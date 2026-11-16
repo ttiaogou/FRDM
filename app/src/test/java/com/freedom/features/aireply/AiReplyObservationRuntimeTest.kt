@@ -835,6 +835,7 @@ class AiReplyObservationRuntimeTest {
             chatListCandidates = listOf(
                 sessionCandidate(
                     unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ,
+                    completeBoundaryEvidence = true,
                     windowGeneration = 5L
                 )
             )
@@ -856,6 +857,7 @@ class AiReplyObservationRuntimeTest {
             gesturePolicy = object : TestGestureApi {
                 override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
                     gestures += command.kind
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
                     return GestureSubmission.ACCEPTED
                 }
             },
@@ -886,8 +888,13 @@ class AiReplyObservationRuntimeTest {
         scheduler.runNextWithDelay(300L)
 
         assertTrue(logs.any { it.contains("AI 启动导航[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("首次向上滑动") })
-        assertTrue("通过稳定复核和工作区确认后执行首次向上准入滑动", gestures.contains(GestureKind.SWIPE))
+        runUntilLog(scheduler, logs, "AI Reply 启动顶部定位[CONFIRMED]")
+        runUntilLog(scheduler, logs, "AI Reply 启动准入：执行进入消息工作区后的首次向上滑动")
+        assertEquals(
+            "先完成向下回顶，再执行首次向上准入滑动",
+            listOf(GestureKind.SWIPE, GestureKind.SWIPE, GestureKind.SWIPE),
+            gestures
+        )
     }
 
     @Test
@@ -1468,11 +1475,18 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, upwardSwipes) // The first upward swipe exposes the middle page.
         assertEquals(
             listOf(
+                GestureKind.SWIPE, GestureKind.SWIPE, // Startup: establish list top.
                 GestureKind.SWIPE, GestureKind.SWIPE, GestureKind.SWIPE,
                 GestureKind.SWIPE, GestureKind.SWIPE, GestureKind.TAP
             ),
             commands.map { it.kind }
         ) // Middle-page unread is tapped before another upward swipe can be submitted.
+        val swipeDirections = commands.mapNotNull {
+            (it.intent as? GestureIntent.VerticalSwipe)?.direction
+        }
+        assertEquals(VerticalSwipeDirection.DOWN, swipeDirections[0])
+        assertEquals(VerticalSwipeDirection.DOWN, swipeDirections[1])
+        assertEquals(VerticalSwipeDirection.UP, swipeDirections[2]) // First unread-admission swipe.
         assertTrue(logs.any { it.contains("顶部方向滑动后可见会话行发生变化；先审视当前新区域") })
         assertEquals("Middle Contact", port.resolvedTapCandidateNames.single())
         assertEquals(2, port.sessionListSamples) // Bottom and middle viewports are both archived.
@@ -1513,12 +1527,10 @@ class AiReplyObservationRuntimeTest {
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
             page = firstPage
-            // The mandatory startup-admission swipe adds a fresh pre-dispatch inspection.
-            // Keep the late viewport change for the delayed boundary confirmation itself.
-            inspectionPages = listOf(
-                firstPage, firstPage, firstPage, firstPage,
-                firstPage, firstPage, firstPage, latePage
-            )
+            // Startup top positioning performs two DOWN swipes and two independent delayed
+            // boundary samples before the first UP admission swipe. Keep the late viewport
+            // change for the delayed bottom-boundary confirmation itself.
+            inspectionPages = List(13) { firstPage } + latePage
         }
         var bottomSwipes = 0
         val logs = ArrayList<String>()
@@ -1555,11 +1567,16 @@ class AiReplyObservationRuntimeTest {
     @Test
     fun aiSessionManagerDoesNotConfirmBoundaryWhenVisibleRowEvidenceIsIncomplete() {
         val scheduler = FakeScheduler()
+        val completeStartupCandidate = sessionCandidate(
+            nameText = "Partially Observed Contact",
+            unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD,
+            completeBoundaryEvidence = true
+        )
         val incompleteCandidate = sessionCandidate(
             nameText = "Partially Observed Contact",
             unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD
         )
-        val listPage = ChatPageSnapshot(
+        fun listPage(candidate: ChatListCandidateSnapshot) = ChatPageSnapshot(
             packageName = "com.immomo.momo",
             activityClass = "com.immomo.momo.maintab.MaintabActivity",
             pageKind = ChatPageKind.CHAT_LIST,
@@ -1572,12 +1589,16 @@ class AiReplyObservationRuntimeTest {
             messageListTarget = null,
             inputFieldTarget = null,
             chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(incompleteCandidate),
+            chatListCandidates = listOf(candidate),
             windowGeneration = 1L
         )
+        // Only the startup top-boundary fixture is complete. The post-admission row is
+        // deliberately incomplete so the bottom boundary must remain unconfirmed.
+        val completeStartupPage = listPage(completeStartupCandidate)
+        val incompletePage = listPage(incompleteCandidate)
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
-            page = listPage
+            page = completeStartupPage
         }
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
@@ -1590,6 +1611,9 @@ class AiReplyObservationRuntimeTest {
                     command: GestureIntentRequest,
                     listener: GestureExecutionListener
                 ): GestureSubmission {
+                    if (command.description.contains("首次向上滑动检查新区域")) {
+                        port.page = incompletePage
+                    }
                     listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
                     return GestureSubmission.ACCEPTED
                 }
@@ -1614,9 +1638,16 @@ class AiReplyObservationRuntimeTest {
         val visibleCandidate = sessionCandidate(
             nameText = "Visible Contact",
             unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD,
-            completeBoundaryEvidence = true
+            completeBoundaryEvidence = true,
+            windowGeneration = 1L
         )
-        val listPage = ChatPageSnapshot(
+        val noWindowCandidate = sessionCandidate(
+            nameText = "Visible Contact",
+            unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD,
+            completeBoundaryEvidence = true,
+            windowGeneration = 0L
+        )
+        fun listPage(candidate: ChatListCandidateSnapshot, generation: Long) = ChatPageSnapshot(
             packageName = "com.immomo.momo",
             activityClass = "com.immomo.momo.maintab.MaintabActivity",
             pageKind = ChatPageKind.CHAT_LIST,
@@ -1629,12 +1660,16 @@ class AiReplyObservationRuntimeTest {
             messageListTarget = null,
             inputFieldTarget = null,
             chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(visibleCandidate),
-            windowGeneration = 0L
+            chatListCandidates = listOf(candidate),
+            windowGeneration = generation
         )
+        // Keep a valid identity while proving the startup top boundary; remove it only after
+        // admission so this test still targets the bottom-boundary safety check.
+        val startupPage = listPage(visibleCandidate, 1L)
+        val noWindowPage = listPage(noWindowCandidate, 0L)
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
-            page = listPage
+            page = startupPage
         }
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
@@ -1647,6 +1682,9 @@ class AiReplyObservationRuntimeTest {
                     command: GestureIntentRequest,
                     listener: GestureExecutionListener
                 ): GestureSubmission {
+                    if (command.description.contains("首次向上滑动检查新区域")) {
+                        port.page = noWindowPage
+                    }
                     listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
                     return GestureSubmission.ACCEPTED
                 }
@@ -1948,7 +1986,8 @@ class AiReplyObservationRuntimeTest {
     fun aiReplyChecksCurrentPositionBeforeAnySwipeAndDoesNotTreatUnknownAsNoUnread() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(
-            unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNKNOWN
+            unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNKNOWN,
+            completeBoundaryEvidence = true
         )
         val listPage = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -1968,7 +2007,8 @@ class AiReplyObservationRuntimeTest {
                 statusNewNodeCount = 1,
                 statusNewUnknownCount = 1,
                 statusNewNonNumericValueCount = 1
-            )
+            ),
+            windowGeneration = 1L
         )
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
@@ -2300,7 +2340,8 @@ class AiReplyObservationRuntimeTest {
     fun unknownUnreadRowsPauseInsteadOfBeingReportedAsNoUnread() {
         val scheduler = FakeScheduler()
         val unknownCandidate = sessionCandidate(
-            unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNKNOWN
+            unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNKNOWN,
+            completeBoundaryEvidence = true
         )
         val listPage = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -2315,7 +2356,8 @@ class AiReplyObservationRuntimeTest {
             messageListTarget = null,
             inputFieldTarget = null,
             chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(unknownCandidate)
+            chatListCandidates = listOf(unknownCandidate),
+            windowGeneration = 1L
         )
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
