@@ -208,9 +208,10 @@ internal object MomoChatListSessionPolicy {
      * Reads only explicit unread semantics. Ordinary preview text such as "我还没看" must not
      * become a badge signal. Within a confirmed private-user item_layout, Momo's exact
      * status_new TextView is authoritative only when the node is visible, geometrically valid,
-     * intersects and is contained by the exact row. A hidden, clipped, or malformed node remains
-     * UNKNOWN. An empty value is READ only after those checks; absence is considered READ only
-     * after the row and all identifying fields are fully visible within the viewport.
+     * intersects and is contained by the exact row. The session_fire feature icon is explicitly
+     * excluded: it does not indicate unread state. A hidden, clipped, or malformed status_new
+     * node remains UNKNOWN. An empty value is READ only after those checks; absence is considered
+     * READ only after the row and all identifying fields are fully visible within the viewport.
      */
     fun inspectUnreadEvidence(
         viewId: String?,
@@ -223,7 +224,11 @@ internal object MomoChatListSessionPolicy {
         visibleToUser: Boolean = true
     ): MomoChatUnreadEvidence {
         val normalizedViewId = viewId.orEmpty().lowercase(java.util.Locale.ROOT)
-        val isStatusNewField = normalizedViewId.substringAfterLast('/') == STATUS_NEW_VIEW_ID_TOKEN
+        val normalizedLeafViewId = normalizedViewId.substringAfterLast('/')
+        // session_fire is the fire-feature icon, not an unread badge. Its presence alone
+        // must never create UNREAD evidence, regardless of the node's accessible label.
+        if (normalizedLeafViewId == FIRE_FEATURE_VIEW_ID_TOKEN) return MomoChatUnreadEvidence()
+        val isStatusNewField = normalizedLeafViewId == STATUS_NEW_VIEW_ID_TOKEN
         if (!boundsValid) {
             return MomoChatUnreadEvidence(
                 statusNewDisposition = if (isStatusNewField) {
@@ -379,7 +384,7 @@ internal object MomoChatListSessionPolicy {
     /** Ordinary private-chat previews are message bodies, not independent unread badges. */
     fun isOtherUnreadMarker(selectionClass: String, viewIdResourceName: String): Boolean {
         val viewId = viewIdResourceName.substringAfterLast('/').lowercase(java.util.Locale.ROOT)
-        if (viewId == STATUS_NEW_VIEW_ID_TOKEN) return false
+        if (viewId == STATUS_NEW_VIEW_ID_TOKEN || viewId == FIRE_FEATURE_VIEW_ID_TOKEN) return false
         if (selectionClass == MomoChatListRowClassification.PRIVATE_CHAT &&
             viewId == PREVIEW_VIEW_ID_TOKEN
         ) return false
@@ -526,6 +531,7 @@ internal object MomoChatListSessionPolicy {
         Regex("\\d{1,3}天前")
     )
     private const val STATUS_NEW_VIEW_ID_TOKEN = "chatlist_item_tv_status_new"
+    private const val FIRE_FEATURE_VIEW_ID_TOKEN = "session_fire"
     private const val PREVIEW_VIEW_ID_TOKEN = "chatlist_item_tv_content"
     private val UNREAD_VIEW_ID_TOKENS = listOf(
         "unread", "msg_count", "message_count", "msg_badge", "message_badge",

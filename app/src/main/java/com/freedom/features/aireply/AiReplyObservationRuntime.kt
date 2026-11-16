@@ -238,10 +238,10 @@ class AiReplyObservationRuntime(
             isMessageViewportPositionedAgainstTab = ::isMessageViewportPositionedAgainstTab,
             hasRelevantMessageStructureDelta = ::hasRelevantMessageStructureDelta,
             onConfirmed = { snapshot ->
-                sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
+                sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP
                 onLog(
                     "AI 启动导航[CONFIRMED]：消息工作区域、底部导航锚点和会话列表视口已连续" +
-                        "3 次新快照确认；重新执行未读准入审计"
+                        "3 次新快照确认；开始执行启动顶部定位"
                 )
                 handleInspectionSnapshot(snapshot)
             },
@@ -376,6 +376,7 @@ class AiReplyObservationRuntime(
                     receivedGreetingsTaskFlow.acknowledgeCompletedTaskExit()
                     sessionActionGeneration += 1L
                     privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
+                    privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted = false
                     privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = false
                     privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.clear()
                     privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized = false
@@ -514,6 +515,7 @@ class AiReplyObservationRuntime(
         if (sessionRunStarted && inspection.pageKind == ChatPageKind.UNKNOWN &&
             sessionManagerState in setOf(
                 SessionManagerState.WAITING_FOR_SESSION_LIST,
+                SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP,
                 SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM,
                 SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
             ) && (previous?.pageKind == ChatPageKind.CHAT_LIST || privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount > 0)
@@ -978,6 +980,7 @@ class AiReplyObservationRuntime(
         privateMessagesTaskController.resetQuota()
         receivedGreetingsTaskFlow.reset()
         privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
+        privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted = false
         privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = false
         privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.clear()
         privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized = false
@@ -999,7 +1002,7 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
         privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
         sessionManagerState = if (sessionRunStarted) {
-            SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
+            SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP
         } else {
             SessionManagerState.PAUSED
         }
@@ -1445,19 +1448,24 @@ class AiReplyObservationRuntime(
         // the positioning phase is allowed to submit any swipe gesture.
         if (!privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted && !receivedGreetingsTaskActive) {
             privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = true
-            // This snapshot only establishes the current Message work area. The required
-            // first upward swipe must complete before unread/no-unread is decided.
+            // The initial snapshot only establishes the Message work area. It is not used for
+            // unread admission: first confirm the list top, then complete one upward admission swipe.
             privateMessagesTraversalTaskExecutor.normalInboxHadUnread = false
             privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = false
+            sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP
             onLog(
                 "AI Reply 启动检查：已确认消息工作区域；当前视口行=${snapshot.chatListCandidates.size}；" +
-                    "先执行一次向上滑动，手势成功后再判定未读，不使用滑动前快照作结论"
+                    "先向下定位并确认列表顶部，再执行一次成功的向上准入滑动；未读判断只使用该向上手势后的新快照"
             )
         }
-        privateMessagesTraversalTaskExecutor.recordViewportUnreadEvidence(
-            snapshot,
-            receivedGreetingsActive = receivedGreetingsTaskActive
-        )
+        // The pre-positioning and top-confirmation snapshots are not admission evidence.
+        // Start accumulating unread state only after the successful first upward gate swipe.
+        if (privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted || receivedGreetingsTaskActive) {
+            privateMessagesTraversalTaskExecutor.recordViewportUnreadEvidence(
+                snapshot,
+                receivedGreetingsActive = receivedGreetingsTaskActive
+            )
+        }
 
         if (sessionManagerState == SessionManagerState.RETURNING_TO_SESSION_LIST) {
             sessionTransitionTask?.cancel()
@@ -1562,6 +1570,15 @@ class AiReplyObservationRuntime(
                 return
             }
             scheduleSessionListStabilityRetry("当前列表暂未提取到会话行")
+            return
+        }
+
+        if (!privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted &&
+            !receivedGreetingsTaskActive
+        ) {
+            sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP
+            onLog("AI Reply 启动顶部定位：当前新快照尚未确认顶部边界；继续在消息列表内向下滑动")
+            scrollSessionList(snapshot, toTop = true)
             return
         }
 
@@ -1787,8 +1804,14 @@ class AiReplyObservationRuntime(
             privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
             if (confirmedTop) {
                 privateMessagesTraversalTaskExecutor.atTop = true
-                sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
-                onLog("AI 会话管理：顶部边界经延迟独立快照复核通过；检查顶部当前可见会话行")
+                if (!privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted) {
+                    privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted = true
+                    sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
+                    onLog("AI Reply 启动顶部定位[CONFIRMED]：列表顶部已通过连续无位移及延迟独立快照复核；下一步执行首次向上准入滑动")
+                } else {
+                    sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
+                    onLog("AI 会话管理：顶部边界经延迟独立快照复核通过；检查顶部当前可见会话行")
+                }
             } else {
                 privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
                 privateMessagesTraversalTaskExecutor.atTop = false
@@ -2595,10 +2618,15 @@ class AiReplyObservationRuntime(
                 direction = if (toTop) VerticalSwipeDirection.DOWN else VerticalSwipeDirection.UP,
                 durationMs = SESSION_SCROLL_DURATION_MS
             ),
-            description = if (toTop) {
-                "AI 会话管理：从底部向上审视时，在列表视口内向下滑动到上一个区域"
-            } else {
-                "AI 会话管理：启动定位底部时，在列表视口内向上滑动到下一个区域"
+            description = when {
+                toTop && !privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted ->
+                    "AI Reply 启动顶部定位：在消息列表视口内向下滑动并确认顶部边界"
+                toTop ->
+                    "AI 会话管理：从底部向上审视时，在列表视口内向下滑动到上一个区域"
+                !privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted ->
+                    "AI Reply 启动准入：首次向上滑动检查新区域；启动定位底部"
+                else ->
+                    "AI 会话管理：启动定位底部时，在列表视口内向上滑动到下一个区域"
             },
             executionContext = executionContext
         )
@@ -2667,7 +2695,8 @@ class AiReplyObservationRuntime(
                                 privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
                                 privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
                                 privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
-                                onLog("AI Reply 启动准入：首次向上滑动已由 Android 确认成功；将用滑动后的新快照判定未读")
+                                privateMessagesTraversalTaskExecutor.atTop = false
+                                onLog("AI Reply 启动准入：顶部定位完成后的首次向上滑动已由 Android 确认成功；将用滑动后的新快照判定未读")
                             }
                             privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount = 0
                             readinessDeferredRetryCount = 0
@@ -2677,6 +2706,7 @@ class AiReplyObservationRuntime(
                             onLog(
                                 when {
                                     wasInitialAdmissionSwipe -> "AI 会话管理：首次向上准入滑动已完成；等待滑动后的新快照判定未读"
+                                    toTop && !privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted -> "AI Reply 启动顶部定位：已完成一次向下滑动；等待新快照确认顶部位置"
                                     toTop -> "AI 会话管理：已完成一次向上审视方向的列表滑动；等待新快照位置复核"
                                     else -> "AI 会话管理：已完成一次底部定位方向的列表滑动；等待新快照确认位置"
                                 }

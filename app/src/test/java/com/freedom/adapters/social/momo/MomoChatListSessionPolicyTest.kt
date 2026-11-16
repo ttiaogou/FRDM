@@ -870,6 +870,29 @@ class MomoChatListSessionPolicyTest {
         )
     }
 
+
+    @Test
+    fun fireFeatureIconIsNotUnreadEvidenceOrAnotherUnreadMarker() {
+        val fireIcon = MomoChatListSessionPolicy.inspectUnreadEvidence(
+            viewId = "com.immomo.momo:id/session_fire",
+            text = null,
+            contentDescription = null,
+            boundsValid = true,
+            intersectsRow = true,
+            containedInRow = true,
+            visibleToUser = true
+        )
+
+        assertEquals(ChatUnreadStatus.UNKNOWN, fireIcon.status)
+        assertEquals(ChatUnreadEvidenceSource.NONE, fireIcon.source)
+        assertFalse(
+            MomoChatListSessionPolicy.isOtherUnreadMarker(
+                MomoChatListRowClassification.PRIVATE_CHAT,
+                "com.immomo.momo:id/session_fire"
+            )
+        )
+    }
+
     @Test
     fun absentStatusNewMeansReadOnlyOnlyForFullyVisibleCompletePrivateRow() {
         val complete = mapOf(

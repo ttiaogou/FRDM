@@ -33,6 +33,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(executor.normalInboxUnreadStateUnknown)
 
         executor.reset()
+        executor.initialInboxTopPositioningCompleted = true
         executor.initialUnreadGateSwipeCompleted = true
         assertEquals(
             PrivateMessagesUnreadAdmissionDecision.NO_UNREAD,
@@ -40,6 +41,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         )
 
         executor.reset()
+        executor.initialInboxTopPositioningCompleted = true
         executor.initialUnreadGateSwipeCompleted = true
         assertEquals(
             PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
@@ -50,7 +52,9 @@ class PrivateMessagesTraversalTaskExecutorTest {
 
     @Test
     fun listSnapshotEvaluationOwnsUnreadAdmissionAndFrozenCandidateSelection() {
-        val executor = PrivateMessagesTraversalTaskExecutor()
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+        }
         val top = candidate(0, "Top", ChatUnreadStatus.UNREAD, top = 100)
         val bottom = candidate(1, "Bottom", ChatUnreadStatus.UNREAD, top = 400)
 
@@ -89,9 +93,42 @@ class PrivateMessagesTraversalTaskExecutorTest {
         ).structuralFingerprint)
     }
 
+
+    @Test
+    fun startupUnreadAdmissionAndCandidateSelectionWaitForTopPositionConfirmation() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val unread = candidate(0, "Unread", ChatUnreadStatus.UNREAD)
+
+        val beforeTopConfirmation = executor.evaluateListSnapshot(
+            snapshot(unread),
+            wasWaitingForUnread = false,
+            maxNoProgressScrolls = 2
+        )
+
+        assertEquals(null, beforeTopConfirmation.unreadAdmissionDecision)
+        assertEquals(null, beforeTopConfirmation.nextCandidate)
+        assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
+
+        executor.initialInboxTopPositioningCompleted = true
+        val afterTopConfirmation = executor.evaluateListSnapshot(
+            snapshot(unread),
+            wasWaitingForUnread = false,
+            maxNoProgressScrolls = 2
+        )
+
+        assertEquals(
+            PrivateMessagesUnreadAdmissionDecision.FIRST_SWIPE_REQUIRED,
+            afterTopConfirmation.unreadAdmissionDecision
+        )
+        assertEquals(null, afterTopConfirmation.nextCandidate)
+        assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
+    }
+
     @Test
     fun listSnapshotEvaluationResetsAttemptedRowsOnlyForExplicitUnreadWakeup() {
-        val executor = PrivateMessagesTraversalTaskExecutor()
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+        }
         executor.executionState = SessionManagerState.WAITING_FOR_UNREAD
         executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
         executor.atTop = true
@@ -289,6 +326,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         executor.reset()
 
         assertEquals(SessionManagerState.STOPPED, executor.executionState)
+        assertFalse(executor.initialInboxTopPositioningCompleted)
         assertEquals(null, executor.currentSessionKey)
         assertEquals(null, executor.currentSessionName)
         assertEquals(null, executor.currentSessionCandidate)
@@ -303,6 +341,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         executor.atTop = true
         executor.initialUnreadGateSwipeCompleted = true
         executor.initialInboxPositionCheckCompleted = false
+        executor.initialInboxTopPositioningCompleted = true
         executor.attemptedSessionKeys += "attempted"
         executor.lockedUnreadSessionKeys += "locked"
         executor.lockedUnreadSetFinalized = true
@@ -320,6 +359,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertEquals(SessionListTraversalPhase.POSITIONING_AT_BOTTOM, executor.phase)
         assertFalse(executor.atTop)
         assertTrue(executor.initialInboxPositionCheckCompleted)
+        assertTrue(executor.initialInboxTopPositioningCompleted)
         assertTrue(executor.initialUnreadGateSwipeCompleted)
         assertTrue(executor.attemptedSessionKeys.isEmpty())
         assertTrue(executor.lockedUnreadSessionKeys.isEmpty())

@@ -20,6 +20,7 @@ internal enum class SessionListTraversalPhase {
 /** 高层私聊会话流程状态。执行器持有状态，运行时仅负责调度外部副作用。 */
 internal enum class SessionManagerState {
     STOPPED,
+    POSITIONING_SESSION_LIST_AT_TOP,
     POSITIONING_SESSION_LIST_AT_BOTTOM,
     SCANNING_SESSION_LIST_BOTTOM_TO_TOP,
     WAITING_FOR_SESSION_LIST,
@@ -86,6 +87,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
     var atTop: Boolean = false
 
     var initialInboxPositionCheckCompleted: Boolean = false
+    /** True only after the startup list-top boundary has been independently confirmed. */
+    var initialInboxTopPositioningCompleted: Boolean = false
     var initialUnreadGateSwipeCompleted: Boolean = false
 
     val attemptedSessionKeys: MutableSet<String> = LinkedHashSet()
@@ -194,7 +197,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val candidatesEmpty = snapshot.chatListCandidates.isEmpty()
         if (!candidatesEmpty) sessionListStabilityRetryCount = 0
 
-        val unreadAdmissionDecision = if (!candidatesEmpty &&
+        val unreadAdmissionDecision = if (initialInboxTopPositioningCompleted && !candidatesEmpty &&
             phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM && !wasWaitingForUnread
         ) {
             evaluateUnreadAdmission(snapshot)
@@ -207,7 +210,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
         }
         if (explicitUnreadWhileWaiting) attemptedSessionKeys.clear()
 
-        val nextCandidate = if (!candidatesEmpty && unreadAdmissionDecision == null) {
+        val nextCandidate = if (initialInboxTopPositioningCompleted && !candidatesEmpty &&
+            unreadAdmissionDecision == null
+        ) {
             selectNextCandidate(snapshot.chatListCandidates, lockedUnreadSessionKeys)
         } else {
             null
@@ -354,6 +359,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
         atTop = false
         initialInboxPositionCheckCompleted = false
+        initialInboxTopPositioningCompleted = false
         initialUnreadGateSwipeCompleted = false
         attemptedSessionKeys.clear()
         ambiguousSessionIdentityKeys.clear()

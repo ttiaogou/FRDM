@@ -35,6 +35,7 @@ import com.freedom.core.accessibility.gesture.GestureCoordinateContext
 import com.freedom.core.accessibility.gesture.GestureKind
 import com.freedom.core.accessibility.gesture.GestureExecutionStatus
 import com.freedom.core.accessibility.gesture.GestureExecutionResult
+import com.freedom.core.accessibility.gesture.VerticalSwipeDirection
 import com.freedom.features.aireply.ports.ChatHeaderNodeDiagnostic
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatPageKind
@@ -599,7 +600,7 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun startupVisibleUnreadStillPositionsAtBottomBeforeBottomToTopTraversal() {
+    fun startupPositionsListAtTopBeforeFirstUpwardUnreadAdmissionSwipe() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -614,7 +615,11 @@ class AiReplyObservationRuntimeTest {
             messageListTarget = null,
             inputFieldTarget = null,
             chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate(unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD))
+            chatListCandidates = listOf(sessionCandidate(
+                unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD,
+                completeBoundaryEvidence = true
+            )),
+            windowGeneration = 1L
         )
         val port = FakeChatPort().apply {
             provideMessageTabPositionEvidence = true
@@ -622,7 +627,7 @@ class AiReplyObservationRuntimeTest {
             page = inbox
         }
         val logs = mutableListOf<String>()
-        val submittedKinds = mutableListOf<GestureKind>()
+        val submittedCommands = mutableListOf<GestureIntentRequest>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             chatPagePort = port,
@@ -630,8 +635,8 @@ class AiReplyObservationRuntimeTest {
             chatSessionManagementPort = port,
             gesturePolicy = object : TestGestureApi {
                 override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    submittedKinds += command.kind
-                    completeMessageTabProbe(command, listener)
+                    submittedCommands += command
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
                     return GestureSubmission.ACCEPTED
                 }
             },
@@ -643,14 +648,27 @@ class AiReplyObservationRuntimeTest {
         )
 
         runtime.scheduleInitialObservation(passiveOnly = false)
-        runUntil(scheduler, 30) { submittedKinds.contains(GestureKind.SWIPE) }
+        runUntil(scheduler, 60) {
+            submittedCommands.any {
+                (it.intent as? GestureIntent.VerticalSwipe)?.direction == VerticalSwipeDirection.UP
+            }
+        }
 
-        assertTrue(logs.any { it.contains("首次向上滑动") })
-        assertTrue("首次向上准入滑动必须先于未读判断", submittedKinds.contains(GestureKind.SWIPE))
+        val directions = submittedCommands.mapNotNull {
+            (it.intent as? GestureIntent.VerticalSwipe)?.direction
+        }
+        val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
+        assertTrue("启动阶段必须先产生向下回顶手势", firstUpwardSwipe > 0)
+        assertTrue(
+            "首次向上准入前的所有滑动都必须是向下回顶",
+            directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN }
+        )
+        assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
+        assertTrue(logs.any { it.contains("首次向上滑动；完成后才检查未读") })
     }
 
     @Test
-    fun startupUnknownUnreadStateIsCheckedOnlyAfterTheMandatoryFirstSwipe() {
+    fun startupUnknownUnreadStateIsCheckedOnlyAfterTopResetAndFirstUpwardSwipe() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -665,7 +683,11 @@ class AiReplyObservationRuntimeTest {
             messageListTarget = null,
             inputFieldTarget = null,
             chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate(unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNKNOWN))
+            chatListCandidates = listOf(sessionCandidate(
+                unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNKNOWN,
+                completeBoundaryEvidence = true
+            )),
+            windowGeneration = 1L
         )
         val port = FakeChatPort().apply {
             provideMessageTabPositionEvidence = true
@@ -673,7 +695,7 @@ class AiReplyObservationRuntimeTest {
             page = inbox
         }
         val logs = mutableListOf<String>()
-        val submittedKinds = mutableListOf<GestureKind>()
+        val submittedCommands = mutableListOf<GestureIntentRequest>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             chatPagePort = port,
@@ -681,8 +703,8 @@ class AiReplyObservationRuntimeTest {
             chatSessionManagementPort = port,
             gesturePolicy = object : TestGestureApi {
                 override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    submittedKinds += command.kind
-                    completeMessageTabProbe(command, listener)
+                    submittedCommands += command
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
                     return GestureSubmission.ACCEPTED
                 }
             },
@@ -693,14 +715,23 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext()
+        runtime.scheduleInitialObservation()
+        runUntilLog(scheduler, logs, "AI Reply 启动准入[UNREAD_STATE_UNKNOWN]")
 
-        assertTrue("UNKNOWN 不能阻止首次准入滑动；必须在该手势成功后的新快照中再判断", submittedKinds.contains(GestureKind.SWIPE))
+        val directions = submittedCommands.mapNotNull {
+            (it.intent as? GestureIntent.VerticalSwipe)?.direction
+        }
+        val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
+        assertTrue("UNKNOWN 不得阻止先执行向下回顶", firstUpwardSwipe > 0)
+        assertTrue(directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN })
+        assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
+        assertTrue(logs.any { it.contains("首次向上滑动已由 Android 确认成功") })
+        assertFalse(scheduler.hasPendingDelay(1_200L))
+        assertFalse(scheduler.hasPendingDelay(30_000L))
     }
 
     @Test
-    fun startupNoUnreadStillSubmitsExactlyTheMandatoryAdmissionSwipeFirst() {
+    fun startupNoUnreadRunsTopResetBeforeExactlyOneAdmissionSwipe() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -715,7 +746,11 @@ class AiReplyObservationRuntimeTest {
             messageListTarget = null,
             inputFieldTarget = null,
             chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate(unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ))
+            chatListCandidates = listOf(sessionCandidate(
+                unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ,
+                completeBoundaryEvidence = true
+            )),
+            windowGeneration = 1L
         )
         val port = FakeChatPort().apply {
             provideMessageTabPositionEvidence = true
@@ -723,7 +758,7 @@ class AiReplyObservationRuntimeTest {
             page = inbox
         }
         val logs = mutableListOf<String>()
-        val submittedKinds = mutableListOf<GestureKind>()
+        val submittedCommands = mutableListOf<GestureIntentRequest>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             chatPagePort = port,
@@ -731,8 +766,8 @@ class AiReplyObservationRuntimeTest {
             chatSessionManagementPort = port,
             gesturePolicy = object : TestGestureApi {
                 override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    submittedKinds += command.kind
-                    completeMessageTabProbe(command, listener)
+                    submittedCommands += command
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
                     return GestureSubmission.ACCEPTED
                 }
             },
@@ -743,11 +778,19 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext()
+        runtime.scheduleInitialObservation()
+        runUntilLog(scheduler, logs, "AI Reply 启动准入[NO_UNREAD_AFTER_FIRST_SWIPE]")
 
-        assertTrue(logs.any { it.contains("首次向上滑动") })
-        assertTrue("消息工作区首次必须执行向上准入滑动", submittedKinds.contains(GestureKind.SWIPE))
+        val directions = submittedCommands.mapNotNull {
+            (it.intent as? GestureIntent.VerticalSwipe)?.direction
+        }
+        val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
+        assertTrue("无未读判断前必须先完成向下回顶", firstUpwardSwipe > 0)
+        assertTrue(directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN })
+        assertEquals(1, directions.count { it == VerticalSwipeDirection.UP })
+        assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
+        assertTrue(logs.any { it.contains("首次成功向上滑动后的视口没有明确未读") })
+        assertFalse(logs.any { it.contains("底部边界经延迟独立快照复核通过") })
     }
 
     @Test
@@ -1997,7 +2040,7 @@ class AiReplyObservationRuntimeTest {
             receivedGreetingsWorkflowEnabled = true
             page = listPage
         }
-        val gestures = ArrayList<GestureKind>()
+        val submittedCommands = ArrayList<GestureIntentRequest>()
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
@@ -2009,7 +2052,7 @@ class AiReplyObservationRuntimeTest {
                     command: GestureIntentRequest,
                     listener: GestureExecutionListener
                 ): GestureSubmission {
-                    gestures += command.kind
+                    submittedCommands += command
                     listener.onResult(
                         GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED)
                     )
@@ -2027,11 +2070,17 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "AI Reply：切换收到的招呼只读 OCR 任务")
 
+        val directions = submittedCommands.mapNotNull {
+            (it.intent as? GestureIntent.VerticalSwipe)?.direction
+        }
+        assertEquals(
+            listOf(VerticalSwipeDirection.DOWN, VerticalSwipeDirection.DOWN, VerticalSwipeDirection.UP),
+            directions
+        )
         assertEquals(1, port.receivedGreetingsIdleSteps)
-        assertEquals("No-unread admission must perform exactly one swipe", listOf(GestureKind.SWIPE), gestures)
+        assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
         assertTrue(logs.any { it.contains("首次成功向上滑动后的视口没有明确未读") })
         assertFalse(logs.any { it.contains("底部边界经延迟独立快照复核通过") })
-        assertFalse(logs.any { it.contains("顶部边界经延迟独立快照复核通过") })
         assertFalse(logs.any { it.contains("随机待机") || it.contains("模拟回复人数") || it.contains("模拟处理目标") })
     }
 
