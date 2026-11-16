@@ -49,6 +49,89 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun listSnapshotEvaluationOwnsUnreadAdmissionAndFrozenCandidateSelection() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val top = candidate(0, "Top", ChatUnreadStatus.UNREAD, top = 100)
+        val bottom = candidate(1, "Bottom", ChatUnreadStatus.UNREAD, top = 400)
+
+        val first = executor.evaluateListSnapshot(
+            snapshot(bottom, top),
+            wasWaitingForUnread = false,
+            maxNoProgressScrolls = 2
+        )
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.FIRST_SWIPE_REQUIRED, first.unreadAdmissionDecision)
+        assertEquals(null, first.nextCandidate)
+
+        executor.initialUnreadGateSwipeCompleted = true
+        val admission = executor.evaluateListSnapshot(
+            snapshot(bottom, top),
+            wasWaitingForUnread = false,
+            maxNoProgressScrolls = 2
+        )
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING, admission.unreadAdmissionDecision)
+        assertEquals(setOf(key(bottom), key(top)), executor.lockedUnreadSessionKeys)
+        assertEquals(null, admission.nextCandidate)
+
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.lockedUnreadSetFinalized = true
+        val scan = executor.evaluateListSnapshot(
+            snapshot(top, bottom),
+            wasWaitingForUnread = false,
+            maxNoProgressScrolls = 2
+        )
+        assertEquals(null, scan.unreadAdmissionDecision)
+        assertEquals(bottom, scan.nextCandidate)
+        assertTrue(scan.unreadAuditChanged)
+        assertEquals(scan.structuralFingerprint, executor.evaluateListSnapshot(
+            snapshot(top, bottom),
+            wasWaitingForUnread = false,
+            maxNoProgressScrolls = 2
+        ).structuralFingerprint)
+    }
+
+    @Test
+    fun listSnapshotEvaluationResetsAttemptedRowsOnlyForExplicitUnreadWakeup() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        executor.executionState = SessionManagerState.WAITING_FOR_UNREAD
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        executor.attemptedSessionKeys += "previously-attempted"
+        val unread = candidate(0, "New unread", ChatUnreadStatus.UNREAD)
+
+        val evaluation = executor.evaluateListSnapshot(
+            snapshot(unread),
+            wasWaitingForUnread = true,
+            maxNoProgressScrolls = 2
+        )
+
+        assertTrue(evaluation.wasWaitingForUnread)
+        assertTrue(evaluation.explicitUnreadWhileWaiting)
+        assertTrue(executor.attemptedSessionKeys.isEmpty())
+        assertEquals(unread, evaluation.nextCandidate)
+    }
+
+    @Test
+    fun listSnapshotEvaluationConsumesViewportScrollAndBoundaryEvidenceOnce() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        val previous = candidate(0, "Previous", ChatUnreadStatus.UNREAD, top = 100)
+        val current = candidate(0, "Current", ChatUnreadStatus.UNREAD, top = 350)
+        executor.pendingScrollBaseline = executor.visibleSessionKeys(snapshot(previous))
+        executor.pendingScrollToTop = true
+
+        val evaluation = executor.evaluateListSnapshot(
+            snapshot(current),
+            wasWaitingForUnread = false,
+            maxNoProgressScrolls = 2
+        )
+
+        assertEquals(PrivateMessagesScrollObservationDecision.TOP_VIEWPORT_CHANGED, evaluation.scrollDecision)
+        assertEquals(null, executor.pendingScrollBaseline)
+        assertFalse(executor.atTop)
+        assertEquals(executor.visibleSessionKeys(snapshot(current)), evaluation.visibleKeys)
+    }
+
+    @Test
     fun unreadEvidenceAccumulatesAccordingToPositioningAndFinalizationPhase() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val unread = candidate(0, "Unread", ChatUnreadStatus.UNREAD)

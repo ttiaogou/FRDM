@@ -55,6 +55,22 @@ internal enum class PrivateMessagesScrollObservationDecision {
     BOTTOM_VIEWPORT_CHANGED
 }
 
+/** A complete, read-only decision packet for one fresh inbox snapshot. */
+internal data class PrivateMessagesListSnapshotEvaluation(
+    val snapshotAmbiguousKeys: Set<String>,
+    val newlyAmbiguousKeys: Set<String>,
+    val unreadAuditChanged: Boolean,
+    val wasWaitingForUnread: Boolean,
+    val visibleKeys: List<String>,
+    val scrollDecision: PrivateMessagesScrollObservationDecision,
+    val viewportPositionInvalidated: Boolean,
+    val candidatesEmpty: Boolean,
+    val unreadAdmissionDecision: PrivateMessagesUnreadAdmissionDecision?,
+    val explicitUnreadWhileWaiting: Boolean,
+    val nextCandidate: ChatListCandidateSnapshot?,
+    val structuralFingerprint: String
+)
+
 internal class PrivateMessagesTraversalTaskExecutor {
     /** 私聊流程和当前会话上下文由此执行器独占持有。 */
     var executionState: SessionManagerState = SessionManagerState.STOPPED
@@ -133,6 +149,89 @@ internal class PrivateMessagesTraversalTaskExecutor {
         return PrivateMessagesUnreadEvidence(
             hasUnread = eligible.any { it.unreadStatus == ChatUnreadStatus.UNREAD },
             hasUnknown = eligible.any { it.unreadStatus == ChatUnreadStatus.UNKNOWN }
+        )
+    }
+
+    /**
+     * Owns the policy sequence from a fresh inbox snapshot to the next traversal decision.
+     * The returned packet contains only decisions; screenshots, diagnostics, timers, navigation
+     * and gestures remain effects performed by AiReplyObservationRuntime.
+     */
+    fun evaluateListSnapshot(
+        snapshot: ChatPageSnapshot,
+        wasWaitingForUnread: Boolean,
+        maxNoProgressScrolls: Int
+    ): PrivateMessagesListSnapshotEvaluation {
+        val snapshotAmbiguousKeys = ambiguousIdentityKeys(snapshot.chatListCandidates)
+        val newlyAmbiguousKeys = snapshotAmbiguousKeys - ambiguousSessionIdentityKeys
+        if (snapshotAmbiguousKeys.isNotEmpty()) {
+            ambiguousSessionIdentityKeys += snapshotAmbiguousKeys
+        }
+
+        // Diagnostic counters are deliberately not part of stableKey(), so audit updates cannot
+        // invalidate a pending row or gesture operation.
+        val unreadAuditFingerprint =
+            "${executionState.name}:${snapshot.stableKey()}:" +
+                "${snapshot.chatListUnreadDiagnostics}:${snapshotAmbiguousKeys.sorted().joinToString(",")}"
+        val unreadAuditChanged = unreadAuditFingerprint != lastUnreadAuditFingerprint
+        if (unreadAuditChanged) lastUnreadAuditFingerprint = unreadAuditFingerprint
+
+        val hadPendingScrollBaseline = pendingScrollBaseline != null
+        val visibleKeys = visibleSessionKeys(snapshot)
+        val scrollDecision = consumePendingScrollObservation(
+            visibleKeys = visibleKeys,
+            maxNoProgressScrolls = maxNoProgressScrolls
+        )
+
+        val viewportPositionInvalidated = reconcileUnrequestedViewportChange(
+            hadPendingScrollBaseline = hadPendingScrollBaseline,
+            wasWaitingForUnread = wasWaitingForUnread,
+            visibleKeys = visibleKeys,
+            snapshot = snapshot
+        )
+        if (visibleKeys.isNotEmpty()) lastStableSessionListVisibleKeys = visibleKeys
+
+        val candidatesEmpty = snapshot.chatListCandidates.isEmpty()
+        if (!candidatesEmpty) sessionListStabilityRetryCount = 0
+
+        val unreadAdmissionDecision = if (!candidatesEmpty &&
+            phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM && !wasWaitingForUnread
+        ) {
+            evaluateUnreadAdmission(snapshot)
+        } else {
+            null
+        }
+
+        val explicitUnreadWhileWaiting = wasWaitingForUnread && snapshot.chatListCandidates.any {
+            it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
+        }
+        if (explicitUnreadWhileWaiting) attemptedSessionKeys.clear()
+
+        val nextCandidate = if (!candidatesEmpty && unreadAdmissionDecision == null) {
+            selectNextCandidate(snapshot.chatListCandidates, lockedUnreadSessionKeys)
+        } else {
+            null
+        }
+
+        val structuralFingerprint = buildString {
+            append(snapshot.stableKey())
+            append("|visibleRows=")
+            append(visibleKeys.joinToString(","))
+        }
+
+        return PrivateMessagesListSnapshotEvaluation(
+            snapshotAmbiguousKeys = snapshotAmbiguousKeys,
+            newlyAmbiguousKeys = newlyAmbiguousKeys,
+            unreadAuditChanged = unreadAuditChanged,
+            wasWaitingForUnread = wasWaitingForUnread,
+            visibleKeys = visibleKeys,
+            scrollDecision = scrollDecision,
+            viewportPositionInvalidated = viewportPositionInvalidated,
+            candidatesEmpty = candidatesEmpty,
+            unreadAdmissionDecision = unreadAdmissionDecision,
+            explicitUnreadWhileWaiting = explicitUnreadWhileWaiting,
+            nextCandidate = nextCandidate,
+            structuralFingerprint = structuralFingerprint
         )
     }
 

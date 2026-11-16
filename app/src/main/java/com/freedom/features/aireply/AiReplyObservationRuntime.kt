@@ -3017,13 +3017,14 @@ class AiReplyObservationRuntime(
             }
         }
 
-        val snapshotAmbiguousKeys = privateMessagesTraversalTaskExecutor.ambiguousIdentityKeys(
-            snapshot.chatListCandidates
+        val wasWaitingForUnread = sessionManagerState == SessionManagerState.WAITING_FOR_UNREAD
+        val listEvaluation = privateMessagesTraversalTaskExecutor.evaluateListSnapshot(
+            snapshot = snapshot,
+            wasWaitingForUnread = wasWaitingForUnread,
+            maxNoProgressScrolls = MAX_NO_PROGRESS_SCROLLS
         )
-        val newlyAmbiguousKeys = snapshotAmbiguousKeys - privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys
-        if (snapshotAmbiguousKeys.isNotEmpty()) {
-            privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys += snapshotAmbiguousKeys
-        }
+        val snapshotAmbiguousKeys = listEvaluation.snapshotAmbiguousKeys
+        val newlyAmbiguousKeys = listEvaluation.newlyAmbiguousKeys
         if (newlyAmbiguousKeys.isNotEmpty()) {
             newlyAmbiguousKeys.forEach(chatSessionManagementPort::blockSessionIdentityKey)
             val affectedRows = snapshot.chatListCandidates.count {
@@ -3037,29 +3038,17 @@ class AiReplyObservationRuntime(
             )
         }
 
-        // Diagnostics are audit metadata, not page structure. Keep them out of stableKey()
-        // so changing counters cannot trigger a new list sample or invalidate pending actions.
-        val unreadAuditFingerprint =
-            "${sessionManagerState.name}:${snapshot.stableKey()}:" +
-                "${snapshot.chatListUnreadDiagnostics}:${snapshotAmbiguousKeys.sorted().joinToString(",")}"
-        if (unreadAuditFingerprint != privateMessagesTraversalTaskExecutor.lastUnreadAuditFingerprint) {
-            privateMessagesTraversalTaskExecutor.lastUnreadAuditFingerprint = unreadAuditFingerprint
+        // The traversal executor owns the snapshot-to-decision sequence. This runtime performs
+        // only the side effects selected by that decision packet.
+        if (listEvaluation.unreadAuditChanged) {
             onLog(
                 "AI 会话管理：未读证据审计；" + formatUnreadAudit(snapshot, snapshotAmbiguousKeys) +
                     "；复查状态=${sessionManagerState.name}"
             )
         }
 
-        // Track every geometrically valid visible row for scroll-position comparison, including
-        // blocked identities. This is observation-only: blocked keys remain excluded by
-        // selectNext() and attemptOpenSession(), and can never become tap candidates here.
-        val wasWaitingForUnread = sessionManagerState == SessionManagerState.WAITING_FOR_UNREAD
-        val hadPendingScrollBaseline = privateMessagesTraversalTaskExecutor.pendingScrollBaseline != null
-        val visibleKeys = privateMessagesTraversalTaskExecutor.visibleSessionKeys(snapshot)
-        when (privateMessagesTraversalTaskExecutor.consumePendingScrollObservation(
-            visibleKeys = visibleKeys,
-            maxNoProgressScrolls = MAX_NO_PROGRESS_SCROLLS
-        )) {
+        val visibleKeys = listEvaluation.visibleKeys
+        when (listEvaluation.scrollDecision) {
             PrivateMessagesScrollObservationDecision.NO_PENDING_SCROLL -> Unit
             PrivateMessagesScrollObservationDecision.TOP_VIEWPORT_CHANGED -> {
                 // The swipe exposed a new viewport. Inspect this exact snapshot before issuing
@@ -3086,27 +3075,15 @@ class AiReplyObservationRuntime(
             PrivateMessagesScrollObservationDecision.BOTTOM_VIEWPORT_CHANGED -> Unit
         }
 
-        // A viewport identity change without one of our pending scroll gestures means the
-        // current scan position is no longer trustworthy (for example, a user swipe during
-        // a detail-page visit). Re-establish the bottom before continuing; do not tap rows
-        // from a position whose place in the traversal is unknown. Parked events remain
-        // current-page probes and deliberately do not trigger a full reposition.
-        if (privateMessagesTraversalTaskExecutor.reconcileUnrequestedViewportChange(
-                hadPendingScrollBaseline = hadPendingScrollBaseline,
-                wasWaitingForUnread = wasWaitingForUnread,
-                visibleKeys = visibleKeys,
-                snapshot = snapshot
-            )
-        ) {
+        if (listEvaluation.viewportPositionInvalidated) {
             sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
             onLog(
                 "AI 会话管理：未发出滚动手势时可见会话身份序列发生变化；当前列表位置不可信；" +
                     "以最新视口重新核对未读状态；保留本轮已处理身份，重新定位底部后继续审视"
             )
         }
-        if (visibleKeys.isNotEmpty()) privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = visibleKeys
 
-        if (snapshot.chatListCandidates.isEmpty()) {
+        if (listEvaluation.candidatesEmpty) {
             if (sessionManagerState == SessionManagerState.WAITING_FOR_UNREAD) {
                 // An incomplete accessibility tree during idle is not evidence that the list
                 // is empty or that a new traversal should begin. Keep the existing low-frequency
@@ -3120,12 +3097,9 @@ class AiReplyObservationRuntime(
             scheduleSessionListStabilityRetry("当前列表暂未提取到会话行")
             return
         }
-        privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount = 0
 
-        if (privateMessagesTraversalTaskExecutor.phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM &&
-            !wasWaitingForUnread
-        ) {
-            when (privateMessagesTraversalTaskExecutor.evaluateUnreadAdmission(snapshot)) {
+        listEvaluation.unreadAdmissionDecision?.let { admission ->
+            when (admission) {
                 PrivateMessagesUnreadAdmissionDecision.FIRST_SWIPE_REQUIRED -> {
                     // First successful upward swipe is a mandatory admission probe.
                     sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
@@ -3152,26 +3126,8 @@ class AiReplyObservationRuntime(
             }
         }
 
-        if (wasWaitingForUnread && snapshot.chatListCandidates.any {
-                it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
-            }
-        ) {
-            privateMessagesTraversalTaskExecutor.attemptedSessionKeys.clear()
-        }
-        val next = privateMessagesTraversalTaskExecutor.selectNextCandidate(
-            snapshot.chatListCandidates,
-            privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys
-        )
-
-        // ChatPageSnapshot.stableKey() captures page/window/viewport structure and redacted
-        // per-row fingerprints. For list archiving, also include the resolved visible-session
-        // identities and current row geometry so a swipe to a new set of rows in the same viewport
-        // bounds is archived as a distinct sample.
-        val structuralFingerprint = buildString {
-            append(snapshot.stableKey())
-            append("|visibleRows=")
-            append(visibleKeys.joinToString(","))
-        }
+        val next = listEvaluation.nextCandidate
+        val structuralFingerprint = listEvaluation.structuralFingerprint
         if (next == null) {
             // While parked, page-change events are wake-up probes only. A visible page with no
             // explicit UNREAD candidate must not restart scrolling; the low-frequency timer owns
