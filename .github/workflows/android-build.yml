@@ -1,8 +1,11 @@
 name: Freedom CI
 
 on:
+  # Run direct-push CI only for integration branches. Feature and Dependabot
+  # branches are validated by pull_request, avoiding duplicate builds for the
+  # same commit on both push and pull_request events.
   push:
-    branches: ["**"]
+    branches: ["main", "master"]
   pull_request:
     branches: ["main", "master"]
   schedule:
@@ -15,7 +18,9 @@ permissions:
   security-events: write
 
 concurrency:
-  group: freedom-ci-${{ github.workflow }}-${{ github.ref }}
+  # Runs for the same PR share one group; event type separates direct pushes,
+  # scheduled runs, and manual runs so they cannot cancel one another.
+  group: freedom-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:

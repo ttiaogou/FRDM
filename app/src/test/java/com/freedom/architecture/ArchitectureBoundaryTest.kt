@@ -568,12 +568,29 @@ class ArchitectureBoundaryTest {
     @Test
     fun ciRunsTheArchitectureGateBeforeAndroidBuild() {
         val workflow = File(projectRoot, ".github/workflows/android-build.yml").readText()
-        assertTrue("CI must define a separate architecture job", workflow.contains("architecture:"))
-        assertTrue("Android build must depend on the architecture job", workflow.contains("needs: architecture"))
-        assertTrue("CI must run the static architecture verifier", workflow.contains("tools/architecture/verify_boundaries.py"))
-        assertTrue("CI must run verifier unit tests", workflow.contains("unittest discover -s tools/architecture"))
-        assertTrue("Android build must execute the JVM module test tasks", workflow.contains(":gesture-runtime:test"))
+        val jobsSection = workflow.substringAfter("jobs:", missingDelimiterValue = "")
+        assertTrue("CI workflow must declare jobs", jobsSection.isNotBlank())
+
+        val jobIds = Regex("(?m)^  ([A-Za-z0-9_-]+):\\s*$")
+            .findAll(jobsSection)
+            .map { it.groupValues[1] }
+            .toList()
+        assertEquals("CI must use one job for architecture checks and the Android build", listOf("ci"), jobIds)
+
+        val verifierUnitTests = workflow.indexOf("python3 -m unittest discover -s tools/architecture")
+        val architectureGate = workflow.indexOf("python3 tools/architecture/verify_boundaries.py")
+        val androidBuild = workflow.indexOf("gradle --no-daemon clean")
+        assertTrue("CI must run verifier unit tests", verifierUnitTests >= 0)
+        assertTrue("CI must run the static architecture verifier", architectureGate >= 0)
+        assertTrue("Architecture verification must finish before the Android Gradle build", verifierUnitTests < architectureGate && architectureGate < androidBuild)
+
+        assertTrue("Android build must execute the core JVM module tests", workflow.contains(":core:test"))
+        assertTrue("Android build must execute the business JVM module tests", workflow.contains(":business:test"))
+        assertTrue("Android build must execute the gesture-core JVM module tests", workflow.contains(":gesture-core:test"))
+        assertTrue("Android build must execute the gesture-runtime JVM module tests", workflow.contains(":gesture-runtime:test"))
         assertTrue("Android build must execute app architecture tests", workflow.contains(":app:testDebugUnitTest"))
+        assertTrue("CI must build the Freedom debug APK", workflow.contains(":app:assembleDebug"))
+        assertTrue("CI must build the OCR plugin debug APK", workflow.contains(":ocr-plugin:assembleDebug"))
     }
 
     @Test
