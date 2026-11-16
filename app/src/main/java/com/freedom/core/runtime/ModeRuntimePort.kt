@@ -10,13 +10,7 @@ interface ModeRuntimePort {
     fun onAccessibilityServiceConnected()
     fun onAccessibilityServiceDisconnected()
     fun onTargetApplicationEvent(event: AccessibilityEventEnvelope)
-    fun onGlobalTouchEvent(event: AccessibilityEventEnvelope)
-
-    /**
-     * Pre-deduplication path for target-app click/selection events that may represent human input.
-     * Implementations must keep this handler side-effect bounded and must not persist event text.
-     */
-    fun onPreemptiveTargetInteraction(event: AccessibilityEventEnvelope) = Unit
+    fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) = Unit
 
     /** Optional mode-specific handling for activity transitions after event normalization. */
     fun onActivityTransition(activityClass: String) = Unit

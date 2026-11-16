@@ -231,7 +231,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             service = service,
             targetPackage = { monitorRepository.targetPackage() },
             activityClass = windowContextTracker::currentActivityClass,
-            inputOriginClassifier = inputOriginClassifier,
             activeRunMode = {
                 if (monitorRepository.isRunRequested()) runSessionCoordinator.activeMode() else null
             },
@@ -239,6 +238,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                 momoSocialAdapter.inspectGesturePageReadiness(root, activity, mode)
             },
             targetAppReadinessController = targetAppReadinessController,
+            inputOriginClassifier = inputOriginClassifier,
             onReadinessDiagnostic = addLog
         )
     }
@@ -314,11 +314,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             onLog = addLog,
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
-            isInputManualReviewRequired = {
-                monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
-            },
-            onManualReviewRequired = persistManualReviewHold,
-            onRequestScreenOff = requestScreenOff,
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             sharedPageObservationCoordinator = pageObservationCoordinator
@@ -369,8 +364,6 @@ internal class AccessibilityServiceDependencies internal constructor(
                 RunMode.ACCOUNT_BROWSE to accountBrowseRuntimeAdapter,
                 RunMode.AI_REPLY to AiReplyModeRuntimeAdapter(
                     runtime = { aiReplyObservationRuntime },
-                    acknowledgeManualReview = inputOriginClassifier::acknowledgeManualReview,
-                    isPersistedManualReviewRequired = monitorRepository::isInputManualReviewRequired,
                     onLog = addLog,
                     onReadinessStarting = { mode, reason ->
                         targetAppReadinessController.markStarting(mode, reason, SystemClock.uptimeMillis())
@@ -391,7 +384,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             dispatchTargetApplicationEvent = runSessionCoordinator::dispatchTargetApplicationEvent,
             dispatchGlobalTouchEvent = runSessionCoordinator::dispatchGlobalTouchEvent,
             dispatchActivityTransition = runSessionCoordinator::dispatchActivityTransition,
-            dispatchPreemptiveTargetInteraction = runSessionCoordinator::dispatchPreemptiveTargetInteraction,
             interactionDiagnostics = runSessionCoordinator::interactionDiagnostics,
             handleManualInteractionFallback = runSessionCoordinator::handleManualInteractionFallback,
             updateAppPage = { appLabel, pageLabel -> monitorRepository.updateAppPage(appLabel, pageLabel) },
@@ -399,7 +391,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             currentActivityClass = windowContextTracker::currentActivityClass,
             updateCurrentActivityClass = windowContextTracker::updateActivityClass,
             onBrowseEventLogged = { monitorPreviewScheduler.scheduleBrowseScan() },
-            inputOriginClassifier = inputOriginClassifier,
             currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() },
             observeWindowStateEvent = windowContextTracker::observeWindowStateEvent,
             onDuplicateSuppressed = { event ->

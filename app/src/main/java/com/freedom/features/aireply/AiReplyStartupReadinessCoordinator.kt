@@ -17,9 +17,6 @@ internal class AiReplyStartupReadinessCoordinator(
     private val targetPackage: () -> String,
     private val isAiReplyActive: () -> Boolean,
     private val isSessionRunStarted: () -> Boolean,
-    private val isAutomationYieldedToUser: () -> Boolean,
-    private val isUserControlIdle: () -> Boolean,
-    private val isManualReviewRequired: () -> Boolean,
     private val inspectFreshPageSnapshot: () -> ChatPageSnapshot?,
     private val isMessageViewportPositionedAgainstTab: (ChatPageSnapshot, ScreenRect, ScreenRect) -> Boolean,
     private val hasRelevantMessageStructureDelta: (ChatPageSnapshot, ChatPageSnapshot, ScreenRect, ScreenRect) -> Boolean,
@@ -31,9 +28,9 @@ internal class AiReplyStartupReadinessCoordinator(
         private const val MAX_STARTUP_MESSAGE_TAB_RETRIES = 75
         private const val MAX_STARTUP_MESSAGE_TAB_TAPS = 1
         private const val STARTUP_MESSAGE_TAB_RETRY_DELAY_MS = 400L
-        private const val USER_CONTROL_NAVIGATION_VERIFY_DELAY_MS = 900L
-        private const val USER_CONTROL_STABILITY_CONFIRM_DELAY_MS = 300L
-        private const val REQUIRED_USER_CONTROL_STABLE_SAMPLES = 3
+        private const val STARTUP_NAVIGATION_VERIFY_DELAY_MS = 900L
+        private const val STARTUP_STABILITY_CONFIRM_DELAY_MS = 300L
+        private const val REQUIRED_STARTUP_STABLE_SAMPLES = 3
     }
 
     private var task: ScheduledTask? = null
@@ -68,7 +65,7 @@ internal class AiReplyStartupReadinessCoordinator(
         initializationPending = false
         workAreaConfirmed = true
         cancelRecovery()
-        onLog("启动仲裁[INITIALIZATION_COMPLETE]：$reason；首个自主手势已收到 Android 完成回调；UNKNOWN按独立行为累计，达到阈值后才进入分级保护")
+        onLog("AI启动就绪[INITIALIZATION_COMPLETE]：$reason；首个自主手势已收到 Android 完成回调；后续任务由最新页面结构决定")
     }
 
     fun markWorkAreaConfirmed() {
@@ -109,8 +106,7 @@ internal class AiReplyStartupReadinessCoordinator(
 
     private fun runProbe(expectedGeneration: Long) {
         if (expectedGeneration != generation || timedOut || workAreaConfirmed ||
-            !initializationPending || !isSessionRunStarted() || !isAiReplyActive() ||
-            isAutomationYieldedToUser() || !isUserControlIdle() || isManualReviewRequired()
+            !initializationPending || !isSessionRunStarted() || !isAiReplyActive()
         ) return
 
         val fresh = inspectFreshPageSnapshot()
@@ -168,7 +164,7 @@ internal class AiReplyStartupReadinessCoordinator(
             "AI 启动导航[TAP_SUBMITTED]：已提交消息标签导航；" +
                 "等待手势完成和新鲜页面快照；tap=$tapAttempts/$MAX_STARTUP_MESSAGE_TAB_TAPS"
         )
-        task = scheduler.schedule(USER_CONTROL_NAVIGATION_VERIFY_DELAY_MS) {
+        task = scheduler.schedule(STARTUP_NAVIGATION_VERIFY_DELAY_MS) {
             task = null
             if (expectedGeneration == generation) verifyAfterTap(expectedGeneration)
         }
@@ -176,8 +172,7 @@ internal class AiReplyStartupReadinessCoordinator(
 
     private fun verifyAfterTap(expectedGeneration: Long) {
         if (expectedGeneration != generation || workAreaConfirmed || timedOut ||
-            !isAiReplyActive() || !initializationPending || isAutomationYieldedToUser() ||
-            !isUserControlIdle()
+            !isAiReplyActive() || !initializationPending
         ) return
 
         val before = beforeTap
@@ -237,7 +232,7 @@ internal class AiReplyStartupReadinessCoordinator(
 
     private fun scheduleListStabilitySample(expectedGeneration: Long) {
         if (task != null || expectedGeneration != generation) return
-        task = scheduler.schedule(USER_CONTROL_STABILITY_CONFIRM_DELAY_MS) {
+        task = scheduler.schedule(STARTUP_STABILITY_CONFIRM_DELAY_MS) {
             task = null
             verifyListStability(expectedGeneration)
         }
@@ -245,8 +240,7 @@ internal class AiReplyStartupReadinessCoordinator(
 
     private fun verifyListStability(expectedGeneration: Long) {
         if (expectedGeneration != generation || workAreaConfirmed || timedOut ||
-            !isAiReplyActive() || !initializationPending || isAutomationYieldedToUser() ||
-            !isUserControlIdle()
+            !isAiReplyActive() || !initializationPending
         ) return
 
         val previous = lastStableSnapshot
@@ -267,7 +261,7 @@ internal class AiReplyStartupReadinessCoordinator(
             onLog(
                 "AI 启动导航[STABILITY_RECHECK]：消息列表结构/位置尚未连续稳定；" +
                     "previous=${previous?.pageKind?.name ?: "NONE"}；fresh=${fresh?.pageKind?.name ?: "UNAVAILABLE"}；" +
-                    "stableSamples=$stableSamples/$REQUIRED_USER_CONTROL_STABLE_SAMPLES；" +
+                    "stableSamples=$stableSamples/$REQUIRED_STARTUP_STABLE_SAMPLES；" +
                     "重新以新快照建立稳定基准，不使用旧节点或旧坐标"
             )
             if (fresh != null && fresh.packageName == targetPackage() &&
@@ -285,12 +279,12 @@ internal class AiReplyStartupReadinessCoordinator(
         val stableSnapshot = fresh ?: return
         stableSamples++
         lastStableSnapshot = stableSnapshot
-        if (stableSamples >= REQUIRED_USER_CONTROL_STABLE_SAMPLES) {
+        if (stableSamples >= REQUIRED_STARTUP_STABLE_SAMPLES) {
             confirmWorkArea(stableSnapshot, expectedGeneration)
         } else {
             onLog(
                 "AI 启动导航[STABILITY_SAMPLE]：消息列表身份、结构和视口位置连续稳定" +
-                    "$stableSamples/$REQUIRED_USER_CONTROL_STABLE_SAMPLES"
+                    "$stableSamples/$REQUIRED_STARTUP_STABLE_SAMPLES"
             )
             scheduleListStabilitySample(expectedGeneration)
         }

@@ -180,34 +180,6 @@ class RunSessionCoordinator(
             }
     }
 
-    /** Deliver click-like target events before visible-log duplicate suppression. */
-    @Synchronized
-    fun dispatchPreemptiveTargetInteraction(event: AccessibilityEventEnvelope) {
-        synchronizeRunRequest()
-        val mode = activeMode()
-        if (mode != RunMode.AI_REPLY) return
-        val runtime = runtimes[mode] ?: run {
-            log.append("人工交互抢占链路[RUN_SESSION_DROPPED]：AI运行时不存在；事件=${event.type}")
-            return
-        }
-        log.append(
-            "人工交互抢占链路[RUN_SESSION_RECEIVED]：事件=${event.type}；" +
-                "eventTime=${event.eventTimeMillis}；模式=$mode"
-        )
-        runCatching { runtime.onPreemptiveTargetInteraction(event) }
-            .onSuccess {
-                log.append("人工交互抢占链路[RUN_SESSION_FORWARDED]：事件=${event.type}；模式=$mode")
-            }
-            .onFailure {
-                log.recordException(
-                    component = "RunSessionCoordinator",
-                    eventType = "preemptive_interaction_dispatch_failed",
-                    message = "人工交互抢占事件分发失败；event=${event.type}",
-                    error = it
-                )
-            }
-    }
-
     @Synchronized
     fun dispatchActivityTransition(activityClass: String) {
         activeMode()?.let { runtimes[it]?.onActivityTransition(activityClass) }

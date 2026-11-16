@@ -45,9 +45,6 @@ class RunSessionCoordinatorTest {
         override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) { calls += "target" }
         override fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) { calls += "global:${event.type}" }
         override fun onExternalRefresh() { externalRefreshCalls++ }
-        override fun onPreemptiveTargetInteraction(event: AccessibilityEventEnvelope) {
-            calls += "preemptive:${event.type}"
-        }
     }
 
     @Test
@@ -134,40 +131,32 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
-    fun aiReplyRunForwardsGlobalTouchAndPreemptiveTargetInteractionWithTraceLogs() {
+    fun targetApplicationEventsRemainTheOnlyAiReplyInteractionDispatchPath() {
         val state = FakeState()
         val ai = FakeRuntime(RunMode.AI_REPLY)
-        val logs = mutableListOf<String>()
         val coordinator = RunSessionCoordinator(
             state,
             mapOf(RunMode.AI_REPLY to ai),
-            RuntimeLogSink { logs += it }
+            RuntimeLogSink { }
         )
         state.requested = true
         state.mode = RunMode.AI_REPLY
         coordinator.synchronizeRunRequest()
-        val touch = AccessibilityEventEnvelope(
-            type = com.freedom.core.accessibility.events.AccessibilityEventType.TOUCH_INTERACTION_START,
-            packageName = "",
-            className = "",
+        val click = AccessibilityEventEnvelope(
+            type = com.freedom.core.accessibility.events.AccessibilityEventType.VIEW_CLICKED,
+            packageName = "com.immomo.momo",
+            className = "android.widget.Button",
             contentChanges = emptySet(),
             eventTimeMillis = 123L,
             eventText = emptyList(),
             contentDescription = null,
             source = null
         )
-        val click = touch.copy(
-            type = com.freedom.core.accessibility.events.AccessibilityEventType.VIEW_CLICKED,
-            packageName = "com.immomo.momo"
-        )
 
-        coordinator.dispatchGlobalTouchEvent(touch)
-        coordinator.dispatchPreemptiveTargetInteraction(click)
+        coordinator.dispatchTargetApplicationEvent(click)
 
-        assertTrue(ai.calls.contains("global:TOUCH_INTERACTION_START"))
-        assertTrue(ai.calls.contains("preemptive:VIEW_CLICKED"))
-        assertTrue(logs.any { it.contains("全局触摸链路[RUN_SESSION_FORWARDED]") })
-        assertTrue(logs.any { it.contains("人工交互抢占链路[RUN_SESSION_FORWARDED]") })
+        assertTrue(ai.calls.contains("target"))
+        assertTrue(ai.calls.none { it.startsWith("preemptive:") })
     }
 
     @Test

@@ -7,20 +7,14 @@ import com.freedom.core.accessibility.events.AccessibilityEventRoute
 import com.freedom.core.accessibility.events.AccessibilityEventRoutePolicy
 import com.freedom.core.accessibility.events.AccessibilityEventType
 import com.freedom.core.accessibility.events.DefaultAccessibilityEventRoutePolicy
-import com.freedom.core.accessibility.events.InputOrigin
-import com.freedom.core.accessibility.events.InputOriginClassifier
-import com.freedom.core.accessibility.events.InputOriginDecision
-import com.freedom.core.accessibility.events.InputOriginEvidence
 import com.freedom.core.runtime.RunMode
 
 /**
  * Owns the synchronous Android-event normalization and dispatch pipeline.
  *
  * The service remains responsible for Android lifecycle, run/permission gates and the
- * pre-normalization window-transition notification. This adapter preserves the established
- * event ordering for the two latched runtimes, including AccountBrowse's pre-deduplication
- * event delivery, AI Reply's pre-deduplication human-interaction arbitration, and AI Reply's
- * ordinary post-log event delivery.
+ * pre-normalization window-transition notification. AccountBrowse retains its existing
+ * pre-deduplication event delivery; AI Reply receives ordinary page-observation events only.
  */
 internal class AndroidAccessibilityEventPipeline(
     private val routePolicy: AccessibilityEventRoutePolicy = DefaultAccessibilityEventRoutePolicy(),
@@ -38,8 +32,6 @@ internal class AndroidAccessibilityEventPipeline(
     private val updateCurrentActivityClass: (String) -> Unit,
     private val onBrowseEventLogged: () -> Unit,
     private val nowMillis: () -> Long = System::currentTimeMillis,
-    private val dispatchPreemptiveTargetInteraction: (AccessibilityEventEnvelope) -> Unit = {},
-    private val inputOriginClassifier: InputOriginClassifier? = null,
     private val currentWindowGeneration: () -> Long = { 0L },
     private val onDuplicateSuppressed: (AccessibilityEventEnvelope) -> Unit = {},
     private val observeWindowStateEvent: (className: String, windowId: Int) -> Unit = { _, _ -> }
@@ -106,20 +98,8 @@ internal class AndroidAccessibilityEventPipeline(
                 "全局触摸链路[PIPELINE_ROUTED]：事件=${eventForRouting.type}；" +
                     "路由=GLOBAL_TOUCH；模式=$runMode；eventTime=${eventForRouting.eventTimeMillis}"
             )
-            val originDecision = if (runMode == RunMode.AI_REPLY) {
-                classifyInputOrigin(eventForRouting)
-            } else null
-            if (originDecision != null) logInputOriginDecision(eventForRouting, originDecision)
-            val routedTouchEvent = if (originDecision != null) {
-                eventForRouting.copy(inputOriginDecision = originDecision)
-            } else eventForRouting
-            if (originDecision?.shouldYieldAutomation == false) {
-                appendLog(
-                    "全局触摸链路[NON_EXTERNAL_SUPPRESSED]：事件=${eventForRouting.type}；" +
-                        "origin=${originDecision.origin}；actionId=${originDecision.actionId ?: "NONE"}；不作为外部交互抢占"
-                )
-            } else if (runMode == RunMode.ACCOUNT_BROWSE || runMode == RunMode.AI_REPLY) {
-                runCatching { dispatchGlobalTouchEvent(routedTouchEvent) }
+            if (runMode == RunMode.ACCOUNT_BROWSE) {
+                runCatching { dispatchGlobalTouchEvent(eventForRouting) }
                     .onSuccess {
                         appendLog("全局触摸链路[PIPELINE_FORWARDED]：事件=${eventForRouting.type}；模式=$runMode")
                     }
@@ -130,7 +110,7 @@ internal class AndroidAccessibilityEventPipeline(
                         )
                     }
             } else {
-                appendLog("全局触摸链路[PIPELINE_DROPPED]：当前模式不消费全局触摸；模式=$runMode")
+                appendLog("全局触摸链路[PIPELINE_DROPPED]：AI Reply 不使用全局触摸事件决定任务或中断调度")
             }
             return
         }
@@ -141,49 +121,10 @@ internal class AndroidAccessibilityEventPipeline(
         // immediately before AccountBrowse's pre-deduplication delivery.
         val eventNow = now ?: nowMillis()
 
-        val inputOriginDecision = if (runMode == RunMode.AI_REPLY && isInputOriginRelevant(eventForRouting.type)) {
-            classifyInputOrigin(eventForRouting).also { logInputOriginDecision(eventForRouting, it) }
-        } else null
-        val routedTargetEvent = if (inputOriginDecision != null) {
-            eventForRouting.copy(inputOriginDecision = inputOriginDecision)
-        } else eventForRouting
+        val routedTargetEvent = eventForRouting
 
         if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && className.isNotBlank()) {
             runCatching { observeWindowStateEvent(className, eventForRouting.windowId) }
-        }
-
-        // AI interaction arbitration runs before log de-duplication. SELF_INJECTED and
-        // target-app control feedback are filtered; only remaining UNKNOWN/external evidence
-        // reaches the independent-behaviour counter downstream.
-        if (runMode == RunMode.AI_REPLY && isPreemptiveInteractionEvent(eventForRouting.type)) {
-            if (inputOriginDecision?.shouldYieldAutomation == false) {
-                val filterTag = if (inputOriginDecision.origin == InputOrigin.SELF_INJECTED) {
-                    "SELF_ACTION_FEEDBACK_CONSUMED"
-                } else {
-                    "APPLICATION_CONTROL_FILTERED"
-                }
-                appendLog(
-                    "人工交互抢占链路[$filterTag]：事件=${eventForRouting.type}；" +
-                        "origin=${inputOriginDecision.origin}；actionId=${inputOriginDecision.actionId ?: "NONE"}；不进入UNKNOWN仲裁"
-                )
-            } else {
-                appendLog(
-                    "人工交互抢占链路[PIPELINE_PRE_DEDUP]：事件=${eventForRouting.type}；" +
-                        "来源包=$eventPackage；eventTime=${eventForRouting.eventTimeMillis}；" +
-                        "ViewId=${eventForRouting.source?.viewId.orEmpty().ifBlank { "NONE" }}；" +
-                        "inputOrigin=${inputOriginDecision?.origin ?: InputOrigin.UNKNOWN}"
-                )
-                runCatching { dispatchPreemptiveTargetInteraction(routedTargetEvent) }
-                    .onSuccess {
-                        appendLog("人工交互抢占链路[PIPELINE_FORWARDED]：事件=${eventForRouting.type}；执行时点=去重前")
-                    }
-                    .onFailure {
-                        appendLog(
-                            "人工交互抢占链路[PIPELINE_FORWARD_ERROR]：事件=${eventForRouting.type}；" +
-                                "异常=${it.javaClass.simpleName}"
-                        )
-                    }
-            }
         }
 
         // AccountBrowse consumes target events before visible-log de-duplication. This updates
@@ -245,7 +186,7 @@ internal class AndroidAccessibilityEventPipeline(
                     addAll(interactionDiagnostics(normalizedEvent, eventNow))
                 } else {
                     add("当前 Activity=${currentActivityClass().ifBlank { "未知" }}")
-                    add("AI 模式不调用自动浏览人工接管逻辑；目标事件仍投递到 AI 被动观察链路")
+                    add("AI Reply 仅将目标事件用于页面结构观察；UNKNOWN 不参与任务调度")
                     add(AccessibilityEventFormatter.sourceDetails(eventForRouting.source))
                 }
             }
@@ -262,39 +203,6 @@ internal class AndroidAccessibilityEventPipeline(
     }
 
     fun resetDuplicateWindow() = routePolicy.resetDuplicateWindow()
-
-    private fun classifyInputOrigin(event: AccessibilityEventEnvelope): InputOriginDecision =
-        inputOriginClassifier?.classify(
-            event = event,
-            currentActivityClass = currentActivityClass(),
-            currentPageGeneration = currentWindowGeneration(),
-            targetPackage = targetPackage()
-        ) ?: InputOriginDecision(
-            origin = InputOrigin.UNKNOWN,
-            evidence = InputOriginEvidence.NO_MATCHING_FREEDOM_ACTION,
-            reason = "来源分类器未配置，不能证明事件来源"
-        )
-
-    private fun logInputOriginDecision(event: AccessibilityEventEnvelope, decision: InputOriginDecision) {
-        appendLog(
-            "输入来源分类[DECISION]：origin=${decision.origin}；evidence=${decision.evidence}；" +
-                "actionId=${decision.actionId ?: "NONE"}；event=${event.type}；" +
-                "windowId=${event.windowId}；pageGeneration=${currentWindowGeneration()}；" +
-                "reason=${decision.reason}"
-        )
-    }
-
-    private fun isInputOriginRelevant(type: AccessibilityEventType): Boolean =
-        isPreemptiveInteractionEvent(type) || type == AccessibilityEventType.VIEW_SCROLLED
-
-    private fun isPreemptiveInteractionEvent(type: AccessibilityEventType): Boolean = when (type) {
-        AccessibilityEventType.VIEW_CLICKED,
-        AccessibilityEventType.VIEW_LONG_CLICKED,
-        AccessibilityEventType.VIEW_CONTEXT_CLICKED,
-        AccessibilityEventType.VIEW_SELECTED,
-        AccessibilityEventType.VIEW_SCROLLED -> true
-        else -> false
-    }
 
     private fun isTrackedInteractionEvent(type: AccessibilityEventType): Boolean = when (type) {
         AccessibilityEventType.VIEW_CLICKED,

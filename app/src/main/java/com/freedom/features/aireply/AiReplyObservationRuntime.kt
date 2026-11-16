@@ -5,14 +5,10 @@ import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.accessibility.events.AccessibilityEventType
 import com.freedom.core.accessibility.event.AccessibilityEventPolicy
 import com.freedom.core.accessibility.events.AccessibilityUiSignal
-import com.freedom.core.accessibility.events.InputOrigin
-import com.freedom.core.accessibility.events.InputOriginDecision
-import com.freedom.core.accessibility.events.InputOriginEvidence
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.PageObservationCoordinator
-import com.freedom.core.runtime.UnknownInteractionArbiter
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
 import com.freedom.core.accessibility.gesture.GestureIntent
@@ -37,7 +33,6 @@ import com.freedom.features.aireply.ports.ChatPageSnapshot
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.LinkedHashSet
-import java.util.Locale
 
 /**
  * Owns AI-mode page observation, bounded chat-region refresh and bounded message-read scheduling.
@@ -57,11 +52,6 @@ class AiReplyObservationRuntime(
     private val fullInspectionDebounceMs: Long,
     private val regionRefreshDebounceMs: Long,
     private val onMessagesObserved: (ChatMessageBatch) -> Unit = {},
-    private val isInputManualReviewRequired: () -> Boolean = { false },
-    private val onManualReviewRequired: (String) -> Unit = {},
-    private val onRequestScreenOff: () -> Boolean = { false },
-    /** Monotonic clock for diagnosing delayed main-thread recovery-watch execution. */
-    private val uptimeMillis: () -> Long = { System.nanoTime() / 1_000_000L },
     /** Inclusive random bounds are injectable so task scheduling can be tested deterministically. */
     private val chooseRandomInt: (Int, Int) -> Int = { minimum, maximum ->
         java.util.concurrent.ThreadLocalRandom.current().nextInt(minimum, maximum + 1)
@@ -106,26 +96,11 @@ class AiReplyObservationRuntime(
         private const val RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS = 750L
         private const val MAX_SESSION_LIST_STABILITY_RETRIES = 3
         private const val MAX_EVENT_BURST_INSPECTION_WAIT_MS = 1_200L
-        private const val USER_CONTROL_STABILITY_CONFIRM_DELAY_MS = 300L
-        private const val REQUIRED_USER_CONTROL_STABLE_SAMPLES = 3
-        private const val MAX_USER_CONTROL_STABILITY_RETRIES = 10
-        private const val USER_CONTROL_NAVIGATION_VERIFY_DELAY_MS = 900L
-        private const val MESSAGE_TAB_GUARD_DEBOUNCE_MS = 180L
-        private const val USER_HANDOFF_MESSAGE_TAB_WATCH_INTERVAL_MS = 30_000L
-        private const val MAX_USER_CONTROL_NAVIGATION_BACK_ATTEMPTS = 4
-        private const val MAX_USER_CONTROL_CHAT_TAB_TAPS = 1
         private const val MAX_ARCHIVED_MANUAL_MESSAGE_FINGERPRINTS = 500
         private const val SESSION_TAP_DURATION_MS = 90L
         private const val SESSION_SCROLL_DURATION_MS = 480L
         private const val PRIVATE_MESSAGES_TASK_ID = PrivateMessagesTaskController.TASK_ID
         private const val RECEIVED_GREETINGS_TASK_ID = ReceivedGreetingsTaskController.TASK_ID
-        private val PREEMPTIVE_INTERACTION_EVENT_TYPES = setOf(
-            AccessibilityEventType.VIEW_CLICKED,
-            AccessibilityEventType.VIEW_LONG_CLICKED,
-            AccessibilityEventType.VIEW_CONTEXT_CLICKED,
-            AccessibilityEventType.VIEW_SELECTED,
-            AccessibilityEventType.VIEW_SCROLLED
-        )
         private val PAGE_CHANGE_RECHECK_EVENT_TYPES = setOf(
             AccessibilityEventType.WINDOW_STATE_CHANGED,
             AccessibilityEventType.WINDOWS_CHANGED,
@@ -177,8 +152,7 @@ class AiReplyObservationRuntime(
     private val inboxPageRecognizer = MomoInboxPageRecognizer()
     private val receivedGreetingsPageRecognizer by lazy(LazyThreadSafetyMode.NONE) {
         MomoReceivedGreetingsPageRecognizer {
-            if (userControlPhase == UserControlPhase.TOUCHING ||
-                !sessionRunStarted || !receivedGreetingsTaskFlow.supportsWorkflow()
+            if (!sessionRunStarted || !receivedGreetingsTaskFlow.supportsWorkflow()
             ) {
                 ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION
             } else {
@@ -210,34 +184,13 @@ class AiReplyObservationRuntime(
     private var readinessDeferredRetryCount = 0
     private var readinessDeferredRetryLimitLogged = false
     private var readinessDeferredRetryGeneration = 0L
-    /** Startup navigation is independent from user-handoff retries and remains bounded. */
+    /** Startup navigation is page-structure verified and remains bounded. */
     private var lastPageInspection: ChatPageSnapshot? = null
     /** Last positively confirmed inbox anchor; survives only same-window transient UNKNOWN samples. */
     private var lastConfirmedChatListInspection: ChatPageSnapshot? = null
     private var lastRegionFingerprint = ""
     private var lastMessageFingerprint = ""
     private val archivedManualMessageFingerprints = LinkedHashSet<String>()
-    private var userControlPhase = UserControlPhase.IDLE
-    /** Owns only the tiered user-quiet delay; page sampling/navigation use separate tasks. */
-    private var handoffMessageTabWatchScheduledAtUptimeMs: Long? = null
-    private var handoffMessageTabWatchDueAtUptimeMs: Long? = null
-    private var messageTabProbeInFlight = false
-    private var userControlCycle = 0L
-    private var userControlInteractionRevision = 0L
-    private var messageTabPositionConfirmedForCycle = false
-    private var messageTabNavigationAnchorBeforeTap: String? = null
-    private var pendingMessageTabGuardReason = ""
-    private var pendingMessageTabGuardRestartsQuiet = false
-    private var pendingMessageTabGuardFallsBackToQuiet = false
-    private val manualTakeoverCoordinator = AiReplyManualTakeoverCoordinator(scheduler)
-    private var pendingUserPageInspection = false
-    private var userControlNavigationBackAttempts = 0
-    private var userControlChatTabTapAttempts = 0
-    private var userControlNavigationInFlight = false
-    /** True after a user hand-off until a stable, eligible target page re-arms automation. */
-    private var automationYieldedToUser = false
-    /** Compatibility gate for an older persisted review latch; new unknown-source inputs never set it. */
-    private var manualReviewRequired = false
     private val loggedOcrDebugFingerprints = LinkedHashSet<String>()
     private val temporaryContactMessageLedger = TemporaryContactMessageLedger(threshold = 10)
     /** Session keys awaiting an externally verified intercept-toggle result, in threshold order. */
@@ -281,9 +234,6 @@ class AiReplyObservationRuntime(
             targetPackage = targetPackage,
             isAiReplyActive = isAiReplyActive,
             isSessionRunStarted = { sessionRunStarted },
-            isAutomationYieldedToUser = { automationYieldedToUser },
-            isUserControlIdle = { userControlPhase == UserControlPhase.IDLE },
-            isManualReviewRequired = ::manualReviewIsRequired,
             inspectFreshPageSnapshot = ::inspectFreshPageSnapshot,
             isMessageViewportPositionedAgainstTab = ::isMessageViewportPositionedAgainstTab,
             hasRelevantMessageStructureDelta = ::hasRelevantMessageStructureDelta,
@@ -300,21 +250,6 @@ class AiReplyObservationRuntime(
         )
     }
 
-    private enum class UserControlPhase {
-        IDLE,
-        TOUCHING,
-        SETTLING,
-        VERIFYING_STABILITY
-    }
-
-    /** Accessibility update categories are diagnostic only; none is itself a touch signal. */
-    private enum class UiChangeKind {
-        MESSAGE_DATA_UPDATE,
-        PAGE_NAVIGATION_UPDATE,
-        PAGE_STRUCTURE_UPDATE,
-        AD_CONTENT_UPDATE,
-        OTHER_UPDATE
-    }
 
 
 
@@ -327,8 +262,6 @@ class AiReplyObservationRuntime(
     private var passiveManualObservation = false
     private var sessionRunStarted = false
     /** Startup stays provisional until the first autonomous gesture is accepted by Android. */
-    /** Captured before a hand-off so passive-only capture can never become autonomous browsing. */
-    private var userHandoffCanResumeAutonomous = false
     // Compatibility accessors keep this large coordinator readable while the executor owns the
     // actual traversal/session state. All writes still cross the same single owner.
     private var currentSessionKey: String?
@@ -357,52 +290,29 @@ class AiReplyObservationRuntime(
     private var sessionSafeViewportRetryTask: ScheduledTask? = null
     private var sessionSafeViewportRetryCount = 0
     private var sessionSafeViewportRetryGeneration = 0L
-    private val unknownInteractionArbiter = UnknownInteractionArbiter()
-    private var unknownCounterResetTask: ScheduledTask? = null
-    private var unknownCounterResetRevision = 0L
-    private var lastUnknownBehaviourAtUptimeMs = Long.MIN_VALUE
     /** Set by relevant target-app page-change events; probe admission never consults InputOrigin. */
     private var receivedGreetingsPageProbePending = false
     /** Short-lived empty accessibility roots are retried without replacing the last confirmed page. */
     private val transientEmptySnapshotRecovery = AiReplySessionTraversalCoordinator(
         TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS
     )
-    /** Generation invalidates callbacks from gestures submitted before a human hand-off. */
+    /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
 
 
     /**
-     * Low-frequency watcher callback. It requests a read-only page inspection or, during an
-     * existing hand-off, lets the established quiet-period guard perform the same watcher-first
-     * check. It never navigates by itself and never bypasses a manual-review latch.
+     * Low-frequency watcher callback. It requests one read-only page inspection and never
+     * navigates or changes task ownership without a page-structure result.
      */
     private fun requestReceivedGreetingsFallbackCheck() {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
             receivedGreetingsTaskCompletedAwaitingUserExit ||
             !receivedGreetingsTaskFlow.supportsWorkflow()
         ) return
-        if (manualReviewIsRequired()) {
-            pageObservationCoordinator.resetReceivedGreetingsWatch()
-            onLog("收到的招呼页面监听[FALLBACK_HELD]：当前存在待人工复核锁定；不自动接管任务")
-            return
-        }
-
         receivedGreetingsPageProbePending = true
-        onLog("收到的招呼页面监听[LOW_FREQUENCY_FALLBACK]：事件静默期间执行一次只读页面复核；不依据输入来源分类")
-        when {
-            userControlPhase != UserControlPhase.IDLE -> {
-                pendingUserPageInspection = true
-            }
-            automationYieldedToUser -> {
-                requestMessageTabGuard(
-                    reason = "收到的招呼页面低频兜底复核",
-                    restartQuietWhenUnconfirmed = false,
-                    fallBackToQuietWhenUnconfirmed = false
-                )
-            }
-            else -> pageObservationCoordinator.signalFullInspection()
-        }
+        onLog("收到的招呼页面观察[LOW_FREQUENCY_CHECK]：执行一次只读页面结构检查")
+        pageObservationCoordinator.signalFullInspection()
     }
 
     private fun runFullInspection() {
@@ -413,10 +323,6 @@ class AiReplyObservationRuntime(
         ) {
             sessionManagerState = SessionManagerState.PAUSED
             onLog("收到的招呼任务观察被阻止：当前任务已不持有 UI 操作权；等待安全恢复")
-            return
-        }
-        if (userControlPhase != UserControlPhase.IDLE) {
-            pendingUserPageInspection = true
             return
         }
         val inspection = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
@@ -443,20 +349,65 @@ class AiReplyObservationRuntime(
 
     /** Applies a newly acquired page snapshot after ordinary debounce or verified user stability. */
     private fun handleInspectionSnapshot(incomingInspection: ChatPageSnapshot) {
-        if (sessionRunStarted && !receivedGreetingsTaskCompletedAwaitingUserExit) {
-            val requiredTask = if (receivedGreetingsTaskActive) {
-                RECEIVED_GREETINGS_TASK_ID
-            } else {
-                PRIVATE_MESSAGES_TASK_ID
-            }
-            if (!ownsTask(requiredTask)) {
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog("页面状态机处理被阻止：当前任务未持有 UI 操作权；task=$requiredTask；仅保留只读页面观察")
-                return
-            }
-        }
         val previous = lastPageInspection
         val inspection = stabilizeIncomingPageSnapshot(incomingInspection)
+
+        if (sessionRunStarted) {
+            when {
+                receivedGreetingsTaskActive && !ownsTask(RECEIVED_GREETINGS_TASK_ID) -> {
+                    sessionManagerState = SessionManagerState.PAUSED
+                    onLog("页面结构调度[OWNERSHIP_REJECTED]：收到的招呼任务未持有UI操作租约；仅保留只读观察")
+                    return
+                }
+                receivedGreetingsTaskCompletedAwaitingUserExit -> {
+                    val returnedToInbox = inspection.pageKind == ChatPageKind.CHAT_LIST &&
+                        inspection.messageTabPositionKey() != null &&
+                        inspection.messageTabAnchorPositionKey() != null
+                    if (!returnedToInbox) {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        lastPageInspection = inspection
+                        return
+                    }
+                    if (!claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "页面结构确认已离开收到的招呼列表并返回普通消息列表")) {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("私人消息任务恢复[OWNERSHIP_REJECTED]：普通消息列表已确认，但未取得UI操作租约")
+                        return
+                    }
+                    receivedGreetingsTaskFlow.acknowledgeCompletedTaskExit()
+                    sessionActionGeneration += 1L
+                    privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
+                    privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = false
+                    privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.clear()
+                    privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized = false
+                    privateMessagesTraversalTaskExecutor.normalInboxHadUnread = false
+                    privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = false
+                    privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
+                    privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount = 0
+                    privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+                    privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+                    privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
+                    privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
+                    privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
+                    privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
+                    privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount = 0
+                    currentSessionKey = null
+                    currentSessionName = null
+                    currentSessionCandidate = null
+                    currentSessionReadCaptured = false
+                    currentSessionWindowKey = null
+                    sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
+                    onLog("收到的招呼任务[PAGE_RETURN_CONFIRMED]：普通消息列表结构已重新确认；重新取得私人消息任务租约并执行原有未读准入流程")
+                }
+                !receivedGreetingsTaskActive && inspection.pageKind == ChatPageKind.CHAT_LIST &&
+                    !ownsTask(PRIVATE_MESSAGES_TASK_ID) -> {
+                    if (!claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "页面结构确认普通消息列表符合私人消息任务条件")) {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("私人消息任务[OWNERSHIP_REJECTED]：页面结构符合普通消息列表，但暂未取得UI操作租约")
+                        return
+                    }
+                }
+            }
+        }
         if (previous != null && inboxPageRecognizer.isChatDetail(previous) &&
             (!inboxPageRecognizer.isChatDetail(inspection) ||
                 !hasSameWindowSession(previous, inspection))
@@ -467,24 +418,23 @@ class AiReplyObservationRuntime(
         val nextKey = inspection.stableKey()
         lastPageInspection = inspection
 
-        // Probe after any relevant target-app page-change event, independently of InputOrigin.
-        // Event bursts are coalesced by EventAssistedDebouncer; the listener owns one stability
-        // retry and one low-frequency fallback timer. Only adapter-confirmed page structure can
-        // transfer ownership to the Received Greetings task.
+        // Probe after any relevant target-app page-change event. Event provenance never gates
+        // the probe or grants task ownership. Event bursts are coalesced by EventAssistedDebouncer;
+        // the listener owns one stability retry and one low-frequency fallback timer. Only
+        // adapter-confirmed page structure can transfer ownership to the Received Greetings task.
         if (receivedGreetingsPageProbePending && sessionRunStarted &&
             !receivedGreetingsTaskActive && !receivedGreetingsTaskCompletedAwaitingUserExit &&
-            userControlPhase == UserControlPhase.IDLE && !automationYieldedToUser &&
             receivedGreetingsTaskFlow.supportsWorkflow()
         ) {
             receivedGreetingsPageProbePending = false
             val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable()
             when (arrivalStatus) {
                 ReceivedGreetingsPageArrivalStatus.NOT_TARGET,
-                ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION -> Unit
+                ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION,
+                ReceivedGreetingsPageArrivalStatus.UNKNOWN -> Unit
                 ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> return
                 ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE,
-                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
-                ReceivedGreetingsPageArrivalStatus.UNKNOWN -> {
+                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING -> {
                     pauseForReceivedGreetingsPageTransition(arrivalStatus)
                     return
                 }
@@ -581,7 +531,14 @@ class AiReplyObservationRuntime(
         when (inspection.pageKind) {
             ChatPageKind.CHAT_LIST -> {
                 when {
-                    sessionRunStarted && !automationYieldedToUser && awaitingNormalInboxAfterGreetingsReturn -> {
+                    sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn -> {
+                        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
+                            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "收到的招呼流程返回普通消息列表后恢复私人消息任务")
+                        ) {
+                            sessionManagerState = SessionManagerState.PAUSED
+                            onLog("私人消息任务恢复[OWNERSHIP_REJECTED]：返回消息列表后未取得UI操作租约")
+                            return
+                        }
                         receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
                         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
                         privateMessagesTaskController.resetQuota()
@@ -612,7 +569,7 @@ class AiReplyObservationRuntime(
                             else -> enterUnreadWait("从收到的招呼返回普通消息页，当前位置没有符合条件的新消息")
                         }
                     }
-                    sessionRunStarted && !automationYieldedToUser -> handleSessionListPage(inspection)
+                    sessionRunStarted -> handleSessionListPage(inspection)
                     isManualObservationEnabled() -> capturePassiveSessionList(inspection)
                 }
             }
@@ -765,378 +722,6 @@ class AiReplyObservationRuntime(
      * Observes system touch boundaries. UNKNOWN boundaries are correlated with adjacent target
      * feedback and counted as one behaviour; only the third independent behaviour yields.
      */
-    fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
-        val decision = event.inputOriginDecision ?: unknownInputDecision("全局触摸事件未携带来源分类")
-        onLog(
-            "全局触摸链路[RUNTIME_RECEIVED]：事件=${event.type}；eventTime=${event.eventTimeMillis}；" +
-                "origin=${decision.origin}；phase=${userControlPhase.name}；" +
-                "automationYielded=$automationYieldedToUser；manualReviewRequired=${manualReviewIsRequired()}"
-        )
-        if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) {
-            onLog("全局触摸链路[RUNTIME_DROPPED]：AI运行未激活或目标包不匹配；事件=${event.type}")
-            return
-        }
-
-        val observation = recordUnknownInteractionBehaviour(event, decision)
-        val protectionTriggered = observation.disposition == UnknownInteractionArbiter.Disposition.HUMAN_CONFIRMED ||
-            observation.thresholdReached
-        if (!protectionTriggered) {
-            if (event.type == AccessibilityEventType.TOUCH_INTERACTION_END &&
-                automationYieldedToUser && userControlPhase != UserControlPhase.IDLE
-            ) {
-                // A target click/scroll may be the event that reaches the third UNKNOWN threshold
-                // and moves the phase to SETTLING before Android sends the global touch END. The
-                // END still owns the true quiet-period start, regardless of the current phase.
-                manualTakeoverCoordinator.quietPeriod.restart()
-                manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_SETTLE)
-                pendingUserPageInspection = true
-                finishUserControl("全局触摸结束；三次UNKNOWN阈值保护周期从实际触摸结束后进入页面静默复核")
-                onLog(
-                    "全局触摸链路[PROTECTION_SETTLING]：保护周期收到全局触摸结束；" +
-                        "静默计时从触摸结束重新起算；进入既有5秒/15秒/60秒静默验证；行为=${observation.behaviourId}"
-                )
-                return
-            }
-            onLog(
-                "全局触摸链路[UNKNOWN_CONTINUES]：事件=${event.type}；" +
-                    "未知独立行为=${observation.count}/${UnknownInteractionArbiter.DEFAULT_THRESHOLD}；" +
-                    "行为=${observation.behaviourId}；任务继续；${observation.reason}"
-            )
-            return
-        }
-
-        val reason = "全局触摸事件=${event.type}；origin=${decision.origin}；仲裁=${observation.disposition}；" +
-            "独立未知行为=${observation.count}/${UnknownInteractionArbiter.DEFAULT_THRESHOLD}；${observation.reason}"
-        when (event.type) {
-            AccessibilityEventType.TOUCH_INTERACTION_START -> {
-                beginUserControl(reason)
-                userControlPhase = UserControlPhase.TOUCHING
-                pendingUserPageInspection = true
-                onLog("全局触摸链路[PROTECTION_TRIGGERED]：$reason；触摸期间暂停自主派发，等待结束后启动分级静默验证")
-            }
-            AccessibilityEventType.TOUCH_INTERACTION_END -> {
-                if (userControlPhase == UserControlPhase.IDLE && !automationYieldedToUser) {
-                    beginUserControl(reason)
-                }
-                pendingUserPageInspection = true
-                finishUserControl(reason)
-                onLog("全局触摸链路[PROTECTION_SETTLING]：$reason；进入既有5秒/15秒/60秒静默验证")
-            }
-            else -> onLog("全局触摸链路[RUNTIME_IGNORED]：不是触摸边界事件；事件=${event.type}")
-        }
-    }
-
-    /**
-     * Receives only click/selection/scroll feedback that survives application-control filtering.
-     * Target-app control callbacks are discarded before this method; remaining UNKNOWN evidence
-     * is grouped into independent behaviours and yields only at the existing third threshold.
-     */
-    fun onPreemptiveTargetInteraction(event: AccessibilityEventEnvelope) {
-        if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
-        if (event.type !in PREEMPTIVE_INTERACTION_EVENT_TYPES) return
-
-        val decision = event.inputOriginDecision ?: unknownInputDecision("目标交互事件未携带来源分类")
-        if (!decision.shouldYieldAutomation) {
-            val filterTag = if (decision.origin == InputOrigin.SELF_INJECTED) {
-                "SELF_ACTION_FEEDBACK_CONSUMED"
-            } else {
-                "APPLICATION_CONTROL_FILTERED"
-            }
-            onLog(
-                "未知交互仲裁[$filterTag]：事件=${event.type}；" +
-                    "origin=${decision.origin}；actionId=${decision.actionId ?: "NONE"}；" +
-                    "已归属自主动作反馈/目标应用控件变化；不计数、不让权"
-            )
-            return
-        }
-
-        val observation = recordUnknownInteractionBehaviour(event, decision)
-        if (observation.disposition != UnknownInteractionArbiter.Disposition.HUMAN_CONFIRMED &&
-            !observation.thresholdReached
-        ) {
-            onLog(
-                "未知交互仲裁[CONTINUE_AUTONOMOUS]：事件=${event.type}；" +
-                    "package=${event.packageName}；Activity=${event.className}；" +
-                    "windowId=${event.windowId}；pageGeneration=${event.pageGeneration}；" +
-                    "class=${event.source?.className.orEmpty()}；ViewId=${event.source?.viewId.orEmpty()}；" +
-                    "bounds=${event.source?.bounds?.let(::formatBounds) ?: "UNKNOWN"}；" +
-                    "origin=${decision.origin}；evidence=${decision.evidence}；" +
-                    "独立未知行为=${observation.count}/${UnknownInteractionArbiter.DEFAULT_THRESHOLD}；" +
-                    "count=${observation.count}/${UnknownInteractionArbiter.DEFAULT_THRESHOLD}；" +
-                    "行为=${observation.behaviourId}；${observation.reason}；任务继续"
-            )
-            return
-        }
-
-        val reason = "目标交互事件=${event.type}；origin=${decision.origin}；" +
-            "独立未知行为=${observation.count}/${UnknownInteractionArbiter.DEFAULT_THRESHOLD}；${observation.reason}"
-        if (userControlPhase == UserControlPhase.TOUCHING) {
-            pendingUserPageInspection = true
-            onLog("未知交互仲裁[PROTECTION_ALREADY_TOUCHING]：$reason；保留当前保护周期")
-            return
-        }
-        beginUserControl(reason)
-        userControlPhase = UserControlPhase.SETTLING
-        pendingUserPageInspection = true
-        scheduleUserPageStabilityCheck(reason)
-        onLog(
-            "未知交互仲裁[PROTECTION_TRIGGERED]：${event.type}；独立未知行为=${observation.count}/3；" +
-                "暂停自主派发并废弃旧任务；进入既有5秒/15秒/60秒页面复核流程"
-        )
-    }
-
-    private fun recordUnknownInteractionBehaviour(
-        event: AccessibilityEventEnvelope,
-        decision: InputOriginDecision
-    ): UnknownInteractionArbiter.Observation {
-        val source = event.source
-        val family = when (event.type) {
-            AccessibilityEventType.TOUCH_INTERACTION_START,
-            AccessibilityEventType.TOUCH_INTERACTION_END -> UnknownInteractionArbiter.GLOBAL_TOUCH_FAMILY
-            AccessibilityEventType.VIEW_SCROLLED -> "SCROLL"
-            AccessibilityEventType.VIEW_CLICKED,
-            AccessibilityEventType.VIEW_LONG_CLICKED,
-            AccessibilityEventType.VIEW_CONTEXT_CLICKED,
-            AccessibilityEventType.VIEW_SELECTED -> "TARGET_INTERACTION"
-            else -> event.type.name
-        }
-        val sourceClass = source?.className.orEmpty()
-        val sourceViewId = source?.viewId.orEmpty()
-        val sourceBounds = source?.bounds?.let(::formatBounds).orEmpty()
-        // Prefer the stable resource locator over geometry: a RecyclerView can move or resize
-        // during one refresh/layout burst without becoming a new interaction source. Geometry is
-        // used only when the source has no ViewId, so anonymous controls remain distinguishable.
-        val sourceKey = when {
-            sourceViewId.isNotBlank() -> "$sourceClass|$sourceViewId"
-            sourceBounds.isNotBlank() -> "$sourceClass|$sourceBounds"
-            else -> sourceClass
-        }
-        val now = uptimeMillis()
-        val observation = unknownInteractionArbiter.record(
-            origin = decision.origin,
-            windowId = event.windowId,
-            pageGeneration = event.pageGeneration,
-            family = family,
-            sourceKey = sourceKey,
-            nowMillis = now
-        )
-        if (decision.shouldYieldAutomation) {
-            lastUnknownBehaviourAtUptimeMs = now
-            scheduleUnknownCounterReset()
-        }
-        onLog(
-            "未知交互仲裁[BEHAVIOUR]：disposition=${observation.disposition}；" +
-                "event=${event.type}；package=${event.packageName.ifBlank { "SYSTEM/NULL" }}；" +
-                "Activity=${event.className.ifBlank { "UNKNOWN" }}；windowId=${event.windowId}；" +
-                "pageGeneration=${event.pageGeneration}；class=${source?.className.orEmpty()}；" +
-                "ViewId=${source?.viewId.orEmpty()}；bounds=${source?.bounds?.let(::formatBounds) ?: "UNKNOWN"}；" +
-                "origin=${decision.origin}；evidence=${decision.evidence}；" +
-                "行为=${observation.behaviourId}；count=${observation.count}/3；reason=${observation.reason}"
-        )
-        return observation
-    }
-
-    private fun retryUnknownCounterResetOnPageEvent(event: AccessibilityEventEnvelope) {
-        if (unknownInteractionArbiter.currentCount == 0 ||
-            unknownInteractionArbiter.isThresholdLatched ||
-            unknownCounterResetTask != null ||
-            event.type !in PAGE_CHANGE_RECHECK_EVENT_TYPES
-        ) return
-        val lastUnknownAt = lastUnknownBehaviourAtUptimeMs
-        if (lastUnknownAt == Long.MIN_VALUE ||
-            uptimeMillis() - lastUnknownAt < UnknownInteractionArbiter.DEFAULT_RESET_QUIET_PERIOD_MS
-        ) return
-        val revision = unknownCounterResetRevision
-        unknownCounterResetTask = scheduler.schedule(0L) {
-            unknownCounterResetTask = null
-            verifyUnknownCounterReset(revision, previousStructureKey = null, stableSamples = 0)
-        }
-    }
-
-    private fun scheduleUnknownCounterReset() {
-        if (unknownInteractionArbiter.isThresholdLatched) return
-        unknownCounterResetRevision += 1L
-        val revision = unknownCounterResetRevision
-        unknownCounterResetTask?.cancel()
-        unknownCounterResetTask = scheduler.schedule(UnknownInteractionArbiter.DEFAULT_RESET_QUIET_PERIOD_MS) {
-            unknownCounterResetTask = null
-            verifyUnknownCounterReset(revision, previousStructureKey = null, stableSamples = 0)
-        }
-    }
-
-    /** A 10-second quiet interval alone is insufficient: require three fresh matching page snapshots. */
-    private fun verifyUnknownCounterReset(
-        revision: Long,
-        previousStructureKey: String?,
-        stableSamples: Int
-    ) {
-        if (revision != unknownCounterResetRevision || !isAiReplyActive() ||
-            unknownInteractionArbiter.isThresholdLatched || unknownInteractionArbiter.currentCount == 0
-        ) return
-        val now = uptimeMillis()
-        if (lastUnknownBehaviourAtUptimeMs == Long.MIN_VALUE ||
-            now - lastUnknownBehaviourAtUptimeMs < UnknownInteractionArbiter.DEFAULT_RESET_QUIET_PERIOD_MS
-        ) {
-            scheduleUnknownCounterReset()
-            return
-        }
-        val fresh = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
-        if (fresh == null || fresh.pageKind == ChatPageKind.UNKNOWN ||
-            !chatPagePort.supportsTargetPackage(fresh.packageName)
-        ) {
-            onLog(
-                "未知交互仲裁[COUNTER_RESET_DEFERRED]：已连续10秒无新UNKNOWN，但当前页面身份/结构尚不可验证；" +
-                    "保留计数=${unknownInteractionArbiter.currentCount}；停止定时全树轮询，等待下一次页面事件再复核"
-            )
-            return
-        }
-        val key = fresh.navigationStructureKey() + "|generation=${fresh.windowGeneration}"
-        val matches = previousStructureKey == key
-        val samples = if (matches) stableSamples + 1 else 1
-        if (samples >= REQUIRED_USER_CONTROL_STABLE_SAMPLES) {
-            val cleared = unknownInteractionArbiter.clearAfterStableQuiet(now)
-            if (cleared) {
-                lastUnknownBehaviourAtUptimeMs = Long.MIN_VALUE
-                onLog(
-                    "未知交互仲裁[COUNTER_RESET]：页面连续${REQUIRED_USER_CONTROL_STABLE_SAMPLES}次结构稳定；" +
-                        "连续10秒无新UNKNOWN；旧计数已清零；后续未知行为从1重新计数；当前页面=${fresh.pageKind}"
-                )
-            }
-            return
-        }
-        unknownCounterResetTask = scheduler.schedule(USER_CONTROL_STABILITY_CONFIRM_DELAY_MS) {
-            unknownCounterResetTask = null
-            verifyUnknownCounterReset(revision, previousStructureKey = key, stableSamples = samples)
-        }
-    }
-
-    private fun formatBounds(bounds: ScreenRect): String =
-        "[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]"
-
-
-    private fun beginUserControl(reason: String) {
-        if (userControlPhase == UserControlPhase.TOUCHING) return
-        if (startupReadinessCoordinator.initializationPending && !startupReadinessCoordinator.workAreaConfirmed) {
-            // A real hand-off owns the screen while startup navigation is pending. The normal
-            // Message-tab guard will revalidate the page before startup can resume.
-            startupReadinessCoordinator.cancelRecovery()
-        }
-        manualTakeoverCoordinator.quietPeriod.restart()
-        val startsNewCycle = !automationYieldedToUser || userControlPhase == UserControlPhase.IDLE
-        if (startsNewCycle) {
-            userControlCycle += 1L
-            userHandoffCanResumeAutonomous = sessionRunStarted || startupReadinessCoordinator.initializationPending
-            userControlNavigationBackAttempts = 0
-            userControlChatTabTapAttempts = 0
-            userControlNavigationInFlight = false
-            messageTabPositionConfirmedForCycle = false
-            messageTabNavigationAnchorBeforeTap = null
-        }
-        userControlInteractionRevision += 1L
-        automationYieldedToUser = true
-        userControlPhase = UserControlPhase.TOUCHING
-        pendingUserPageInspection = true
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_SETTLE)
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_STABILITY)
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_NAVIGATION)
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.MESSAGE_TAB_GUARD)
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.MESSAGE_TAB_PROBE)
-        messageTabProbeInFlight = false
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.HANDOFF_MESSAGE_TAB_WATCH)
-        handoffMessageTabWatchScheduledAtUptimeMs = null
-        handoffMessageTabWatchDueAtUptimeMs = null
-        pendingMessageTabGuardReason = ""
-        pendingMessageTabGuardRestartsQuiet = false
-        pendingMessageTabGuardFallsBackToQuiet = false
-
-        // Revoke future automation work without stopping the archive or event listener.
-        sessionTransitionTask?.cancel()
-        sessionTransitionTask = null
-        cancelSessionSafeViewportRetry(resetCount = true)
-        if (sessionRunStarted) sessionManagerState = SessionManagerState.PAUSED
-        sessionActionGeneration += 1L
-        val interruptedGestureRequestId = activeSessionGestureRequestId
-        activeSessionGestureRequestId = null
-        if (interruptedGestureRequestId != null) {
-            val interrupted = gesturePolicy.cancelActive(interruptedGestureRequestId, reason)
-            onLog(
-                "人工接管[ACTIVE_GESTURE_INVALIDATED]：commandId=$interruptedGestureRequestId；" +
-                    "逻辑取消=$interrupted；任务代次=$sessionActionGeneration；" +
-                    "平台回调负责确认旧手势结束"
-            )
-        } else {
-            onLog("人工接管[ACTIVE_GESTURE_INVALIDATED]：没有活动自主手势；任务代次=$sessionActionGeneration")
-        }
-        privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
-        privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
-        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
-        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
-        privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
-        pageInspectionTask?.cancel()
-        pageInspectionTask = null
-        regionRefreshTask?.cancel()
-        regionRefreshTask = null
-        pageObservationCoordinator.cancelFullInspection()
-        pageObservationCoordinator.cancelRegionRefresh()
-        invalidatePendingMessageRead()
-        onLog(
-            "AI 用户优先权：检测到$reason；已让出界面控制权并撤销待执行自动遍历任务；" +
-                "样本归档和无障碍事件观察保持运行；等待用户操作结束"
-        )
-    }
-
-    private fun finishUserControl(reason: String) {
-        if (userControlPhase == UserControlPhase.IDLE && !pendingUserPageInspection) return
-        if (userControlPhase == UserControlPhase.TOUCHING || userControlPhase == UserControlPhase.IDLE) {
-            pendingUserPageInspection = true
-            onLog("AI 用户优先权：$reason；等待页面静止后复核")
-        }
-        scheduleUserPageStabilityCheck(reason, restartQuietWhenUnconfirmed = true)
-    }
-
-    /**
-     * Runs the message-tab guard before any manual quiet timer is scheduled. A confirmed message
-     * tab is checked by tapping its current locator and comparing a fresh positional snapshot.
-     */
-    private fun scheduleUserPageStabilityCheck(
-        reason: String = "页面状态复核",
-        restartQuietWhenUnconfirmed: Boolean = true,
-        fallBackToQuietWhenUnconfirmed: Boolean = true
-    ) {
-        if (!isAiReplyActive() || manualReviewIsRequired()) {
-            onLog("AI 用户优先权：存在先前持久化复核状态；本轮不启动自动恢复")
-            return
-        }
-        userControlPhase = UserControlPhase.SETTLING
-        requestMessageTabGuard(
-            reason = reason,
-            restartQuietWhenUnconfirmed = restartQuietWhenUnconfirmed,
-            fallBackToQuietWhenUnconfirmed = fallBackToQuietWhenUnconfirmed
-        )
-    }
-
-    /** The original tiered quiet-period timer, now reached only after the message-tab guard fails. */
-    private fun scheduleQuietPeriodStabilityCheck(restartQuietPeriod: Boolean) {
-        if (!isAiReplyActive() || manualReviewIsRequired()) return
-        if (!restartQuietPeriod && manualTakeoverCoordinator.isScheduled(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_SETTLE)) return
-        userControlPhase = UserControlPhase.SETTLING
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_SETTLE)
-        val delayMs = manualTakeoverCoordinator.quietPeriod.currentDelayMs
-        val stage = manualTakeoverCoordinator.quietPeriod.stageNumber
-        manualTakeoverCoordinator.schedule(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_SETTLE, delayMs) {
-            if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return@schedule
-            userControlPhase = UserControlPhase.VERIFYING_STABILITY
-            pendingUserPageInspection = true
-            onLog("AI 用户优先权：第${stage}轮静默 ${delayMs / 1_000} 秒结束；开始连续 ${REQUIRED_USER_CONTROL_STABLE_SAMPLES} 次页面快照验证")
-            verifyUserPageStability(previous = null, retry = 0, stableSamples = 0)
-        }
-        scheduleHandoffMessageTabWatch()
-    }
-
-    /**
-     * Cross-checks the freshly captured inbox viewport against the bottom Message-tab anchor.
-     * This is geometry evidence, not a refresh-state or scroll-counter dependency.
-     */
     private fun isMessageViewportPositionedAgainstTab(
         snapshot: ChatPageSnapshot,
         tabBounds: ScreenRect,
@@ -1189,961 +774,37 @@ class AiReplyObservationRuntime(
     }
 
     /**
-     * Continue page verification after an observation-only update without inventing a new quiet
-     * period. An already pending quiet timer is left untouched; after it expires, stable sampling
-     * resumes on its own bounded task handle.
-     */
-    private fun continuePageVerificationWithoutRestartingQuiet() {
-        if (!isAiReplyActive() || manualReviewIsRequired()) return
-        if (manualTakeoverCoordinator.isScheduled(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_SETTLE) || manualTakeoverCoordinator.isScheduled(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_STABILITY)) return
-        userControlPhase = UserControlPhase.VERIFYING_STABILITY
-        manualTakeoverCoordinator.schedule(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_STABILITY, USER_CONTROL_STABILITY_CONFIRM_DELAY_MS) {
-            if (!isAiReplyActive() || !automationYieldedToUser ||
-                userControlPhase == UserControlPhase.TOUCHING
-            ) return@schedule
-            verifyUserPageStability(previous = null, retry = 0, stableSamples = 0)
-        }
-    }
-
-    /** A known message-list page never enters manual quiet solely because position proof is pending. */
-    private fun keepMessagePageAwaitingPositionEvidence(snapshot: ChatPageSnapshot?, reason: String) {
-        if (!automationYieldedToUser || !userHandoffCanResumeAutonomous || manualReviewIsRequired()) return
-        userControlPhase = UserControlPhase.SETTLING
-        pendingUserPageInspection = true
-        if (snapshot != null) lastPageInspection = snapshot
-        onLog(
-            "消息标签保护[MESSAGE_PAGE_AWAITING_POSITION]：$reason；" +
-                "快照仍识别为消息页面；不安排人工静默；等待30秒位置巡检或新的页面证据"
-        )
-        scheduleHandoffMessageTabWatch()
-    }
-
-    /**
-     * Coalesces navigation/content bursts into one bounded page probe. A page/content update does
-     * not restart the quiet period; only a new input signal does that at its call site.
-     */
-    private fun requestMessageTabGuard(
-        reason: String,
-        restartQuietWhenUnconfirmed: Boolean,
-        fallBackToQuietWhenUnconfirmed: Boolean = true
-    ) {
-        if (!isAiReplyActive() || manualReviewIsRequired()) return
-        if (userControlPhase == UserControlPhase.TOUCHING) {
-            pendingUserPageInspection = true
-            onLog("消息标签保护[DEFERRED]：仍处于触摸期；不读取或点击导航标签；等待触摸结束")
-            return
-        }
-
-        pendingMessageTabGuardReason = reason
-        pendingMessageTabGuardRestartsQuiet =
-            pendingMessageTabGuardRestartsQuiet || restartQuietWhenUnconfirmed
-        pendingMessageTabGuardFallsBackToQuiet =
-            pendingMessageTabGuardFallsBackToQuiet || fallBackToQuietWhenUnconfirmed
-        // A fresh page probe supersedes a queued stability sample, but it must not cancel or
-        // restart the independent user-quiet timer. This prevents stale samples racing the
-        // Message-tab positional check after content/navigation notifications.
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_STABILITY)
-        if (messageTabProbeInFlight || manualTakeoverCoordinator.isScheduled(AiReplyManualTakeoverCoordinator.TaskKey.MESSAGE_TAB_GUARD)) return
-
-        val cycle = userControlCycle
-        manualTakeoverCoordinator.schedule(AiReplyManualTakeoverCoordinator.TaskKey.MESSAGE_TAB_GUARD, MESSAGE_TAB_GUARD_DEBOUNCE_MS) {
-            if (cycle != userControlCycle || !automationYieldedToUser ||
-                userControlPhase == UserControlPhase.TOUCHING
-            ) return@schedule
-            val guardReason = pendingMessageTabGuardReason.ifBlank { "页面状态复核" }
-            val restartQuiet = pendingMessageTabGuardRestartsQuiet
-            val fallBackToQuiet = pendingMessageTabGuardFallsBackToQuiet
-            pendingMessageTabGuardReason = ""
-            pendingMessageTabGuardRestartsQuiet = false
-            pendingMessageTabGuardFallsBackToQuiet = false
-            runMessageTabGuard(cycle, guardReason, restartQuiet, fallBackToQuiet)
-        }
-    }
-
-    /**
-     * Momo does not expose a reliable selected-state flag on every build. The verified fallback
-     * is therefore: tap the visible bottom message tab, reacquire a fresh page snapshot, and
-     * accept it only when the tab bounds and inbox viewport bounds remain unchanged.
-     */
-    private fun runMessageTabGuard(
-        cycle: Long,
-        reason: String,
-        restartQuietWhenUnconfirmed: Boolean,
-        fallBackToQuietWhenUnconfirmed: Boolean
-    ) {
-        if (cycle != userControlCycle || userControlPhase == UserControlPhase.TOUCHING) return
-
-        // Momo's manual path to Received Greetings passes through the ordinary Message tab.
-        // Give the page-arrival watcher first refusal before the legacy recovery guard can tap
-        // Message or navigate away from an intermediate greetings page.
-        if (sessionRunStarted && userHandoffCanResumeAutonomous &&
-            receivedGreetingsTaskFlow.supportsWorkflow()
-        ) {
-            val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable()
-            receivedGreetingsPageProbePending = false
-            if (receivedGreetingsTaskCompletedAwaitingUserExit) {
-                val current = inspectFreshPageSnapshot()
-                if (current?.pageKind == ChatPageKind.CHAT_LIST &&
-                    current.messageTabPositionKey() != null &&
-                    current.messageTabAnchorPositionKey() != null
-                ) {
-                    if (!claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "用户返回消息列表后恢复私人消息任务")) {
-                        sessionManagerState = SessionManagerState.PAUSED
-                        onLog("私人消息任务恢复暂停[OWNERSHIP_REJECTED]：用户已返回消息列表，但未取得 UI 操作权")
-                        return
-                    }
-                    receivedGreetingsTaskFlow.acknowledgeCompletedTaskExit()
-                    sessionActionGeneration += 1L
-                    onLog("收到的招呼人工任务[USER_RETURNED_TO_INBOX]：已确认用户返回消息列表；重新取得 UI 操作权并交还现有私人消息恢复流程")
-                } else {
-                    holdForReceivedGreetingsPageTransition(arrivalStatus)
-                    return
-                }
-            } else if (arrivalStatus == ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED &&
-                receivedGreetingsTaskActive
-            ) {
-                return
-            } else if (arrivalStatus != ReceivedGreetingsPageArrivalStatus.NOT_TARGET) {
-                holdForReceivedGreetingsPageTransition(arrivalStatus)
-                return
-            }
-        }
-
-        val before = inspectFreshPageSnapshot()
-        val beforePositionKey = before?.messageTabPositionKey()
-        val beforeContextPositionKey = before?.messageTabContextPositionKey()
-        val beforeAnchorPositionKey = before?.messageTabAnchorPositionKey()
-        val tabTarget = before?.sessionListNavigationTarget
-        val displayBounds = before?.screenBounds
-
-        // Passive-only observation may inspect the current surface, but must never gain a
-        // navigation gesture merely because the recovery guard was added.
-        if (!userHandoffCanResumeAutonomous) {
-            onLog(
-                "消息标签保护[PASSIVE_ONLY]：当前运行仅允许被动归档；" +
-                    "不执行导航点击或自主恢复；页面=${before?.let(::classifyUiSnapshot) ?: "UNAVAILABLE"}"
-            )
-            if (before?.pageKind == ChatPageKind.CHAT_LIST) {
-                messageTabProbeInFlight = false
-                keepPassiveObservationAfterHandoff(
-                    before,
-                    "被动模式只读观察到消息页面；不执行消息标签点击或自主恢复"
-                )
-            } else if (fallBackToQuietWhenUnconfirmed) {
-                scheduleQuietPeriodStabilityCheck(restartQuietWhenUnconfirmed)
-            }
-            return
-        }
-        if (before == null || beforeAnchorPositionKey == null || tabTarget == null ||
-            displayBounds == null || displayBounds.isEmpty
-        ) {
-            val kind = before?.let(::classifyUiSnapshot).orEmpty()
-            onLog(
-                "消息标签保护[NOT_CONFIRMED]：原因=$reason；页面=${before?.pageKind?.name ?: "UNAVAILABLE"}；" +
-                    "Activity=${before?.activityClass?.substringAfterLast('.') ?: "未知"}；" +
-                    "页面类型=$kind；当前没有可验证的消息标签锚点位置证据"
-            )
-            if (before?.pageKind == ChatPageKind.CHAT_LIST) {
-                keepMessagePageAwaitingPositionEvidence(before, "消息标签位置锚点暂不可用")
-            } else if (fallBackToQuietWhenUnconfirmed) {
-                scheduleQuietPeriodStabilityCheck(restartQuietWhenUnconfirmed)
-            } else {
-                continuePageVerificationWithoutRestartingQuiet()
-            }
-            return
-        }
-
-        if (userControlChatTabTapAttempts >= MAX_USER_CONTROL_CHAT_TAB_TAPS) {
-            onLog("消息标签保护[PROBE_LIMIT]：本轮已执行过消息标签验证点击；保持现有页面验证流程")
-            if (before?.pageKind == ChatPageKind.CHAT_LIST) {
-                keepMessagePageAwaitingPositionEvidence(before, "消息标签验证点击次数达到本轮上限")
-            } else if (fallBackToQuietWhenUnconfirmed) {
-                scheduleQuietPeriodStabilityCheck(restartQuietWhenUnconfirmed)
-            } else {
-                continuePageVerificationWithoutRestartingQuiet()
-            }
-            return
-        }
-
-        if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("消息标签保护[OWNERSHIP_REJECTED]：私人消息任务未持有 UI 操作权；不提交导航点击")
-            return
-        }
-        val tapBounds = tabTarget.bounds
-        val executionContext = gesturePolicy.captureContext(tabTarget.nodeTarget.window) ?: run {
-            onLog("消息标签保护[CONTEXT_STALE]：生成点击坐标时的窗口或显示坐标上下文已变化；拒绝派发")
-            if (before.pageKind == ChatPageKind.CHAT_LIST) {
-                keepMessagePageAwaitingPositionEvidence(before, "消息标签点击上下文已失效")
-            } else if (fallBackToQuietWhenUnconfirmed) {
-                scheduleQuietPeriodStabilityCheck(restartQuietWhenUnconfirmed)
-            }
-            return
-        }
-        val request = GestureIntentRequest(
-            id = "ai-message-tab-guard-${System.currentTimeMillis()}-${userControlChatTabTapAttempts + 1}",
-            intent = GestureIntent.Tap(
-                preferredBounds = tapBounds,
-                targetBounds = tapBounds,
-                durationMs = SESSION_TAP_DURATION_MS,
-                displayBounds = displayBounds,
-                feedbackIntent = GestureFeedbackIntent.NAVIGATION_TAB
-            ),
-            description = "AI会话恢复验证：点击底部消息标签并核对页面位置",
-            executionContext = executionContext
-        )
-        messageTabProbeInFlight = true
-        activeSessionGestureRequestId = request.id
-        val actionGeneration = sessionActionGeneration
-        val interactionRevision = userControlInteractionRevision
-        if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-            messageTabProbeInFlight = false
-            activeSessionGestureRequestId = null
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("消息标签保护[OWNERSHIP_REJECTED]：派发前任务租约已变化；取消导航点击")
-            return
-        }
-        val submission = runCatching {
-            gesturePolicy.execute(request) { result ->
-                scheduler.schedule(0L) gestureCallback@{
-                    if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                    if (actionGeneration != sessionActionGeneration || cycle != userControlCycle) return@gestureCallback
-                    if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-                        messageTabProbeInFlight = false
-                        onLog("消息标签保护[STALE_CALLBACK_IGNORED]：私人消息任务租约已失效；不继续页面导航验证")
-                        return@gestureCallback
-                    }
-                    if (userControlPhase == UserControlPhase.TOUCHING) {
-                        messageTabProbeInFlight = false
-                        return@gestureCallback
-                    }
-                    if (result.status != GestureExecutionStatus.COMPLETED) {
-                        messageTabProbeInFlight = false
-                        onLog("消息标签保护[PLATFORM_GESTURE_FAILED]：派发已被系统接受，但平台手势终态=${result.status}；尚未进入点击后的页面验证，不认定消息标签有效")
-                        if (interactionRevision != userControlInteractionRevision) {
-                            requestMessageTabGuard("验证点击期间出现新的输入事件", true)
-                        } else if (before.pageKind == ChatPageKind.CHAT_LIST) {
-                            keepMessagePageAwaitingPositionEvidence(before, "消息标签验证手势未完成")
-                        } else if (fallBackToQuietWhenUnconfirmed) {
-                            scheduleQuietPeriodStabilityCheck(restartQuietWhenUnconfirmed)
-                        } else {
-                            continuePageVerificationWithoutRestartingQuiet()
-                        }
-                        return@gestureCallback
-                    }
-
-                    onLog(
-                        "消息标签保护[TAP_COMPLETED]：已点击底部消息标签；" +
-                            "点击前锚点指纹=${beforeAnchorPositionKey.hashCode()}；" +
-                            "点击前页面位置指纹=${beforeContextPositionKey?.hashCode() ?: "NONE"}；" +
-                            "点击前列表位置指纹=${beforePositionKey?.hashCode() ?: "NONE"}；等待新快照复核"
-                    )
-                    manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.MESSAGE_TAB_PROBE)
-                    manualTakeoverCoordinator.schedule(AiReplyManualTakeoverCoordinator.TaskKey.MESSAGE_TAB_PROBE, USER_CONTROL_NAVIGATION_VERIFY_DELAY_MS) postTapVerification@{
-                        if (actionGeneration != sessionActionGeneration || cycle != userControlCycle ||
-                            !automationYieldedToUser || userControlPhase == UserControlPhase.TOUCHING
-                        ) {
-                            messageTabProbeInFlight = false
-                            return@postTapVerification
-                        }
-                        if (interactionRevision != userControlInteractionRevision) {
-                            messageTabProbeInFlight = false
-                            requestMessageTabGuard("消息标签验证期间出现新的输入事件", true)
-                            return@postTapVerification
-                        }
-
-                        val after = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
-                        val afterPositionKey = after?.messageTabPositionKey()
-                        val afterContextPositionKey = after?.messageTabContextPositionKey()
-                        val afterAnchorPositionKey = after?.messageTabAnchorPositionKey()
-                        val sameExistingMessagePagePosition =
-                            before.pageKind == ChatPageKind.CHAT_LIST &&
-                                beforePositionKey != null &&
-                                afterPositionKey == beforePositionKey
-                        // A NON_CHAT snapshot is only a valid starting point for a tab-switch
-                        // proof when it contains no pre-existing chat-list viewport/evidence.
-                        // Otherwise the post-tap CHAT_LIST classification may merely reflect a
-                        // reclassification of the same surface, not navigation into the inbox.
-                        val verifiedNonChatBeforeTap =
-                            before.pageKind == ChatPageKind.NON_CHAT &&
-                                before.chatListViewport?.isEmpty != false &&
-                                before.messageListCount == 0 &&
-                                before.messageListTarget == null &&
-                                before.chatListCandidates.isEmpty()
-                        val sameNavigationStructure = after != null &&
-                            before.navigationStructureKey() == after.navigationStructureKey()
-                        val positionCrossValidated = after != null &&
-                            isMessageViewportPositionedAgainstTab(after, tapBounds, displayBounds)
-                        val positionUnchanged = after != null &&
-                            after.pageKind == ChatPageKind.CHAT_LIST &&
-                            afterAnchorPositionKey == beforeAnchorPositionKey &&
-                            afterPositionKey != null &&
-                            beforeContextPositionKey != null &&
-                            afterContextPositionKey == beforeContextPositionKey &&
-                            positionCrossValidated &&
-                            (sameExistingMessagePagePosition ||
-                                verifiedNonChatBeforeTap &&
-                                hasRelevantMessageStructureDelta(before, after, tapBounds, displayBounds))
-                        messageTabProbeInFlight = false
-                        if (after != null && positionUnchanged) {
-                            lastPageInspection = after
-                            messageTabPositionConfirmedForCycle = true
-                            messageTabNavigationAnchorBeforeTap = null
-                            onLog(
-                                "消息标签保护[CONFIRMED]：点击底部消息后页面上下文和位置保持不变；" +
-                                    "Activity=${after.activityClass.substringAfterLast('.')}；" +
-                                    "消息列表视口与导航标签边界一致；不安排人工静默"
-                            )
-                            cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
-                            if (userHandoffCanResumeAutonomous) {
-                                resumeAutonomousSessionTraversal(after)
-                            } else {
-                                keepPassiveObservationAfterHandoff(
-                                    after,
-                                    "消息标签位置验证通过；当前运行仅允许被动样本归档，不启动自主点击或滑动"
-                                )
-                            }
-                        } else if (after != null && sameNavigationStructure) {
-                            lastPageInspection = after
-                            onLog(
-                                "消息标签保护[NO_STRUCTURE_CHANGE]：点击前后页面结构指纹一致；" +
-                                    "判定未发生页面结构转换，不记为UNKNOWN，并立即结束该导航点击的滚动反馈匹配；" +
-                                    "page=${after.pageKind.name}；structure=${after.navigationStructureKey().hashCode()}"
-                            )
-                            if (after.pageKind == ChatPageKind.CHAT_LIST && positionCrossValidated) {
-                                // Same message page and same stable structure is a valid no-transition
-                                // result; do not require a refresh counter or manufacture UNKNOWN.
-                                lastPageInspection = after
-                                messageTabPositionConfirmedForCycle = true
-                                messageTabNavigationAnchorBeforeTap = null
-                                onLog("消息标签保护[CONFIRMED_NO_TRANSITION]：消息页结构及列表/导航位置稳定；保持当前消息页面")
-                                cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
-                                resumeAutonomousSessionTraversal(after)
-                            } else if (fallBackToQuietWhenUnconfirmed) {
-                                scheduleQuietPeriodStabilityCheck(restartQuietWhenUnconfirmed)
-                            } else {
-                                continuePageVerificationWithoutRestartingQuiet()
-                            }
-                        } else {
-                            lastPageInspection = after ?: lastPageInspection
-                            onLog(
-                                "消息标签保护[PAGE_VERIFICATION_FAILED]：手势已被系统接受并完成，但点击后的页面结构及空间位置交叉验证未通过；" +
-                                    "点击前锚点=${beforeAnchorPositionKey.hashCode()}；" +
-                                    "点击后锚点=${afterAnchorPositionKey?.hashCode() ?: "NONE"}；" +
-                                    "结构变化路径=${after?.let { before.changedNavigationNodePaths(it).take(12) } ?: emptyList<String>()}；" +
-                                    "点击前列表=${beforePositionKey?.hashCode() ?: "NONE"}；" +
-                                    "点击后列表=${afterPositionKey?.hashCode() ?: "NONE"}；" +
-                                    "页面=${after?.pageKind?.name ?: "UNAVAILABLE"}；不认定消息标签有效"
-                            )
-                            if (after?.pageKind == ChatPageKind.CHAT_LIST) {
-                                keepMessagePageAwaitingPositionEvidence(after, "点击后仍在消息页面，但位置证据尚未稳定")
-                            } else if (fallBackToQuietWhenUnconfirmed) {
-                                scheduleQuietPeriodStabilityCheck(restartQuietWhenUnconfirmed)
-                            } else {
-                                continuePageVerificationWithoutRestartingQuiet()
-                            }
-                        }
-                    }
-                }
-            }
-        }.getOrDefault(GestureSubmission.REJECTED)
-
-        when (submission) {
-            GestureSubmission.DEFERRED_NOT_READY -> {
-                if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                messageTabProbeInFlight = false
-                onLog("消息标签保护[DEFERRED_NOT_READY]：5秒启动保护或页面准入仍在进行；保留验证任务，静默结束后重新采集快照再决定点击")
-                scheduleAiReadinessRetry("消息标签保护等待目标页面就绪") {
-                    if (cycle == userControlCycle && automationYieldedToUser &&
-                        userControlPhase != UserControlPhase.TOUCHING
-                    ) runMessageTabGuard(cycle, reason, restartQuietWhenUnconfirmed, fallBackToQuietWhenUnconfirmed)
-                }
-            }
-            GestureSubmission.REJECTED -> {
-                if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                messageTabProbeInFlight = false
-                onLog("消息标签保护[DISPATCH_NOT_ACCEPTED]：系统没有接受验证手势；这是派发拒绝，不是点击后的页面验证失败")
-                if (before.pageKind == ChatPageKind.CHAT_LIST) {
-                    keepMessagePageAwaitingPositionEvidence(before, "系统未接受消息标签验证手势")
-                } else if (fallBackToQuietWhenUnconfirmed) {
-                    scheduleQuietPeriodStabilityCheck(restartQuietWhenUnconfirmed)
-                } else {
-                    continuePageVerificationWithoutRestartingQuiet()
-                }
-            }
-            GestureSubmission.ACCEPTED -> {
-                userControlChatTabTapAttempts++
-                readinessDeferredRetryCount = 0
-                readinessDeferredRetryLimitLogged = false
-                onLog("消息标签保护[TAP_SUBMITTED]：已提交底部消息标签验证点击；触摸落点由统一手势策略在安全区域内生成")
-            }
-        }
-    }
-
-    /**
-     * A structurally recognized greetings navigation state requires the private task to yield.
-     * Event origin is intentionally not consulted; ownership changes only after the adapter's
-     * existing page evidence and fresh-snapshot confirmation have been evaluated.
+     * A page transition no longer enters a human-takeover state machine. It only invalidates
+     * work tied to the old page and releases the private-task lease until structure confirms
+     * which task is eligible to own the UI again.
      */
     private fun pauseForReceivedGreetingsPageTransition(status: ReceivedGreetingsPageArrivalStatus) {
-        if (!automationYieldedToUser) {
-            beginUserControl("收到的招呼页面结构进入过渡/稳定确认阶段")
-            userControlPhase = UserControlPhase.IDLE
-            pendingUserPageInspection = false
-            manualTakeoverCoordinator.quietPeriod.reset()
+        sessionActionGeneration += 1L
+        val interruptedGestureRequestId = activeSessionGestureRequestId
+        activeSessionGestureRequestId = null
+        if (interruptedGestureRequestId != null) {
+            gesturePolicy.cancelActive(interruptedGestureRequestId, "received_greetings_page_transition")
         }
-        holdForReceivedGreetingsPageTransition(status)
-    }
-
-    private fun holdForReceivedGreetingsPageTransition(status: ReceivedGreetingsPageArrivalStatus) {
-        sessionManagerState = SessionManagerState.PAUSED
-        automationYieldedToUser = true
-        onLog(
-            "收到的招呼页面监听[WAITING]：status=${status.name}；私人消息任务保持暂停；" +
-                "不点击消息标签、不执行返回导航；等待用户继续导航或进入已确认的收到招呼列表"
-        )
-    }
-
-    private fun scheduleHandoffMessageTabWatch() {
-        if (manualTakeoverCoordinator.isScheduled(AiReplyManualTakeoverCoordinator.TaskKey.HANDOFF_MESSAGE_TAB_WATCH)) return
-        if (!automationYieldedToUser || !userHandoffCanResumeAutonomous || manualReviewIsRequired()) return
-        val cycle = userControlCycle
-        val scheduledAt = uptimeMillis()
-        val dueAt = scheduledAt + USER_HANDOFF_MESSAGE_TAB_WATCH_INTERVAL_MS
-        handoffMessageTabWatchScheduledAtUptimeMs = scheduledAt
-        handoffMessageTabWatchDueAtUptimeMs = dueAt
-        onLog(
-            "AI 用户优先权[30S_MESSAGE_TAB_WATCH_SCHEDULED]：" +
-                "cycle=$cycle；scheduledAtUptimeMs=$scheduledAt；dueAtUptimeMs=$dueAt；" +
-                "delayMs=$USER_HANDOFF_MESSAGE_TAB_WATCH_INTERVAL_MS"
-        )
-        manualTakeoverCoordinator.schedule(AiReplyManualTakeoverCoordinator.TaskKey.HANDOFF_MESSAGE_TAB_WATCH, USER_HANDOFF_MESSAGE_TAB_WATCH_INTERVAL_MS) {
-            val firedAt = uptimeMillis()
-            val expectedAt = handoffMessageTabWatchDueAtUptimeMs ?: dueAt
-            val actualDelay = (firedAt - scheduledAt).coerceAtLeast(0L)
-            val lateBy = (firedAt - expectedAt).coerceAtLeast(0L)
-            handoffMessageTabWatchScheduledAtUptimeMs = null
-            handoffMessageTabWatchDueAtUptimeMs = null
-            onLog(
-                "AI 用户优先权[30S_MESSAGE_TAB_WATCH_FIRED]：" +
-                    "cycle=$cycle；scheduledAtUptimeMs=$scheduledAt；dueAtUptimeMs=$expectedAt；" +
-                    "firedAtUptimeMs=$firedAt；actualDelayMs=$actualDelay；lateByMs=$lateBy"
-            )
-            if (cycle != userControlCycle || !automationYieldedToUser ||
-                !userHandoffCanResumeAutonomous || manualReviewIsRequired()
-            ) return@schedule
-            if (userControlPhase != UserControlPhase.TOUCHING &&
-                !messageTabProbeInFlight && !manualTakeoverCoordinator.isScheduled(AiReplyManualTakeoverCoordinator.TaskKey.MESSAGE_TAB_GUARD)
-            ) {
-                // One bounded, safe re-tap per 30-second watch interval. The gesture is only
-                // against the freshly inspected semantic Message-tab target; no list row is tapped.
-                userControlChatTabTapAttempts = 0
-                onLog("AI 用户优先权[30S_MESSAGE_TAB_WATCH]：执行新快照检查；必要时重新点击消息标签并比较位置")
-                requestMessageTabGuard(
-                    reason = "30秒消息标签状态巡检",
-                    restartQuietWhenUnconfirmed = false,
-                    fallBackToQuietWhenUnconfirmed = false
-                )
-            } else {
-                onLog("AI 用户优先权[30S_MESSAGE_TAB_WATCH]：当前触摸或已有验证任务；本轮仅保持让权，不叠加任务")
-            }
-            scheduleHandoffMessageTabWatch()
-        }
-    }
-
-    private fun cancelUserControlRecoveryTasks(cancelMessageTabWatch: Boolean = false) {
-        cancelAiReadinessRetry(resetCount = true)
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_SETTLE)
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_STABILITY)
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_NAVIGATION)
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.MESSAGE_TAB_GUARD)
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.MESSAGE_TAB_PROBE)
-        messageTabProbeInFlight = false
-        pendingMessageTabGuardReason = ""
-        pendingMessageTabGuardRestartsQuiet = false
-        pendingMessageTabGuardFallsBackToQuiet = false
-        if (cancelMessageTabWatch) {
-            manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.HANDOFF_MESSAGE_TAB_WATCH)
-            handoffMessageTabWatchScheduledAtUptimeMs = null
-            handoffMessageTabWatchDueAtUptimeMs = null
-        }
-    }
-
-    /** Only input-like events restart quiet; page/data/advertisement updates are observations. */
-    private fun isManualInputEvent(event: AccessibilityEventEnvelope): Boolean =
-        event.type in PREEMPTIVE_INTERACTION_EVENT_TYPES ||
-            event.type == AccessibilityEventType.VIEW_SCROLLED ||
-            event.type == AccessibilityEventType.TOUCH_INTERACTION_START ||
-            event.type == AccessibilityEventType.TOUCH_INTERACTION_END
-
-    private fun classifyUiSnapshot(snapshot: ChatPageSnapshot): String = when {
-        snapshot.pageKind == ChatPageKind.CHAT_LIST -> "MESSAGE_PAGE"
-        snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE -> "CHAT_DETAIL"
-        snapshot.pageKind == ChatPageKind.NON_CHAT -> "NON_CHAT_PAGE"
-        else -> "UNKNOWN_PAGE"
-    }
-
-    private fun classifyUiChange(event: AccessibilityEventEnvelope): UiChangeKind {
-        if (event.type == AccessibilityEventType.WINDOW_STATE_CHANGED ||
-            event.type == AccessibilityEventType.WINDOWS_CHANGED ||
-            event.contentChanges.any {
-                it == com.freedom.core.accessibility.events.AccessibilityContentChange.PANE_APPEARED ||
-                    it == com.freedom.core.accessibility.events.AccessibilityContentChange.PANE_DISAPPEARED
-            }
-        ) return UiChangeKind.PAGE_NAVIGATION_UPDATE
-
-        val viewId = event.source?.viewId.orEmpty().lowercase(Locale.ROOT)
-        val className = event.source?.className.orEmpty().lowercase(Locale.ROOT)
-        val adTokens = listOf("advert", "sponsor", "native_ad", "ad_view", "_ad", "ad_")
-        if (adTokens.any(viewId::contains) || adTokens.any(className::contains)) {
-            return UiChangeKind.AD_CONTENT_UPDATE
-        }
-
-        val messageTokens = listOf("chatlist_item_", "message", "msg_", "conversation", "chat_content")
-        if (messageTokens.any(viewId::contains) ||
-            event.signals.contains(AccessibilityUiSignal.MESSAGE_TAB)
-        ) return UiChangeKind.MESSAGE_DATA_UPDATE
-
-        return when (event.type) {
-            AccessibilityEventType.WINDOW_CONTENT_CHANGED -> UiChangeKind.PAGE_STRUCTURE_UPDATE
-            AccessibilityEventType.VIEW_TEXT_CHANGED -> UiChangeKind.MESSAGE_DATA_UPDATE
-            else -> UiChangeKind.OTHER_UPDATE
-        }
-    }
-
-    /**
-     * Mirrors AccountBrowse's post-handoff recovery: quiet period, repeated stable page samples,
-     * safe navigation to the required root, then a fresh autonomous traversal from a new baseline.
-     * Only a confirmed Momo session-list surface re-arms the manager.
-     */
-    private fun verifyUserPageStability(
-        previous: ChatPageSnapshot?,
-        retry: Int,
-        stableSamples: Int
-    ) {
-        if (userControlPhase != UserControlPhase.VERIFYING_STABILITY ||
-            !automationYieldedToUser || !isAiReplyActive()
-        ) return
-
-        val rawFresh = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
-        if (rawFresh == null) {
-            retryUserPageStability(previous, retry + 1, 0)
-            return
-        }
-        val fresh = stabilizeIncomingPageSnapshot(rawFresh)
-
-        val previousMessagePosition = previous?.messageTabPositionKey()
-        val freshMessagePosition = fresh.messageTabPositionKey()
-        val sameSnapshot = previous != null && if (
-            previousMessagePosition != null && freshMessagePosition != null
-        ) {
-            // Ignore live row/message changes while the message tab and inbox viewport stay put.
-            previousMessagePosition == freshMessagePosition
-        } else {
-            previous.stableKey() == fresh.stableKey() &&
-                previous.packageName == fresh.packageName &&
-                previous.hasSameWindowIdentity(fresh)
-        }
-        val nextStableSamples = if (sameSnapshot) stableSamples + 1 else 1
-        if (nextStableSamples < REQUIRED_USER_CONTROL_STABLE_SAMPLES) {
-            retryUserPageStability(fresh, retry + 1, nextStableSamples)
-            return
-        }
-
-        lastPageInspection = fresh
-        if (fresh.packageName != targetPackage()) {
-            finishUserPageVerification(
-                "稳定页面不属于目标应用；保持人工让权",
-                fresh
-            )
-            return
-        }
-
-        when (fresh.pageKind) {
-            ChatPageKind.CHAT_LIST -> {
-                val freshPositionKey = fresh.messageTabPositionKey()
-                val navigationAnchor = messageTabNavigationAnchorBeforeTap
-                if (!messageTabPositionConfirmedForCycle &&
-                    freshPositionKey != null && navigationAnchor != null &&
-                    fresh.messageTabAnchorPositionKey() == navigationAnchor
-                ) {
-                    messageTabPositionConfirmedForCycle = true
-                    messageTabNavigationAnchorBeforeTap = null
-                    onLog("消息标签保护[CONFIRMED_AFTER_NAVIGATION]：已点击底部消息标签；导航锚点未移动；连续稳定快照确认会话列表视口；允许恢复")
-                }
-                if (!messageTabPositionConfirmedForCycle) {
-                    if (freshPositionKey != null) {
-                        requestMessageTabGuard(
-                            reason = "三次稳定快照后执行消息标签最终点击验证",
-                            restartQuietWhenUnconfirmed = false,
-                            fallBackToQuietWhenUnconfirmed = false
-                        )
-                    } else {
-                        keepMessagePageAwaitingPositionEvidence(
-                            fresh,
-                            "虽然页面识别为CHAT_LIST，但缺少底部消息标签/列表视口的可比位置证据；不恢复自主操控"
-                        )
-                    }
-                    return
-                }
-                resumeAutonomousSessionTraversal(fresh)
-            }
-            ChatPageKind.CHAT_DETAIL_CANDIDATE,
-            ChatPageKind.NON_CHAT -> {
-                // Passive-only sample capture must never gain autonomous navigation privileges.
-                handleInspectionSnapshot(fresh)
-                if (userHandoffCanResumeAutonomous) {
-                    navigateTowardSessionList(fresh)
-                } else {
-                    keepPassiveObservationAfterHandoff(fresh, "当前运行仅允许被动样本归档；不执行自动返回或标签点击")
-                }
-            }
-            ChatPageKind.UNKNOWN -> {
-                if (userHandoffCanResumeAutonomous) {
-                    finishUserPageVerification(
-                        "连续快照仍无法确认页面身份；保持自主控制暂停，等待下一次页面事件",
-                        fresh
-                    )
-                } else {
-                    keepPassiveObservationAfterHandoff(fresh, "被动归档模式无法确认页面身份；不启动自主导航")
-                }
-            }
-        }
-    }
-
-    private fun keepPassiveObservationAfterHandoff(snapshot: ChatPageSnapshot, reason: String) {
+        sessionTransitionTask?.cancel()
+        sessionTransitionTask = null
         cancelSessionSafeViewportRetry(resetCount = true)
-        cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
-        unknownCounterResetTask?.cancel()
-        unknownCounterResetTask = null
-        unknownCounterResetRevision += 1L
-        unknownInteractionArbiter.reset()
-        lastUnknownBehaviourAtUptimeMs = Long.MIN_VALUE
-        manualTakeoverCoordinator.quietPeriod.reset()
-        userControlPhase = UserControlPhase.IDLE
-        pendingUserPageInspection = false
-        userControlNavigationInFlight = false
-        automationYieldedToUser = true
-        sessionManagerState = SessionManagerState.PAUSED
-        onLog(
-            "AI 用户优先权：$reason；页面=${snapshot.pageKind.name}；" +
-                "保持只读观察；该模式不具备自主恢复条件，不启动分级复核锁"
-        )
+        invalidatePendingMessageRead()
+        if (ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            releaseTaskOwnership("页面结构进入收到招呼过渡态；暂停私人消息任务并让出UI操作租约")
+        }
+        // The current page kind itself prevents private-message execution while off the inbox.
+        // Keep the traversal state resumable so a later CHAT_LIST snapshot can reacquire the lease
+        // and continue through the existing page-driven scheduler without a manual-resume phase.
+        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+        onLog("收到的招呼页面观察[WAITING]：status=${status.name}；私人消息任务已释放UI操作租约；等待页面结构确认可执行任务")
     }
-
-    private fun resumeAutonomousSessionTraversal(fresh: ChatPageSnapshot) {
-        cancelSessionSafeViewportRetry(resetCount = true)
-        cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
-        unknownCounterResetTask?.cancel()
-        unknownCounterResetTask = null
-        unknownCounterResetRevision += 1L
-        unknownInteractionArbiter.reset()
-        lastUnknownBehaviourAtUptimeMs = Long.MIN_VALUE
-        manualTakeoverCoordinator.quietPeriod.reset()
-        userControlPhase = UserControlPhase.IDLE
-        pendingUserPageInspection = false
-        userControlNavigationBackAttempts = 0
-        userControlChatTabTapAttempts = 0
-        userControlNavigationInFlight = false
-
-        if (!userHandoffCanResumeAutonomous) {
-            automationYieldedToUser = false
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog(
-                "AI 用户优先权：消息会话列表已连续稳定确认；当前运行是被动样本归档，" +
-                    "恢复页面观察但不启动自主点击或滑动"
-            )
-            handleInspectionSnapshot(fresh)
-            return
-        }
-
-        val resumingStartupInitialization = startupReadinessCoordinator.initializationPending
-        sessionRunStarted = true
-        automationYieldedToUser = false
-        userHandoffCanResumeAutonomous = false
-        if (resumingStartupInitialization) {
-            startupReadinessCoordinator.markWorkAreaConfirmed()
-        }
-
-        // A fresh page is now authoritative. Re-run the unread gate before any positioning swipe.
-        privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
-        privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = false
-        privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.clear()
-        privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized = false
-        privateMessagesTraversalTaskExecutor.normalInboxHadUnread = false
-        privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = false
-        // Human navigation invalidates the old viewport position. The first fresh snapshot must
-        // pass the unread gate before any bottom-positioning swipe can be submitted.
-        privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
-        privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount = 0
-        privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
-        privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
-        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
-        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
-        privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
-        privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
-        privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount = 0
-        currentSessionKey = null
-        currentSessionName = null
-        currentSessionCandidate = null
-        currentSessionReadCaptured = false
-        currentSessionWindowKey = null
-        sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
-
-        if (resumingStartupInitialization) {
-            onLog(
-                "启动仲裁[INITIALIZATION_RESUMED]：消息会话列表已连续稳定确认；" +
-                    "未设置持久化复核锁；重新定位列表底部并启动自主遍历"
-            )
-        } else {
-            onLog(
-                "AI 用户优先权：页面连续稳定 ${REQUIRED_USER_CONTROL_STABLE_SAMPLES} 次并确认是消息会话列表；" +
-                    "人工操作结束；自动接管已恢复；清除旧列表基准并重新定位底部"
-            )
-        }
-        handleInspectionSnapshot(fresh)
-    }
-
-    private fun navigateTowardSessionList(snapshot: ChatPageSnapshot) {
-        if (userControlNavigationInFlight) return
-        if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("AI 会话恢复导航[OWNERSHIP_REJECTED]：私人消息任务未持有 UI 操作权；保持当前页面")
-            return
-        }
-
-        // The social adapter exposes a semantic, freshly verified session-tab target.
-        // Provider package names, Activity names and resource IDs never enter this feature.
-        val chatTabNavigation = snapshot.sessionListNavigationTarget
-        if (chatTabNavigation != null) {
-            if (userControlChatTabTapAttempts >= MAX_USER_CONTROL_CHAT_TAB_TAPS) {
-                finishUserPageVerification("已达到消息Tab导航次数上限；保持人工让权", snapshot)
-                return
-            }
-            val fresh = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
-            val freshTarget = fresh?.sessionListNavigationTarget
-            if (fresh == null || fresh.pageKind != ChatPageKind.NON_CHAT ||
-                fresh.packageName != targetPackage() || !fresh.hasSameWindowIdentity(snapshot) ||
-                freshTarget == null
-            ) {
-                finishUserPageVerification("消息Tab导航前页面或控件复核失败；拒绝点击", fresh ?: snapshot)
-                return
-            }
-            val tapBounds = freshTarget.bounds
-            val displayBounds = fresh.screenBounds
-            if (displayBounds == null || displayBounds.isEmpty) {
-                finishUserPageVerification("消息Tab点击前缺少有效屏幕边界；拒绝使用控件边界代替屏幕边界", fresh)
-                return
-            }
-            val executionContext = gesturePolicy.captureContext(freshTarget.nodeTarget.window) ?: run {
-                finishUserPageVerification("消息Tab点击上下文已变化；拒绝派发旧窗口坐标", fresh)
-                return
-            }
-            val request = GestureIntentRequest(
-                id = "ai-session-recovery-tab-${System.currentTimeMillis()}-${userControlChatTabTapAttempts + 1}",
-                intent = GestureIntent.Tap(
-                    preferredBounds = tapBounds,
-                    targetBounds = tapBounds,
-                    durationMs = SESSION_TAP_DURATION_MS,
-                    displayBounds = displayBounds,
-                    feedbackIntent = GestureFeedbackIntent.NAVIGATION_TAB
-                ),
-                description = "AI会话管理恢复导航：定位并点击消息Tab",
-                executionContext = executionContext
-            )
-            userControlNavigationInFlight = true
-            activeSessionGestureRequestId = request.id
-            val generation = sessionActionGeneration
-            if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-                userControlNavigationInFlight = false
-                activeSessionGestureRequestId = null
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog("AI 会话恢复导航[OWNERSHIP_REJECTED]：派发前任务租约已变化；取消消息Tab点击")
-                return
-            }
-            val submission = runCatching {
-                gesturePolicy.execute(request) { result ->
-                    scheduler.schedule(0L) {
-                        if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                        userControlNavigationInFlight = false
-                        if (generation != sessionActionGeneration || !automationYieldedToUser) return@schedule
-                        if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-                            userControlNavigationInFlight = false
-                            onLog("AI 会话恢复导航[STALE_CALLBACK_IGNORED]：私人消息任务租约已失效；停止后续导航")
-                            return@schedule
-                        }
-                        if (result.status == GestureExecutionStatus.COMPLETED) {
-                            onLog("AI会话管理恢复导航：消息Tab点击完成；等待页面跳转后重新验证会话列表")
-                            scheduleNavigationReverification()
-                        } else {
-                            finishUserPageVerification("消息Tab导航手势未完成（${result.status}）；保持人工让权", fresh)
-                        }
-                    }
-                }
-            }.getOrDefault(GestureSubmission.REJECTED)
-            when (submission) {
-                GestureSubmission.DEFERRED_NOT_READY -> {
-                    if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                    userControlNavigationInFlight = false
-                    onLog("AI会话管理恢复导航[DEFERRED_NOT_READY]：保留消息Tab导航意图；不计入点击次数，也不让权为业务失败")
-                    scheduleAiReadinessRetry("消息Tab导航等待静默窗口结束") { latest ->
-                        if (generation == sessionActionGeneration && automationYieldedToUser) {
-                            navigateTowardSessionList(latest)
-                        }
-                    }
-                }
-                GestureSubmission.REJECTED -> {
-                    if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                    userControlNavigationInFlight = false
-                    onLog("AI会话管理恢复导航[DISPATCH_NOT_ACCEPTED]：系统未接受手势；与页面跳转验证失败分开记录")
-                    finishUserPageVerification("系统未接受消息Tab导航手势；保持人工让权", fresh)
-                }
-                GestureSubmission.ACCEPTED -> {
-                    userControlChatTabTapAttempts++
-                    readinessDeferredRetryCount = 0
-                    readinessDeferredRetryLimitLogged = false
-                    onLog(
-                        "AI会话管理恢复导航：已通过统一手势策略提交消息Tab点击；" +
-                            "触摸落点由统一手势策略在安全区域内生成"
-                    )
-                }
-            }
-            return
-        }
-
-        if (chatPagePort.canSafelyNavigateBackToSessionList(snapshot) &&
-            userControlNavigationBackAttempts < MAX_USER_CONTROL_NAVIGATION_BACK_ATTEMPTS &&
-            (!sessionRunStarted || ownsTask(PRIVATE_MESSAGES_TASK_ID))
-        ) {
-            val accepted = runCatching { chatSessionManagementPort.navigateBackToSessionList() }
-                .getOrDefault(false)
-            if (accepted) {
-                userControlNavigationBackAttempts++
-                userControlNavigationInFlight = true
-                onLog(
-                    "AI会话管理恢复导航：当前页面=${snapshot.activityClass.substringAfterLast('.')}；" +
-                        "提交安全返回 ${userControlNavigationBackAttempts}/$MAX_USER_CONTROL_NAVIGATION_BACK_ATTEMPTS；等待页面重新识别"
-                )
-                scheduleNavigationReverification()
-            } else {
-                finishUserPageVerification("系统未接受安全返回动作；保持人工让权", snapshot)
-            }
-            return
-        }
-
-        val reason = when {
-            userControlNavigationBackAttempts >= MAX_USER_CONTROL_NAVIGATION_BACK_ATTEMPTS ->
-                "已达到安全返回次数上限"
-            else -> "当前页面没有已验证的消息Tab或安全返回路径"
-        }
-        finishUserPageVerification("$reason；等待用户返回消息会话列表", snapshot)
-    }
-
-    private fun scheduleNavigationReverification() {
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_NAVIGATION)
-        manualTakeoverCoordinator.schedule(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_NAVIGATION, USER_CONTROL_NAVIGATION_VERIFY_DELAY_MS) {
-            userControlNavigationInFlight = false
-            if (!isAiReplyActive() || !automationYieldedToUser) return@schedule
-            userControlPhase = UserControlPhase.VERIFYING_STABILITY
-            verifyUserPageStability(previous = null, retry = 0, stableSamples = 0)
-        }
-    }
-
-    private fun finishUserPageVerification(reason: String, snapshot: ChatPageSnapshot) {
-        userControlNavigationInFlight = false
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_NAVIGATION)
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_STABILITY)
-        automationYieldedToUser = true
-        pendingUserPageInspection = true
-        sessionManagerState = SessionManagerState.PAUSED
-        val nextDelayMs = manualTakeoverCoordinator.quietPeriod.advanceAfterUnmetCondition()
-        onLog(
-            "AI 用户优先权：${reason}；页面=${snapshot.pageKind.name}；" +
-                "Activity=${snapshot.activityClass.substringAfterLast('.')}; 本轮未满足自主恢复条件"
-        )
-        if (nextDelayMs != null) {
-            userControlPhase = UserControlPhase.SETTLING
-            onLog(
-                "AI 用户优先权：第${manualTakeoverCoordinator.quietPeriod.stageNumber - 1}轮复核未通过；" +
-                    "开始第${manualTakeoverCoordinator.quietPeriod.stageNumber}轮静默 ${nextDelayMs / 1_000} 秒，结束后重新检查页面、导航能力和稳定性"
-            )
-            scheduleUserPageStabilityCheck()
-        } else {
-            latchManualReviewAndTurnScreenOff(
-                "第三轮静默 60 秒结束后仍不满足会话列表自主恢复条件；最后页面=${snapshot.pageKind.name}；$reason"
-            )
-        }
-    }
-
-    private fun latchManualReviewAndTurnScreenOff(reason: String) {
-        cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
-        userControlPhase = UserControlPhase.IDLE
-        pendingUserPageInspection = false
-        userControlNavigationInFlight = false
-        automationYieldedToUser = true
-        manualReviewRequired = true
-        sessionManagerState = SessionManagerState.PAUSED
-        runCatching { onManualReviewRequired(reason) }
-        val screenOffAccepted = runCatching { onRequestScreenOff() }.getOrDefault(false)
-        onLog(
-            "AI 用户优先权[MANUAL_REVIEW_LATCHED]：$reason；已写入持久化人工复核锁；" +
-                "已请求息屏=${screenOffAccepted}；不会自动恢复，必须显式停止并重新启动运行"
-        )
-    }
-
-    private fun retryUserPageStability(
-        previous: ChatPageSnapshot?,
-        retry: Int,
-        stableSamples: Int
-    ) {
-        if (retry >= MAX_USER_CONTROL_STABILITY_RETRIES) {
-            finishUserPageVerification(
-                "页面在 ${MAX_USER_CONTROL_STABILITY_RETRIES + 1} 次采样内未形成连续稳定快照",
-                previous ?: lastPageInspection ?: ChatPageSnapshot(
-                    packageName = targetPackage(),
-                    activityClass = "",
-                    pageKind = ChatPageKind.UNKNOWN,
-                    scannedNodeCount = 0,
-                    editableInputCount = 0,
-                    messageListCount = 0,
-                    sendActionCount = 0,
-                    messageRelatedViewIdCount = 0,
-                    hasChatTab = false,
-                    messageListTarget = null,
-                    inputFieldTarget = null
-                )
-            )
-            return
-        }
-        manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_STABILITY)
-        manualTakeoverCoordinator.schedule(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_STABILITY, USER_CONTROL_STABILITY_CONFIRM_DELAY_MS) {
-            verifyUserPageStability(
-                previous = previous,
-                retry = retry + 1,
-                stableSamples = stableSamples
-            )
-        }
-    }
-
-    private fun unknownInputDecision(reason: String): InputOriginDecision = InputOriginDecision(
-        origin = InputOrigin.UNKNOWN,
-        evidence = InputOriginEvidence.NO_MATCHING_FREEDOM_ACTION,
-        reason = reason
-    )
-
-    private fun manualReviewIsRequired(): Boolean =
-        manualReviewRequired || isInputManualReviewRequired()
 
     private fun isManualObservationEnabled(): Boolean =
-        sampleCaptureActive && (passiveManualObservation || automationYieldedToUser)
+        sampleCaptureActive && passiveManualObservation
 
     private fun runRegionRefresh() {
         regionRefreshTask = null
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
-        if (userControlPhase != UserControlPhase.IDLE) {
-            pendingUserPageInspection = true
-            return
-        }
         val previous = lastPageInspection
             ?.takeIf { it.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE }
             ?: return
@@ -2205,22 +866,6 @@ class AiReplyObservationRuntime(
         lastRegionFingerprint = ""
         lastMessageFingerprint = ""
         archivedManualMessageFingerprints.clear()
-        cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
-        unknownCounterResetTask?.cancel()
-        unknownCounterResetTask = null
-        unknownCounterResetRevision += 1L
-        unknownInteractionArbiter.reset()
-        lastUnknownBehaviourAtUptimeMs = Long.MIN_VALUE
-        userControlPhase = UserControlPhase.IDLE
-        manualTakeoverCoordinator.quietPeriod.reset()
-        pendingUserPageInspection = false
-        userControlNavigationBackAttempts = 0
-        userControlChatTabTapAttempts = 0
-        userControlNavigationInFlight = false
-        messageTabPositionConfirmedForCycle = false
-        messageTabNavigationAnchorBeforeTap = null
-        automationYieldedToUser = false
-        manualReviewRequired = false
         loggedOcrDebugFingerprints.clear()
         ocrDebugBatchLimitLogged = false
         invalidatePendingMessageRead()
@@ -2238,7 +883,6 @@ class AiReplyObservationRuntime(
         passiveManualObservation = false
         sessionRunStarted = false
         startupReadinessCoordinator.resetState(sessionStarted = false)
-        userHandoffCanResumeAutonomous = false
         sessionManagerState = SessionManagerState.STOPPED
         taskOwnership.reset("运行时重置：$reason")
         currentSessionKey = null
@@ -2342,7 +986,6 @@ class AiReplyObservationRuntime(
         receivedGreetingsPageProbePending = false
         pageObservationCoordinator.resetReceivedGreetingsWatch()
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
-        userHandoffCanResumeAutonomous = false
         privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
         privateMessagesTraversalTaskExecutor.atTop = false
         privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
@@ -2352,16 +995,6 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.clear()
         lastMessageFingerprint = ""
         archivedManualMessageFingerprints.clear()
-        cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
-        userControlPhase = UserControlPhase.IDLE
-        manualTakeoverCoordinator.quietPeriod.reset()
-        pendingUserPageInspection = false
-        userControlNavigationBackAttempts = 0
-        userControlChatTabTapAttempts = 0
-        userControlNavigationInFlight = false
-        messageTabPositionConfirmedForCycle = false
-        messageTabNavigationAnchorBeforeTap = null
-        automationYieldedToUser = false
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
         privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
@@ -2414,22 +1047,6 @@ class AiReplyObservationRuntime(
         // even when durable sample capture is off. The port implementation only persists events
         // while a collection run is open.
         runCatching { chatSessionManagementPort.recordAccessibilityEvent(event) }
-        if (manualReviewIsRequired()) {
-            manualReviewRequired = true
-            automationYieldedToUser = true
-            userControlPhase = UserControlPhase.IDLE
-            if (event.type in PAGE_CHANGE_RECHECK_EVENT_TYPES) {
-                pendingUserPageInspection = true
-                if (pageInspectionTask == null && !pageObservationCoordinator.isFullInspectionPending()) {
-                    pageObservationCoordinator.signalFullInspection()
-                }
-                onLog("输入仲裁[READ_ONLY_OBSERVATION]：来源复核锁定期间只采集当前页面；不运行自主点击/滚动")
-            }
-            return
-        }
-        retryUnknownCounterResetOnPageEvent(event)
-        val changeKind = classifyUiChange(event)
-        val isManualInput = isManualInputEvent(event)
         // Page probing is source-agnostic by design. UNKNOWN, PHYSICAL_USER and SELF_INJECTED
         // events can all indicate that the current page may have changed; none of them grants
         // operation ownership. The debouncer merges bursts before the read-only adapter probe.
@@ -2440,52 +1057,6 @@ class AiReplyObservationRuntime(
         ) {
             pageObservationCoordinator.onPageChangeEvent()
             receivedGreetingsPageProbePending = true
-        }
-        if (userControlPhase == UserControlPhase.TOUCHING) {
-            pendingUserPageInspection = true
-            return
-        }
-        if (userControlPhase == UserControlPhase.SETTLING ||
-            userControlPhase == UserControlPhase.VERIFYING_STABILITY
-        ) {
-            val restartQuiet = isManualInput && event.inputOriginDecision?.shouldYieldAutomation != false
-            if (restartQuiet) {
-                userControlInteractionRevision += 1L
-                manualTakeoverCoordinator.quietPeriod.restart()
-                manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_SETTLE)
-            }
-            pendingUserPageInspection = true
-            scheduleUserPageStabilityCheck(
-                reason = "让权期间事件=${event.type}；更新类型=${changeKind.name}",
-                restartQuietWhenUnconfirmed = restartQuiet,
-                fallBackToQuietWhenUnconfirmed = restartQuiet
-            )
-            onLog(
-                "AI 用户优先权[HANDOFF_EVENT]：事件=${event.type}；更新类型=${changeKind.name}；" +
-                    "人工输入=$restartQuiet；页面/内容/广告更新不重置静默；先检查消息标签"
-            )
-            return
-        }
-        // A verified NON_CHAT page does not end the user's hand-off window. Page, message and
-        // advertisement events trigger a fresh message-tab check but never restart quiet.
-        if (automationYieldedToUser && event.type in PAGE_CHANGE_RECHECK_EVENT_TYPES) {
-            val restartQuiet = isManualInput && event.inputOriginDecision?.shouldYieldAutomation != false
-            if (restartQuiet) {
-                userControlInteractionRevision += 1L
-                manualTakeoverCoordinator.quietPeriod.restart()
-                manualTakeoverCoordinator.cancel(AiReplyManualTakeoverCoordinator.TaskKey.USER_CONTROL_SETTLE)
-            }
-            pendingUserPageInspection = true
-            scheduleUserPageStabilityCheck(
-                reason = "让权页面复核事件=${event.type}；更新类型=${changeKind.name}",
-                restartQuietWhenUnconfirmed = restartQuiet,
-                fallBackToQuietWhenUnconfirmed = restartQuiet
-            )
-            onLog(
-                "AI 用户优先权[HANDOFF_EVENT]：事件=${event.type}；更新类型=${changeKind.name}；" +
-                    "人工输入=$restartQuiet；页面/内容/广告更新不重置静默；先检查消息标签"
-            )
-            return
         }
         val knownInspection = lastPageInspection
         val knownChatDetail = knownInspection?.let {
@@ -3373,18 +1944,11 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼页面监听：当前列表本轮已经处理完成；保持页面不动，等待用户离开后再次进入")
             return
         }
-        if (userControlPhase == UserControlPhase.TOUCHING) return
         if (!claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, "接管人工打开的收到招呼列表")) {
             onLog("收到的招呼人工任务启动[OWNERSHIP_REJECTED]：未取得唯一 UI 操作权；不接管当前页面")
             return
         }
         sessionActionGeneration += 1L
-        if (!automationYieldedToUser) {
-            beginUserControl("收到的招呼人工列表已连续稳定确认")
-            userControlPhase = UserControlPhase.IDLE
-            pendingUserPageInspection = false
-            manualTakeoverCoordinator.quietPeriod.reset()
-        }
         receivedGreetingsPageProbePending = false
 
         val accepted = receivedGreetingsTaskFlow.beginFromConfirmedList()
@@ -3405,21 +1969,9 @@ class AiReplyObservationRuntime(
         receivedGreetingsTaskFlow.markStarted()
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
 
-        cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
-        unknownCounterResetTask?.cancel()
-        unknownCounterResetTask = null
-        unknownCounterResetRevision += 1L
-        unknownInteractionArbiter.reset()
-        lastUnknownBehaviourAtUptimeMs = Long.MIN_VALUE
-        manualTakeoverCoordinator.quietPeriod.reset()
-        userControlPhase = UserControlPhase.IDLE
-        pendingUserPageInspection = false
-        userControlNavigationInFlight = false
-        automationYieldedToUser = false
-        userHandoffCanResumeAutonomous = false
         startupReadinessCoordinator.markReceivedGreetingsWorkAreaConfirmed()
 
-        onLog("收到的招呼人工任务[STARTED]：已确认用户手动打开的列表；暂停私人消息任务并接管当前页面；不点击入口、不返回消息列表")
+        onLog("收到的招呼任务[STARTED]：页面结构已确认当前列表；任务租约已取得；不重复导航进入列表")
         val firstStepAccepted = receivedGreetingsTaskFlow.performInitialIdleStep()
         if (!firstStepAccepted) {
             scheduleReceivedGreetingsRecoveryRetry("人工打开的列表已接管，但首次只读遍历检查暂未完成")
@@ -3442,15 +1994,8 @@ class AiReplyObservationRuntime(
         receivedGreetingsTaskFlow.markCompletedAwaitingUserExit()
         sessionActionGeneration += 1L
         releaseTaskOwnership("收到的招呼任务完成；保持当前页面等待用户离开")
-        cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
-        userControlPhase = UserControlPhase.IDLE
-        pendingUserPageInspection = false
-        userControlNavigationInFlight = false
-        manualTakeoverCoordinator.quietPeriod.reset()
-        automationYieldedToUser = true
-        userHandoffCanResumeAutonomous = sessionRunStarted
         sessionManagerState = SessionManagerState.PAUSED
-        onLog("收到的招呼任务[COMPLETE_STAY_ON_PAGE]：列表遍历已完成；保持当前收到的招呼页面；等待用户离开后再恢复私人消息任务")
+        onLog("收到的招呼任务[COMPLETE_STAY_ON_PAGE]：列表遍历已完成；保持当前页面；待页面结构重新确认普通消息列表后再申请私人消息任务租约")
         return true
     }
 
@@ -3552,7 +2097,6 @@ class AiReplyObservationRuntime(
 
     private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) {
         if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID) ||
-            automationYieldedToUser || userControlPhase != UserControlPhase.IDLE
         ) return
 
         val actionGeneration = sessionActionGeneration
@@ -3623,7 +2167,7 @@ class AiReplyObservationRuntime(
                         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                         onLog("AI 会话管理[DEFERRED_NOT_READY]：启动保护期间不打开会话、不消耗尝试次数；保留目标意图并等待全新列表快照")
                         scheduleAiReadinessRetry("会话行点击等待目标页面就绪") {
-                            if (actionGeneration == sessionActionGeneration && sessionRunStarted && !automationYieldedToUser) {
+                            if (actionGeneration == sessionActionGeneration && sessionRunStarted) {
                                 attemptOpenSession(candidate)
                             }
                         }
@@ -3690,7 +2234,7 @@ class AiReplyObservationRuntime(
             sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
             onLog("AI 会话管理[DEFERRED]：会话点击在延迟派发阶段遇到启动保护；不消耗尝试次数，使用新列表快照重新定位目标")
             scheduleAiReadinessRetry("会话行点击等待目标页面就绪") { latest ->
-                if (actionGeneration == sessionActionGeneration && sessionRunStarted && !automationYieldedToUser) {
+                if (actionGeneration == sessionActionGeneration && sessionRunStarted) {
                     val latestCandidate = latest.chatListCandidates.firstOrNull {
                         ChatSessionManagementPolicy.stableSessionKey(it) == selectedKey
                     }
@@ -3948,8 +2492,6 @@ class AiReplyObservationRuntime(
         toTop: Boolean = false
     ) {
         if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID) ||
-            automationYieldedToUser ||
-            userControlPhase != UserControlPhase.IDLE
         ) return
         // Reacquire the active page immediately before scrolling. A previous list snapshot can
         // become stale after RecyclerView relayout, window changes, or user interaction.
@@ -4186,7 +2728,7 @@ class AiReplyObservationRuntime(
                             sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                             onLog("AI 会话管理[DEFERRED]：列表滑动在实际派发前遇到启动保护；结束旧轨迹，等待新快照后重算")
                             scheduleAiReadinessRetry("列表滚动等待目标页面就绪") { latest ->
-                                if (actionGeneration == sessionActionGeneration && sessionRunStarted && !automationYieldedToUser) {
+                                if (actionGeneration == sessionActionGeneration && sessionRunStarted) {
                                     scrollSessionList(latest, toTop)
                                 }
                             }
@@ -4210,7 +2752,7 @@ class AiReplyObservationRuntime(
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                 onLog("AI 会话管理[DEFERRED_NOT_READY]：列表滚动未派发；保留滚动方向，等待静默结束并用新视口重算轨迹")
                 scheduleAiReadinessRetry("列表滚动等待目标页面就绪") { latest ->
-                    if (actionGeneration == sessionActionGeneration && sessionRunStarted && !automationYieldedToUser) {
+                    if (actionGeneration == sessionActionGeneration && sessionRunStarted) {
                         scrollSessionList(latest, toTop)
                     }
                 }
@@ -4240,9 +2782,7 @@ class AiReplyObservationRuntime(
         expectedWindowIdentity: String,
         reason: String
     ) {
-        if (!isAiReplyActive() || !sessionRunStarted || automationYieldedToUser ||
-            userControlPhase != UserControlPhase.IDLE
-        ) return
+        if (!isAiReplyActive() || !sessionRunStarted) return
         if (sessionSafeViewportRetryTask != null) return
 
         privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
@@ -4266,8 +2806,7 @@ class AiReplyObservationRuntime(
             sessionSafeViewportRetryTask = null
             if (retryGeneration != sessionSafeViewportRetryGeneration ||
                 actionGeneration != sessionActionGeneration ||
-                !isAiReplyActive() || !sessionRunStarted || automationYieldedToUser ||
-                userControlPhase != UserControlPhase.IDLE ||
+                !isAiReplyActive() || !sessionRunStarted ||
                 sessionManagerState != SessionManagerState.WAITING_FOR_SESSION_LIST
             ) return@retry
 
@@ -4419,10 +2958,6 @@ class AiReplyObservationRuntime(
     }
 
     private fun scheduleFullInspectionAfter(delayMs: Long) {
-        if (userControlPhase != UserControlPhase.IDLE) {
-            pendingUserPageInspection = true
-            return
-        }
         cancelMessageReadRetry()
         pageObservationCoordinator.cancelFullInspection()
         pageObservationCoordinator.cancelRegionRefresh()

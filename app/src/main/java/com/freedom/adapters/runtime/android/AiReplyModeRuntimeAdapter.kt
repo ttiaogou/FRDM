@@ -8,8 +8,6 @@ import com.freedom.features.aireply.AiReplyObservationRuntime
 /** Keeps AI page observation behind the application runtime contract. */
 internal class AiReplyModeRuntimeAdapter(
     private val runtime: () -> AiReplyObservationRuntime,
-    private val acknowledgeManualReview: (String) -> Unit = {},
-    private val isPersistedManualReviewRequired: () -> Boolean = { false },
     private val onLog: (String) -> Unit = {},
     private val onReadinessStarting: (RunMode, String) -> Unit = { _, _ -> },
     private val onReadinessInvalidated: (String) -> Unit = {}
@@ -19,19 +17,8 @@ internal class AiReplyModeRuntimeAdapter(
 
     override fun onRunStarted() {
         onReadinessStarting(mode, "AI Reply 已启动；等待目标应用正式就绪")
-        if (isPersistedManualReviewRequired()) {
-            awaitingServiceReconnect = true
-            runtime().reset("恢复时存在未确认的输入来源复核锁")
-            onLog("AI 会话管理：检测到持久化输入来源复核锁；本次运行请求不视为人工确认；保持自动控制暂停")
-            return
-        }
-        // The UI command clears the persisted latch before requesting a new run. Therefore this
-        // acknowledgement is safe here and does not turn process/service recovery into approval.
-        acknowledgeManualReview("显式新运行已通过UI命令确认")
         awaitingServiceReconnect = false
         runtime().reset("开始新运行前清理")
-        // AI Reply is the autonomous inbox-observation workflow. Manual priority is enforced
-        // by AiReplyObservationRuntime; passive-only observation is not the run default.
         runtime().scheduleInitialObservation(passiveOnly = false)
     }
 
@@ -42,10 +29,6 @@ internal class AiReplyModeRuntimeAdapter(
 
     override fun onAccessibilityServiceConnected() {
         if (awaitingServiceReconnect) {
-            if (isPersistedManualReviewRequired()) {
-                onLog("AI 会话管理：服务重连但输入来源仍待人工复核；保持暂停；不会自动恢复；请显式停止并重新启动运行")
-                return
-            }
             awaitingServiceReconnect = false
             onReadinessStarting(mode, "AI Reply 服务重连；重新等待目标应用正式就绪")
             runtime().scheduleInitialObservation(passiveOnly = false)
@@ -59,11 +42,6 @@ internal class AiReplyModeRuntimeAdapter(
     }
 
     override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = runtime().schedule(event)
-
-    override fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) = runtime().onGlobalTouchEvent(event)
-
-    override fun onPreemptiveTargetInteraction(event: AccessibilityEventEnvelope) =
-        runtime().onPreemptiveTargetInteraction(event)
 
     override fun onAccessibilityServiceInterrupted(reason: String) {
         onReadinessInvalidated("无障碍服务中断；目标应用就绪状态失效：$reason")

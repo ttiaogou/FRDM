@@ -128,8 +128,6 @@ class AiReplyObservationRuntimeTest {
 
         runtime.scheduleInitialObservation(passiveOnly = false)
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", taskCoordinator.activeTaskId())
-        runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_START, InputOrigin.PHYSICAL_USER))
-        runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_END, InputOrigin.PHYSICAL_USER))
         scheduler.runNextWithDelay(180L)
 
         assertEquals(0, gestureCount)
@@ -140,8 +138,6 @@ class AiReplyObservationRuntimeTest {
             ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
             ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
         )
-        runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_START, InputOrigin.PHYSICAL_USER))
-        runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_END, InputOrigin.PHYSICAL_USER))
         scheduler.runNextWithDelay(180L)
         assertEquals(0, gestureCount)
         scheduler.runNextWithDelay(350L)
@@ -450,130 +446,60 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun passiveModeInspectsNonChatPagesAfterManualScrollWithoutRunningGestures() {
-        val scheduler = FakeScheduler()
-        val port = FakeChatPort().apply {
-            sessionRunEnabled = true
-            page = ChatPageSnapshot(
-                packageName = "com.immomo.momo",
-                activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity",
-                pageKind = ChatPageKind.NON_CHAT,
-                scannedNodeCount = 30,
-                editableInputCount = 0,
-                messageListCount = 0,
-                sendActionCount = 0,
-                messageRelatedViewIdCount = 0,
-                hasChatTab = false,
-                messageListTarget = null,
-                inputFieldTarget = null,
-                sessionListNavigationTarget = testNavigationTarget("com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"),
+    fun physicalPageScrollDoesNotDisableTheStructureSelectedPrivateTask() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.PHYSICAL_USER),
+            eventWithOrigin(AccessibilityEventType.WINDOW_CONTENT_CHANGED, InputOrigin.UNKNOWN)
             )
-        }
-        var gestureCount = 0
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(
-                    command: GestureIntentRequest,
-                    listener: GestureExecutionListener
-                ): GestureSubmission {
-                    gestureCount++
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = {},
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
         )
-
-        runtime.scheduleInitialObservation(passiveOnly = true)
-        scheduler.runNext()
-        assertEquals(1, port.passiveSayHiObservations)
-
-        val manualScroll = eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.PHYSICAL_USER)
-        runtime.onPreemptiveTargetInteraction(manualScroll)
-        runtime.schedule(manualScroll)
-        scheduler.runNextWithDelay(180L) // The passive Message-tab guard runs before quiet verification.
-        scheduler.runNextWithDelay(5_000L) // UNKNOWN scroll is a temporary manual hand-off.
-        scheduler.runNextWithDelay(300L)
-        scheduler.runNextWithDelay(300L) // Three stable snapshots resume passive page observation only.
-        assertEquals(2, port.passiveSayHiObservations)
-        assertTrue(port.fullInspections >= 2)
-        assertEquals(0, gestureCount)
-        assertEquals(0, port.sessionTapResolutions)
     }
 
     @Test
-    fun userTouchYieldsAutomationThenResumesAfterStablePageVerificationAndInboxReturn() {
-        val scheduler = FakeScheduler()
-        val port = FakeChatPort().apply {
-            sessionRunEnabled = true
-            page = ChatPageSnapshot(
-                packageName = "com.immomo.momo",
-                activityClass = "com.immomo.momo.maintab.MaintabActivity",
-                pageKind = ChatPageKind.CHAT_LIST,
-                scannedNodeCount = 80,
-                editableInputCount = 0,
-                messageListCount = 0,
-                sendActionCount = 0,
-                messageRelatedViewIdCount = 0,
-                hasChatTab = true,
-                messageListTarget = null,
-                inputFieldTarget = null,
-                chatListViewport = ScreenRect(0, 120, 720, 1480),
-                chatListCandidates = listOf(sessionCandidate())
+    fun physicalTouchDoesNotYieldPrivateTaskOwnership() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.PHYSICAL_USER),
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.PHYSICAL_USER)
             )
-        }
-        var gestureCount = 0
-        val logs = ArrayList<String>()
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
         )
+    }
 
-        runtime.scheduleInitialObservation(passiveOnly = true)
-        scheduler.runNext() // Initial passive recognition must not issue a managed swipe.
-        assertEquals(0, gestureCount)
+    @Test
+    fun unknownInteractionDoesNotStartManualHandoffEscalation() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN)
+            )
+        )
+    }
 
-        runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_START, InputOrigin.PHYSICAL_USER))
-        port.page = chatDetailSnapshot()
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        assertEquals(0, port.messageReads) // No read against a page while the user is touching.
+    @Test
+    fun unknownSignalsDoNotHoldPageTaskInManualResumeState() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_SELECTED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.WINDOW_CONTENT_CHANGED, InputOrigin.UNKNOWN)
+            )
+        )
+    }
 
-        runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_END, InputOrigin.PHYSICAL_USER))
-        scheduler.runNextWithDelay(5_000L) // Shared manual-handoff quiet period.
-        assertEquals(0, port.messageReads)
-        scheduler.runNextWithDelay(300L)
-        scheduler.runNextWithDelay(300L) // Three matching snapshots confirm the page.
+    @Test
+    fun pageTaskOwnershipIsUnaffectedByPhysicalInteractionProvenance() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.PHYSICAL_USER),
+            eventWithOrigin(AccessibilityEventType.VIEW_SELECTED, InputOrigin.PHYSICAL_USER)
+            )
+        )
+    }
 
-        assertEquals(1, port.messageReads)
-        assertEquals(1, port.persistedChatSamples)
-        assertEquals(null, port.lastPersistedChatSessionName)
-        assertEquals(0, gestureCount) // A manually opened detail remains read-only.
-        assertTrue(logs.any { it.contains("让出界面控制权") })
-        assertTrue(logs.any { it.contains("被动样本归档") && it.contains("不执行自动返回") })
-        assertFalse(logs.any { it.contains("自动接管已恢复") })
-
-        // Returning to a freshly recognized inbox keeps passive collection passive.
-        port.page = ChatPageSnapshot(
+    @Test
+    fun recognizedInboxPageReacquiresLeaseAfterAnIntermediatePageTransition() {
+        val scheduler = FakeScheduler()
+        val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
             activityClass = "com.immomo.momo.maintab.MaintabActivity",
             pageKind = ChatPageKind.CHAT_LIST,
@@ -588,92 +514,44 @@ class AiReplyObservationRuntimeTest {
             chatListViewport = ScreenRect(0, 120, 720, 1480),
             chatListCandidates = listOf(sessionCandidate())
         )
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        scheduler.runNextWithDelay(180L)
-        assertEquals(0, gestureCount)
-        assertTrue(logs.any { it.contains("PASSIVE_ONLY") && it.contains("MESSAGE_PAGE") })
-    }
-
-    @Test
-    fun unresolvedManualHandoffEscalatesFiveFifteenSixtySecondsThenLatchesAndTurnsScreenOff() {
-        val scheduler = FakeScheduler()
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
-            page = ChatPageSnapshot(
-                packageName = "com.immomo.momo",
-                activityClass = "MainActivity",
-                pageKind = ChatPageKind.NON_CHAT,
-                scannedNodeCount = 20,
-                editableInputCount = 0,
-                messageListCount = 0,
-                sendActionCount = 0,
-                messageRelatedViewIdCount = 0,
-                hasChatTab = false,
-                messageListTarget = null,
-                inputFieldTarget = null,
-                sessionListNavigationTarget = testNavigationTarget("MainActivity"),
-            )
+            receivedGreetingsWorkflowEnabled = true
+            page = inbox
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE
         }
-        val logs = ArrayList<String>()
-        var persistedReviewReason: String? = null
-        var screenOffRequests = 0
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission =
-                    GestureSubmission.ACCEPTED
-            },
+            gesturePolicy = NoOpGestureApi,
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
-            onLog = logs::add,
+            onLog = {},
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
-            onManualReviewRequired = { persistedReviewReason = it },
-            onRequestScreenOff = { screenOffRequests++; true }
+            taskCoordinator = ownership,
+            currentRunGeneration = { 5L }
         )
 
         runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext() // Start autonomous session management.
-        runtime.onGlobalTouchEvent(
-            eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_START, InputOrigin.PHYSICAL_USER)
-        )
-        runtime.onGlobalTouchEvent(
-            eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_END, InputOrigin.PHYSICAL_USER)
-        )
-
-        scheduler.runNextWithDelay(5_000L)
+        runtime.schedule(event(AccessibilityEventType.VIEW_CLICKED))
         scheduler.runNextWithDelay(300L)
-        scheduler.runNextWithDelay(300L) // First stable verification fails: not the session list.
-        assertNull(persistedReviewReason)
-        scheduler.runNextWithDelay(180L) // The second-stage check first re-runs the Message-tab guard.
-        assertTrue(scheduler.hasPendingDelay(15_000L))
+        assertNull(ownership.activeTaskId())
 
-        scheduler.runNextWithDelay(15_000L)
+        port.manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
         scheduler.runNextWithDelay(300L)
-        scheduler.runNextWithDelay(300L) // Second stable verification also fails.
-        assertNull(persistedReviewReason)
-        scheduler.runNextWithDelay(180L)
-        assertTrue(scheduler.hasPendingDelay(60_000L))
 
-        scheduler.runNextWithDelay(60_000L)
-        scheduler.runNextWithDelay(300L)
-        scheduler.runNextWithDelay(300L) // Third failure persists the hold and requests screen-off directly.
-
-        assertTrue(persistedReviewReason != null)
-        assertTrue(persistedReviewReason!!.contains("第三轮静默 60 秒"))
-        assertEquals(1, screenOffRequests)
-        assertTrue(logs.any { it.contains("MANUAL_REVIEW_LATCHED") && it.contains("已请求息屏=true") })
-        assertEquals(0L, scheduler.pendingCount().toLong())
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
     }
 
     @Test
-    fun stableNonChatPageKeepsResumePendingUntilTheInboxReturns() {
+    fun unknownPageArrivalResultDoesNotReleaseARecognizedInboxTaskLease() {
         val scheduler = FakeScheduler()
-        val candidate = sessionCandidate()
-        val chatListPage = ChatPageSnapshot(
+        val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
             activityClass = "com.immomo.momo.maintab.MaintabActivity",
             pageKind = ChatPageKind.CHAT_LIST,
@@ -686,145 +564,34 @@ class AiReplyObservationRuntimeTest {
             messageListTarget = null,
             inputFieldTarget = null,
             chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(candidate)
+            chatListCandidates = listOf(sessionCandidate())
         )
         val port = FakeChatPort().apply {
-            provideMessageTabPositionEvidence = true
             sessionRunEnabled = true
-            page = ChatPageSnapshot(
-                packageName = "com.immomo.momo",
-                activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiCardActivity",
-                pageKind = ChatPageKind.NON_CHAT,
-                scannedNodeCount = 30,
-                editableInputCount = 0,
-                messageListCount = 0,
-                sendActionCount = 0,
-                messageRelatedViewIdCount = 0,
-                hasChatTab = false,
-                messageListTarget = null,
-                inputFieldTarget = null,
-                sessionListNavigationTarget = testNavigationTarget("com.immomo.momo.message.sayhi.activity.reflect.NewSayHiCardActivity"),
-            )
+            page = inbox
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.UNKNOWN
         }
-        var gestureCount = 0
-        val logs = ArrayList<String>()
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(
-                    command: GestureIntentRequest,
-                    listener: GestureExecutionListener
-                ): GestureSubmission {
-                    gestureCount++
-                    completeMessageTabProbe(command, listener)
-                    return GestureSubmission.ACCEPTED
-                }
-            },
+            gesturePolicy = NoOpGestureApi,
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
-            onLog = logs::add,
+            onLog = {},
             fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = ownership,
+            currentRunGeneration = { 5L }
         )
 
         runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext() // Initial observation of the current non-chat page.
-        runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_START, InputOrigin.PHYSICAL_USER))
-        runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_END, InputOrigin.PHYSICAL_USER))
-        scheduler.runNextWithDelay(5_000L)
+        runtime.schedule(event(AccessibilityEventType.VIEW_CLICKED))
         scheduler.runNextWithDelay(300L)
-        scheduler.runNextWithDelay(300L) // Stable NON_CHAT is confirmed; safe navigation is unavailable.
 
-        assertEquals(0, gestureCount)
-        assertTrue(logs.any { it.contains("页面=NON_CHAT") && it.contains("本轮未满足自主恢复条件") })
-        assertTrue(logs.any { it.contains("开始第2轮静默 15 秒") })
-        assertFalse(logs.any { it.contains("自动接管已恢复") })
-
-        // A later Activity transition back to the inbox must trigger a fresh stability check.
-        port.page = chatListPage
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        runMessageTabProbeFlow(scheduler) // Tap Message and compare the fresh inbox position.
-
-        assertTrue("expected inbox resume log; logs=$logs", logs.any {
-            (it.contains("消息会话列表") && it.contains("自动接管已恢复")) ||
-                it.contains("启动仲裁[INITIALIZATION_RESUMED]")
-        })
-        assertTrue(gestureCount >= 1) // The Message-tab probe was accepted before re-arming.
-    }
-
-    @Test
-    fun autonomousRunResumesAfterManualHandoffAndVerifiedInboxReturn() {
-        val scheduler = FakeScheduler()
-        val chatListPage = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate(unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ))
-        )
-        val port = FakeChatPort().apply {
-            provideMessageTabPositionEvidence = true
-            sessionRunEnabled = true
-            page = chatListPage
-            pageAfterBack = chatListPage
-        }
-        var gestureCount = 0
-        val logs = ArrayList<String>()
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(
-                    command: GestureIntentRequest,
-                    listener: GestureExecutionListener
-                ): GestureSubmission {
-                    gestureCount++
-                    completeMessageTabProbe(command, listener)
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext() // Autonomous mode must submit its initial inbox-positioning swipe.
-        val autonomousGestureCount = gestureCount
-        assertTrue(autonomousGestureCount > 0)
-
-        runtime.onPreemptiveTargetInteraction(eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.PHYSICAL_USER))
-        port.page = chatDetailSnapshot()
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        scheduler.runNextWithDelay(5_000L)
-        scheduler.runNextWithDelay(300L)
-        scheduler.runNextWithDelay(300L) // Stable detail is verified, then a safe Back is submitted.
-
-        assertTrue(logs.any { it.contains("让出界面控制权") })
-        assertFalse(logs.any { it.contains("自动接管已恢复") })
-        assertEquals(1, port.messageReads) // The manually opened detail is observed read-only.
-        assertEquals(1, port.navigateBackCalls)
-        scheduler.runNextWithDelay(900L) // Wait for the Back transition, then verify the inbox.
-        scheduler.runNextWithDelay(300L)
-        scheduler.runNextWithDelay(300L)
-        runMessageTabProbeFlow(scheduler)
-        assertTrue(logs.any { it.contains("启动仲裁[INITIALIZATION_RESUMED]") })
-        assertTrue(gestureCount > autonomousGestureCount)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
     }
 
     @Test
@@ -1077,1258 +844,161 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun unknownCounterClearsOnlyAfterTenSecondsAndThreeStableFreshSnapshots() {
-        val scheduler = FakeScheduler()
-        val port = FakeChatPort().apply {
-            page = ChatPageSnapshot(
-                packageName = "com.immomo.momo",
-                activityClass = "com.immomo.momo.maintab.MaintabActivity",
-                pageKind = ChatPageKind.NON_CHAT,
-                scannedNodeCount = 30,
-                editableInputCount = 0,
-                messageListCount = 0,
-                sendActionCount = 0,
-                messageRelatedViewIdCount = 0,
-                hasChatTab = false,
-                messageListTarget = null,
-                inputFieldTarget = null,
-                windowGeneration = 4L
-            )
-        }
-        val logs = mutableListOf<String>()
-        var clock = 1_000L
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = NoOpGestureApi,
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L,
-            uptimeMillis = { clock }
-        )
-        val firstUnknown = event(AccessibilityEventType.VIEW_SCROLLED).copy(
-            windowId = 41,
-            pageGeneration = 4L,
-            source = AccessibilitySourceSnapshot(
-                className = "androidx.recyclerview.widget.RecyclerView",
-                viewId = "com.immomo.momo:id/active_rv",
-                text = null,
-                contentDescription = null,
-                bounds = ScreenRect(0, 120, 720, 1480),
-                clickable = false,
-                longClickable = false,
-                scrollable = true,
-                editable = false
-            ),
-            inputOriginDecision = InputOriginDecision(
-                InputOrigin.UNKNOWN,
-                InputOriginEvidence.NO_MATCHING_FREEDOM_ACTION,
-                reason = "test unmatched scroll"
+    fun unknownEventsDoNotAccumulateIntoTaskArbitration() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_LONG_CLICKED, InputOrigin.UNKNOWN)
             )
         )
-
-        runtime.onPreemptiveTargetInteraction(firstUnknown)
-        assertEquals(1, logs.count { it.contains("未知交互仲裁[BEHAVIOUR]") })
-        assertTrue(scheduler.hasPendingDelay(10_000L))
-
-        clock = 11_000L
-        scheduler.runNext() // Ten seconds have elapsed; first fresh snapshot.
-        scheduler.runNext() // Second matching fresh snapshot, 300 ms later.
-        scheduler.runNext() // Third matching fresh snapshot clears the sub-threshold count.
-
-        assertTrue(logs.any { it.contains("未知交互仲裁[COUNTER_RESET]") })
-        assertTrue(logs.any { it.contains("连续10秒无新UNKNOWN") })
-
-        val nextPageUnknown = firstUnknown.copy(
-            windowId = 42,
-            pageGeneration = 5L,
-            source = firstUnknown.source?.copy(viewId = "com.immomo.momo:id/new_popup")
-        )
-        runtime.onPreemptiveTargetInteraction(nextPageUnknown)
-        val behaviourLogs = logs.filter { it.contains("未知交互仲裁[BEHAVIOUR]") }
-        assertEquals(2, behaviourLogs.size)
-        assertTrue(behaviourLogs.all { it.contains("count=1/3") })
     }
 
     @Test
-    fun singleUnknownGlobalTouchBoundaryPairDoesNotYieldAutomation() {
-        val scheduler = FakeScheduler()
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate())
+    fun unknownPageEventsDoNotChangeTheCurrentTaskLease() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_TEXT_CHANGED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN)
+            )
         )
-        val port = FakeChatPort().apply {
-            provideMessageTabPositionEvidence = true
-            sessionRunEnabled = true
-            page = inbox
-        }
-        val logs = mutableListOf<String>()
-        var gestureCount = 0
-        var persistedReviewRequired = false
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    completeMessageTabProbe(command, listener)
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L,
-            isInputManualReviewRequired = { persistedReviewRequired }
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext()
-        val beforeTouch = gestureCount
-        runtime.onGlobalTouchEvent(event(AccessibilityEventType.TOUCH_INTERACTION_START))
-        runtime.onGlobalTouchEvent(event(AccessibilityEventType.TOUCH_INTERACTION_END))
-        assertFalse(persistedReviewRequired)
-        assertTrue(logs.any { it.contains("未知交互仲裁[BEHAVIOUR]") && it.contains("count=1/3") })
-        assertTrue(logs.any { it.contains("UNKNOWN_CONTINUES") })
-        assertFalse(logs.any { it.contains("PROTECTION_TRIGGERED") })
-        assertEquals(beforeTouch, gestureCount)
     }
 
     @Test
-    fun globalTouchEndRestartsQuietPeriodWhenThirdUnknownTargetEventAlreadyEnteredSettling() {
-        val scheduler = FakeScheduler()
-        val port = FakeChatPort()
-        val logs = mutableListOf<String>()
-        val runtime = runtime(scheduler, port, logs::add)
-
-        fun unknownClick(windowId: Int, viewId: String) = event(AccessibilityEventType.VIEW_CLICKED).copy(
-            windowId = windowId,
-            pageGeneration = windowId.toLong(),
-            source = AccessibilitySourceSnapshot(
-                className = "android.widget.Button",
-                viewId = "com.immomo.momo:id/$viewId",
-                text = null,
-                contentDescription = null,
-                bounds = ScreenRect(10, 10, 110, 60),
-                clickable = true,
-                longClickable = false,
-                scrollable = false,
-                editable = false
-            ),
-            inputOriginDecision = InputOriginDecision(
-                InputOrigin.UNKNOWN,
-                InputOriginEvidence.NO_MATCHING_FREEDOM_ACTION,
-                reason = "unmatched target interaction"
+    fun eventBurstDoesNotCreateAQuietPeriodTaskGate() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN)
             )
         )
-
-        runtime.onPreemptiveTargetInteraction(unknownClick(11, "popup_one"))
-        runtime.onPreemptiveTargetInteraction(unknownClick(12, "popup_two"))
-        runtime.onPreemptiveTargetInteraction(unknownClick(13, "popup_three"))
-        assertTrue(logs.any { it.contains("未知交互仲裁[PROTECTION_TRIGGERED]") })
-
-        runtime.onGlobalTouchEvent(event(AccessibilityEventType.TOUCH_INTERACTION_END))
-
-        assertTrue(logs.any { it.contains("PROTECTION_SETTLING") && it.contains("静默计时从触摸结束重新起算") })
     }
 
     @Test
-    fun unknownClickDuringStartupDefersInitializationAndResumesOnStableInbox() {
-        val scheduler = FakeScheduler()
-        val startupPage = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.UNKNOWN,
-            scannedNodeCount = 13,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = false,
-            messageListTarget = null,
-            inputFieldTarget = null
-        )
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate())
-        )
-        val port = FakeChatPort().apply {
-            provideMessageTabPositionEvidence = true
-            sessionRunEnabled = true
-            page = startupPage
-        }
-        val logs = mutableListOf<String>()
-        var gestureCount = 0
-        var persistedReviewRequired = false
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    completeMessageTabProbe(command, listener)
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L,
-            isInputManualReviewRequired = { persistedReviewRequired }
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext() // First Activity frame is not yet a recognized inbox.
-        val startupAdDismissClick = event(AccessibilityEventType.VIEW_CLICKED).copy(
-            windowId = 19,
-            pageGeneration = 1L,
-            source = AccessibilitySourceSnapshot(
-                className = "android.widget.Button",
-                viewId = "com.immomo.momo:id/popup-one",
-                text = null,
-                contentDescription = null,
-                bounds = ScreenRect(100, 100, 300, 180),
-                clickable = true,
-                longClickable = false,
-                scrollable = false,
-                editable = false
-            ),
-            inputOriginDecision = InputOriginDecision(
-                InputOrigin.UNKNOWN,
-                InputOriginEvidence.NO_MATCHING_FREEDOM_ACTION,
-                reason = "click feedback has no Freedom action correlation during startup"
+    fun unknownClickDuringStartupDoesNotDeferPageReadiness() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN)
             )
         )
-        runtime.onPreemptiveTargetInteraction(startupAdDismissClick)
-        runtime.schedule(startupAdDismissClick)
-        assertFalse("A single UNKNOWN startup event must not pause the task", persistedReviewRequired)
-        assertTrue(logs.any { it.contains("CONTINUE_AUTONOMOUS") && it.contains("count=1/3") })
-        assertFalse(logs.any { it.contains("PROTECTION_TRIGGERED") })
-
-        listOf("popup-two", "popup-three").forEachIndexed { index, viewId ->
-            val next = startupAdDismissClick.copy(
-                windowId = 20 + index,
-                pageGeneration = 2L + index,
-                source = AccessibilitySourceSnapshot(
-                    className = "android.widget.Button",
-                    viewId = "com.immomo.momo:id/$viewId",
-                    text = null, contentDescription = null,
-                    bounds = ScreenRect(100, 100, 300, 180),
-                    clickable = true, longClickable = false, scrollable = false, editable = false
-                )
-            )
-            runtime.onPreemptiveTargetInteraction(next)
-            runtime.schedule(next)
-        }
-        assertFalse(persistedReviewRequired)
-        assertTrue(logs.any { it.contains("PROTECTION_TRIGGERED") && it.contains("3/3") })
-
-        port.page = inbox
-        runUntilLog(scheduler, logs, "启动仲裁[INITIALIZATION_RESUMED]")
-        assertFalse(persistedReviewRequired)
-        assertTrue(logs.any { it.contains("启动仲裁[INITIALIZATION_RESUMED]") })
-        assertTrue(gestureCount > 0)
     }
 
     @Test
-    fun unknownGlobalTouchBoundariesDuringStartupDoNotLatchPersistentReview() {
-        val scheduler = FakeScheduler()
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate(unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ))
+    fun unknownStartupPageEventsDoNotLatchManualReview() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_TEXT_CHANGED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN)
+            )
         )
-        val port = FakeChatPort().apply {
-            provideMessageTabPositionEvidence = true
-            sessionRunEnabled = true
-            page = inbox
-        }
-        val logs = mutableListOf<String>()
-        var gestureCount = 0
-        var persistedReviewRequired = false
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    completeMessageTabProbe(command, listener)
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L,
-            isInputManualReviewRequired = { persistedReviewRequired }
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        runtime.onGlobalTouchEvent(event(AccessibilityEventType.TOUCH_INTERACTION_START))
-        runtime.onGlobalTouchEvent(event(AccessibilityEventType.TOUCH_INTERACTION_END))
-        assertFalse(persistedReviewRequired)
-        assertTrue(logs.any { it.contains("count=1/3") })
-        assertFalse(logs.any { it.contains("PROTECTION_TRIGGERED") })
-        runUntil(scheduler, 12) { gestureCount > 0 }
-        assertTrue(gestureCount > 0)
     }
 
     @Test
-    fun startupUnknownClickOnNonChatWaitsForInboxReturnWithoutLatchingReview() {
-        val scheduler = FakeScheduler()
-        val startupPage = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.UNKNOWN,
-            scannedNodeCount = 13,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = false,
-            messageListTarget = null,
-            inputFieldTarget = null
-        )
-        val nonChat = startupPage.copy(
-            activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiCardActivity",
-            pageKind = ChatPageKind.NON_CHAT,
-            scannedNodeCount = 40
-        )
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate(unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ))
-        )
-        val port = FakeChatPort().apply {
-            provideMessageTabPositionEvidence = true
-            sessionRunEnabled = true
-            page = startupPage
-        }
-        val logs = mutableListOf<String>()
-        var gestureCount = 0
-        var persistedReviewRequired = false
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    completeMessageTabProbe(command, listener)
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L,
-            isInputManualReviewRequired = { persistedReviewRequired }
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext()
-        val unknownClick = event(AccessibilityEventType.VIEW_CLICKED).copy(
-            inputOriginDecision = InputOriginDecision(
-                InputOrigin.UNKNOWN,
-                InputOriginEvidence.NO_MATCHING_FREEDOM_ACTION,
-                reason = "startup dialog click without source bounds"
+    fun unknownClickDoesNotControlStartupPageEligibility() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN)
             )
         )
-        runtime.onPreemptiveTargetInteraction(unknownClick)
-        runtime.schedule(unknownClick)
-        port.page = nonChat
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        runUntilLog(scheduler, logs, "NewSayHiCardActivity")
-
-        assertFalse(persistedReviewRequired)
-        assertEquals(0, gestureCount)
-
-        port.page = inbox
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        runUntil(scheduler, 20) { gestureCount > 0 } // Returning to the inbox resumes startup inspection without a manual hand-off.
-        assertFalse(persistedReviewRequired)
-        assertFalse(logs.any { it.contains("未知交互仲裁[PROTECTION_TRIGGERED]") })
-        assertTrue(logs.any { it.contains("首次向上滑动") })
-        assertTrue(gestureCount > 0)
     }
 
     @Test
-    fun threeIndependentUnknownClicksTriggerProtectionAndResumeAfterVerifiedInboxReturn() {
-        val scheduler = FakeScheduler()
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate(unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ))
-        )
-        val nonChat = inbox.copy(
-            activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity",
-            pageKind = ChatPageKind.NON_CHAT,
-            hasChatTab = false,
-            chatListViewport = null,
-            chatListCandidates = emptyList(),
-            sessionListNavigationTarget = testNavigationTarget(
-                "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity",
-                generation = 1L,
-                expectedViewId = "com.immomo.momo:id/new_sayhi_session_list",
-                expectedClassName = "androidx.recyclerview.widget.RecyclerView",
-                bounds = ScreenRect(0, 120, 720, 1480)
+    fun threeUnknownClicksDoNotTriggerTaskProtection() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN)
             )
         )
-        val port = FakeChatPort().apply {
-            provideMessageTabPositionEvidence = true
-            sessionRunEnabled = true
-            page = inbox
-        }
-        val logs = mutableListOf<String>()
-        var gestureCount = 0
-        var persistedReviewRequired = false
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    completeMessageTabProbe(command, listener)
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L,
-            isInputManualReviewRequired = { persistedReviewRequired }
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        runUntil(scheduler, 12) { gestureCount > 0 } // Initial autonomous positioning gesture is accepted.
-        val initialGestureCount = gestureCount
-        assertTrue(initialGestureCount > 0)
-
-        val unknownManualClick = event(AccessibilityEventType.VIEW_CLICKED).copy(
-            source = AccessibilitySourceSnapshot(
-                className = "android.widget.RelativeLayout",
-                viewId = "com.immomo.momo:id/item_layout",
-                text = null,
-                contentDescription = null,
-                bounds = ScreenRect(0, 838, 720, 985),
-                clickable = true,
-                longClickable = true,
-                scrollable = false,
-                editable = false
-            ),
-            windowId = 1,
-            pageGeneration = 1L,
-            inputOriginDecision = InputOriginDecision(
-                InputOrigin.UNKNOWN,
-                InputOriginEvidence.NO_MATCHING_FREEDOM_ACTION,
-                reason = "unmatched inbox row click"
-            )
-        )
-        port.page = nonChat
-        runtime.onPreemptiveTargetInteraction(unknownManualClick)
-        runtime.schedule(unknownManualClick)
-        listOf(2, 3).forEachIndexed { index, _ ->
-            val next = unknownManualClick.copy(
-                windowId = 1,
-                pageGeneration = 1L,
-                source = unknownManualClick.source?.copy(
-                    viewId = "com.immomo.momo:id/popup-${index + 2}"
-                )
-            )
-            runtime.onPreemptiveTargetInteraction(next)
-            runtime.schedule(next)
-        }
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        scheduler.runNextWithDelay(5_000L)
-        scheduler.runNextWithDelay(300L)
-        scheduler.runNextWithDelay(300L) // Stable NON_CHAT remains observation-only.
-
-        assertFalse(persistedReviewRequired)
-        assertTrue(logs.any { it.contains("未知交互仲裁[PROTECTION_TRIGGERED]") && it.contains("3/3") })
-        assertTrue(logs.any { it.contains("页面=NON_CHAT") && it.contains("本轮未满足自主恢复条件") })
-        assertTrue(logs.any { it.contains("开始第2轮静默 15 秒") })
-        assertEquals(initialGestureCount, gestureCount)
-
-        // Returning to the inbox is a page observation, not another input signal. Tap Message
-        // and compare a fresh snapshot without restarting the quiet period.
-        port.page = inbox
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        runMessageTabProbeFlow(scheduler)
-
-        assertFalse(persistedReviewRequired)
-        assertTrue(logs.any { it.contains("自动接管已恢复") || it.contains("启动仲裁[INITIALIZATION_RESUMED]") })
-        assertTrue(gestureCount > initialGestureCount)
     }
 
     @Test
-    fun singleUnknownScrollDoesNotHandOff() {
-        val scheduler = FakeScheduler()
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate())
-        )
-        val port = FakeChatPort().apply {
-            provideMessageTabPositionEvidence = true
-            sessionRunEnabled = true
-            page = inbox
-        }
-        val logs = mutableListOf<String>()
-        var gestureCount = 0
-        var persistedReviewRequired = false
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    completeMessageTabProbe(command, listener)
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L,
-            isInputManualReviewRequired = { persistedReviewRequired }
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext() // Start the autonomous inbox positioning gesture.
-        val beforeUnknownInput = gestureCount
-        val unknownScroll = event(AccessibilityEventType.VIEW_SCROLLED).copy(
-            inputOriginDecision = InputOriginDecision(
-                InputOrigin.UNKNOWN,
-                InputOriginEvidence.NO_MATCHING_FREEDOM_ACTION,
-                reason = "unmatched list scroll"
+    fun singleUnknownScrollDoesNotChangeTaskOwnership() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN)
             )
         )
-        runtime.onPreemptiveTargetInteraction(unknownScroll)
-        runtime.schedule(unknownScroll)
-        assertFalse(persistedReviewRequired)
-        assertTrue(logs.any { it.contains("CONTINUE_AUTONOMOUS") && it.contains("count=1/3") })
-        assertFalse(logs.any { it.contains("PROTECTION_TRIGGERED") })
-        assertEquals(beforeUnknownInput, gestureCount)
     }
 
     @Test
-    fun messageTabPositionGuardConfirmsAfterTapAndPageDataUpdatesDoNotStartQuietPeriod() {
-        val scheduler = FakeScheduler()
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 156, 720, 1486),
-            screenBounds = ScreenRect(0, 0, 720, 1600),
-            sessionListNavigationTarget = SessionListNavigationTarget(
-                nodeTarget = NodeTarget(
-                    window = WindowRef(
-                        packageName = "com.immomo.momo",
-                        activityClass = "com.immomo.momo.maintab.MaintabActivity",
-                        generation = 5L,
-                        windowId = 41
-                    ),
-                    path = NodePath(listOf(0, 2, 1)),
-                    expectedViewId = "com.immomo.momo:id/maintab_layout_chat",
-                    expectedClassName = "android.widget.FrameLayout"
-                ),
-                bounds = ScreenRect(288, 1486, 432, 1600)
+    fun pageStructureObservationDoesNotDependOnMessageTabRecoveryGuard() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.WINDOW_CONTENT_CHANGED, InputOrigin.UNKNOWN)
             )
         )
-        val port = FakeChatPort().apply {
-            sessionRunEnabled = true
-            page = inbox
-        }
-        val logs = mutableListOf<String>()
-        var messageTabTaps = 0
-        var messageTabFeedbackIntent = GestureFeedbackIntent.STANDARD
-        val executor = object : TestGestureApi {
-            override fun execute(
-                command: GestureIntentRequest,
-                listener: GestureExecutionListener
-            ): GestureSubmission {
-                if (command.kind == GestureKind.TAP && command.description.contains("点击底部消息标签")) {
-                    messageTabTaps++
-                    messageTabFeedbackIntent = command.feedbackIntent
-                }
-                listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
-                return GestureSubmission.ACCEPTED
-            }
-        }
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = executor,
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        val unknownScroll = eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.PHYSICAL_USER)
-        runtime.onPreemptiveTargetInteraction(unknownScroll)
-        runtime.schedule(unknownScroll)
-
-        // Burst notifications while the guard is coalescing: none is a new touch signal.
-        runtime.schedule(
-            event(AccessibilityEventType.WINDOW_CONTENT_CHANGED).copy(
-                source = AccessibilitySourceSnapshot(
-                    className = "android.widget.TextView",
-                    viewId = "com.immomo.momo:id/chatlist_item_tv_content",
-                    text = null,
-                    contentDescription = null,
-                    bounds = ScreenRect(157, 240, 570, 278),
-                    clickable = false,
-                    longClickable = false,
-                    scrollable = false,
-                    editable = false
-                )
-            )
-        )
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        runtime.schedule(
-            event(AccessibilityEventType.WINDOW_CONTENT_CHANGED).copy(
-                source = AccessibilitySourceSnapshot(
-                    className = "android.widget.FrameLayout",
-                    viewId = "com.immomo.momo:id/native_ad_container",
-                    text = null,
-                    contentDescription = null,
-                    bounds = ScreenRect(0, 300, 720, 500),
-                    clickable = false,
-                    longClickable = false,
-                    scrollable = false,
-                    editable = false
-                )
-            )
-        )
-
-        scheduler.runNextWithDelay(180L) // Fresh pre-tap message-tab and viewport snapshot.
-        scheduler.runNextWithDelay(0L) // Gesture completion callback.
-        // Selecting Message may refresh the adjacent RecyclerView and emit a scroll event.
-        // The ledger's explicit NAVIGATION_TAB intent must classify that as self feedback.
-        val protectionCountBeforeSelfFeedback = logs.count { it.contains("PROTECTION_TRIGGERED") }
-        runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.SELF_INJECTED))
-        scheduler.runNextWithDelay(900L) // Fresh post-tap snapshot; positions remain unchanged.
-
-        assertEquals(1, messageTabTaps)
-        assertEquals(GestureFeedbackIntent.NAVIGATION_TAB, messageTabFeedbackIntent)
-        assertTrue(logs.any { it.contains("消息标签保护[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("MESSAGE_DATA_UPDATE") })
-        assertTrue(logs.any { it.contains("PAGE_NAVIGATION_UPDATE") })
-        assertTrue(logs.any { it.contains("AD_CONTENT_UPDATE") })
-        assertTrue(logs.any {
-            it.contains("HANDOFF_EVENT") && it.contains("事件=VIEW_SCROLLED") && it.contains("人工输入=false")
-        })
-        assertEquals(
-            protectionCountBeforeSelfFeedback,
-            logs.count { it.contains("PROTECTION_TRIGGERED") }
-        )
-        assertFalse(logs.any { it.contains("第1轮静默") })
-        assertFalse(scheduler.hasPendingDelay(5_000L))
-        assertFalse(scheduler.hasPendingDelay(15_000L))
-        assertFalse(scheduler.hasPendingDelay(60_000L))
     }
 
     @Test
-    fun messageTabProbeDoesNotResumeWhenTapChangesPageContext() {
-        val scheduler = FakeScheduler()
-        val tabTarget = SessionListNavigationTarget(
-            nodeTarget = NodeTarget(
-                window = WindowRef("com.immomo.momo", "com.immomo.momo.maintab.MaintabActivity", 5L, 41),
-                path = NodePath(listOf(0, 2, 1)),
-                expectedViewId = "com.immomo.momo:id/maintab_layout_chat",
-                expectedClassName = "android.widget.FrameLayout"
-            ),
-            bounds = ScreenRect(288, 1486, 432, 1600)
+    fun changedPageContextIsHandledByFreshPageInspection() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.PHYSICAL_USER),
+            eventWithOrigin(AccessibilityEventType.WINDOW_STATE_CHANGED, InputOrigin.UNKNOWN)
+            )
         )
-        val otherTab = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.NON_CHAT,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 156, 720, 1486),
-            screenBounds = ScreenRect(0, 0, 720, 1600),
-            sessionListNavigationTarget = tabTarget
-        )
-        val inbox = otherTab.copy(pageKind = ChatPageKind.CHAT_LIST)
-        val port = FakeChatPort().apply {
-            sessionRunEnabled = true
-            page = otherTab
-        }
-        val logs = mutableListOf<String>()
-        var messageTabTaps = 0
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    if (command.description.contains("点击底部消息标签")) {
-                        messageTabTaps++
-                        port.page = inbox // The click changes page context: it was not already the active tab.
-                        listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
-                    }
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext()
-        val manualScroll = eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.PHYSICAL_USER)
-        runtime.onPreemptiveTargetInteraction(manualScroll)
-        runtime.schedule(manualScroll)
-        scheduler.runNextWithDelay(180L)
-        scheduler.runNextWithDelay(0L)
-        scheduler.runNextWithDelay(900L)
-
-        assertEquals(1, messageTabTaps)
-        assertFalse(logs.any { it.contains("消息标签保护[CONFIRMED]") })
-        assertFalse(logs.any { it.contains("自动接管已恢复") })
-        assertTrue(logs.any { it.contains("MESSAGE_PAGE_AWAITING_POSITION") })
-        assertFalse(scheduler.hasPendingDelay(5_000L))
-        assertTrue(scheduler.hasPendingDelay(30_000L))
     }
 
     @Test
-    fun recoveryDoesNotResumeWhenMessageTabPositionEvidenceIsMissing() {
-        val scheduler = FakeScheduler()
-        var fakeUptimeMs = 10_000L
-        val port = FakeChatPort().apply {
-            sessionRunEnabled = true
-            omitMessageTabPositionEvidence = true
-            page = ChatPageSnapshot(
-                packageName = "com.immomo.momo",
-                activityClass = "com.immomo.momo.maintab.MaintabActivity",
-                pageKind = ChatPageKind.CHAT_LIST,
-                scannedNodeCount = 80,
-                editableInputCount = 0,
-                messageListCount = 0,
-                sendActionCount = 0,
-                messageRelatedViewIdCount = 0,
-                hasChatTab = true,
-                messageListTarget = null,
-                inputFieldTarget = null,
-                chatListViewport = ScreenRect(0, 156, 720, 1486)
+    fun missingPageEvidenceDoesNotCreateAnInteractionArbitrationState() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_SELECTED, InputOrigin.UNKNOWN)
             )
-        }
-        val logs = mutableListOf<String>()
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = NoOpGestureApi,
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L,
-            uptimeMillis = { fakeUptimeMs }
         )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext()
-        val manualScroll = eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.PHYSICAL_USER)
-        runtime.onPreemptiveTargetInteraction(manualScroll)
-        runtime.schedule(manualScroll)
-        runUntilLog(scheduler, logs, "MESSAGE_PAGE_AWAITING_POSITION")
-
-        assertFalse(logs.any { it.contains("自动接管已恢复") })
-        assertFalse(scheduler.hasPendingDelay(5_000L))
-        assertTrue(scheduler.hasPendingDelay(30_000L))
-        assertTrue(logs.any { it.contains("30S_MESSAGE_TAB_WATCH_SCHEDULED") })
-        fakeUptimeMs += 35_000L
-        scheduler.runNextWithDelay(30_000L)
-        assertTrue(logs.any { it.contains("30S_MESSAGE_TAB_WATCH_FIRED") && it.contains("lateByMs=5000") })
     }
 
     @Test
-    fun passiveOnlyMessageTabGuardNeverExecutesNavigationGesture() {
-        val scheduler = FakeScheduler()
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 156, 720, 1486),
-            screenBounds = ScreenRect(0, 0, 720, 1600),
-            sessionListNavigationTarget = SessionListNavigationTarget(
-                nodeTarget = NodeTarget(
-                    window = WindowRef(
-                        packageName = "com.immomo.momo",
-                        activityClass = "com.immomo.momo.maintab.MaintabActivity",
-                        generation = 5L,
-                        windowId = 41
-                    ),
-                    path = NodePath(listOf(0, 2, 1)),
-                    expectedViewId = "com.immomo.momo:id/maintab_layout_chat",
-                    expectedClassName = "android.widget.FrameLayout"
-                ),
-                bounds = ScreenRect(288, 1486, 432, 1600)
+    fun passivePageObservationNeverExecutesNavigationGesture() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.PHYSICAL_USER)
             )
         )
-        val port = FakeChatPort().apply { sessionRunEnabled = true; page = inbox }
-        var gestureCount = 0
-        val logs = mutableListOf<String>()
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = true)
-        scheduler.runNext()
-        val manualScroll = eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.PHYSICAL_USER)
-        runtime.onPreemptiveTargetInteraction(manualScroll)
-        runtime.schedule(manualScroll)
-        scheduler.runNextWithDelay(180L)
-
-        assertEquals(0, gestureCount)
-        assertTrue(logs.any { it.contains("消息标签保护[PASSIVE_ONLY]") })
     }
 
     @Test
-    fun singleExternalInjectedClickDoesNotImmediatelyHandOff() {
-        val scheduler = FakeScheduler()
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate())
-        )
-        val port = FakeChatPort().apply {
-            provideMessageTabPositionEvidence = true
-            sessionRunEnabled = true
-            page = inbox
-        }
-        val logs = mutableListOf<String>()
-        var gestureCount = 0
-        var persistedReviewRequired = false
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    completeMessageTabProbe(command, listener)
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L,
-            isInputManualReviewRequired = { persistedReviewRequired }
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext()
-        val beforeExternalInput = gestureCount
-        val externalClick = event(AccessibilityEventType.VIEW_CLICKED).copy(
-            inputOriginDecision = InputOriginDecision(
-                InputOrigin.EXTERNAL_INJECTED,
-                InputOriginEvidence.NO_MATCHING_FREEDOM_ACTION,
-                reason = "external input provider"
+    fun externalInjectedClickDoesNotChangeTaskOwnership() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.EXTERNAL_INJECTED)
             )
         )
-        runtime.onPreemptiveTargetInteraction(externalClick)
-        runtime.schedule(externalClick)
-        assertFalse(persistedReviewRequired)
-        assertEquals(beforeExternalInput, gestureCount)
-        assertTrue(logs.any { it.contains("CONTINUE_AUTONOMOUS") && it.contains("origin=EXTERNAL_INJECTED") })
-        assertFalse(logs.any { it.contains("PROTECTION_TRIGGERED") })
     }
 
     @Test
-    fun externalInjectedNonClickEventAlsoYieldsWithoutPersistentReviewLatch() {
-        val scheduler = FakeScheduler()
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 120, 720, 1480),
-            chatListCandidates = listOf(sessionCandidate())
-        )
-        val port = FakeChatPort().apply {
-            provideMessageTabPositionEvidence = true
-            sessionRunEnabled = true
-            page = inbox
-        }
-        val logs = mutableListOf<String>()
-        var gestureCount = 0
-        var persistedReviewRequired = false
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    completeMessageTabProbe(command, listener)
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L,
-            isInputManualReviewRequired = { persistedReviewRequired }
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        scheduler.runNext()
-        val beforeExternalEvent = gestureCount
-        val externalFocusEvent = event(AccessibilityEventType.VIEW_FOCUSED).copy(
-            inputOriginDecision = InputOriginDecision(
-                InputOrigin.EXTERNAL_INJECTED,
-                InputOriginEvidence.NO_MATCHING_FREEDOM_ACTION,
-                reason = "external injected focus event"
+    fun externalInjectedNonClickDoesNotChangeTaskOwnership() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.EXTERNAL_INJECTED)
             )
         )
-        runtime.schedule(externalFocusEvent)
-
-        assertFalse(persistedReviewRequired)
-        assertEquals(beforeExternalEvent, gestureCount)
-        assertFalse(logs.any { it.contains("EXTERNAL_INJECTED_HANDOFF") })
     }
 
     @Test
-    fun recoveryLocatesAndTapsMessageTabBeforeResumingSessionTraversal() {
-        val scheduler = FakeScheduler()
-        val messageTabTarget = SessionListNavigationTarget(
-            nodeTarget = NodeTarget(
-                window = WindowRef("com.immomo.momo", "com.immomo.momo.maintab.MaintabActivity", 1L, 41),
-                path = NodePath(listOf(0, 3)),
-                expectedViewId = "com.immomo.momo:id/maintab_layout_chat",
-                expectedClassName = "android.widget.FrameLayout"
-            ),
-            bounds = ScreenRect(0, 1400, 180, 1600)
-        )
-        val inbox = ChatPageSnapshot(
-            packageName = "com.immomo.momo",
-            activityClass = "com.immomo.momo.maintab.MaintabActivity",
-            pageKind = ChatPageKind.CHAT_LIST,
-            scannedNodeCount = 80,
-            editableInputCount = 0,
-            messageListCount = 0,
-            sendActionCount = 0,
-            messageRelatedViewIdCount = 0,
-            hasChatTab = true,
-            messageListTarget = null,
-            inputFieldTarget = null,
-            chatListViewport = ScreenRect(0, 120, 720, 1480),
-            screenBounds = ScreenRect(0, 0, 720, 1600),
-            chatListCandidates = listOf(sessionCandidate()),
-            sessionListNavigationTarget = messageTabTarget
-        )
-        val mainPageOutsideInbox = inbox.copy(
-            pageKind = ChatPageKind.NON_CHAT,
-            chatListViewport = null,
-            chatListCandidates = emptyList()
-        )
-        val port = FakeChatPort().apply {
-            sessionRunEnabled = true
-            page = mainPageOutsideInbox
-        }
-        val logs = mutableListOf<String>()
-        var gestureCount = 0
-        var tabTapCount = 0
-        var tabTapCommand: GestureIntentRequest? = null
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                    gestureCount++
-                    if (command.description.contains("点击底部消息标签")) {
-                        tabTapCount++
-                        tabTapCommand = command
-                        port.page = inbox
-                        listener.onResult(
-                            GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED)
-                        )
-                    }
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = false)
-        // Initial page is NON_CHAT, so no traversal gesture is allowed.
-        scheduler.runNext()
-        val beforeHandoff = gestureCount
-        val firstUnknownClick = eventWithOrigin(
-            AccessibilityEventType.VIEW_CLICKED,
-            InputOrigin.UNKNOWN
-        ).copy(
-            windowId = 31,
-            pageGeneration = 1L,
-            source = AccessibilitySourceSnapshot(
-                className = "android.widget.Button",
-                viewId = "com.immomo.momo:id/popup-one",
-                text = null,
-                contentDescription = null,
-                bounds = ScreenRect(100, 100, 300, 180),
-                clickable = true,
-                longClickable = false,
-                scrollable = false,
-                editable = false
+    fun returningToInboxIsResolvedByPageStructureOnly() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.WINDOW_STATE_CHANGED, InputOrigin.PHYSICAL_USER),
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN)
             )
         )
-        listOf(firstUnknownClick, firstUnknownClick.copy(
-            windowId = 32,
-            pageGeneration = 2L,
-            source = firstUnknownClick.source?.copy(viewId = "com.immomo.momo:id/popup-two")
-        ), firstUnknownClick.copy(
-            windowId = 33,
-            pageGeneration = 3L,
-            source = firstUnknownClick.source?.copy(viewId = "com.immomo.momo:id/popup-three")
-        )).forEach { click ->
-            runtime.onPreemptiveTargetInteraction(click)
-            runtime.schedule(click)
-        }
-        runMessageTabProbeFlow(scheduler)
-
-        assertEquals(1, tabTapCount)
-        val submittedTap = tabTapCommand?.intent as? GestureIntent.Tap
-        assertTrue("Business code must submit only the semantic Message-tab target", submittedTap != null)
-        assertEquals(messageTabTarget.bounds, submittedTap?.preferredBounds)
-        assertEquals(messageTabTarget.bounds, submittedTap?.targetBounds)
-        assertEquals(inbox.screenBounds, submittedTap?.displayBounds)
-        assertEquals(GestureFeedbackIntent.NAVIGATION_TAB, submittedTap?.feedbackIntent)
-        assertTrue(logs.any { it.contains("消息标签保护[CONFIRMED]") })
-        assertFalse(logs.any { it.contains("第1轮静默") })
-
-        assertTrue(logs.any { it.contains("自动接管已恢复") || it.contains("启动仲裁[INITIALIZATION_RESUMED]") })
-        assertTrue(gestureCount > beforeHandoff)
     }
 
     @Test
-    fun delayedScrollEventAfterOwnGestureCallbackDoesNotYieldToUser() {
-        val scheduler = FakeScheduler()
-        val candidate = sessionCandidate(unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ)
-        val port = FakeChatPort().apply {
-            sessionRunEnabled = true
-            page = ChatPageSnapshot(
-                packageName = "com.immomo.momo",
-                activityClass = "com.immomo.momo.maintab.MaintabActivity",
-                pageKind = ChatPageKind.CHAT_LIST,
-                scannedNodeCount = 80,
-                editableInputCount = 0,
-                messageListCount = 0,
-                sendActionCount = 0,
-                messageRelatedViewIdCount = 0,
-                hasChatTab = true,
-                messageListTarget = null,
-                inputFieldTarget = null,
-                chatListViewport = ScreenRect(0, 120, 720, 1480),
-                chatListCandidates = listOf(candidate)
-            )
-        }
-        val logs = ArrayList<String>()
-        var pendingGestureListener: GestureExecutionListener? = null
-        var pendingGestureIntentRequestId = ""
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = object : TestGestureApi {
-                override fun execute(
-                    command: GestureIntentRequest,
-                    listener: GestureExecutionListener
-                ): GestureSubmission {
-                    pendingGestureListener = listener
-                    pendingGestureIntentRequestId = command.id
-                    return GestureSubmission.ACCEPTED
-                }
-            },
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
-        )
-
-        runtime.scheduleInitialObservation()
-        runUntil(scheduler, 12) { pendingGestureListener != null } // Initial page inspection submits our own list swipe.
-        assertTrue(pendingGestureListener != null)
-
-        pendingGestureListener!!.onResult(
-            GestureExecutionResult(
-                pendingGestureIntentRequestId,
-                GestureExecutionStatus.COMPLETED
+    fun delayedScrollEventDoesNotTriggerInteractionArbitration() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN),
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.SELF_INJECTED)
             )
         )
-        scheduler.runNext() // Gesture callback switches state to WAITING_FOR_SESSION_LIST.
-
-        // Android can deliver TYPE_VIEW_SCROLLED after the gesture callback. The pending
-        // viewport baseline is still the ownership marker until the refreshed snapshot arrives.
-        runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.SELF_INJECTED))
-
-        assertTrue(logs.none { it.contains("检测到目标页面滚动事件") })
-        assertTrue(logs.none { it.contains("已让出界面控制权") })
-
-        // Explicit user touch remains authoritative and revokes the pending self-scroll marker.
-        runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_START, InputOrigin.PHYSICAL_USER))
-        assertTrue(logs.any { it.contains("PROTECTION_TRIGGERED") && it.contains("PHYSICAL_USER") })
     }
 
     @Test
@@ -2401,127 +1071,25 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun manualClickPreemptsAnActiveAutonomousScrollBeforeTheDebouncedPageEvent() {
-        val scheduler = FakeScheduler()
-        val port = FakeChatPort().apply {
-            sessionRunEnabled = true
-            page = ChatPageSnapshot(
-                packageName = "com.immomo.momo",
-                activityClass = "com.immomo.momo.maintab.MaintabActivity",
-                pageKind = ChatPageKind.CHAT_LIST,
-                scannedNodeCount = 80,
-                editableInputCount = 0,
-                messageListCount = 0,
-                sendActionCount = 0,
-                messageRelatedViewIdCount = 0,
-                hasChatTab = true,
-                messageListTarget = null,
-                inputFieldTarget = null,
-                chatListViewport = ScreenRect(0, 120, 720, 1480),
-                chatListCandidates = listOf(sessionCandidate(unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ))
-            )
-        }
-        val logs = ArrayList<String>()
-        var pendingCommandId: String? = null
-        var pendingListener: GestureExecutionListener? = null
-        var cancelledCommandId: String? = null
-        val executor = object : TestGestureApiWithCancellation {
-            override fun execute(
-                command: GestureIntentRequest,
-                listener: GestureExecutionListener
-            ): GestureSubmission {
-                pendingCommandId = command.id
-                pendingListener = listener
-                return GestureSubmission.ACCEPTED
-            }
-
-            override fun cancelActive(commandId: String, reason: String): Boolean {
-                if (pendingCommandId == null || commandId != pendingCommandId) return false
-                cancelledCommandId = pendingCommandId
-                pendingListener?.onResult(
-                    GestureExecutionResult(
-                        commandId = pendingCommandId!!,
-                        status = GestureExecutionStatus.CANCELLED,
-                        reason = reason
-                    )
-                )
-                return true
-            }
-        }
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = executor,
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
-        )
-
-        runtime.scheduleInitialObservation()
-        scheduler.runNext() // Initial CHAT_LIST inspection submits an autonomous list swipe.
-        val autonomousCommandId = pendingCommandId
-        assertTrue(autonomousCommandId != null)
-
-        val manualClick = eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.PHYSICAL_USER).copy(
-            source = AccessibilitySourceSnapshot(
-                className = "android.widget.RelativeLayout",
-                viewId = "com.immomo.momo:id/item_layout",
-                text = null,
-                contentDescription = null,
-                bounds = ScreenRect(0, 600, 720, 750),
-                clickable = true,
-                longClickable = true,
-                scrollable = false,
-                editable = false
+    fun manualClickDoesNotCreateASecondTaskPreemptionPath() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.PHYSICAL_USER),
+            eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.SELF_INJECTED)
             )
         )
-        runtime.onPreemptiveTargetInteraction(manualClick)
-
-        assertEquals(autonomousCommandId, cancelledCommandId)
-        assertTrue(logs.any { it.contains("未知交互仲裁[PROTECTION_TRIGGERED]") })
-        assertTrue(logs.any { it.contains("ACTIVE_GESTURE_INVALIDATED") && it.contains("逻辑取消=true") })
-
-        // The cancellation callback belongs to the pre-handoff generation and must not schedule
-        // a retry/continuation after the human click has already taken control.
-        scheduler.runNext()
-        assertTrue(logs.any { it.contains("已忽略过期自主滑动回调") })
-        assertTrue(logs.none { it.contains("已完成一次底部定位方向的列表滑动") })
     }
 
     @Test
-    fun clickLongClickContextClickAndSelectionPreemptEvenWithoutSampleCapture() {
-        val interactionTypes = listOf(
-            AccessibilityEventType.VIEW_CLICKED,
-            AccessibilityEventType.VIEW_LONG_CLICKED,
-            AccessibilityEventType.VIEW_CONTEXT_CLICKED,
-            AccessibilityEventType.VIEW_SELECTED
-        )
-
-        interactionTypes.forEach { type ->
-            val logs = mutableListOf<String>()
-            val runtime = AiReplyObservationRuntime(
-                scheduler = FakeScheduler(),
-                chatPagePort = FakeChatPort(),
-                chatMessagePort = FakeChatPort(),
-                chatSessionManagementPort = FakeChatPort(),
-                gesturePolicy = NoOpGestureApi,
-                targetPackage = { "com.immomo.momo" },
-                isAiReplyActive = { true },
-                onLog = logs::add,
-                fullInspectionDebounceMs = 300L,
-                regionRefreshDebounceMs = 500L
+    fun clickLikeEventsNeverCreateManualTaskPreemption() {
+        assertLegacySignalsDoNotControlPageSelectedTask(
+            listOf(
+            eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.PHYSICAL_USER),
+            eventWithOrigin(AccessibilityEventType.VIEW_LONG_CLICKED, InputOrigin.PHYSICAL_USER),
+            eventWithOrigin(AccessibilityEventType.VIEW_CONTEXT_CLICKED, InputOrigin.PHYSICAL_USER),
+            eventWithOrigin(AccessibilityEventType.VIEW_SELECTED, InputOrigin.PHYSICAL_USER)
             )
-
-            runtime.onPreemptiveTargetInteraction(eventWithOrigin(type, InputOrigin.PHYSICAL_USER))
-
-            assertTrue("$type must yield control even when sample capture is inactive", logs.any {
-                it.contains("未知交互仲裁[PROTECTION_TRIGGERED]")
-            })
-        }
+        )
     }
 
     @Test
@@ -4663,6 +3231,57 @@ class AiReplyObservationRuntimeTest {
         assertEquals(null, observed?.ocrDebugLatinTextByRowIndex)
         assertTrue(observed?.messages?.isEmpty() == true)
         assertTrue(observed?.messages?.all { it.isAiInputEligible } == true)
+    }
+
+    private fun assertLegacySignalsDoNotControlPageSelectedTask(events: List<AccessibilityEventEnvelope>) {
+        val scheduler = FakeScheduler()
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(sessionCandidate())
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            page = inbox
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+        }
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val logs = mutableListOf<String>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            chooseRandomInt = { minimum, _ -> minimum },
+            taskCoordinator = ownership,
+            currentRunGeneration = { 5L }
+        )
+
+        runtime.scheduleInitialObservation(passiveOnly = false)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        events.forEach(runtime::schedule)
+        scheduler.runNextWithDelay(300L)
+
+        assertTrue("A fresh page inspection must still run", port.fullInspections > 0)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        assertFalse(logs.any { it.contains("未知交互仲裁[PROTECTION_TRIGGERED]") })
+        assertFalse(logs.any { it.contains("人工接管") || it.contains("人工复核锁") })
     }
 
     private fun runtime(

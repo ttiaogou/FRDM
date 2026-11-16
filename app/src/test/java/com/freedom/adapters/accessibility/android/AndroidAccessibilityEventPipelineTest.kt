@@ -6,10 +6,6 @@ import com.freedom.core.accessibility.events.AccessibilityContentChange
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.accessibility.events.AccessibilityEventType
 import com.freedom.core.accessibility.events.AccessibilitySourceSnapshot
-import com.freedom.core.accessibility.events.InputOriginClassifier
-import com.freedom.core.accessibility.api.GesturePathCommand
-import com.freedom.core.accessibility.api.GesturePoint
-import com.freedom.core.accessibility.api.GestureSpec
 import com.freedom.core.accessibility.events.DefaultAccessibilityEventRoutePolicy
 import com.freedom.core.runtime.RunMode
 import org.junit.Assert.assertEquals
@@ -52,78 +48,29 @@ class AndroidAccessibilityEventPipelineTest {
         assertFalse(logged.joinToString().contains("private accessibility description"))
         assertFalse(trace.contains("manual-fallback"))
         assertFalse(trace.contains("schedule-scan"))
-        assertTrue(logged.joinToString().contains("目标事件仍投递到 AI 被动观察链路"))
+        assertTrue(logged.joinToString().contains("UNKNOWN 不参与任务调度"))
     }
 
     @Test
-    fun aiReplyTargetControlClickIsFilteredBeforeUnknownArbitration() {
+    fun aiReplyClickAndScrollEventsRemainOrdinaryPageObservationEvents() {
         val trace = mutableListOf<String>()
-        val logged = mutableListOf<String>()
-        var preemptions = 0
-        val pipeline = pipeline(
-            trace,
-            appendLog = { logged += it; trace += "append-log" },
-            dispatchPreemptiveTargetInteraction = { preemptions++; trace += "preemptive-interaction" },
-            inputOriginClassifier = InputOriginClassifier()
-        )
+        val pipeline = pipeline(trace)
         val click = event(AccessibilityEventType.VIEW_CLICKED, TARGET_PACKAGE, "android.widget.RelativeLayout")
+        val scroll = event(AccessibilityEventType.VIEW_SCROLLED, TARGET_PACKAGE, "androidx.recyclerview.widget.RecyclerView")
 
         pipeline.processNormalized(click, AccessibilityEvent.TYPE_VIEW_CLICKED, RunMode.AI_REPLY, 2_100L)
         pipeline.processNormalized(click, AccessibilityEvent.TYPE_VIEW_CLICKED, RunMode.AI_REPLY, 2_150L)
+        pipeline.processNormalized(scroll, AccessibilityEvent.TYPE_VIEW_SCROLLED, RunMode.AI_REPLY, 2_300L)
 
-        assertEquals(0, preemptions)
-        assertEquals(1, trace.count { it == "dispatch-target" })
-        assertFalse(trace.contains("preemptive-interaction"))
-        assertTrue(logged.any { it.contains("APPLICATION_CONTROL_FILTERED") })
-    }
-
-
-    @Test
-    fun aiReplyTargetRecyclerViewScrollFeedbackIsFilteredFromUnknownArbitration() {
-        val trace = mutableListOf<String>()
-        val preempted = mutableListOf<AccessibilityEventEnvelope>()
-        val pipeline = pipeline(
-            trace,
-            dispatchPreemptiveTargetInteraction = { preempted += it; trace += "preemptive-scroll" },
-            currentWindowGeneration = { 7L },
-            inputOriginClassifier = InputOriginClassifier()
-        )
-        val scroll = event(
-            AccessibilityEventType.VIEW_SCROLLED,
-            TARGET_PACKAGE,
-            "androidx.recyclerview.widget.RecyclerView"
-        )
-
-        pipeline.processNormalized(scroll, AccessibilityEvent.TYPE_VIEW_SCROLLED, RunMode.AI_REPLY, 2_120L)
-        pipeline.processNormalized(scroll, AccessibilityEvent.TYPE_VIEW_SCROLLED, RunMode.AI_REPLY, 2_150L)
-
-        assertEquals(0, preempted.size)
-        assertEquals(1, trace.count { it == "dispatch-target" })
+        assertEquals(2, trace.count { it == "dispatch-target" })
+        assertFalse(trace.contains("manual-fallback"))
+        assertTrue(trace.contains("append-log"))
     }
 
     @Test
-    fun aiReplyConsumesClickFeedbackMatchedToRegisteredFreedomDispatchWithoutPreemption() {
+    fun aiReplyDoesNotClassifyMatchedGestureFeedbackForTaskArbitration() {
         val trace = mutableListOf<String>()
-        val classifier = InputOriginClassifier()
-        classifier.registerDispatchGesture(
-            actionId = "freedom-tap-1",
-            packageName = TARGET_PACKAGE,
-            activityClass = ACTIVITY,
-            pageGeneration = 0L,
-            windowId = -1,
-            gesture = GestureSpec(
-                commands = listOf(GesturePathCommand.MoveTo(GesturePoint(5f, 5f))),
-                durationMs = 120L
-            ),
-            submittedAtUptimeMs = 1L
-        )
-        classifier.settleDispatchGesture("freedom-tap-1", completed = true, settledAtUptimeMs = 120L)
-        val pipeline = pipeline(
-            trace,
-            currentActivityClass = { ACTIVITY },
-            inputOriginClassifier = classifier,
-            dispatchPreemptiveTargetInteraction = { trace += "preemptive" }
-        )
+        val pipeline = pipeline(trace)
 
         pipeline.processNormalized(
             event(AccessibilityEventType.VIEW_CLICKED, TARGET_PACKAGE),
@@ -132,97 +79,77 @@ class AndroidAccessibilityEventPipelineTest {
             2_100L
         )
 
-        assertFalse(trace.contains("preemptive"))
-        assertTrue(trace.contains("dispatch-target"))
+        assertEquals(1, trace.count { it == "dispatch-target" })
+        assertFalse(trace.contains("manual-fallback"))
     }
 
     @Test
-    fun aiReplyTreatsUnattributedGlobalTouchAsUnknownAndForwardsItForSafePause() {
+    fun aiReplyDropsGlobalTouchBoundariesWithoutPausingOrForwardingThem() {
         val trace = mutableListOf<String>()
-        var forwarded: AccessibilityEventEnvelope? = null
-        val classifier = InputOriginClassifier()
-        classifier.registerDispatchGesture(
-            actionId = "freedom-swipe-1",
-            packageName = TARGET_PACKAGE,
-            activityClass = ACTIVITY,
-            pageGeneration = 0L,
-            windowId = -1,
-            gesture = GestureSpec(
-                commands = listOf(
-                    GesturePathCommand.MoveTo(GesturePoint(5f, 90f)),
-                    GesturePathCommand.LineTo(GesturePoint(5f, 10f))
-                ),
-                durationMs = 180L
-            ),
-            submittedAtUptimeMs = 1L
-        )
-        val pipeline = pipeline(
-            trace,
-            inputOriginClassifier = classifier,
-            dispatchGlobalTouchEvent = { forwarded = it; trace += "dispatch-global-touch" }
-        )
-
-        pipeline.processNormalized(
-            event(AccessibilityEventType.TOUCH_INTERACTION_START, "").copy(windowId = 44),
-            AccessibilityEvent.TYPE_TOUCH_INTERACTION_START,
-            RunMode.AI_REPLY,
-            2_200L
-        )
-
-        assertTrue(trace.contains("dispatch-global-touch"))
-        assertFalse(trace.contains("dispatch-target"))
-        assertEquals(44, forwarded?.windowId)
-        assertEquals(com.freedom.core.accessibility.events.InputOrigin.UNKNOWN, forwarded?.inputOriginDecision?.origin)
-    }
-
-    @Test
-    fun globalTouchBoundaryRemainsUnknownWhileTargetApplicationClickIsFiltered() {
-        val trace = mutableListOf<String>()
-        val classifier = InputOriginClassifier()
-        classifier.registerDispatchGesture(
-            actionId = "freedom-tap-overlap",
-            packageName = TARGET_PACKAGE,
-            activityClass = "",
-            pageGeneration = 0L,
-            windowId = -1,
-            gesture = GestureSpec(
-                commands = listOf(GesturePathCommand.MoveTo(GesturePoint(5f, 5f))),
-                durationMs = 120L
-            ),
-            submittedAtUptimeMs = 1L
-        )
-        val pipeline = pipeline(
-            trace,
-            currentActivityClass = { ACTIVITY },
-            inputOriginClassifier = classifier,
-            dispatchPreemptiveTargetInteraction = { trace += "preemptive" }
-        )
+        val pipeline = pipeline(trace)
 
         pipeline.processNormalized(
             event(AccessibilityEventType.TOUCH_INTERACTION_START, ""),
             AccessibilityEvent.TYPE_TOUCH_INTERACTION_START,
             RunMode.AI_REPLY,
-            1L
+            2_100L
         )
         pipeline.processNormalized(
-            event(AccessibilityEventType.VIEW_CLICKED, TARGET_PACKAGE),
-            AccessibilityEvent.TYPE_VIEW_CLICKED,
+            event(AccessibilityEventType.TOUCH_INTERACTION_END, ""),
+            AccessibilityEvent.TYPE_TOUCH_INTERACTION_END,
             RunMode.AI_REPLY,
-            1L
+            2_150L
         )
 
-        assertTrue(trace.contains("dispatch-global-touch"))
-        assertFalse(trace.contains("preemptive"))
+        assertFalse(trace.contains("dispatch-global-touch"))
+        assertFalse(trace.contains("dispatch-target"))
+        assertTrue(trace.contains("append-log"))
     }
 
     @Test
-    fun aiReplyFiltersTargetControlLongContextAndSelectionFeedback() {
+    fun aiReplyWindowTransitionEventsContinueToReachThePageObserver() {
         val trace = mutableListOf<String>()
-        val pipeline = pipeline(
-            trace,
-            dispatchPreemptiveTargetInteraction = { trace += "preemptive:${it.type}" },
-            inputOriginClassifier = InputOriginClassifier()
+        val pipeline = pipeline(trace)
+        val transition = event(
+            AccessibilityEventType.WINDOW_STATE_CHANGED,
+            TARGET_PACKAGE,
+            "com.immomo.momo.maintab.MaintabActivity"
         )
+
+        pipeline.processNormalized(
+            transition,
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            RunMode.AI_REPLY,
+            2_250L
+        )
+
+        assertTrue(trace.contains("activity-transition"))
+        assertTrue(trace.contains("dispatch-target"))
+        assertTrue(trace.indexOf("activity-transition") < trace.indexOf("append-log"))
+        assertTrue(trace.indexOf("append-log") < trace.indexOf("dispatch-target"))
+        assertFalse(trace.contains("manual-fallback"))
+    }
+
+    @Test
+    fun aiReplyWindowContentChangesContinueToReachThePageObserver() {
+        val trace = mutableListOf<String>()
+        val pipeline = pipeline(trace)
+
+        pipeline.processNormalized(
+            event(AccessibilityEventType.WINDOW_CONTENT_CHANGED, TARGET_PACKAGE),
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            RunMode.AI_REPLY,
+            2_260L
+        )
+
+        assertEquals(1, trace.count { it == "dispatch-target" })
+        assertFalse(trace.contains("manual-fallback"))
+    }
+
+    @Test
+    fun aiReplyLongClickContextClickAndSelectionRemainOrdinaryPageEvents() {
+        val trace = mutableListOf<String>()
+        val pipeline = pipeline(trace)
         val interactionTypes = listOf(
             AccessibilityEventType.VIEW_LONG_CLICKED,
             AccessibilityEventType.VIEW_CONTEXT_CLICKED,
@@ -242,9 +169,8 @@ class AndroidAccessibilityEventPipelineTest {
             )
         }
 
-        assertTrue(trace.none { it.startsWith("preemptive:") })
-        assertTrue(trace.any { it == "append-log" })
         assertEquals(3, trace.count { it == "dispatch-target" })
+        assertFalse(trace.contains("manual-fallback"))
     }
 
     @Test
@@ -322,26 +248,19 @@ class AndroidAccessibilityEventPipelineTest {
     }
 
     @Test
-    fun aiReplyDispatchesGlobalTouchEventsToUserControlArbiter() {
+    fun aiReplyGlobalTouchIsNotDispatchedToAnyRuntimeInteractionHandler() {
         val trace = mutableListOf<String>()
         val pipeline = pipeline(trace)
 
         pipeline.processNormalized(
-            event(AccessibilityEventType.TOUCH_INTERACTION_START, "", ""),
+            event(AccessibilityEventType.TOUCH_INTERACTION_START, ""),
             AccessibilityEvent.TYPE_TOUCH_INTERACTION_START,
             RunMode.AI_REPLY,
-            3_100L
-        )
-        pipeline.processNormalized(
-            event(AccessibilityEventType.TOUCH_INTERACTION_END, "", ""),
-            AccessibilityEvent.TYPE_TOUCH_INTERACTION_END,
-            RunMode.AI_REPLY,
-            3_200L
+            2_100L
         )
 
-        assertEquals(2, trace.count { it == "dispatch-global-touch" })
+        assertFalse(trace.contains("dispatch-global-touch"))
         assertFalse(trace.contains("dispatch-target"))
-        assertTrue(trace.count { it == "append-log" } >= 4)
     }
 
     @Test
@@ -429,8 +348,6 @@ class AndroidAccessibilityEventPipelineTest {
         updateAppPage: (String, String) -> Unit = { _, _ -> trace += "update-app-page" },
         currentActivityClass: () -> String = { "" },
         updateCurrentActivityClass: (String) -> Unit = { trace += "update-activity" },
-        dispatchPreemptiveTargetInteraction: (AccessibilityEventEnvelope) -> Unit = {},
-        inputOriginClassifier: InputOriginClassifier? = null,
         dispatchGlobalTouchEvent: (AccessibilityEventEnvelope) -> Unit = { trace += "dispatch-global-touch" },
         currentWindowGeneration: () -> Long = { 0L }
     ) = AndroidAccessibilityEventPipeline(
@@ -448,8 +365,6 @@ class AndroidAccessibilityEventPipelineTest {
         currentActivityClass = currentActivityClass,
         updateCurrentActivityClass = updateCurrentActivityClass,
         onBrowseEventLogged = { trace += "schedule-scan" },
-        dispatchPreemptiveTargetInteraction = dispatchPreemptiveTargetInteraction,
-        inputOriginClassifier = inputOriginClassifier,
         currentWindowGeneration = currentWindowGeneration
     )
 
