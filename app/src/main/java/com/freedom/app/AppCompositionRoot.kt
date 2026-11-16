@@ -313,7 +313,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             onManualReviewRequired = persistManualReviewHold,
             onRequestScreenOff = requestScreenOff,
-            taskCoordinator = taskCoordinator,
+            taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() }
         )
     }
@@ -349,7 +349,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             onReadinessInvalidated = { reason ->
                 targetAppReadinessController.invalidate(reason, SystemClock.uptimeMillis())
             },
-            taskCoordinator = taskCoordinator,
+            taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             onLog = addLog
         )
