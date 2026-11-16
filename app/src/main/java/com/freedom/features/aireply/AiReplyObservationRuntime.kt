@@ -2096,8 +2096,7 @@ class AiReplyObservationRuntime(
     }
 
     private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) {
-        if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID) ||
-        ) return
+        if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID)) return
 
         val actionGeneration = sessionActionGeneration
         val attempt = privateMessagesTaskExecutor.openSession(
@@ -2491,8 +2490,7 @@ class AiReplyObservationRuntime(
         snapshot: ChatPageSnapshot,
         toTop: Boolean = false
     ) {
-        if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID) ||
-        ) return
+        if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID)) return
         // Reacquire the active page immediately before scrolling. A previous list snapshot can
         // become stale after RecyclerView relayout, window changes, or user interaction.
         val inspectionResult = runCatching { chatPagePort.inspectChatPage() }
