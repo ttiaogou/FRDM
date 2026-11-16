@@ -7,8 +7,11 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class AiModelConfigurationTest {
-    @Test fun defaultConfigurationUsesRequestContractDefaults() {
+    @Test fun defaultConfigurationUsesRequestContractDefaultsAndOpenAiPresets() {
         val configuration = AiModelConfiguration()
+        assertEquals(AiModelServiceProvider.OPENAI, configuration.provider)
+        assertEquals("https://api.openai.com/v1", configuration.apiBaseUrl)
+        assertEquals("gpt-6.1-sol", configuration.modelName)
         assertEquals(0.3, configuration.temperature, 0.0)
         assertEquals(512, configuration.maxOutputTokens)
         assertEquals(30_000L, configuration.requestTimeoutMillis)
@@ -53,4 +56,22 @@ class AiModelConfigurationTest {
         assertFalse(configuration.toString().contains("highly-sensitive-api-key"))
         assertTrue(configuration.toString().contains("[REDACTED]"))
     }
+    @Test fun providerCatalogContainsSelectableOpenAiAndDeepSeekModels() {
+        assertTrue(AiModelServiceProvider.OPENAI.modelOptions.any { it.id == "gpt-6.1-sol" })
+        assertTrue(AiModelServiceProvider.OPENAI.modelOptions.any { it.id == "gpt-6.1-terra" })
+        assertTrue(AiModelServiceProvider.DEEPSEEK.modelOptions.any { it.id == "deepseek-flash" })
+        assertTrue(AiModelServiceProvider.DEEPSEEK.modelOptions.any { it.id == "deepseek-v4-pro" })
+    }
+
+    @Test fun legacyEndpointDetectionPreservesCustomOpenAiCompatibleProviders() {
+        assertEquals(
+            AiModelServiceProvider.DEEPSEEK,
+            AiModelServiceProvider.fromLegacyBaseUrl("https://api.deepseek.com")
+        )
+        assertEquals(
+            AiModelServiceProvider.CUSTOM_OPENAI_COMPAT,
+            AiModelServiceProvider.fromLegacyBaseUrl("https://gateway.example.com/v1")
+        )
+    }
+
 }

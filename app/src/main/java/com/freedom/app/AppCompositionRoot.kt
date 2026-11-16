@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Build
 import com.freedom.accessibility.FreedomAccessibilityService
 import com.freedom.adapters.accessibility.android.AndroidAccessibilityEventPipeline
+import com.freedom.adapters.ai.DeepSeekAiModelTransport
 import com.freedom.adapters.ai.OpenAiCompatibleAiModelTransport
 import com.freedom.adapters.accessibility.android.AndroidAccessibilityGateway
 import com.freedom.adapters.accessibility.android.AndroidAccessibilityServiceRecoveryCoordinator
@@ -67,6 +68,7 @@ import com.freedom.data.database.LocalConversationRepository
 import com.freedom.data.social.momo.MomoSayHiTraversalCheckpointDataStore
 import com.freedom.data.samples.MomoChatSampleArchiveDataStore
 import com.freedom.features.aireply.AiReplyObservationRuntime
+import com.freedom.features.aireply.ai.AiModelServiceProvider
 import com.freedom.features.aireply.ai.ConversationContextManager
 import com.freedom.features.aireply.ai.AiModelConfigurationRepository
 import com.freedom.features.aireply.ai.AiReplyPersonalizationRepository
@@ -330,10 +332,20 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             onLog = addLog,
             createProvider = { configuration ->
+                val transport = when (configuration.provider) {
+                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration)
+                    AiModelServiceProvider.OPENAI,
+                    AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport(configuration)
+                }
+                val providerName = when (configuration.provider) {
+                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport.PROVIDER_NAME
+                    AiModelServiceProvider.OPENAI -> "openai"
+                    AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport.PROVIDER_NAME
+                }
                 TransportBackedAiModelProvider(
-                    providerName = OpenAiCompatibleAiModelTransport.PROVIDER_NAME,
+                    providerName = providerName,
                     modelName = configuration.modelName,
-                    transport = OpenAiCompatibleAiModelTransport(configuration),
+                    transport = transport,
                     cloudConsent = root.aiModelCloudConsent
                 )
             }

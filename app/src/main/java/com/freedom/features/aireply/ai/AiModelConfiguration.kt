@@ -2,17 +2,77 @@ package com.freedom.features.aireply.ai
 
 import java.net.URI
 
+data class AiModelOption(
+    val id: String,
+    val displayName: String
+)
+
+/** Providers currently supported by the app. CUSTOM_OPENAI_COMPAT preserves existing custom endpoints. */
+enum class AiModelServiceProvider(
+    val storageKey: String,
+    val displayName: String,
+    val defaultBaseUrl: String,
+    val defaultModelName: String,
+    val modelOptions: List<AiModelOption>
+) {
+    OPENAI(
+        storageKey = "openai",
+        displayName = "OpenAI",
+        defaultBaseUrl = "https://api.openai.com/v1",
+        defaultModelName = "gpt-6.1-sol",
+        modelOptions = listOf(
+            AiModelOption("gpt-6.1-sol", "GPT-6.1 Sol · 综合推荐"),
+            AiModelOption("gpt-6.1-terra", "GPT-6.1 Terra · 快速助手"),
+            AiModelOption("gpt-6-luna", "GPT-6 Luna · 轻量快速"),
+            AiModelOption("gpt-6-astra", "GPT-6 Astra · 高能力")
+        )
+    ),
+    DEEPSEEK(
+        storageKey = "deepseek",
+        displayName = "DeepSeek",
+        defaultBaseUrl = "https://api.deepseek.com",
+        defaultModelName = "deepseek-flash",
+        modelOptions = listOf(
+            AiModelOption("deepseek-flash", "DeepSeek Flash · 日常推荐"),
+            AiModelOption("deepseek-v4-pro", "DeepSeek V4 Pro · 高能力")
+        )
+    ),
+    CUSTOM_OPENAI_COMPAT(
+        storageKey = "custom_openai_compatible",
+        displayName = "自定义兼容接口（高级）",
+        defaultBaseUrl = "",
+        defaultModelName = "",
+        modelOptions = emptyList()
+    );
+
+    companion object {
+        fun fromStorageKey(value: String): AiModelServiceProvider =
+            entries.firstOrNull { it.storageKey == value || it.name == value }
+                ?: throw IllegalArgumentException("AI 模型服务商不受支持")
+
+        fun fromLegacyBaseUrl(baseUrl: String): AiModelServiceProvider {
+            val host = runCatching { URI(baseUrl).host?.lowercase() }.getOrNull()
+            return when (host) {
+                "api.openai.com" -> OPENAI
+                "api.deepseek.com" -> DEEPSEEK
+                else -> if (baseUrl.isBlank()) OPENAI else CUSTOM_OPENAI_COMPAT
+            }
+        }
+    }
+}
+
 /**
- * User-owned configuration for the OpenAI-compatible remote chat-completions adapter.
+ * User-owned configuration for a selected cloud model provider.
  * The API key is deliberately excluded from toString() to prevent accidental log disclosure.
  */
 data class AiModelConfiguration(
-    val apiBaseUrl: String = "",
-    val modelName: String = "",
+    val apiBaseUrl: String = AiModelServiceProvider.OPENAI.defaultBaseUrl,
+    val modelName: String = AiModelServiceProvider.OPENAI.defaultModelName,
     val apiKey: String = "",
     val temperature: Double = DEFAULT_TEMPERATURE,
     val maxOutputTokens: Int = DEFAULT_MAX_OUTPUT_TOKENS,
-    val requestTimeoutMillis: Long = DEFAULT_REQUEST_TIMEOUT_MILLIS
+    val requestTimeoutMillis: Long = DEFAULT_REQUEST_TIMEOUT_MILLIS,
+    val provider: AiModelServiceProvider = AiModelServiceProvider.OPENAI
 ) {
     init {
         require(temperature.isFinite() && temperature in 0.0..2.0) {
@@ -36,14 +96,14 @@ data class AiModelConfiguration(
         val endpoint = apiBaseUrl.trim()
         if (endpoint.isEmpty()) return null
         val uri = runCatching { URI(endpoint) }.getOrNull()
-            ?: return "API Base URL 格式无效"
+            ?: return "API 地址格式无效"
         if (!uri.isAbsolute || !uri.scheme.equals("https", ignoreCase = true) || uri.host.isNullOrBlank()) {
-            return "API Base URL 必须是有效的 HTTPS 地址"
+            return "API 地址必须是有效的 HTTPS 地址"
         }
         if (uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null) {
-            return "API Base URL 不能包含账号密码、查询参数或片段"
+            return "API 地址不能包含账号密码、查询参数或片段"
         }
-        if (uri.port !in -1..65_535 || uri.port == 0) return "API Base URL 端口无效"
+        if (uri.port !in -1..65_535 || uri.port == 0) return "API 地址端口无效"
         return null
     }
 
@@ -58,10 +118,10 @@ data class AiModelConfiguration(
     )
 
     override fun toString(): String =
-        "AiModelConfiguration(apiBaseUrl=${if (apiBaseUrl.isBlank()) "[EMPTY]" else "[CONFIGURED]"}, " +
+        "AiModelConfiguration(provider=${provider.storageKey}, " +
+            "apiBaseUrl=${if (apiBaseUrl.isBlank()) "[EMPTY]" else "[CONFIGURED]"}, " +
             "modelName=$modelName, apiKey=[REDACTED], temperature=$temperature, " +
-            "maxOutputTokens=$maxOutputTokens, " +
-            "requestTimeoutMillis=$requestTimeoutMillis)"
+            "maxOutputTokens=$maxOutputTokens, requestTimeoutMillis=$requestTimeoutMillis)"
 
     companion object {
         const val DEFAULT_TEMPERATURE = 0.3

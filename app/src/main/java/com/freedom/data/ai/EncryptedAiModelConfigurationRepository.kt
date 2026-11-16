@@ -3,6 +3,7 @@ package com.freedom.data.ai
 import android.content.Context
 import android.util.Base64
 import com.freedom.features.aireply.ai.AiModelConfiguration
+import com.freedom.features.aireply.ai.AiModelServiceProvider
 import com.freedom.features.aireply.ai.AiModelConfigurationRepository
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -121,7 +122,8 @@ internal interface AiModelConfigurationCipher {
 /** Versioned binary codec kept separate from Android APIs so its compatibility can be unit-tested. */
 internal object AiModelConfigurationCodec {
     private const val MAGIC = 0x46524149 // FRAI
-    private const val VERSION = 1
+    private const val VERSION = 2
+    private const val LEGACY_VERSION = 1
 
     fun encode(configuration: AiModelConfiguration): ByteArray {
         require(configuration.validationError() == null) { "AI 模型配置无效" }
@@ -129,6 +131,7 @@ internal object AiModelConfigurationCodec {
         DataOutputStream(output).use { data ->
             data.writeInt(MAGIC)
             data.writeInt(VERSION)
+            data.writeUTF(configuration.provider.storageKey)
             data.writeUTF(configuration.apiBaseUrl)
             data.writeUTF(configuration.modelName)
             data.writeUTF(configuration.apiKey)
@@ -142,18 +145,42 @@ internal object AiModelConfigurationCodec {
     fun decode(payload: ByteArray): AiModelConfiguration {
         DataInputStream(ByteArrayInputStream(payload)).use { data ->
             require(data.readInt() == MAGIC) { "AI 模型配置文件头无效" }
-            require(data.readInt() == VERSION) { "AI 模型配置版本不受支持" }
-            val configuration = AiModelConfiguration(
-                apiBaseUrl = data.readUTF(),
-                modelName = data.readUTF(),
-                apiKey = data.readUTF(),
-                temperature = data.readDouble(),
-                maxOutputTokens = data.readInt(),
-                requestTimeoutMillis = data.readLong()
-            ).normalized()
+            val version = data.readInt()
+            val configuration = when (version) {
+                LEGACY_VERSION -> decodeV1(data)
+                VERSION -> decodeV2(data)
+                else -> throw IllegalArgumentException("AI 模型配置版本不受支持")
+            }.normalized()
             require(data.available() == 0) { "AI 模型配置包含多余数据" }
             require(configuration.validationError() == null) { "AI 模型配置内容无效" }
             return configuration
         }
+    }
+
+    private fun decodeV1(data: DataInputStream): AiModelConfiguration {
+        val legacyBaseUrl = data.readUTF()
+        val provider = AiModelServiceProvider.fromLegacyBaseUrl(legacyBaseUrl)
+        return AiModelConfiguration(
+            provider = provider,
+            apiBaseUrl = legacyBaseUrl.ifBlank { provider.defaultBaseUrl },
+            modelName = data.readUTF().ifBlank { provider.defaultModelName },
+            apiKey = data.readUTF(),
+            temperature = data.readDouble(),
+            maxOutputTokens = data.readInt(),
+            requestTimeoutMillis = data.readLong()
+        )
+    }
+
+    private fun decodeV2(data: DataInputStream): AiModelConfiguration {
+        val provider = AiModelServiceProvider.fromStorageKey(data.readUTF())
+        return AiModelConfiguration(
+            provider = provider,
+            apiBaseUrl = data.readUTF(),
+            modelName = data.readUTF(),
+            apiKey = data.readUTF(),
+            temperature = data.readDouble(),
+            maxOutputTokens = data.readInt(),
+            requestTimeoutMillis = data.readLong()
+        )
     }
 }
