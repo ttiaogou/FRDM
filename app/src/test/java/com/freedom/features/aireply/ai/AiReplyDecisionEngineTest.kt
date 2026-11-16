@@ -65,20 +65,21 @@ class AiReplyDecisionEngineTest {
         val request = provider.lastRequest!!
         assertEquals(0.4, request.temperature, 0.0)
         assertEquals(512, request.maxOutputTokens)
-        assertTrue(request.systemInstruction.contains("naturally friendly"))
-        assertTrue(request.systemInstruction.contains("moderate positive interest"))
-        assertTrue(request.systemInstruction.contains("Use emoji occasionally"))
+        assertTrue(request.systemInstruction.contains("表达亲切友善、自然真诚"))
+        assertTrue(request.systemInstruction.contains("根据语境自然表达关心或积极态度"))
+        assertTrue(request.systemInstruction.contains("偶尔加入轻松幽默"))
     }
 
-    @Test fun personalizationControlsTemperatureOutputLimitAndSystemPrompt() {
+    @Test fun personalizationChangesProviderNeutralInstructionsWithoutChangingGenerationParameters() {
         val provider = FakeProvider(replyJson("收到"))
         val personalization = AiReplyPersonalization(
-            answerStyle = AnswerStyle.NATURAL_CASUAL,
-            responseFlexibility = ResponseFlexibility.FLEXIBLE_DIVERSE,
+            personalityStyle = PersonalityStyle.GENTLE_HEALING,
+            languageStyle = LanguageStyle.CONCISE,
             replyLength = ReplyLength.DETAILED,
-            friendliness = Friendliness.VERY_FRIENDLY,
-            enthusiasm = Enthusiasm.ENERGETIC,
-            emojiUsage = EmojiUsage.RICH
+            emotionExpression = EmotionExpression.HIGHLY_EMPATHETIC,
+            humorLevel = HumorLevel.SERIOUS,
+            interactionLevel = InteractionLevel.ASK_QUESTIONS,
+            customInstructions = "不要刻意讨好我。"
         )
 
         AiReplyDecisionEngine(provider, grantedConsent).decide(
@@ -91,12 +92,21 @@ class AiReplyDecisionEngineTest {
         )
 
         val request = provider.lastRequest!!
-        assertEquals(0.7, request.temperature, 0.0)
-        assertEquals(1_024, request.maxOutputTokens)
-        assertTrue(request.systemInstruction.contains("natural, relaxed, conversational"))
-        assertTrue(request.systemInstruction.contains("distinctly warm"))
-        assertTrue(request.systemInstruction.contains("lively, upbeat"))
-        assertTrue(request.systemInstruction.contains("wider range of relevant emoji"))
+        assertEquals(AiReplyDecisionEngine.DEFAULT_TEMPERATURE, request.temperature, 0.0)
+        assertEquals(AiReplyDecisionEngine.DEFAULT_MAX_OUTPUT_TOKENS, request.maxOutputTokens)
+        assertTrue(request.systemInstruction.contains("表达温和、耐心、有安抚感"))
+        assertTrue(request.systemInstruction.contains("减少铺垫和重复"))
+        assertTrue(request.systemInstruction.contains("充分解释"))
+        assertTrue(request.systemInstruction.contains("以有同理心的方式回应"))
+        assertTrue(request.systemInstruction.contains("保持严肃、认真"))
+        assertTrue(request.systemInstruction.contains("提出简短、相关的问题"))
+        assertTrue(request.systemInstruction.contains("不要刻意讨好我。"))
+    }
+
+    @Test fun systemInstructionDoesNotRequireFalseClaimsAboutAiIdentity() {
+        val instruction = AiReplyDecisionEngine.DEFAULT_SYSTEM_INSTRUCTION
+        assertTrue(instruction.contains("if directly asked whether you are an AI, answer truthfully"))
+        assertTrue(instruction.contains("never claim to be human"))
     }
 
     @Test fun personalIdentifiersAreRedactedBeforeProviderCall() {

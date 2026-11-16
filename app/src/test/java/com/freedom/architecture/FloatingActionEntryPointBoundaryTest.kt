@@ -191,6 +191,29 @@ class FloatingActionEntryPointBoundaryTest {
     }
 
     @Test
+    fun chatPersonalizationUsesProviderNeutralDropdownsAndModelSettingsLiveInConfigMenu() {
+        val personalization = source("app/src/main/java/com/freedom/ui/config/PersonalizationScreen.kt")
+        val preferences = source("app/src/main/java/com/freedom/features/aireply/ai/AiReplyPersonalization.kt")
+        val configMenu = source("app/src/main/java/com/freedom/ui/config/ConfigPanel.kt")
+        val modelScreen = source("app/src/main/java/com/freedom/ui/config/AiModelConfigurationScreen.kt")
+        val activity = source("app/src/main/java/com/freedom/MainActivity.kt")
+
+        listOf("性格风格", "语言风格", "回复长度", "情绪表达程度", "幽默程度", "主动互动程度")
+            .forEach { assertTrue(personalization.contains("label = \"$it\"")) }
+        assertTrue(personalization.contains("Spinner.MODE_DROPDOWN"))
+        assertTrue(personalization.contains("InputFilter.LengthFilter"))
+        assertTrue(preferences.contains("systemPromptInstructions()"))
+        assertTrue(preferences.contains("MAX_CUSTOM_INSTRUCTION_LENGTH = 500"))
+        assertTrue(configMenu.contains("AI 模型配置"))
+        assertTrue(configMenu.contains("callbacks.onAiModelConfiguration()"))
+        assertTrue(activity.contains("onAiModelConfiguration = ::showAiModelConfigurationPage"))
+        assertTrue(modelScreen.contains("cloudConsentPreferenceRow()"))
+        assertTrue(modelScreen.contains("cloudConsentGranted()"))
+        assertFalse(personalization.contains("modelConfigurationPreferenceRow()"))
+        assertFalse(personalization.contains("cloudConsentPreferenceRow()"))
+    }
+
+    @Test
     fun configurationSectionsUseTheFinalShortLabels() {
         val config = source("app/src/main/java/com/freedom/ui/config/ConfigPanel.kt")
         assertTrue(config.contains("addSectionTitle(body, \"配置\")"))

@@ -40,6 +40,7 @@ internal class ConfigPanel(
         val isNotificationEnabled: () -> Boolean,
         val requestNotificationPermission: () -> Unit,
         val onOcrManagement: () -> Unit,
+        val onAiModelConfiguration: () -> Unit,
         val showGestureCalibrationDialog: () -> Unit,
         val hideOverlay: () -> Unit
     )
@@ -126,6 +127,16 @@ internal class ConfigPanel(
                     Toast.makeText(activity, "切换悬浮按钮失败，请查看运行记录", Toast.LENGTH_LONG).show()
                 }.getOrDefault(false)
             }
+        }
+        addDivider(body)
+        addActionRow(
+            body,
+            "AI 模型配置",
+            "管理模型 API、密钥与云端处理授权",
+            "管理"
+        ) {
+            dialog.dismiss()
+            callbacks.onAiModelConfiguration()
         }
         addDivider(body)
         addActionRow(

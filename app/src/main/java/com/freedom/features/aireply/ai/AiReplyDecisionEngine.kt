@@ -21,11 +21,13 @@ class AiReplyDecisionEngine(
 
         val request = AiModelRequest(
             systemInstruction = AiModelDataRedactor.redact(
-                "$systemInstruction\n\nPersonalized reply preferences:\n${input.personalization.systemPromptInstructions()}"
+                "$systemInstruction\n\n用户聊天风格偏好（通用自然语言指令）：\n${input.personalization.systemPromptInstructions()}"
             ),
             conversation = AiModelDataRedactor.redactMessages(input.context.messages),
-            temperature = input.personalization.responseFlexibility.temperature,
-            maxOutputTokens = input.personalization.replyLength.maxOutputTokens,
+            // Keep the existing generation defaults independent from persona choices. Style
+            // preferences are plain-language instructions and do not assume provider parameters.
+            temperature = DEFAULT_TEMPERATURE,
+            maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
             requestId = input.requestId,
             responseFormat = AiModelResponseFormat.JsonSchema(
                 name = "ai_reply_decision",
@@ -47,11 +49,14 @@ class AiReplyDecisionEngine(
     }
 
     companion object {
+        const val DEFAULT_TEMPERATURE = 0.4
+        const val DEFAULT_MAX_OUTPUT_TOKENS = 512
         const val DEFAULT_SYSTEM_INSTRUCTION = "You are a careful conversation assistant. Use only the supplied conversation history. " +
             "Return one JSON object matching the supplied strict JSON Schema: action, reason, draft. " +
             "Use a short uppercase reason code. Set draft to a string only for REPLY; otherwise set draft to null. " +
             "Never claim to have performed actions. If context is insufficient, choose WAIT. " +
             "If sensitive, risky, ambiguous, or requiring a consequential decision, choose HUMAN_REVIEW. " +
+            "Do not volunteer your AI identity when it is irrelevant to the conversation; if directly asked whether you are an AI, answer truthfully and never claim to be human. " +
             "Common phone numbers, email addresses, and mainland Chinese identity numbers are redacted before submission."
     }
 }

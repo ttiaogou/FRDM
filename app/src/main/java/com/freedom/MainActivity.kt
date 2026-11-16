@@ -112,6 +112,7 @@ class MainActivity : Activity() {
                 isNotificationEnabled = ::isNotificationEnabled,
                 requestNotificationPermission = ::requestNotificationPermissionFromConfig,
                 onOcrManagement = ::showOcrPluginManager,
+                onAiModelConfiguration = ::showAiModelConfigurationPage,
                 showGestureCalibrationDialog = { gestureCalibrationUi.showDialog() },
                 hideOverlay = { MonitorOverlay.setHostActivityVisible(this, true) }
             )
@@ -1316,22 +1317,19 @@ class MainActivity : Activity() {
                 taskParameters = { taskLaunchParametersStore.read() },
                 onTaskParametersChanged = taskLaunchParametersStore::write,
                 loadAiReplyPersonalization = aiReplyPersonalizationRepository::load,
-                onAiReplyPersonalizationChanged = aiReplyPersonalizationRepository::save,
-                cloudConsentGranted = aiModelCloudConsent::isGranted,
-                onCloudConsentChanged = aiModelCloudConsent::setGranted,
-                onModelConfiguration = ::showAiModelConfigurationPage
+                onAiReplyPersonalizationChanged = aiReplyPersonalizationRepository::save
             ).create()
         )
     }
 
-    /** Model settings only persist local parameters; outbound model requests are a later phase. */
+    /** Opens the locally encrypted model configuration and its cloud-processing consent. */
     private fun showAiModelConfigurationPage() {
         val loaded = runCatching { aiModelConfigurationRepository.load() }
         val configuration = loaded.getOrElse { failure ->
             val dialog = AlertDialog.Builder(this)
                 .setTitle("无法读取 AI 模型配置")
                 .setMessage(failure.message ?: "本机加密配置无法读取。原有密文未被删除。")
-                .setPositiveButton("返回") { _, _ -> showPersonalizationPage() }
+                .setPositiveButton("返回") { _, _ -> showConfigurationPage() }
                 .create()
             dialog.show()
             return
@@ -1342,9 +1340,11 @@ class MainActivity : Activity() {
                 activity = this,
                 dp = ::dp,
                 initialConfiguration = configuration,
-                onBack = ::showPersonalizationPage,
+                onBack = ::showConfigurationPage,
                 onSave = { value -> runCatching { aiModelConfigurationRepository.save(value) } },
-                onClearApiKey = { runCatching { aiModelConfigurationRepository.clearApiKey() } }
+                onClearApiKey = { runCatching { aiModelConfigurationRepository.clearApiKey() } },
+                cloudConsentGranted = aiModelCloudConsent::isGranted,
+                onCloudConsentChanged = aiModelCloudConsent::setGranted
             ).create()
         )
     }
@@ -1379,7 +1379,7 @@ class MainActivity : Activity() {
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
         when (currentScreen) {
-            Screen.AI_MODEL_CONFIGURATION -> showPersonalizationPage()
+            Screen.AI_MODEL_CONFIGURATION -> showConfigurationPage()
             Screen.PERSONALIZATION -> showConfigurationPage()
             Screen.CONFIGURATION -> super.onBackPressed()
         }

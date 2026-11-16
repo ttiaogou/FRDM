@@ -2,6 +2,7 @@ package com.freedom.ui.config
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.text.InputType
@@ -11,6 +12,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import com.freedom.features.aireply.ai.AiModelConfiguration
 import com.freedom.ui.theme.FreedomUi
@@ -22,7 +24,9 @@ internal class AiModelConfigurationScreen(
     initialConfiguration: AiModelConfiguration,
     private val onBack: () -> Unit,
     private val onSave: (AiModelConfiguration) -> Result<Unit>,
-    private val onClearApiKey: () -> Result<Unit>
+    private val onClearApiKey: () -> Result<Unit>,
+    private val cloudConsentGranted: () -> Boolean,
+    private val onCloudConsentChanged: (Boolean) -> Unit
 ) {
     private var configuration = initialConfiguration
     private var apiKeyStatus: TextView? = null
@@ -115,14 +119,14 @@ internal class AiModelConfigurationScreen(
         keyActions.addView(clearKeyButton, LinearLayout.LayoutParams(-1, dp(44)))
         content.addView(keyActions, topMargin(4))
 
-        content.addView(sectionTitle("生成偏好"), topMargin(18))
         content.addView(TextView(activity).apply {
-            text = "回答灵活度和回复长度请在“个性化”页面中选择，系统会自动应用对应的生成设置，无需手动填写技术参数。"
+            text = "聊天风格偏好通过通用自然语言指令传递，不依赖特定模型厂商的温度或 Token 参数。不同模型对指令的遵循效果可能有所差异。当前连接配置使用 OpenAI 兼容的 Chat Completions 接口。"
             textSize = 12f
             setTextColor(FreedomUi.MUTED)
             setLineSpacing(dp(2).toFloat(), 1f)
-            setPadding(dp(2), 0, dp(2), dp(8))
+            setPadding(dp(2), dp(12), dp(2), dp(8))
         })
+        content.addView(cloudConsentPreferenceRow(), topMargin(18))
         val timeoutInput = addField(
             content,
             label = "请求超时（秒，1 – 180）",
@@ -248,6 +252,90 @@ internal class AiModelConfigurationScreen(
         }
         parent.addView(input, LinearLayout.LayoutParams(-1, dp(48)))
         return input
+    }
+
+    private fun cloudConsentPreferenceRow(): View {
+        val wrapper = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        wrapper.addView(sectionTitle("云端模型处理授权"))
+        val row = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(72)
+            setPadding(dp(2), dp(6), dp(4), dp(8))
+        }
+        val consentSwitch = Switch(activity).apply {
+            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+            thumbTintList = ColorStateList(states, intArrayOf(FreedomUi.TEXT, Color.WHITE))
+            trackTintList = ColorStateList(states, intArrayOf(FreedomUi.LIME, 0xFFD9DED5.toInt()))
+            minWidth = dp(52)
+            showText = false
+            isChecked = cloudConsentGranted()
+            contentDescription = "云端模型处理授权"
+        }
+        val consentStatusTitle = TextView(activity).apply {
+            text = if (cloudConsentGranted()) "已授权云端模型处理" else "尚未授权云端模型处理"
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(FreedomUi.TEXT)
+        }
+        row.addView(LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(consentStatusTitle)
+            addView(TextView(activity).apply {
+                text = "开启后，允许将本地脱敏后的聊天上下文发送给当前配置的云端模型；可随时撤销。"
+                textSize = 11f
+                setTextColor(FreedomUi.MUTED)
+                setPadding(0, dp(4), 0, 0)
+                maxLines = 3
+            })
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+
+        fun installConsentListener() {
+            consentSwitch.setOnCheckedChangeListener { button, checked ->
+                if (checked) {
+                    button.setOnCheckedChangeListener(null)
+                    button.isChecked = false
+                    installConsentListener()
+                    val dialog = AlertDialog.Builder(activity)
+                        .setTitle("授权云端模型处理")
+                        .setMessage(
+                            "授权后，应用可以将本地脱敏后的聊天上下文发送给当前配置的云端模型服务。系统会尝试对常见手机号、邮箱和中国大陆居民身份证号进行脱敏，但无法保证识别所有敏感信息。授权保存在本机，可随时关闭。生成内容仍受现有回复校验流程约束，不会因授权而自动发送消息。"
+                        )
+                        .setNegativeButton("暂不授权", null)
+                        .setPositiveButton("同意并授权") { _, _ ->
+                            runCatching { onCloudConsentChanged(true) }
+                                .onSuccess {
+                                    consentStatusTitle.text = "已授权云端模型处理"
+                                    consentSwitch.setOnCheckedChangeListener(null)
+                                    consentSwitch.isChecked = true
+                                    installConsentListener()
+                                }
+                                .onFailure { failure ->
+                                    showStatus(failure.message ?: "保存云端授权状态失败。", error = true)
+                                }
+                        }
+                        .create()
+                    dialog.show()
+                    FreedomUi.styleAlertDialog(dialog, activity, dp)
+                } else {
+                    runCatching { onCloudConsentChanged(false) }
+                        .onSuccess { consentStatusTitle.text = "尚未授权云端模型处理" }
+                        .onFailure { failure ->
+                            showStatus(failure.message ?: "撤销云端授权失败。", error = true)
+                            consentSwitch.setOnCheckedChangeListener(null)
+                            consentSwitch.isChecked = true
+                            installConsentListener()
+                        }
+                }
+            }
+        }
+        installConsentListener()
+        row.addView(consentSwitch)
+        wrapper.addView(row)
+        wrapper.addView(View(activity).apply {
+            setBackgroundColor(FreedomUi.DIVIDER)
+        }, LinearLayout.LayoutParams(-1, dp(1)))
+        return wrapper
     }
 
     private fun confirmClearApiKey() {

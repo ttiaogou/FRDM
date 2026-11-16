@@ -1,72 +1,89 @@
 package com.freedom.features.aireply.ai
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AiReplyPersonalizationTest {
-    @Test fun dailyChatDefaultsUseTheRequestedCombination() {
+    @Test
+    fun dailyChatDefaultsUseTheNewProviderNeutralPreferences() {
         val preferences = AiReplyPersonalization()
 
-        assertEquals(AnswerStyle.EFFICIENT_PRACTICAL, preferences.answerStyle)
-        assertEquals(ResponseFlexibility.NATURAL_BALANCED, preferences.responseFlexibility)
+        assertEquals(PersonalityStyle.FRIENDLY, preferences.personalityStyle)
+        assertEquals(LanguageStyle.CASUAL, preferences.languageStyle)
         assertEquals(ReplyLength.MODERATE, preferences.replyLength)
-        assertEquals(Friendliness.NATURAL_FRIENDLY, preferences.friendliness)
-        assertEquals(Enthusiasm.MODERATE, preferences.enthusiasm)
-        assertEquals(EmojiUsage.OCCASIONAL, preferences.emojiUsage)
+        assertEquals(EmotionExpression.NATURAL_MODERATE, preferences.emotionExpression)
+        assertEquals(HumorLevel.OCCASIONAL, preferences.humorLevel)
+        assertEquals(InteractionLevel.MODERATE, preferences.interactionLevel)
+        assertEquals("", preferences.customInstructions)
     }
 
-    @Test fun availableLabelsMatchTheRequestedPersonalizationChoices() {
+    @Test
+    fun availableLabelsMatchAllRequestedChoices() {
         assertEquals(
-            listOf("高效务实", "自然随和", "严谨专业", "轻松幽默"),
-            enumValues<AnswerStyle>().map { it.displayName }
+            listOf("暧昧试探", "亲切友好", "温柔治愈", "活泼可爱", "幽默风趣", "细腻敏感"),
+            enumValues<PersonalityStyle>().map { it.displayName }
         )
         assertEquals(
-            listOf("严谨稳定", "自然均衡", "灵活多样", "创意丰富"),
-            enumValues<ResponseFlexibility>().map { it.displayName }
+            listOf("日常口语", "正式得体", "简洁直接", "知性优雅", "网络流行语"),
+            enumValues<LanguageStyle>().map { it.displayName }
         )
         assertEquals(
-            listOf("简短精炼", "适中", "详细充分"),
+            listOf("极简", "简短", "适中", "详细"),
             enumValues<ReplyLength>().map { it.displayName }
         )
         assertEquals(
-            listOf("正式客观", "自然友好", "亲切随和", "非常亲切"),
-            enumValues<Friendliness>().map { it.displayName }
+            listOf("克制冷静", "自然适度", "情绪丰富", "热情积极", "高度共情"),
+            enumValues<EmotionExpression>().map { it.displayName }
         )
         assertEquals(
-            listOf("沉稳冷静", "适度热情", "积极热情", "充满活力"),
-            enumValues<Enthusiasm>().map { it.displayName }
+            listOf("严肃认真", "偶尔幽默", "适当玩梗", "幽默风趣", "经常调侃"),
+            enumValues<HumorLevel>().map { it.displayName }
         )
         assertEquals(
-            listOf("不使用", "偶尔使用", "适量使用", "丰富使用"),
-            enumValues<EmojiUsage>().map { it.displayName }
+            listOf("只回答，不主动延伸", "适当互动", "主动提出问题", "主动延伸话题、提供建议"),
+            enumValues<InteractionLevel>().map { it.displayName }
         )
     }
 
-    @Test fun responseFlexibilityMapsToTemperaturePresets() {
-        assertEquals(0.2, ResponseFlexibility.STRICT_STABLE.temperature, 0.0)
-        assertEquals(0.4, ResponseFlexibility.NATURAL_BALANCED.temperature, 0.0)
-        assertEquals(0.7, ResponseFlexibility.FLEXIBLE_DIVERSE.temperature, 0.0)
-        assertEquals(1.0, ResponseFlexibility.CREATIVE_RICH.temperature, 0.0)
-    }
-
-    @Test fun replyLengthMapsToOutputTokenPresets() {
-        assertEquals(256, ReplyLength.CONCISE.maxOutputTokens)
-        assertEquals(512, ReplyLength.MODERATE.maxOutputTokens)
-        assertEquals(1_024, ReplyLength.DETAILED.maxOutputTokens)
-    }
-
-    @Test fun tonePreferencesAreExpressedAsSystemPromptInstructions() {
+    @Test
+    fun allPreferencesBecomePlainLanguageInstructionsForAnyProviderAdapter() {
         val prompt = AiReplyPersonalization(
-            answerStyle = AnswerStyle.LIGHT_HUMOR,
-            friendliness = Friendliness.VERY_FRIENDLY,
-            enthusiasm = Enthusiasm.ENERGETIC,
-            emojiUsage = EmojiUsage.RICH
+            personalityStyle = PersonalityStyle.FLIRTATIOUS_PROBING,
+            languageStyle = LanguageStyle.INTELLECTUAL,
+            replyLength = ReplyLength.DETAILED,
+            emotionExpression = EmotionExpression.HIGHLY_EMPATHETIC,
+            humorLevel = HumorLevel.LIGHT_WORDPLAY,
+            interactionLevel = InteractionLevel.EXTEND_AND_SUGGEST,
+            customInstructions = "不要频繁使用表情符号。\n不要每次回答都反问我。"
         ).systemPromptInstructions()
 
-        assertTrue(prompt.contains("light, appropriate humor"))
-        assertTrue(prompt.contains("distinctly warm"))
-        assertTrue(prompt.contains("lively, upbeat"))
-        assertTrue(prompt.contains("wider range of relevant emoji"))
+        assertTrue(prompt.contains("暧昧和试探感"))
+        assertTrue(prompt.contains("知性优雅"))
+        assertTrue(prompt.contains("充分解释"))
+        assertTrue(prompt.contains("有同理心"))
+        assertTrue(prompt.contains("文字趣味"))
+        assertTrue(prompt.contains("可行建议"))
+        assertTrue(prompt.contains("不要频繁使用表情符号。"))
+        assertTrue(prompt.contains("不得覆盖任务要求、事实准确性或安全规则"))
+        assertFalse(prompt.contains("temperature"))
+        assertFalse(prompt.contains("maxOutputTokens"))
+    }
+
+    @Test
+    fun customInstructionsAreNormalizedAndLengthValidated() {
+        val normalized = AiReplyPersonalization(
+            customInstructions = "  不要刻意讨好我。\u0000\n可以偶尔开玩笑。  "
+        ).normalized()
+        assertEquals("不要刻意讨好我。\n可以偶尔开玩笑。", normalized.customInstructions)
+        assertNull(normalized.validationError())
+
+        val tooLong = AiReplyPersonalization(
+            customInstructions = "x".repeat(AiReplyPersonalization.MAX_CUSTOM_INSTRUCTION_LENGTH + 1)
+        )
+        assertNotNull(tooLong.validationError())
     }
 }
