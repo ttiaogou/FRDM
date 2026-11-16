@@ -128,6 +128,37 @@ class MomoSayHiAvatarTargetPolicyTest {
         assertNotEquals(row.avatarTapTarget?.path, row.rowTapTarget?.path)
     }
 
+    @Test fun ordinaryInboxIdentityTargetUsesClickableChatlistFaceContainerOnly() {
+        val rowPath = listOf(0, 0)
+        val tree = AccessibilityTreeSnapshot(
+            window = WindowRef("com.immomo.momo", MomoAppDescriptor.MAIN_ACTIVITY_CLASS, 12, 3),
+            nodes = listOf(
+                node(emptyList(), bounds = ScreenRect(0, 0, 720, 1600), children = 1),
+                node(listOf(0), "com.immomo.momo:id/recyclerview", ScreenRect(0, 156, 720, 1486), children = 1,
+                    className = "androidx.recyclerview.widget.RecyclerView"),
+                node(rowPath, "com.immomo.momo:id/item_layout", ScreenRect(0, 156, 720, 300), clickable = true, children = 2),
+                node(rowPath + 0, "com.immomo.momo:id/chatlist_item_iv_face", ScreenRect(30, 171, 140, 281),
+                    clickable = true, children = 1, className = "android.widget.FrameLayout"),
+                node(rowPath + listOf(0, 0), "com.immomo.momo:id/img_avatar", ScreenRect(30, 171, 140, 281),
+                    className = "android.widget.ImageView"),
+                node(rowPath + 1, "com.immomo.momo:id/chatlist_item_tv_name", ScreenRect(160, 180, 340, 225),
+                    text = "果粒橙", className = "android.widget.TextView")
+            ),
+            visitedNodeCount = 6,
+            truncated = false
+        )
+
+        val target = MomoSayHiAvatarTargetPolicy.resolveAvatarTarget(
+            NodeTreeIndex(tree), NodePath(rowPath)
+        )
+
+        assertEquals(rowPath + 0, target?.path?.childIndices)
+        assertEquals(ScreenRect(30, 171, 140, 281), target?.targetBounds)
+        assertEquals(ScreenRect(30, 171, 140, 281), target?.preferredBounds)
+        assertNotEquals(rowPath, target?.path?.childIndices)
+        assertNotEquals(rowPath + listOf(0, 0), target?.path?.childIndices)
+    }
+
     @Test fun refusesToUseWholeClickableRowAsAvatarFallback() {
         val tree = AccessibilityTreeSnapshot(
             window = WindowRef("com.immomo.momo", MomoSayHiPageContract.LIST_ACTIVITY, 2),

@@ -47,6 +47,7 @@ import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import kotlin.math.abs
 import java.io.File
@@ -143,6 +144,52 @@ internal class MomoSocialAdapter(
         val sourceWindow: WindowRef,
         val sourceStructureFingerprint: String
     )
+
+    private enum class InboxIdentityCaptureStage {
+        AVATAR_TAP_PENDING,
+        WAITING_PROFILE,
+        WAITING_LIST_RETURN
+    }
+
+    /**
+     * Exact, short-lived row evidence used only to bind a profile ID back to the row that opened
+     * it. A nickname by itself is deliberately insufficient to restore the association.
+     */
+    private data class InboxIdentityRowAnchor(
+        val rowIndex: Int,
+        val rowPath: List<Int>,
+        val displayName: String,
+        val rowBounds: ScreenRect,
+        val avatarBounds: ScreenRect
+    ) {
+        fun matches(candidate: ChatListCandidateSnapshot): Boolean =
+            candidate.selectionClass == "PRIVATE_CHAT" &&
+                candidate.rowIndex == rowIndex &&
+                candidate.rowTarget.path.childIndices == rowPath &&
+                normalizeIdentityDisplayName(candidate.nameText) == normalizeIdentityDisplayName(displayName) &&
+                candidate.rowBounds == rowBounds &&
+                candidate.avatarBounds == avatarBounds
+
+        fun opaqueKey(): String = listOf(
+            rowIndex,
+            rowPath.joinToString("."),
+            normalizeIdentityDisplayName(displayName),
+            rowBounds.left, rowBounds.top, rowBounds.right, rowBounds.bottom,
+            avatarBounds.left, avatarBounds.top, avatarBounds.right, avatarBounds.bottom
+        ).joinToString("|").let(::sha256IdentityAnchor)
+    }
+
+    private class PendingInboxIdentityCapture(
+        val anchor: InboxIdentityRowAnchor,
+        stage: InboxIdentityCaptureStage,
+        lastTransitionAtMs: Long
+    ) {
+        @Volatile var stage: InboxIdentityCaptureStage = stage
+        @Volatile var lastTransitionAtMs: Long = lastTransitionAtMs
+        @Volatile var platformUserId: String? = null
+        @Volatile var profileReadCompleted: Boolean = false
+        @Volatile var backAttempts: Int = 0
+    }
 
     private sealed interface SayHiCardListTapInspection {
         data class Ready(
@@ -291,6 +338,12 @@ internal class MomoSocialAdapter(
     @Volatile private var sayHiUnverifiedBackAttemptActivity: String = ""
     /** True only when we safely backed out of a fingerprint-confirmed detail whose tap event never arrived. */
     @Volatile private var sayHiUnverifiedDetailReturnPending: Boolean = false
+    private val inboxIdentityCaptureLock = Any()
+    @Volatile private var pendingInboxIdentityCapture: PendingInboxIdentityCapture? = null
+    private val failedInboxIdentityCaptureKeys = LinkedHashSet<String>()
+    /** Run-scoped row-anchor cache; never persists a display-name-to-ID mapping across runs. */
+    private val verifiedInboxIdentityByAnchor = LinkedHashMap<String, String>()
+
     init {
         sayHiTraversalState.restore()?.let { restored ->
             onLog(
@@ -3219,9 +3272,31 @@ internal class MomoSocialAdapter(
             onLog("资料页专用 BACK 暂缓：本用户已达到有界安全返回尝试次数；保留页面和任务断点，等待新的页面/窗口事件")
             return false
         }
+        val inspection = submitVerifiedProfileBackNavigation() ?: return false
+        sayHiProfileBackAttempts++
+        sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_BACK_PENDING
+        sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+        sayHiProfileBackDialogPending = inspection.dialogHPresent
+        sayHiProfileBackDialogWindowId = inspection.dialogHWindowId
+        sayHiProfileBackWindowId = inspection.window.windowId
+        onLog(
+            if (inspection.dialogHPresent) {
+                "收到招呼身份页面：当前 dialog.h 窗口已完成安全检查并提交 BACK；等待确认其从窗口集合消失，再对资料页执行独立安全返回"
+            } else {
+                "收到招呼身份页面：资料页专用 BACK 已通过弹层安全检查并提交；等待收到招呼列表验证"
+            }
+        )
+        return true
+    }
+
+    /**
+     * Shared verified profile return used by Received Greetings and inbox identity capture.
+     * Keeps the existing active-window, dialog.h, popup-blocker and WindowRef checks in one path.
+     */
+    private fun submitVerifiedProfileBackNavigation(): SayHiProfileBackInspection? {
         if (activityClass() != MomoSayHiPageContract.PROFILE_ACTIVITY) {
             onLog("资料页专用 BACK 拒绝：当前 Activity 已不是已确认的 PersonalProfileActivityK")
-            return false
+            return null
         }
         val dialogObservation = latestDialogWindowObservation()
         val inspection = rootAccess.withTargetWindowRoots { windows ->
@@ -3289,32 +3364,18 @@ internal class MomoSocialAdapter(
                 dialogHPresent = dialogPresent,
                 dialogHWindowId = dialogRoot?.window?.windowId ?: -1
             )
-        } ?: return false
+        } ?: return null
 
         if (!accessibilityGateway.isWindowCurrent(inspection.window)) {
             onLog("资料页专用 BACK 拒绝：安全检查后活动窗口或页面代次发生变化")
-            return false
+            return null
         }
         val accepted = accessibilityGateway.performVerifiedNavigationBack(
             inspection.window,
             MomoSayHiPageContract.PROFILE_ACTIVITY
         )
-        if (accepted) {
-            sayHiProfileBackAttempts++
-            sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_BACK_PENDING
-            sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
-            sayHiProfileBackDialogPending = inspection.dialogHPresent
-            sayHiProfileBackDialogWindowId = inspection.dialogHWindowId
-            sayHiProfileBackWindowId = inspection.window.windowId
-            onLog(
-                if (inspection.dialogHPresent) {
-                    "收到招呼身份页面：当前 dialog.h 窗口已完成安全检查并提交 BACK；等待确认其从窗口集合消失，再对资料页执行独立安全返回"
-                } else {
-                    "收到招呼身份页面：资料页专用 BACK 已通过弹层安全检查并提交；等待收到招呼列表验证"
-                }
-            )
-        }
-        return accepted
+        if (!accepted) return null
+        return inspection
     }
 
     private fun selectedContactId(): String? =
@@ -4280,6 +4341,7 @@ internal class MomoSocialAdapter(
     }
 
     override fun inspectChatPage(): ChatPageSnapshot {
+        if (inspectPendingInboxIdentityCapture()) return unknownChatPageSnapshot()
         val currentActivity = activityClass()
         if (sayHiNavigationFlowController.shouldUseDedicatedReceivedListInspector(
                 isReceivedListSurface = isReceivedGreetingsListStructureVisible()
@@ -4328,6 +4390,12 @@ internal class MomoSocialAdapter(
 
         val (pageEvidence, chatListExtraction) = captured
         val (inspection, treeEvidence, window) = pageEvidence
+        val awaitingIdentityListReturn = pendingInboxIdentityCapture?.takeIf {
+            it.stage == InboxIdentityCaptureStage.WAITING_LIST_RETURN
+        }
+        if (awaitingIdentityListReturn != null && inspection.pageType != MomoChatPageType.CHAT_LIST) {
+            return unknownChatPageSnapshot()
+        }
         treeEvidence.snapshot?.let { snapshot ->
             sessionComponents.sampleStore.recordNodeTree(
                 snapshot,
@@ -4341,22 +4409,62 @@ internal class MomoSocialAdapter(
             MomoChatPageType.CHAT_LIST -> ChatPageKind.CHAT_LIST
             MomoChatPageType.CHAT_DETAIL_CANDIDATE -> ChatPageKind.CHAT_DETAIL_CANDIDATE
         }
+        val pendingIdentityCapture = awaitingIdentityListReturn
+        val pendingIdentityMatches = pendingIdentityCapture?.let { pending ->
+            chatListExtraction.candidates.indices.filter { index ->
+                pending.anchor.matches(chatListExtraction.candidates[index])
+            }
+        }.orEmpty()
+        val pendingIdentityMatchIndex = pendingIdentityMatches.singleOrNull()
+        val canConsumePendingIdentity = pendingIdentityCapture != null &&
+            inspection.pageType == MomoChatPageType.CHAT_LIST && !chatListExtraction.truncated
+
         if (chatListExtraction.candidates.isNotEmpty()) {
             val observedAt = System.currentTimeMillis()
             val snapshotId = "momo-${observedAt}-${sessionComponents.chatListSnapshotSequence.incrementAndGet()}"
+            val cachedPlatformIds = chatListExtraction.candidates.mapIndexed { index, candidate ->
+                val justCapturedId = if (index == pendingIdentityMatchIndex) {
+                    pendingIdentityCapture?.platformUserId
+                } else null
+                justCapturedId ?: createInboxIdentityAnchor(candidate)?.opaqueKey()?.let { key ->
+                    synchronized(inboxIdentityCaptureLock) { verifiedInboxIdentityByAnchor[key] }
+                }
+            }
             val identities = sessionComponents.contactIdentityManager.resolveSnapshot(
                 snapshotId = snapshotId,
-                observations = chatListExtraction.candidates.map { candidate ->
+                observations = chatListExtraction.candidates.mapIndexed { index, candidate ->
                     ContactIdentityObservation(
                         displayName = candidate.nameText,
-                        isPrivateChat = candidate.selectionClass == "PRIVATE_CHAT"
+                        isPrivateChat = candidate.selectionClass == "PRIVATE_CHAT",
+                        platformUserId = cachedPlatformIds[index]
                     )
                 },
                 observedAtMillis = observedAt
             )
-            chatListExtraction.candidates.zip(identities).forEach { (candidate, identity) ->
+            chatListExtraction.candidates.zip(identities).forEachIndexed { index, (candidate, identity) ->
                 candidate.contactIdentity = identity
+                if (index != pendingIdentityMatchIndex && cachedPlatformIds[index] != null &&
+                    identity.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                ) {
+                    createInboxIdentityAnchor(candidate)?.opaqueKey()?.let { key ->
+                        synchronized(inboxIdentityCaptureLock) {
+                            verifiedInboxIdentityByAnchor.remove(key)
+                            failedInboxIdentityCaptureKeys += key
+                        }
+                    }
+                }
             }
+            if (canConsumePendingIdentity) {
+                val verified = pendingIdentityMatchIndex?.let { index ->
+                    identities.getOrNull(index)?.let { identity ->
+                        identity.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                            !identity.contactId.isNullOrBlank()
+                    }
+                } == true
+                completePendingInboxIdentityBinding(pendingIdentityCapture!!, verified)
+            }
+        } else if (canConsumePendingIdentity) {
+            completePendingInboxIdentityBinding(pendingIdentityCapture!!, false)
         }
         return ChatPageSnapshot(
             packageName = inspection.windowPackage,
@@ -4473,7 +4581,367 @@ internal class MomoSocialAdapter(
 
     // ---- ChatSessionManagementPort: bounded Momo session navigation and local samples ----
 
+    override fun requestContactIdentityCapture(
+        candidate: ChatListCandidateSnapshot
+    ): ContactIdentityCaptureRequestResult {
+        if (candidate.contactIdentity?.let {
+                it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                    !it.contactId.isNullOrBlank()
+            } == true
+        ) return ContactIdentityCaptureRequestResult.NOT_SUPPORTED
+
+        val anchor = createInboxIdentityAnchor(candidate)
+            ?: return ContactIdentityCaptureRequestResult.REJECTED
+        val anchorKey = anchor.opaqueKey()
+        synchronized(inboxIdentityCaptureLock) {
+            if (anchorKey in failedInboxIdentityCaptureKeys) {
+                return ContactIdentityCaptureRequestResult.REJECTED
+            }
+            val pending = pendingInboxIdentityCapture
+            if (pending != null) return ContactIdentityCaptureRequestResult.IN_PROGRESS
+        }
+
+        if (activityClass() != MomoAppDescriptor.MAIN_ACTIVITY_CLASS ||
+            sayHiGestureInFlight || receivedGreetingsEntryTapPending ||
+            receivedGreetingsEntrySearchGestureInFlight || sayHiCardListTapPending
+        ) return ContactIdentityCaptureRequestResult.RETRY_LATER
+
+        val tree = accessibilityGateway.inspectActiveWindow(
+            TreeInspectionRequest(
+                maxNodes = 1_800,
+                maxDepth = 48,
+                maxDurationMs = 1_000L,
+                allowVisibleWindowFallback = false,
+                textCapture = NodeTextCapture.EPHEMERAL
+            )
+        ) ?: return ContactIdentityCaptureRequestResult.RETRY_LATER
+        if (tree.truncated || tree.window.packageName != targetPackage ||
+            tree.window.activityClass != MomoAppDescriptor.MAIN_ACTIVITY_CLASS ||
+            tree.window != candidate.rowTarget.window ||
+            !accessibilityGateway.isWindowCurrent(tree.window)
+        ) return ContactIdentityCaptureRequestResult.RETRY_LATER
+
+        val index = NodeTreeIndex(tree)
+        val row = index.nodeAt(candidate.rowTarget.path)
+            ?: return ContactIdentityCaptureRequestResult.RETRY_LATER
+        if (localNodeId(row.viewId) != "item_layout" || !row.visible ||
+            row.bounds != candidate.rowBounds ||
+            index.ancestorsOf(row.path).none { localNodeId(it.viewId) == "recyclerview" }
+        ) return ContactIdentityCaptureRequestResult.RETRY_LATER
+
+        val nameNodes = index.descendantsOf(row.path).filter {
+            localNodeId(it.viewId) == "chatlist_item_tv_name" && it.visible
+        }
+        val currentName = nameNodes.singleOrNull()?.text?.trim()
+        if (nameNodes.size != 1 ||
+            nameNodes.singleOrNull()?.path?.childIndices != candidate.nameNodePath?.childIndices ||
+            normalizeIdentityDisplayName(currentName) != normalizeIdentityDisplayName(anchor.displayName)
+        ) return ContactIdentityCaptureRequestResult.RETRY_LATER
+
+        // Reuse the Received Greetings avatar resolver. In the ordinary inbox tree the exact
+        // clickable node is chatlist_item_iv_face; img_avatar itself is not the tap target.
+        val target = MomoSayHiAvatarTargetPolicy.resolveAvatarTarget(index, row.path)
+            ?: return ContactIdentityCaptureRequestResult.REJECTED
+        val avatarClickNode = index.nodeAt(target.path)
+            ?: return ContactIdentityCaptureRequestResult.RETRY_LATER
+        if (localNodeId(avatarClickNode.viewId) != "chatlist_item_iv_face" ||
+            target.path.childIndices != candidate.avatarPath?.childIndices ||
+            !avatarClickNode.visible || !avatarClickNode.enabled || !avatarClickNode.clickable ||
+            target.preferredBounds != candidate.avatarBounds ||
+            target.targetBounds != avatarClickNode.bounds
+        ) return ContactIdentityCaptureRequestResult.REJECTED
+
+        if (sayHiTapReadiness(tree, target) != MomoSayHiTapReadiness.READY) {
+            return ContactIdentityCaptureRequestResult.RETRY_LATER
+        }
+        val metrics = accessibilityGateway.displayMetrics()
+        val executionContext = gesturePolicy.captureContext(
+            tree.window,
+            metrics.toGestureCoordinateContext()
+        ) ?: return ContactIdentityCaptureRequestResult.RETRY_LATER
+
+        val pending = PendingInboxIdentityCapture(
+            anchor = anchor,
+            stage = InboxIdentityCaptureStage.AVATAR_TAP_PENDING,
+            lastTransitionAtMs = System.currentTimeMillis()
+        )
+        synchronized(inboxIdentityCaptureLock) {
+            if (pendingInboxIdentityCapture != null || anchorKey in failedInboxIdentityCaptureKeys) {
+                return ContactIdentityCaptureRequestResult.IN_PROGRESS
+            }
+            pendingInboxIdentityCapture = pending
+        }
+
+        val request = GestureIntentRequest(
+            id = "momo-inbox-identity-avatar-${System.nanoTime()}",
+            intent = GestureIntent.Tap(
+                preferredBounds = target.preferredBounds,
+                targetBounds = target.targetBounds,
+                durationMs = RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS,
+                feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
+            ),
+            description = "陌陌普通消息列表：点击当前联系人头像采集平台身份（只读）",
+            executionContext = executionContext
+        )
+        val submission = runCatching {
+            gesturePolicy.execute(request, GestureExecutionListener { result ->
+                synchronized(inboxIdentityCaptureLock) {
+                    if (pendingInboxIdentityCapture !== pending) return@synchronized
+                    if (result.status == GestureExecutionStatus.COMPLETED) {
+                        pending.stage = InboxIdentityCaptureStage.WAITING_PROFILE
+                        pending.lastTransitionAtMs = System.currentTimeMillis()
+                    } else {
+                        if (result.status != GestureExecutionStatus.DEFERRED) {
+                            failedInboxIdentityCaptureKeys += anchorKey
+                        }
+                        pendingInboxIdentityCapture = null
+                    }
+                }
+                if (result.status == GestureExecutionStatus.COMPLETED) {
+                    onLog("AI 联系人身份采集：已完成当前消息行独立头像点击；等待资料页身份字段，不点击整行")
+                } else {
+                    onLog("AI 联系人身份采集：头像手势未完成，状态=${result.status}；本轮不改点消息行或使用坐标兜底")
+                }
+            })
+        }.getOrElse {
+            synchronized(inboxIdentityCaptureLock) {
+                if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
+                failedInboxIdentityCaptureKeys += anchorKey
+            }
+            onLog("AI 联系人身份采集：头像手势执行器异常；拒绝坐标兜底")
+            return ContactIdentityCaptureRequestResult.REJECTED
+        }
+
+        if (submission != GestureSubmission.ACCEPTED) {
+            synchronized(inboxIdentityCaptureLock) {
+                if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
+                if (submission != GestureSubmission.DEFERRED_NOT_READY) {
+                    failedInboxIdentityCaptureKeys += anchorKey
+                }
+            }
+            return if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+                ContactIdentityCaptureRequestResult.RETRY_LATER
+            } else {
+                ContactIdentityCaptureRequestResult.REJECTED
+            }
+        }
+        return ContactIdentityCaptureRequestResult.STARTED
+    }
+
+    private fun createInboxIdentityAnchor(
+        candidate: ChatListCandidateSnapshot
+    ): InboxIdentityRowAnchor? {
+        if (candidate.selectionClass != "PRIVATE_CHAT" ||
+            !candidate.hasReadableName || !candidate.rowVisibleToUser ||
+            !candidate.rowBoundsValid || candidate.avatarBounds == null ||
+            candidate.avatarPath == null || candidate.nameNodePath == null ||
+            candidate.rowTarget.window.packageName != targetPackage ||
+            candidate.rowTarget.window.activityClass != MomoAppDescriptor.MAIN_ACTIVITY_CLASS
+        ) return null
+        val avatar = candidate.avatarBounds
+        if (candidate.rowBounds.isEmpty || avatar.isEmpty ||
+            avatar.left < candidate.rowBounds.left || avatar.top < candidate.rowBounds.top ||
+            avatar.right > candidate.rowBounds.right || avatar.bottom > candidate.rowBounds.bottom
+        ) return null
+        return InboxIdentityRowAnchor(
+            rowIndex = candidate.rowIndex,
+            rowPath = candidate.rowTarget.path.childIndices.toList(),
+            displayName = candidate.nameText.orEmpty().trim(),
+            rowBounds = candidate.rowBounds,
+            avatarBounds = avatar
+        )
+    }
+
+    private fun localNodeId(viewId: String): String = viewId.substringAfterLast('/')
+
+    private fun completePendingInboxIdentityBinding(
+        pending: PendingInboxIdentityCapture,
+        identityVerified: Boolean
+    ) {
+        synchronized(inboxIdentityCaptureLock) {
+            if (pendingInboxIdentityCapture !== pending) return
+            val anchorKey = pending.anchor.opaqueKey()
+            if (identityVerified && !pending.platformUserId.isNullOrBlank()) {
+                failedInboxIdentityCaptureKeys.remove(anchorKey)
+                verifiedInboxIdentityByAnchor[anchorKey] = pending.platformUserId!!
+                while (verifiedInboxIdentityByAnchor.size > MAX_INBOX_VERIFIED_IDENTITY_CACHE_ENTRIES) {
+                    val oldest = verifiedInboxIdentityByAnchor.entries.firstOrNull()?.key ?: break
+                    verifiedInboxIdentityByAnchor.remove(oldest)
+                }
+            } else {
+                failedInboxIdentityCaptureKeys += anchorKey
+            }
+            pendingInboxIdentityCapture = null
+        }
+        onLog(
+            if (identityVerified) {
+                "AI 联系人身份采集完成：资料页 ID 已绑定回唯一匹配的原消息行，并由 ContactIdentityManager 确认为 PLATFORM_ID_VERIFIED"
+            } else {
+                "AI 联系人身份采集未完成：返回列表后无法将资料页 ID 唯一绑定到原消息行；不关联任何历史记录"
+            }
+        )
+    }
+
+    /** Returns true while the profile-navigation transaction owns the current foreground page. */
+    private fun inspectPendingInboxIdentityCapture(): Boolean {
+        val pending = pendingInboxIdentityCapture ?: return false
+        val currentActivity = activityClass()
+        val ageMs = System.currentTimeMillis() - pending.lastTransitionAtMs
+
+        when (pending.stage) {
+            InboxIdentityCaptureStage.AVATAR_TAP_PENDING -> {
+                if (ageMs <= INBOX_IDENTITY_TAP_TIMEOUT_MS) return true
+                if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY) {
+                    pending.stage = InboxIdentityCaptureStage.WAITING_PROFILE
+                    pending.lastTransitionAtMs = System.currentTimeMillis()
+                    return true
+                }
+                if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) {
+                    failPendingInboxIdentityCapture(pending, "头像点击后未观察到完成回调或资料页导航")
+                    return false
+                }
+                return true
+            }
+
+            InboxIdentityCaptureStage.WAITING_PROFILE -> {
+                if (currentActivity != MomoSayHiPageContract.PROFILE_ACTIVITY) {
+                    if (ageMs <= SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
+                    if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) {
+                        failPendingInboxIdentityCapture(pending, "头像点击后未进入已确认的个人资料页")
+                        return false
+                    }
+                    return true
+                }
+
+                if (pending.backAttempts >= MAX_SAYHI_PROFILE_BACK_ATTEMPTS) return true
+
+                val dialogObservation = latestDialogWindowObservation()
+                if (dialogObservation != null &&
+                    rootAccess.isTargetWindowPresent(dialogObservation.windowId) != false
+                ) {
+                    val back = submitVerifiedProfileBackNavigation() ?: return true
+                    pending.backAttempts++
+                    pending.lastTransitionAtMs = System.currentTimeMillis()
+                    // As in Received Greetings, dismiss a verified overlay first; only the next
+                    // clean profile observation may be parsed and returned from.
+                    if (!back.dialogHPresent) {
+                        pending.stage = InboxIdentityCaptureStage.WAITING_LIST_RETURN
+                    }
+                    return true
+                }
+
+                if (!pending.profileReadCompleted) {
+                    val tree = accessibilityGateway.inspectActiveWindow(
+                        TreeInspectionRequest(
+                            maxNodes = 1_800,
+                            maxDepth = 48,
+                            maxDurationMs = 1_000L,
+                            allowVisibleWindowFallback = false,
+                            textCapture = NodeTextCapture.EPHEMERAL
+                        )
+                    )
+                    if (tree == null || tree.truncated || tree.window.packageName != targetPackage ||
+                        tree.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
+                        !accessibilityGateway.isWindowCurrent(tree.window)
+                    ) {
+                        if (ageMs <= SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
+                        pending.profileReadCompleted = true
+                    } else {
+                        val profileNameMatches = inboxProfileNameMatches(tree, pending.anchor.displayName)
+                        val readout = if (profileNameMatches) {
+                            MomoSayHiPlatformIdentityParser.parse(tree.nodes)
+                        } else {
+                            MomoSayHiPlatformIdentityReadout(
+                                value = null,
+                                status = MomoSayHiPlatformIdentityStatus.MISSING,
+                                candidateCount = 0,
+                                source = "PROFILE_NAME_MISMATCH"
+                            )
+                        }
+                        pending.platformUserId = readout.value.takeIf {
+                            readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED
+                        }
+                        pending.profileReadCompleted = true
+                        onLog(
+                            if (pending.platformUserId != null) {
+                                "AI 联系人身份采集：资料页昵称与原消息行一致，现有陌陌资料页解析器确认唯一平台 ID；原始 ID 不写入运行日志"
+                            } else {
+                                "AI 联系人身份采集：资料页身份未通过唯一 ID 或昵称交叉验证；不关联历史会话"
+                            }
+                        )
+                    }
+                }
+
+                val back = submitVerifiedProfileBackNavigation() ?: return true
+                pending.backAttempts++
+                pending.lastTransitionAtMs = System.currentTimeMillis()
+                if (!back.dialogHPresent) {
+                    pending.stage = InboxIdentityCaptureStage.WAITING_LIST_RETURN
+                }
+                return true
+            }
+
+            InboxIdentityCaptureStage.WAITING_LIST_RETURN -> {
+                if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) return false
+                if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY &&
+                    ageMs > SAYHI_PROFILE_PAGE_TIMEOUT_MS &&
+                    pending.backAttempts < MAX_SAYHI_PROFILE_BACK_ATTEMPTS
+                ) {
+                    // A submitted BACK is not proof that the profile was left. Allow one more
+                    // independently revalidated, popup-safe attempt after the bounded wait.
+                    val back = submitVerifiedProfileBackNavigation() ?: return true
+                    pending.backAttempts++
+                    pending.lastTransitionAtMs = System.currentTimeMillis()
+                    if (back.dialogHPresent) {
+                        pending.stage = InboxIdentityCaptureStage.WAITING_PROFILE
+                    }
+                }
+                return true
+            }
+        }
+    }
+
+    private fun inboxProfileNameMatches(
+        tree: AccessibilityTreeSnapshot,
+        expectedName: String
+    ): Boolean {
+        if (tree.nodes.none { localNodeId(it.viewId) == "personal_profile_photo_fl" && it.visible } ||
+            tree.nodes.none { localNodeId(it.viewId) == "user_profile_view_pager" && it.visible } ||
+            tree.nodes.none { localNodeId(it.viewId) == "pagertabcontent" && it.visible }
+        ) return false
+        fun uniqueName(id: String): String? {
+            val matches = tree.nodes.filter {
+                localNodeId(it.viewId) == id && it.visible &&
+                    it.className.substringAfterLast('.') == "TextView"
+            }
+            return matches.singleOrNull()?.text?.trim()?.takeIf(String::isNotBlank)
+        }
+        val profileName = uniqueName("personal_profile_name") ?: return false
+        val toolbarName = uniqueName("toolbar_title") ?: return false
+        val expected = normalizeIdentityDisplayName(expectedName)
+        return expected.isNotBlank() &&
+            normalizeIdentityDisplayName(profileName) == expected &&
+            normalizeIdentityDisplayName(toolbarName) == expected &&
+            normalizeIdentityDisplayName(profileName) == normalizeIdentityDisplayName(toolbarName)
+    }
+
+    private fun failPendingInboxIdentityCapture(
+        pending: PendingInboxIdentityCapture,
+        reason: String
+    ) {
+        synchronized(inboxIdentityCaptureLock) {
+            if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
+            failedInboxIdentityCaptureKeys += pending.anchor.opaqueKey()
+        }
+        onLog("AI 联系人身份采集失败：$reason；保留未验证身份，不以昵称关联历史")
+    }
+
     override fun beginSessionManagement(): String? = runCatching {
+        synchronized(inboxIdentityCaptureLock) {
+            pendingInboxIdentityCapture = null
+            failedInboxIdentityCaptureKeys.clear()
+            verifiedInboxIdentityByAnchor.clear()
+        }
         sessionComponents.sampleStore.beginRun()
     }.onFailure { error ->
         diagnostics.recordException(
@@ -4494,8 +4962,14 @@ internal class MomoSocialAdapter(
         sessionComponents.sampleStore.recordAccessibilityEvent(event)
     }
 
-    override fun finishSessionManagement(): String? =
-        runCatching { sessionComponents.sampleStore.finishRun() }.getOrNull()
+    override fun finishSessionManagement(): String? {
+        synchronized(inboxIdentityCaptureLock) {
+            pendingInboxIdentityCapture = null
+            failedInboxIdentityCaptureKeys.clear()
+            verifiedInboxIdentityByAnchor.clear()
+        }
+        return runCatching { sessionComponents.sampleStore.finishRun() }.getOrNull()
+    }
 
     override fun blockSessionIdentityKey(sessionKey: String) {
         sessionComponents.sampleStore.blockSessionIdentityKey(sessionKey)
@@ -5094,6 +5568,8 @@ internal class MomoSocialAdapter(
         private const val SAYHI_ROW_DETAIL_VERIFY_TIMEOUT_MS = 8_000L
         private const val SAYHI_CLICK_EVENT_SETTLE_MS = 700L
         private const val SAYHI_PROFILE_PAGE_TIMEOUT_MS = 6_000L
+        private const val INBOX_IDENTITY_TAP_TIMEOUT_MS = 6_000L
+        private const val MAX_INBOX_VERIFIED_IDENTITY_CACHE_ENTRIES = 256
         private const val SAYHI_PROFILE_SCROLL_TIMEOUT_MS = 8_000L
         private const val SAYHI_PROFILE_SCROLL_SETTLE_MS = 500L
         private const val SAYHI_PROFILE_IDENTITY_SCROLL_DURATION_MS = 520L
@@ -5179,3 +5655,12 @@ internal class MomoSocialAdapter(
         )
     }
 }
+
+private fun normalizeIdentityDisplayName(value: String?): String =
+    java.text.Normalizer.normalize(value.orEmpty().trim(), java.text.Normalizer.Form.NFC)
+        .replace(Regex("\\s+"), " ")
+
+private fun sha256IdentityAnchor(value: String): String =
+    java.security.MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }

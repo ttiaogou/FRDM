@@ -148,6 +148,26 @@ class MomoSayHiPlatformIdentityParserTest {
         assertEquals(1, result.candidateCount)
     }
 
+    @Test fun observedProfileLayoutRecognizesConfirmedMomoPlatformId830936401() {
+        val idRowPath = listOf(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 6)
+        val result = MomoSayHiPlatformIdentityParser.parse(
+            listOf(
+                // Demographic rows also use TextView[id=name], but lack the verified ID-row
+                // parent contract and therefore must not become platform identity candidates.
+                structuralNode(idRowPath.dropLast(1), "android.widget.LinearLayout", clickable = true,
+                    longClickable = true, childCount = 2),
+                structuralNode(idRowPath.dropLast(1) + 0, "android.widget.ImageView", "com.immomo.momo:id/icon"),
+                structuralNode(idRowPath, "android.widget.TextView", "com.immomo.momo:id/name", "830936401"),
+                structuralNode(listOf(8, 0), "android.widget.TextView", "com.immomo.momo:id/name", "身高176cm"),
+                structuralNode(listOf(8, 1), "android.widget.TextView", "com.immomo.momo:id/name", "Lv29")
+            )
+        )
+
+        assertEquals(MomoSayHiPlatformIdentityStatus.CONFIRMED, result.status)
+        assertEquals("830936401", result.value)
+        assertEquals(1, result.candidateCount)
+    }
+
     @Test fun explicitIdResourceViewIsAcceptedButInvisibleNodeIsIgnored() {
         val visible = MomoSayHiPlatformIdentityParser.parse(
             listOf(node("com.immomo.momo:id/tv_user_id", "abc12345"))

@@ -28,6 +28,7 @@ import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
+import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatUnreadStatus
@@ -2143,6 +2144,42 @@ class AiReplyObservationRuntime(
 
     private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) {
         if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID)) return
+
+        val candidateIdentity = candidate.contactIdentity
+        val hasVerifiedPlatformIdentity = candidateIdentity?.let {
+            it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                !it.contactId.isNullOrBlank()
+        } == true
+        if (candidate.selectionClass == "PRIVATE_CHAT" && !hasVerifiedPlatformIdentity) {
+            val captureResult = runCatching {
+                chatSessionManagementPort.requestContactIdentityCapture(candidate)
+            }.getOrDefault(ContactIdentityCaptureRequestResult.RETRY_LATER)
+            when (captureResult) {
+                ContactIdentityCaptureRequestResult.STARTED,
+                ContactIdentityCaptureRequestResult.IN_PROGRESS -> {
+                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                    onLog("AI 会话身份采集：目标联系人尚无已验证平台 ID；已请求头像资料采集，暂不打开会话或读取跨会话历史")
+                    scheduleFullInspectionAfter(350L)
+                    return
+                }
+                ContactIdentityCaptureRequestResult.RETRY_LATER -> {
+                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                    onLog("AI 会话身份采集：当前消息列表快照或窗口暂不满足采集条件；等待新快照，不使用旧坐标")
+                    scheduleFullInspectionAfter(500L)
+                    return
+                }
+                ContactIdentityCaptureRequestResult.REJECTED -> {
+                    val identityKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
+                    privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys += identityKey
+                    chatSessionManagementPort.blockSessionIdentityKey(identityKey)
+                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                    onLog("AI 会话身份采集[REJECTED]：无法安全确认平台用户 ID；本轮跳过该名称候选，不以昵称关联历史")
+                    scheduleFullInspectionAfter(350L)
+                    return
+                }
+                ContactIdentityCaptureRequestResult.NOT_SUPPORTED -> Unit
+            }
+        }
 
         val actionGeneration = sessionActionGeneration
         val attempt = privateMessagesTaskExecutor.openSession(
