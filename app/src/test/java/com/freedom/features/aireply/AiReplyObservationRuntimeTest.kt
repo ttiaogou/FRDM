@@ -149,7 +149,7 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.receivedGreetingsIdleSteps)
         assertEquals(0, port.receivedGreetingsNavigationTaskStarts)
         assertEquals("AI_REPLY_RECEIVED_GREETINGS", taskCoordinator.activeTaskId())
-        assertTrue(logs.any { it.contains("收到的招呼人工任务[STARTED]") })
+        assertTrue(logs.any { it.contains("收到的招呼任务[STARTED]") })
 
         // Option A: completion releases automation ownership but never navigates away.
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
@@ -224,7 +224,7 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.receivedGreetingsIdleSteps)
         assertEquals(0, port.receivedGreetingsNavigationTaskStarts)
         assertEquals(0, gestures)
-        assertTrue(logs.any { it.contains("收到的招呼人工任务[STARTED]") })
+        assertTrue(logs.any { it.contains("收到的招呼任务[STARTED]") })
     }
 
     @Test
@@ -280,7 +280,7 @@ class AiReplyObservationRuntimeTest {
 
             assertEquals("Stable list must start the task for $origin", 1, port.receivedGreetingsCurrentListStartAttempts)
             assertEquals(1, port.receivedGreetingsIdleSteps)
-            assertTrue(logs.any { it.contains("收到的招呼人工任务[STARTED]") })
+            assertTrue(logs.any { it.contains("收到的招呼任务[STARTED]") })
         }
     }
 
@@ -334,7 +334,7 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
         assertEquals(1, port.receivedGreetingsIdleSteps)
         assertTrue(logs.any { it.contains("收到的招呼页面观察[LOW_FREQUENCY_CHECK]") })
-        assertTrue(logs.any { it.contains("收到的招呼人工任务[STARTED]") })
+        assertTrue(logs.any { it.contains("收到的招呼任务[STARTED]") })
     }
 
     @Test
