@@ -11,7 +11,6 @@ import com.freedom.core.accessibility.events.InputOriginEvidence
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.TaskCoordinator
-import com.freedom.core.runtime.TaskLease
 import com.freedom.core.runtime.UnknownInteractionArbiter
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
@@ -120,8 +119,8 @@ class AiReplyObservationRuntime(
         private const val MAX_ARCHIVED_MANUAL_MESSAGE_FINGERPRINTS = 500
         private const val SESSION_TAP_DURATION_MS = 90L
         private const val SESSION_SCROLL_DURATION_MS = 480L
-        private const val PRIVATE_MESSAGES_TASK_ID = "AI_REPLY_PRIVATE_MESSAGES"
-        private const val RECEIVED_GREETINGS_TASK_ID = "AI_REPLY_RECEIVED_GREETINGS"
+        private const val PRIVATE_MESSAGES_TASK_ID = PrivateMessagesTaskController.TASK_ID
+        private const val RECEIVED_GREETINGS_TASK_ID = ReceivedGreetingsTaskController.TASK_ID
         private val PREEMPTIVE_INTERACTION_EVENT_TYPES = setOf(
             AccessibilityEventType.VIEW_CLICKED,
             AccessibilityEventType.VIEW_LONG_CLICKED,
@@ -141,6 +140,27 @@ class AiReplyObservationRuntime(
             AccessibilityEventType.VIEW_TEXT_CHANGED
         )
     }
+
+    private val taskOwnership = AiReplyTaskOwnership(
+        coordinator = taskCoordinator,
+        currentRunGeneration = currentRunGeneration,
+        onLog = onLog
+    )
+    private val privateMessagesTaskController = PrivateMessagesTaskController(
+        ownership = taskOwnership,
+        chooseRandomInt = chooseRandomInt
+    )
+    private val receivedGreetingsTaskController = ReceivedGreetingsTaskController(taskOwnership)
+    private val normalCompletedObservationCount: Int
+        get() = privateMessagesTaskController.completedObservationCount
+    private val normalInboxTaskTargetCount: Int
+        get() = privateMessagesTaskController.targetObservationCount
+    private val receivedGreetingsTaskActive: Boolean
+        get() = receivedGreetingsTaskController.isActive
+    private val receivedGreetingsTaskCompletedAwaitingUserExit: Boolean
+        get() = receivedGreetingsTaskController.completedAwaitingUserExit
+    private val awaitingNormalInboxAfterGreetingsReturn: Boolean
+        get() = receivedGreetingsTaskController.awaitingNormalInboxAfterReturn
 
     private var pageInspectionTask: ScheduledTask? = null
     private var regionRefreshTask: ScheduledTask? = null
@@ -281,9 +301,6 @@ class AiReplyObservationRuntime(
     }
 
     private var sessionManagerState = SessionManagerState.STOPPED
-    private var taskLease: TaskLease? = null
-    /** Captured once per AI run so callbacks from an older run cannot renew ownership. */
-    private var taskRunGeneration: Long? = null
     private var sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
     private var sessionListAtTop = false
     /** Archive lifecycle is independent from the optional automatic session traversal state. */
@@ -314,10 +331,7 @@ class AiReplyObservationRuntime(
     /** Names colliding within a visible list snapshot stay blocked for the entire run. */
     private val ambiguousSessionIdentityKeys = LinkedHashSet<String>()
     private var sessionActionCount = 0
-    /** Simulated private-task completion count; it never represents an actual sent reply. */
-    private var normalCompletedObservationCount = 0
-    /** Simulated successful-reply quota for the current private-message task; no messages are sent. */
-    private var normalInboxTaskTargetCount = 0
+    /** Private-message quota state is owned by PrivateMessagesTaskController. */
     private var initialInboxPositionCheckCompleted = false
     /** True only after Android reports completion of the mandatory first upward list swipe. */
     private var initialUnreadGateSwipeCompleted = false
@@ -327,13 +341,8 @@ class AiReplyObservationRuntime(
     private var lockedUnreadSetFinalized = false
     private var normalInboxHadUnread = false
     private var normalInboxUnreadStateUnknown = false
-    private var receivedGreetingsTaskActive = false
     /** Set by relevant target-app page-change events; probe admission never consults InputOrigin. */
     private var receivedGreetingsPageProbePending = false
-    /** A completed greetings task stays on its list until the user leaves that page. */
-    private var receivedGreetingsTaskCompletedAwaitingUserExit = false
-    private var awaitingNormalInboxAfterGreetingsReturn = false
-    private var receivedGreetingsPageRetryCount = 0
     private var sessionListStabilityRetryCount = 0
     /** Short-lived empty accessibility roots are retried without replacing the last confirmed page. */
     private val transientEmptySnapshotRecovery = AiReplySessionTraversalCoordinator(
@@ -491,7 +500,7 @@ class AiReplyObservationRuntime(
                     chatPagePort.returnFromReceivedGreetingsForPriorityCheck()
                 }.getOrDefault(false)
                 if (returned) {
-                    awaitingNormalInboxAfterGreetingsReturn = true
+                    receivedGreetingsTaskController.markAwaitingNormalInboxAfterReturn()
                     sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                     onLog("收到的招呼遍历已通过适配器完整性检查；已请求返回普通消息页，等待页面身份复核")
                     scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
@@ -526,7 +535,7 @@ class AiReplyObservationRuntime(
                         )
                     }
                 } else {
-                    receivedGreetingsPageRetryCount = 0
+                    receivedGreetingsTaskController.resetRecoveryRetryCount()
                     when (nextStatus) {
                         ReceivedGreetingsTraversalStatus.COMPLETE -> {
                             if (completeReceivedGreetingsTaskAtCurrentPage()) return
@@ -535,7 +544,7 @@ class AiReplyObservationRuntime(
                                 chatPagePort.returnFromReceivedGreetingsForPriorityCheck()
                             }.getOrDefault(false)
                             if (returned) {
-                                awaitingNormalInboxAfterGreetingsReturn = true
+                                receivedGreetingsTaskController.markAwaitingNormalInboxAfterReturn()
                                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                                 scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
                             } else {
@@ -605,12 +614,9 @@ class AiReplyObservationRuntime(
             ChatPageKind.CHAT_LIST -> {
                 when {
                     sessionRunStarted && !automationYieldedToUser && awaitingNormalInboxAfterGreetingsReturn -> {
-                        awaitingNormalInboxAfterGreetingsReturn = false
-                        receivedGreetingsTaskActive = false
-                        receivedGreetingsPageRetryCount = 0
+                        receivedGreetingsTaskController.markTraversalReturnedToInbox()
                         sessionActionCount = 0
-                        normalCompletedObservationCount = 0
-                        normalInboxTaskTargetCount = chooseRandomInt(5, 11).coerceIn(5, 11)
+                        privateMessagesTaskController.resetQuota()
                         // The greeting branch returned to the already-established inbox context.
                         // Start a fresh quota/identity set without replaying the startup admission swipe.
                         lockedUnreadSessionKeys.clear()
@@ -711,7 +717,7 @@ class AiReplyObservationRuntime(
                             )
                         }
                         traversalStatus == ReceivedGreetingsTraversalStatus.SCANNING -> {
-                            receivedGreetingsPageRetryCount = 0
+                            receivedGreetingsTaskController.resetRecoveryRetryCount()
                             onLog("收到的招呼只读测试：已验证列表页面；优先采集未读行头像身份和聊天详情 OCR，完成后再滚动；不回复")
                             scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                         }
@@ -721,7 +727,7 @@ class AiReplyObservationRuntime(
                                 chatPagePort.returnFromReceivedGreetingsForPriorityCheck()
                             }.getOrDefault(false)
                             if (returned) {
-                                awaitingNormalInboxAfterGreetingsReturn = true
+                                receivedGreetingsTaskController.markAwaitingNormalInboxAfterReturn()
                                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                                 onLog("收到的招呼测试遍历：列表扫描到达边界；已请求返回普通消息页，等待页面身份复核")
                                 scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
@@ -1317,7 +1323,7 @@ class AiReplyObservationRuntime(
                         onLog("私人消息任务恢复暂停[OWNERSHIP_REJECTED]：用户已返回消息列表，但未取得 UI 操作权")
                         return
                     }
-                    receivedGreetingsTaskCompletedAwaitingUserExit = false
+                    receivedGreetingsTaskController.acknowledgeCompletedTaskExit()
                     sessionActionGeneration += 1L
                     onLog("收到的招呼人工任务[USER_RETURNED_TO_INBOX]：已确认用户返回消息列表；重新取得 UI 操作权并交还现有私人消息恢复流程")
                 } else {
@@ -2267,8 +2273,7 @@ class AiReplyObservationRuntime(
         startupReadinessCoordinator.resetState(sessionStarted = false)
         userHandoffCanResumeAutonomous = false
         sessionManagerState = SessionManagerState.STOPPED
-        releaseTaskOwnership("运行时重置：$reason")
-        taskRunGeneration = null
+        taskOwnership.reset("运行时重置：$reason")
         sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
         sessionListAtTop = false
         currentSessionKey = null
@@ -2286,19 +2291,15 @@ class AiReplyObservationRuntime(
         temporaryContactMessageLedger.clearAll()
         pendingInterceptionContactKeys.clear()
         sessionActionCount = 0
-        normalCompletedObservationCount = 0
-        normalInboxTaskTargetCount = chooseRandomInt(5, 11).coerceIn(5, 11)
-        awaitingNormalInboxAfterGreetingsReturn = false
+        privateMessagesTaskController.resetQuota()
+        receivedGreetingsTaskController.reset()
         initialInboxPositionCheckCompleted = false
         initialUnreadGateSwipeCompleted = false
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
         normalInboxHadUnread = false
         normalInboxUnreadStateUnknown = false
-        receivedGreetingsTaskActive = false
         receivedGreetingsPageProbePending = false
-        receivedGreetingsTaskCompletedAwaitingUserExit = false
-        receivedGreetingsPageRetryCount = 0
         sessionListStabilityRetryCount = 0
         lastUnreadAuditFingerprint = ""
         noProgressScrollCount = 0
@@ -2309,57 +2310,27 @@ class AiReplyObservationRuntime(
     }
 
     /**
-     * Claim or atomically transfer the shared task/UI lease. Read-only page observations do not
-     * require a lease; every autonomous task start does.
+     * Route ownership requests through the controller that owns the requested business task.
+     * Read-only page observations remain outside the UI-operation lease.
      */
-    private fun claimTaskOwnership(taskId: String, reason: String): Boolean {
-        val coordinator = taskCoordinator ?: return true
-        val runGeneration = taskRunGeneration ?: currentRunGeneration().also {
-            taskRunGeneration = it
-        }
-        val current = taskLease
-        val next = when {
-            current == null -> coordinator.tryAcquire(taskId, runGeneration)
-            coordinator.isCurrent(current) && current.taskId == taskId -> current
-            coordinator.isCurrent(current) -> coordinator.transfer(current, taskId)
-            else -> {
-                taskLease = null
-                coordinator.tryAcquire(taskId, runGeneration)
-            }
-        }
-        if (next == null) {
-            onLog(
-                "任务协调[REJECTED]：task=$taskId；reason=$reason；" +
-                    "activeTask=${coordinator.activeTaskId() ?: "NONE"}；runGeneration=$runGeneration"
-            )
-            return false
-        }
-        taskLease = next
-        onLog(
-            "任务协调[OWNED]：task=$taskId；reason=$reason；" +
-                "runGeneration=${next.runGeneration}；lease 已确认"
-        )
-        return true
+    private fun claimTaskOwnership(taskId: String, reason: String): Boolean = when (taskId) {
+        PrivateMessagesTaskController.TASK_ID -> privateMessagesTaskController.claimOwnership(reason)
+        ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskController.claimOwnership(reason)
+        else -> false
     }
 
-    private fun ownsTask(taskId: String): Boolean {
-        val coordinator = taskCoordinator ?: return true
-        val lease = taskLease ?: return false
-        return lease.taskId == taskId && coordinator.isCurrent(lease)
+    private fun ownsTask(taskId: String): Boolean = when (taskId) {
+        PrivateMessagesTaskController.TASK_ID -> privateMessagesTaskController.ownsTask()
+        ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskController.ownsTask()
+        else -> false
     }
 
     private fun releaseTaskOwnership(reason: String) {
-        val coordinator = taskCoordinator ?: return
-        val lease = taskLease ?: return
-        val released = coordinator.release(lease)
-        taskLease = null
-        onLog(
-            if (released) {
-                "任务协调[RELEASED]：task=${lease.taskId}；reason=$reason；已释放 UI 操作权"
-            } else {
-                "任务协调[STALE_RELEASE_IGNORED]：task=${lease.taskId}；reason=$reason；租约已过期或已转交"
-            }
-        )
+        when (taskOwnership.activeTaskId()) {
+            PrivateMessagesTaskController.TASK_ID -> privateMessagesTaskController.releaseOwnership(reason)
+            ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskController.releaseOwnership(reason)
+            else -> taskOwnership.releaseCurrent(reason)
+        }
     }
 
     /**
@@ -2408,25 +2379,21 @@ class AiReplyObservationRuntime(
         // In passive-only mode, archive creation must not implicitly start inbox scrolling or
         // opening. Keep legacy traversal available for explicit/internal callers only.
         sessionRunStarted = sampleCaptureActive && !passiveOnly
-        taskRunGeneration = currentRunGeneration()
+        privateMessagesTaskController.beginRun(currentRunGeneration())
         if (sessionRunStarted && !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动私人消息任务")) {
             sessionRunStarted = false
             onLog("AI Reply 启动暂停：私人消息任务未取得唯一 UI 操作权；不会执行自动滚动或打开会话")
         }
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
-        normalCompletedObservationCount = 0
-        normalInboxTaskTargetCount = chooseRandomInt(5, 11).coerceIn(5, 11)
-        awaitingNormalInboxAfterGreetingsReturn = false
+        privateMessagesTaskController.resetQuota()
+        receivedGreetingsTaskController.reset()
         initialInboxPositionCheckCompleted = false
         initialUnreadGateSwipeCompleted = false
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
         normalInboxHadUnread = false
         normalInboxUnreadStateUnknown = false
-        receivedGreetingsTaskActive = false
         receivedGreetingsPageProbePending = false
-        receivedGreetingsTaskCompletedAwaitingUserExit = false
-        receivedGreetingsPageRetryCount = 0
         pageObservationCoordinator.resetReceivedGreetingsWatch()
         sessionActionCount = 0
         userHandoffCanResumeAutonomous = false
@@ -3123,9 +3090,9 @@ class AiReplyObservationRuntime(
             currentSessionWindowKey = null
             sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
             if (observationCompleted) {
-                normalCompletedObservationCount += 1
-                onLog("AI Reply 模拟回复计数：已成功读取并保存的不同私人聊天=$normalCompletedObservationCount/$normalInboxTaskTargetCount；仅模拟计数，未发送消息")
-                if (normalInboxTaskTargetCount > 0 && normalCompletedObservationCount >= normalInboxTaskTargetCount) {
+                val completedObservations = privateMessagesTaskController.recordSuccessfulObservation()
+                onLog("AI Reply 模拟回复计数：已成功读取并保存的不同私人聊天=$completedObservations/$normalInboxTaskTargetCount；仅模拟计数，未发送消息")
+                if (privateMessagesTaskController.quotaReached()) {
                     onLog("AI Reply 私人消息任务达到本轮随机目标；暂停私聊扫描，切换收到的招呼任务")
                     startReceivedGreetingsTask("私人消息成功归档计数达到随机目标 $normalInboxTaskTargetCount")
                     return
@@ -3637,8 +3604,7 @@ class AiReplyObservationRuntime(
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
         val noUnreadFastPath = initialUnreadGateSwipeCompleted && lockedUnreadSessionKeys.isEmpty() &&
             !normalInboxHadUnread && !normalInboxUnreadStateUnknown
-        val quotaReached = normalInboxTaskTargetCount > 0 &&
-            normalCompletedObservationCount >= normalInboxTaskTargetCount
+        val quotaReached = privateMessagesTaskController.quotaReached()
         if ((!noUnreadFastPath && !quotaReached &&
                 (sessionListTraversalPhase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP || !sessionListAtTop)) ||
             normalInboxUnreadStateUnknown
@@ -3660,8 +3626,7 @@ class AiReplyObservationRuntime(
         sessionTransitionTask = null
         val ordinarySessionClickCount = sessionActionCount
         runCatching { chatPagePort.beginReceivedGreetingsNavigationTask() }
-        receivedGreetingsTaskActive = true
-        receivedGreetingsPageRetryCount = 0
+        receivedGreetingsTaskController.markNavigationStarted()
         currentSessionKey = null
         currentSessionWindowKey = null
         currentSessionName = null
@@ -3735,10 +3700,7 @@ class AiReplyObservationRuntime(
         pendingMessageReadSnapshot = null
         messageReadGeneration += 1L
 
-        receivedGreetingsTaskActive = true
-        receivedGreetingsTaskCompletedAwaitingUserExit = false
-        receivedGreetingsPageRetryCount = 0
-        awaitingNormalInboxAfterGreetingsReturn = false
+        receivedGreetingsTaskController.markStarted()
         sessionActionCount = 0
 
         cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
@@ -3778,12 +3740,9 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼任务完成检查被阻止：租约已失效；按安全原则保持当前页面，不执行返回导航")
             return true
         }
-        receivedGreetingsTaskActive = false
-        receivedGreetingsTaskCompletedAwaitingUserExit = true
+        receivedGreetingsTaskController.markCompletedAwaitingUserExit()
         sessionActionGeneration += 1L
         releaseTaskOwnership("收到的招呼任务完成；保持当前页面等待用户离开")
-        receivedGreetingsPageRetryCount = 0
-        awaitingNormalInboxAfterGreetingsReturn = false
         cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
         userControlPhase = UserControlPhase.IDLE
         pendingUserPageInspection = false
@@ -4781,10 +4740,10 @@ class AiReplyObservationRuntime(
         if (!sessionRunStarted || !receivedGreetingsTaskActive ||
             sessionManagerState != SessionManagerState.BROWSING_RECEIVED_GREETINGS
         ) return
-        receivedGreetingsPageRetryCount++
-        val delayMs = ReceivedGreetingsRetrySchedule.delayForRetry(receivedGreetingsPageRetryCount)
+        val retryCount = receivedGreetingsTaskController.nextRecoveryRetryCount()
+        val delayMs = ReceivedGreetingsRetrySchedule.delayForRetry(retryCount)
         onLog(
-            "收到的招呼自动恢复[RETRY]：$reason；第${receivedGreetingsPageRetryCount}次新鲜快照复核；" +
+            "收到的招呼自动恢复[RETRY]：$reason；第${retryCount}次新鲜快照复核；" +
                 "delay=${delayMs}ms；任务和当前用户进度保持不变"
         )
         scheduleFullInspectionAfter(delayMs)
