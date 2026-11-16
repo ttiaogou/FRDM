@@ -10,6 +10,8 @@ import com.freedom.core.accessibility.events.InputOriginDecision
 import com.freedom.core.accessibility.events.InputOriginEvidence
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
+import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.TaskLease
 import com.freedom.core.runtime.UnknownInteractionArbiter
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
@@ -65,7 +67,10 @@ class AiReplyObservationRuntime(
     /** Inclusive random bounds are injectable so task scheduling can be tested deterministically. */
     private val chooseRandomInt: (Int, Int) -> Int = { minimum, maximum ->
         java.util.concurrent.ThreadLocalRandom.current().nextInt(minimum, maximum + 1)
-    }
+    },
+    /** Shared task/UI ownership; nullable only for isolated legacy unit fixtures. */
+    private val taskCoordinator: TaskCoordinator? = null,
+    private val currentRunGeneration: () -> Long = { 0L }
 ) {
     companion object {
         private const val MAX_LOGGED_STRUCTURE_EVIDENCE = 256
@@ -115,6 +120,8 @@ class AiReplyObservationRuntime(
         private const val MAX_ARCHIVED_MANUAL_MESSAGE_FINGERPRINTS = 500
         private const val SESSION_TAP_DURATION_MS = 90L
         private const val SESSION_SCROLL_DURATION_MS = 480L
+        private const val PRIVATE_MESSAGES_TASK_ID = "AI_REPLY_PRIVATE_MESSAGES"
+        private const val RECEIVED_GREETINGS_TASK_ID = "AI_REPLY_RECEIVED_GREETINGS"
         private val PREEMPTIVE_INTERACTION_EVENT_TYPES = setOf(
             AccessibilityEventType.VIEW_CLICKED,
             AccessibilityEventType.VIEW_LONG_CLICKED,
@@ -274,6 +281,9 @@ class AiReplyObservationRuntime(
     }
 
     private var sessionManagerState = SessionManagerState.STOPPED
+    private var taskLease: TaskLease? = null
+    /** Captured once per AI run so callbacks from an older run cannot renew ownership. */
+    private var taskRunGeneration: Long? = null
     private var sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
     private var sessionListAtTop = false
     /** Archive lifecycle is independent from the optional automatic session traversal state. */
@@ -382,6 +392,13 @@ class AiReplyObservationRuntime(
     private fun runFullInspection() {
         pageInspectionTask = null
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
+        if (sessionRunStarted && receivedGreetingsTaskActive &&
+            !ownsTask(RECEIVED_GREETINGS_TASK_ID)
+        ) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("收到的招呼任务观察被阻止：当前任务已不持有 UI 操作权；等待安全恢复")
+            return
+        }
         if (userControlPhase != UserControlPhase.IDLE) {
             pendingUserPageInspection = true
             return
@@ -410,6 +427,18 @@ class AiReplyObservationRuntime(
 
     /** Applies a newly acquired page snapshot after ordinary debounce or verified user stability. */
     private fun handleInspectionSnapshot(incomingInspection: ChatPageSnapshot) {
+        if (sessionRunStarted && !receivedGreetingsTaskCompletedAwaitingUserExit) {
+            val requiredTask = if (receivedGreetingsTaskActive) {
+                RECEIVED_GREETINGS_TASK_ID
+            } else {
+                PRIVATE_MESSAGES_TASK_ID
+            }
+            if (!ownsTask(requiredTask)) {
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("页面状态机处理被阻止：当前任务未持有 UI 操作权；task=$requiredTask；仅保留只读页面观察")
+                return
+            }
+        }
         val previous = lastPageInspection
         val inspection = stabilizeIncomingPageSnapshot(incomingInspection)
         if (previous != null && inboxPageRecognizer.isChatDetail(previous) &&
@@ -1283,8 +1312,14 @@ class AiReplyObservationRuntime(
                     current.messageTabPositionKey() != null &&
                     current.messageTabAnchorPositionKey() != null
                 ) {
+                    if (!claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "用户返回消息列表后恢复私人消息任务")) {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("私人消息任务恢复暂停[OWNERSHIP_REJECTED]：用户已返回消息列表，但未取得 UI 操作权")
+                        return
+                    }
                     receivedGreetingsTaskCompletedAwaitingUserExit = false
-                    onLog("收到的招呼人工任务[USER_RETURNED_TO_INBOX]：已确认用户返回消息列表；交还现有私人消息恢复流程")
+                    sessionActionGeneration += 1L
+                    onLog("收到的招呼人工任务[USER_RETURNED_TO_INBOX]：已确认用户返回消息列表；重新取得 UI 操作权并交还现有私人消息恢复流程")
                 } else {
                     holdForReceivedGreetingsPageTransition(arrivalStatus)
                     return
@@ -1355,6 +1390,11 @@ class AiReplyObservationRuntime(
             return
         }
 
+        if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("消息标签保护[OWNERSHIP_REJECTED]：私人消息任务未持有 UI 操作权；不提交导航点击")
+            return
+        }
         val tapBounds = tabTarget.bounds
         val executionContext = gesturePolicy.captureContext(tabTarget.nodeTarget.window) ?: run {
             onLog("消息标签保护[CONTEXT_STALE]：生成点击坐标时的窗口或显示坐标上下文已变化；拒绝派发")
@@ -1381,11 +1421,23 @@ class AiReplyObservationRuntime(
         activeSessionGestureRequestId = request.id
         val actionGeneration = sessionActionGeneration
         val interactionRevision = userControlInteractionRevision
+        if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            messageTabProbeInFlight = false
+            activeSessionGestureRequestId = null
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("消息标签保护[OWNERSHIP_REJECTED]：派发前任务租约已变化；取消导航点击")
+            return
+        }
         val submission = runCatching {
             gesturePolicy.execute(request) { result ->
                 scheduler.schedule(0L) gestureCallback@{
                     if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
                     if (actionGeneration != sessionActionGeneration || cycle != userControlCycle) return@gestureCallback
+                    if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+                        messageTabProbeInFlight = false
+                        onLog("消息标签保护[STALE_CALLBACK_IGNORED]：私人消息任务租约已失效；不继续页面导航验证")
+                        return@gestureCallback
+                    }
                     if (userControlPhase == UserControlPhase.TOUCHING) {
                         messageTabProbeInFlight = false
                         return@gestureCallback
@@ -1881,6 +1933,11 @@ class AiReplyObservationRuntime(
 
     private fun navigateTowardSessionList(snapshot: ChatPageSnapshot) {
         if (userControlNavigationInFlight) return
+        if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 会话恢复导航[OWNERSHIP_REJECTED]：私人消息任务未持有 UI 操作权；保持当前页面")
+            return
+        }
 
         // The social adapter exposes a semantic, freshly verified session-tab target.
         // Provider package names, Activity names and resource IDs never enter this feature.
@@ -1924,12 +1981,24 @@ class AiReplyObservationRuntime(
             userControlNavigationInFlight = true
             activeSessionGestureRequestId = request.id
             val generation = sessionActionGeneration
+            if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+                userControlNavigationInFlight = false
+                activeSessionGestureRequestId = null
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 会话恢复导航[OWNERSHIP_REJECTED]：派发前任务租约已变化；取消消息Tab点击")
+                return
+            }
             val submission = runCatching {
                 gesturePolicy.execute(request) { result ->
                     scheduler.schedule(0L) {
                         if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
                         userControlNavigationInFlight = false
                         if (generation != sessionActionGeneration || !automationYieldedToUser) return@schedule
+                        if (sessionRunStarted && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+                            userControlNavigationInFlight = false
+                            onLog("AI 会话恢复导航[STALE_CALLBACK_IGNORED]：私人消息任务租约已失效；停止后续导航")
+                            return@schedule
+                        }
                         if (result.status == GestureExecutionStatus.COMPLETED) {
                             onLog("AI会话管理恢复导航：消息Tab点击完成；等待页面跳转后重新验证会话列表")
                             scheduleNavigationReverification()
@@ -1970,7 +2039,8 @@ class AiReplyObservationRuntime(
         }
 
         if (chatPagePort.canSafelyNavigateBackToSessionList(snapshot) &&
-            userControlNavigationBackAttempts < MAX_USER_CONTROL_NAVIGATION_BACK_ATTEMPTS
+            userControlNavigationBackAttempts < MAX_USER_CONTROL_NAVIGATION_BACK_ATTEMPTS &&
+            (!sessionRunStarted || ownsTask(PRIVATE_MESSAGES_TASK_ID))
         ) {
             val accepted = runCatching { chatSessionManagementPort.navigateBackToSessionList() }
                 .getOrDefault(false)
@@ -2197,6 +2267,8 @@ class AiReplyObservationRuntime(
         startupReadinessCoordinator.resetState(sessionStarted = false)
         userHandoffCanResumeAutonomous = false
         sessionManagerState = SessionManagerState.STOPPED
+        releaseTaskOwnership("运行时重置：$reason")
+        taskRunGeneration = null
         sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
         sessionListAtTop = false
         currentSessionKey = null
@@ -2234,6 +2306,60 @@ class AiReplyObservationRuntime(
         pendingScrollToTop = false
         lastStableSessionListVisibleKeys = null
         cancelledScrollRecoveryCount = 0
+    }
+
+    /**
+     * Claim or atomically transfer the shared task/UI lease. Read-only page observations do not
+     * require a lease; every autonomous task start does.
+     */
+    private fun claimTaskOwnership(taskId: String, reason: String): Boolean {
+        val coordinator = taskCoordinator ?: return true
+        val runGeneration = taskRunGeneration ?: currentRunGeneration().also {
+            taskRunGeneration = it
+        }
+        val current = taskLease
+        val next = when {
+            current == null -> coordinator.tryAcquire(taskId, runGeneration)
+            coordinator.isCurrent(current) && current.taskId == taskId -> current
+            coordinator.isCurrent(current) -> coordinator.transfer(current, taskId)
+            else -> {
+                taskLease = null
+                coordinator.tryAcquire(taskId, runGeneration)
+            }
+        }
+        if (next == null) {
+            onLog(
+                "任务协调[REJECTED]：task=$taskId；reason=$reason；" +
+                    "activeTask=${coordinator.activeTaskId() ?: "NONE"}；runGeneration=$runGeneration"
+            )
+            return false
+        }
+        taskLease = next
+        onLog(
+            "任务协调[OWNED]：task=$taskId；reason=$reason；" +
+                "runGeneration=${next.runGeneration}；lease 已确认"
+        )
+        return true
+    }
+
+    private fun ownsTask(taskId: String): Boolean {
+        val coordinator = taskCoordinator ?: return true
+        val lease = taskLease ?: return false
+        return lease.taskId == taskId && coordinator.isCurrent(lease)
+    }
+
+    private fun releaseTaskOwnership(reason: String) {
+        val coordinator = taskCoordinator ?: return
+        val lease = taskLease ?: return
+        val released = coordinator.release(lease)
+        taskLease = null
+        onLog(
+            if (released) {
+                "任务协调[RELEASED]：task=${lease.taskId}；reason=$reason；已释放 UI 操作权"
+            } else {
+                "任务协调[STALE_RELEASE_IGNORED]：task=${lease.taskId}；reason=$reason；租约已过期或已转交"
+            }
+        )
     }
 
     /**
@@ -2282,6 +2408,11 @@ class AiReplyObservationRuntime(
         // In passive-only mode, archive creation must not implicitly start inbox scrolling or
         // opening. Keep legacy traversal available for explicit/internal callers only.
         sessionRunStarted = sampleCaptureActive && !passiveOnly
+        taskRunGeneration = currentRunGeneration()
+        if (sessionRunStarted && !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动私人消息任务")) {
+            sessionRunStarted = false
+            onLog("AI Reply 启动暂停：私人消息任务未取得唯一 UI 操作权；不会执行自动滚动或打开会话")
+        }
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         normalCompletedObservationCount = 0
         normalInboxTaskTargetCount = chooseRandomInt(5, 11).coerceIn(5, 11)
@@ -2516,6 +2647,17 @@ class AiReplyObservationRuntime(
      */
     private fun readVisibleMessages(snapshot: ChatPageSnapshot) {
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
+        if (sessionRunStarted) {
+            val requiredTask = if (receivedGreetingsTaskActive) {
+                RECEIVED_GREETINGS_TASK_ID
+            } else {
+                PRIVATE_MESSAGES_TASK_ID
+            }
+            if (!ownsTask(requiredTask)) {
+                onLog("消息详情读取被阻止：当前任务未持有 UI 操作权；task=$requiredTask")
+                return
+            }
+        }
         if (messageReadInFlight) {
             pendingMessageReadSnapshot = snapshot
             return
@@ -2665,6 +2807,17 @@ class AiReplyObservationRuntime(
     }
 
     private fun handleMessageReadBatch(batch: ChatMessageBatch, snapshot: ChatPageSnapshot) {
+        if (sessionRunStarted) {
+            val requiredTask = if (receivedGreetingsTaskActive) {
+                RECEIVED_GREETINGS_TASK_ID
+            } else {
+                PRIVATE_MESSAGES_TASK_ID
+            }
+            if (!ownsTask(requiredTask)) {
+                onLog("消息读取回调[STALE_TASK_IGNORED]：任务租约已失效；不保存样本、不执行后续页面操作；task=$requiredTask")
+                return
+            }
+        }
         // Received-greeting details are an OCR calibration task only. Do not expose their
         // contents to the future AI observer callback and do not enter any reply/send state.
         if (sessionRunStarted && receivedGreetingsTaskActive &&
@@ -2914,6 +3067,10 @@ class AiReplyObservationRuntime(
                 SessionManagerState.PAUSED
             )
         ) return
+        if (!receivedGreetingsTaskActive && !ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            onLog("私人消息列表处理被阻止：当前任务未持有 UI 操作权")
+            return
+        }
 
         // The first list snapshot is a read-only current-position check. It must happen before
         // the positioning phase is allowed to submit any swipe gesture.
@@ -3493,6 +3650,12 @@ class AiReplyObservationRuntime(
             )
             return
         }
+        if (!claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, "切换收到的招呼任务")) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("收到的招呼任务切换暂停：无法原子取得 UI 操作权；不执行入口导航")
+            return
+        }
+        sessionActionGeneration += 1L
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
         val ordinarySessionClickCount = sessionActionCount
@@ -3538,6 +3701,11 @@ class AiReplyObservationRuntime(
             return
         }
         if (userControlPhase == UserControlPhase.TOUCHING) return
+        if (!claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, "接管人工打开的收到招呼列表")) {
+            onLog("收到的招呼人工任务启动[OWNERSHIP_REJECTED]：未取得唯一 UI 操作权；不接管当前页面")
+            return
+        }
+        sessionActionGeneration += 1L
         if (!automationYieldedToUser) {
             beginUserControl("收到的招呼人工列表已连续稳定确认")
             userControlPhase = UserControlPhase.IDLE
@@ -3605,8 +3773,15 @@ class AiReplyObservationRuntime(
      */
     private fun completeReceivedGreetingsTaskAtCurrentPage(): Boolean {
         if (!receivedGreetingsTaskActive) return false
+        if (!ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("收到的招呼任务完成检查被阻止：租约已失效；按安全原则保持当前页面，不执行返回导航")
+            return true
+        }
         receivedGreetingsTaskActive = false
         receivedGreetingsTaskCompletedAwaitingUserExit = true
+        sessionActionGeneration += 1L
+        releaseTaskOwnership("收到的招呼任务完成；保持当前页面等待用户离开")
         receivedGreetingsPageRetryCount = 0
         awaitingNormalInboxAfterGreetingsReturn = false
         cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
@@ -3718,8 +3893,8 @@ class AiReplyObservationRuntime(
     }
 
     private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) {
-        if (!isAiReplyActive() || !sessionRunStarted || automationYieldedToUser ||
-            userControlPhase != UserControlPhase.IDLE
+        if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID) ||
+            automationYieldedToUser || userControlPhase != UserControlPhase.IDLE
         ) return
         val selectedKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
         val refreshed = inspectFreshPageSnapshot()
@@ -3802,6 +3977,11 @@ class AiReplyObservationRuntime(
             description = "AI 会话管理：打开已复核的会话行 ${candidate.rowIndex + 1}",
             executionContext = executionContext
         )
+        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 会话点击[OWNERSHIP_REJECTED]：构造手势后任务租约已变化；拒绝派发旧点击")
+            return
+        }
         currentSessionKey = selectedKey
         synchronized(headerMismatchGuard) {
             headerMismatchRecordedForCurrentAttempt = false
@@ -3880,6 +4060,11 @@ class AiReplyObservationRuntime(
         actionGeneration: Long
     ) {
         if (sessionManagerState != SessionManagerState.OPENING_SESSION) return
+        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 会话点击回调[STALE_CALLBACK_IGNORED]：私人消息任务租约已失效；不推进旧会话状态")
+            return
+        }
         if (result.status == GestureExecutionStatus.DEFERRED) {
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
@@ -3928,6 +4113,11 @@ class AiReplyObservationRuntime(
         if (!isAiReplyActive() || !sessionRunStarted ||
             sessionManagerState != SessionManagerState.OPENING_SESSION
         ) return
+        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 会话打开复核被阻止：私人消息任务租约已失效；不处理旧页面状态")
+            return
+        }
         val current = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
         if (current?.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             current.packageName == targetPackage() &&
@@ -4022,6 +4212,11 @@ class AiReplyObservationRuntime(
      * session list is re-observed, the attempted key keeps this candidate from being tapped again.
      */
     private fun scheduleRejectedSessionReturn(snapshot: ChatPageSnapshot) {
+        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 会话安全返回被阻止：私人消息任务未持有 UI 操作权")
+            return
+        }
         val rejectedWindowKey = windowSessionKey(snapshot)
         if (snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
             snapshot.packageName != targetPackage() || rejectedWindowKey == null || currentSessionKey == null
@@ -4039,6 +4234,11 @@ class AiReplyObservationRuntime(
             if (!isAiReplyActive() || !sessionRunStarted ||
                 sessionManagerState != SessionManagerState.RETURNING_TO_SESSION_LIST
             ) return@rejectedReturn
+            if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 会话安全返回[STALE_TASK_IGNORED]：私人消息任务租约已失效；不提交返回动作")
+                return@rejectedReturn
+            }
 
             val current = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
@@ -4084,12 +4284,22 @@ class AiReplyObservationRuntime(
 
     private fun scheduleReturnToSessionList(snapshot: ChatPageSnapshot) {
         if (sessionManagerState != SessionManagerState.READING_SESSION) return
+        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 会话返回被阻止：私人消息任务未持有 UI 操作权")
+            return
+        }
         sessionTransitionTask?.cancel()
         sessionTransitionTask = scheduler.schedule(SESSION_RETURN_DELAY_MS) {
             sessionTransitionTask = null
             if (!isAiReplyActive() || !sessionRunStarted ||
                 sessionManagerState != SessionManagerState.READING_SESSION
             ) return@schedule
+            if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 会话返回[STALE_TASK_IGNORED]：私人消息任务租约已失效；不提交返回动作")
+                return@schedule
+            }
             val current = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 current.packageName != snapshot.packageName || !hasSameWindowSession(snapshot, current)
@@ -4125,7 +4335,8 @@ class AiReplyObservationRuntime(
         snapshot: ChatPageSnapshot,
         toTop: Boolean = false
     ) {
-        if (!isAiReplyActive() || !sessionRunStarted || automationYieldedToUser ||
+        if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID) ||
+            automationYieldedToUser ||
             userControlPhase != UserControlPhase.IDLE
         ) return
         // Reacquire the active page immediately before scrolling. A previous list snapshot can
@@ -4239,6 +4450,11 @@ class AiReplyObservationRuntime(
             },
             executionContext = executionContext
         )
+        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 会话滚动[OWNERSHIP_REJECTED]：构造手势后任务租约已变化；拒绝派发旧滑动")
+            return
+        }
         val freshAmbiguousIdentityKeys = ChatSessionManagementPolicy.ambiguousSessionIdentityKeys(
             fresh.chatListCandidates
         )
@@ -4280,6 +4496,11 @@ class AiReplyObservationRuntime(
                             "已忽略过期自主滑动回调：commandId=${request.id}；" +
                                 "提交代次=$actionGeneration；当前代次=$sessionActionGeneration；结果=${result.status}"
                         )
+                        return@schedule
+                    }
+                    if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 会话滚动回调[STALE_TASK_IGNORED]：私人消息任务租约已失效；不推进列表状态")
                         return@schedule
                     }
                     if (sessionManagerState != SessionManagerState.SCROLLING_SESSION_LIST) return@schedule

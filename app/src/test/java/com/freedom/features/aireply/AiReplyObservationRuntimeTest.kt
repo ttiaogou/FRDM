@@ -15,6 +15,8 @@ import com.freedom.core.accessibility.events.InputOriginDecision
 import com.freedom.core.accessibility.events.InputOriginEvidence
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
+import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
@@ -100,6 +102,7 @@ class AiReplyObservationRuntimeTest {
         }
         var gestureCount = 0
         val logs = ArrayList<String>()
+        val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             chatPagePort = port,
@@ -118,10 +121,13 @@ class AiReplyObservationRuntimeTest {
             isAiReplyActive = { true },
             onLog = logs::add,
             fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = taskCoordinator,
+            currentRunGeneration = { 5L }
         )
 
         runtime.scheduleInitialObservation(passiveOnly = false)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", taskCoordinator.activeTaskId())
         runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_START, InputOrigin.PHYSICAL_USER))
         runtime.onGlobalTouchEvent(eventWithOrigin(AccessibilityEventType.TOUCH_INTERACTION_END, InputOrigin.PHYSICAL_USER))
         scheduler.runNextWithDelay(180L)
@@ -144,12 +150,14 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
         assertEquals(1, port.receivedGreetingsIdleSteps)
         assertEquals(0, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", taskCoordinator.activeTaskId())
         assertTrue(logs.any { it.contains("收到的招呼人工任务[STARTED]") })
 
         // Option A: completion releases automation ownership but never navigates away.
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
         scheduler.runNextWithDelay(1_300L)
         assertEquals(0, port.receivedGreetingsPriorityReturns)
+        assertNull(taskCoordinator.activeTaskId())
         assertTrue(logs.any { it.contains("收到的招呼任务[COMPLETE_STAY_ON_PAGE]") })
     }
 

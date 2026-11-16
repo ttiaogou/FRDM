@@ -47,6 +47,8 @@ import com.freedom.core.accessibility.gesture.toGestureCoordinateContext
 import com.freedom.core.logging.RunLogCategory
 import com.freedom.core.logging.RunLogLevel
 import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import com.freedom.core.runtime.TargetAppReadinessController
 import com.freedom.data.MonitorStoreRepository
 import com.freedom.data.MonitorStoreSnapshotRepository
@@ -109,6 +111,13 @@ class AppCompositionRoot(context: Context) {
     }
     val sampleArchivePort: SessionSampleArchivePort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MomoChatSampleArchiveDataStore()
+    }
+    /** Shared across the mutually exclusive business modes and AI Reply sub-tasks. */
+    val uiOperationOwnershipCoordinator by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        UiOperationOwnershipCoordinator()
+    }
+    val taskCoordinator by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        TaskCoordinator(uiOperationOwnershipCoordinator)
     }
     val monitorSnapshotRepository: MonitorSnapshotRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MonitorStoreSnapshotRepository(appContext)
@@ -303,7 +312,9 @@ internal class AccessibilityServiceDependencies internal constructor(
                 monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
             },
             onManualReviewRequired = persistManualReviewHold,
-            onRequestScreenOff = requestScreenOff
+            onRequestScreenOff = requestScreenOff,
+            taskCoordinator = taskCoordinator,
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() }
         )
     }
     val accountBrowseWorkflow by lazy(LazyThreadSafetyMode.NONE) {
@@ -337,7 +348,10 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             onReadinessInvalidated = { reason ->
                 targetAppReadinessController.invalidate(reason, SystemClock.uptimeMillis())
-            }
+            },
+            taskCoordinator = taskCoordinator,
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+            onLog = addLog
         )
     }
     val runSessionCoordinator: RunSessionCoordinator by lazy(LazyThreadSafetyMode.NONE) {
