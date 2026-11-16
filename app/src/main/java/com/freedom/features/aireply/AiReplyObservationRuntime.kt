@@ -151,6 +151,18 @@ class AiReplyObservationRuntime(
         chooseRandomInt = chooseRandomInt
     )
     private val receivedGreetingsTaskController = ReceivedGreetingsTaskController(taskOwnership)
+    private val receivedGreetingsTaskExecutor = ReceivedGreetingsTaskExecutor(chatPagePort) {
+        ownsTask(RECEIVED_GREETINGS_TASK_ID)
+    }
+    private val privateMessagesTaskExecutor by lazy(LazyThreadSafetyMode.NONE) {
+        PrivateMessagesTaskExecutor(
+            sessionPort = chatSessionManagementPort,
+            gesturePolicy = gesturePolicy,
+            inspectFreshPageSnapshot = ::inspectFreshPageSnapshot,
+            targetPackage = targetPackage,
+            ownsTask = { ownsTask(PRIVATE_MESSAGES_TASK_ID) }
+        )
+    }
     private val normalCompletedObservationCount: Int
         get() = privateMessagesTaskController.completedObservationCount
     private val normalInboxTaskTargetCount: Int
@@ -168,11 +180,11 @@ class AiReplyObservationRuntime(
     private val receivedGreetingsPageRecognizer by lazy(LazyThreadSafetyMode.NONE) {
         MomoReceivedGreetingsPageRecognizer {
             if (userControlPhase == UserControlPhase.TOUCHING ||
-                !sessionRunStarted || !chatPagePort.supportsReceivedGreetingsIdleWorkflow()
+                !sessionRunStarted || !receivedGreetingsTaskExecutor.supportsWorkflow()
             ) {
                 ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION
             } else {
-                chatPagePort.observeManuallyOpenedReceivedGreetingsPage()
+                receivedGreetingsTaskExecutor.observeManuallyOpenedPage()
             }
         }
     }
@@ -373,7 +385,7 @@ class AiReplyObservationRuntime(
     private fun requestReceivedGreetingsFallbackCheck() {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
             receivedGreetingsTaskCompletedAwaitingUserExit ||
-            !chatPagePort.supportsReceivedGreetingsIdleWorkflow()
+            !receivedGreetingsTaskExecutor.supportsWorkflow()
         ) return
         if (manualReviewIsRequired()) {
             pageObservationCoordinator.resetReceivedGreetingsWatch()
@@ -467,7 +479,7 @@ class AiReplyObservationRuntime(
         if (receivedGreetingsPageProbePending && sessionRunStarted &&
             !receivedGreetingsTaskActive && !receivedGreetingsTaskCompletedAwaitingUserExit &&
             userControlPhase == UserControlPhase.IDLE && !automationYieldedToUser &&
-            chatPagePort.supportsReceivedGreetingsIdleWorkflow()
+            receivedGreetingsTaskExecutor.supportsWorkflow()
         ) {
             receivedGreetingsPageProbePending = false
             val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable()
@@ -487,7 +499,7 @@ class AiReplyObservationRuntime(
         if (sessionRunStarted && receivedGreetingsTaskActive &&
             sessionManagerState == SessionManagerState.BROWSING_RECEIVED_GREETINGS
         ) {
-            val traversalBefore = runCatching { chatPagePort.receivedGreetingsTraversalStatus() }
+            val traversalBefore = runCatching { receivedGreetingsTaskExecutor.traversalStatus() }
                 .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
             if (traversalBefore == ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND) {
                 sessionManagerState = SessionManagerState.PAUSED
@@ -497,7 +509,7 @@ class AiReplyObservationRuntime(
             if (traversalBefore == ReceivedGreetingsTraversalStatus.COMPLETE) {
                 if (completeReceivedGreetingsTaskAtCurrentPage()) return
                 val returned = runCatching {
-                    chatPagePort.returnFromReceivedGreetingsForPriorityCheck()
+                    receivedGreetingsTaskExecutor.returnForPriorityCheck()
                 }.getOrDefault(false)
                 if (returned) {
                     receivedGreetingsTaskController.markAwaitingNormalInboxAfterReturn()
@@ -521,9 +533,9 @@ class AiReplyObservationRuntime(
                 // Keep invoking the adapter's bounded idle step even when the current page is
                 // still the ordinary CHAT_LIST. Entry discovery can require scrolling through
                 // the Message list; one failed viewport lookup must not silently strand the task.
-                val observed = runCatching { chatPagePort.performReceivedGreetingsIdleStep() }
+                val observed = runCatching { receivedGreetingsTaskExecutor.performIdleStep() }
                     .getOrDefault(false)
-                val nextStatus = runCatching { chatPagePort.receivedGreetingsTraversalStatus() }
+                val nextStatus = runCatching { receivedGreetingsTaskExecutor.traversalStatus() }
                     .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
                 if (!observed) {
                     if (nextStatus == ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND) {
@@ -541,7 +553,7 @@ class AiReplyObservationRuntime(
                             if (completeReceivedGreetingsTaskAtCurrentPage()) return
                             onLog("收到的招呼导航：适配器报告列表边界候选；仍需完成安全返回与普通列表页面复核")
                             val returned = runCatching {
-                                chatPagePort.returnFromReceivedGreetingsForPriorityCheck()
+                                receivedGreetingsTaskExecutor.returnForPriorityCheck()
                             }.getOrDefault(false)
                             if (returned) {
                                 receivedGreetingsTaskController.markAwaitingNormalInboxAfterReturn()
@@ -663,7 +675,7 @@ class AiReplyObservationRuntime(
                 if (sessionRunStarted && receivedGreetingsTaskActive &&
                     sessionManagerState == SessionManagerState.BROWSING_RECEIVED_GREETINGS
                 ) {
-                    val detailStatus = runCatching { chatPagePort.receivedGreetingsTraversalStatus() }
+                    val detailStatus = runCatching { receivedGreetingsTaskExecutor.traversalStatus() }
                         .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
                     if (detailStatus == ReceivedGreetingsTraversalStatus.DETAIL_READY) {
                         // This is the intentionally read-only OCR validation path. It never enters
@@ -704,9 +716,9 @@ class AiReplyObservationRuntime(
                 if (sessionRunStarted && receivedGreetingsTaskActive &&
                     sessionManagerState == SessionManagerState.BROWSING_RECEIVED_GREETINGS
                 ) {
-                    val observed = runCatching { chatPagePort.performReceivedGreetingsIdleStep() }
+                    val observed = runCatching { receivedGreetingsTaskExecutor.performIdleStep() }
                         .getOrDefault(false)
-                    val traversalStatus = runCatching { chatPagePort.receivedGreetingsTraversalStatus() }
+                    val traversalStatus = runCatching { receivedGreetingsTaskExecutor.traversalStatus() }
                         .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
                     when {
                         !observed -> {
@@ -724,7 +736,7 @@ class AiReplyObservationRuntime(
                         traversalStatus == ReceivedGreetingsTraversalStatus.COMPLETE -> {
                             if (completeReceivedGreetingsTaskAtCurrentPage()) return
                             val returned = runCatching {
-                                chatPagePort.returnFromReceivedGreetingsForPriorityCheck()
+                                receivedGreetingsTaskExecutor.returnForPriorityCheck()
                             }.getOrDefault(false)
                             if (returned) {
                                 receivedGreetingsTaskController.markAwaitingNormalInboxAfterReturn()
@@ -748,7 +760,7 @@ class AiReplyObservationRuntime(
                     }
                 }
                 if (isManualObservationEnabled()) {
-                    val observed = runCatching { chatPagePort.observeReceivedGreetingsPage() }.getOrDefault(false)
+                    val observed = runCatching { receivedGreetingsTaskExecutor.observePageReadOnly() }.getOrDefault(false)
                     if (observed) {
                         onLog("AI 被动观察：已识别并采集人工打开的收到招呼页面；未执行点击或滚动")
                     } else {
@@ -1308,7 +1320,7 @@ class AiReplyObservationRuntime(
         // Give the page-arrival watcher first refusal before the legacy recovery guard can tap
         // Message or navigate away from an intermediate greetings page.
         if (sessionRunStarted && userHandoffCanResumeAutonomous &&
-            chatPagePort.supportsReceivedGreetingsIdleWorkflow()
+            receivedGreetingsTaskExecutor.supportsWorkflow()
         ) {
             val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable()
             receivedGreetingsPageProbePending = false
@@ -2490,7 +2502,7 @@ class AiReplyObservationRuntime(
         val receivedGreetingsPageChangeSignal = event.type in PAGE_CHANGE_RECHECK_EVENT_TYPES
         if (sessionRunStarted &&
             !receivedGreetingsTaskActive && !receivedGreetingsTaskCompletedAwaitingUserExit &&
-            chatPagePort.supportsReceivedGreetingsIdleWorkflow() && receivedGreetingsPageChangeSignal
+            receivedGreetingsTaskExecutor.supportsWorkflow() && receivedGreetingsPageChangeSignal
         ) {
             pageObservationCoordinator.onPageChangeEvent()
             receivedGreetingsPageProbePending = true
@@ -2733,7 +2745,7 @@ class AiReplyObservationRuntime(
         messageReadTimeoutTask = null
         messageReadInFlight = false
         val readOnlyGreetingRequest = sessionRunStarted && receivedGreetingsTaskActive &&
-            chatPagePort.receivedGreetingsTraversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
+            receivedGreetingsTaskExecutor.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
         if (isAiReplyActive() && chatPagePort.supportsTargetPackage(targetPackage())) {
             val current = if (revalidateActivePage) {
                 runCatching { chatPagePort.inspectChatPage() }.getOrNull()
@@ -2742,7 +2754,7 @@ class AiReplyObservationRuntime(
             }
             val expectedWindowSessionKey = windowSessionKey(snapshot)
             val readOnlyGreetingDetail = sessionRunStarted && receivedGreetingsTaskActive &&
-                chatPagePort.receivedGreetingsTraversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
+                receivedGreetingsTaskExecutor.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
             val stillSameChat = current?.let { active ->
                 if (readOnlyGreetingDetail) {
                     active.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
@@ -2788,15 +2800,15 @@ class AiReplyObservationRuntime(
         // Received-greeting details are an OCR calibration task only. Do not expose their
         // contents to the future AI observer callback and do not enter any reply/send state.
         if (sessionRunStarted && receivedGreetingsTaskActive &&
-            chatPagePort.receivedGreetingsTraversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
+            receivedGreetingsTaskExecutor.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
         ) {
             logTemporaryOcrResults(batch)
             val sampleIndex = runCatching {
                 chatSessionManagementPort.persistChatSample(
                     snapshot,
                     batch,
-                    sessionName = chatPagePort.receivedGreetingsCurrentDisplayName(),
-                    contactIdentity = chatPagePort.receivedGreetingsCurrentContactIdentity()
+                    sessionName = receivedGreetingsTaskExecutor.currentDisplayName(),
+                    contactIdentity = receivedGreetingsTaskExecutor.currentContactIdentity()
                 )
             }.getOrDefault(0)
             onLog(
@@ -2804,11 +2816,11 @@ class AiReplyObservationRuntime(
                     "读取状态=${batch.status.name}；消息行=${batch.messages.size}；" +
                     "OCR目标=${batch.ocrTargets.size}；已识别=${batch.ocrRecognizedTargetCount}；" +
                     "失败=${batch.ocrFailedTargetCount}；截断=${batch.truncated}；" +
-                    "唯一身份=${if (chatPagePort.receivedGreetingsCurrentContactIdentity() != null) "已验证" else "未验证"}；" +
+                    "唯一身份=${if (receivedGreetingsTaskExecutor.currentContactIdentity() != null) "已验证" else "未验证"}；" +
                     "未调用 AI 消息回调，不输入、不发送"
             )
             val returned = runCatching {
-                chatPagePort.completeReceivedGreetingDetailInspection(sampleIndex > 0)
+                receivedGreetingsTaskExecutor.completeDetailInspection(sampleIndex > 0)
             }.getOrDefault(false)
             if (returned) {
                 scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
@@ -3625,7 +3637,7 @@ class AiReplyObservationRuntime(
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
         val ordinarySessionClickCount = sessionActionCount
-        runCatching { chatPagePort.beginReceivedGreetingsNavigationTask() }
+        runCatching { receivedGreetingsTaskExecutor.beginNavigationTask() }
         receivedGreetingsTaskController.markNavigationStarted()
         currentSessionKey = null
         currentSessionWindowKey = null
@@ -3643,12 +3655,12 @@ class AiReplyObservationRuntime(
                 "私人聊天成功归档数=$normalCompletedObservationCount/$normalInboxTaskTargetCount；" +
                 "普通聊天会话点击次数=$ordinarySessionClickCount；头像身份与详情 OCR 不触发回复"
         )
-        if (!chatPagePort.supportsReceivedGreetingsIdleWorkflow()) {
+        if (!receivedGreetingsTaskExecutor.supportsWorkflow()) {
             sessionManagerState = SessionManagerState.PAUSED
             onLog("AI Reply 收到的招呼支线暂停：当前社交适配器未声明支持该入口/页面识别能力")
             return
         }
-        val accepted = runCatching { chatPagePort.performReceivedGreetingsIdleStep() }.getOrDefault(false)
+        val accepted = runCatching { receivedGreetingsTaskExecutor.performIdleStep() }.getOrDefault(false)
         if (!accepted) {
             scheduleReceivedGreetingsRecoveryRetry(
                 "首次入口导航步骤暂未完成；保留任务和导航状态，不尝试备用坐标"
@@ -3680,7 +3692,7 @@ class AiReplyObservationRuntime(
         receivedGreetingsPageProbePending = false
 
         val accepted = runCatching {
-            chatPagePort.beginReceivedGreetingsTaskFromCurrentList()
+            receivedGreetingsTaskExecutor.beginFromConfirmedList()
         }.getOrDefault(false)
         if (!accepted) {
             onLog("收到的招呼人工任务启动[REJECTED]：确认后的当前列表未通过第二次窗口/阶段复核；不执行任何导航动作")
@@ -3720,7 +3732,7 @@ class AiReplyObservationRuntime(
 
         onLog("收到的招呼人工任务[STARTED]：已确认用户手动打开的列表；暂停私人消息任务并接管当前页面；不点击入口、不返回消息列表")
         val firstStepAccepted = runCatching {
-            chatPagePort.performReceivedGreetingsIdleStep()
+            receivedGreetingsTaskExecutor.performIdleStep()
         }.getOrDefault(false)
         if (!firstStepAccepted) {
             scheduleReceivedGreetingsRecoveryRetry("人工打开的列表已接管，但首次只读遍历检查暂未完成")
@@ -3855,153 +3867,110 @@ class AiReplyObservationRuntime(
         if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID) ||
             automationYieldedToUser || userControlPhase != UserControlPhase.IDLE
         ) return
-        val selectedKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
-        val refreshed = inspectFreshPageSnapshot()
-        if (refreshed == null || refreshed.pageKind != ChatPageKind.CHAT_LIST ||
-            refreshed.packageName != targetPackage()
-        ) {
-            sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-            onLog("AI 会话管理：点击前复核发现页面已变化；取消本次会话操作")
-            scheduleFullInspection()
-            return
-        }
-        val refreshedAmbiguousKeys = ChatSessionManagementPolicy.ambiguousSessionIdentityKeys(
-            refreshed.chatListCandidates
-        )
-        if (selectedKey in ambiguousSessionIdentityKeys || selectedKey in refreshedAmbiguousKeys) {
-            ambiguousSessionIdentityKeys += selectedKey
-            sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-            onLog("AI 会话管理：点击前复核发现目标昵称已被本轮阻止或当前快照存在重复行；拒绝点击")
-            scheduleFullInspection()
-            return
-        }
-        val currentCandidate = refreshed.chatListCandidates.firstOrNull {
-            ChatSessionManagementPolicy.stableSessionKey(it) == selectedKey && it.rowIndex == candidate.rowIndex
-        }
-        if (currentCandidate == null) {
-            sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-            onLog("AI 会话管理：点击前未能重新匹配目标会话行；拒绝使用旧节点路径")
-            scheduleFullInspection()
-            return
-        }
-        // Reapply the complete admission rule to the fresh snapshot immediately before resolving
-        // a tap. The row may have changed from UNREAD to READ/UNKNOWN, or its preview may now be
-        // clipped while the accessibility tree is being relaid out.
-        if (currentCandidate.unreadStatus != ChatUnreadStatus.UNREAD ||
-            !ChatSessionManagementPolicy.isEligible(currentCandidate)
-        ) {
-            sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-            onLog(
-                "AI 会话管理：点击前准入复核失败；仅允许明确未读且会话行、昵称、预览均完整可见的私人会话；" +
-                    "当前未读状态=${currentCandidate.unreadStatus.name}；拒绝点击"
-            )
-            scheduleFullInspection()
-            return
-        }
-        val bounds = chatSessionManagementPort.resolveSessionTapBounds(refreshed, currentCandidate)
-        val row = currentCandidate.rowBounds
-        val tapBoundsInsideRow = bounds != null &&
-            bounds.left >= row.left && bounds.top >= row.top &&
-            bounds.right <= row.right && bounds.bottom <= row.bottom
-        if (bounds == null || bounds.isEmpty || bounds.width < 80 || bounds.height < 48 ||
-            !tapBoundsInsideRow
-        ) {
-            sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-            onLog("AI 会话管理：目标会话行复核失败或边界不安全；点击未派发、不消耗会话尝试次数，目标序号=${candidate.rowIndex}")
-            scheduleFullInspection()
-            return
+
+        val actionGeneration = sessionActionGeneration
+        val attempt = privateMessagesTaskExecutor.openSession(
+            candidate = candidate,
+            blockedIdentityKeys = ambiguousSessionIdentityKeys
+        ) { requestId, snapshot, selectedKey, result ->
+            scheduler.schedule(0L) {
+                if (activeSessionGestureRequestId == requestId) activeSessionGestureRequestId = null
+                if (actionGeneration != sessionActionGeneration) {
+                    onLog(
+                        "已忽略过期自主点击回调：commandId=$requestId；" +
+                            "提交代次=$actionGeneration；当前代次=$sessionActionGeneration；结果=${result.status}"
+                    )
+                    return@schedule
+                }
+                handleSessionTapResult(result, snapshot, selectedKey, actionGeneration)
+            }
         }
 
-        val visibleViewport = refreshed.chatListViewport
-        if (visibleViewport == null || visibleViewport.isEmpty) {
-            sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-            onLog("AI 会话管理：点击前缺少当前列表视口边界；点击未派发、不消耗会话尝试次数，拒绝使用行中心或旧坐标")
-            scheduleFullInspection()
-            return
-        }
-        val executionContext = gesturePolicy.captureContext(currentCandidate.rowTarget.window) ?: run {
-            sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-            onLog("AI 会话管理：目标会话行所属窗口或显示坐标上下文已变化；拒绝点击")
-            scheduleFullInspection()
-            return
-        }
-        val request = GestureIntentRequest(
-            id = "momo-session-${System.currentTimeMillis()}-${candidate.rowIndex}",
-            intent = GestureIntent.Tap(
-                preferredBounds = bounds,
-                targetBounds = row,
-                durationMs = SESSION_TAP_DURATION_MS,
-                displayBounds = visibleViewport
-            ),
-            description = "AI 会话管理：打开已复核的会话行 ${candidate.rowIndex + 1}",
-            executionContext = executionContext
-        )
-        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("AI 会话点击[OWNERSHIP_REJECTED]：构造手势后任务租约已变化；拒绝派发旧点击")
-            return
-        }
-        currentSessionKey = selectedKey
-        synchronized(headerMismatchGuard) {
-            headerMismatchRecordedForCurrentAttempt = false
-        }
-        // Use the name from the just-revalidated row, not the older pre-screenshot snapshot.
-        currentSessionName = currentCandidate.nameText
-        currentSessionCandidate = currentCandidate
-        currentSessionReadCaptured = false
-        currentSessionWindowKey = null
-        sessionManagerState = SessionManagerState.OPENING_SESSION
-        val actionGeneration = sessionActionGeneration
-        activeSessionGestureRequestId = request.id
-        val submission = runCatching {
-            gesturePolicy.execute(request) { result ->
-                scheduler.schedule(0L) {
-                    if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                    if (actionGeneration != sessionActionGeneration) {
-                        onLog(
-                            "已忽略过期自主点击回调：commandId=${request.id}；" +
-                                "提交代次=$actionGeneration；当前代次=$sessionActionGeneration；结果=${result.status}"
-                        )
-                        return@schedule
+        when (attempt) {
+            is PrivateMessagesTaskExecutor.Attempt.Rejected -> {
+                when (attempt.reason) {
+                    PrivateMessagesTaskExecutor.RejectionReason.OWNERSHIP_LOST -> {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 会话点击[OWNERSHIP_REJECTED]：构造手势前或过程中任务租约已变化；拒绝派发旧点击")
                     }
-                    handleSessionTapResult(result, refreshed, selectedKey, actionGeneration)
-                }
-            }
-        }.getOrDefault(GestureSubmission.REJECTED)
-        when (submission) {
-            GestureSubmission.DEFERRED_NOT_READY -> {
-                if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                attemptedSessionKeys.remove(selectedKey)
-                currentSessionKey = null
-                currentSessionName = null
-                currentSessionCandidate = null
-                currentSessionReadCaptured = false
-                currentSessionWindowKey = null
-                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                onLog("AI 会话管理[DEFERRED_NOT_READY]：启动保护期间不打开会话、不消耗尝试次数；保留目标意图并等待全新列表快照")
-                scheduleAiReadinessRetry("会话行点击等待目标页面就绪") {
-                    if (actionGeneration == sessionActionGeneration && sessionRunStarted && !automationYieldedToUser) {
-                        attemptOpenSession(candidate)
+                    else -> {
+                        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                        val message = when (attempt.reason) {
+                            PrivateMessagesTaskExecutor.RejectionReason.PAGE_CHANGED ->
+                                "AI 会话管理：点击前复核发现页面已变化；取消本次会话操作"
+                            PrivateMessagesTaskExecutor.RejectionReason.AMBIGUOUS_SESSION_IDENTITY -> {
+                                ambiguousSessionIdentityKeys += attempt.selectedKey
+                                "AI 会话管理：点击前复核发现目标昵称已被本轮阻止或当前快照存在重复行；拒绝点击"
+                            }
+                            PrivateMessagesTaskExecutor.RejectionReason.SESSION_ROW_NOT_FOUND ->
+                                "AI 会话管理：点击前未能重新匹配目标会话行；拒绝使用旧节点路径"
+                            PrivateMessagesTaskExecutor.RejectionReason.UNREAD_ADMISSION_CHANGED ->
+                                "AI 会话管理：点击前准入复核失败；仅允许明确未读且会话行、昵称、预览均完整可见的私人会话；" +
+                                    "当前未读状态=${attempt.unreadStatus?.name ?: ChatUnreadStatus.UNKNOWN.name}；拒绝点击"
+                            PrivateMessagesTaskExecutor.RejectionReason.UNSAFE_TAP_BOUNDS ->
+                                "AI 会话管理：目标会话行复核失败或边界不安全；点击未派发、不消耗会话尝试次数，目标序号=${candidate.rowIndex}"
+                            PrivateMessagesTaskExecutor.RejectionReason.MISSING_LIST_VIEWPORT ->
+                                "AI 会话管理：点击前缺少当前列表视口边界；点击未派发、不消耗会话尝试次数，拒绝使用行中心或旧坐标"
+                            PrivateMessagesTaskExecutor.RejectionReason.WINDOW_CONTEXT_CHANGED ->
+                                "AI 会话管理：目标会话行所属窗口或显示坐标上下文已变化；拒绝点击"
+                            PrivateMessagesTaskExecutor.RejectionReason.OWNERSHIP_LOST ->
+                                "AI 会话点击[OWNERSHIP_REJECTED]：任务租约已变化；拒绝派发旧点击"
+                        }
+                        onLog(message)
+                        scheduleFullInspection()
                     }
                 }
                 return
             }
-            GestureSubmission.REJECTED -> {
-                if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                sessionManagerState = SessionManagerState.PAUSED
-                currentSessionKey = null
-                currentSessionName = null
-                currentSessionCandidate = null
-                onLog("AI 会话管理已暂停：系统明确拒绝会话点击派发；与页面跳转验证失败分开记录")
-                return
-            }
-            GestureSubmission.ACCEPTED -> {
-                attemptedSessionKeys += selectedKey
-                sessionActionCount += 1
-                readinessDeferredRetryCount = 0
-                readinessDeferredRetryLimitLogged = false
+            is PrivateMessagesTaskExecutor.Attempt.Submitted -> {
+                activeSessionGestureRequestId = attempt.requestId
+                when (attempt.submission) {
+                    GestureSubmission.DEFERRED_NOT_READY -> {
+                        if (activeSessionGestureRequestId == attempt.requestId) activeSessionGestureRequestId = null
+                        attemptedSessionKeys.remove(attempt.selectedKey)
+                        currentSessionKey = null
+                        currentSessionName = null
+                        currentSessionCandidate = null
+                        currentSessionReadCaptured = false
+                        currentSessionWindowKey = null
+                        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                        onLog("AI 会话管理[DEFERRED_NOT_READY]：启动保护期间不打开会话、不消耗尝试次数；保留目标意图并等待全新列表快照")
+                        scheduleAiReadinessRetry("会话行点击等待目标页面就绪") {
+                            if (actionGeneration == sessionActionGeneration && sessionRunStarted && !automationYieldedToUser) {
+                                attemptOpenSession(candidate)
+                            }
+                        }
+                        return
+                    }
+                    GestureSubmission.REJECTED -> {
+                        if (activeSessionGestureRequestId == attempt.requestId) activeSessionGestureRequestId = null
+                        sessionManagerState = SessionManagerState.PAUSED
+                        currentSessionKey = null
+                        currentSessionName = null
+                        currentSessionCandidate = null
+                        onLog("AI 会话管理已暂停：系统明确拒绝会话点击派发；与页面跳转验证失败分开记录")
+                        return
+                    }
+                    GestureSubmission.ACCEPTED -> {
+                        currentSessionKey = attempt.selectedKey
+                        synchronized(headerMismatchGuard) {
+                            headerMismatchRecordedForCurrentAttempt = false
+                        }
+                        // Use the name from the just-revalidated row, not the older pre-screenshot snapshot.
+                        currentSessionName = attempt.candidate.nameText
+                        currentSessionCandidate = attempt.candidate
+                        currentSessionReadCaptured = false
+                        currentSessionWindowKey = null
+                        sessionManagerState = SessionManagerState.OPENING_SESSION
+                        attemptedSessionKeys += attempt.selectedKey
+                        sessionActionCount += 1
+                        readinessDeferredRetryCount = 0
+                        readinessDeferredRetryLimitLogged = false
+                    }
+                }
             }
         }
+
         onLog(
             "AI 会话管理：已提交会话行点击；序号=${candidate.rowIndex + 1}；" +
                 "触摸落点由统一手势策略在安全区域内生成；等待验证页面跳转"
