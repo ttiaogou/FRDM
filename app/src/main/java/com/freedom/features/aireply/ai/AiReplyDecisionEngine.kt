@@ -20,9 +20,12 @@ class AiReplyDecisionEngine(
         }
 
         val request = AiModelRequest(
-            systemInstruction = AiModelDataRedactor.redact(systemInstruction),
+            systemInstruction = AiModelDataRedactor.redact(
+                "$systemInstruction\n\nPersonalized reply preferences:\n${input.personalization.systemPromptInstructions()}"
+            ),
             conversation = AiModelDataRedactor.redactMessages(input.context.messages),
-            maxOutputTokens = input.maxOutputTokens,
+            temperature = input.personalization.responseFlexibility.temperature,
+            maxOutputTokens = input.personalization.replyLength.maxOutputTokens,
             requestId = input.requestId,
             responseFormat = AiModelResponseFormat.JsonSchema(
                 name = "ai_reply_decision",
@@ -59,7 +62,7 @@ data class AiReplyDecisionInput(
     val manualReviewRequired: Boolean = false,
     val cooldownActive: Boolean = false,
     val requestId: String,
-    val maxOutputTokens: Int = 512
+    val personalization: AiReplyPersonalization = AiReplyPersonalization()
 )
 
 enum class AiReplyAction { REPLY, DO_NOT_REPLY, WAIT, HUMAN_REVIEW }

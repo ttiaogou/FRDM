@@ -56,6 +56,49 @@ class AiReplyDecisionEngineTest {
         assertTrue(responseFormat.schema.contains("REPLY"))
     }
 
+    @Test fun defaultPersonalizationUsesDailyChatGenerationPresets() {
+        val provider = FakeProvider(replyJson("收到"))
+        AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r-default-personalization")
+        )
+
+        val request = provider.lastRequest!!
+        assertEquals(0.4, request.temperature, 0.0)
+        assertEquals(512, request.maxOutputTokens)
+        assertTrue(request.systemInstruction.contains("naturally friendly"))
+        assertTrue(request.systemInstruction.contains("moderate positive interest"))
+        assertTrue(request.systemInstruction.contains("Use emoji occasionally"))
+    }
+
+    @Test fun personalizationControlsTemperatureOutputLimitAndSystemPrompt() {
+        val provider = FakeProvider(replyJson("收到"))
+        val personalization = AiReplyPersonalization(
+            answerStyle = AnswerStyle.NATURAL_CASUAL,
+            responseFlexibility = ResponseFlexibility.FLEXIBLE_DIVERSE,
+            replyLength = ReplyLength.DETAILED,
+            friendliness = Friendliness.VERY_FRIENDLY,
+            enthusiasm = Enthusiasm.ENERGETIC,
+            emojiUsage = EmojiUsage.RICH
+        )
+
+        AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(
+                context = context(),
+                contactIdentityVerified = true,
+                requestId = "r-personalization",
+                personalization = personalization
+            )
+        )
+
+        val request = provider.lastRequest!!
+        assertEquals(0.7, request.temperature, 0.0)
+        assertEquals(1_024, request.maxOutputTokens)
+        assertTrue(request.systemInstruction.contains("natural, relaxed, conversational"))
+        assertTrue(request.systemInstruction.contains("distinctly warm"))
+        assertTrue(request.systemInstruction.contains("lively, upbeat"))
+        assertTrue(request.systemInstruction.contains("wider range of relevant emoji"))
+    }
+
     @Test fun personalIdentifiersAreRedactedBeforeProviderCall() {
         val provider = FakeProvider(replyJson("收到"))
         val engine = AiReplyDecisionEngine(provider, grantedConsent)

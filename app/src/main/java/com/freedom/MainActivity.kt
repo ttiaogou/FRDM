@@ -65,6 +65,7 @@ class MainActivity : Activity() {
     private val taskLaunchParametersStore get() = dependencies.taskLaunchParametersRepository
     private val aiModelCloudConsent get() = dependencies.aiModelCloudConsent
     private val aiModelConfigurationRepository get() = dependencies.aiModelConfigurationRepository
+    private val aiReplyPersonalizationRepository get() = dependencies.aiReplyPersonalizationRepository
     private val gestureCalibration get() = dependencies.gestureCalibration
     private val runSessionCommands get() = dependencies.runSessionCommands
     private val ocrReviewRepository get() = dependencies.ocrReviewRepository
@@ -1314,6 +1315,8 @@ class MainActivity : Activity() {
                 onBack = ::showConfigurationPage,
                 taskParameters = { taskLaunchParametersStore.read() },
                 onTaskParametersChanged = taskLaunchParametersStore::write,
+                loadAiReplyPersonalization = aiReplyPersonalizationRepository::load,
+                onAiReplyPersonalizationChanged = aiReplyPersonalizationRepository::save,
                 cloudConsentGranted = aiModelCloudConsent::isGranted,
                 onCloudConsentChanged = aiModelCloudConsent::setGranted,
                 onModelConfiguration = ::showAiModelConfigurationPage

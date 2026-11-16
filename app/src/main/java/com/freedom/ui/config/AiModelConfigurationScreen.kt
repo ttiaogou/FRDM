@@ -115,21 +115,14 @@ internal class AiModelConfigurationScreen(
         keyActions.addView(clearKeyButton, LinearLayout.LayoutParams(-1, dp(44)))
         content.addView(keyActions, topMargin(4))
 
-        content.addView(sectionTitle("生成参数"), topMargin(18))
-        val temperatureInput = addField(
-            content,
-            label = "Temperature（0.0 – 2.0）",
-            value = configuration.temperature.toString(),
-            hint = "默认 0.3",
-            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-        )
-        val maxTokensInput = addField(
-            content,
-            label = "Max Output Tokens（1 – 8192）",
-            value = configuration.maxOutputTokens.toString(),
-            hint = "默认 512",
-            inputType = InputType.TYPE_CLASS_NUMBER
-        )
+        content.addView(sectionTitle("生成偏好"), topMargin(18))
+        content.addView(TextView(activity).apply {
+            text = "回答灵活度和回复长度请在“个性化”页面中选择，系统会自动应用对应的生成设置，无需手动填写技术参数。"
+            textSize = 12f
+            setTextColor(FreedomUi.MUTED)
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setPadding(dp(2), 0, dp(2), dp(8))
+        })
         val timeoutInput = addField(
             content,
             label = "请求超时（秒，1 – 180）",
@@ -139,7 +132,7 @@ internal class AiModelConfigurationScreen(
         )
 
         content.addView(TextView(activity).apply {
-            text = "API Key 与其他模型配置使用独立 Android Keystore 密钥，通过 AES-GCM 加密后保存在应用私有存储中。API 地址仅接受 HTTPS。当前阶段只保存配置，尚未发送模型请求；云端处理仍受“云端模型处理授权”开关控制。"
+            text = "API Key 与其他模型配置使用独立 Android Keystore 密钥，通过 AES-GCM 加密后保存在应用私有存储中。API 地址仅接受 HTTPS。当前阶段只保存连接配置，尚未发送模型请求；云端处理仍受“云端模型处理授权”开关控制。"
             textSize = 12f
             setTextColor(FreedomUi.MUTED)
             setLineSpacing(dp(2).toFloat(), 1f)
@@ -155,18 +148,6 @@ internal class AiModelConfigurationScreen(
         val saveButton = Button(activity).apply {
             text = "保存模型配置"
             setOnClickListener {
-                val temperature = temperatureInput.text.toString().trim().toDoubleOrNull()
-                if (temperature == null) {
-                    showStatus("Temperature 必须是数字。", error = true)
-                    temperatureInput.error = "请输入 0.0 到 2.0 之间的数字"
-                    return@setOnClickListener
-                }
-                val maxTokens = maxTokensInput.text.toString().trim().toIntOrNull()
-                if (maxTokens == null) {
-                    showStatus("Max Output Tokens 必须是整数。", error = true)
-                    maxTokensInput.error = "请输入 1 到 8192 之间的整数"
-                    return@setOnClickListener
-                }
                 val timeoutSeconds = timeoutInput.text.toString().trim().toLongOrNull()
                 if (timeoutSeconds == null || timeoutSeconds !in 1L..180L) {
                     showStatus("请求超时必须是 1 到 180 秒之间的整数。", error = true)
@@ -179,8 +160,6 @@ internal class AiModelConfigurationScreen(
                         modelName = modelInput.text.toString().trim(),
                         apiKey = apiKeyInput?.text?.toString()?.trim()
                             ?.takeIf { it.isNotEmpty() } ?: configuration.apiKey,
-                        temperature = temperature,
-                        maxOutputTokens = maxTokens,
                         requestTimeoutMillis = timeoutSeconds * 1_000L
                     ).normalized()
                 }.getOrElse { failure ->

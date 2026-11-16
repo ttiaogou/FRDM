@@ -59,12 +59,14 @@ import com.freedom.data.SharedPreferencesAiModelCloudConsent
 import com.freedom.data.SharedPreferencesGestureSettingsRepository
 import com.freedom.data.TaskLaunchParametersStore
 import com.freedom.data.ai.EncryptedAiModelConfigurationRepository
+import com.freedom.data.ai.AiReplyPersonalizationStore
 import com.freedom.data.database.LocalConversationRepository
 import com.freedom.data.social.momo.MomoSayHiTraversalCheckpointDataStore
 import com.freedom.data.samples.MomoChatSampleArchiveDataStore
 import com.freedom.features.aireply.AiReplyObservationRuntime
 import com.freedom.features.aireply.ai.ConversationContextManager
 import com.freedom.features.aireply.ai.AiModelConfigurationRepository
+import com.freedom.features.aireply.ai.AiReplyPersonalizationRepository
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.ports.ConversationRepository
@@ -103,6 +105,9 @@ class AppCompositionRoot(context: Context) {
     val aiModelConfigurationRepository: AiModelConfigurationRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         EncryptedAiModelConfigurationRepository(appContext)
     }
+    val aiReplyPersonalizationRepository: AiReplyPersonalizationRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        AiReplyPersonalizationStore(appContext)
+    }
     val ocrReviewRepository: OcrReviewRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OcrReviewStore(appContext)
     }
@@ -140,6 +145,7 @@ class AppCompositionRoot(context: Context) {
         taskLaunchParametersRepository = taskLaunchParametersRepository,
         aiModelCloudConsent = aiModelCloudConsent,
         aiModelConfigurationRepository = aiModelConfigurationRepository,
+        aiReplyPersonalizationRepository = aiReplyPersonalizationRepository,
         gestureCalibration = AndroidGestureCalibrationPresentationAdapter(activity, gestureSettingsRepository),
         runSessionCommands = RunSessionCommandUseCase(
             state = monitorRepository,
@@ -176,6 +182,7 @@ class ActivityDependencies internal constructor(
     val taskLaunchParametersRepository: TaskLaunchParametersRepository,
     val aiModelCloudConsent: AiModelCloudConsentSettings,
     val aiModelConfigurationRepository: AiModelConfigurationRepository,
+    val aiReplyPersonalizationRepository: AiReplyPersonalizationRepository,
     val gestureCalibration: GestureCalibrationPresentationPort,
     val runSessionCommands: RunSessionCommandUseCase,
     val ocrReviewRepository: OcrReviewRepository,

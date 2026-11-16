@@ -19,6 +19,13 @@ import android.widget.Switch
 import android.widget.TextView
 import com.freedom.R
 import com.freedom.application.TaskLaunchParameters
+import com.freedom.features.aireply.ai.AiReplyPersonalization
+import com.freedom.features.aireply.ai.AnswerStyle
+import com.freedom.features.aireply.ai.ResponseFlexibility
+import com.freedom.features.aireply.ai.ReplyLength
+import com.freedom.features.aireply.ai.Friendliness
+import com.freedom.features.aireply.ai.Enthusiasm
+import com.freedom.features.aireply.ai.EmojiUsage
 import com.freedom.ui.theme.FreedomUi
 
 /** Full-screen personalization UI; kept visually aligned with the launcher palette. */
@@ -28,15 +35,23 @@ internal class PersonalizationScreen(
     private val onBack: () -> Unit,
     private val taskParameters: () -> TaskLaunchParameters,
     private val onTaskParametersChanged: (TaskLaunchParameters) -> Unit,
+    private val loadAiReplyPersonalization: () -> AiReplyPersonalization,
+    private val onAiReplyPersonalizationChanged: (AiReplyPersonalization) -> Unit,
     private val cloudConsentGranted: () -> Boolean,
     private val onCloudConsentChanged: (Boolean) -> Unit,
     private val onModelConfiguration: () -> Unit
 ) {
     private var parameters = taskParameters()
+    private var personalization = loadAiReplyPersonalization()
     private var replyLimitValue: TextView? = null
+    private val preferenceValueViews = mutableMapOf<String, TextView>()
+    private val preferenceRowViews = mutableMapOf<String, View>()
 
     fun create(): View {
         parameters = taskParameters()
+        personalization = loadAiReplyPersonalization()
+        preferenceValueViews.clear()
+        preferenceRowViews.clear()
         val root = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xFFF8F7F0.toInt())
@@ -95,10 +110,52 @@ internal class PersonalizationScreen(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(2), dp(8), dp(2), dp(8))
         }
-        content.addView(preferenceRow("基本风格和语调", "高效务实"), LinearLayout.LayoutParams(-1, -2))
-        content.addView(preferenceRow("亲切程度", "默认"), LinearLayout.LayoutParams(-1, -2))
-        content.addView(preferenceRow("热情程度", "默认"), LinearLayout.LayoutParams(-1, -2))
-        content.addView(preferenceRow("表情符号", "默认"), LinearLayout.LayoutParams(-1, -2))
+        content.addView(sectionHeader("基本风格和语调"), LinearLayout.LayoutParams(-1, -2))
+        content.addView(preferenceRow("回答风格", personalization.answerStyle.displayName, "answerStyle") {
+            val current = personalization
+            showChoicePicker("回答风格", enumValues<AnswerStyle>(), current.answerStyle, { it.displayName }) { selected ->
+                updatePersonalization { it.copy(answerStyle = selected) }
+            }
+        }, LinearLayout.LayoutParams(-1, -2))
+        content.addView(preferenceRow("回答灵活度", personalization.responseFlexibility.displayName, "responseFlexibility") {
+            val current = personalization
+            showChoicePicker("回答灵活度", enumValues<ResponseFlexibility>(), current.responseFlexibility, { it.displayName }) { selected ->
+                updatePersonalization { it.copy(responseFlexibility = selected) }
+            }
+        }, LinearLayout.LayoutParams(-1, -2))
+        content.addView(preferenceRow("回复长度", personalization.replyLength.displayName, "replyLength") {
+            val current = personalization
+            showChoicePicker("回复长度", enumValues<ReplyLength>(), current.replyLength, { it.displayName }) { selected ->
+                updatePersonalization { it.copy(replyLength = selected) }
+            }
+        }, LinearLayout.LayoutParams(-1, -2))
+        content.addView(sectionHeader("亲切程度"), LinearLayout.LayoutParams(-1, -2))
+        content.addView(preferenceRow("亲切程度", personalization.friendliness.displayName, "friendliness") {
+            val current = personalization
+            showChoicePicker("亲切程度", enumValues<Friendliness>(), current.friendliness, { it.displayName }) { selected ->
+                updatePersonalization { it.copy(friendliness = selected) }
+            }
+        }, LinearLayout.LayoutParams(-1, -2))
+        content.addView(sectionHeader("热情程度"), LinearLayout.LayoutParams(-1, -2))
+        content.addView(preferenceRow("热情程度", personalization.enthusiasm.displayName, "enthusiasm") {
+            val current = personalization
+            showChoicePicker("热情程度", enumValues<Enthusiasm>(), current.enthusiasm, { it.displayName }) { selected ->
+                updatePersonalization { it.copy(enthusiasm = selected) }
+            }
+        }, LinearLayout.LayoutParams(-1, -2))
+        content.addView(sectionHeader("表情符号"), LinearLayout.LayoutParams(-1, -2))
+        content.addView(preferenceRow("表情符号", personalization.emojiUsage.displayName, "emojiUsage") {
+            val current = personalization
+            showChoicePicker("表情符号", enumValues<EmojiUsage>(), current.emojiUsage, { it.displayName }) { selected ->
+                updatePersonalization { it.copy(emojiUsage = selected) }
+            }
+        }, LinearLayout.LayoutParams(-1, -2))
+        content.addView(TextView(activity).apply {
+            text = "日常聊天默认：自然均衡 · 适中 · 自然友好 · 适度热情 · 偶尔使用表情"
+            textSize = 11f
+            setTextColor(FreedomUi.MUTED)
+            setPadding(dp(2), dp(10), dp(2), dp(12))
+        }, LinearLayout.LayoutParams(-1, -2))
         content.addView(replyLimitPreferenceRow(), LinearLayout.LayoutParams(-1, -2))
         content.addView(imagePreReplyPreferenceRow(), LinearLayout.LayoutParams(-1, -2))
         content.addView(modelConfigurationPreferenceRow(), LinearLayout.LayoutParams(-1, -2))
@@ -287,7 +344,7 @@ internal class PersonalizationScreen(
                 setTextColor(FreedomUi.TEXT)
             })
             addView(TextView(activity).apply {
-                text = "设置 API 地址、模型名称、生成参数和 API Key"
+                text = "设置 API 地址、模型名称、API Key 和请求超时"
                 textSize = 11f
                 setTextColor(FreedomUi.MUTED)
                 setPadding(0, dp(4), 0, 0)
@@ -413,24 +470,45 @@ internal class PersonalizationScreen(
         }
     )
 
-    private fun preferenceRow(label: String, value: String): View {
+    private fun sectionHeader(title: String): View = TextView(activity).apply {
+        text = title
+        textSize = 13f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(FreedomUi.SECONDARY)
+        setPadding(dp(2), dp(12), dp(2), dp(4))
+    }
+
+    private fun preferenceRow(
+        label: String,
+        value: String,
+        preferenceKey: String,
+        onClick: () -> Unit
+    ): View {
         val wrapper = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         val row = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = dp(64)
             setPadding(dp(2), dp(8), dp(4), dp(8))
+            background = clickableBackground(8)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "$label：$value，点击选择"
+            setOnClickListener { onClick() }
         }
         row.addView(TextView(activity).apply {
             text = label
             textSize = 14f
             setTextColor(0xFF23372B.toInt())
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        row.addView(TextView(activity).apply {
+        val valueView = TextView(activity).apply {
             text = value
-            textSize = 15f
+            textSize = 14f
             setTextColor(0xFF7D887E.toInt())
-        })
+        }
+        preferenceValueViews[preferenceKey] = valueView
+        preferenceRowViews[preferenceKey] = row
+        row.addView(valueView)
         row.addView(TextView(activity).apply {
             text = "›"
             textSize = 21f
@@ -442,6 +520,47 @@ internal class PersonalizationScreen(
             setBackgroundColor(0xFFDDE2D8.toInt())
         }, LinearLayout.LayoutParams(-1, dp(1)))
         return wrapper
+    }
+
+    private fun <T> showChoicePicker(
+        title: String,
+        choices: Array<T>,
+        selected: T,
+        label: (T) -> String,
+        onSelected: (T) -> Unit
+    ) {
+        val labels = choices.map(label).toTypedArray()
+        val selectedIndex = choices.indexOf(selected).coerceAtLeast(0)
+        val dialog = AlertDialog.Builder(activity)
+            .setTitle(title)
+            .setSingleChoiceItems(labels, selectedIndex) { currentDialog, which ->
+                choices.getOrNull(which)?.let(onSelected)
+                currentDialog.dismiss()
+            }
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.show()
+        FreedomUi.styleAlertDialog(dialog, activity, dp)
+    }
+
+    private fun updatePersonalization(
+        update: (AiReplyPersonalization) -> AiReplyPersonalization
+    ) {
+        val updated = update(personalization)
+        personalization = updated
+        onAiReplyPersonalizationChanged(updated)
+        preferenceValueViews["answerStyle"]?.text = updated.answerStyle.displayName
+        preferenceValueViews["responseFlexibility"]?.text = updated.responseFlexibility.displayName
+        preferenceValueViews["replyLength"]?.text = updated.replyLength.displayName
+        preferenceValueViews["friendliness"]?.text = updated.friendliness.displayName
+        preferenceValueViews["enthusiasm"]?.text = updated.enthusiasm.displayName
+        preferenceValueViews["emojiUsage"]?.text = updated.emojiUsage.displayName
+        preferenceRowViews["answerStyle"]?.contentDescription = "回答风格：${updated.answerStyle.displayName}，点击选择"
+        preferenceRowViews["responseFlexibility"]?.contentDescription = "回答灵活度：${updated.responseFlexibility.displayName}，点击选择"
+        preferenceRowViews["replyLength"]?.contentDescription = "回复长度：${updated.replyLength.displayName}，点击选择"
+        preferenceRowViews["friendliness"]?.contentDescription = "亲切程度：${updated.friendliness.displayName}，点击选择"
+        preferenceRowViews["enthusiasm"]?.contentDescription = "热情程度：${updated.enthusiasm.displayName}，点击选择"
+        preferenceRowViews["emojiUsage"]?.contentDescription = "表情符号：${updated.emojiUsage.displayName}，点击选择"
     }
 
     private fun rounded(fill: Int, radius: Int) = GradientDrawable().apply {
