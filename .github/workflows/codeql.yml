@@ -1,0 +1,16 @@
+# CodeQL analysis has been consolidated into .github/workflows/android-build.yml.
+# This reusable-workflow stub is retained to preserve the original project path.
+# Do not add push, pull_request, or schedule triggers here; the main CI job performs
+# CodeQL initialization, the single Gradle build, and analysis in one runner job.
+name: CodeQL Security Analysis (consolidated)
+
+on:
+  workflow_call:
+
+jobs:
+  analyze:
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: CodeQL runs in Freedom CI
+        run: echo "CodeQL is executed by .github/workflows/android-build.yml."

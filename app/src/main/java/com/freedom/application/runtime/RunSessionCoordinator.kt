@@ -1,0 +1,256 @@
+package com.freedom.application.runtime
+
+import com.freedom.core.runtime.ModeRuntimePort
+import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.RunStateRepository
+import com.freedom.core.runtime.RuntimeLogSink
+import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
+
+/**
+ * Reconciles persisted run intent with runtime lifecycle and dispatches normalized events to at
+ * most one mode runtime. RunSessionCommandUseCase is the sole user-command write boundary. A null
+ * mode is a valid manual-observation session with no business runtime.
+ */
+class RunSessionCoordinator(
+    private val state: RunStateRepository,
+    private val runtimes: Map<RunMode, ModeRuntimePort>,
+    private val log: RuntimeLogSink
+) {
+    private var observedMode: RunMode? = null
+    private var observedRunRequested: Boolean = false
+    /** Monotonic process-local generation used to invalidate commands from a previous run. */
+    private var runGeneration: Long = 0L
+
+    @Synchronized
+    fun currentRunGeneration(): Long = runGeneration
+
+    private fun advanceRunGeneration() {
+        check(runGeneration < Long.MAX_VALUE) { "run generation exhausted" }
+        runGeneration += 1L
+    }
+
+    /** Clear persisted intent and notify only the runtime that owned the active session. */
+    @Synchronized
+    fun stop(reason: String) {
+        val active = activeMode() ?: observedMode
+        if (active != null || state.isRunRequested()) advanceRunGeneration()
+        // Write the stop cause before clearing the run flag. The data adapter starts a fallback
+        // finish timer; this coordinator seals immediately after runtime/archive cleanup below.
+        log.append("运行请求准备停止：来源=RunSessionCoordinator.stop；原因=$reason；原模式=$active")
+        state.setRunRequested(false)
+        try {
+            if (active != null) runtimes[active]?.onRunStopped(reason)
+        } catch (error: Throwable) {
+            log.recordException(
+                component = "RunSessionCoordinator",
+                eventType = "runtime_stop_failed",
+                message = "停止运行时清理失败；mode=$active；reason=$reason",
+                error = error
+            )
+            throw error
+        } finally {
+            log.finishRun("STOPPED", reason)
+            observedMode = null
+            observedRunRequested = false
+        }
+    }
+
+    /**
+     * Applies persisted run-intent changes written by the command boundary or restored by the
+     * system. Returns true only when this call performed a runtime lifecycle transition.
+     */
+    @Synchronized
+    fun synchronizeRunRequest(): Boolean {
+        val requestedRun = state.isRunRequested()
+        val requestedMode = activeMode()
+        if (requestedMode == observedMode && requestedRun == observedRunRequested) return false
+        // Invalidate old requests before asking the previous runtime to perform cleanup. Any
+        // late callback or scheduled step from that runtime must not submit into the new run.
+        advanceRunGeneration()
+        log.append(
+            "运行请求发生变化：来源=synchronizeRunRequest；旧观察模式=$observedMode；" +
+                "当前请求模式=$requestedMode；runRequested=${state.isRunRequested()}；" +
+                "持久化模式=${state.activeMode()}"
+        )
+        val previous = observedMode
+        if (previous != null) {
+            if (requestedMode == null) {
+                log.append(
+                    "运行请求停止[OBSERVED]：source=RunSessionCoordinator.synchronizeRunRequest；" +
+                        "previousMode=$previous；runRequested=${state.isRunRequested()}；" +
+                        "persistedMode=${state.activeMode() ?: "NONE"}；reason=外部运行请求被清除"
+                )
+            }
+            try {
+                runtimes[previous]?.onRunStopped("运行模式或运行请求已变化")
+            } catch (error: Throwable) {
+                log.recordException(
+                    component = "RunSessionCoordinator",
+                    eventType = "runtime_sync_stop_failed",
+                    message = "同步运行状态时停止旧运行时失败；mode=$previous",
+                    error = error
+                )
+                throw error
+            } finally {
+                if (requestedMode == null) {
+                    log.finishRun("STOPPED", "运行请求状态变化；原运行时已完成停止清理")
+                }
+            }
+        }
+        observedMode = requestedMode
+        observedRunRequested = requestedRun
+        if (requestedMode != null) {
+            val runtime = runtimes[requestedMode]
+            try {
+                runtime?.onRunStarted()
+            } catch (error: Throwable) {
+                log.recordException(
+                    component = "RunSessionCoordinator",
+                    eventType = "runtime_sync_start_failed",
+                    message = "同步运行状态时启动运行时失败；mode=$requestedMode",
+                    error = error
+                )
+                runCatching { runtime?.onRunStopped("恢复启动失败，执行安全清理") }
+                    .onFailure { cleanupError ->
+                        log.recordException(
+                            component = "RunSessionCoordinator",
+                            eventType = "runtime_restore_cleanup_failed",
+                            message = "恢复启动失败后的安全清理也失败；mode=$requestedMode",
+                            error = cleanupError
+                        )
+                    }
+                state.setRunRequested(false)
+                log.finishRun("FAILED", "runtime_sync_start_failed:$requestedMode")
+                observedMode = null
+                observedRunRequested = false
+                throw error
+            }
+        }
+        return true
+    }
+
+    /**
+     * Restore only a mode explicitly latched for this run. A null mode is a valid manual-
+     * observation session; mutable UI preferences must never silently start an AI/Browse runtime.
+     */
+    @Synchronized
+    fun resolveActiveModeForRestore(): RunMode? =
+        if (state.isRunRequested()) state.activeMode() else null
+
+    @Synchronized
+    fun activeMode(): RunMode? =
+        if (state.isRunRequested()) resolveActiveModeForRestore() else null
+
+    @Synchronized
+    fun onAccessibilityServiceConnected() {
+        synchronizeRunRequest()
+        observedMode?.let { runtimes[it]?.onAccessibilityServiceConnected() }
+    }
+
+    @Synchronized
+    fun onAccessibilityServiceDisconnected() {
+        observedMode?.let { runtimes[it]?.onAccessibilityServiceDisconnected() }
+    }
+
+    @Synchronized
+    fun dispatchTargetApplicationEvent(event: AccessibilityEventEnvelope) {
+        synchronizeRunRequest()
+        activeMode()?.let { runtimes[it]?.onTargetApplicationEvent(event) }
+    }
+
+    @Synchronized
+    fun dispatchGlobalTouchEvent(event: AccessibilityEventEnvelope) {
+        synchronizeRunRequest()
+        val mode = activeMode()
+        log.append("全局触摸链路[RUN_SESSION_RECEIVED]：事件=${event.type}；eventTime=${event.eventTimeMillis}；模式=${mode ?: "NONE"}")
+        val runtime = mode?.let(runtimes::get)
+        if (runtime == null) {
+            log.append("全局触摸链路[RUN_SESSION_DROPPED]：没有活动运行时；事件=${event.type}")
+            return
+        }
+        runCatching { runtime.onGlobalTouchEvent(event) }
+            .onSuccess { log.append("全局触摸链路[RUN_SESSION_FORWARDED]：事件=${event.type}；模式=$mode") }
+            .onFailure {
+                log.recordException(
+                    component = "RunSessionCoordinator",
+                    eventType = "global_touch_dispatch_failed",
+                    message = "全局触摸事件分发失败；event=${event.type}",
+                    error = it
+                )
+            }
+    }
+
+    /** Deliver click-like target events before visible-log duplicate suppression. */
+    @Synchronized
+    fun dispatchPreemptiveTargetInteraction(event: AccessibilityEventEnvelope) {
+        synchronizeRunRequest()
+        val mode = activeMode()
+        if (mode != RunMode.AI_REPLY) return
+        val runtime = runtimes[mode] ?: run {
+            log.append("人工交互抢占链路[RUN_SESSION_DROPPED]：AI运行时不存在；事件=${event.type}")
+            return
+        }
+        log.append(
+            "人工交互抢占链路[RUN_SESSION_RECEIVED]：事件=${event.type}；" +
+                "eventTime=${event.eventTimeMillis}；模式=$mode"
+        )
+        runCatching { runtime.onPreemptiveTargetInteraction(event) }
+            .onSuccess {
+                log.append("人工交互抢占链路[RUN_SESSION_FORWARDED]：事件=${event.type}；模式=$mode")
+            }
+            .onFailure {
+                log.recordException(
+                    component = "RunSessionCoordinator",
+                    eventType = "preemptive_interaction_dispatch_failed",
+                    message = "人工交互抢占事件分发失败；event=${event.type}",
+                    error = it
+                )
+            }
+    }
+
+    @Synchronized
+    fun dispatchActivityTransition(activityClass: String) {
+        activeMode()?.let { runtimes[it]?.onActivityTransition(activityClass) }
+    }
+
+    @Synchronized
+    fun onExternalRefresh() {
+        // A new session has already received onRunStarted() while synchronizing. Do not run the
+        // idle-refresh hook again for the same broadcast; later refreshes still reach the runtime.
+        if (synchronizeRunRequest()) return
+        activeMode()?.let { runtimes[it]?.onExternalRefresh() }
+    }
+
+    @Synchronized
+    fun isTrackedInteractionEvent(event: AccessibilityEventEnvelope): Boolean =
+        activeMode()?.let { runtimes[it]?.isTrackedInteractionEvent(event) } ?: false
+
+    @Synchronized
+    fun interactionDiagnostics(event: AccessibilityEventEnvelope, nowMillis: Long): List<String> =
+        activeMode()?.let { runtimes[it]?.interactionDiagnostics(event, nowMillis) }.orEmpty()
+
+    @Synchronized
+    fun handleManualInteractionFallback(event: AccessibilityEventEnvelope) {
+        activeMode()?.let { runtimes[it]?.handleManualInteractionFallback(event) }
+    }
+
+    @Synchronized
+    fun resetRuntime(mode: RunMode, reason: String) {
+        runtimes[mode]?.resetRuntime(reason)
+    }
+
+    @Synchronized
+    fun onAccessibilityServiceInterrupted(reason: String) {
+        activeMode()?.let { runtimes[it]?.onAccessibilityServiceInterrupted(reason) }
+    }
+
+    @Synchronized
+    fun onServiceDestroyed() {
+        runtimes.values.forEach(ModeRuntimePort::onServiceDestroyed)
+    }
+
+    private fun RunMode.displayName(): String = when (this) {
+        RunMode.AI_REPLY -> "AI 回复基础模式"
+        RunMode.ACCOUNT_BROWSE -> "自动浏览模式"
+    }
+}

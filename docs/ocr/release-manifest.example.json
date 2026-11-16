@@ -1,0 +1,8 @@
+{
+  "pluginId": "com.freedom.ocr.plugin",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "apkUrl": "https://downloads.example.com/freedom/ocr/FreedomOcrPlugin-1.0.0.apk",
+  "sha256": "REPLACE_WITH_THE_64_CHARACTER_SHA256_OF_THE_APK",
+  "protocolVersion": 1
+}

@@ -1,0 +1,24 @@
+package com.freedom.features.aireply.ports
+
+/** Privacy-preserving durable state for the received-greetings traversal. */
+data class MomoSayHiDeferredRowCheckpointRecord(
+    val attempts: Int,
+    val retryAfterEpochMs: Long,
+    val safeTargetValidationFailures: Int = 0
+)
+
+data class MomoSayHiTraversalCheckpointRecord(
+    val processedRowKeys: Set<String>,
+    val processedContactIdHashes: Set<String>,
+    val deferredRows: Map<String, MomoSayHiDeferredRowCheckpointRecord>,
+    val deferredReturnToTopActive: Boolean,
+    val deferredReplayStarted: Boolean,
+    val savedAtEpochMs: Long = System.currentTimeMillis()
+)
+
+/** Port for bounded, expiring traversal checkpoints; Data owns their serialization. */
+interface MomoSayHiTraversalCheckpointRepository {
+    fun load(nowEpochMs: Long = System.currentTimeMillis()): MomoSayHiTraversalCheckpointRecord?
+    fun save(checkpoint: MomoSayHiTraversalCheckpointRecord)
+    fun clear()
+}

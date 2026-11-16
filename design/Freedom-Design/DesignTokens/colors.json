@@ -1,0 +1,31 @@
+{
+  "background": "#F8F7F0",
+  "surface": "#FBFAF5",
+  "text": "#23372B",
+  "secondary": "#56665B",
+  "muted": "#7D887E",
+  "divider": "#DDE2D8",
+  "forest": "#23372B",
+  "forestDark": "#17281F",
+  "lime": "#D8EF68",
+  "limeDark": "#A5C331",
+  "limeWash": "#EAF2CF",
+  "error": "#9B5145",
+  "notes": "Use warm ivory, forest green and restrained lime accents. Avoid purple/blue gradients and unnecessary glass effects.",
+  "appIcon": {
+    "background": "#F8F7F0",
+    "pathOuterGradient": [
+      "#314D3A",
+      "#17281F"
+    ],
+    "pathInnerGradient": [
+      "#E1F66A",
+      "#B9DF3B",
+      "#7DAE25"
+    ],
+    "middleNodeFill": "#F8F7F0",
+    "middleNodeStroke": "#23372B",
+    "startAndEndNodeStroke": "#F8F7F0",
+    "source": "AppIcon/freedom_icon_master.svg"
+  }
+}

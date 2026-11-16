@@ -1,0 +1,5181 @@
+package com.freedom.adapters.social.momo
+
+import com.freedom.gesture.api.GestureApi
+import com.freedom.features.conversation.domain.contact.ContactIdentityManager
+import com.freedom.features.conversation.domain.contact.ContactIdentityObservation
+import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
+import com.freedom.features.conversation.domain.contact.ContactRowIdentity
+import com.freedom.features.conversation.domain.message.ConversationMessageInput
+import android.content.Context
+import android.os.SystemClock
+import android.graphics.Rect
+import android.view.accessibility.AccessibilityNodeInfo
+import com.freedom.BuildConfig
+import com.freedom.adapters.accessibility.android.AndroidActiveWindowRootAccess
+import com.freedom.adapters.accessibility.android.AndroidScreenshotCapture
+import com.freedom.adapters.accessibility.android.AndroidDialogWindowObservation
+import com.freedom.adapters.accessibility.android.AndroidTargetWindowRoot
+import com.freedom.adapters.accessibility.android.MonitorOverlay
+import com.freedom.core.accessibility.api.AccessibilityGateway
+import com.freedom.core.accessibility.api.TreeInspectionRequest
+import com.freedom.core.accessibility.api.NodeTextCapture
+import com.freedom.core.accessibility.api.AccessibilityTreeLimits
+import com.freedom.core.accessibility.api.AccessibilityTreeSnapshot
+import com.freedom.core.accessibility.api.DisplayMetricsSnapshot
+import com.freedom.core.accessibility.api.GestureSubmission
+import com.freedom.core.accessibility.gesture.GestureIntent
+import com.freedom.core.accessibility.gesture.GestureIntentRequest
+import com.freedom.core.accessibility.gesture.VerticalSwipeDirection
+import com.freedom.core.accessibility.gesture.GestureExecutionListener
+import com.freedom.core.accessibility.gesture.GestureExecutionStatus
+import com.freedom.core.accessibility.gesture.toGestureCoordinateContext
+import com.freedom.core.accessibility.api.GlobalAccessibilityAction
+import com.freedom.core.accessibility.api.NodePath
+import com.freedom.core.accessibility.query.NodeTreeIndex
+import com.freedom.core.accessibility.api.NodeTarget
+import com.freedom.core.accessibility.api.ScreenRect
+import com.freedom.core.accessibility.api.WindowRef
+import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
+import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.TargetAppPageReadiness
+import com.freedom.features.accountbrowse.ports.*
+import com.freedom.features.aireply.ports.ChatPageKind
+import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
+import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
+import com.freedom.features.aireply.ports.ChatPageNodeEvidence
+import com.freedom.features.aireply.ports.ChatPagePort
+import com.freedom.features.aireply.ports.ChatMessagePort
+import com.freedom.features.aireply.ports.ChatSessionManagementPort
+import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+import com.freedom.features.aireply.domain.message.ChatMessageBatch
+import kotlin.math.abs
+import java.io.File
+import java.util.concurrent.atomic.AtomicLong
+import com.freedom.features.aireply.application.message.ChatMessageParser
+import com.freedom.application.ports.GestureSettingsRepository
+import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.aireply.ports.ChatRegionSnapshot
+import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
+import com.freedom.features.aireply.ports.SessionListNavigationTarget
+import com.freedom.application.ports.RunDiagnosticsPort
+import com.freedom.application.ports.OcrReviewRepository
+import com.freedom.application.ports.SessionSampleArchivePort
+import com.freedom.features.conversation.ports.ConversationRepository
+import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
+
+/**
+ * Android-side Momo adapter. It owns app-specific inspectors and controllers and exposes
+ * platform-neutral evidence and short-lived locators through SocialBrowsePort / ChatPagePort.
+ * Raw Android nodes stay inside this adapter and are never exposed to the browse workflow.
+ */
+internal class MomoSocialAdapter(
+    private val context: Context,
+    private val rootAccess: AndroidActiveWindowRootAccess,
+    private val accessibilityGateway: AccessibilityGateway,
+    private val targetPackage: String,
+    private val activityClass: () -> String,
+    private val dp: (Int) -> Int,
+    private val onLog: (String) -> Unit,
+    gestureSettingsRepository: GestureSettingsRepository,
+    private val gesturePolicy: GestureApi,
+    private val screenshotCapture: AndroidScreenshotCapture? = null,
+    private val onNodeTreeSnapshot: (AccessibilityTreeSnapshot) -> Unit = {},
+    private val latestDialogWindowObservation: () -> AndroidDialogWindowObservation? = { null },
+    private val conversationRepository: ConversationRepository,
+    private val diagnostics: RunDiagnosticsPort,
+    private val sayHiTraversalCheckpointRepository: MomoSayHiTraversalCheckpointRepository,
+    private val ocrReviewRepository: OcrReviewRepository,
+    private val sampleArchivePort: SessionSampleArchivePort
+) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort {
+
+    private data class Config(
+        val page: MomoPageInspector.Config,
+        val navigation: MomoNavigationController.Config,
+        val popupMaxScanNodes: Int,
+        val feedGesture: MomoFeedGestureController.Config,
+        val chatMaxPageInspectionNodes: Int = MomoChatPageInspector.MAX_PAGE_INSPECTION_NODES,
+        val chatMaxRegionInspectionNodes: Int = MomoChatPageInspector.MAX_REGION_INSPECTION_NODES
+    )
+
+    // Keep the adapter's established Momo-specific defaults as the single config owner.
+    private val config: Config = createDefaultConfig()
+
+    private data class AiFinderOverlayInspection(
+        val bounds: ScreenRect?,
+        val foundVisible: Boolean,
+        val complete: Boolean
+    )
+
+    private sealed interface ReceivedGreetingsTapInspection {
+        data class Ready(
+            val tree: AccessibilityTreeSnapshot,
+            val metrics: DisplayMetricsSnapshot,
+            val target: MomoReceivedGreetingsEntryTapDecision.Ready
+        ) : ReceivedGreetingsTapInspection
+
+        data class Rejected(val reason: String) : ReceivedGreetingsTapInspection
+    }
+
+    private enum class SayHiRowTapFeedbackState {
+        NOT_DISPATCHED,
+        WAITING,
+        TIMED_OUT,
+        VERIFIED,
+        REJECTED
+    }
+
+    private enum class SayHiReadOnlyStage {
+        IDLE,
+        AVATAR_TAP_PENDING,
+        WAITING_PROFILE,
+        PROFILE_SCROLL_PENDING,
+        PROFILE_BACK_PENDING,
+        ROW_TAP_PENDING,
+        WAITING_DETAIL,
+        DETAIL_BACK_PENDING
+    }
+
+    private data class SayHiSelectedGreeting(
+        val rowKey: String,
+        val displayName: String,
+        val greetingText: String?,
+        val timestampText: String?,
+        val sourceWindow: WindowRef,
+        val sourceStructureFingerprint: String
+    )
+
+    private sealed interface SayHiCardListTapInspection {
+        data class Ready(
+            val tree: AccessibilityTreeSnapshot,
+            val metrics: DisplayMetricsSnapshot,
+            val target: MomoSayHiCardListTapDecision.Ready
+        ) : SayHiCardListTapInspection
+
+        data class Rejected(val reason: String) : SayHiCardListTapInspection
+    }
+
+    // Momo-specific behavior is composed by bounded Browse/Chat/Message/Session collaborators.
+    private val browseComponents = MomoBrowseAdapterComponents(
+        context = context,
+        dp = dp,
+        accessibilityGateway = accessibilityGateway,
+        onLog = onLog,
+        gestureSettingsRepository = gestureSettingsRepository,
+        pageConfig = config.page,
+        navigationConfig = config.navigation,
+        popupMaxScanNodes = config.popupMaxScanNodes,
+        popupSafetyMaxIncompleteAttempts = MAX_POPUP_SAFETY_INCOMPLETE_ATTEMPTS,
+        feedGestureConfig = config.feedGesture
+    )
+    private val chatComponents = MomoChatAdapterComponents(
+        chatMaxPageInspectionNodes = config.chatMaxPageInspectionNodes,
+        chatMaxRegionInspectionNodes = config.chatMaxRegionInspectionNodes
+    )
+    private val sayHiAccessibilityInspector = MomoSayHiAccessibilityInspector()
+    private val sessionComponents = MomoSessionAdapterComponents(
+        context = context,
+        diagnostics = diagnostics,
+        conversationRepository = conversationRepository,
+        sayHiTraversalCheckpointRepository = sayHiTraversalCheckpointRepository,
+        sampleArchivePort = sampleArchivePort
+    )
+    private val sayHiTraversalState = MomoSayHiTraversalState(
+        checkpointStore = sessionComponents.sayHiTraversalCheckpointStore,
+        maxRememberedRows = MAX_SAYHI_PROCESSED_ROWS,
+        maxRetryBackoffStage = MAX_SAYHI_ROW_RETRY_BACKOFF_STAGE,
+        safeTargetFailureReasonPrefix = SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX
+    )
+    private val messageComponents = MomoMessageAdapterComponents(
+        context = context,
+        rootAccess = rootAccess,
+        targetPackage = targetPackage,
+        screenshotCapture = screenshotCapture,
+        sampleStore = sessionComponents.sampleStore,
+        ocrReviewRepository = ocrReviewRepository,
+        onLog = onLog
+    )
+    private val pageInspectionComponents = MomoPageInspectionComponents(
+        browse = browseComponents,
+        chat = chatComponents,
+        sayHiAccessibilityInspector = sayHiAccessibilityInspector,
+        rootAccess = rootAccess,
+        targetPackage = targetPackage,
+        dp = dp,
+        onLog = onLog,
+        latestDialogWindowObservation = latestDialogWindowObservation,
+        isSayHiProfileScrollPending = { windowId ->
+            sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_SCROLL_PENDING &&
+                sayHiProfileScrollInFlight && sayHiProfileScrollWindowId == windowId
+        },
+        sayHiProfileScrollWindowId = { sayHiProfileScrollWindowId }
+    )
+
+    private val sayHiNavigationEvidenceInspector = MomoSayHiNavigationEvidenceInspector()
+    private val sayHiAutonomousBrowseController = MomoSayHiAutonomousBrowseController()
+    private val sayHiNavigationFlowController = MomoSayHiNavigationFlowController()
+    private val sayHiListSnapshotRecoveryPolicy = MomoSayHiListSnapshotRecoveryPolicy()
+    private val sayHiSnapshotCoordinator = MomoSayHiListSnapshotCoordinator(
+        recoveryPolicy = sayHiListSnapshotRecoveryPolicy,
+        isNavigationRelevant = {
+            sayHiNavigationFlowController.isReceivedListConfirmed() ||
+                sayHiNavigationFlowController.isWaitingForReceivedList()
+        },
+        isGestureBusy = { sayHiGestureInFlight },
+        beforeFreshInspection = { lastSayHiInspectionAtMs = 0L },
+        inspectFreshSnapshot = {
+            inspectSayHiPageAndAutonomousBrowse(
+                allowAutonomousScroll = false,
+                minimumIntervalMs = 0L,
+                forceFresh = true
+            )
+        },
+        onLog = onLog
+    )
+    @Volatile private var sayHiConfirmedListTarget: NodeTarget? = null
+    @Volatile private var lastSayHiSnapshotGateDiagnostic: String = ""
+    @Volatile private var lastSayHiSnapshotGateDiagnosticAtMs: Long = 0L
+    @Volatile private var sayHiGenericChatInspectionBypassActive: Boolean = false
+    @Volatile private var lastSayHiInspectionSignature: String = ""
+    @Volatile private var lastSayHiInspectionAtMs: Long = 0L
+    @Volatile private var lastSayHiNavigationEvidenceSignature: String = ""
+    @Volatile private var lastMomoNavigationEvidenceAtMs: Long = 0L
+    @Volatile private var receivedGreetingsEntryTapPending: Boolean = false
+    /** Scoped to one read-only probe; it enables manual-list stability, never navigation. */
+    @Volatile private var manualReceivedGreetingsArrivalProbeActive: Boolean = false
+    @Volatile private var sayHiCardListTapPending: Boolean = false
+    @Volatile private var sayHiGestureInFlight: Boolean = false
+    @Volatile private var receivedGreetingsEntryTapAtMs: Long = 0L
+    @Volatile private var sayHiCardListTapAtMs: Long = 0L
+    @Volatile private var lastSayHiCardListTapAtMs: Long = 0L
+    @Volatile private var lastReceivedGreetingsEntryTapAtMs: Long = 0L
+    @Volatile private var lastReceivedGreetingsEntryDiagnostic: String = ""
+    @Volatile private var lastReceivedGreetingsEntryDiagnosticAtMs: Long = 0L
+    @Volatile private var lastReceivedGreetingsNavigationWaitActivityClass: String = ""
+    private val receivedGreetingsEntrySearchController = MomoReceivedGreetingsEntrySearchController()
+    @Volatile private var receivedGreetingsEntrySearchActive: Boolean = false
+    @Volatile private var receivedGreetingsEntrySearchComplete: Boolean = false
+    @Volatile private var receivedGreetingsEntrySearchGestureInFlight: Boolean = false
+    @Volatile private var receivedGreetingsEntrySearchWindowIdentity: String = ""
+    @Volatile private var sayHiReadOnlyStage: SayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
+    @Volatile private var sayHiSelectedGreeting: SayHiSelectedGreeting? = null
+    @Volatile private var sayHiSelectedContactIdentity: ContactRowIdentity? = null
+    @Volatile private var sayHiSelectedIdentityStatus: MomoSayHiPlatformIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
+    @Volatile private var sayHiReadOnlyStageStartedAtMs: Long = 0L
+    @Volatile private var sayHiDetailBackRecoveryWindowStartedAtUptimeMs: Long = 0L
+    @Volatile private var sayHiDetailBackRecoveryAttempted: Boolean = false
+    @Volatile private var sayHiDetailBackSourceWindow: WindowRef? = null
+    private val sayHiDetailBackReturnConfirmation = MomoSayHiListReturnConfirmationPolicy()
+    @Volatile private var sayHiProfileReadAttempts: Int = 0
+    @Volatile private var sayHiProfileScrollAttempted: Boolean = false
+    @Volatile private var sayHiProfileScrollFailed: Boolean = false
+    @Volatile private var sayHiProfileScrollInFlight: Boolean = false
+    @Volatile private var sayHiProfileScrollWindowId: Int = -1
+    @Volatile private var sayHiProfileScrollRequestId: String? = null
+    @Volatile private var sayHiProfileScrollSettledAtMs: Long = 0L
+    @Volatile private var sayHiProfileBackDialogPending: Boolean = false
+    @Volatile private var sayHiProfileBackDialogWindowId: Int = -1
+    @Volatile private var sayHiProfileBackWindowId: Int = -1
+    @Volatile private var sayHiProfileBackAttempts: Int = 0
+    @Volatile private var sayHiStableCandidateKey: String = ""
+    @Volatile private var sayHiStableCandidateTarget: MomoSayHiTapTarget? = null
+    @Volatile private var sayHiStableCandidateWindow: WindowRef? = null
+    @Volatile private var sayHiProfileRowRecoveryAttempts: Int = 0
+    @Volatile private var pendingSayHiRowTapTarget: MomoSayHiTapTarget? = null
+    @Volatile private var pendingSayHiRowTapSubmittedAtUptimeMs: Long = 0L
+    @Volatile private var pendingSayHiRowTapGestureCommandId: String? = null
+    @Volatile private var pendingSayHiRowTapWindowId: Int = -1
+    @Volatile private var sayHiRowTapFeedbackState: SayHiRowTapFeedbackState =
+        SayHiRowTapFeedbackState.NOT_DISPATCHED
+    @Volatile private var sayHiRowTapHitReason: String = ""
+    @Volatile private var sayHiUnverifiedBackAttempted: Boolean = false
+    @Volatile private var sayHiUnverifiedBackAttemptActivity: String = ""
+    /** True only when we safely backed out of a fingerprint-confirmed detail whose tap event never arrived. */
+    @Volatile private var sayHiUnverifiedDetailReturnPending: Boolean = false
+    init {
+        sayHiTraversalState.restore()?.let { restored ->
+            onLog(
+                "收到招呼断点恢复：已恢复成功记录=${restored.processedRows}；待恢复用户=${restored.deferredRows}；" +
+                    "已验证联系人去重=${restored.processedContacts}；反向回访=false；复核遍历=false；仅恢复行/联系人哈希和状态"
+            )
+        }
+    }
+
+    // ---- SocialBrowsePort / ChatPagePort: app-specific evidence and short-lived locators ----
+
+    override val detailActivityClass: String = MomoAppDescriptor.DYNAMIC_DETAIL_ACTIVITY_CLASS
+
+    override fun isMainActivity(activityClass: String): Boolean =
+        activityClass == MomoAppDescriptor.MAIN_ACTIVITY_CLASS
+
+    /**
+     * Fresh, read-only page inspection used immediately before every autonomous dispatch.
+     * The caller owns the supplied root and keeps it alive only for this synchronous call.
+     */
+    fun inspectGesturePageReadiness(
+        root: AccessibilityNodeInfo,
+        currentActivity: String,
+        mode: RunMode
+    ): TargetAppPageReadiness = pageInspectionComponents.gestureReadinessInspector.inspect(root, currentActivity, mode)
+
+    override fun isDetailActivity(activityClass: String): Boolean =
+        activityClass == detailActivityClass
+
+    override fun isImageBrowserActivity(activityClass: String): Boolean =
+        activityClass == MomoAppDescriptor.FEED_IMAGE_BROWSER_ACTIVITY_CLASS
+
+    override fun supportsTargetPackage(packageName: String): Boolean = packageName == targetPackage
+
+    override fun canSafelyNavigateBackToSessionList(snapshot: ChatPageSnapshot): Boolean {
+        if (snapshot.packageName != targetPackage) return false
+        return snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            isReceivedGreetingsListStructureVisible() ||
+            inspectPage().pageKind == BrowsePageKind.DETAIL ||
+            (snapshot.activityClass == MomoSayHiPageContract.CARD_ACTIVITY &&
+                snapshot.structureEvidence.any { it.viewId.substringAfterLast('/') in setOf(
+                    MomoSayHiPageContract.CARD_CONTENT_VIEW_ID.substringAfterLast('/'),
+                    MomoSayHiPageContract.CARD_CLOSE_VIEW_ID.substringAfterLast('/')
+                ) })
+    }
+
+    private fun observedDialogWindowIdFor(window: WindowRef): Int? {
+        val observation = latestDialogWindowObservation() ?: return null
+        if (observation.windowId < 0 || observation.windowId == window.windowId) return null
+        return if (rootAccess.isTargetWindowPresent(observation.windowId) == true) {
+            observation.windowId
+        } else null
+    }
+
+    override fun inspectPage(): BrowsePageEvidence = rootAccess.withActiveTargetRoot { root, window ->
+        val packageName = safeString { root.packageName?.toString().orEmpty() }
+        val activity = window.activityClass
+        if (packageName != targetPackage || window.packageName != targetPackage ||
+            window.windowId < 0 || !accessibilityGateway.isWindowCurrent(window)
+        ) {
+            return@withActiveTargetRoot BrowsePageEvidence(
+                packageName = packageName,
+                activityClass = activity,
+                pageKind = BrowsePageKind.UNKNOWN,
+                fingerprint = "",
+                confidence = 0,
+                reason = if (packageName.isBlank()) "当前前台窗口没有可识别的包名"
+                    else "当前活动窗口不是已验证的陌陌窗口"
+            )
+        }
+
+        val readiness = browseComponents.pageInspector.inspectMomoFeedReadiness(root)
+        val detail = if (readiness.fingerprint == null) {
+            browseComponents.pageInspector.inspectCurrentDynamicDetailIdentity(
+                root = root,
+                currentActivity = activity
+            )
+        } else null
+        val homeFingerprint = if (readiness.fingerprint == null && detail?.identityConfirmed != true) {
+            browseComponents.pageInspector.hasMomoHomePageNavigationFingerprint(root)
+        } else false
+        val fingerprint = when {
+            readiness.fingerprint != null -> readiness.fingerprint.signature
+            detail?.identityConfirmed == true -> detail.fingerprint.signature
+            homeFingerprint -> "momo-home-navigation-v1"
+            else -> browseComponents.pageInspector.pageFingerprint(root).signature
+        }
+        val kind = when {
+            readiness.fingerprint != null -> BrowsePageKind.DYNAMIC_FEED
+            detail?.identityConfirmed == true -> BrowsePageKind.DETAIL
+            homeFingerprint -> BrowsePageKind.HOME
+            else -> BrowsePageKind.OTHER
+        }
+        val windowScopedFingerprint = MomoWindowPageFingerprint.create(
+            window = window,
+            targetPackage = targetPackage,
+            pageKind = kind.name,
+            structuralSignature = fingerprint
+        ).orEmpty()
+        if (kind in setOf(BrowsePageKind.HOME, BrowsePageKind.DYNAMIC_FEED, BrowsePageKind.DETAIL) &&
+            windowScopedFingerprint.isNotBlank()
+        ) {
+            browseComponents.pageIdentityMemory.remember(
+                window = window,
+                pageKind = kind.name,
+                fingerprint = windowScopedFingerprint,
+                nowUptimeMs = SystemClock.uptimeMillis()
+            )
+        } else if (kind == BrowsePageKind.OTHER) {
+            val dialogWindowId = observedDialogWindowIdFor(window)
+            val popup = if (dialogWindowId == null) browseComponents.popupInspector.inspect(root) else null
+            val retained = try {
+                when {
+                    dialogWindowId != null -> browseComponents.pageIdentityMemory.retainForDialog(
+                        window, dialogWindowId, SystemClock.uptimeMillis()
+                    )
+                    popup != null -> browseComponents.pageIdentityMemory.retainForObstruction(window, SystemClock.uptimeMillis())
+                    else -> null
+                }
+            } finally {
+                popup?.let(browseComponents.popupInspector::recycle)
+            }
+            val retainedKind = when (retained?.pageKind) {
+                BrowsePageKind.HOME.name -> BrowsePageKind.HOME
+                BrowsePageKind.DYNAMIC_FEED.name -> BrowsePageKind.DYNAMIC_FEED
+                BrowsePageKind.DETAIL.name -> BrowsePageKind.DETAIL
+                else -> null
+            }
+            if (retained != null && retainedKind != null) {
+                return@withActiveTargetRoot BrowsePageEvidence(
+                    packageName = packageName,
+                    activityClass = activity,
+                    pageKind = retainedKind,
+                    fingerprint = retained.fingerprint,
+                    confidence = 35,
+                    reason = "页面遮挡（dialogWindowId=${dialogWindowId ?: "same-window-popup"}）；沿用同一窗口代次内最近确认的${retainedKind.name}身份；" +
+                        "仅保留页面上下文，不授权点击/滚动/OCR/BACK，等待遮挡消失后重新识别",
+                    nodeCount = 0
+                )
+            }
+        }
+        if (windowScopedFingerprint.isBlank()) {
+            return@withActiveTargetRoot BrowsePageEvidence(
+                packageName = packageName,
+                activityClass = activity,
+                pageKind = BrowsePageKind.UNKNOWN,
+                fingerprint = "",
+                confidence = 0,
+                reason = "无法建立当前活动窗口的页面身份键"
+            )
+        }
+        BrowsePageEvidence(
+            packageName = packageName,
+            activityClass = activity,
+            pageKind = kind,
+            fingerprint = windowScopedFingerprint,
+            confidence = when (kind) {
+                BrowsePageKind.UNKNOWN -> 0
+                BrowsePageKind.OTHER -> 20
+                BrowsePageKind.HOME -> 85
+                BrowsePageKind.DYNAMIC_FEED, BrowsePageKind.DETAIL -> 100
+                BrowsePageKind.IMAGE_VIEWER -> 0
+            },
+            reason = when (kind) {
+                BrowsePageKind.UNKNOWN -> "当前窗口不是目标陌陌窗口"
+                BrowsePageKind.DYNAMIC_FEED -> readiness.reason.ifBlank { "已确认动态列表结构指纹" }
+                BrowsePageKind.DETAIL -> detail?.reason.orEmpty()
+                BrowsePageKind.HOME -> "首页导航结构指纹确认"
+                BrowsePageKind.OTHER -> "当前陌陌窗口未匹配已验证的页面结构指纹"
+                BrowsePageKind.IMAGE_VIEWER -> "图片浏览器暂时仍采用专属 Activity 与可见内容双重辅助确认"
+            },
+            nodeCount = when {
+                readiness.fingerprint != null -> readiness.fingerprint.nodeCount
+                detail?.identityConfirmed == true -> detail.fingerprint.nodeCount
+                else -> 0
+            }
+        )
+    } ?: BrowsePageEvidence(
+        packageName = "",
+        activityClass = activityClass(),
+        pageKind = BrowsePageKind.UNKNOWN,
+        fingerprint = "",
+        confidence = 0,
+        reason = "当前没有可用的陌陌前台活动窗口",
+        windowAvailable = false
+    )
+
+    override fun inspectDynamicTab(): DynamicTabEvidence = rootAccess.withActiveTargetRoot { root, window ->
+        val tabInspection = browseComponents.pageInspector.inspectDynamicTabRow(root)
+        val row = tabInspection.evidence
+        val home = browseComponents.pageInspector.inspectHomeBottomNav(root)
+        val metrics = context.resources.displayMetrics
+        val dynamicTarget = row?.let { evidence ->
+            browseComponents.navigationController.findClickableNodeForLabel(
+                root = root,
+                label = configPageDynamicTabLabel(),
+                expectedBounds = evidence.dynamicBounds,
+                minCenterY = 0,
+                maxCenterY = (metrics.heightPixels * configPageDynamicTabUpperBandRatio()).toInt()
+            )
+        }
+        val homeTarget = home?.let { evidence ->
+            browseComponents.navigationController.findClickableNodeForLabel(
+                root = root,
+                label = configPageHomeTabLabel(),
+                expectedBounds = evidence.homeBounds,
+                minCenterY = (metrics.heightPixels * configPageHomeNavLowerBandRatio()).toInt(),
+                maxCenterY = metrics.heightPixels
+            ) ?: browseComponents.navigationController.findClickableHomeTabContainer(
+                root = root,
+                expectedLabelBounds = evidence.homeBounds,
+                minCenterY = (metrics.heightPixels * configPageHomeNavLowerBandRatio()).toInt(),
+                maxCenterY = metrics.heightPixels
+            )
+        }
+        try {
+            DynamicTabEvidence(
+                bounds = row?.dynamicBounds?.toScreenRect(),
+                targetBounds = dynamicTarget?.let {
+                    val targetBounds = Rect()
+                    runCatching { it.getBoundsInScreen(targetBounds) }
+                    targetBounds.toScreenRect()
+                },
+                selected = row?.dynamicSelected ?: false,
+                selectionKnown = row?.selectionKnown ?: false,
+                homeTabBounds = home?.homeBounds?.toScreenRect(),
+                homeTabTargetBounds = homeTarget?.let {
+                    val targetBounds = Rect()
+                    runCatching { it.getBoundsInScreen(targetBounds) }
+                    targetBounds.toScreenRect()
+                },
+                homeSelected = home?.homeSelected ?: false,
+                homeSelectionKnown = home?.selectionKnown ?: false,
+                contentTop = row?.contentTop,
+                reason = row?.diagnostic ?: "${tabInspection.reason}; ${home?.diagnostic.orEmpty()}",
+                targetWindow = window
+            )
+        } finally {
+            runCatching { dynamicTarget?.recycle() }
+            runCatching { homeTarget?.recycle() }
+        }
+    } ?: DynamicTabEvidence(
+        bounds = null,
+        targetBounds = null,
+        selected = false,
+        selectionKnown = false,
+        homeTabBounds = null,
+        homeTabTargetBounds = null,
+        homeSelected = false,
+        homeSelectionKnown = false,
+        contentTop = null,
+        reason = "当前没有可用的陌陌活动窗口",
+        targetWindow = null
+    )
+
+    override fun inspectPopup(): PopupEvidence? = rootAccess.withActiveTargetRoot { root, window ->
+        val popup = browseComponents.popupInspector.inspect(root) ?: return@withActiveTargetRoot null
+        try {
+            PopupEvidence(
+                signature = popup.signature,
+                dismissable = popup.dismissable,
+                critical = popup.critical,
+                dismissTarget = popup.container?.let { rootAccess.targetFor(root, it, window) },
+                closeBounds = popup.closeTapBounds?.toScreenRect(),
+                closeTargetBounds = popup.closeTarget?.let {
+                    val targetBounds = Rect()
+                    runCatching { it.getBoundsInScreen(targetBounds) }
+                    targetBounds.toScreenRect()
+                },
+                description = popup.description,
+                targetWindow = window
+            )
+        } finally {
+            popup?.let(browseComponents.popupInspector::recycle)
+        }
+    }
+
+    override fun inspectExternalPopup(): PopupEvidence? = rootAccess.withActiveWindowRoot { root ->
+        val packageName = safeString { root.packageName?.toString().orEmpty() }
+        if (packageName == targetPackage) return@withActiveWindowRoot null
+        val popup = browseComponents.popupInspector.inspect(root) ?: return@withActiveWindowRoot null
+        try {
+            PopupEvidence(
+                signature = popup.signature,
+                dismissable = false,
+                critical = popup.critical,
+                dismissTarget = null,
+                closeBounds = null,
+                closeTargetBounds = null,
+                description = popup.description
+            )
+        } finally {
+            popup?.let(browseComponents.popupInspector::recycle)
+        }
+    }
+
+    override fun inspectFeed(): FeedEvidence = rootAccess.withActiveTargetRoot { root, window ->
+        if (!accessibilityGateway.isWindowCurrent(window)) {
+            return@withActiveTargetRoot FeedEvidence(false, "", 0, null, "动态列表快照窗口已过期")
+        }
+        val blockingDialogWindowId = observedDialogWindowIdFor(window)
+        if (blockingDialogWindowId != null) {
+            return@withActiveTargetRoot FeedEvidence(
+                ready = false,
+                fingerprint = "",
+                visibleCardCount = 0,
+                scrollBounds = null,
+                reason = "独立弹窗 windowId=$blockingDialogWindowId 仍存在；保留页面身份但不允许滚动/选卡，等待新快照"
+            )
+        }
+        val readiness = browseComponents.pageInspector.inspectMomoFeedReadiness(root)
+        val tab = browseComponents.pageInspector.inspectDynamicTabRow(root).evidence
+        val visibleContainer = tab?.let { browseComponents.pageInspector.findVisibleFeedContainer(root, it.contentTop) }
+        val scrollContainer = browseComponents.feedGestureController.findScrollableFeedContainer(root)
+        try {
+            val structuralFingerprint = readiness.fingerprint?.signature.orEmpty()
+            val windowScopedFingerprint = if (structuralFingerprint.isNotBlank()) {
+                MomoWindowPageFingerprint.create(
+                    window = window,
+                    targetPackage = targetPackage,
+                    pageKind = "DYNAMIC_FEED",
+                    structuralSignature = structuralFingerprint
+                ).orEmpty()
+            } else ""
+            FeedEvidence(
+                ready = windowScopedFingerprint.isNotBlank() &&
+                    accessibilityGateway.isWindowCurrent(window),
+                fingerprint = windowScopedFingerprint,
+                visibleCardCount = visibleContainer?.let(::countVisibleDirectChildren) ?: 0,
+                scrollBounds = scrollContainer?.let {
+                    val bounds = Rect()
+                    runCatching { it.getBoundsInScreen(bounds) }
+                    bounds.toScreenRect()
+                },
+                reason = readiness.reason
+            )
+        } finally {
+            runCatching { visibleContainer?.recycle() }
+            runCatching { scrollContainer?.recycle() }
+        }
+    } ?: FeedEvidence(false, "", 0, null, "当前没有可用的陌陌活动窗口")
+
+    override fun loadFeedGestureProfile(): FeedGestureProfile =
+        browseComponents.feedGestureController.loadScrollGestureProfile().let { profile ->
+            FeedGestureProfile(durationMillis = profile.durationMs)
+        }
+
+    override fun planFeedGesture(profile: FeedGestureProfile): FeedGesturePlan? =
+        rootAccess.withActiveTargetRoot { root, window ->
+            val target = browseComponents.feedGestureController.resolveFeedGestureTarget(root)
+                ?: return@withActiveTargetRoot null
+            FeedGesturePlan(
+                bounds = target.bounds.toScreenRect(),
+                className = target.className,
+                profile = profile,
+                targetWindow = window
+            )
+        }
+
+    override fun captureVisibleFeedSnapshot(listOnly: Boolean): String =
+        rootAccess.withActiveTargetRoot { root, _ ->
+            if (!listOnly) {
+                browseComponents.feedGestureController.captureVisibleFeedNodeSnapshot(root)
+            } else {
+                val list = browseComponents.feedGestureController.findScrollableFeedContainer(root)
+                    ?: return@withActiveTargetRoot ""
+                try {
+                    browseComponents.feedGestureController.captureVisibleFeedNodeSnapshot(list)
+                } finally {
+                    runCatching { list.recycle() }
+                }
+            }
+        }.orEmpty()
+
+    override fun selectVisibleFeedCard(
+        minimumWidthPx: Int,
+        minimumHeightPx: Int
+    ): FeedSelectionResult = rootAccess.withActiveTargetRoot { root, window ->
+        val list = browseComponents.feedGestureController.findScrollableFeedContainer(root)
+            ?: return@withActiveTargetRoot FeedSelectionResult(
+                null, 0, 0, 0, 0, "未找到可安全滚动的动态列表容器"
+            )
+        val sourceFingerprint = browseComponents.pageInspector.pageFingerprint(root).signature
+        val sourceSnapshot = try {
+            browseComponents.feedGestureController.captureVisibleFeedNodeSnapshot(list)
+        } catch (_: Exception) {
+            ""
+        }
+        val selection = try {
+            MomoDynamicCardSelector.select(list, minimumWidthPx, minimumHeightPx)
+        } finally {
+            runCatching { list.recycle() }
+        }
+        val selectedNode = selection.node
+        val candidate = selectedNode?.let { node ->
+            try {
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+                if (bounds.isEmpty) null else FeedCardCandidate(
+                    bounds = bounds.toScreenRect(),
+                    cardType = FeedCardType.NORMAL_SOCIAL,
+                    fingerprint = "${safeString { node.className?.toString().orEmpty() }}@${bounds.toShortString()}",
+                    targetWindow = window
+                )
+            } finally {
+                runCatching { node.recycle() }
+            }
+        }
+        FeedSelectionResult(
+            candidate = candidate,
+            inspectedCount = selection.inspectedCardCount,
+            skippedAdvertisements = selection.skippedAdvertisementCount,
+            skippedLiveStreams = selection.skippedLiveStreamCount,
+            skippedUnknown = selection.skippedUnknownCount,
+            reason = selection.reason,
+            sourceFingerprint = sourceFingerprint,
+            sourceSnapshot = sourceSnapshot
+        )
+    } ?: FeedSelectionResult(null, 0, 0, 0, 0, "当前没有可用的陌陌活动窗口")
+
+    override fun inspectDetail(expectedFingerprint: String): DetailEvidence =
+        rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(window)
+            ) {
+                return@withActiveTargetRoot DetailEvidence(
+                    false, false, "", "动态详情检查时活动窗口身份已变化"
+                )
+            }
+            val blockingDialogWindowId = observedDialogWindowIdFor(window)
+            if (blockingDialogWindowId != null) {
+                return@withActiveTargetRoot DetailEvidence(
+                    isFeedPage = false,
+                    identityConfirmed = false,
+                    fingerprint = "",
+                    reason = "动态详情仍有独立弹窗 windowId=$blockingDialogWindowId；等待遮挡消失后重新确认"
+                )
+            }
+            val result = browseComponents.pageInspector.inspectCurrentDynamicDetailIdentity(
+                root = root,
+                currentActivity = window.activityClass
+            )
+            val scopedFingerprint = MomoWindowPageFingerprint.create(
+                window = window,
+                targetPackage = targetPackage,
+                pageKind = "DETAIL",
+                structuralSignature = result.fingerprint.signature
+            ).orEmpty()
+            DetailEvidence(
+                isFeedPage = result.isFeedPage,
+                identityConfirmed = result.identityConfirmed && accessibilityGateway.isWindowCurrent(window),
+                fingerprint = scopedFingerprint,
+                reason = result.reason,
+                nodeCount = result.fingerprint.nodeCount
+            )
+        } ?: DetailEvidence(false, false, "", "当前没有可用的陌陌活动窗口")
+
+    override fun inspectFeedReturn(expectedFingerprint: String): FeedReturnEvidence =
+        rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(window)
+            ) return@withActiveTargetRoot FeedReturnEvidence(
+                false, false, "", "动态列表返回检查时活动窗口身份已变化"
+            )
+            val readiness = browseComponents.pageInspector.inspectMomoFeedReadiness(root)
+            val structuralFingerprint = readiness.fingerprint?.signature.orEmpty()
+            val fingerprint = if (structuralFingerprint.isNotBlank()) {
+                MomoWindowPageFingerprint.create(
+                    window = window,
+                    targetPackage = targetPackage,
+                    pageKind = "DYNAMIC_FEED",
+                    structuralSignature = structuralFingerprint
+                ).orEmpty()
+            } else ""
+            val restored = fingerprint.isNotBlank()
+            FeedReturnEvidence(
+                restored = restored,
+                stable = restored && expectedFingerprint.isNotBlank() && fingerprint == expectedFingerprint &&
+                    accessibilityGateway.isWindowCurrent(window),
+                fingerprint = fingerprint,
+                reason = if (restored) readiness.reason else "动态 Feed 尚未重新出现"
+            )
+        } ?: FeedReturnEvidence(false, false, "", "当前没有可用的陌陌活动窗口")
+
+    // ---- ChatPagePort: AIReply sees only generic structure and NodeTarget locators ----
+
+    /**
+     * Captures redacted navigation evidence on non-SayHi Momo pages, including the message-home
+     * entry and any interception settings page. Candidate controls are never clicked here.
+     */
+    private fun inspectMomoNavigationEvidenceIfNeeded() {
+        val activityHint = activityClass()
+        if (isReceivedGreetingsListStructureVisible() ||
+            activityHint == MomoSayHiPageContract.CARD_ACTIVITY
+        ) return
+        val now = System.currentTimeMillis()
+        if (now - lastMomoNavigationEvidenceAtMs < NAVIGATION_EVIDENCE_INTERVAL_MS) return
+        lastMomoNavigationEvidenceAtMs = now
+        val tree = accessibilityGateway.inspectActiveWindow(
+            TreeInspectionRequest(
+                maxNodes = NAVIGATION_EVIDENCE_MAX_NODES,
+                textCapture = NodeTextCapture.EPHEMERAL
+            )
+        ) ?: return
+        if (tree.window.packageName != targetPackage) return
+        recordMomoNavigationEvidence(tree)
+    }
+
+    /** Stores only structural metadata; raw node text remains ephemeral and is never logged. */
+    private fun recordMomoNavigationEvidence(
+        tree: com.freedom.core.accessibility.api.AccessibilityTreeSnapshot
+    ) {
+        val metrics = runCatching { accessibilityGateway.displayMetrics() }.getOrNull()
+        val evidence = sayHiNavigationEvidenceInspector.inspect(
+            tree = tree,
+            screenWidth = metrics?.widthPixels ?: 0,
+            screenHeight = metrics?.heightPixels ?: 0
+        )
+        val signature = evidence.structuralKey()
+        if (signature == lastSayHiNavigationEvidenceSignature) return
+        lastSayHiNavigationEvidenceSignature = signature
+        fun describe(candidates: List<MomoNavigationTargetEvidence>): String =
+            candidates.take(MAX_NAVIGATION_EVIDENCE_LOG_ITEMS).joinToString(";") { candidate ->
+                "path=${candidate.path.joinToString("/")};" +
+                    "class=${candidate.className.substringAfterLast('.')};" +
+                    "id=${candidate.viewId};" +
+                    "bounds=${candidate.bounds.left},${candidate.bounds.top}," +
+                    "${candidate.bounds.right},${candidate.bounds.bottom};" +
+                    "clickable=${candidate.clickable};enabled=${candidate.enabled};" +
+                    "checkable=${candidate.checkable};checked=${candidate.checked};" +
+                    "clickAncestor=${candidate.clickableAncestorPath?.joinToString("/") ?: "NONE"};" +
+                    "clickAncestorId=${candidate.clickableAncestorViewId.orEmpty()};" +
+                    "clickAncestorClass=${candidate.clickableAncestorClassName?.substringAfterLast('.') ?: "NONE"};" +
+                    "listLabel=${candidate.hasListRelatedLabel};" +
+                    "interceptRelated=${candidate.relatedToInterceptLabel}"
+            }.ifBlank { "NONE" }
+        onLog(
+            "陌陌导航结构取证：Activity=${evidence.activityClass};" +
+                "扫描节点=${evidence.visitedNodeCount};截断=${evidence.truncated};" +
+                "收到招呼入口候选=${evidence.receivedGreetingsEntryTargets.size};" +
+                "入口节点=[${describe(evidence.receivedGreetingsEntryTargets)}];" +
+                "右上角可点击候选=${evidence.topRightActionTargets.size};" +
+                "右上角节点=[${describe(evidence.topRightActionTargets)}];" +
+                "拦截相关文本节点=${evidence.interceptLabelNodeCount};" +
+                "开关候选=${evidence.toggleTargets.size};" +
+                "开关节点=[${describe(evidence.toggleTargets)}]"
+        )
+    }
+
+    /**
+     * Entry point for the explicit received-greetings branch. The runtime periodically invokes
+     * this bounded step while CHAT_LIST remains visible so entry discovery survives viewport misses.
+     */
+    override fun supportsReceivedGreetingsIdleWorkflow(): Boolean = true
+
+    /** Passive path for pages the user opens manually; it never scrolls or taps. */
+    override fun observeReceivedGreetingsPage(): Boolean =
+        inspectSayHiPageAndAutonomousBrowse(allowAutonomousScroll = false, minimumIntervalMs = 300L)
+
+    /**
+     * Page-arrival watcher used after a real user-navigation event. It reuses the existing
+     * Received Greetings fingerprint and complete list-container evidence, but does not require
+     * the automated profile-card/list-button navigation checkpoint.
+     */
+    override fun observeManuallyOpenedReceivedGreetingsPage(): ReceivedGreetingsPageArrivalStatus {
+        val currentActivity = activityClass()
+        if (currentActivity.isBlank()) return ReceivedGreetingsPageArrivalStatus.UNKNOWN
+
+        manualReceivedGreetingsArrivalProbeActive = true
+        val inspected = try {
+            inspectSayHiPageAndAutonomousBrowse(
+                allowAutonomousScroll = false,
+                minimumIntervalMs = 0L,
+                forceFresh = true
+            )
+        } finally {
+            manualReceivedGreetingsArrivalProbeActive = false
+        }
+
+        val listFingerprintVisible = isReceivedGreetingsListStructureVisible()
+        return when {
+            sayHiNavigationFlowController.isReceivedListConfirmed() && listFingerprintVisible ->
+                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+            sayHiNavigationFlowController.isManuallyStabilizingReceivedList() || listFingerprintVisible ->
+                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING
+            currentActivity == MomoSayHiPageContract.CARD_ACTIVITY ||
+                currentActivity == MomoSayHiPageContract.LIST_ACTIVITY ||
+                currentActivity.contains(".message.sayhi.", ignoreCase = true) ->
+                ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE
+            currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS ->
+                ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION
+            inspected -> ReceivedGreetingsPageArrivalStatus.UNKNOWN
+            else -> ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+        }
+    }
+
+    /** Starts the existing read-only browser on the already confirmed current list. */
+    override fun beginReceivedGreetingsTaskFromCurrentList(): Boolean {
+        val confirmedTarget = sayHiConfirmedListTarget
+        if (!sayHiNavigationFlowController.isReceivedListConfirmed() ||
+            !isReceivedGreetingsListStructureVisible() ||
+            confirmedTarget == null || !accessibilityGateway.isWindowCurrent(confirmedTarget.window) ||
+            sayHiGestureInFlight || sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE ||
+            receivedGreetingsEntrySearchGestureInFlight
+        ) {
+            onLog("收到的招呼人工入口接管[REJECTED]：当前列表、窗口或只读阶段未通过重新验证；保持页面不动")
+            return false
+        }
+
+        resetReceivedGreetingsEntrySearch()
+        sayHiAutonomousBrowseController.reset()
+        clearSayHiSelectedGreeting()
+        resetSayHiRowTapTransaction()
+        receivedGreetingsEntryTapPending = false
+        sayHiCardListTapPending = false
+        sayHiTraversalState.setDeferredReturnToTopActive(false)
+        sayHiTraversalState.setDeferredReplayStarted(false)
+        sayHiStableCandidateKey = ""
+        sayHiStableCandidateTarget = null
+        sayHiStableCandidateWindow = null
+        onLog("收到的招呼人工入口接管[ACCEPTED]：复核当前活动窗口和已确认 listview；从当前列表启动只读遍历，不执行入口导航")
+        return true
+    }
+
+    override fun beginReceivedGreetingsNavigationTask() {
+        resetReceivedGreetingsEntrySearch()
+    }
+
+    override fun performReceivedGreetingsIdleStep(): Boolean {
+        // Do not inspect/tap a candidate while the bounded discovery swipe is still running.
+        // The next fresh page snapshot owns the next decision; this also prevents a recycled
+        // row or transiently visible label from racing the gesture callback.
+        if (receivedGreetingsEntrySearchGestureInFlight) return true
+
+        val currentActivity = activityClass()
+        when (sayHiReadOnlyStage) {
+            SayHiReadOnlyStage.AVATAR_TAP_PENDING,
+            SayHiReadOnlyStage.ROW_TAP_PENDING -> {
+                if (System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs > SAYHI_GESTURE_TERMINAL_TIMEOUT_MS) {
+                    if (sayHiGestureInFlight) {
+                        onLog("收到招呼手势等待超时：协调器仍报告手势在途；继续等待平台终态，不重复派发")
+                        return true
+                    }
+                    when {
+                        inspectCurrentChatDetailFingerprint() != null -> {
+                            sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_DETAIL
+                            onLog("收到招呼手势回调超时：新鲜结构已确认聊天详情候选；保留事务，继续等待点击来源核验，不启动 OCR")
+                            return true
+                        }
+                        currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY -> {
+                            sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
+                            sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                            onLog("收到招呼手势回调超时：当前为资料页；转入资料页独立识别与安全返回流程")
+                            return inspectPendingSayHiAvatarProfile(currentActivity)
+                        }
+                        isReceivedGreetingsListStructureVisible() -> {
+                            sayHiSelectedGreeting?.let { deferSayHiRow(it.rowKey, "GESTURE_TERMINAL_CALLBACK_TIMEOUT") }
+                            clearSayHiSelectedGreeting()
+                            resetSayHiRowTapTransaction()
+                            sayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
+                            onLog("收到招呼手势回调超时：仍在已识别的招呼列表；隔离当前用户并继续其他用户，不重复派发")
+                            return inspectSayHiPageAndAutonomousBrowse(
+                                allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
+                            )
+                        }
+                        else -> {
+                            onLog("收到招呼手势回调超时：当前页面仍无法确认；保留用户和事务，等待新鲜页面快照，不盲目点击或返回")
+                            return true
+                        }
+                    }
+                }
+                return true
+            }
+            SayHiReadOnlyStage.WAITING_PROFILE -> return inspectPendingSayHiAvatarProfile(currentActivity)
+            SayHiReadOnlyStage.PROFILE_SCROLL_PENDING -> {
+                if (System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs > SAYHI_PROFILE_SCROLL_TIMEOUT_MS) {
+                    sayHiProfileScrollRequestId = null
+                    sayHiProfileScrollInFlight = false
+                    sayHiGestureInFlight = false
+                    sayHiProfileScrollFailed = true
+                    sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
+                    sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                    onLog("收到招呼身份采集：资料页单次向上滑动等待超时；不重复派发，转入安全返回")
+                }
+                return true
+            }
+            SayHiReadOnlyStage.PROFILE_BACK_PENDING -> {
+                if (sayHiProfileBackDialogPending) {
+                    when (rootAccess.isTargetWindowPresent(sayHiProfileBackDialogWindowId)) {
+                        true -> return true
+                        null -> {
+                            onLog("收到招呼资料页返回：无法确认 dialog.h 是否仍存在；保持暂停，不继续执行第二次 BACK")
+                            return true
+                        }
+                        false -> {
+                            sayHiProfileBackDialogPending = false
+                            sayHiProfileBackDialogWindowId = -1
+                            val activePage = rootAccess.withActiveTargetRoot { root, window ->
+                                window to pageInspectionComponents.gestureReadinessInspector.hasVisibleViewId(
+                                    root,
+                                    setOf(MomoSayHiPageContract.LIST_VIEW_ID)
+                                )
+                            }
+                            if (activePage == null) return true
+                            if (isReceivedGreetingsListConfirmed()) {
+                                sayHiProfileBackWindowId = -1
+                                onLog("收到招呼资料页返回：dialog.h 已消失；NewSayHiSessionListActivity、活动窗口和可见 listview 均已确认")
+                                return inspectSayHiPageAndAutonomousBrowse(
+                                    allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
+                                )
+                            }
+                            if (isReceivedGreetingsListStructureVisible()) {
+                                onLog("收到招呼资料页返回：dialog.h 已消失且收到招呼列表结构指纹已出现；等待稳定快照确认")
+                                return true
+                            }
+                            if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY &&
+                                activePage.first.activityClass == MomoSayHiPageContract.PROFILE_ACTIVITY
+                            ) {
+                                onLog("收到招呼资料页返回：已确认 dialog.h 消失且资料页重新活动；重新执行独立安全检查后再返回列表")
+                                return requestSayHiProfileBack()
+                            }
+                            if (isReceivedGreetingsListStructureVisible()) {
+                                onLog("收到招呼资料页返回：Activity 已变化但列表容器尚未稳定；等待新鲜快照")
+                                return true
+                            }
+                        }
+                    }
+                }
+                if (isReceivedGreetingsListConfirmed()) {
+                    sayHiProfileBackWindowId = -1
+                    onLog("收到招呼资料页返回确认：NewSayHiSessionListActivity、活动窗口和可见 listview 均已重新验证")
+                    return inspectSayHiPageAndAutonomousBrowse(
+                        allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
+                    )
+                }
+                if (System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs > SAYHI_PROFILE_BACK_TIMEOUT_MS) {
+                    if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY &&
+                        !sayHiProfileBackDialogPending && sayHiProfileBackAttempts < MAX_SAYHI_PROFILE_BACK_ATTEMPTS
+                    ) {
+                        onLog("收到招呼资料页返回超时：当前资料页仍通过 Activity 识别且无待关闭弹层；重新执行一次独立窗口/弹层安全检查")
+                        return requestSayHiProfileBack()
+                    }
+                    onLog("收到招呼资料页返回等待仍未确认：保留当前页面与用户断点，继续低频获取新鲜窗口快照；不盲目重复 BACK")
+                }
+                return true
+            }
+            SayHiReadOnlyStage.WAITING_DETAIL -> {
+                if (sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.WAITING &&
+                    pendingSayHiRowTapSubmittedAtUptimeMs > 0L &&
+                    SystemClock.uptimeMillis() - pendingSayHiRowTapSubmittedAtUptimeMs >=
+                    SAYHI_CLICK_EVENT_SETTLE_MS
+                ) {
+                    // A missing event at the deadline is inconclusive, not proof that the tap
+                    // hit the wrong control. Keep the transaction alive for late event delivery.
+                    sayHiRowTapFeedbackState = SayHiRowTapFeedbackState.TIMED_OUT
+                    onLog("收到招呼点击事件核验[TIMEOUT_PENDING]：真实派发后的反馈窗口已到期；不判定 REJECTED，保留点击事务并继续页面复核")
+                }
+                if (sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.REJECTED) {
+                    if (isReceivedGreetingsListStructureVisible()) {
+                        sayHiSelectedGreeting?.let { deferSayHiRow(it.rowKey, "DETAIL_NAVIGATION_UNVERIFIED") }
+                        val reason = sayHiRowTapHitReason
+                        clearSayHiSelectedGreeting()
+                        onLog("收到招呼点击失败：实际命中非行容器控件（$reason）；仍在原列表，不执行 BACK、不执行 OCR；重新识别列表")
+                        return inspectSayHiPageAndAutonomousBrowse(
+                            allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
+                        )
+                    }
+                    return returnFromUnverifiedSayHiDetailNavigation(
+                        currentActivity,
+                        "CLICKED_UNEXPECTED_CONTROL:$sayHiRowTapHitReason"
+                    )
+                }
+                val chatDetailFingerprintConfirmed = inspectCurrentChatDetailFingerprint() != null
+                if (chatDetailFingerprintConfirmed) {
+                    val fingerprintConfirmed = sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.VERIFIED
+                    if (fingerprintConfirmed) return true
+                    val detailWaitElapsedMs =
+                        (System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs).coerceAtLeast(0L)
+                    if (detailWaitElapsedMs < SAYHI_ROW_DETAIL_VERIFY_TIMEOUT_MS) return true
+                    if (sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.TIMED_OUT &&
+                        !sayHiUnverifiedBackAttempted
+                    ) {
+                        // The destination page is independently fingerprinted, but the source tap
+                        // event never arrived. Do not read the conversation. Use only the
+                        // existing exact-window + overlay-checked ChatActivity BACK, then defer
+                        // this row after the received-greetings list is independently confirmed.
+                        sayHiUnverifiedBackAttempted = true
+                        val sourceWindow = inspectCurrentChatDetailFingerprint()?.first
+                        var submittedWindow: WindowRef? = null
+                        val accepted = sourceWindow?.let { expectedWindow ->
+                            requestChatActivityBack(
+                                reason = "收到招呼点击反馈超时后的安全单用户隔离回退；不执行 OCR",
+                                expectedWindow = expectedWindow,
+                                onSubmitted = { submittedWindow = it }
+                            )
+                        } ?: false
+                        if (accepted) {
+                            sayHiUnverifiedDetailReturnPending = true
+                            sayHiReadOnlyStage = SayHiReadOnlyStage.DETAIL_BACK_PENDING
+                            sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                            resetSayHiDetailBackReturnTracking()
+                            sayHiDetailBackSourceWindow = submittedWindow
+                            onLog(
+                                "收到招呼点击反馈超时恢复：聊天详情指纹已独立确认，但来源事件缺失；" +
+                                    "已通过精确窗口/弹层检查安全返回；本用户记为待恢复，不读取消息、不计入成功；等待列表确认"
+                            )
+                            return true
+                        }
+                    }
+                    onLog(
+                        "收到招呼详情页指纹确认暂未满足：Activity 虽为 ChatActivity，但点击来源或页面指纹尚未全部确认；" +
+                            "不执行 OCR；安全回退未获准时保留当前事务并请求新快照复核"
+                    )
+                    return true
+                }
+                if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY) {
+                    return returnFromUnverifiedSayHiDetailNavigation(
+                        currentActivity,
+                        "UNEXPECTED_PROFILE_ACTIVITY:$currentActivity"
+                    )
+                }
+                if (System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs < SAYHI_ROW_DETAIL_VERIFY_TIMEOUT_MS) {
+                    return true
+                }
+                if (isReceivedGreetingsListStructureVisible()) {
+                    // The row tap produced no page transition. Never issue BACK from the list,
+                    // which could leave the received-greetings workflow entirely.
+                    sayHiSelectedGreeting?.let { deferSayHiRow(it.rowKey, "ROW_TAP_NO_PAGE_TRANSITION") }
+                    clearSayHiSelectedGreeting()
+                    resetSayHiRowTapTransaction()
+                    sayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
+                    onLog("收到招呼只读详情导航：行区域点击后仍停留在原列表；本行隔离并安排后续复核，不执行返回或立即重复点击")
+                    return inspectSayHiPageAndAutonomousBrowse(
+                        allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
+                    )
+                }
+                onLog("收到招呼只读详情导航：未在限定时间内确认陌陌聊天 Activity；不执行输入或发送，安全返回")
+                return returnFromUnverifiedSayHiDetailNavigation(currentActivity)
+            }
+            SayHiReadOnlyStage.DETAIL_BACK_PENDING -> {
+                val nowUptimeMs = SystemClock.uptimeMillis()
+                val listWindowIdentity = receivedGreetingsListWindowIdentity()
+                if (sayHiDetailBackReturnConfirmation.observe(listWindowIdentity, nowUptimeMs)) {
+                    onLog(
+                        "收到招呼详情页返回确认：NewSayHiSessionListActivity、当前活动窗口和可见 listview " +
+                            "已由连续 ${sayHiDetailBackReturnConfirmation.stableSampleCount} 份新鲜快照确认；" +
+                            "window=$listWindowIdentity"
+                    )
+                    resetSayHiDetailBackReturnTracking()
+                    return inspectSayHiPageAndAutonomousBrowse(
+                        allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
+                    )
+                }
+                if (listWindowIdentity != null && sayHiDetailBackReturnConfirmation.stableSampleCount == 1) {
+                    onLog(
+                        "收到招呼详情页返回候选：已识别目标 Activity、当前窗口和可见 listview；" +
+                            "等待至少 500ms 后的第二份新鲜快照；window=$listWindowIdentity"
+                    )
+                }
+
+                val nowWallClockMs = System.currentTimeMillis()
+                val elapsedMs = (nowWallClockMs - sayHiReadOnlyStageStartedAtMs).coerceAtLeast(0L)
+                if (elapsedMs >= SAYHI_DETAIL_BACK_TIMEOUT_MS &&
+                    sayHiDetailBackRecoveryWindowStartedAtUptimeMs == 0L
+                ) {
+                    sayHiDetailBackRecoveryWindowStartedAtUptimeMs = nowUptimeMs
+                    onLog(
+                        "收到招呼详情页返回等待超时：已等待 ${elapsedMs}ms，未完成连续列表确认；" +
+                            "进入额外 ${SAYHI_DETAIL_BACK_RECOVERY_TIMEOUT_MS}ms 安全恢复窗口，" +
+                            "仅当当前仍是 ChatActivity 且窗口/弹层复核通过时允许一次补救 BACK"
+                    )
+                }
+
+                if (sayHiDetailBackRecoveryWindowStartedAtUptimeMs > 0L &&
+                    !sayHiDetailBackRecoveryAttempted &&
+                    inspectCurrentChatDetailFingerprint() != null
+                ) {
+                    // Mark before dispatch. A rejected/uncertain action must never become a loop.
+                    sayHiDetailBackRecoveryAttempted = true
+                    val sourceWindow = sayHiDetailBackSourceWindow
+                    val accepted = sourceWindow?.let { expectedWindow ->
+                        requestChatActivityBack(
+                            reason = "收到招呼详情页首次返回超时后的单次安全补救",
+                            expectedWindow = expectedWindow
+                        )
+                    } ?: false
+                    onLog(
+                        "收到招呼详情页返回补救：仍处于 ChatActivity；" +
+                            "原始窗口引用可用=${sourceWindow != null}；" +
+                            "已按原始 windowId/generation 复核当前页面并执行独立弹层安全检查；" +
+                            "platformAccepted=$accepted；仅提交本次补救，不把平台接受视作返回成功；" +
+                            "等待新的页面快照确认"
+                    )
+                }
+
+                val recoveryWindowElapsedMs = if (sayHiDetailBackRecoveryWindowStartedAtUptimeMs > 0L) {
+                    (nowUptimeMs - sayHiDetailBackRecoveryWindowStartedAtUptimeMs).coerceAtLeast(0L)
+                } else {
+                    0L
+                }
+                if (recoveryWindowElapsedMs >= SAYHI_DETAIL_BACK_RECOVERY_TIMEOUT_MS) {
+                    onLog(
+                        "收到招呼详情页返回仍未确认：初次等待与额外恢复窗口均已结束；" +
+                            "补救 BACK 已尝试=${sayHiDetailBackRecoveryAttempted}；" +
+                            "当前 Activity=$currentActivity；列表稳定快照数=" +
+                            "${sayHiDetailBackReturnConfirmation.stableSampleCount}；" +
+                            "保留页面和采集数据，停止重复 BACK，继续等待页面事件或新鲜快照"
+                    )
+                    return true
+                }
+                return true
+            }
+            SayHiReadOnlyStage.IDLE -> Unit
+        }
+        // Do not validate the main chat-list identity or enter the intermediate list host while
+        // the just-submitted entry tap is navigating. Momo may publish one or more intermediate
+        // Activity values before NewSayHiCardActivity arrives. Every transition is bounded by the
+        // existing entry verification timeout and checked against a fresh Activity on each pass.
+        if (sayHiNavigationFlowController.shouldAwaitProfileCardActivity(
+                currentActivityClass = currentActivity,
+                profileCardActivityClass = MomoSayHiPageContract.CARD_ACTIVITY,
+                entryTapPending = receivedGreetingsEntryTapPending
+            )
+        ) {
+            val now = System.currentTimeMillis()
+            val elapsedMs = (now - receivedGreetingsEntryTapAtMs).coerceAtLeast(0L)
+            if (elapsedMs < RECEIVED_GREETINGS_ENTRY_VERIFY_TIMEOUT_MS) {
+                if (lastReceivedGreetingsNavigationWaitActivityClass != currentActivity) {
+                    lastReceivedGreetingsNavigationWaitActivityClass = currentActivity
+                    onLog(
+                        "收到的招呼导航：入口点击已提交，等待异步进入 NewSayHiCardActivity；" +
+                            "当前过渡 Activity=${currentActivity.ifBlank { "UNKNOWN" }}；" +
+                            "elapsed=${elapsedMs}ms；导航等待中，不执行主聊天列表扫描"
+                    )
+                }
+                return true
+            }
+            receivedGreetingsEntryTapPending = false
+            lastReceivedGreetingsNavigationWaitActivityClass = ""
+            sayHiNavigationFlowController.reset()
+            logReceivedGreetingsEntrySkip("PAGE_SWITCH_NOT_CONFIRMED_WITHIN_TIMEOUT")
+            onLog(
+                "收到的招呼入口点击后未能在限定时间内验证资料卡页面切换；" +
+                    "本轮不自动重复点击；elapsed=${elapsedMs}ms"
+            )
+            return false
+        }
+        if (currentActivity == MomoSayHiPageContract.CARD_ACTIVITY) {
+            if (receivedGreetingsEntryTapPending) {
+                receivedGreetingsEntryTapPending = false
+                lastReceivedGreetingsNavigationWaitActivityClass = ""
+                lastReceivedGreetingsEntryDiagnostic = ""
+                onLog("收到的招呼入口点击后已进入资料卡 Activity；等待卡片与顶部‘列表’控件稳定")
+            }
+            if (sayHiCardListTapPending) {
+                if (System.currentTimeMillis() - sayHiCardListTapAtMs < SAYHI_CARD_LIST_VERIFY_TIMEOUT_MS) {
+                    return true
+                }
+                sayHiCardListTapPending = false
+                sayHiNavigationFlowController.markCardListTapFailed()
+                onLog("收到的招呼资料卡：点击‘列表’后未在限定时间内确认列表 Activity；重新复核资料卡")
+            }
+            if (!sayHiNavigationFlowController.isWaitingForCard()) {
+                onLog("收到的招呼资料卡：当前不处于等待资料卡阶段；不执行额外点击")
+                return true
+            }
+
+            // Keep a read-only profile sample, but gate the actual click on multiple spaced
+            // snapshots of the exact close_container + child label. The profile card's accept /
+            // reject controls are never considered by this navigation policy.
+            inspectSayHiPageAndAutonomousBrowse(allowAutonomousScroll = false, minimumIntervalMs = 300L)
+            when (val inspection = inspectSayHiCardListTapTarget()) {
+                is SayHiCardListTapInspection.Ready -> {
+                    val windowKey = sayHiWindowStabilityKey(inspection.tree)
+                    val signature = listOf(
+                        inspection.target.controlPath,
+                        inspection.target.labelPath,
+                        inspection.target.controlBounds,
+                        inspection.target.tapBounds
+                    ).joinToString("|")
+                    val stable = sayHiNavigationFlowController.observeStableCardTarget(
+                        windowKey = windowKey,
+                        targetSignature = signature,
+                        capturedAtMs = inspection.tree.capturedAtEpochMs
+                    )
+                    if (stable) {
+                        onLog("收到的招呼资料卡：连续新快照确认 close_container 与‘列表’位置稳定；准备点击")
+                        dispatchSayHiCardListTap()
+                    } else {
+                        onLog("收到的招呼资料卡：已识别可点击 close_container 和子节点‘列表’；等待下一份稳定快照")
+                    }
+                }
+                is SayHiCardListTapInspection.Rejected -> {
+                    sayHiNavigationFlowController.resetCardStability()
+                    logSayHiCardListTapSkip(inspection.reason)
+                }
+            }
+            return true
+        }
+        if (isReceivedGreetingsListStructureVisible()) {
+            if (sayHiNavigationFlowController.isWaitingForCard()) {
+                // Momo first exposes NewSayHiSessionListActivity as the card host, then opens
+                // NewSayHiCardActivity on top. This first Activity is not the message list.
+                onLog("收到的招呼导航：检测到资料卡宿主过渡 Activity；等待 NewSayHiCardActivity，不开始列表扫描")
+                return true
+            }
+            if (sayHiNavigationFlowController.isWaitingForReceivedList()) {
+                val inspected = inspectSayHiPageAndAutonomousBrowse(
+                    allowAutonomousScroll = false,
+                    minimumIntervalMs = 300L
+                )
+                if (!inspected) sayHiNavigationFlowController.resetListStability()
+                if (!sayHiNavigationFlowController.isReceivedListConfirmed()) {
+                    return true
+                }
+                sayHiCardListTapPending = false
+                sayHiAutonomousBrowseController.reset()
+                onLog("收到的招呼资料卡‘列表’导航已验证：NewSayHiSessionListActivity 与外层可滚动 listview 连续稳定")
+                return true
+            }
+            if (!sayHiNavigationFlowController.isReceivedListConfirmed()) {
+                onLog("收到的招呼导航：当前列表 Activity 尚无资料卡‘列表’点击凭证；拒绝把过渡页面当作消息列表")
+                return true
+            }
+            return inspectSayHiPageAndAutonomousBrowse(
+                allowAutonomousScroll = true,
+                minimumIntervalMs = 300L
+            )
+        }
+        val currentMainPageType = rootAccess.withActiveTargetRoot { root, window ->
+            chatComponents.pageInspector.inspectRoot(
+                root = AccessibilityNodeInfo.obtain(root),
+                targetPackage = targetPackage,
+                activityClass = window.activityClass.ifBlank { currentActivity }
+            ).pageType
+        }
+        when (currentMainPageType) {
+            MomoChatPageType.CHAT_LIST -> Unit
+            MomoChatPageType.UNKNOWN, null -> {
+                logReceivedGreetingsEntrySkip("MESSAGE_WORK_AREA_SNAPSHOT_TEMPORARILY_UNKNOWN")
+                onLog("收到的招呼导航暂缓：消息列表页面指纹本次快照暂不可用；保留导航任务，等待新快照，不复用旧坐标")
+                return true
+            }
+            else -> {
+                logReceivedGreetingsEntrySkip("MESSAGE_WORK_AREA_STRUCTURAL_FINGERPRINT_NOT_CONFIRMED")
+                return false
+            }
+        }
+
+        val now = System.currentTimeMillis()
+        if (now - lastReceivedGreetingsEntryTapAtMs < RECEIVED_GREETINGS_ENTRY_RETRY_COOLDOWN_MS) {
+            logReceivedGreetingsEntrySkip("ENTRY_RETRY_COOLDOWN_ACTIVE")
+            return true
+        }
+
+        val firstInspection = inspectReceivedGreetingsTapTarget()
+        if (firstInspection !is ReceivedGreetingsTapInspection.Ready) {
+            val reason = (firstInspection as ReceivedGreetingsTapInspection.Rejected).reason
+            logReceivedGreetingsEntrySkip(reason)
+            return if (reason.contains("ENTRY_LABEL_COUNT=0")) {
+                performReceivedGreetingsEntrySearchStep()
+            } else {
+                // A visible-but-ambiguous or unsafe label is not permission to scroll past it.
+                true
+            }
+        }
+        resetReceivedGreetingsEntrySearch()
+
+        // This second tree is acquired immediately before dispatch. It must still identify the
+        // same window and exactly the same label/clickable-parent geometry; otherwise the list
+        // moved, recycled a row, or navigated while the earlier candidate was being evaluated.
+        val latestInspection = inspectReceivedGreetingsTapTarget(
+            expectedWindow = firstInspection.tree.window,
+            expectedWindowId = firstInspection.tree.windowId
+        )
+        if (latestInspection !is ReceivedGreetingsTapInspection.Ready) {
+            val reason = (latestInspection as ReceivedGreetingsTapInspection.Rejected).reason
+            logReceivedGreetingsEntrySkip(reason)
+            return true
+        }
+        if (!MomoReceivedGreetingsEntryTapPolicy.hasStableTargetPosition(
+                firstTree = firstInspection.tree,
+                first = firstInspection.target,
+                latestTree = latestInspection.tree,
+                latest = latestInspection.target
+            )
+        ) {
+            logReceivedGreetingsEntrySkip("TARGET_POSITION_CHANGED_BETWEEN_FRESH_SNAPSHOTS")
+            onLog(
+                "收到的招呼入口：点击前两次独立快照的标签/可点击父控件位置不一致；" +
+                    "丢弃旧坐标，本轮不点击，等待列表稳定后的新快照"
+            )
+            return true
+        }
+
+        val tree = latestInspection.tree
+        val metrics = latestInspection.metrics
+        val tapTarget = latestInspection.target
+        if (!accessibilityGateway.isWindowCurrent(tree.window)) {
+            logReceivedGreetingsEntrySkip("LATEST_SNAPSHOT_BECAME_STALE_BEFORE_GESTURE")
+            return true
+        }
+        onLog(
+            "收到的招呼入口[PRE_TAP_REVALIDATED]：windowGeneration=${tree.window.generation}；" +
+                "windowId=${tree.windowId}；snapshotAt=${tree.capturedAtEpochMs}；" +
+                "display=${metrics.widthPixels}x${metrics.heightPixels}；" +
+                "labelBounds=${formatBounds(tapTarget.tapBounds)}；" +
+                "clickableParentBounds=${formatBounds(tapTarget.clickableAncestorBounds)}；" +
+                "点击使用第二次独立快照的位置"
+        )
+
+        val tapSubmittedAt = System.currentTimeMillis()
+        val snapshotAgeMs = (tapSubmittedAt - tree.capturedAtEpochMs).coerceAtLeast(0L)
+        if (snapshotAgeMs > RECEIVED_GREETINGS_PRE_TAP_MAX_SNAPSHOT_AGE_MS) {
+            logReceivedGreetingsEntrySkip("LATEST_SNAPSHOT_TOO_OLD:${snapshotAgeMs}ms")
+            return true
+        }
+        if (!accessibilityGateway.isWindowCurrent(tree.window)) {
+            logReceivedGreetingsEntrySkip("WINDOW_CHANGED_DURING_FINAL_GESTURE_PREPARATION")
+            return true
+        }
+        val executionContext = gesturePolicy.captureContext(
+            tree.window,
+            metrics.toGestureCoordinateContext()
+        ) ?: run {
+            logReceivedGreetingsEntrySkip("WINDOW_OR_DISPLAY_CONTEXT_CHANGED_AT_GESTURE_BIND")
+            return true
+        }
+        resetSayHiListSnapshotState()
+        resetReceivedGreetingsEntrySearch()
+        sayHiNavigationFlowController.beginEntryNavigation()
+        receivedGreetingsEntryTapPending = true
+        lastReceivedGreetingsNavigationWaitActivityClass = ""
+        sayHiGestureInFlight = true
+        receivedGreetingsEntryTapAtMs = tapSubmittedAt
+        lastReceivedGreetingsEntryTapAtMs = tapSubmittedAt
+        lastReceivedGreetingsEntryDiagnostic = ""
+        val tapRequest = GestureIntentRequest(
+            id = "momo-sayhi-entry-${tapSubmittedAt}-${System.nanoTime()}",
+            intent = GestureIntent.Tap(
+                preferredBounds = tapTarget.tapBounds,
+                targetBounds = tapTarget.clickableAncestorBounds,
+                durationMs = RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS,
+                feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
+            ),
+            description = "陌陌收到的招呼入口安全点击",
+            executionContext = executionContext
+        )
+        val submission = gesturePolicy.execute(tapRequest, GestureExecutionListener { result ->
+            sayHiGestureInFlight = false
+            val completed = result.status == GestureExecutionStatus.COMPLETED
+            onLog(
+                if (completed) {
+                    "收到的招呼入口：统一手势策略已完成标签安全区域点击；" +
+                        "标签路径=${tapTarget.labelPath.joinToString("/")}；" +
+                        "点击祖先=${tapTarget.clickableAncestorPath.joinToString("/")}；等待新页面身份验证"
+                } else {
+                    receivedGreetingsEntryTapPending = false
+                    sayHiNavigationFlowController.reset()
+                    "收到的招呼入口：协调器手势未完成；status=${result.status}；reason=${result.reason}；不尝试其他坐标"
+                }
+            )
+        })
+        if (submission == GestureSubmission.ACCEPTED) {
+            onLog(
+                "收到的招呼入口：主聊天列表已唯一识别入口；已在文本标签安全内收区域提交一次点击；" +
+                    "未点击整行中心，未触碰资料卡拒绝/通过操作"
+            )
+        } else if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+            // No tap was dispatched. Restore the entry phase so the next idle inspection can
+            // reacquire the same list entry after the overlay/startup guard clears.
+            sayHiGestureInFlight = false
+            receivedGreetingsEntryTapPending = false
+            sayHiNavigationFlowController.reset()
+            onLog("收到的招呼入口[DEFERRED_NOT_READY]：页面暂不可操作，未派发点击、未消耗入口重试；保留导航意图并等待新快照")
+        } else {
+            sayHiGestureInFlight = false
+            receivedGreetingsEntryTapPending = false
+            sayHiNavigationFlowController.reset()
+            logReceivedGreetingsEntrySkip("GESTURE_SUBMISSION_REJECTED")
+            onLog("收到的招呼入口：统一手势协调器未接受精确入口点击；保持待机，不执行坐标兜底")
+        }
+        return true
+    }
+
+    /**
+     * Double-snapshot validation and Gesture API dispatch for the card header's exact "列表"
+     * control. The actual list page is accepted only after the Activity and list container change.
+     */
+    private fun dispatchSayHiCardListTap() {
+        if (sayHiGestureInFlight || sayHiCardListTapPending) return
+        val now = System.currentTimeMillis()
+        if (now - lastSayHiCardListTapAtMs < SAYHI_CARD_LIST_TAP_COOLDOWN_MS) return
+
+        val first = inspectSayHiCardListTapTarget()
+        if (first !is SayHiCardListTapInspection.Ready) {
+            val reason = (first as SayHiCardListTapInspection.Rejected).reason
+            logSayHiCardListTapSkip(reason)
+            return
+        }
+        val latest = inspectSayHiCardListTapTarget(
+            expectedWindow = first.tree.window,
+            expectedWindowId = first.tree.windowId
+        )
+        if (latest !is SayHiCardListTapInspection.Ready) {
+            val reason = (latest as SayHiCardListTapInspection.Rejected).reason
+            logSayHiCardListTapSkip(reason)
+            return
+        }
+        if (!MomoSayHiCardListTapPolicy.hasStableTargetPosition(
+                firstTree = first.tree,
+                first = first.target,
+                latestTree = latest.tree,
+                latest = latest.target
+            )
+        ) {
+            logSayHiCardListTapSkip("TARGET_POSITION_CHANGED_BETWEEN_FRESH_SNAPSHOTS")
+            return
+        }
+
+        val tree = latest.tree
+        val metrics = latest.metrics
+        val target = latest.target
+        if (!accessibilityGateway.isWindowCurrent(tree.window)) {
+            logSayHiCardListTapSkip("WINDOW_STALE_BEFORE_GESTURE")
+            return
+        }
+        val snapshotAgeMs = (System.currentTimeMillis() - tree.capturedAtEpochMs).coerceAtLeast(0L)
+        if (snapshotAgeMs > SAYHI_CARD_LIST_PRE_TAP_MAX_SNAPSHOT_AGE_MS) {
+            logSayHiCardListTapSkip("SNAPSHOT_TOO_OLD:${snapshotAgeMs}ms")
+            return
+        }
+        val executionContext = gesturePolicy.captureContext(
+            tree.window,
+            metrics.toGestureCoordinateContext()
+        ) ?: run {
+            logSayHiCardListTapSkip("WINDOW_OR_DISPLAY_CONTEXT_CHANGED_AT_GESTURE_BIND")
+            return
+        }
+
+        if (!sayHiNavigationFlowController.markCardListTapSubmitted()) {
+            logSayHiCardListTapSkip("CARD_PAGE_NOT_STABLE_FOR_NAVIGATION")
+            return
+        }
+        resetSayHiListSnapshotState()
+        val submittedAt = System.currentTimeMillis()
+        sayHiGestureInFlight = true
+        sayHiCardListTapPending = true
+        sayHiCardListTapAtMs = submittedAt
+        val request = GestureIntentRequest(
+            id = "momo-sayhi-card-list-${submittedAt}-${System.nanoTime()}",
+            intent = GestureIntent.Tap(
+                preferredBounds = target.tapBounds,
+                targetBounds = target.controlBounds,
+                durationMs = RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS,
+                feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
+            ),
+            description = "陌陌收到招呼资料卡点击列表入口",
+            executionContext = executionContext
+        )
+        val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
+            sayHiGestureInFlight = false
+            if (result.status == GestureExecutionStatus.COMPLETED) {
+                sayHiCardListTapPending = true
+                sayHiCardListTapAtMs = submittedAt
+                lastSayHiCardListTapAtMs = submittedAt
+                onLog("收到的招呼资料卡：已通过统一手势执行精确‘列表’控件点击；等待 NewSayHiSessionListActivity 验证")
+            } else {
+                sayHiCardListTapPending = false
+                sayHiNavigationFlowController.markCardListTapFailed()
+                onLog("收到的招呼资料卡：‘列表’控件手势未完成；status=${result.status}；reason=${result.reason}")
+            }
+        })
+        if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+            sayHiGestureInFlight = false
+            sayHiCardListTapPending = false
+            sayHiNavigationFlowController.markCardListTapFailed()
+            onLog("收到的招呼资料卡列表入口[DEFERRED_NOT_READY]：没有派发点击；清除旧稳定样本，重新采集资料卡快照后再尝试")
+        } else if (submission != GestureSubmission.ACCEPTED) {
+            sayHiGestureInFlight = false
+            sayHiCardListTapPending = false
+            sayHiNavigationFlowController.markCardListTapFailed()
+            logSayHiCardListTapSkip("GESTURE_SUBMISSION_REJECTED:$submission")
+        } else {
+            // The pending flag was set before dispatch, preventing duplicate dispatches while
+            // the Gesture API is still executing. The callback closes it on cancellation.
+            onLog(
+                "收到的招呼资料卡[PRE_TAP_REVALIDATED]：已唯一确认 close_container 与子节点‘列表’；" +
+                    "labelBounds=${formatBounds(target.tapBounds)}；controlBounds=${formatBounds(target.controlBounds)}"
+            )
+        }
+    }
+
+    private fun inspectSayHiCardListTapTarget(
+        expectedWindow: WindowRef? = null,
+        expectedWindowId: Int? = null
+    ): SayHiCardListTapInspection {
+        val tree = accessibilityGateway.inspectActiveWindow(
+            TreeInspectionRequest(
+                maxNodes = NAVIGATION_EVIDENCE_MAX_NODES,
+                textCapture = NodeTextCapture.EPHEMERAL
+            )
+        ) ?: return SayHiCardListTapInspection.Rejected("ACTIVE_WINDOW_TREE_UNAVAILABLE")
+        if (tree.truncated) return SayHiCardListTapInspection.Rejected("ACCESSIBILITY_TREE_TRUNCATED")
+        if (tree.window.packageName != targetPackage ||
+            tree.window.activityClass != MomoSayHiPageContract.CARD_ACTIVITY
+        ) return SayHiCardListTapInspection.Rejected("PACKAGE_OR_ACTIVITY_MISMATCH")
+        if (expectedWindow != null && tree.window != expectedWindow) {
+            return SayHiCardListTapInspection.Rejected("WINDOW_CHANGED_BETWEEN_SNAPSHOTS")
+        }
+        if (expectedWindowId != null && tree.windowId != expectedWindowId) {
+            return SayHiCardListTapInspection.Rejected("WINDOW_ID_CHANGED_BETWEEN_SNAPSHOTS")
+        }
+        if (!accessibilityGateway.isWindowCurrent(tree.window)) {
+            return SayHiCardListTapInspection.Rejected("WINDOW_NOT_CURRENT")
+        }
+        val metrics = runCatching { accessibilityGateway.displayMetrics() }.getOrNull()
+            ?: return SayHiCardListTapInspection.Rejected("DISPLAY_METRICS_UNAVAILABLE")
+        val decision = MomoSayHiCardListTapPolicy.evaluate(
+            tree = tree,
+            screenWidth = metrics.widthPixels,
+            screenHeight = metrics.heightPixels
+        )
+        return when (decision) {
+            is MomoSayHiCardListTapDecision.Ready -> SayHiCardListTapInspection.Ready(tree, metrics, decision)
+            is MomoSayHiCardListTapDecision.Rejected -> SayHiCardListTapInspection.Rejected(decision.reason)
+        }
+    }
+
+    private fun logSayHiCardListTapSkip(reason: String) {
+        onLog("收到的招呼资料卡列表入口：未点击；原因=$reason")
+    }
+
+    /**
+     * Searches the complete ordinary Message-list surface for the received-greetings entry.
+     * A miss in the current viewport is not terminal: swipe toward later rows, confirm that
+     * direction's boundary with two successful no-motion observations, then sweep back once.
+     * Every gesture is tied to a newly inspected CHAT_LIST snapshot and a freshly resolved safe
+     * viewport that excludes the mf_view overlay.
+     */
+    private fun performReceivedGreetingsEntrySearchStep(): Boolean {
+        if (receivedGreetingsEntrySearchComplete) return false
+        if (receivedGreetingsEntrySearchGestureInFlight) return true
+
+        val fresh = runCatching { inspectChatPage() }.getOrNull() ?: run {
+            onLog("收到的招呼入口搜索暂停：无法重新读取普通消息列表；不使用旧视口坐标")
+            return false
+        }
+        if (fresh.packageName != targetPackage) {
+            onLog(
+                "收到的招呼入口搜索暂停：当前前台包已离开目标应用；" +
+                    "packageMatch=false；不跨应用派发滑动"
+            )
+            return false
+        }
+        if (fresh.pageKind != ChatPageKind.CHAT_LIST) {
+            // Accessibility snapshots can briefly classify a transitioning list as UNKNOWN.
+            // Keep the task alive and let the next page event retry; never reuse old coordinates.
+            if (fresh.pageKind == ChatPageKind.UNKNOWN) {
+                onLog("收到的招呼入口搜索暂缓：列表快照暂时为 UNKNOWN；等待新快照后重新确认，不终止导航")
+                return true
+            }
+            resetReceivedGreetingsEntrySearch()
+            onLog(
+                "收到的招呼入口搜索暂停当前滑动：页面已切换为 ${fresh.pageKind.name}；" +
+                    "不在非消息列表页面执行搜索手势，保留任务等待页面级导航"
+            )
+            return true
+        }
+        val expectedWindow = fresh.messageListTarget?.window
+            ?: fresh.chatListCandidates.firstOrNull()?.rowTarget?.window
+            ?: fresh.sessionListNavigationTarget?.nodeTarget?.window
+            ?: run {
+                onLog("收到的招呼入口搜索暂缓：新鲜列表快照尚未提供可绑定的窗口身份；等待下一次快照，不终止导航")
+                return true
+            }
+        if (!accessibilityGateway.isWindowCurrent(expectedWindow) ||
+            expectedWindow.packageName != targetPackage || expectedWindow.windowId < 0 ||
+            fresh.windowGeneration > 0L && expectedWindow.generation != fresh.windowGeneration
+        ) {
+            onLog("收到的招呼入口搜索暂缓：当前窗口/代次与最新消息列表快照暂不一致；不派发旧坐标滑动，等待重取")
+            return true
+        }
+        val windowIdentity = "${expectedWindow.packageName}|${expectedWindow.windowId}|${expectedWindow.generation}"
+        if (!receivedGreetingsEntrySearchActive || receivedGreetingsEntrySearchWindowIdentity != windowIdentity) {
+            receivedGreetingsEntrySearchController.reset()
+            receivedGreetingsEntrySearchController.start()
+            receivedGreetingsEntrySearchActive = true
+            receivedGreetingsEntrySearchComplete = false
+            receivedGreetingsEntrySearchWindowIdentity = windowIdentity
+            onLog(
+                "收到的招呼入口搜索开始：已确认普通消息列表窗口=$windowIdentity；" +
+                    "当前视口未见唯一入口标签；先向列表后续区域搜索，再反向复核全列表"
+            )
+        }
+
+        val viewportFingerprint = receivedGreetingsEntrySearchViewportFingerprint(fresh)
+        if (viewportFingerprint.isBlank()) {
+            onLog("收到的招呼入口搜索暂缓：当前视口暂缺可比较的会话行身份/几何证据；等待新快照，不终止导航")
+            return true
+        }
+        when (receivedGreetingsEntrySearchController.observeAfterGesture(viewportFingerprint)) {
+            MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE -> Unit
+            MomoReceivedGreetingsEntrySearchController.Observation.REVERSED -> {
+                onLog("收到的招呼入口搜索：已通过连续两次无位移确认当前方向边界；反转方向，复核剩余列表区域")
+            }
+            MomoReceivedGreetingsEntrySearchController.Observation.COMPLETE -> {
+                receivedGreetingsEntrySearchComplete = true
+                receivedGreetingsEntrySearchActive = false
+                onLog(
+                    "收到的招呼入口搜索完成：已从当前起点双向扫描普通消息列表并复核两端边界；" +
+                        "仍未发现唯一‘收到的招呼’标签；不盲点其它行，也不把未命中伪装成进入成功"
+                )
+                return false
+            }
+        }
+
+        val viewport = resolveSessionListSwipeViewport(fresh)
+        if (viewport == null || viewport.isEmpty || viewport.width < MIN_SAFE_SESSION_SWIPE_WIDTH_PX ||
+            viewport.height < MIN_SAFE_SESSION_SWIPE_HEIGHT_PX
+        ) {
+            onLog("收到的招呼入口搜索暂缓：当前快照/悬浮控件状态下没有足够大的安全列表滑动区域；等待重取")
+            return true
+        }
+        val metrics = runCatching { accessibilityGateway.displayMetrics() }.getOrNull() ?: run {
+            onLog("收到的招呼入口搜索暂缓：无法读取当前显示坐标上下文；等待下一次安全复核")
+            return true
+        }
+        val executionContext = gesturePolicy.captureContext(
+            expectedWindow,
+            metrics.toGestureCoordinateContext()
+        ) ?: run {
+            onLog("收到的招呼入口搜索暂缓：窗口或显示坐标上下文已变化；未派发滑动")
+            return true
+        }
+        val direction = receivedGreetingsEntrySearchController.direction()
+        val submittedAt = System.currentTimeMillis()
+        val request = GestureIntentRequest(
+            id = "momo-sayhi-entry-search-${submittedAt}-${System.nanoTime()}",
+            intent = GestureIntent.VerticalSwipe(
+                viewport = viewport,
+                direction = direction,
+                durationMs = RECEIVED_GREETINGS_ENTRY_SEARCH_SCROLL_DURATION_MS
+            ),
+            description = if (direction == VerticalSwipeDirection.UP) {
+                "收到的招呼入口搜索：沿普通消息列表向后续区域安全滚动"
+            } else {
+                "收到的招呼入口搜索：反向复核普通消息列表前序区域"
+            },
+            executionContext = executionContext
+        )
+        receivedGreetingsEntrySearchGestureInFlight = true
+        sayHiGestureInFlight = true
+        val submission = runCatching {
+            gesturePolicy.execute(request, GestureExecutionListener { result ->
+                receivedGreetingsEntrySearchGestureInFlight = false
+                sayHiGestureInFlight = false
+                if (result.status == GestureExecutionStatus.COMPLETED) {
+                    receivedGreetingsEntrySearchController.onGestureCompleted(viewportFingerprint)
+                    onLog(
+                        "收到的招呼入口搜索滑动完成：方向=${direction.name}；" +
+                            "等待新的会话行身份/位置快照后继续搜索"
+                    )
+                } else {
+                    receivedGreetingsEntrySearchController.onGestureFailed()
+                    onLog(
+                        "收到的招呼入口搜索滑动未完成：status=${result.status}；reason=${result.reason}；" +
+                            "保留方向状态，等待新快照后安全重试"
+                    )
+                }
+            })
+        }.getOrElse {
+            receivedGreetingsEntrySearchGestureInFlight = false
+            sayHiGestureInFlight = false
+            receivedGreetingsEntrySearchController.onGestureFailed()
+            onLog("收到的招呼入口搜索暂停：手势协调器异常=${it.javaClass.simpleName}；未使用坐标兜底")
+            return false
+        }
+        return when (submission) {
+            GestureSubmission.ACCEPTED -> true
+            GestureSubmission.DEFERRED_NOT_READY -> {
+                receivedGreetingsEntrySearchGestureInFlight = false
+                sayHiGestureInFlight = false
+                receivedGreetingsEntrySearchController.onGestureFailed()
+                onLog("收到的招呼入口搜索暂缓：手势协调器尚未就绪；保留搜索方向并等待后续快照")
+                true
+            }
+            else -> {
+                receivedGreetingsEntrySearchGestureInFlight = false
+                sayHiGestureInFlight = false
+                receivedGreetingsEntrySearchController.onGestureFailed()
+                onLog("收到的招呼入口搜索暂停：手势协调器拒绝安全滑动；submission=$submission")
+                false
+            }
+        }
+    }
+
+    private fun receivedGreetingsEntrySearchViewportFingerprint(snapshot: ChatPageSnapshot): String =
+        snapshot.chatListCandidates.joinToString("|") { candidate ->
+            if (!MomoChatListSessionPolicy.hasValidBounds(candidate.rowBounds)) return@joinToString ""
+            // A transiently unreadable nickname must not strand navigation. structuralKey() is
+            // already redacted (length/hash/geometry only) and provides a viewport-change signal
+            // without pretending that the row has a verified person identity.
+            val identity = ChatSessionManagementPolicy.stableSessionKey(candidate)
+                .ifBlank { candidate.structuralKey() }
+            "$identity@${candidate.rowBounds.left},${candidate.rowBounds.top}," +
+                "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
+        }.trim('|')
+
+    private fun resetReceivedGreetingsEntrySearch() {
+        receivedGreetingsEntrySearchController.reset()
+        receivedGreetingsEntrySearchActive = false
+        receivedGreetingsEntrySearchComplete = false
+        receivedGreetingsEntrySearchGestureInFlight = false
+        receivedGreetingsEntrySearchWindowIdentity = ""
+    }
+
+    private fun inspectReceivedGreetingsTapTarget(
+        expectedWindow: WindowRef? = null,
+        expectedWindowId: Int? = null
+    ): ReceivedGreetingsTapInspection {
+        val tree = accessibilityGateway.inspectActiveWindow(
+            TreeInspectionRequest(
+                maxNodes = NAVIGATION_EVIDENCE_MAX_NODES,
+                textCapture = NodeTextCapture.EPHEMERAL
+            )
+        ) ?: return ReceivedGreetingsTapInspection.Rejected("PRE_TAP_ACTIVE_WINDOW_TREE_UNAVAILABLE")
+        if (tree.window.packageName != targetPackage) {
+            return ReceivedGreetingsTapInspection.Rejected("PRE_TAP_PACKAGE_MISMATCH")
+        }
+        if (tree.window.windowId < 0 || tree.windowId != tree.window.windowId) {
+            return ReceivedGreetingsTapInspection.Rejected("PRE_TAP_WINDOW_ID_UNAVAILABLE_OR_MISMATCHED")
+        }
+        if (tree.truncated) {
+            return ReceivedGreetingsTapInspection.Rejected("PRE_TAP_TREE_TRUNCATED")
+        }
+        if (expectedWindow != null && tree.window != expectedWindow) {
+            return ReceivedGreetingsTapInspection.Rejected("PRE_TAP_WINDOW_GENERATION_CHANGED")
+        }
+        if (expectedWindowId != null && tree.windowId != expectedWindowId) {
+            return ReceivedGreetingsTapInspection.Rejected("PRE_TAP_WINDOW_ID_CHANGED")
+        }
+        if (!accessibilityGateway.isWindowCurrent(tree.window)) {
+            return ReceivedGreetingsTapInspection.Rejected("PRE_TAP_WINDOW_NOT_CURRENT")
+        }
+        if (!MomoMessageTabAnchorResolver.isMessageWorkArea(tree.nodes, targetPackage)) {
+            return ReceivedGreetingsTapInspection.Rejected("PRE_TAP_MESSAGE_WORK_AREA_FINGERPRINT_MISMATCH")
+        }
+        val metrics = runCatching { accessibilityGateway.displayMetrics() }.getOrNull()
+            ?: return ReceivedGreetingsTapInspection.Rejected("PRE_TAP_DISPLAY_METRICS_UNAVAILABLE")
+        val evidence = sayHiNavigationEvidenceInspector.inspect(
+            tree = tree,
+            screenWidth = metrics.widthPixels,
+            screenHeight = metrics.heightPixels
+        )
+        recordMomoNavigationEvidence(tree)
+        val decision = MomoReceivedGreetingsEntryTapPolicy.evaluate(
+            tree = tree,
+            evidence = evidence,
+            screenWidth = metrics.widthPixels,
+            screenHeight = metrics.heightPixels
+        )
+        if (decision is MomoReceivedGreetingsEntryTapDecision.Rejected) {
+            return ReceivedGreetingsTapInspection.Rejected(
+                "PRE_TAP_TARGET_REJECTED:${decision.reason};入口候选=${evidence.receivedGreetingsEntryTargets.size}"
+            )
+        }
+        return ReceivedGreetingsTapInspection.Ready(
+            tree = tree,
+            metrics = metrics,
+            target = decision as MomoReceivedGreetingsEntryTapDecision.Ready
+        )
+    }
+
+    private fun sameMomoWindowGeneration(left: WindowRef, right: WindowRef): Boolean =
+        left.packageName == right.packageName &&
+            left.windowId == right.windowId &&
+            left.generation == right.generation
+
+    private fun sayHiWindowStabilityKey(tree: AccessibilityTreeSnapshot): String =
+        sayHiWindowStabilityKey(tree.window.copy(windowId = tree.windowId))
+
+    private fun sayHiWindowStabilityKey(window: WindowRef): String = listOf(
+        window.packageName,
+        window.windowId,
+        window.generation
+    ).joinToString("|")
+
+    private fun resetSayHiListSnapshotState() {
+        sayHiSnapshotCoordinator.reset()
+        sayHiConfirmedListTarget = null
+        lastSayHiSnapshotGateDiagnostic = ""
+        lastSayHiSnapshotGateDiagnosticAtMs = 0L
+        sayHiGenericChatInspectionBypassActive = false
+    }
+
+    private fun scheduleSayHiListSnapshotInspection(
+        delayMs: Long,
+        reason: String,
+        retry: Boolean
+    ) = sayHiSnapshotCoordinator.scheduleInspection(delayMs, reason, retry)
+
+    private fun handleIncompleteSayHiListSnapshot(
+        windowKey: String,
+        stopReason: String,
+        visitedNodes: Int,
+        targetedSubtree: Boolean
+    ) = sayHiSnapshotCoordinator.handleIncompleteSnapshot(
+        windowKey,
+        stopReason,
+        visitedNodes,
+        targetedSubtree
+    )
+
+    private fun formatBounds(bounds: ScreenRect): String =
+        "[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]"
+
+    private fun logReceivedGreetingsEntrySkip(reason: String) {
+        val now = System.currentTimeMillis()
+        if (reason != lastReceivedGreetingsEntryDiagnostic ||
+            now - lastReceivedGreetingsEntryDiagnosticAtMs >= RECEIVED_GREETINGS_ENTRY_DIAGNOSTIC_INTERVAL_MS
+        ) {
+            lastReceivedGreetingsEntryDiagnostic = reason
+            lastReceivedGreetingsEntryDiagnosticAtMs = now
+            onLog("收到的招呼入口：本轮未点击；原因=$reason")
+        }
+    }
+
+    /**
+     * Reacquires the received-greetings list from any currently exposed Momo window. The first
+     * same-package window is not necessarily the list: tooltips and transient overlays can own
+     * separate roots. Prefer a complete tree that actually contains the outer listview.
+     */
+    private fun inspectVisibleReceivedGreetingsWindow(
+        request: TreeInspectionRequest
+    ): AccessibilityTreeSnapshot? {
+        val candidates = accessibilityGateway.inspectTargetWindows(request).filter { candidate ->
+            candidate.window.packageName == targetPackage &&
+                !candidate.truncated &&
+                sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(candidate)
+        }
+        return candidates.firstOrNull { !it.truncated } ?: candidates.firstOrNull()
+    }
+
+    private fun processReceivedGreetingRows(
+        tree: AccessibilityTreeSnapshot,
+        inspection: MomoSayHiPageInspection
+    ): Boolean {
+        if (inspection.truncated || inspection.queryBudgetExceeded || tree.truncated ||
+            !inspection.containerFound || !inspection.containerMatchCountExact || inspection.containerAmbiguous
+        ) return true
+
+        if (sayHiReadOnlyStage == SayHiReadOnlyStage.DETAIL_BACK_PENDING) {
+            // Only a successfully archived detail inspection marks the row processed before
+            // BACK. Unverified source clicks remain isolated/deferred after a safe return.
+            if (sayHiUnverifiedDetailReturnPending) {
+                sayHiSelectedGreeting?.let {
+                    deferSayHiRow(it.rowKey, "CLICK_FEEDBACK_UNVERIFIED_AFTER_DETAIL")
+                }
+                sayHiUnverifiedDetailReturnPending = false
+                onLog("收到招呼单用户隔离：聊天页结构已确认但原点击事件未核验；安全返回列表后仅延期本用户，继续其余遍历")
+            }
+            clearSayHiSelectedGreeting()
+        }
+
+        if (sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_BACK_PENDING) {
+            val selected = sayHiSelectedGreeting ?: run {
+                // Missing selection state is not permission to choose a replacement row.
+                onLog("收到招呼身份复核暂停：资料页返回状态缺少原始行身份；不重置流程、不选择其他行")
+                return true
+            }
+            // Page identity must be re-established on the post-BACK snapshot before the
+            // retained business identity is rebound to its new window generation.
+            if (inspection.kind != MomoSayHiPageKind.RECEIVED_GREETINGS_LIST ||
+                !sayHiNavigationFlowController.isReceivedListConfirmed() ||
+                tree.window.packageName != targetPackage ||
+                !accessibilityGateway.isWindowCurrent(tree.window)
+            ) {
+                onLog("收到招呼身份复核暂停：返回后的列表页面或当前窗口尚未重新确认；不绑定新代次、不派发点击")
+                scheduleSayHiListSnapshotInspection(
+                    delayMs = 350L,
+                    reason = "PROFILE_RETURN_PAGE_REVALIDATION_REQUIRED",
+                    retry = false
+                )
+                return true
+            }
+            // The content-derived row key intentionally excludes RecyclerView path/position.
+            // If the exact original row is temporarily absent or ambiguous after BACK, keep the
+            // selected identity and block list scanning; never fall through to another candidate.
+            val matches = inspection.listRows.filter { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == selected.rowKey }
+            if (matches.size != 1) {
+                sayHiProfileRowRecoveryAttempts++
+                if (sayHiProfileRowRecoveryAttempts <= SAYHI_PROFILE_ROW_RECOVERY_MAX_ATTEMPTS) {
+                    onLog(
+                        "收到招呼身份复核：返回列表未唯一定位原始行；同一行候选=${matches.size}；" +
+                            "按稳定身份与行内容重新获取快照=${sayHiProfileRowRecoveryAttempts}/" +
+                            "$SAYHI_PROFILE_ROW_RECOVERY_MAX_ATTEMPTS；禁止选择其他行"
+                    )
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = 350L,
+                        reason = "PROFILE_RETURN_ORIGINAL_ROW_REIDENTIFICATION",
+                        retry = false
+                    )
+                } else {
+                    onLog(
+                        "收到招呼身份复核暂停：多次快照仍无法唯一定位原始行；保留已验证身份和原始行键，" +
+                            "不滚动、不点击其他用户，等待页面重新稳定"
+                    )
+                }
+                return true
+            }
+            sayHiProfileRowRecoveryAttempts = 0
+            val row = matches.single()
+            val resolvedContactId = sayHiSelectedContactIdentity
+                ?.takeIf {
+                    sayHiSelectedIdentityStatus == MomoSayHiPlatformIdentityStatus.CONFIRMED &&
+                        it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                }
+                ?.contactId
+                ?.takeIf(String::isNotBlank)
+            if (resolvedContactId == null) {
+                deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+                onLog("收到招呼身份复核暂停：原始行已找到，但资料页 ID 未达到平台身份验证标准；不点击行容器或进入会话")
+                clearSayHiSelectedGreeting()
+                return false
+            }
+            if (sayHiTraversalState.isProcessedContactHash(
+                    MomoSayHiIdentityFingerprintPolicy.contactIdHash(resolvedContactId)
+                )) {
+                sayHiTraversalState.markProcessedRow(selected.rowKey)
+                clearSayHiRowDeferral(selected.rowKey)
+                persistSayHiTraversalCheckpoint()
+                onLog("收到招呼只读采集：头像身份对应的联系人本轮已完成 OCR；跳过重复会话，不重复打开")
+                clearSayHiSelectedGreeting()
+                return false
+            }
+            val namePath = row.namePath ?: run {
+                deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+                onLog("收到招呼详情点击跳过：重新定位的原始消息行缺少姓名节点路径；不使用旧节点路径或坐标")
+                clearSayHiSelectedGreeting()
+                return false
+            }
+            // Rebuild the clickable row target from this post-BACK snapshot. The inspector's
+            // rowPath/namePath are current-snapshot evidence; no pre-profile NodePath or bounds
+            // are carried across the navigation boundary.
+            val target = MomoSayHiAvatarTargetPolicy.resolveRowTarget(
+                index = NodeTreeIndex(tree),
+                rowPath = NodePath(row.rowPath),
+                namePath = namePath
+            ) ?: run {
+                deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+                onLog("收到招呼详情点击跳过：当前快照无法重新构建原始消息行的安全点击目标；不使用旧目标或整行坐标兜底")
+                clearSayHiSelectedGreeting()
+                return false
+            }
+            // Only after page, unique row identity, confirmed platform identity and a freshly
+            // reconstructed target are all proven do we bind this selection to the current
+            // list window generation and structure. The business identity itself is retained.
+            val reboundSelection = selected.copy(
+                sourceWindow = tree.window,
+                sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree)
+            )
+            sayHiSelectedGreeting = reboundSelection
+            onLog("收到招呼身份复核：返回列表页面、原始行、平台身份和新建安全目标均已确认；绑定当前窗口代次后执行二次校验")
+            return dispatchSayHiReadOnlyRowTap(tree, row, target)
+        }
+
+        if (sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE) return true
+        val candidates = inspection.listRows.filter { row ->
+            row.unread.status == EvidenceStatus.CONFIRMED && row.unread.value == true
+        }
+        val unprocessedCandidates = candidates.filter { row ->
+            val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
+            !sayHiTraversalState.isProcessedRow(key) && !sayHiTraversalState.isDeferredRow(key)
+        }
+        val deferredRetryCandidates = candidates.filter { row ->
+            val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
+            sayHiTraversalState.isDeferredRetryDue(key, System.currentTimeMillis())
+        }
+        // New users are isolated from one user's transient failures. Deferred users get a
+        // bounded retry opportunity only after currently visible fresh candidates are handled.
+        val candidate = (unprocessedCandidates.firstOrNull() ?: deferredRetryCandidates.firstOrNull()) ?: run {
+            sayHiStableCandidateKey = ""
+            sayHiStableCandidateTarget = null
+            sayHiStableCandidateWindow = null
+            return false
+        }
+        val key = MomoSayHiIdentityFingerprintPolicy.rowKey(candidate)
+        if (inspection.listRows.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1) {
+            deferSayHiRow(key, "ROW_NOT_SAFELY_ACTIONABLE")
+            onLog("收到招呼头像点击跳过：当前可见列表存在无法区分的重复消息行；不猜测目标用户")
+            return false
+        }
+        val target = candidate.avatarTapTarget ?: run {
+            deferSayHiRow(key, "ROW_NOT_SAFELY_ACTIONABLE")
+            onLog("收到招呼头像点击跳过：未找到唯一、可见且尺寸受限的头像节点（userlist_item_iv_face/img_avatar/icon）；不点击整行")
+            return false
+        }
+        val priorTarget = sayHiStableCandidateTarget
+        val stable = sayHiStableCandidateKey == key &&
+            sayHiStableCandidateWindow == tree.window && priorTarget != null &&
+            MomoSayHiAvatarTargetPolicy.sameTarget(priorTarget, target)
+        if (!stable) {
+            sayHiStableCandidateKey = key
+            sayHiStableCandidateTarget = target
+            sayHiStableCandidateWindow = tree.window
+            onLog("收到招呼未读消息：已定位头像资源节点并记录候选；等待第二份稳定快照后再点击")
+            return true
+        }
+        val selected = SayHiSelectedGreeting(
+            rowKey = key,
+            displayName = candidate.displayName.value.orEmpty(),
+            greetingText = candidate.greetingText.value,
+            timestampText = candidate.timestampText.value,
+            sourceWindow = tree.window,
+            sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree)
+        )
+        return dispatchSayHiReadOnlyAvatarTap(tree, selected, target)
+    }
+
+    private fun dispatchSayHiReadOnlyAvatarTap(
+        tree: AccessibilityTreeSnapshot,
+        selected: SayHiSelectedGreeting,
+        target: MomoSayHiTapTarget,
+        allowFreshRevalidation: Boolean = true
+    ): Boolean {
+        val readiness = sayHiTapReadiness(tree, target)
+        when (readiness) {
+            MomoSayHiTapReadiness.NEEDS_SCROLL -> {
+                // Keep only the stable row identity while the list moves. Every later pass still
+                // reacquires a fresh tree and rechecks the current geometry before tapping.
+                // Do not relax the tap bounds: let the outer vertical list move it fully onscreen.
+                onLog(
+                    "收到招呼头像点击暂缓：头像未完整落在显示范围内；" +
+                        "目标=${formatBounds(target.targetBounds)}；先滚动外层 listview，再重新识别"
+                )
+                return false
+            }
+            MomoSayHiTapReadiness.REACQUIRE_SNAPSHOT -> {
+                if (!allowFreshRevalidation) {
+                    onLog("收到招呼头像点击暂缓：复核快照仍不满足窗口或时效条件；等待新快照")
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = 350L,
+                        reason = "AVATAR_TAP_REVALIDATION_REQUIRED",
+                        retry = false
+                    )
+                    return true
+                }
+            }
+            MomoSayHiTapReadiness.READY -> Unit
+        }
+        if (readiness == MomoSayHiTapReadiness.REACQUIRE_SNAPSHOT) {
+            val freshRequest = TreeInspectionRequest(
+                maxNodes = 1_200,
+                maxDepth = 48,
+                maxDurationMs = 900L,
+                allowVisibleWindowFallback = true,
+                textCapture = NodeTextCapture.EPHEMERAL
+            )
+            val freshTree = inspectVisibleReceivedGreetingsWindow(freshRequest)
+                ?: accessibilityGateway.inspectActiveWindow(freshRequest)
+            if (freshTree == null || freshTree.truncated ||
+                freshTree.window.packageName != targetPackage ||
+                !sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(freshTree) ||
+                !accessibilityGateway.isWindowCurrent(freshTree.window)
+            ) {
+                onLog("收到招呼头像点击暂缓：旧快照已过期，无法获取当前完整列表快照；不使用旧坐标，安排重新取快照")
+                scheduleSayHiListSnapshotInspection(
+                    delayMs = 350L,
+                    reason = "AVATAR_TAP_FRESH_SNAPSHOT_UNAVAILABLE",
+                    retry = false
+                )
+                return true
+            }
+            val freshInspection = sayHiAccessibilityInspector.inspect(freshTree)
+            if (freshInspection.kind != MomoSayHiPageKind.RECEIVED_GREETINGS_LIST ||
+                freshInspection.truncated || freshInspection.queryBudgetExceeded ||
+                !freshInspection.containerFound || !freshInspection.containerMatchCountExact ||
+                freshInspection.containerAmbiguous
+            ) {
+                onLog("收到招呼头像点击暂缓：新快照无法完整确认收到招呼列表；保留当前位置，不使用旧坐标")
+                return true
+            }
+            val matchingRows = freshInspection.listRows.filter { row -> MomoSayHiIdentityFingerprintPolicy.rowKey(row) == selected.rowKey }
+            val freshTarget = matchingRows.singleOrNull()?.avatarTapTarget
+            if (matchingRows.size != 1 || freshTarget == null) {
+                onLog("收到招呼头像点击取消：新快照无法唯一找到原始未读用户行；不改点其他用户")
+                sayHiStableCandidateKey = ""
+                sayHiStableCandidateTarget = null
+                sayHiStableCandidateWindow = null
+                return true
+            }
+            if (!MomoSayHiAvatarTargetPolicy.sameTarget(target, freshTarget)) {
+                // Position changed while the old snapshot aged. Replace the candidate geometry and
+                // require another independent snapshot before any gesture is allowed.
+                sayHiStableCandidateKey = selected.rowKey
+                sayHiStableCandidateTarget = freshTarget
+                sayHiStableCandidateWindow = freshTree.window
+                onLog("收到招呼头像点击暂缓：新快照中同一用户头像位置已变化；更新目标并等待下一份稳定快照")
+                return true
+            }
+            onLog("收到招呼头像点击复核：已丢弃旧坐标；新鲜完整快照再次确认同一用户行和头像位置")
+            return dispatchSayHiReadOnlyAvatarTap(
+                tree = freshTree,
+                selected = selected.copy(
+                    sourceWindow = freshTree.window,
+                    sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(freshTree)
+                ),
+                target = freshTarget,
+                allowFreshRevalidation = false
+            )
+        }
+        val metrics = accessibilityGateway.displayMetrics()
+        val executionContext = gesturePolicy.captureContext(tree.window, metrics.toGestureCoordinateContext())
+            ?: run {
+                onLog("收到招呼头像点击暂缓：窗口或显示坐标上下文发生变化；不使用当前坐标，安排新快照")
+                scheduleSayHiListSnapshotInspection(
+                    delayMs = 350L,
+                    reason = "AVATAR_TAP_COORDINATE_CONTEXT_CHANGED",
+                    retry = false
+                )
+                return true
+            }
+        sayHiStableCandidateKey = ""
+        sayHiStableCandidateTarget = null
+        sayHiStableCandidateWindow = null
+        sayHiSelectedGreeting = selected
+        sayHiSelectedContactIdentity = null
+        sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
+        sayHiProfileRowRecoveryAttempts = 0
+        clearSayHiRowTapEvidence()
+        sayHiProfileReadAttempts = 0
+        sayHiProfileScrollAttempted = false
+        sayHiProfileScrollFailed = false
+        sayHiProfileScrollInFlight = false
+        sayHiProfileScrollWindowId = -1
+        sayHiProfileScrollRequestId = null
+        sayHiProfileScrollSettledAtMs = 0L
+        sayHiProfileBackDialogPending = false
+        sayHiProfileBackDialogWindowId = -1
+        sayHiProfileBackWindowId = -1
+        sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+        sayHiReadOnlyStage = SayHiReadOnlyStage.AVATAR_TAP_PENDING
+        sayHiGestureInFlight = true
+        val request = GestureIntentRequest(
+            id = "momo-sayhi-avatar-${System.nanoTime()}",
+            intent = GestureIntent.Tap(
+                preferredBounds = target.preferredBounds,
+                targetBounds = target.targetBounds,
+                durationMs = RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS,
+                feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
+            ),
+            description = "陌陌收到招呼未读行头像身份读取（只读）",
+            executionContext = executionContext
+        )
+        val submission = runCatching {
+            gesturePolicy.execute(request, GestureExecutionListener { result ->
+                sayHiGestureInFlight = false
+                if (result.status == GestureExecutionStatus.COMPLETED) {
+                    sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
+                    sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                    onLog("收到招呼头像导航：精确头像手势完成；等待用户资料页与明确身份字段，不点击消息行")
+                } else if (result.status == GestureExecutionStatus.DEFERRED) {
+                    clearSayHiSelectedGreeting()
+                    onLog("收到招呼头像导航[DEFERRED]：平台未派发头像点击；不标记跳过，等待新列表快照重新识别")
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = 500L,
+                        reason = "AVATAR_TAP_CALLBACK_DEFERRED",
+                        retry = false
+                    )
+                } else {
+                    deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+                    clearSayHiSelectedGreeting()
+                    onLog("收到招呼头像导航未完成：status=${result.status}；reason=${result.reason}；不改用整行点击")
+                }
+            })
+        }.getOrElse {
+            sayHiGestureInFlight = false
+            deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+            clearSayHiSelectedGreeting()
+            onLog("收到招呼头像导航失败：手势执行器异常；不执行坐标兜底")
+            return true
+        }
+        if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+            sayHiGestureInFlight = false
+            clearSayHiSelectedGreeting()
+            onLog("收到招呼头像导航[DEFERRED_NOT_READY]：弹窗/页面准入暂未放行；未点击、未标记跳过；下一轮使用新列表快照重新识别原用户行")
+            scheduleSayHiListSnapshotInspection(
+                delayMs = 500L,
+                reason = "AVATAR_TAP_SUBMISSION_DEFERRED",
+                retry = false
+            )
+        } else if (submission != GestureSubmission.ACCEPTED) {
+            sayHiGestureInFlight = false
+            deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+            clearSayHiSelectedGreeting()
+            onLog("收到招呼头像导航未提交：统一手势协调器拒绝；submission=$submission")
+        } else {
+            onLog("收到招呼只读采集：已提交 userlist_item_iv_face 的独立头像点击；后续仅读取身份与消息，不回复")
+        }
+        return true
+    }
+
+    private fun dispatchSayHiReadOnlyRowTap(
+        tree: AccessibilityTreeSnapshot,
+        row: MomoSayHiListRow,
+        target: MomoSayHiTapTarget
+    ): Boolean {
+        when (sayHiTapReadiness(tree, target)) {
+            MomoSayHiTapReadiness.NEEDS_SCROLL -> {
+                onLog(
+                    "收到招呼详情点击暂缓：原消息行未完整落在显示范围内；" +
+                        "目标=${formatBounds(target.targetBounds)}；先滚动外层 listview"
+                )
+                return false
+            }
+            MomoSayHiTapReadiness.REACQUIRE_SNAPSHOT -> {
+                onLog("收到招呼详情点击暂缓：快照或窗口上下文已失效；等待新快照，不使用旧坐标")
+                scheduleSayHiListSnapshotInspection(
+                    delayMs = 350L,
+                    reason = "ROW_TAP_REVALIDATION_REQUIRED",
+                    retry = false
+                )
+                return true
+            }
+            MomoSayHiTapReadiness.READY -> Unit
+        }
+        val selected = sayHiSelectedGreeting ?: return false
+        val revalidationFailure = revalidateSayHiRowTarget(tree, row, target, selected)
+        if (revalidationFailure != null) {
+            val diagnostic = describeSayHiRowTargetRevalidation(tree, row, target, revalidationFailure)
+            sayHiGestureInFlight = false
+            deferSayHiRow(
+                selected.rowKey,
+                "$SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX:$revalidationFailure"
+            )
+            onLog(
+                "收到招呼整行点击取消：安全区域二次校验失败；reason=$revalidationFailure；" +
+                    "$diagnostic；不派发坐标；当前用户已隔离，其他可安全处理用户继续遍历"
+            )
+            clearSayHiSelectedGreeting()
+            sayHiStableCandidateKey = ""
+            sayHiStableCandidateTarget = null
+            sayHiStableCandidateWindow = null
+            scheduleSayHiListSnapshotInspection(
+                delayMs = 350L,
+                reason = "ROW_SAFE_TAP_TARGET_SECOND_VALIDATION_FAILED",
+                retry = false
+            )
+            return true
+        }
+        val metrics = accessibilityGateway.displayMetrics()
+        val executionContext = gesturePolicy.captureContext(tree.window, metrics.toGestureCoordinateContext())
+            ?: run {
+                onLog("收到招呼详情点击暂缓：窗口或显示坐标上下文发生变化；安排新快照，不使用旧坐标")
+                scheduleSayHiListSnapshotInspection(
+                    delayMs = 350L,
+                    reason = "ROW_TAP_COORDINATE_CONTEXT_CHANGED",
+                    retry = false
+                )
+                return true
+            }
+        sayHiReadOnlyStage = SayHiReadOnlyStage.ROW_TAP_PENDING
+        sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+        sayHiGestureInFlight = true
+        pendingSayHiRowTapTarget = target
+        sayHiUnverifiedBackAttempted = false
+        sayHiUnverifiedBackAttemptActivity = ""
+        pendingSayHiRowTapSubmittedAtUptimeMs = 0L
+        pendingSayHiRowTapWindowId = tree.window.windowId
+        sayHiRowTapFeedbackState = SayHiRowTapFeedbackState.NOT_DISPATCHED
+        sayHiRowTapHitReason = ""
+        val gestureCommandId = "momo-sayhi-row-detail-${System.nanoTime()}"
+        pendingSayHiRowTapGestureCommandId = gestureCommandId
+        val request = GestureIntentRequest(
+            id = gestureCommandId,
+            intent = GestureIntent.Tap(
+                preferredBounds = target.preferredBounds,
+                targetBounds = target.targetBounds,
+                durationMs = RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS,
+                feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
+            ),
+            description = "陌陌收到招呼用户行安全区域进入详情（只读 OCR）",
+            executionContext = executionContext
+        )
+        val submission = runCatching {
+            gesturePolicy.execute(request, object : GestureExecutionListener {
+                override fun onDispatched(commandId: String, dispatchedAtUptimeMs: Long) {
+                    if (pendingSayHiRowTapGestureCommandId == commandId) {
+                        pendingSayHiRowTapSubmittedAtUptimeMs = dispatchedAtUptimeMs
+                        sayHiRowTapFeedbackState = SayHiRowTapFeedbackState.WAITING
+                    }
+                }
+
+                override fun onResult(result: com.freedom.core.accessibility.gesture.GestureExecutionResult) {
+                    sayHiGestureInFlight = false
+                    if (result.status == GestureExecutionStatus.COMPLETED) {
+                        sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_DETAIL
+                        sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                        if (sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.REJECTED) {
+                            onLog("收到招呼点击后核验失败：TYPE_VIEW_CLICKED 未命中会话行安全区域；reason=$sayHiRowTapHitReason；禁止 OCR，转入安全回退判定")
+                        } else {
+                            onLog("收到招呼详情导航：用户行安全区域手势已完成；等待行级点击事件核验和目标聊天页验证后才允许读取")
+                        }
+                    } else if (result.status == GestureExecutionStatus.DEFERRED) {
+                        clearSayHiSelectedGreeting()
+                        resetSayHiRowTapTransaction()
+                        sayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
+                        onLog("收到招呼详情点击[DEFERRED]：平台尚未派发用户行点击；不记为未验证或跳过，等待新鲜列表快照重新识别")
+                        scheduleSayHiListSnapshotInspection(
+                            delayMs = 500L,
+                            reason = "ROW_TAP_CALLBACK_DEFERRED",
+                            retry = false
+                        )
+                    } else {
+                        val activityAfterGesture = activityClass()
+                        if (inspectCurrentChatDetailFingerprint() != null) {
+                            sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_DETAIL
+                            sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                            onLog("收到招呼详情导航：手势终态=${result.status}，但当前页面已是目标聊天 Activity；继续等待活动窗口二次确认")
+                        } else if (!isReceivedGreetingsListStructureVisible()) {
+                            sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_DETAIL
+                            sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                            onLog("收到招呼详情点击异常：手势终态=${result.status}，页面=${activityAfterGesture}；不执行 OCR，转入安全 BACK")
+                            returnFromUnverifiedSayHiDetailNavigation(
+                                activityAfterGesture,
+                                "GESTURE_TERMINAL_${result.status}:${result.reason}"
+                            )
+                        } else {
+                            deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+                            clearSayHiSelectedGreeting()
+                            onLog("收到招呼详情导航未完成：status=${result.status}；reason=${result.reason}；仍在列表时跳过原行，不执行备用点击")
+                        }
+                    }
+                }
+            })
+        }.getOrElse { error ->
+            sayHiGestureInFlight = false
+            val activityAfterFailure = activityClass()
+            if (activityAfterFailure.isNotBlank() &&
+                !isReceivedGreetingsListStructureVisible() && inspectCurrentChatDetailFingerprint() == null
+            ) {
+                sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_DETAIL
+                sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                onLog("收到招呼详情点击执行异常：页面已离开原列表；不执行 OCR，申请安全 BACK")
+                returnFromUnverifiedSayHiDetailNavigation(
+                    activityAfterFailure, "GESTURE_EXECUTOR_EXCEPTION:${error.javaClass.simpleName}"
+                )
+            } else {
+                deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+                clearSayHiSelectedGreeting()
+                onLog("收到招呼详情导航失败：手势执行器异常；不执行坐标兜底")
+            }
+            return true
+        }
+        if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+            sayHiGestureInFlight = false
+            clearSayHiSelectedGreeting()
+            pendingSayHiRowTapTarget = null
+            resetSayHiRowTapTransaction()
+            onLog("收到招呼消息行点击[DEFERRED_NOT_READY]：平台手势未派发；不标记本行跳过、不进入详情；重新扫描后再确认")
+            scheduleSayHiListSnapshotInspection(
+                delayMs = 500L,
+                reason = "ROW_TAP_SUBMISSION_DEFERRED",
+                retry = false
+            )
+        } else if (submission != GestureSubmission.ACCEPTED) {
+            sayHiGestureInFlight = false
+            val activityAfterRejection = activityClass()
+            if (activityAfterRejection.isNotBlank() &&
+                !isReceivedGreetingsListStructureVisible() && inspectCurrentChatDetailFingerprint() == null
+            ) {
+                sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_DETAIL
+                sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                onLog("收到招呼详情点击未提交但页面已变化：不执行 OCR，申请安全 BACK")
+                returnFromUnverifiedSayHiDetailNavigation(
+                    activityAfterRejection, "GESTURE_SUBMISSION_REJECTED:$submission"
+                )
+            } else {
+                deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+                clearSayHiSelectedGreeting()
+                onLog("收到招呼详情导航未提交：统一手势协调器拒绝；submission=$submission")
+            }
+        } else {
+            onLog("收到招呼只读采集：头像身份步骤已完成；已提交第二阶段用户行安全区域点击；头像区域保留为候选，仅排除 VIP/SVIP、财富等级及独立行内功能控件；若命中头像并进入资料页则复用安全 BACK；明确禁止输入和发送")
+        }
+        return true
+    }
+
+    /** Returns a stable failure code instead of hiding the failed proof behind one Boolean. */
+    private fun revalidateSayHiRowTarget(
+        tree: AccessibilityTreeSnapshot,
+        row: MomoSayHiListRow,
+        target: MomoSayHiTapTarget,
+        selected: SayHiSelectedGreeting
+    ): String? {
+        if (tree.truncated) return "SNAPSHOT_TRUNCATED"
+        if (tree.window.packageName != targetPackage) return "PACKAGE_MISMATCH"
+        if (!sameMomoWindowGeneration(tree.window, selected.sourceWindow)) {
+            return "WINDOW_GENERATION_CHANGED"
+        }
+        if (selected.sourceStructureFingerprint != MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree)) {
+            return "SOURCE_STRUCTURE_FINGERPRINT_CHANGED"
+        }
+        if (!accessibilityGateway.isWindowCurrent(tree.window)) return "WINDOW_NOT_CURRENT"
+        val fullPageFingerprint = sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(tree)
+        // LISTVIEW_SUBTREE snapshots intentionally omit layout_content. They may be used here
+        // only while the list controller remains confirmed and the retained exact list target,
+        // selected row and current snapshot still belong to the same Android window generation.
+        val retainedListWindow = sayHiConfirmedListTarget?.window
+        val confirmedSubtreeFingerprint = !fullPageFingerprint &&
+            sayHiNavigationFlowController.isReceivedListConfirmed() &&
+            retainedListWindow != null &&
+            sameMomoWindowGeneration(tree.window, retainedListWindow) &&
+            sayHiAccessibilityInspector.hasReceivedGreetingsListSubtreeFingerprint(tree)
+        if (!fullPageFingerprint && !confirmedSubtreeFingerprint) {
+            return "RECEIVED_GREETINGS_LIST_FINGERPRINT_MISSING"
+        }
+        if (MomoSayHiIdentityFingerprintPolicy.rowKey(row) != selected.rowKey) return "ROW_IDENTITY_CHANGED"
+        if (target.targetBounds != target.preferredBounds) return "TARGET_BOUNDS_DIVERGED"
+
+        val rowPath = NodePath(row.rowPath)
+        val namePath = row.namePath ?: return "NAME_NODE_PATH_MISSING"
+        val index = NodeTreeIndex(tree)
+        val rowNode = index.nodeAt(rowPath) ?: return "ROW_NODE_PATH_NOT_FOUND"
+        val targetNode = index.nodeAt(target.path) ?: return "TARGET_NODE_PATH_NOT_FOUND"
+        if (!targetNode.visible) return "TARGET_NODE_NOT_VISIBLE"
+        if (!targetNode.enabled) return "TARGET_NODE_DISABLED"
+        if (!targetNode.clickable) return "TARGET_NODE_NOT_CLICKABLE"
+        if (targetNode.bounds.isEmpty) return "TARGET_NODE_BOUNDS_EMPTY"
+        if (!containsBounds(targetNode.bounds, target.targetBounds)) {
+            return "TARGET_NODE_DOES_NOT_CONTAIN_SAFE_BOUNDS"
+        }
+        if (!isPathWithin(rowPath.childIndices, target.path.childIndices)) {
+            return "TARGET_NODE_NOT_ROW_ANCESTOR"
+        }
+        if (!isPathWithin(namePath.childIndices, rowPath.childIndices)) {
+            return "NAME_NODE_NOT_WITHIN_ROW"
+        }
+        if (!containsBounds(rowNode.bounds, target.targetBounds)) {
+            return "ROW_NODE_DOES_NOT_CONTAIN_SAFE_BOUNDS"
+        }
+        val independentlyResolved = MomoSayHiAvatarTargetPolicy.resolveRowTarget(index, rowPath, namePath)
+            ?: return "SAFE_ROW_BOUNDS_RECOMPUTE_FAILED"
+        if (target.path != independentlyResolved.path) return "CLICK_ANCESTOR_PATH_CHANGED"
+        if (target.targetBounds != independentlyResolved.targetBounds) return "SAFE_ROW_BOUNDS_CHANGED"
+        if (target.preferredBounds != independentlyResolved.preferredBounds) {
+            return "PREFERRED_ROW_BOUNDS_CHANGED"
+        }
+        if (target.excludedBounds != independentlyResolved.excludedBounds) {
+            return "EXCLUDED_COMPONENT_BOUNDS_CHANGED"
+        }
+        if (target.targetBounds.width < 24 || target.targetBounds.height < 20) {
+            return "SAFE_ROW_BOUNDS_TOO_SMALL"
+        }
+        return null
+    }
+
+    private fun containsBounds(outer: ScreenRect, inner: ScreenRect): Boolean =
+        !outer.isEmpty && !inner.isEmpty && inner.left >= outer.left && inner.top >= outer.top &&
+            inner.right <= outer.right && inner.bottom <= outer.bottom
+
+    /** Contains geometry and node-path evidence only; no display name, greeting text or platform ID. */
+    private fun describeSayHiRowTargetRevalidation(
+        tree: AccessibilityTreeSnapshot,
+        row: MomoSayHiListRow,
+        target: MomoSayHiTapTarget,
+        reason: String
+    ): String {
+        val index = NodeTreeIndex(tree)
+        val rowNode = index.nodeAt(NodePath(row.rowPath))
+        val targetNode = index.nodeAt(target.path)
+        val localTargetId = targetNode?.viewId.orEmpty().substringAfterLast('/')
+        val ageMs = (System.currentTimeMillis() - tree.capturedAtEpochMs).coerceAtLeast(0L)
+        return "rowPath=${row.rowPath};namePath=${row.namePath?.childIndices};" +
+            "targetPath=${target.path.childIndices};windowId=${tree.window.windowId};" +
+            "windowGeneration=${tree.window.generation};activity=${tree.window.activityClass};" +
+            "snapshotAgeMs=$ageMs;capturedAtEpochMs=${tree.capturedAtEpochMs};truncated=${tree.truncated};" +
+            "rowBounds=${formatBounds(row.bounds)};rowNodeBounds=${rowNode?.bounds?.let(::formatBounds) ?: "MISSING"};" +
+            "targetBounds=${formatBounds(target.targetBounds)};preferredBounds=${formatBounds(target.preferredBounds)};" +
+            "excludedBounds=${target.excludedBounds.joinToString(",") { formatBounds(it) }};" +
+            "targetNodeId=$localTargetId;targetNodeBounds=${targetNode?.bounds?.let(::formatBounds) ?: "MISSING"};" +
+            "targetVisible=${targetNode?.visible};targetEnabled=${targetNode?.enabled};" +
+            "targetClickable=${targetNode?.clickable};reasonCode=$reason"
+    }
+
+    private fun isPathWithin(path: List<Int>, ancestor: List<Int>): Boolean =
+        path.size >= ancestor.size && path.take(ancestor.size) == ancestor
+
+    private fun clearSayHiRowTapEvidence() {
+        sayHiUnverifiedDetailReturnPending = false
+        pendingSayHiRowTapTarget = null
+        pendingSayHiRowTapSubmittedAtUptimeMs = 0L
+        pendingSayHiRowTapGestureCommandId = null
+        pendingSayHiRowTapWindowId = -1
+        sayHiRowTapFeedbackState = SayHiRowTapFeedbackState.NOT_DISPATCHED
+        sayHiRowTapHitReason = ""
+        sayHiUnverifiedBackAttempted = false
+        sayHiUnverifiedBackAttemptActivity = ""
+    }
+
+    private fun resetSayHiRowTapTransaction() {
+        pendingSayHiRowTapTarget = null
+        pendingSayHiRowTapSubmittedAtUptimeMs = 0L
+        pendingSayHiRowTapGestureCommandId = null
+        pendingSayHiRowTapWindowId = -1
+        sayHiRowTapFeedbackState = SayHiRowTapFeedbackState.NOT_DISPATCHED
+        sayHiRowTapHitReason = ""
+    }
+
+    private fun deferSayHiRow(rowKey: String, reason: String) {
+        val result = sayHiTraversalState.deferRow(rowKey, reason, System.currentTimeMillis())
+        onLog(
+            "收到招呼单用户隔离[DEFERRED]：rowKeyHash=$rowKey；reason=$reason；" +
+                "cooldown=${result.delayMs}ms；backoffStage=${result.backoffStage}；" +
+                "safeTargetFailures=${result.safeTargetFailures}/${MomoSayHiSafeTargetValidationRetryPolicy.MAX_FAILURES}；" +
+                "safeTargetRetryExhausted=${result.safeTargetRetryExhausted}；未计入成功"
+        )
+    }
+
+    private fun hasRetryableSayHiDeferredRows(): Boolean =
+        sayHiTraversalState.hasRetryableDeferredRows()
+
+    private fun clearSayHiRowDeferral(rowKey: String) {
+        sayHiTraversalState.clearDeferral(rowKey)
+    }
+
+    private fun persistSayHiTraversalCheckpoint() {
+        sayHiTraversalState.persist()
+    }
+
+    private fun handleSayHiRowTapClickEvidence(event: AccessibilityEventEnvelope) {
+        if (event.type != com.freedom.core.accessibility.events.AccessibilityEventType.VIEW_CLICKED ||
+            event.packageName != targetPackage ||
+            sayHiReadOnlyStage !in setOf(SayHiReadOnlyStage.ROW_TAP_PENDING, SayHiReadOnlyStage.WAITING_DETAIL)
+        ) return
+        val target = pendingSayHiRowTapTarget ?: return
+        // No event can verify this tap until the coordinator reports its actual platform dispatch.
+        if (pendingSayHiRowTapSubmittedAtUptimeMs <= 0L ||
+            event.eventTimeMillis < pendingSayHiRowTapSubmittedAtUptimeMs
+        ) return
+        if (pendingSayHiRowTapWindowId >= 0 && event.windowId >= 0 &&
+            event.windowId != pendingSayHiRowTapWindowId
+        ) return
+        val source = event.source
+        val hit = MomoSayHiRowClickHitPolicy.evaluate(
+            safeTapBounds = target.preferredBounds,
+            sourceViewId = source?.viewId,
+            sourceContentDescription = source?.contentDescription,
+            sourceBounds = source?.bounds,
+            sourceClickable = source?.clickable == true
+        )
+        val sourceId = source?.viewId.orEmpty().substringAfterLast('/').lowercase()
+        val reason = (hit as? MomoSayHiRowClickHitResult.Rejected)?.let {
+            "${it.reason}:${it.sourceViewId}"
+        }
+        if (reason != null) {
+            sayHiRowTapFeedbackState = SayHiRowTapFeedbackState.REJECTED
+            sayHiRowTapHitReason = reason
+            onLog("收到招呼点击事件核验[REJECTED]：TYPE_VIEW_CLICKED 未能证明命中用户行安全区域；sourceId=$sourceId；reason=$reason；禁止将其解释为聊天详情导航")
+        } else {
+            // A late, window/time-matched accepted event supersedes a timeout-only state.
+            // It may not override a genuine rejected event from a different source event, but
+            // this exact event has just passed the row-hit policy and therefore is authoritative.
+            // One enum value owns the whole feedback outcome; a late accepted event atomically
+            // supersedes TIMED_OUT/REJECTED for this same command/window transaction.
+            sayHiRowTapFeedbackState = SayHiRowTapFeedbackState.VERIFIED
+            sayHiRowTapHitReason = ""
+            val acceptedHit = hit as? MomoSayHiRowClickHitResult.Accepted
+            if (acceptedHit?.avatarHit == true) {
+                onLog("收到招呼点击事件核验[AVATAR_HIT]：整行候选区域实际命中头像；等待页面识别，若进入资料页则安全返回，不读取聊天 OCR；sourceId=$sourceId")
+            } else {
+                onLog("收到招呼点击事件核验[ACCEPTED]：TYPE_VIEW_CLICKED 来源是覆盖整块行点击候选区域的可点击行容器；sourceId=$sourceId")
+            }
+        }
+    }
+
+    private fun sayHiTapReadiness(
+        tree: AccessibilityTreeSnapshot,
+        target: MomoSayHiTapTarget
+    ): MomoSayHiTapReadiness {
+        val metrics = accessibilityGateway.displayMetrics()
+        val fresh = System.currentTimeMillis() - tree.capturedAtEpochMs <= SAYHI_ROW_PRE_TAP_MAX_SNAPSHOT_AGE_MS
+        return MomoSayHiTapReadinessPolicy.evaluate(
+            snapshotFresh = fresh,
+            packageMatches = tree.window.packageName == targetPackage,
+            windowCurrent = accessibilityGateway.isWindowCurrent(tree.window),
+            targetBounds = target.targetBounds,
+            preferredBounds = target.preferredBounds,
+            displayBounds = ScreenRect(0, 0, metrics.widthPixels, metrics.heightPixels)
+        )
+    }
+
+    private fun inspectPendingSayHiAvatarProfile(currentActivity: String): Boolean {
+        if (sayHiReadOnlyStage == SayHiReadOnlyStage.AVATAR_TAP_PENDING || sayHiGestureInFlight) return true
+        val selected = sayHiSelectedGreeting ?: run {
+            sayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
+            return true
+        }
+        val ageMs = System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs
+        if (currentActivity != MomoSayHiPageContract.PROFILE_ACTIVITY) {
+            if (ageMs < SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
+            sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
+            sessionComponents.sampleStore.persistSayHiIdentityResult(
+                selected.rowKey, selected.displayName, sayHiSelectedIdentityStatus,
+                0, "PROFILE_ACTIVITY_NOT_CONFIRMED", null
+            )
+            if (isReceivedGreetingsListStructureVisible()) {
+                deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+                clearSayHiSelectedGreeting()
+                onLog("收到招呼头像身份采集：头像点击后仍停留在收到招呼列表；本行标记为未验证并跳过")
+                return inspectSayHiPageAndAutonomousBrowse(
+                    allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
+                )
+            }
+            onLog("收到招呼头像身份采集：目标资料页 Activity 暂未确认；保留当前用户，等待新的 Activity/窗口快照，不继续点击")
+            return true
+        }
+
+        val observedDialog = latestDialogWindowObservation()
+        if (observedDialog != null) {
+            val dialogStillPresent = rootAccess.isTargetWindowPresent(observedDialog.windowId)
+            if (dialogStillPresent == true) {
+                onLog(
+                    "收到招呼身份采集：检测到仍存在的 dialog.h 窗口；" +
+                        "先执行独立弹层安全检查和返回，不在对话框上读取 ID 或滑动"
+                )
+                return requestSayHiProfileBack()
+            }
+            if (dialogStillPresent == false) {
+                onLog("收到招呼身份采集：dialog.h 事件对应窗口已不在当前窗口集合；忽略过期观察并继续检查资料页")
+            } else {
+                onLog("收到招呼身份采集：无法确认 dialog.h 窗口当前是否存在；暂停节点采集和滑动，等待下一次窗口快照")
+                return true
+            }
+        }
+
+        if (sayHiProfileScrollFailed) {
+            sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
+            sessionComponents.sampleStore.persistSayHiIdentityResult(
+                selected.rowKey, selected.displayName, sayHiSelectedIdentityStatus,
+                0, "PROFILE_IDENTITY_SCROLL_NOT_COMPLETED", null
+            )
+            onLog("收到招呼头像身份采集：资料页向上滑动未完成；身份保留为 UNKNOWN")
+            return returnFromSayHiIdentityProfile(true)
+        }
+        if (sayHiProfileScrollSettledAtMs > 0L &&
+            System.currentTimeMillis() - sayHiProfileScrollSettledAtMs < SAYHI_PROFILE_SCROLL_SETTLE_MS
+        ) return true
+
+        val tree = accessibilityGateway.inspectActiveWindow(
+            TreeInspectionRequest(
+                maxNodes = 1_200,
+                textCapture = NodeTextCapture.EPHEMERAL,
+                maxDepth = 48,
+                maxDurationMs = 800L
+            )
+        )
+        if (tree == null || tree.window.packageName != targetPackage ||
+            tree.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
+            !accessibilityGateway.isWindowCurrent(tree.window)
+        ) {
+            if (ageMs < SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
+            sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
+            sessionComponents.sampleStore.persistSayHiIdentityResult(
+                selected.rowKey, selected.displayName, sayHiSelectedIdentityStatus,
+                0, "PROFILE_SNAPSHOT_UNAVAILABLE", null
+            )
+            onLog("收到招呼头像身份采集暂停：资料页快照持续不可用；不猜测 ID、不点击消息行")
+            return returnFromSayHiIdentityProfile(true)
+        }
+
+        sayHiProfileReadAttempts++
+        if (tree.truncated) {
+            if (sayHiProfileReadAttempts < SAYHI_PROFILE_ID_MAX_ATTEMPTS) return true
+            sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
+            sessionComponents.sampleStore.persistSayHiIdentityResult(
+                selected.rowKey, selected.displayName, sayHiSelectedIdentityStatus,
+                0,
+                if (sayHiProfileScrollAttempted) "PROFILE_TREE_INCOMPLETE_AFTER_SCROLL" else "PROFILE_TREE_INCOMPLETE",
+                null
+            )
+            onLog("收到招呼头像身份采集：资料页节点树不完整；不把未扫描区域判定为没有 ID")
+            return returnFromSayHiIdentityProfile(true)
+        }
+
+        val readout = MomoSayHiPlatformIdentityParser.parse(tree.nodes)
+        if (readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED) {
+            val resolved = sessionComponents.contactIdentityManager.resolveSnapshot(
+                snapshotId = "sayhi-${System.currentTimeMillis()}-${selected.rowKey.take(12)}",
+                observations = listOf(
+                    ContactIdentityObservation(
+                        displayName = selected.displayName,
+                        isPrivateChat = true,
+                        platformUserId = readout.value
+                    )
+                ),
+                observedAtMillis = System.currentTimeMillis()
+            ).singleOrNull()
+            sayHiSelectedContactIdentity = resolved
+            val hasVerifiedPlatformId = resolved?.let {
+                it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                    !it.contactId.isNullOrBlank()
+            } == true
+            sayHiSelectedIdentityStatus = if (hasVerifiedPlatformId) {
+                MomoSayHiPlatformIdentityStatus.CONFIRMED
+            } else {
+                MomoSayHiPlatformIdentityStatus.AMBIGUOUS
+            }
+            val identityArchived = sessionComponents.sampleStore.persistSayHiIdentityResult(
+                selected.rowKey, selected.displayName, sayHiSelectedIdentityStatus,
+                readout.candidateCount, readout.source, resolved
+            )
+            onLog(
+                "收到招呼头像身份采集：已从资料页无障碍节点取得唯一 ID 证据；" +
+                    "本地身份样本归档=${if (identityArchived) "成功" else "未成功"}；" +
+                    "来源=${readout.source}；原始 ID 不写入运行日志"
+            )
+            return returnFromSayHiIdentityProfile(true)
+        }
+
+        if (!sayHiProfileScrollAttempted) {
+            onLog(
+                "收到招呼头像身份采集[INITIAL_SCAN]：资料页首次完整节点扫描未取得唯一用户 ID；" +
+                    "status=${readout.status}；准备执行且仅执行一次纵向向上滑动"
+            )
+            return dispatchSayHiProfileIdentityScroll(tree)
+        }
+
+        sayHiSelectedIdentityStatus = readout.status
+        sessionComponents.sampleStore.persistSayHiIdentityResult(
+            selected.rowKey, selected.displayName, readout.status,
+            readout.candidateCount, readout.source, null
+        )
+        onLog(
+            if (readout.status == MomoSayHiPlatformIdentityStatus.AMBIGUOUS) {
+                "收到招呼头像身份采集[POST_SCROLL]：上滑后仍出现多个不同的明确身份候选；标记身份冲突，不关联联系人"
+            } else {
+                "收到招呼头像身份采集[POST_SCROLL]：完成唯一一次向上滑动和第二次节点扫描；仍未找到明确 ID，保留 UNKNOWN"
+            }
+        )
+        return returnFromSayHiIdentityProfile(true)
+    }
+
+    /** Dispatches the one allowed upward profile scroll through the shared gesture policy path. */
+    private fun dispatchSayHiProfileIdentityScroll(tree: AccessibilityTreeSnapshot): Boolean {
+        if (sayHiProfileScrollAttempted) return true
+        sayHiProfileScrollAttempted = true
+        val selected = sayHiSelectedGreeting ?: return false
+        val metrics = accessibilityGateway.displayMetrics()
+        val decision = MomoSayHiProfileScrollPolicy.resolveViewport(
+            nodes = tree.nodes,
+            displayWidth = metrics.widthPixels,
+            displayHeight = metrics.heightPixels
+        )
+        val viewport = decision.viewport
+        if (viewport == null) {
+            sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
+            sessionComponents.sampleStore.persistSayHiIdentityResult(
+                selected.rowKey, selected.displayName, sayHiSelectedIdentityStatus,
+                0, "PROFILE_SCROLL_VIEWPORT_UNAVAILABLE:${decision.reason}", null
+            )
+            onLog(
+                "收到招呼身份采集：首次扫描未找到 ID，但无法唯一确认安全滑动视口；" +
+                    "candidates=${decision.candidateCount}；reason=${decision.reason}；不猜测坐标"
+            )
+            return returnFromSayHiIdentityProfile(true)
+        }
+        if (tree.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
+            !accessibilityGateway.isWindowCurrent(tree.window)
+        ) {
+            sayHiProfileScrollAttempted = false
+            onLog("收到招呼身份采集：资料页窗口在滑动准备期间发生变化；丢弃旧坐标")
+            return true
+        }
+        val executionContext = gesturePolicy.captureContext(
+            tree.window,
+            metrics.toGestureCoordinateContext()
+        ) ?: run {
+            // No platform gesture was submitted. Preserve the one permitted scroll attempt for
+            // a later fresh snapshot instead of consuming it on a stale execution context.
+            sayHiProfileScrollAttempted = false
+            sayHiProfileScrollFailed = true
+            onLog("收到招呼身份采集：资料页滑动坐标上下文已失效；不使用旧视口")
+            return true
+        }
+        val request = GestureIntentRequest(
+            id = "momo-sayhi-profile-id-scroll-${System.nanoTime()}",
+            intent = GestureIntent.VerticalSwipe(
+                viewport = viewport,
+                direction = VerticalSwipeDirection.UP,
+                durationMs = SAYHI_PROFILE_IDENTITY_SCROLL_DURATION_MS
+            ),
+            description = "收到招呼用户资料页身份字段只读上滑",
+            executionContext = executionContext
+        )
+        sayHiProfileScrollRequestId = request.id
+        sayHiProfileScrollWindowId = tree.window.windowId
+        sayHiProfileScrollInFlight = true
+        sayHiProfileScrollFailed = false
+        sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_SCROLL_PENDING
+        sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+        sayHiGestureInFlight = true
+        onLog(
+            "收到招呼身份采集[PROFILE_SCROLL]：已唯一确认可滚动资料内容视口；" +
+                "candidates=${decision.candidateCount}；fingerprint=${decision.reason}；" +
+                "targetPath=${decision.targetPath ?: "none"}；" +
+                "bounds=${viewport.left},${viewport.top},${viewport.right},${viewport.bottom}；" +
+                "direction=UP；count=1"
+        )
+        val submission = runCatching {
+            gesturePolicy.execute(request, GestureExecutionListener { result ->
+                if (sayHiProfileScrollRequestId != request.id) return@GestureExecutionListener
+                sayHiGestureInFlight = false
+                sayHiProfileScrollInFlight = false
+                sayHiProfileScrollRequestId = null
+                if (result.status == GestureExecutionStatus.COMPLETED) {
+                    sayHiProfileScrollFailed = false
+                    sayHiProfileScrollSettledAtMs = System.currentTimeMillis()
+                    sayHiProfileReadAttempts = 0
+                    sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
+                    sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                    onLog("收到招呼身份采集[PROFILE_SCROLL_COMPLETED]：单次向上滑动完成；等待新鲜资料页快照后重新提取 ID")
+                } else if (result.status == GestureExecutionStatus.DEFERRED) {
+                    sayHiProfileScrollFailed = false
+                    sayHiProfileScrollAttempted = false
+                    sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
+                    sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                    onLog("收到招呼身份采集[PROFILE_SCROLL_DEFERRED]：资料页未发生滑动；保留唯一滑动机会，等待新鲜快照")
+                } else {
+                    sayHiProfileScrollFailed = true
+                    sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
+                    sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+                    onLog("收到招呼身份采集[PROFILE_SCROLL_FAILED]：status=${result.status}；reason=${result.reason}；不重复滑动")
+                }
+            })
+        }.getOrElse {
+            sayHiGestureInFlight = false
+            sayHiProfileScrollInFlight = false
+            sayHiProfileScrollRequestId = null
+            sayHiProfileScrollFailed = true
+            sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
+            sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+            onLog("收到招呼身份采集：资料页上滑协调器异常；type=${it.javaClass.simpleName}；不重复滑动")
+            return true
+        }
+        if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+            sayHiGestureInFlight = false
+            sayHiProfileScrollInFlight = false
+            sayHiProfileScrollRequestId = null
+            sayHiProfileScrollAttempted = false
+            sayHiProfileScrollFailed = false
+            sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
+            sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+            onLog("收到招呼身份资料页上滑[DEFERRED_NOT_READY]：页面暂不可操作，未派发滑动且不消耗唯一滑动机会；等待新鲜资料页快照")
+        } else if (submission != GestureSubmission.ACCEPTED) {
+            sayHiGestureInFlight = false
+            sayHiProfileScrollInFlight = false
+            sayHiProfileScrollRequestId = null
+            sayHiProfileScrollFailed = true
+            sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
+            sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+            onLog("收到招呼身份采集：统一手势协调器拒绝资料页上滑；submission=$submission；不重复滑动")
+        }
+        return true
+    }
+
+    private fun returnFromSayHiIdentityProfile(pageChanged: Boolean): Boolean {
+        val selected = sayHiSelectedGreeting ?: return false
+        if (!pageChanged) {
+            deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
+            clearSayHiSelectedGreeting()
+            return inspectSayHiPageAndAutonomousBrowse(
+                allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
+            )
+        }
+        val accepted = requestSayHiProfileBack()
+        if (!accepted) {
+            onLog("收到招呼身份页面：资料页专用 BACK 未通过新鲜窗口/弹层安全检查；保留现场并暂停后续行点击")
+        }
+        return accepted
+    }
+
+    /**
+     * A ChatActivity BACK is permitted only after re-resolving the exact active Momo window and
+     * completing the bounded overlay scan for both the activity and any currently observed
+     * dialog.h window. The caller must still verify the destination page after dispatch.
+     */
+    private fun requestChatActivityBack(
+        reason: String,
+        expectedWindow: WindowRef? = null,
+        onSubmitted: (WindowRef) -> Unit = {}
+    ): Boolean {
+        val dialogObservation = latestDialogWindowObservation()
+        val inspection = rootAccess.withTargetWindowRoots { windows ->
+            if (windows.isEmpty()) return@withTargetWindowRoots null
+            val active = windows.firstOrNull { it.active }
+                ?: windows.firstOrNull { it.focused }
+                ?: run {
+                    onLog("ChatActivity BACK 安全检查拒绝：没有可确认的活动/焦点窗口；reason=$reason")
+                    return@withTargetWindowRoots null
+                }
+            if (active.window.packageName != targetPackage || active.window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(active.window)
+            ) {
+                onLog(
+                    "ChatActivity BACK 安全检查拒绝：活动窗口身份不匹配；" +
+                        "package=${active.window.packageName}；activityHint=${active.window.activityClass}；" +
+                        "windowId=${active.window.windowId}；reason=$reason"
+                )
+                return@withTargetWindowRoots null
+            }
+            if (sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(
+                    active.root, targetPackage
+                )
+            ) {
+                onLog(
+                    "ChatActivity BACK 安全检查拒绝：当前活动根节点已出现收到招呼 listview；" +
+                        "页面身份可能尚未同步，禁止从列表页再次返回；reason=$reason"
+                )
+                return@withTargetWindowRoots null
+            }
+
+            val chatFingerprint = chatComponents.pageInspector.inspectRoot(
+                root = AccessibilityNodeInfo.obtain(active.root),
+                targetPackage = targetPackage,
+                activityClass = active.window.activityClass
+            )
+            if (chatFingerprint.pageType != MomoChatPageType.CHAT_DETAIL_CANDIDATE ||
+                !chatFingerprint.hasStableChatDetailFingerprint
+            ) {
+                onLog(
+                    "ChatActivity BACK 安全检查拒绝：当前活动窗口未通过统一聊天详情页指纹；" +
+                        "${chatFingerprint.summary()}；reason=$reason"
+                )
+                return@withTargetWindowRoots null
+            }
+            onLog(
+                "ChatActivity BACK 页面指纹通过：至少一条完整的同窗口聊天详情识别路径已命中，" +
+                    "且当前活动窗口/页面代次已独立复核；windowId=${active.window.windowId}；" +
+                    "generation=${active.window.generation}；reason=$reason"
+            )
+
+            val dialogRoot = dialogObservation?.let { observed ->
+                windows.firstOrNull { it.window.windowId == observed.windowId }
+            }
+            if (dialogObservation != null && dialogRoot == null) {
+                val dialogPresent = rootAccess.isTargetWindowPresent(dialogObservation.windowId)
+                if (dialogPresent != false) {
+                    onLog(
+                        "ChatActivity BACK 安全检查拒绝：观察到 dialog.h，但无法取得其当前窗口根节点" +
+                            "或证明该窗口已消失；windowId=${dialogObservation.windowId}；reason=$reason"
+                    )
+                    return@withTargetWindowRoots null
+                }
+                onLog(
+                    "ChatActivity BACK 安全取证[DIALOG_WINDOW_GONE]：" +
+                        "observedWindowId=${dialogObservation.windowId}；" +
+                        "activeWindowId=${active.window.windowId}；已确认过期弹层窗口消失"
+                )
+            }
+
+            val rootsToInspect = buildList {
+                add(active)
+                if (dialogRoot != null && dialogRoot.window.windowId != active.window.windowId) {
+                    add(dialogRoot)
+                }
+            }
+            for (candidate in rootsToInspect) {
+                val isObservedDialog = dialogObservation?.windowId == candidate.window.windowId
+                val inspectionActivity = if (isObservedDialog) {
+                    dialogObservation?.className
+                } else {
+                    candidate.window.activityClass
+                }
+                val safety = browseComponents.popupInspector.inspectBlockingOverlay(
+                    candidate.root,
+                    inspectionActivity
+                )
+                onLog(
+                    "ChatActivity BACK 安全取证[WINDOW]：windowId=${candidate.window.windowId}；" +
+                        "active=${candidate.active}；focused=${candidate.focused}；" +
+                        "root=${if (isObservedDialog) dialogObservation?.className else candidate.window.activityClass}；" +
+                        "visited=${safety.visitedNodes}；elapsedMs=${safety.elapsedMs}；" +
+                        "complete=${safety.complete}；stopReason=${safety.stopReason ?: "none"}；" +
+                        "popupCandidates=${safety.popupCandidateCount}；" +
+                        "blocking=${safety.blockingReason?.take(120) ?: "none"}"
+                )
+                if (!safety.complete || !safety.blockingReason.isNullOrBlank()) {
+                    onLog("ChatActivity BACK 安全检查拒绝：窗口扫描不完整或存在阻断弹层；reason=$reason")
+                    return@withTargetWindowRoots null
+                }
+            }
+            ChatActivityBackInspection(active.window)
+        } ?: return false
+
+        if (expectedWindow != null && (
+                inspection.window.packageName != expectedWindow.packageName ||
+                    inspection.window.windowId != expectedWindow.windowId ||
+                    inspection.window.generation != expectedWindow.generation
+                )
+        ) {
+            onLog(
+                "ChatActivity 安全 BACK 拒绝：当前窗口身份与首次 BACK 的来源窗口不一致；" +
+                    "expected=${expectedWindow.windowId}/${expectedWindow.generation}；" +
+                    "actual=${inspection.window.windowId}/${inspection.window.generation}；reason=$reason"
+            )
+            return false
+        }
+        val stillSameDetail = rootAccess.withActiveTargetRoot { root, window ->
+            sameMomoWindowGeneration(window, inspection.window) &&
+                chatComponents.pageInspector.inspectRoot(
+                    root = AccessibilityNodeInfo.obtain(root),
+                    targetPackage = targetPackage,
+                    activityClass = window.activityClass
+                ).let { page ->
+                    page.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
+                        page.hasStableChatDetailFingerprint
+                }
+        } ?: false
+        if (!stillSameDetail || !accessibilityGateway.isWindowCurrent(inspection.window)) {
+            onLog("聊天详情结构安全 BACK 拒绝：弹层检查后页面指纹、窗口或页面代次发生变化；reason=$reason")
+            return false
+        }
+        val accepted = accessibilityGateway.performVerifiedNavigationBack(
+            inspection.window,
+            inspection.window.activityClass
+        )
+        onLog(
+            "ChatActivity 安全 BACK 派发：windowId=${inspection.window.windowId}；" +
+                "generation=${inspection.window.generation}；platformAccepted=$accepted；" +
+                "reason=$reason；path=${if (accepted) "VERIFIED_NAVIGATION_BACK" else "REJECTED"}"
+        )
+        if (accepted) onSubmitted(inspection.window)
+        return accepted
+    }
+
+    /** Structural identity confirmation; Activity names and stale list-view events are not enough. */
+    private fun isReceivedGreetingsListConfirmed(): Boolean = rootAccess.withActiveTargetRoot { root, window ->
+        if (window.packageName != targetPackage || window.windowId < 0 ||
+            !accessibilityGateway.isWindowCurrent(window)
+        ) return@withActiveTargetRoot false
+        val confirmed = sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage)
+        confirmed && accessibilityGateway.isWindowCurrent(window)
+    } == true
+
+    /** Current list identity includes the actual Android window and page generation. */
+    private fun receivedGreetingsListWindowIdentity(): String? =
+        rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(window) ||
+                !sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage)
+            ) return@withActiveTargetRoot null
+            if (!accessibilityGateway.isWindowCurrent(window)) return@withActiveTargetRoot null
+            MomoWindowPageFingerprint.windowIdentity(
+                window = window,
+                targetPackage = targetPackage,
+                pageKind = "RECEIVED_GREETINGS_LIST"
+            )
+        }
+
+    private fun isReceivedGreetingsListStructureVisible(): Boolean =
+        rootAccess.withActiveTargetRoot { root, window ->
+            window.packageName == targetPackage && window.windowId >= 0 &&
+                accessibilityGateway.isWindowCurrent(window) &&
+                sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage) &&
+                accessibilityGateway.isWindowCurrent(window)
+        } == true
+
+    private fun resetSayHiDetailBackReturnTracking() {
+        sayHiDetailBackRecoveryWindowStartedAtUptimeMs = 0L
+        sayHiDetailBackRecoveryAttempted = false
+        sayHiDetailBackSourceWindow = null
+        sayHiDetailBackReturnConfirmation.reset()
+    }
+
+    private data class SayHiProfileBackInspection(
+        val window: WindowRef,
+        val dialogHPresent: Boolean,
+        val dialogHWindowId: Int
+    )
+
+    /**
+     * Confirms the shared Momo chat-detail fingerprint from one fresh active-window tree.
+     * Activity, package, WindowRef generation and current-window checks remain independent
+     * identity constraints; the three UI anchors only identify the page inside that window.
+     */
+    private fun inspectCurrentChatDetailFingerprint(): Pair<WindowRef, MomoChatPageInspection>? {
+        val observed = rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(window)
+            ) {
+                return@withActiveTargetRoot null
+            }
+            val inspection = chatComponents.pageInspector.inspectRoot(
+                root = AccessibilityNodeInfo.obtain(root),
+                targetPackage = targetPackage,
+                activityClass = window.activityClass
+            )
+            window to inspection
+        } ?: return null
+
+        val (window, inspection) = observed
+        if (window.windowId < 0 ||
+            !accessibilityGateway.isWindowCurrent(window) ||
+            inspection.pageType != MomoChatPageType.CHAT_DETAIL_CANDIDATE ||
+            !inspection.hasStableChatDetailFingerprint
+        ) {
+            return null
+        }
+        return observed
+    }
+
+    private data class ChatActivityBackInspection(
+        val window: WindowRef
+    )
+
+    /**
+     * Dedicated back admission for the verified received-greetings profile flow. It performs a
+     * bounded popup-safety inspection of the current profile window and any currently-present
+     * dialog.h window, then asks the gateway to revalidate the exact active WindowRef immediately
+     * before BACK. A stale dialog event is diagnostic only and never blocks a verified profile.
+     */
+    private fun requestSayHiProfileBack(): Boolean {
+        if (sayHiProfileBackAttempts >= MAX_SAYHI_PROFILE_BACK_ATTEMPTS) {
+            onLog("资料页专用 BACK 暂缓：本用户已达到有界安全返回尝试次数；保留页面和任务断点，等待新的页面/窗口事件")
+            return false
+        }
+        if (activityClass() != MomoSayHiPageContract.PROFILE_ACTIVITY) {
+            onLog("资料页专用 BACK 拒绝：当前 Activity 已不是已确认的 PersonalProfileActivityK")
+            return false
+        }
+        val dialogObservation = latestDialogWindowObservation()
+        val inspection = rootAccess.withTargetWindowRoots { windows ->
+            if (windows.isEmpty()) return@withTargetWindowRoots null
+            val active = windows.firstOrNull { it.active }
+                ?: windows.firstOrNull { it.focused }
+                ?: return@withTargetWindowRoots null
+            if (active.window.packageName != targetPackage ||
+                active.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
+                active.window.windowId < 0
+            ) return@withTargetWindowRoots null
+
+            val dialogRoot = dialogObservation?.let { observation ->
+                windows.firstOrNull { it.window.windowId == observation.windowId }
+            }
+            if (dialogObservation != null && dialogRoot == null) {
+                val dialogWindowPresent = rootAccess.isTargetWindowPresent(dialogObservation.windowId)
+                if (dialogWindowPresent != false) {
+                    onLog(
+                        "资料页 BACK 安全取证[DIALOG_H_ROOT_UNAVAILABLE]：" +
+                            "observedClass=${dialogObservation.className}；" +
+                            "observedWindowId=${dialogObservation.windowId}；" +
+                            "windowPresent=$dialogWindowPresent；" +
+                            "说明=无法取得当前 dialog.h 根节点或证明窗口已消失；拒绝 BACK"
+                    )
+                    return@withTargetWindowRoots null
+                }
+                onLog(
+                    "资料页 BACK 安全取证[DIALOG_WINDOW_GONE]：" +
+                        "observedClass=${dialogObservation.className}；" +
+                        "observedWindowId=${dialogObservation.windowId}；" +
+                        "observedAtUptimeMs=${dialogObservation.observedAtUptimeMs}；" +
+                        "activeWindowId=${active.window.windowId}；" +
+                        "说明=窗口集合已确认该 dialog.h 窗口消失；按当前资料页重新检查"
+                )
+            }
+
+            val dialogPresent = dialogRoot != null
+            val rootsToInspect = buildList {
+                add(active)
+                if (dialogRoot != null && dialogRoot.window.windowId != active.window.windowId) add(dialogRoot)
+            }
+            for (candidate in rootsToInspect) {
+                val isDialogH = dialogObservation?.windowId == candidate.window.windowId
+                val safety = browseComponents.popupInspector.inspectBlockingOverlay(
+                    candidate.root,
+                    if (isDialogH) dialogObservation?.className else MomoSayHiPageContract.PROFILE_ACTIVITY
+                )
+                onLog(
+                    "资料页 BACK 安全取证[WINDOW]：windowId=${candidate.window.windowId}；" +
+                        "active=${candidate.active}；focused=${candidate.focused}；" +
+                        "eventClass=${if (isDialogH) dialogObservation?.className else MomoSayHiPageContract.PROFILE_ACTIVITY}；" +
+                        "visited=${safety.visitedNodes}；elapsedMs=${safety.elapsedMs}；" +
+                        "complete=${safety.complete}；stopReason=${safety.stopReason ?: "none"}；" +
+                        "popupCandidates=${safety.popupCandidateCount}；" +
+                        "blocking=${safety.blockingReason?.take(120) ?: "none"}"
+                )
+                if (!safety.complete || !safety.blockingReason.isNullOrBlank()) {
+                    onLog("资料页 BACK 安全检查拒绝：活动窗口或当前存在的 dialog.h 窗口未能通过完整无阻断检查")
+                    return@withTargetWindowRoots null
+                }
+            }
+            SayHiProfileBackInspection(
+                window = active.window,
+                dialogHPresent = dialogPresent,
+                dialogHWindowId = dialogRoot?.window?.windowId ?: -1
+            )
+        } ?: return false
+
+        if (!accessibilityGateway.isWindowCurrent(inspection.window)) {
+            onLog("资料页专用 BACK 拒绝：安全检查后活动窗口或页面代次发生变化")
+            return false
+        }
+        val accepted = accessibilityGateway.performVerifiedNavigationBack(
+            inspection.window,
+            MomoSayHiPageContract.PROFILE_ACTIVITY
+        )
+        if (accepted) {
+            sayHiProfileBackAttempts++
+            sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_BACK_PENDING
+            sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+            sayHiProfileBackDialogPending = inspection.dialogHPresent
+            sayHiProfileBackDialogWindowId = inspection.dialogHWindowId
+            sayHiProfileBackWindowId = inspection.window.windowId
+            onLog(
+                if (inspection.dialogHPresent) {
+                    "收到招呼身份页面：当前 dialog.h 窗口已完成安全检查并提交 BACK；等待确认其从窗口集合消失，再对资料页执行独立安全返回"
+                } else {
+                    "收到招呼身份页面：资料页专用 BACK 已通过弹层安全检查并提交；等待收到招呼列表验证"
+                }
+            )
+        }
+        return accepted
+    }
+
+    private fun selectedContactId(): String? =
+        sayHiSelectedContactIdentity?.contactId?.takeIf(String::isNotBlank)
+
+    private fun clearSayHiSelectedGreeting() {
+        sayHiSelectedGreeting = null
+        sayHiSelectedContactIdentity = null
+        sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
+        sayHiProfileReadAttempts = 0
+        sayHiProfileScrollAttempted = false
+        sayHiProfileScrollFailed = false
+        sayHiProfileScrollInFlight = false
+        sayHiProfileScrollWindowId = -1
+        sayHiProfileScrollRequestId = null
+        sayHiProfileScrollSettledAtMs = 0L
+        sayHiProfileBackDialogPending = false
+        sayHiProfileBackDialogWindowId = -1
+        sayHiProfileBackWindowId = -1
+        sayHiProfileBackAttempts = 0
+        sayHiProfileRowRecoveryAttempts = 0
+        clearSayHiRowTapEvidence()
+        sayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
+        sayHiReadOnlyStageStartedAtMs = 0L
+        resetSayHiDetailBackReturnTracking()
+    }
+
+    private fun returnFromUnverifiedSayHiDetailNavigation(
+        currentActivity: String,
+        reason: String = "CHAT_ACTIVITY_NOT_CONFIRMED"
+    ): Boolean {
+        if (currentActivity.isBlank() || isReceivedGreetingsListStructureVisible() ||
+            inspectCurrentChatDetailFingerprint() != null
+        ) return false
+        val selected = sayHiSelectedGreeting
+        if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY) {
+            selected?.let { if (!sayHiTraversalState.isDeferredRow(it.rowKey)) deferSayHiRow(it.rowKey, "DETAIL_NAVIGATION_UNVERIFIED") }
+            sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
+            val accepted = requestSayHiProfileBack()
+            onLog(
+                if (accepted) {
+                    "收到招呼误入资料页识别[PROFILE_OR_AVATAR_PAGE]：第二阶段行区域点击命中头像/资料入口；" +
+                        "已复用资料页弹层安全检查并派发 VERIFIED_NAVIGATION_BACK；等待收到招呼列表确认；不读取资料页、不执行 OCR"
+                } else {
+                    "收到招呼误入资料页安全返回暂未通过：保留资料页和用户断点；等待新的窗口/弹层快照，不继续点击"
+                }
+            )
+            return true
+        }
+        // An unknown intermediate Activity is not proof that BACK is safe. Keep the captured row
+        // and wait for a structural page fingerprint instead of blindly navigating away.
+        onLog(
+            "收到招呼详情导航处于未知页面：reason=$reason；Activity=${currentActivity.ifBlank { "未知" }}；" +
+                "未确认聊天详情指纹/资料页结构，因此不发送全局 BACK、不执行 OCR，保留事务等待新鲜页面复核"
+        )
+        return true
+    }
+
+    override fun receivedGreetingsCurrentDisplayName(): String? =
+        sayHiSelectedGreeting?.displayName?.takeIf(String::isNotBlank)
+
+    override fun receivedGreetingsCurrentContactIdentity(): ContactRowIdentity? =
+        sayHiSelectedContactIdentity?.takeIf { it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED }
+
+    override fun receivedGreetingsCurrentRowKeyHash(): String? = sayHiSelectedGreeting?.rowKey
+
+    override fun receivedGreetingsCurrentIdentityStatus(): String? = sayHiSelectedIdentityStatus.name
+
+    override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean {
+        if (sayHiReadOnlyStage != SayHiReadOnlyStage.WAITING_DETAIL ||
+            sayHiRowTapFeedbackState != SayHiRowTapFeedbackState.VERIFIED
+        ) return false
+        val selected = sayHiSelectedGreeting ?: return false
+        val confirmedDetail = inspectCurrentChatDetailFingerprint()
+        if (confirmedDetail == null || sayHiGestureInFlight) {
+            onLog("收到招呼详情采集完成回退准入拒绝：当前活动窗口未通过统一聊天详情页指纹或仍有手势执行")
+            return false
+        }
+        var dispatchedBackWindow: WindowRef? = null
+        val accepted = requestChatActivityBack(
+            reason = "收到招呼只读详情采集完成",
+            expectedWindow = confirmedDetail.first,
+            onSubmitted = { window -> dispatchedBackWindow = window }
+        )
+        if (accepted) {
+            if (success) {
+                sayHiTraversalState.markProcessedRow(selected.rowKey)
+                selectedContactId()?.let { contactId ->
+                    sayHiTraversalState.markProcessedContactHash(
+                        MomoSayHiIdentityFingerprintPolicy.contactIdHash(contactId)
+                    )
+                }
+                clearSayHiRowDeferral(selected.rowKey)
+            } else {
+                // A safe BACK only closes the detail page. It is not proof that the OCR sample
+                // was archived, so keep this row eligible for the existing bounded retry flow.
+                deferSayHiRow(selected.rowKey, "DETAIL_SAMPLE_ARCHIVE_FAILED")
+            }
+            sayHiReadOnlyStage = SayHiReadOnlyStage.DETAIL_BACK_PENDING
+            sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
+            resetSayHiDetailBackReturnTracking()
+            sayHiDetailBackSourceWindow = dispatchedBackWindow
+            onLog(
+                "收到招呼只读 OCR 完成：样本状态=${if (success) "已保存，已记录处理" else "读取/归档未成功，已延期且不标记完成"}；" +
+                    "ChatActivity 已通过窗口/弹层安全检查派发 VERIFIED_NAVIGATION_BACK；" +
+                    "等待 NewSayHiSessionListActivity 与 listview 容器双重确认；本流程未调用 AI 输入回调、输入框或发送控件"
+            )
+        } else {
+            onLog("收到招呼只读 OCR 完成，但 ChatActivity 未通过安全 BACK 检查或系统拒绝返回；暂停后续用户处理")
+        }
+        return accepted
+    }
+
+    override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus {
+        val currentActivity = activityClass()
+        if (receivedGreetingsEntrySearchActive || receivedGreetingsEntrySearchGestureInFlight) {
+            return ReceivedGreetingsTraversalStatus.NAVIGATING
+        }
+        if (receivedGreetingsEntrySearchComplete) return ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND
+        if (sayHiReadOnlyStage == SayHiReadOnlyStage.WAITING_DETAIL &&
+            sayHiRowTapFeedbackState != SayHiRowTapFeedbackState.REJECTED
+        ) {
+            // A verified row tap identifies the navigation source; the shared structural
+            // fingerprint independently identifies the destination before read-only OCR unlocks.
+            if (sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.VERIFIED &&
+                inspectCurrentChatDetailFingerprint() != null
+            ) {
+                return ReceivedGreetingsTraversalStatus.DETAIL_READY
+            }
+        }
+        if (sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE) {
+            return ReceivedGreetingsTraversalStatus.NAVIGATING
+        }
+        if (sayHiNavigationFlowController.shouldAwaitProfileCardActivity(
+                currentActivityClass = currentActivity,
+                profileCardActivityClass = MomoSayHiPageContract.CARD_ACTIVITY,
+                entryTapPending = receivedGreetingsEntryTapPending
+            ) || sayHiNavigationFlowController.isWaitingForReceivedList()
+        ) {
+            return ReceivedGreetingsTraversalStatus.NAVIGATING
+        }
+        return when {
+            isReceivedGreetingsListStructureVisible() -> if (!sayHiNavigationFlowController.isReceivedListConfirmed()) {
+                ReceivedGreetingsTraversalStatus.UNKNOWN
+            } else if (sayHiAutonomousBrowseController.isFinished() && !sayHiTraversalState.hasDeferredRows) {
+                ReceivedGreetingsTraversalStatus.COMPLETE
+            } else {
+                ReceivedGreetingsTraversalStatus.SCANNING
+            }
+            currentActivity == MomoSayHiPageContract.CARD_ACTIVITY -> ReceivedGreetingsTraversalStatus.PROFILE_CARD
+            else -> ReceivedGreetingsTraversalStatus.UNKNOWN
+        }
+    }
+
+    override fun returnFromReceivedGreetingsForPriorityCheck(): Boolean {
+        val currentActivity = activityClass()
+        val isReceivedList = isReceivedGreetingsListStructureVisible()
+        val isCardHost = currentActivity == MomoSayHiPageContract.CARD_ACTIVITY
+        if (!isReceivedList && !isCardHost) return false
+        val confirmedWindow = rootAccess.withActiveTargetRoot { _, window ->
+            window.packageName == targetPackage && accessibilityGateway.isWindowCurrent(window)
+        } ?: false
+        if (!confirmedWindow) return false
+        if (sayHiGestureInFlight) {
+            onLog("收到的招呼任务让出执行权：等待当前已提交手势完成，暂不并发执行返回操作")
+            return true
+        }
+        val accepted = accessibilityGateway.performGlobalAction(GlobalAccessibilityAction.BACK)
+        if (accepted) {
+            receivedGreetingsEntryTapPending = false
+            sayHiCardListTapPending = false
+            sayHiNavigationFlowController.reset()
+            sayHiAutonomousBrowseController.reset()
+            resetReceivedGreetingsEntrySearch()
+            resetSayHiListSnapshotState()
+            clearSayHiSelectedGreeting()
+            sayHiTraversalState.clear()
+            sayHiStableCandidateKey = ""
+            sayHiStableCandidateTarget = null
+            sayHiStableCandidateWindow = null
+        }
+        onLog(
+            if (accepted) "收到的招呼任务让出执行权：已从确认的招呼页面请求返回普通聊天列表"
+            else "收到的招呼任务让出执行权失败：系统拒绝返回操作"
+        )
+        return accepted
+    }
+
+    /**
+     * Inspects confirmed SayHi pages. Test traversal may scroll only the confirmed list;
+     * passive observation always leaves the user's viewport alone.
+     */
+    private fun inspectSayHiPageAndAutonomousBrowse(
+        allowAutonomousScroll: Boolean = true,
+        minimumIntervalMs: Long = 500L,
+        forceFresh: Boolean = false
+    ): Boolean {
+        val activityHint = activityClass() // diagnostic/card-host hint only; list identity is structural
+        val listSurfaceVisible = isReceivedGreetingsListStructureVisible()
+        val listFlowExpected = sayHiNavigationFlowController.isReceivedListConfirmed() ||
+            sayHiNavigationFlowController.isWaitingForReceivedList() ||
+            sayHiNavigationFlowController.isManuallyStabilizingReceivedList()
+        val listPipelineCandidate = listSurfaceVisible || listFlowExpected
+        val cardHostCandidate = activityHint == MomoSayHiPageContract.CARD_ACTIVITY
+        if (!listPipelineCandidate && !cardHostCandidate) return false
+        val confirmedList = listSurfaceVisible && sayHiNavigationFlowController.isReceivedListConfirmed()
+        if (confirmedList) {
+            val pausedTarget = sayHiConfirmedListTarget
+            val pausedWindowKey = pausedTarget?.window?.let(::sayHiWindowStabilityKey)
+                ?: "${targetPackage}|$activityHint|WINDOW_UNAVAILABLE"
+            if (sayHiListSnapshotRecoveryPolicy.isPausedForWindow(pausedWindowKey)) {
+                if (pausedTarget == null || accessibilityGateway.isWindowCurrent(pausedTarget.window)) {
+                    // The current page has already exhausted its bounded retry budget. Do not
+                    // trigger another full tree walk for every subsequent accessibility event.
+                    return true
+                }
+                // The paused window identity is no longer current. Drop its locator and allow one
+                // bounded full-window recovery under the new window identity.
+                sayHiConfirmedListTarget = null
+                sayHiSnapshotCoordinator.requestFullListFallback()
+            }
+        }
+        if (listPipelineCandidate &&
+            sayHiSnapshotCoordinator.isPending && !forceFresh
+        ) return true
+        val now = System.currentTimeMillis()
+        if (!forceFresh && now - lastSayHiInspectionAtMs < minimumIntervalMs) return true
+        var listSnapshotLeaseAcquired = false
+        if (listPipelineCandidate) {
+            when (val admission = sayHiListSnapshotRecoveryPolicy.tryBeginSnapshot(
+                SystemClock.elapsedRealtime()
+            )) {
+                MomoSayHiListSnapshotRecoveryPolicy.SnapshotAdmission.Acquired -> {
+                    listSnapshotLeaseAcquired = true
+                    lastSayHiSnapshotGateDiagnostic = ""
+                }
+                MomoSayHiListSnapshotRecoveryPolicy.SnapshotAdmission.GestureInFlight -> {
+                    // Gesture terminal callback owns scheduling the next fresh snapshot.
+                    return true
+                }
+                MomoSayHiListSnapshotRecoveryPolicy.SnapshotAdmission.SnapshotInFlight -> {
+                    val now = System.currentTimeMillis()
+                    if (lastSayHiSnapshotGateDiagnostic != "SNAPSHOT_READ_IN_FLIGHT" ||
+                        now - lastSayHiSnapshotGateDiagnosticAtMs >= 1_500L
+                    ) {
+                        lastSayHiSnapshotGateDiagnostic = "SNAPSHOT_READ_IN_FLIGHT"
+                        lastSayHiSnapshotGateDiagnosticAtMs = now
+                        onLog("收到招呼列表快照：已有节点树读取正在进行；合并本次事件，稍后重新获取新快照")
+                    }
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = 200L,
+                        reason = "SNAPSHOT_READ_IN_FLIGHT",
+                        retry = false
+                    )
+                    return true
+                }
+                is MomoSayHiListSnapshotRecoveryPolicy.SnapshotAdmission.Settling -> {
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = admission.remainingMs,
+                        reason = "POST_GESTURE_SETTLE_WINDOW",
+                        retry = false
+                    )
+                    return true
+                }
+            }
+        }
+        lastSayHiInspectionAtMs = now
+
+        val confirmedTarget = if (confirmedList && !sayHiSnapshotCoordinator.forceFullListSnapshot) {
+            sayHiConfirmedListTarget?.takeIf { accessibilityGateway.isWindowCurrent(it.window) }
+        } else null
+        if (confirmedList && confirmedTarget == null) sayHiSnapshotCoordinator.requestFullListFallback()
+        val usedListSubtree = confirmedTarget != null
+        val useVisibleWindowFallback = sayHiSnapshotCoordinator.forceFullListSnapshot && !usedListSubtree
+        val treeRequest = if (usedListSubtree) {
+            TreeInspectionRequest(
+                maxNodes = 900,
+                maxDepth = 36,
+                maxDurationMs = 650L,
+                textCapture = NodeTextCapture.EPHEMERAL
+            )
+        } else {
+            TreeInspectionRequest(
+                maxNodes = 1_200,
+                maxDepth = 48,
+                maxDurationMs = 900L,
+                allowVisibleWindowFallback = useVisibleWindowFallback,
+                textCapture = NodeTextCapture.EPHEMERAL
+            )
+        }
+        val snapshotScopeLabel = when {
+            usedListSubtree -> "LISTVIEW_SUBTREE"
+            useVisibleWindowFallback -> "ACTIVE_WINDOW_FALLBACK"
+            else -> "ACTIVE_WINDOW"
+        }
+        val tree = try {
+            if (confirmedTarget != null) {
+                accessibilityGateway.inspectNodeSubtree(confirmedTarget, treeRequest)
+            } else if (useVisibleWindowFallback) {
+                // A fallback root lookup must search all currently exposed windows for the
+                // actual received-greetings list, not stop at the first same-package popup.
+                inspectVisibleReceivedGreetingsWindow(treeRequest)
+                    ?: accessibilityGateway.inspectActiveWindow(treeRequest)
+            } else {
+                accessibilityGateway.inspectActiveWindow(treeRequest)
+            }
+        } finally {
+            if (listSnapshotLeaseAcquired) {
+                sayHiListSnapshotRecoveryPolicy.onSnapshotReadFinished()
+                listSnapshotLeaseAcquired = false
+            }
+        }
+        if (tree == null) {
+            if (listPipelineCandidate) {
+                val key = confirmedTarget?.window?.let(::sayHiWindowStabilityKey)
+                    ?: sayHiConfirmedListTarget?.window?.let(::sayHiWindowStabilityKey)
+                    ?: "${targetPackage}|$activityHint|WINDOW_UNAVAILABLE"
+                handleIncompleteSayHiListSnapshot(
+                    windowKey = key,
+                    stopReason = if (usedListSubtree) "LIST_SUBTREE_REACQUIRE_FAILED" else "ACTIVE_WINDOW_ROOT_UNAVAILABLE",
+                    visitedNodes = 0,
+                    targetedSubtree = usedListSubtree
+                )
+                return confirmedList
+            }
+            return false
+        }
+        if (tree.window.packageName != targetPackage || !accessibilityGateway.isWindowCurrent(tree.window)) return false
+        if (tree.truncated) {
+            val partialRecorded = sessionComponents.sampleStore.recordNodeTree(tree, MomoNodeTreeCapturePriorityPolicy.classify(tree.window.activityClass))
+            if (partialRecorded) {
+                onLog(
+                    "收到招呼列表不完整快照已归档：scope=$snapshotScopeLabel；" +
+                        "visited=${tree.visitedNodeCount}；stopReason=${tree.stopReason ?: "UNKNOWN"}；仅保存结构元数据"
+                )
+            }
+            val reason = tree.stopReason ?: when {
+                tree.timeBudgetExceeded -> "TIME_BUDGET"
+                tree.depthTruncated -> "DEPTH_BUDGET"
+                tree.walkTruncated -> "NODE_BUDGET_OR_CHILD_READ_FAILED"
+                else -> "TREE_INCOMPLETE"
+            }
+            if (listPipelineCandidate) {
+                handleIncompleteSayHiListSnapshot(
+                    windowKey = sayHiWindowStabilityKey(tree.window),
+                    stopReason = reason,
+                    visitedNodes = tree.visitedNodeCount,
+                    targetedSubtree = usedListSubtree
+                )
+                return confirmedList
+            }
+            return false
+        }
+        // This is the same immutable snapshot used by the page inspector. Persist only its
+        // structural metadata; NodeDumpFormatter excludes all text and descriptions.
+        val nodeTreeRecorded = sessionComponents.sampleStore.recordNodeTree(tree, MomoNodeTreeCapturePriorityPolicy.classify(tree.window.activityClass))
+        if (nodeTreeRecorded) {
+            onLog(
+                "节点树样本已写入本次采集归档：Activity=${tree.window.activityClass}；" +
+                    "范围=$snapshotScopeLabel；" +
+                    "节点=${tree.visitedNodeCount}；截断=${tree.truncated}；格式=JSON/TXT/XML"
+            )
+        }
+        if (!usedListSubtree) recordMomoNavigationEvidence(tree)
+        // Full-window page identity was confirmed before retaining this exact listview target.
+        // A targeted subtree omits layout_content by construction, so revalidate its root/list
+        // rows with the subtree policy instead of rerunning the full-page ancestor fingerprint.
+        // Do not require Activity equality here: on BACK, the accessibility root can already be
+        // the restored received-greetings list while the service's event-derived Activity hint
+        // remains ChatActivity. Exact NodeTarget/window-generation continuity and the strict
+        // listview + greeting-row subtree fingerprint are the authority for this scoped read.
+        val confirmedListSubtree = usedListSubtree && confirmedList &&
+            confirmedTarget != null && confirmedTarget.window == tree.window
+        val result = sayHiAccessibilityInspector.inspect(
+            tree,
+            receivedGreetingsListSubtreeConfirmed = confirmedListSubtree
+        )
+        if (result.kind == MomoSayHiPageKind.UNKNOWN) {
+            if (listPipelineCandidate) {
+                val reason = result.queryStopReason ?: if (result.queryBudgetExceeded || result.truncated) {
+                    "SAYHI_QUERY_INCOMPLETE"
+                } else {
+                    "LIST_PAGE_IDENTITY_NOT_CONFIRMED"
+                }
+                handleIncompleteSayHiListSnapshot(
+                    windowKey = sayHiWindowStabilityKey(tree.window),
+                    stopReason = reason,
+                    visitedNodes = result.queryVisitedNodeCount,
+                    targetedSubtree = usedListSubtree
+                )
+                onLog(
+                    "收到招呼列表识别未完成：queryBudgetExceeded=${result.queryBudgetExceeded}；" +
+                        "queryTruncated=${result.truncated}；queryVisited=${result.queryVisitedNodeCount}；" +
+                        "queryElapsed=${result.queryElapsedMs}ms；queryStopReason=${result.queryStopReason ?: "NONE"}"
+                )
+                return confirmedList
+            }
+            sayHiAutonomousBrowseController.reset()
+            if (result.queryBudgetExceeded || result.truncated) {
+                onLog(
+                    "收到招呼页面识别暂停：查询预算超限=${result.queryBudgetExceeded}；节点树截断=${tree.truncated}；" +
+                        "查询访问节点=${result.queryVisitedNodeCount}；耗时=${result.queryElapsedMs}ms；" +
+                        "停止原因=${result.queryStopReason ?: "NONE"}"
+                )
+            }
+            return false
+        }
+        if (listPipelineCandidate &&
+            (result.truncated || result.queryBudgetExceeded)
+        ) {
+            handleIncompleteSayHiListSnapshot(
+                windowKey = sayHiWindowStabilityKey(tree.window),
+                stopReason = result.queryStopReason ?: "SAYHI_QUERY_INCOMPLETE",
+                visitedNodes = result.queryVisitedNodeCount,
+                targetedSubtree = usedListSubtree
+            )
+            return confirmedList
+        }
+        if (result.kind == MomoSayHiPageKind.GREETING_PROFILE_CARD) {
+            // Never interact with the card: its primary actions are Reject / Accept.
+            sayHiAutonomousBrowseController.reset()
+            sayHiConfirmedListTarget = null
+        }
+        if (result.kind == MomoSayHiPageKind.RECEIVED_GREETINGS_LIST) {
+            val listContainers = tree.nodes.filter {
+                it.visible && it.viewId == MomoSayHiPageContract.LIST_VIEW_ID &&
+                    it.scrollable && !it.bounds.isEmpty
+            }
+            val listContainer = listContainers.singleOrNull()
+            val completeListEvidence = !tree.truncated && !result.truncated &&
+                !result.queryBudgetExceeded && result.containerFound &&
+                result.containerMatchCountExact && !result.containerAmbiguous &&
+                listContainer != null
+            if (completeListEvidence) {
+                // Keep a window-scoped locator to the confirmed RecyclerView. Later post-swipe
+                // reads can reacquire only this subtree instead of walking the whole Activity.
+                sayHiConfirmedListTarget = listContainer!!.target(tree.window)
+                sayHiSnapshotCoordinator.markListSnapshotComplete()
+                sayHiListSnapshotRecoveryPolicy.onSnapshotComplete(sayHiWindowStabilityKey(tree.window))
+            }
+            if (sayHiNavigationFlowController.isWaitingForReceivedList()) {
+                if (completeListEvidence) {
+                    val listSignature = listOf(
+                        listContainer!!.path.childIndices,
+                        listContainer.bounds,
+                        listContainer.childCount,
+                        listContainer.scrollable
+                    ).joinToString("|")
+                    val confirmed = sayHiNavigationFlowController.observeStableReceivedList(
+                        windowKey = sayHiWindowStabilityKey(tree),
+                        listSignature = listSignature,
+                        capturedAtMs = tree.capturedAtEpochMs
+                    )
+                    if (confirmed) {
+                        onLog("收到的招呼列表：收到资料卡‘列表’点击后的连续稳定快照；外层 listview 唯一、可滚动且边界完整")
+                    } else {
+                        onLog("收到的招呼列表：已确认资料卡‘列表’点击后的列表容器；等待第二份稳定快照")
+                    }
+                } else {
+                    sayHiNavigationFlowController.resetListStability()
+                    onLog(
+                        "收到的招呼列表：页面仍在加载或列表容器证据不完整；暂不开始遍历；" +
+                            "外层 listview 候选=${listContainers.size}；容器完整=${completeListEvidence}"
+                    )
+                }
+            } else if (manualReceivedGreetingsArrivalProbeActive &&
+                (sayHiNavigationFlowController.phase == MomoSayHiNavigationPhase.IDLE ||
+                    sayHiNavigationFlowController.isManuallyStabilizingReceivedList())
+            ) {
+                if (completeListEvidence) {
+                    val listSignature = listOf(
+                        listContainer!!.path.childIndices,
+                        listContainer.bounds,
+                        listContainer.childCount,
+                        listContainer.scrollable
+                    ).joinToString("|")
+                    val confirmed = sayHiNavigationFlowController.observeStableManuallyOpenedReceivedList(
+                        windowKey = sayHiWindowStabilityKey(tree),
+                        listSignature = listSignature,
+                        capturedAtMs = tree.capturedAtEpochMs
+                    )
+                    onLog(
+                        if (confirmed) {
+                            "收到的招呼人工页面监听[CONFIRMED]：现有页面指纹、完整 listview 和连续稳定快照均已通过"
+                        } else {
+                            "收到的招呼人工页面监听[STABILIZING]：现有页面指纹和完整 listview 已匹配；等待下一份间隔快照"
+                        }
+                    )
+                } else {
+                    sayHiNavigationFlowController.resetManualListStability()
+                    onLog(
+                        "收到的招呼人工页面监听[WAITING]：列表容器证据尚不完整；不执行点击或滚动；" +
+                            "外层 listview 候选=${listContainers.size}；容器完整=${completeListEvidence}"
+                    )
+                }
+            } else if (sayHiNavigationFlowController.isReceivedListConfirmed() && !completeListEvidence) {
+                handleIncompleteSayHiListSnapshot(
+                    windowKey = sayHiWindowStabilityKey(tree.window),
+                    stopReason = "LIST_CONTAINER_EVIDENCE_INCOMPLETE",
+                    visitedNodes = tree.visitedNodeCount,
+                    targetedSubtree = usedListSubtree
+                )
+            }
+        }
+        var greetingRowActionHandled = false
+        if (allowAutonomousScroll && result.kind == MomoSayHiPageKind.RECEIVED_GREETINGS_LIST &&
+            sayHiNavigationFlowController.isReceivedListConfirmed()
+        ) {
+            greetingRowActionHandled = processReceivedGreetingRows(tree, result)
+            if (!greetingRowActionHandled) {
+                // Empty visible rows are not by themselves proof of completion. Route them
+                // through the same stable-boundary / scroll-progress checks as populated pages.
+                dispatchAutonomousSayHiListScroll(tree, result)
+            }
+        }
+        val archived = sessionComponents.sampleStore.persistSayHiInspection(result)
+        if (archived) {
+            onLog(
+                "收到招呼页面结构化样本已写入本地归档：页面=${result.kind}；" +
+                    "顶部推荐头像已排除=${result.excludedRecommendationCardCount}；" +
+                    "下方纵向全部招呼行=${result.listRows.size}；" +
+                    "资料卡字段=${result.profile?.nodeTextFields?.size ?: 0}"
+            )
+        }
+        val profile = result.profile
+        val signature = listOf(
+            result.kind.name,
+            result.containerFound,
+            result.containerMatchCount,
+            result.containerMatchCountExact,
+            result.containerAmbiguous,
+            result.containerResolutionStrategy,
+            result.containerNodeCount,
+            result.textNodeCount,
+            result.excludedRecommendationCardCount,
+            result.listRows.map { it.rowPath },
+            result.listRows.map { listOf(
+                it.displayName.status, it.age.status, it.age.value, it.gender.status, it.gender.value,
+                it.distanceText.status, it.distanceKm.value, it.online.status, it.online.value,
+                it.greetingText.status, it.timestampText.status,
+                it.unread.status, it.unread.value, it.hasAvatarNode,
+                it.avatarTapTarget?.path, it.avatarTapTarget?.targetBounds,
+                it.rowTapTarget?.path, it.rowTapTarget?.targetBounds
+            ) },
+            result.truncated,
+            profile?.displayName?.status,
+            profile?.age?.status,
+            profile?.gender?.status,
+            profile?.distanceKm?.status,
+            profile?.online?.status,
+            profile?.biography?.status,
+            profile?.displayName?.value,
+            profile?.age?.value,
+            profile?.gender?.value,
+            profile?.distanceKm?.value,
+            profile?.online?.value,
+            profile?.biography?.value,
+            profile?.nodeTextFields?.mapValues { (_, field) ->
+                field.evidence.status to field.candidateCount
+            }
+        ).joinToString("|")
+        if (signature == lastSayHiInspectionSignature) return true
+        lastSayHiInspectionSignature = signature
+        val nameStatus = profile?.displayName?.status?.name ?: "N/A"
+        val ageStatus = profile?.age?.status?.name ?: "N/A"
+        val genderStatus = profile?.gender?.status?.name ?: "N/A"
+        val distanceStatus = profile?.distanceKm?.status?.name ?: "N/A"
+        val onlineStatus = profile?.online?.status?.name ?: "N/A"
+        val biographyStatus = profile?.biography?.status?.name ?: "N/A"
+        onLog(
+            "陌陌收到招呼只读采集：页面=${result.kind}；Activity=${result.activityClass}; " +
+                "顶部推荐头像已排除=${result.excludedRecommendationCardCount}；下方纵向招呼行=${result.listRows.size}； " +
+                "扫描节点=${result.nodeCount}；可见节点=${result.visibleNodeCount}；" +
+                "容器命中=${result.containerFound}；容器候选=${result.containerMatchCount}；" +
+                "候选数量精确=${result.containerMatchCountExact}；原始候选冲突=${result.containerAmbiguous}；" +
+                "容器消歧策略=${result.containerResolutionStrategy}；" +
+                "查询预算超限=${result.queryBudgetExceeded}；查询访问节点=${result.queryVisitedNodeCount}；" +
+                "查询耗时=${result.queryElapsedMs}ms；查询停止原因=${result.queryStopReason ?: "none"}；" +
+                "容器节点=${result.containerNodeCount}；" +
+                "文本节点=${result.textNodeCount}；列表候选行=${result.listRows.size}；" +
+                "列表姓名可读=${result.listRows.count { it.displayName.status == EvidenceStatus.CONFIRMED }}；" +
+                "列表年龄可读=${result.listRows.count { it.age.status == EvidenceStatus.CONFIRMED }}；" +
+                "列表性别可读=${result.listRows.count { it.gender.status == EvidenceStatus.CONFIRMED }}；" +
+                "列表距离可读=${result.listRows.count { it.distanceKm.status == EvidenceStatus.CONFIRMED }}；" +
+                "列表在线状态可读=${result.listRows.count { it.online.status == EvidenceStatus.CONFIRMED }}；" +
+                "列表招呼内容可读=${result.listRows.count { it.greetingText.status == EvidenceStatus.CONFIRMED }}；" +
+                "列表时间可读=${result.listRows.count { it.timestampText.status == EvidenceStatus.CONFIRMED }}；" +
+                "列表未读=${result.listRows.count { it.unread.value == true }}；" +
+                "列表无未读标记=${result.listRows.count { it.unread.value == false && it.unread.status == EvidenceStatus.CONFIRMED }}；" +
+                "列表未读未知=${result.listRows.count { it.unread.status != EvidenceStatus.CONFIRMED }}；" +
+                "截断=${result.truncated}；" +
+                "姓名=$nameStatus；年龄=$ageStatus；性别=$genderStatus；距离=$distanceStatus；" +
+                "在线=$onlineStatus；简介=$biographyStatus；" +
+                "资料卡节点字段状态=${profile?.nodeTextFields.orEmpty().entries.joinToString(",") { (id, field) ->
+                    "$id:${field.evidence.status.name}(候选=${field.candidateCount})"
+                }}；" +
+                "说明=${result.diagnostic}"
+        )
+        return true
+    }
+
+    /**
+     * Autonomously browses only the outer vertically scrolling listview proven by the device trace.
+     * The nested card_list recommendation carousel is never used as the scroll target.
+     */
+    private fun dispatchAutonomousSayHiListScroll(
+        tree: com.freedom.core.accessibility.api.AccessibilityTreeSnapshot,
+        inspection: MomoSayHiPageInspection
+    ) {
+        if (sayHiGestureInFlight) return
+        val visibleList = tree.nodes.firstOrNull {
+            it.visible && it.viewId == MomoSayHiPageContract.LIST_VIEW_ID
+        } ?: run {
+            onLog("收到招呼自主浏览暂停：未找到可见且可滚动的外层 listview 容器")
+            return
+        }
+        if (inspection.truncated || inspection.queryBudgetExceeded || !inspection.containerFound ||
+            !inspection.containerMatchCountExact || inspection.containerAmbiguous
+        ) {
+            onLog("收到招呼自主浏览暂停：列表容器证据不完整或有歧义，不判定遍历完成")
+            return
+        }
+        val list = visibleList
+        if (list.bounds.isEmpty) {
+            onLog("收到招呼自主浏览暂缓：外层 listview 边界无效；不判定遍历完成")
+            scheduleSayHiListSnapshotInspection(500L, "LIST_BOUNDS_INVALID", retry = false)
+            return
+        }
+        val rowSignature = inspection.listRows.joinToString("|") { row ->
+            "${MomoSayHiIdentityFingerprintPolicy.rowKey(row)}@${row.bounds.top},${row.bounds.bottom}"
+        }
+        val signature = if (rowSignature.isNotBlank()) rowSignature else
+            "EMPTY:${tree.window.windowId}:${list.bounds.left},${list.bounds.top},${list.bounds.right},${list.bounds.bottom}:${list.childCount}"
+        if (!visibleList.scrollable) {
+            val boundaryConfirmed = sayHiAutonomousBrowseController.observeNonScrollableBoundary(
+                signature = signature,
+                capturedAtMs = tree.capturedAtEpochMs
+            )
+            if (!boundaryConfirmed) {
+                onLog("收到招呼列表边界复核：外层 listview 暂不可滚动；等待第二份间隔快照，不报告完成")
+                scheduleSayHiListSnapshotInspection(350L, "NON_SCROLLABLE_BOUNDARY_CONFIRMATION", retry = false)
+                return
+            }
+            if (sayHiTraversalState.hasDeferredRows) {
+                if (hasRetryableSayHiDeferredRows()) {
+                    onLog("收到招呼自主浏览暂未完成：已确认当前 listview 不可滚动，但仍有 ${sayHiTraversalState.deferredRowCount} 个用户待恢复；保留断点并等待回访，不报告完成")
+                    scheduleSayHiListSnapshotInspection(2_000L, "DEFERRED_ROWS_WAIT_FOR_FRESH_LIST", retry = false)
+                } else {
+                    onLog("收到招呼自主浏览暂停：${sayHiTraversalState.deferredRowCount} 个用户的安全点击区域已达到有限复核上限；保留断点，不再自动重试、不报告完成")
+                }
+                return
+            }
+            onLog("收到招呼自主浏览完成：外层 listview 连续两份完整、间隔快照均确认不可滚动，且不存在待恢复用户")
+            return
+        }
+        if (sayHiAutonomousBrowseController.isFinished() && sayHiTraversalState.hasDeferredRows) {
+            if (!hasRetryableSayHiDeferredRows()) {
+                onLog("收到招呼自主浏览暂停：待恢复用户均已达到安全点击区域复核上限；保留断点，不再启动自动回访、不报告完成")
+                return
+            }
+            when {
+                sayHiTraversalState.deferredReturnToTopActive -> {
+                    // The reverse sweep has reached the top candidate boundary. Begin one
+                    // forward pass so previously deferred rows can be retried on fresh rows.
+                    sayHiTraversalState.setDeferredReturnToTopActive(false)
+                    sayHiTraversalState.setDeferredReplayStarted(true)
+                    sayHiAutonomousBrowseController.reset()
+                    persistSayHiTraversalCheckpoint()
+                    onLog("收到招呼待恢复用户：反向回访已到达稳定边界；开始一次正向复核遍历")
+                }
+                !sayHiTraversalState.deferredReplayStarted -> {
+                    sayHiTraversalState.setDeferredReturnToTopActive(true)
+                    sayHiAutonomousBrowseController.reset()
+                    persistSayHiTraversalCheckpoint()
+                    onLog("收到招呼待恢复用户：首次列表边界已确认但仍有待恢复用户；启动一次反向回访，不报告完成")
+                }
+                else -> {
+                    // A completed reverse+forward replay is not permission to abandon deferred
+                    // rows. Start another bounded-rate recovery cycle; per-row attempts remain
+                    // at the capped backoff stage and each row remains eligible for retry.
+                    sayHiTraversalState.setDeferredReturnToTopActive(true)
+                    sayHiTraversalState.setDeferredReplayStarted(false)
+                    sayHiAutonomousBrowseController.reset()
+                    persistSayHiTraversalCheckpoint()
+                    onLog("收到招呼自主浏览未完成：正向复核后仍有 ${sayHiTraversalState.deferredRowCount} 个用户待恢复；保留断点并安排下一轮反向/正向回访，不报告 COMPLETE")
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = 5_000L,
+                        reason = "DEFERRED_ROWS_NEXT_RECOVERY_CYCLE",
+                        retry = false
+                    )
+                    return
+                }
+            }
+        }
+        val now = System.currentTimeMillis()
+        if (!sayHiAutonomousBrowseController.shouldScroll(signature, now, list.scrollable)) {
+            if (sayHiAutonomousBrowseController.isFinished()) {
+                if (!sayHiTraversalState.hasDeferredRows) {
+                    onLog("收到招呼自主浏览完成：连续页面内容无变化，停止继续滚动")
+                } else {
+                    onLog("收到招呼自主浏览未完成：列表边界候选已达到，但仍有 ${sayHiTraversalState.deferredRowCount} 个用户处于待恢复状态；不报告 COMPLETE，保留行键和重试记录")
+                }
+            }
+            return
+        }
+        if (!accessibilityGateway.isWindowCurrent(tree.window)) {
+            sayHiAutonomousBrowseController.onGestureCompleted(false)
+            onLog("收到招呼自主浏览取消：执行前窗口代次已变化")
+            return
+        }
+        // Keep the original resource-metrics geometry source for the list viewport. The gateway
+        // snapshot is captured separately and must describe the same physical coordinate space.
+        val metrics = context.resources.displayMetrics
+        val coordinateMetrics = accessibilityGateway.displayMetrics()
+        if (metrics.widthPixels != coordinateMetrics.widthPixels ||
+            metrics.heightPixels != coordinateMetrics.heightPixels ||
+            metrics.density != coordinateMetrics.density
+        ) {
+            sayHiAutonomousBrowseController.onGestureCompleted(false)
+            onLog("收到招呼自主浏览暂停：列表几何坐标与无障碍显示快照不一致")
+            return
+        }
+        val rawListBounds = list.bounds
+        val visibleListBounds = ScreenRect(
+            left = maxOf(rawListBounds.left, 0),
+            top = maxOf(rawListBounds.top, 0),
+            right = minOf(rawListBounds.right, metrics.widthPixels),
+            bottom = minOf(rawListBounds.bottom, metrics.heightPixels)
+        )
+        val executionContext = gesturePolicy.captureContext(
+            tree.window,
+            coordinateMetrics.toGestureCoordinateContext()
+        ) ?: run {
+            sayHiAutonomousBrowseController.onGestureDeferred()
+            onLog("收到招呼自主浏览暂缓：列表坐标上下文已变化；未派发滑动，等待重新获取列表快照")
+            scheduleSayHiListSnapshotInspection(
+                delayMs = 350L,
+                reason = "LIST_SCROLL_COORDINATE_CONTEXT_STALE",
+                retry = false
+            )
+            return
+        }
+        val request = GestureIntentRequest(
+            id = "momo-sayhi-list-scroll-${System.nanoTime()}",
+            intent = GestureIntent.VerticalSwipe(
+                viewport = visibleListBounds,
+                direction = if (sayHiTraversalState.deferredReturnToTopActive) VerticalSwipeDirection.DOWN else VerticalSwipeDirection.UP,
+                durationMs = 520L
+            ),
+            description = "陌陌收到招呼列表安全上滑",
+            executionContext = executionContext
+        )
+        if (!sayHiListSnapshotRecoveryPolicy.tryBeginGesture(SystemClock.elapsedRealtime())) {
+            // The list gate refused before dispatch; this is a deferral, not a failed platform
+            // gesture. Keep the browse failure budget untouched and retry after the gate clears.
+            sayHiAutonomousBrowseController.onGestureDeferred()
+            val settleRemainingMs = sayHiListSnapshotRecoveryPolicy.remainingSettleMs(
+                SystemClock.elapsedRealtime()
+            ).coerceAtLeast(200L)
+            onLog("收到招呼自主浏览暂缓：节点树读取或手势稳定窗口仍占用；等待=${settleRemainingMs}ms")
+            scheduleSayHiListSnapshotInspection(
+                delayMs = settleRemainingMs,
+                reason = "SNAPSHOT_OR_SETTLE_GATE_BUSY",
+                retry = false
+            )
+            return
+        }
+        sayHiGestureInFlight = true
+        val submission = try {
+            gesturePolicy.execute(request, GestureExecutionListener { result ->
+                sayHiGestureInFlight = false
+                if (result.status == GestureExecutionStatus.DEFERRED) {
+                    sayHiAutonomousBrowseController.onGestureDeferred()
+                    sayHiListSnapshotRecoveryPolicy.onGestureDeferred()
+                    onLog("收到招呼自主浏览[DEFERRED]：平台未派发滑动；不记失败、不开启布局静默期，重新获取列表快照")
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = 500L,
+                        reason = "LIST_SCROLL_CALLBACK_DEFERRED",
+                        retry = false
+                    )
+                } else {
+                    val completed = result.status == GestureExecutionStatus.COMPLETED
+                    sayHiAutonomousBrowseController.onGestureCompleted(completed)
+                    val settleDelayMs = sayHiListSnapshotRecoveryPolicy.onGestureFinished(
+                        SystemClock.elapsedRealtime()
+                    )
+                    onLog(
+                        if (completed) "收到招呼自主浏览：外层 listview 上滑手势完成；等待=${settleDelayMs}ms 后采集快照"
+                        else "收到招呼自主浏览：协调器手势未完成；status=${result.status}；reason=${result.reason}"
+                    )
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = settleDelayMs,
+                        reason = "GESTURE_TERMINAL_${result.status}",
+                        retry = false
+                    )
+                }
+            })
+        } catch (failure: Throwable) {
+            sayHiGestureInFlight = false
+            sayHiAutonomousBrowseController.onGestureCompleted(false)
+            val settleDelayMs = sayHiListSnapshotRecoveryPolicy.onGestureFinished(
+                SystemClock.elapsedRealtime()
+            )
+            onLog(
+                "收到招呼自主浏览：手势协调器抛出异常；type=${failure.javaClass.simpleName}；" +
+                    "释放手势状态并等待=${settleDelayMs}ms 后重新采集"
+            )
+            scheduleSayHiListSnapshotInspection(
+                delayMs = settleDelayMs,
+                reason = "GESTURE_EXECUTION_EXCEPTION",
+                retry = false
+            )
+            return
+        }
+        if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+            sayHiGestureInFlight = false
+            sayHiAutonomousBrowseController.onGestureDeferred()
+            sayHiListSnapshotRecoveryPolicy.onGestureDeferred()
+            scheduleSayHiListSnapshotInspection(
+                delayMs = 500L,
+                reason = "LIST_SCROLL_DEFERRED_NOT_READY",
+                retry = false
+            )
+            onLog("收到招呼自主浏览[DEFERRED_NOT_READY]：弹窗/窗口准入暂未放行；未派发滑动、不计失败、不消耗滚动机会；等待新快照")
+        } else if (submission != GestureSubmission.ACCEPTED) {
+            sayHiGestureInFlight = false
+            sayHiAutonomousBrowseController.onGestureCompleted(false)
+            val settleDelayMs = sayHiListSnapshotRecoveryPolicy.onGestureFinished(
+                SystemClock.elapsedRealtime()
+            )
+            scheduleSayHiListSnapshotInspection(
+                delayMs = settleDelayMs,
+                reason = "GESTURE_SUBMISSION_REJECTED",
+                retry = false
+            )
+            onLog("收到招呼自主浏览：统一手势协调器拒绝外层 listview 上滑手势")
+        } else {
+            onLog("收到招呼自主浏览：已向外层 listview 提交上滑；不触碰用户行及资料卡按钮")
+        }
+    }
+
+    /**
+     * Enters/refreshes the Momo message work area through the exact navigation resource ID.
+     * The target is reacquired twice and dispatched only through the unified gesture executor.
+     */
+    override fun supportsVerifiedMessageWorkAreaNavigation(): Boolean = true
+
+    override fun ensureMessageWorkArea(): Boolean {
+        fun captureSnapshot(
+            expectedWindow: WindowRef? = null,
+            expectedWindowId: Int? = null
+        ): AccessibilityTreeSnapshot? {
+            val tree = accessibilityGateway.inspectActiveWindow(
+                TreeInspectionRequest(maxNodes = NAVIGATION_EVIDENCE_MAX_NODES, textCapture = NodeTextCapture.NONE)
+            ) ?: return null
+            if (tree.truncated || tree.window.packageName != targetPackage ||
+                tree.window.windowId < 0 || tree.windowId != tree.window.windowId ||
+                !accessibilityGateway.isWindowCurrent(tree.window)
+            ) return null
+            if (expectedWindow != null && tree.window != expectedWindow) return null
+            if (expectedWindowId != null && tree.windowId != expectedWindowId) return null
+            return tree
+        }
+
+        // First accept any complete, page-local message-workspace fingerprint. This allows the
+        // top Message tab or appbar actions + session list to confirm the workspace when a popup
+        // temporarily hides the bottom navigation locator. No tap is authorized by this proof.
+        val firstPage = captureSnapshot() ?: run {
+            onLog("消息工作区域等待：当前活动窗口快照暂不可用；保留启动导航意图并重新采集")
+            return false
+        }
+        if (MomoMessageTabAnchorResolver.isMessageWorkArea(firstPage.nodes, targetPackage)) {
+            val secondPage = captureSnapshot(firstPage.window, firstPage.windowId)
+            if (secondPage != null &&
+                MomoMessageTabAnchorResolver.isMessageWorkArea(secondPage.nodes, targetPackage) &&
+                accessibilityGateway.isWindowCurrent(secondPage.window)
+            ) {
+                onLog(
+                    "消息工作区域[ALTERNATIVE_FINGERPRINT_CONFIRMED]：同一窗口两份新鲜快照中，" +
+                        "同页独立指纹路径成立；不要求底部导航定位器同时可见"
+                )
+                return true
+            }
+            onLog("消息工作区域等待：页面身份路径在连续快照间暂未稳定；保留导航意图后重试")
+            return false
+        }
+
+        fun captureTarget(
+            expectedWindow: WindowRef? = null,
+            expectedWindowId: Int? = null
+        ): Pair<AccessibilityTreeSnapshot, MomoMessageTabAnchor>? {
+            val tree = captureSnapshot(expectedWindow, expectedWindowId) ?: return null
+            val anchor = MomoMessageTabAnchorResolver.resolve(tree.nodes, targetPackage) ?: return null
+            return tree to anchor
+        }
+
+        val first = captureTarget() ?: run {
+            onLog(
+                "消息工作区域入口等待：既未确认消息工作区备用指纹，也暂时无法定位底部消息标签；" +
+                    "等待遮挡消失后重新扫描，不执行猜测性点击"
+            )
+            return false
+        }
+        val latest = captureTarget(first.first.window, first.first.windowId) ?: run {
+            onLog("消息工作区域入口等待：点击前第二份快照暂不可用；保留导航意图并重试")
+            return false
+        }
+        val firstAnchor = first.second
+        val latestAnchor = latest.second
+        if (latestAnchor.clickableTab.path != firstAnchor.clickableTab.path ||
+            latestAnchor.clickableTab.bounds != firstAnchor.clickableTab.bounds ||
+            latestAnchor.bubble.path != firstAnchor.bubble.path ||
+            latestAnchor.bubble.bounds != firstAnchor.bubble.bounds ||
+            latestAnchor.isSelected != firstAnchor.isSelected ||
+            !accessibilityGateway.isWindowCurrent(latest.first.window)
+        ) {
+            onLog("消息工作区域入口等待：两次新鲜快照中的消息标签层级、状态或边界发生变化；丢弃旧坐标并重试")
+            return false
+        }
+        if (latestAnchor.isSelected) {
+            if (!MomoMessageTabAnchorResolver.isMessageWorkArea(latest.first.nodes, targetPackage)) {
+                onLog("消息工作区域入口等待：底部消息导航已选中，但消息工作区备用指纹尚未确认")
+                return false
+            }
+            onLog("消息工作区域入口[STRUCTURE_CONFIRMED]：底部消息标签与消息会话区域结构已在同一快照中确认")
+            return true
+        }
+
+        val executionContext = gesturePolicy.captureContext(latest.first.window) ?: run {
+            onLog("消息工作区域入口等待：窗口或显示坐标上下文已变化；拒绝使用旧坐标并重新扫描")
+            return false
+        }
+        val request = GestureIntentRequest(
+            id = "momo-message-work-area-${System.nanoTime()}",
+            intent = GestureIntent.Tap(
+                preferredBounds = latestAnchor.bubble.bounds,
+                targetBounds = latestAnchor.clickableTab.bounds,
+                durationMs = RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS,
+                feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_TAB
+            ),
+            description = "Tap verified Momo message tab using its bottom-navigation hierarchy",
+            executionContext = executionContext
+        )
+        val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
+            onLog(
+                if (result.status == GestureExecutionStatus.COMPLETED) {
+                    "消息工作区域入口：消息标签手势完成；等待新鲜页面指纹确认"
+                } else {
+                    "消息工作区域入口：手势未完成；status=${result.status}；reason=${result.reason}"
+                }
+            )
+        })
+        if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+            onLog("消息工作区域入口[DEFERRED_NOT_READY]：页面暂不可操作；未点击、不消耗导航尝试，保留意图并等待下一份新快照")
+            return false
+        }
+        if (submission != GestureSubmission.ACCEPTED) {
+            onLog("消息工作区域入口：统一手势协调器未接受点击；submission=$submission；保留导航意图")
+            return false
+        }
+        onLog("消息工作区域入口：已提交经过双快照验证的消息标签导航；等待新鲜页面指纹确认")
+        return true
+    }
+
+    override fun inspectChatPage(): ChatPageSnapshot {
+        val currentActivity = activityClass()
+        if (sayHiNavigationFlowController.shouldUseDedicatedReceivedListInspector(
+                isReceivedListSurface = isReceivedGreetingsListStructureVisible()
+            )
+        ) {
+            if (!sayHiGenericChatInspectionBypassActive) {
+                sayHiGenericChatInspectionBypassActive = true
+                onLog(
+                    "收到招呼列表快照隔离：跳过通用 CHAT_PAGE 全树扫描；" +
+                        "节点采集统一交由受手势/快照闸门保护的外层 listview 与内层 card_list 精确检查"
+                )
+            }
+            return receivedGreetingsListChatPagePlaceholder()
+        }
+        sayHiGenericChatInspectionBypassActive = false
+        inspectMomoNavigationEvidenceIfNeeded()
+        val captured = rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(window)
+            ) return@withActiveTargetRoot null
+            val inspection = chatComponents.pageInspector.inspectRoot(
+                root = AccessibilityNodeInfo.obtain(root),
+                targetPackage = targetPackage,
+                activityClass = window.activityClass.ifBlank { activityClass() }
+            )
+            val resolvedActivity = window.activityClass.ifBlank { activityClass() }
+            val treeEvidence = chatComponents.nodeTreeDiagnosticInspector.inspectRoot(
+                root = AccessibilityNodeInfo.obtain(root),
+                targetPackage = targetPackage,
+                activityClass = resolvedActivity,
+                window = window
+            )
+            val shouldCaptureInboxViewport = inspection.pageType == MomoChatPageType.CHAT_LIST
+            val chatListExtraction = if (shouldCaptureInboxViewport) {
+                chatComponents.listSessionExtractor.extractRoot(
+                    root = AccessibilityNodeInfo.obtain(root),
+                    targetPackage = targetPackage,
+                    activityClass = resolvedActivity,
+                    window = window
+                )
+            } else {
+                MomoChatListSessionExtraction(null, emptyList(), 0, false)
+            }
+            Triple(inspection, treeEvidence, window) to chatListExtraction
+        } ?: return unknownChatPageSnapshot()
+
+        val (pageEvidence, chatListExtraction) = captured
+        val (inspection, treeEvidence, window) = pageEvidence
+        treeEvidence.snapshot?.let { snapshot ->
+            sessionComponents.sampleStore.recordNodeTree(
+                snapshot,
+                MomoNodeTreeCapturePriorityPolicy.classify(snapshot.window.activityClass, inspection.pageType)
+            )
+            onNodeTreeSnapshot(snapshot)
+        }
+        val chatKind = when (inspection.pageType) {
+            MomoChatPageType.UNKNOWN -> ChatPageKind.UNKNOWN
+            MomoChatPageType.NON_CHAT -> ChatPageKind.NON_CHAT
+            MomoChatPageType.CHAT_LIST -> ChatPageKind.CHAT_LIST
+            MomoChatPageType.CHAT_DETAIL_CANDIDATE -> ChatPageKind.CHAT_DETAIL_CANDIDATE
+        }
+        if (chatListExtraction.candidates.isNotEmpty()) {
+            val observedAt = System.currentTimeMillis()
+            val snapshotId = "momo-${observedAt}-${sessionComponents.chatListSnapshotSequence.incrementAndGet()}"
+            val identities = sessionComponents.contactIdentityManager.resolveSnapshot(
+                snapshotId = snapshotId,
+                observations = chatListExtraction.candidates.map { candidate ->
+                    ContactIdentityObservation(
+                        displayName = candidate.nameText,
+                        isPrivateChat = candidate.selectionClass == "PRIVATE_CHAT"
+                    )
+                },
+                observedAtMillis = observedAt
+            )
+            chatListExtraction.candidates.zip(identities).forEach { (candidate, identity) ->
+                candidate.contactIdentity = identity
+            }
+        }
+        return ChatPageSnapshot(
+            packageName = inspection.windowPackage,
+            activityClass = inspection.activityClass,
+            pageKind = chatKind,
+            scannedNodeCount = inspection.scannedNodeCount,
+            editableInputCount = inspection.editableInputCount,
+            messageListCount = inspection.messageListCount,
+            sendActionCount = inspection.sendActionCount,
+            messageRelatedViewIdCount = inspection.messageRelatedViewIdCount,
+            hasChatTab = inspection.hasChatTab,
+            messageListTarget = inspection.messageListPath?.let {
+                NodeTarget(
+                    window = window,
+                    path = NodePath(it),
+                    expectedViewId = inspection.messageListViewId?.takeIf(String::isNotBlank),
+                    expectedClassName = inspection.messageListClassName?.takeIf(String::isNotBlank)
+                )
+            },
+            inputFieldTarget = inspection.inputFieldPath?.let { NodeTarget(window, NodePath(it)) },
+            structureEvidence = (treeEvidence.evidence + inspection.structureEvidence)
+                .distinctBy { evidence -> evidence.path }
+                .map { evidence ->
+                ChatPageNodeEvidence(
+                    path = evidence.path,
+                    className = evidence.className,
+                    viewId = evidence.viewId,
+                    left = evidence.left,
+                    top = evidence.top,
+                    right = evidence.right,
+                    bottom = evidence.bottom,
+                    childCount = evidence.childCount,
+                    isEditable = evidence.isEditable,
+                    isScrollable = evidence.isScrollable,
+                    isClickable = evidence.isClickable,
+                    hasText = evidence.hasText,
+                    insideListCandidate = evidence.insideListCandidate,
+                    depth = evidence.depth,
+                    parentPath = evidence.parentPath,
+                    isVisibleToUser = evidence.isVisibleToUser,
+                    isListProbeRoot = evidence.isListProbeRoot,
+                    isAlternateListProbe = evidence.isAlternateListProbe,
+                    isMessageRowCandidate = evidence.isMessageRowCandidate,
+                    textLength = evidence.textLength,
+                    contentDescriptionLength = evidence.contentDescriptionLength,
+                    boundsValid = evidence.boundsValid,
+                    isSelected = evidence.isSelected
+                )
+            },
+            nodeTreeProbeVisitedNodeCount = treeEvidence.visitedNodeCount,
+            nodeTreeProbeTruncated = treeEvidence.truncated,
+            chatListViewport = chatListExtraction.viewport,
+            screenBounds = ScreenRect(
+                left = 0,
+                top = 0,
+                right = context.resources.displayMetrics.widthPixels,
+                bottom = context.resources.displayMetrics.heightPixels
+            ),
+            chatListCandidates = chatListExtraction.candidates,
+            chatListExtractionTruncated = chatListExtraction.truncated,
+            chatListInvalidRowBoundsCount = chatListExtraction.invalidRowBoundsCount,
+            chatListUnreadDiagnostics = chatListExtraction.unreadDiagnostics,
+            chatTitleText = inspection.chatTitleText,
+            chatHeaderDiagnostic = inspection.chatHeaderDiagnostic?.let { diagnostic ->
+                com.freedom.features.aireply.ports.ChatHeaderNodeDiagnostic(
+                    nodePath = diagnostic.nodePath,
+                    found = diagnostic.found,
+                    textLength = diagnostic.textLength,
+                    contentDescriptionLength = diagnostic.contentDescriptionLength,
+                    isVisibleToUser = diagnostic.isVisibleToUser,
+                    left = diagnostic.left,
+                    top = diagnostic.top,
+                    right = diagnostic.right,
+                    bottom = diagnostic.bottom,
+                    boundsValid = diagnostic.boundsValid,
+                    parentFound = diagnostic.parentFound,
+                    parentClassName = diagnostic.parentClassName,
+                    parentViewId = diagnostic.parentViewId,
+                    parentIsVisibleToUser = diagnostic.parentIsVisibleToUser,
+                    parentBoundsValid = diagnostic.parentBoundsValid,
+                    readOutcome = diagnostic.readOutcome
+                )
+            },
+            sessionListNavigationTarget = inspection.chatTabEvidence?.takeIf { evidence ->
+                evidence.boundsValid && evidence.right > evidence.left && evidence.bottom > evidence.top
+            }?.let { evidence ->
+                val parsedIndices = evidence.path.split("/").map { it.toIntOrNull() }
+                val childIndices = parsedIndices.filterNotNull()
+                val display = ScreenRect(
+                    0, 0,
+                    context.resources.displayMetrics.widthPixels,
+                    context.resources.displayMetrics.heightPixels
+                )
+                val clipped = ScreenRect(
+                    maxOf(evidence.left, display.left),
+                    maxOf(evidence.top, display.top),
+                    minOf(evidence.right, display.right),
+                    minOf(evidence.bottom, display.bottom)
+                )
+                if (childIndices.isEmpty() || childIndices.size != parsedIndices.size || clipped.isEmpty) null
+                else SessionListNavigationTarget(
+                    nodeTarget = NodeTarget(
+                        window = window,
+                        path = NodePath(childIndices),
+                        expectedViewId = evidence.viewId,
+                        expectedClassName = evidence.className
+                    ),
+                    bounds = clipped
+                )
+            },
+            windowGeneration = window.generation
+        )
+    }
+
+    // ---- ChatSessionManagementPort: bounded Momo session navigation and local samples ----
+
+    override fun beginSessionManagement(): String? = runCatching {
+        sessionComponents.sampleStore.beginRun()
+    }.onFailure { error ->
+        diagnostics.recordException(
+            component = "MomoSocialAdapter",
+            eventType = "sample_archive_begin_failed",
+            message = "AI 会话样本归档初始化失败",
+            error = error
+        )
+    }.getOrNull()
+
+    /** Called by the Service log boundary; records only while an AI collection run is open. */
+    fun recordRuntimeLog(message: String) {
+        sessionComponents.sampleStore.recordRuntimeLog(message)
+    }
+
+    override fun recordAccessibilityEvent(event: AccessibilityEventEnvelope) {
+        handleSayHiRowTapClickEvidence(event)
+        sessionComponents.sampleStore.recordAccessibilityEvent(event)
+    }
+
+    override fun finishSessionManagement(): String? =
+        runCatching { sessionComponents.sampleStore.finishRun() }.getOrNull()
+
+    override fun blockSessionIdentityKey(sessionKey: String) {
+        sessionComponents.sampleStore.blockSessionIdentityKey(sessionKey)
+    }
+
+    override fun isSessionIdentityBlocked(sessionKey: String): Boolean =
+        sessionComponents.sampleStore.isSessionIdentityBlocked(sessionKey)
+
+    override fun captureSessionListSample(
+        snapshot: ChatPageSnapshot,
+        onComplete: (String?) -> Unit
+    ) {
+        val sampleIndex = runCatching {
+            sessionComponents.sampleStore.persistSessionList(snapshot)
+        }.getOrDefault(0)
+        val capture = screenshotCapture
+        if (capture == null || sampleIndex <= 0) {
+            onComplete(null)
+            return
+        }
+        MonitorOverlay.acquireObservationVisibility(context) { observationLease ->
+            runCatching {
+                capture.captureActiveDisplay(snapshot.packageName, snapshot.activityClass) { frame ->
+                    val path = if (frame == null) null else try {
+                        sessionComponents.sampleStore.saveBitmap("session_list_$sampleIndex", frame.bitmap)
+                    } finally {
+                        runCatching { frame.bitmap.recycle() }
+                        frame.close()
+                    }
+                    try {
+                        sessionComponents.sampleStore.persistSessionListScreenshot(sampleIndex, path, snapshot)
+                        onComplete(path)
+                    } finally {
+                        observationLease.close()
+                    }
+                }
+            }.onFailure {
+                observationLease.close()
+                onComplete(null)
+            }
+        }
+    }
+
+    override fun resolveSessionTapBounds(
+        snapshot: ChatPageSnapshot,
+        candidate: ChatListCandidateSnapshot
+    ): ScreenRect? {
+        if (snapshot.pageKind != ChatPageKind.CHAT_LIST ||
+            snapshot.packageName != targetPackage ||
+            candidate.rowTarget.window.packageName != targetPackage ||
+            !candidate.rowBoundsValid || !candidate.intersectsViewport ||
+            !candidate.fullyInsideViewport || !candidate.hasReadableName
+        ) return null
+
+        return rootAccess.withActiveTargetRoot { root, window ->
+            if (!sameMomoWindowGeneration(window, candidate.rowTarget.window) ||
+                safeString { root.packageName?.toString().orEmpty() } != targetPackage
+            ) return@withActiveTargetRoot null
+
+            var current: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(root)
+            try {
+                for (index in candidate.rowTarget.path.childIndices) {
+                    val parent = current ?: return@withActiveTargetRoot null
+                    val child = safeNode { parent.getChild(index) }
+                    runCatching { parent.recycle() }
+                    current = child
+                    if (child == null) return@withActiveTargetRoot null
+                }
+                val row = current ?: return@withActiveTargetRoot null
+                val actualClass = safeString { row.className?.toString().orEmpty() }
+                val actualViewId = safeString { row.viewIdResourceName.orEmpty() }
+                val bounds = Rect()
+                runCatching { row.getBoundsInScreen(bounds) }
+                val currentBounds = bounds.toScreenRect()
+                val viewport = snapshot.chatListViewport
+                val geometryMatches = viewport != null &&
+                    MomoChatListSessionPolicy.hasValidBounds(currentBounds) &&
+                    MomoChatListSessionPolicy.fullyInsideViewport(currentBounds, viewport) &&
+                    abs(currentBounds.left - candidate.rowBounds.left) <= SESSION_ROW_BOUNDS_TOLERANCE_PX &&
+                    abs(currentBounds.top - candidate.rowBounds.top) <= SESSION_ROW_BOUNDS_TOLERANCE_PX &&
+                    abs(currentBounds.right - candidate.rowBounds.right) <= SESSION_ROW_BOUNDS_TOLERANCE_PX &&
+                    abs(currentBounds.bottom - candidate.rowBounds.bottom) <= SESSION_ROW_BOUNDS_TOLERANCE_PX
+                if (!geometryMatches ||
+                    (candidate.rowTarget.expectedViewId != null && actualViewId != candidate.rowTarget.expectedViewId) ||
+                    (candidate.rowTarget.expectedClassName != null && actualClass != candidate.rowTarget.expectedClassName) ||
+                    !safeBoolean { row.isEnabled } || !safeBoolean { row.isClickable }
+                ) return@withActiveTargetRoot null
+
+                val namePath = candidate.nameNodePath ?: return@withActiveTargetRoot null
+                val nameNode = resolveLocalPath(row, namePath.childIndices.drop(candidate.rowTarget.path.childIndices.size))
+                    ?: return@withActiveTargetRoot null
+                try {
+                    val currentName = safeString { nameNode.text?.toString().orEmpty() }
+                        .ifBlank { safeString { nameNode.contentDescription?.toString().orEmpty() } }
+                        .trim()
+                    if (currentName != candidate.nameText?.trim()) return@withActiveTargetRoot null
+                } finally {
+                    runCatching { nameNode.recycle() }
+                }
+                // Reacquire the floating control's current physical bounds immediately before
+                // returning a tap region. A row overlapping the control is restricted to the
+                // largest remaining rectangle; an incomplete overlay scan fails closed.
+                val overlay = inspectAiFinderFloatingOverlay(root)
+                if (!overlay.complete) return@withActiveTargetRoot null
+                if (!overlay.foundVisible) {
+                    currentBounds
+                } else {
+                    MomoChatListSessionPolicy.largestSafeSubRect(
+                        bounds = currentBounds,
+                        excludedBounds = overlay.bounds,
+                        minimumWidth = MIN_SAFE_SESSION_TAP_WIDTH_PX,
+                        minimumHeight = MIN_SAFE_SESSION_TAP_HEIGHT_PX
+                    )
+                }
+            } finally {
+                runCatching { current?.recycle() }
+            }
+        }
+    }
+
+    override fun resolveSessionListSwipeViewport(snapshot: ChatPageSnapshot): ScreenRect? {
+        if (snapshot.pageKind != ChatPageKind.CHAT_LIST ||
+            snapshot.packageName != targetPackage
+        ) return null
+        val viewport = snapshot.chatListViewport ?: return null
+        val expectedWindow = snapshot.messageListTarget?.window
+            ?: snapshot.chatListCandidates.firstOrNull()?.rowTarget?.window
+            ?: snapshot.sessionListNavigationTarget?.nodeTarget?.window
+            ?: return null
+        return rootAccess.withActiveTargetRoot { root, window ->
+            if (!sameMomoWindowGeneration(window, expectedWindow) ||
+                safeString { root.packageName?.toString().orEmpty() } != targetPackage
+            ) return@withActiveTargetRoot null
+            val overlay = inspectAiFinderFloatingOverlay(root)
+            if (!overlay.complete) return@withActiveTargetRoot null
+            val auxiliaryBands = findVisibleAuxiliaryRecyclerBounds(root, viewport)
+                ?: return@withActiveTargetRoot null
+            val mainListBand = MomoChatListSessionPolicy.largestVerticalBandExcluding(
+                bounds = viewport,
+                excludedBounds = auxiliaryBands,
+                minimumWidth = MIN_SAFE_SESSION_SWIPE_WIDTH_PX,
+                minimumHeight = MIN_SAFE_SESSION_SWIPE_HEIGHT_PX
+            ) ?: return@withActiveTargetRoot null
+            if (!overlay.foundVisible) {
+                mainListBand
+            } else {
+                MomoChatListSessionPolicy.largestSafeSubRect(
+                    bounds = mainListBand,
+                    excludedBounds = overlay.bounds,
+                    minimumWidth = MIN_SAFE_SESSION_SWIPE_WIDTH_PX,
+                    minimumHeight = MIN_SAFE_SESSION_SWIPE_HEIGHT_PX
+                )
+            }
+        }
+    }
+
+    /**
+     * Nested active_rv widgets are horizontal recommendation carousels inside the inbox. Exclude
+     * their vertical bands from main-list swipes; otherwise a swipe may be consumed by a nested
+     * RecyclerView while the main inbox fingerprint remains unchanged.
+     */
+    private fun findVisibleAuxiliaryRecyclerBounds(
+        root: AccessibilityNodeInfo,
+        viewport: ScreenRect
+    ): List<ScreenRect>? {
+        val matches = runCatching {
+            root.findAccessibilityNodeInfosByViewId("$targetPackage:id/active_rv")
+        }.getOrNull() ?: return null
+        val bounds = ArrayList<ScreenRect>()
+        var invalidVisibleAuxiliaryBounds = false
+        try {
+            matches.forEach { node ->
+                val rect = Rect()
+                try {
+                    if (safeBoolean { node.isVisibleToUser } && safeBoolean { node.isScrollable }) {
+                        node.getBoundsInScreen(rect)
+                        val candidate = ScreenRect(rect.left, rect.top, rect.right, rect.bottom)
+                        if (MomoChatListSessionPolicy.intersectsViewport(candidate, viewport) &&
+                            candidate.width >= viewport.width * 0.60f
+                        ) {
+                            if (!MomoChatListSessionPolicy.hasValidBounds(candidate)) {
+                                invalidVisibleAuxiliaryBounds = true
+                            } else {
+                                bounds += candidate
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // If the auxiliary node cannot be inspected, we cannot prove the swipe
+                    // path avoids it. Fail closed instead of risking a nested-list gesture.
+                    invalidVisibleAuxiliaryBounds = true
+                }
+            }
+        } finally {
+            matches.forEach { runCatching { it.recycle() } }
+        }
+        if (invalidVisibleAuxiliaryBounds) return null
+        return bounds.distinct()
+    }
+
+    /**
+     * Reads the exact mf_view overlay from the freshly acquired active root. The view-ID lookup
+     * is available because the AccessibilityService enables FLAG_REPORT_VIEW_IDS. Its children
+     * are deliberately not traversed: the FrameLayout bounds cover the complete control.
+     */
+    private fun inspectAiFinderFloatingOverlay(root: AccessibilityNodeInfo): AiFinderOverlayInspection {
+        val matches = runCatching {
+            root.findAccessibilityNodeInfosByViewId("$targetPackage:id/mf_view")
+        }.getOrNull() ?: return AiFinderOverlayInspection(null, foundVisible = false, complete = false)
+        var foundVisible = false
+        var invalidVisibleBounds = false
+        var unionBounds: ScreenRect? = null
+        matches.forEach { node ->
+            try {
+                val viewId = safeString { node.viewIdResourceName?.toString().orEmpty() }
+                if (!MomoChatListSessionPolicy.isAiFinderFloatingView(viewId) ||
+                    !safeBoolean { node.isVisibleToUser }
+                ) return@forEach
+                foundVisible = true
+                val rect = Rect()
+                val readSucceeded = runCatching { node.getBoundsInScreen(rect) }.isSuccess
+                if (!readSucceeded || rect.right <= rect.left || rect.bottom <= rect.top) {
+                    invalidVisibleBounds = true
+                } else {
+                    val next = rect.toScreenRect()
+                    val previous = unionBounds
+                    unionBounds = if (previous == null) next else ScreenRect(
+                        left = minOf(previous.left, next.left),
+                        top = minOf(previous.top, next.top),
+                        right = maxOf(previous.right, next.right),
+                        bottom = maxOf(previous.bottom, next.bottom)
+                    )
+                }
+            } finally {
+                runCatching { node.recycle() }
+            }
+        }
+        return AiFinderOverlayInspection(
+            bounds = unionBounds,
+            foundVisible = foundVisible,
+            complete = !invalidVisibleBounds && (!foundVisible || unionBounds != null)
+        )
+    }
+
+    override fun persistChatSample(
+        snapshot: ChatPageSnapshot,
+        batch: ChatMessageBatch,
+        sessionName: String?
+    ): Int = persistChatSample(snapshot, batch, sessionName, null)
+
+    override fun persistChatSample(
+        snapshot: ChatPageSnapshot,
+        batch: ChatMessageBatch,
+        sessionName: String?,
+        contactIdentity: ContactRowIdentity?
+    ): Int {
+        val sampleIndex = runCatching {
+            sessionComponents.sampleStore.persistChatBatch(
+                snapshot = snapshot,
+                batch = batch,
+                sessionName = sessionName,
+                contactIdentity = contactIdentity,
+                greetingRowKeyHash = receivedGreetingsCurrentRowKeyHash(),
+                greetingIdentityStatus = receivedGreetingsCurrentIdentityStatus()
+            )
+        }.getOrDefault(0)
+        persistConversationMessagesIfVerified(snapshot, batch, sessionName, contactIdentity)
+        // Structural-only or non-text conversations can have no OCR targets. Still preserve a
+        // full-screen reference image for those samples so the exported record is reviewable.
+        if (sampleIndex > 0 && batch.sampleScreenshotPath.isNullOrBlank()) {
+            val capture = screenshotCapture
+            if (capture != null) {
+                MonitorOverlay.acquireObservationVisibility(context) { observationLease ->
+                    runCatching {
+                        capture.captureActiveDisplay(snapshot.packageName, snapshot.activityClass) { frame ->
+                            val path = if (frame == null) null else try {
+                                sessionComponents.sampleStore.saveBitmap("chat_screen_$sampleIndex", frame.bitmap)
+                            } finally {
+                                runCatching { frame.bitmap.recycle() }
+                                frame.close()
+                            }
+                            try {
+                                sessionComponents.sampleStore.persistChatScreenshot(
+                                    sampleIndex,
+                                    path,
+                                    "structural_read_without_ocr_capture"
+                                )
+                            } finally {
+                                observationLease.close()
+                            }
+                        }
+                    }.onFailure { observationLease.close() }
+                }
+            }
+        }
+        return sampleIndex
+    }
+
+    /** Persists only batches tied to the exact inbox identity and a freshly validated chat header. */
+    private fun persistConversationMessagesIfVerified(
+        snapshot: ChatPageSnapshot,
+        batch: ChatMessageBatch,
+        sessionName: String?,
+        identity: ContactRowIdentity?
+    ) {
+        val contactId = identity?.contactId?.takeIf(String::isNotBlank) ?: return
+        if (identity.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) return
+        if (ChatSessionManagementPolicy.matchChatHeader(sessionName, snapshot.chatTitleText) == null) return
+        if (batch.windowSessionKey.isNullOrBlank() || batch.messages.isEmpty()) return
+
+        val inputs = batch.messages.map { message ->
+            ConversationMessageInput(
+                messageFingerprint = message.id,
+                direction = message.direction.name,
+                type = message.type.name,
+                content = message.content,
+                contentQuality = message.contentQuality.name,
+                directionEvidence = message.directionEvidence.name,
+                bounds = message.bounds
+            )
+        }
+        runCatching {
+            conversationRepository.persistMessages(
+                contactId = contactId,
+                conversationId = "momo-direct-$contactId",
+                identityConfidence = identity.confidence.name,
+                capturedAtMillis = batch.capturedAtMillis,
+                messages = inputs
+            )
+        }.onSuccess { result ->
+            if (result.insertedCount > 0 || result.rejectedCount > 0) {
+                onLog(
+                    "会话消息本地存储：新增=${result.insertedCount}；" +
+                        "重复观察=${result.duplicateObservationCount}；拒绝=${result.rejectedCount}；" +
+                        "身份可信级别=${identity.confidence.name}"
+                )
+            }
+        }.onFailure {
+            onLog("会话消息本地持久化失败；未记录消息正文")
+        }
+    }
+
+    override fun persistChatHeaderValidationDiagnostic(
+        snapshot: ChatPageSnapshot,
+        expectedSessionName: String?,
+        matched: Boolean,
+        expectedCandidate: ChatListCandidateSnapshot?
+    ) {
+        runCatching {
+            sessionComponents.sampleStore.persistChatHeaderValidationDiagnostic(
+                snapshot, expectedSessionName, matched, expectedCandidate
+            )
+        }
+    }
+
+    override fun navigateBackToSessionList(): Boolean =
+        requestChatActivityBack("普通聊天消息采集完成")
+
+    private fun resolveLocalPath(
+        root: AccessibilityNodeInfo,
+        relativePath: List<Int>
+    ): AccessibilityNodeInfo? {
+        var current: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(root)
+        for (index in relativePath) {
+            val parent = current ?: return null
+            val child = safeNode { parent.getChild(index) }
+            runCatching { parent.recycle() }
+            current = child ?: return null
+        }
+        return current
+    }
+
+    override fun refreshKnownChatRegions(previous: ChatPageSnapshot): ChatRegionSnapshot {
+        val previousWindow = previous.messageListTarget?.window
+            ?: previous.inputFieldTarget?.window
+        val bothTargetsShareWindow = previous.messageListTarget == null ||
+            previous.inputFieldTarget == null ||
+            previous.messageListTarget.window == previous.inputFieldTarget.window
+        if (previousWindow == null || !bothTargetsShareWindow) {
+            return ChatRegionSnapshot(false, 0, 0, 0, 0, false)
+        }
+
+        val previousInspection = MomoChatPageInspection(
+            pageType = when (previous.pageKind) {
+                ChatPageKind.UNKNOWN -> MomoChatPageType.UNKNOWN
+                ChatPageKind.NON_CHAT -> MomoChatPageType.NON_CHAT
+                ChatPageKind.CHAT_LIST -> MomoChatPageType.CHAT_LIST
+                ChatPageKind.CHAT_DETAIL_CANDIDATE -> MomoChatPageType.CHAT_DETAIL_CANDIDATE
+            },
+            windowPackage = previous.packageName,
+            activityClass = previous.activityClass,
+            scannedNodeCount = previous.scannedNodeCount,
+            editableInputCount = previous.editableInputCount,
+            messageListCount = previous.messageListCount,
+            sendActionCount = previous.sendActionCount,
+            messageRelatedViewIdCount = previous.messageRelatedViewIdCount,
+            hasChatTab = previous.hasChatTab,
+            messageListPath = previous.messageListTarget?.path?.childIndices,
+            inputFieldPath = previous.inputFieldTarget?.path?.childIndices,
+            messageListClassName = previous.messageListTarget?.expectedClassName,
+            messageListViewId = previous.messageListTarget?.expectedViewId,
+            hasCanonicalMessageList =
+                previous.messageListTarget?.expectedClassName == MomoChatPageContract.MESSAGE_LIST_CLASS_NAME &&
+                    previous.messageListTarget?.expectedViewId == MomoChatPageContract.MESSAGE_LIST_VIEW_ID
+        )
+
+        return rootAccess.withActiveTargetRoot { root, currentWindow ->
+            // Node paths are meaningful only inside the exact window generation in which
+            // they were observed. A page transition requests a full, bounded inspection.
+            if (currentWindow != previousWindow) {
+                return@withActiveTargetRoot ChatRegionSnapshot(false, 0, 0, 0, 0, false)
+            }
+            val refreshed = chatComponents.pageInspector.inspectKnownChatRegions(
+                root = AccessibilityNodeInfo.obtain(root),
+                targetPackage = targetPackage,
+                previous = previousInspection
+            )
+            ChatRegionSnapshot(
+                packageMatches = refreshed.packageMatches,
+                messageRegionNodeCount = refreshed.messageRegionNodeCount,
+                messageRegionTextNodeCount = refreshed.messageRegionTextNodeCount,
+                inputRegionNodeCount = refreshed.inputRegionNodeCount,
+                inputRegionEditableNodeCount = refreshed.inputRegionEditableNodeCount,
+                pathsResolved = refreshed.pathsResolved
+            )
+        } ?: ChatRegionSnapshot(false, 0, 0, 0, 0, false)
+    }
+
+    override fun readRecentMessages(page: ChatPageSnapshot, limit: Int): ChatMessageBatch =
+        messageComponents.reader.readRecentMessages(page, limit)
+
+    override fun readRecentMessagesAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        onResult: (ChatMessageBatch) -> Unit
+    ) {
+        // Hide the monitor before the structural node read, not only before the screenshot.
+        // The nested screenshot lease in AndroidAccessibilityGateway keeps the same hidden
+        // state through capture/OCR; reference counting prevents either layer restoring early.
+        MonitorOverlay.acquireObservationVisibility(context) { observationLease ->
+            val resultDelivered = java.util.concurrent.atomic.AtomicBoolean(false)
+            val deliver: (ChatMessageBatch) -> Unit = { batch ->
+                if (resultDelivered.compareAndSet(false, true)) {
+                    try {
+                        onResult(batch)
+                    } catch (_: Exception) {
+                        onLog("AI 模式消息读取结果回调异常；监控悬浮窗已安排恢复")
+                    } finally {
+                        observationLease.close()
+                    }
+                }
+            }
+
+            val structuralBatch = try {
+                messageComponents.reader.readRecentMessages(page, limit)
+            } catch (_: Exception) {
+                deliver(
+                    ChatMessageBatch(
+                        status = com.freedom.features.aireply.domain.message.MessageReadStatus.READ_FAILED,
+                        windowSessionKey = null,
+                        messages = emptyList(),
+                        scannedRowCount = 0,
+                        candidateRowCount = 0,
+                        truncated = false,
+                        capturedAtMillis = System.currentTimeMillis(),
+                        messageListUnavailableReason = "消息结构读取异常（异常详情已隐藏）"
+                    )
+                )
+                return@acquireObservationVisibility
+            }
+
+            if (structuralBatch.ocrTargets.isEmpty()) {
+                deliver(structuralBatch)
+                return@acquireObservationVisibility
+            }
+
+            try {
+                messageComponents.ocrProcessor.recognize(
+                    batch = structuralBatch,
+                    expectedPackage = page.packageName,
+                    expectedActivity = page.activityClass
+                ) { ocrResult ->
+                    val resultBatch = try {
+                        val mergedBatch = messageComponents.reader.applyOcrResults(structuralBatch, ocrResult, limit)
+                        // Raw recognized text is carried only to the runtime's post-window-validation
+                        // diagnostic path. It is never added to the normal message summary/toString.
+                        if (BuildConfig.DEBUG && BuildConfig.OCR_RESULT_DEBUG_LOGGING) {
+                            mergedBatch.copy(
+                                ocrDebugTextByRowIndex = ocrResult.textByRowIndex.toMap(),
+                                ocrDebugChineseTextByRowIndex = ocrResult.chineseTextByRowIndex.toMap(),
+                                ocrDebugLatinTextByRowIndex = ocrResult.latinTextByRowIndex.toMap()
+                            )
+                        } else {
+                            mergedBatch
+                        }
+                    } catch (_: Exception) {
+                        structuralBatch.copy(
+                            status = MomoChatMessageReadStatusPolicy.afterOcrException(),
+                            ocrAttempted = true,
+                            ocrAttemptedTargetCount = structuralBatch.ocrTargets.size,
+                            ocrFailedTargetCount = structuralBatch.ocrTargets.size,
+                            ocrFailureReason = "本地 OCR 结果合并失败（异常详情已隐藏）",
+                            ocrDebugTextByRowIndex = if (BuildConfig.DEBUG && BuildConfig.OCR_RESULT_DEBUG_LOGGING) emptyMap() else null,
+                            ocrDebugChineseTextByRowIndex = if (BuildConfig.DEBUG && BuildConfig.OCR_RESULT_DEBUG_LOGGING) emptyMap() else null,
+                            ocrDebugLatinTextByRowIndex = if (BuildConfig.DEBUG && BuildConfig.OCR_RESULT_DEBUG_LOGGING) emptyMap() else null
+                        )
+                    }
+                    deliver(resultBatch)
+                }
+            } catch (_: Exception) {
+                deliver(
+                    structuralBatch.copy(
+                        status = MomoChatMessageReadStatusPolicy.afterOcrException(),
+                        ocrAttempted = true,
+                        ocrAttemptedTargetCount = structuralBatch.ocrTargets.size,
+                        ocrFailedTargetCount = structuralBatch.ocrTargets.size,
+                        ocrFailureReason = "本地 OCR 初始化或执行失败",
+                        ocrDebugTextByRowIndex = if (BuildConfig.DEBUG && BuildConfig.OCR_RESULT_DEBUG_LOGGING) emptyMap() else null,
+                        ocrDebugChineseTextByRowIndex = if (BuildConfig.DEBUG && BuildConfig.OCR_RESULT_DEBUG_LOGGING) emptyMap() else null,
+                        ocrDebugLatinTextByRowIndex = if (BuildConfig.DEBUG && BuildConfig.OCR_RESULT_DEBUG_LOGGING) emptyMap() else null
+                    )
+                )
+            }
+        }
+    }
+
+    fun close() {
+        if (messageComponents.ocrProcessorDelegate.isInitialized()) {
+            runCatching { messageComponents.ocrProcessor.close() }
+        }
+    }
+
+    private fun receivedGreetingsListChatPagePlaceholder() = ChatPageSnapshot(
+        packageName = targetPackage,
+        activityClass = MomoSayHiPageContract.LIST_ACTIVITY,
+        pageKind = ChatPageKind.NON_CHAT,
+        scannedNodeCount = 0,
+        editableInputCount = 0,
+        messageListCount = 0,
+        sendActionCount = 0,
+        messageRelatedViewIdCount = 0,
+        hasChatTab = false,
+        messageListTarget = null,
+        inputFieldTarget = null
+    )
+
+    private fun unknownChatPageSnapshot() = ChatPageSnapshot(
+        packageName = "",
+        activityClass = activityClass(),
+        pageKind = ChatPageKind.UNKNOWN,
+        scannedNodeCount = 0,
+        editableInputCount = 0,
+        messageListCount = 0,
+        sendActionCount = 0,
+        messageRelatedViewIdCount = 0,
+        hasChatTab = false,
+        messageListTarget = null,
+        inputFieldTarget = null
+    )
+
+    private fun configPageDynamicTabLabel(): String = config.page.dynamicTabLabel
+    private fun configPageHomeTabLabel(): String = config.page.homeTabLabel
+    private fun configPageDynamicTabUpperBandRatio(): Float = config.page.dynamicTabUpperBandRatio
+    private fun configPageHomeNavLowerBandRatio(): Float = config.page.homeNavLowerBandRatio
+
+    private fun Rect.toScreenRect() = ScreenRect(left, top, right, bottom)
+
+    private fun countVisibleDirectChildren(container: AccessibilityNodeInfo): Int {
+        var visible = 0
+        val count = safeInt { container.childCount }
+        for (index in 0 until count) {
+            val child = runCatching { container.getChild(index) }.getOrNull() ?: continue
+            try {
+                if (runCatching { child.isVisibleToUser }.getOrDefault(false)) visible += 1
+            } finally {
+                runCatching { child.recycle() }
+            }
+        }
+        return visible
+    }
+
+    private inline fun safeString(block: () -> String): String = runCatching(block).getOrDefault("")
+    private fun safeInt(block: () -> Int): Int = runCatching(block).getOrDefault(0)
+    private fun safeBoolean(block: () -> Boolean): Boolean = runCatching(block).getOrDefault(false)
+    private fun safeNode(block: () -> AccessibilityNodeInfo?): AccessibilityNodeInfo? = runCatching(block).getOrNull()
+
+    private companion object {
+        private const val NAVIGATION_EVIDENCE_INTERVAL_MS = 2_000L
+        private const val RECEIVED_GREETINGS_ENTRY_VERIFY_TIMEOUT_MS = 4_000L
+        private const val RECEIVED_GREETINGS_ENTRY_RETRY_COOLDOWN_MS = 12_000L
+        private const val SAYHI_CARD_LIST_VERIFY_TIMEOUT_MS = 4_000L
+        private const val SAYHI_CARD_LIST_TAP_COOLDOWN_MS = 12_000L
+        private const val SAYHI_CARD_LIST_PRE_TAP_MAX_SNAPSHOT_AGE_MS = 750L
+        private const val SAYHI_ROW_PRE_TAP_MAX_SNAPSHOT_AGE_MS = 750L
+        private const val SAYHI_GESTURE_TERMINAL_TIMEOUT_MS = 12_000L
+        private const val SAYHI_ROW_DETAIL_VERIFY_TIMEOUT_MS = 8_000L
+        private const val SAYHI_CLICK_EVENT_SETTLE_MS = 700L
+        private const val SAYHI_PROFILE_PAGE_TIMEOUT_MS = 6_000L
+        private const val SAYHI_PROFILE_SCROLL_TIMEOUT_MS = 8_000L
+        private const val SAYHI_PROFILE_SCROLL_SETTLE_MS = 500L
+        private const val SAYHI_PROFILE_IDENTITY_SCROLL_DURATION_MS = 520L
+        private const val SAYHI_PROFILE_BACK_TIMEOUT_MS = 5_000L
+        private const val MAX_SAYHI_PROFILE_BACK_ATTEMPTS = 2
+        private const val SAYHI_DETAIL_BACK_TIMEOUT_MS = 8_000L
+        private const val SAYHI_DETAIL_BACK_RECOVERY_TIMEOUT_MS = 8_000L
+        private const val SAYHI_PROFILE_ID_MAX_ATTEMPTS = 3
+        private const val SAYHI_PROFILE_ROW_RECOVERY_MAX_ATTEMPTS = 5
+        private const val MAX_SAYHI_PROCESSED_ROWS = 600
+        private const val MAX_SAYHI_ROW_RETRY_BACKOFF_STAGE = 4
+        private const val SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX =
+            "ROW_SAFE_TAP_TARGET_SECOND_VALIDATION_FAILED"
+        private const val RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS = 90L
+        private const val RECEIVED_GREETINGS_ENTRY_SEARCH_SCROLL_DURATION_MS = 520L
+        private const val RECEIVED_GREETINGS_PRE_TAP_MAX_SNAPSHOT_AGE_MS = 750L
+        private const val RECEIVED_GREETINGS_ENTRY_DIAGNOSTIC_INTERVAL_MS = 5_000L
+        private const val NAVIGATION_EVIDENCE_MAX_NODES = 1_200
+        private const val MAX_NAVIGATION_EVIDENCE_LOG_ITEMS = 8
+
+        private const val MOMO_DYNAMIC_TAB_LABEL = "动态"
+        private const val MOMO_NEARBY_TAB_LABEL = "附近"
+        private const val MOMO_AI_TAB_LABEL = "AI小陌"
+        private const val MOMO_HOME_TAB_LABEL = "首页"
+        private val MOMO_HOME_NAV_LABELS = setOf("首页", "附近", "消息", "我的", "直播", "动态")
+        private val MOMO_HOME_TAB_CONTAINER_VIEW_ID_SUFFIXES = setOf("maintab_layout_nearby")
+        private const val HOME_NAV_LOWER_BAND_RATIO = 0.72f
+        private val DYNAMIC_TAB_LABELS = setOf(
+            MOMO_DYNAMIC_TAB_LABEL,
+            MOMO_NEARBY_TAB_LABEL,
+            MOMO_AI_TAB_LABEL
+        )
+        private const val DYNAMIC_TAB_UPPER_BAND_RATIO = 0.28f
+        private const val DYNAMIC_TAB_ROW_TOLERANCE_DP = 48
+        private const val DYNAMIC_TAB_CONTENT_GAP_DP = 8
+        private const val TAB_TARGET_MATCH_TOLERANCE_DP = 18
+        private const val MAX_TAB_CLICK_TARGET_HEIGHT_RATIO = 0.24f
+        private const val MAX_TAB_CLICK_ANCESTOR_DEPTH = 5
+        private const val SESSION_ROW_BOUNDS_TOLERANCE_PX = 8
+        private const val PAGE_FINGERPRINT_MAX_NODES = 500
+        private const val MAX_POPUP_SAFETY_INCOMPLETE_ATTEMPTS = 3
+        private const val POPUP_SAFETY_SCAN_DIAGNOSTIC_NODE_THRESHOLD = 350
+        private const val POPUP_SAFETY_SCAN_DIAGNOSTIC_DURATION_MS = 300L
+        private const val FINGERPRINT_SIZE_BUCKET_PX = 24
+        private const val MIN_LIST_WIDTH_RATIO = 0.58f
+        private const val MIN_LIST_HEIGHT_RATIO = 0.28f
+        private const val MIN_SAFE_SESSION_TAP_WIDTH_PX = 80
+        private const val MIN_SAFE_SESSION_TAP_HEIGHT_PX = 48
+        private const val MIN_SAFE_SESSION_SWIPE_WIDTH_PX = 240
+        private const val MIN_SAFE_SESSION_SWIPE_HEIGHT_PX = 240
+
+        private fun createDefaultConfig(): Config = Config(
+            page = MomoPageInspector.Config(
+                targetPackage = MomoAppDescriptor.PACKAGE_NAME,
+                homeNavLabels = MOMO_HOME_NAV_LABELS,
+                homeTabLabel = MOMO_HOME_TAB_LABEL,
+                homeNavLowerBandRatio = HOME_NAV_LOWER_BAND_RATIO,
+                dynamicTabLabels = DYNAMIC_TAB_LABELS,
+                dynamicTabLabel = MOMO_DYNAMIC_TAB_LABEL,
+                nearbyTabLabel = MOMO_NEARBY_TAB_LABEL,
+                aiTabLabel = MOMO_AI_TAB_LABEL,
+                dynamicTabUpperBandRatio = DYNAMIC_TAB_UPPER_BAND_RATIO,
+                dynamicTabRowToleranceDp = DYNAMIC_TAB_ROW_TOLERANCE_DP,
+                dynamicTabContentGapDp = DYNAMIC_TAB_CONTENT_GAP_DP,
+                pageFingerprintMaxNodes = PAGE_FINGERPRINT_MAX_NODES,
+                fingerprintSizeBucketPx = FINGERPRINT_SIZE_BUCKET_PX,
+                minListWidthRatio = MIN_LIST_WIDTH_RATIO,
+                minListHeightRatio = MIN_LIST_HEIGHT_RATIO
+            ),
+            navigation = MomoNavigationController.Config(
+                maxScanNodes = PAGE_FINGERPRINT_MAX_NODES,
+                tabTargetMatchToleranceDp = TAB_TARGET_MATCH_TOLERANCE_DP,
+                maxClickTargetHeightRatio = MAX_TAB_CLICK_TARGET_HEIGHT_RATIO,
+                maxAncestorDepth = MAX_TAB_CLICK_ANCESTOR_DEPTH,
+                homeTabContainerViewIdSuffixes = MOMO_HOME_TAB_CONTAINER_VIEW_ID_SUFFIXES
+            ),
+            popupMaxScanNodes = PAGE_FINGERPRINT_MAX_NODES,
+            feedGesture = MomoFeedGestureController.Config(
+                minListWidthRatio = MIN_LIST_WIDTH_RATIO,
+                minListHeightRatio = MIN_LIST_HEIGHT_RATIO,
+                maxNodesPerScan = AccessibilityTreeLimits.MAX_NODES_PER_SCAN
+            )
+        )
+    }
+}

@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Foreground companion service for an explicitly started monitoring session. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="com.freedom.permission.BIND_OCR_PLUGIN" />
+
+    <permission
+        android:name="com.freedom.permission.BIND_OCR_PLUGIN"
+        android:protectionLevel="signature" />
+
+
+    <queries>
+        <package android:name="com.immomo.momo" />
+        <!-- The independently installed OCR engine is a known companion package; declaring
+             visibility avoids treating PackageManager visibility filtering as plugin absence. -->
+        <package android:name="com.freedom.ocr.plugin" />
+        <!-- Allow validation and launch of a user-selected custom target application. -->
+        <intent>
+            <action android:name="org.autojs.plugin.PADDLE_OCR" />
+            <category android:name="paddle-ocr" />
+        </intent>
+        <intent>
+            <action android:name="com.freedom.ocr.plugin.action.WAKE" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".app.FreedomApplication"
+        android:allowBackup="false"
+        android:icon="@drawable/ic_freedom_master"
+        android:label="Freedom"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".accessibility.FreedomAccessibilityService"
+            android:exported="true"
+            android:label="Freedom 无障碍监控服务"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <service
+            android:name=".adapters.accessibility.android.FloatingWindowHostService"
+            android:exported="false"
+            android:stopWithTask="false" />
+
+        <service
+            android:name=".stability.MonitorKeepAliveService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-visible ongoing accessibility monitoring session started by the user." />
+        </service>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.ocr.plugin.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/ocr_plugin_file_paths" />
+        </provider>
+
+        <receiver
+            android:name=".stability.BootRecoveryReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

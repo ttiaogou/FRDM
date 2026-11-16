@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "catalogVersion": "2026-06-ppocrv6-small-1",
+  "models": [
+    {
+      "modelId": "ppocrv6_small",
+      "version": "ppocrv6-small-2026-06",
+      "engineId": "paddle-onnx",
+      "engineApiVersion": 1,
+      "detUrl": "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/resolve/28fe5895c24fd108c19eb3e8479f4ab385fbfc62/inference.onnx?download=true",
+      "recUrl": "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/b8f84f0b80c529de40b4fbb3544b84fa7233a513/inference.onnx?download=true",
+      "recConfigUrl": "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/b8f84f0b80c529de40b4fbb3544b84fa7233a513/inference.yml?download=true",
+      "minimumSizes": [8000000, 15000000, 10000],
+      "sha256": {
+        "det": "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e",
+        "rec": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
+        "recConfig": "ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1"
+      }
+    }
+  ]
+}

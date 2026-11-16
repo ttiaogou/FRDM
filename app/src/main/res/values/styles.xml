@@ -1,0 +1,20 @@
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#718E22</item>
+        <item name="android:alertDialogTheme">@style/FreedomAlertDialogTheme</item>
+        <item name="android:windowBackground">#F8F7F0</item>
+        <item name="android:statusBarColor">#F8F7F0</item>
+        <item name="android:navigationBarColor">#F8F7F0</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+
+    <style name="FreedomAlertDialogTheme" parent="android:style/Theme.Material.Light.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_freedom_dialog</item>
+        <item name="android:colorAccent">#718E22</item>
+        <item name="android:textColorPrimary">#23372B</item>
+        <item name="android:textColorSecondary">#56665B</item>
+    </style>
+</resources>

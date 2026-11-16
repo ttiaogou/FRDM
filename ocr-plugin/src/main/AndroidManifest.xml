@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="com.freedom.permission.BIND_OCR_PLUGIN" />
+
+    <application
+        android:allowBackup="false"
+        android:label="Freedom OCR 插件"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".OcrPluginWakeActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:finishOnTaskLaunch="true"
+            android:permission="com.freedom.permission.BIND_OCR_PLUGIN"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="com.freedom.ocr.plugin.action.WAKE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".OcrPluginService"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="com.freedom.permission.BIND_OCR_PLUGIN">
+            <intent-filter>
+                <action android:name="org.autojs.plugin.PADDLE_OCR" />
+                <category android:name="paddle-ocr" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.freedom.ocr.action.BIND_OCR_PLUGIN" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>
