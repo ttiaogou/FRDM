@@ -7,6 +7,7 @@ import com.freedom.core.accessibility.events.AccessibilityEventRoute
 import com.freedom.core.accessibility.events.AccessibilityEventRoutePolicy
 import com.freedom.core.accessibility.events.AccessibilityEventType
 import com.freedom.core.accessibility.events.DefaultAccessibilityEventRoutePolicy
+import com.freedom.core.accessibility.events.InputOriginClassifier
 import com.freedom.core.runtime.RunMode
 
 /**
@@ -33,6 +34,7 @@ internal class AndroidAccessibilityEventPipeline(
     private val onBrowseEventLogged: () -> Unit,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val currentWindowGeneration: () -> Long = { 0L },
+    private val inputOriginClassifier: InputOriginClassifier = InputOriginClassifier(),
     private val onDuplicateSuppressed: (AccessibilityEventEnvelope) -> Unit = {},
     private val observeWindowStateEvent: (className: String, windowId: Int) -> Unit = { _, _ -> }
 ) {
@@ -99,7 +101,14 @@ internal class AndroidAccessibilityEventPipeline(
                     "路由=GLOBAL_TOUCH；模式=$runMode；eventTime=${eventForRouting.eventTimeMillis}"
             )
             if (runMode == RunMode.ACCOUNT_BROWSE) {
-                runCatching { dispatchGlobalTouchEvent(eventForRouting) }
+                val originDecision = inputOriginClassifier.classify(
+                    event = eventForRouting,
+                    currentActivityClass = currentActivityClass(),
+                    currentPageGeneration = currentWindowGeneration(),
+                    targetPackage = targetPackage()
+                )
+                val routedTouchEvent = eventForRouting.copy(inputOriginDecision = originDecision)
+                runCatching { dispatchGlobalTouchEvent(routedTouchEvent) }
                     .onSuccess {
                         appendLog("全局触摸链路[PIPELINE_FORWARDED]：事件=${eventForRouting.type}；模式=$runMode")
                     }

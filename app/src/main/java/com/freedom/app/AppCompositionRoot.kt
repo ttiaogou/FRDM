@@ -392,6 +392,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             updateCurrentActivityClass = windowContextTracker::updateActivityClass,
             onBrowseEventLogged = { monitorPreviewScheduler.scheduleBrowseScan() },
             currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() },
+            inputOriginClassifier = inputOriginClassifier,
             observeWindowStateEvent = windowContextTracker::observeWindowStateEvent,
             onDuplicateSuppressed = { event ->
                 val decision = event.inputOriginDecision

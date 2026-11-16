@@ -7,6 +7,9 @@ import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.accessibility.events.AccessibilityEventType
 import com.freedom.core.accessibility.events.AccessibilitySourceSnapshot
 import com.freedom.core.accessibility.events.DefaultAccessibilityEventRoutePolicy
+import com.freedom.core.accessibility.events.InputOrigin
+import com.freedom.core.accessibility.events.InputOriginClassifier
+import com.freedom.core.accessibility.events.InputOriginEvidence
 import com.freedom.core.runtime.RunMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -248,6 +251,32 @@ class AndroidAccessibilityEventPipelineTest {
     }
 
     @Test
+    fun globalTouchIsClassifiedAndStampedBeforeRuntimeDispatch() {
+        val trace = mutableListOf<String>()
+        val dispatched = mutableListOf<AccessibilityEventEnvelope>()
+        val pipeline = pipeline(
+            trace,
+            dispatchGlobalTouchEvent = { dispatched += it },
+            currentActivityClass = { "com.example.CurrentActivity" },
+            currentWindowGeneration = { 17L }
+        )
+
+        pipeline.processNormalized(
+            event(AccessibilityEventType.TOUCH_INTERACTION_START, "", ""),
+            AccessibilityEvent.TYPE_TOUCH_INTERACTION_START,
+            RunMode.ACCOUNT_BROWSE,
+            3_000L
+        )
+
+        val forwarded = dispatched.single()
+        assertEquals(InputOrigin.UNKNOWN, forwarded.inputOriginDecision?.origin)
+        assertEquals(
+            InputOriginEvidence.GLOBAL_TOUCH_EVENT_WITHOUT_ACTOR_PROVENANCE,
+            forwarded.inputOriginDecision?.evidence
+        )
+    }
+
+    @Test
     fun aiReplyGlobalTouchIsNotDispatchedToAnyRuntimeInteractionHandler() {
         val trace = mutableListOf<String>()
         val pipeline = pipeline(trace)
@@ -349,7 +378,8 @@ class AndroidAccessibilityEventPipelineTest {
         currentActivityClass: () -> String = { "" },
         updateCurrentActivityClass: (String) -> Unit = { trace += "update-activity" },
         dispatchGlobalTouchEvent: (AccessibilityEventEnvelope) -> Unit = { trace += "dispatch-global-touch" },
-        currentWindowGeneration: () -> Long = { 0L }
+        currentWindowGeneration: () -> Long = { 0L },
+        inputOriginClassifier: InputOriginClassifier = InputOriginClassifier()
     ) = AndroidAccessibilityEventPipeline(
         routePolicy = DefaultAccessibilityEventRoutePolicy(),
         targetPackage = { TARGET_PACKAGE },
@@ -365,7 +395,8 @@ class AndroidAccessibilityEventPipelineTest {
         currentActivityClass = currentActivityClass,
         updateCurrentActivityClass = updateCurrentActivityClass,
         onBrowseEventLogged = { trace += "schedule-scan" },
-        currentWindowGeneration = currentWindowGeneration
+        currentWindowGeneration = currentWindowGeneration,
+        inputOriginClassifier = inputOriginClassifier
     )
 
     private fun event(

@@ -931,9 +931,15 @@ class ArchitectureBoundaryTest {
         val compositionRoot = File(projectRoot, "app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
         assertTrue("Application composition root must create the shared Runtime handle", compositionRoot.contains("GestureRuntimeFactory.create("))
         assertTrue("Composition root must expose the shared runtime through the public GestureApi view", compositionRoot.contains("val gesturePolicy: PublicGestureApi get() = gestureRuntime"))
-        assertTrue("AI Reply must cancel a gesture through GestureApi without interface casts", consumers
-            .first { it.name == "AiReplyObservationRuntime.kt" }.readText()
-            .contains("gesturePolicy.cancelActive(interruptedGestureRequestId, reason)"))
+        val aiReplySource = consumers.first { it.name == "AiReplyObservationRuntime.kt" }.readText()
+        assertTrue(
+            "AI Reply must cancel an active gesture through the canonical GestureApi",
+            aiReplySource.contains("gesturePolicy.cancelActive(interruptedGestureRequestId,")
+        )
+        assertFalse(
+            "AI Reply must not cast the public GestureApi to a runtime implementation",
+            Regex("gesturePolicy\\s+as\\s+").containsMatchIn(aiReplySource)
+        )
     }
 
     @Test
