@@ -38,8 +38,6 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.LinkedHashSet
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Owns AI-mode page observation, bounded chat-region refresh and bounded message-read scheduling.
@@ -76,11 +74,8 @@ class AiReplyObservationRuntime(
     companion object {
         private const val MAX_LOGGED_STRUCTURE_EVIDENCE = 256
         private const val MAX_STRUCTURE_LOG_LINE_CHARS = 3_500
-        private const val MAX_VISIBLE_MESSAGES = 20
         private const val MESSAGE_LIST_RETRY_DELAY_MS = 120L
         private const val MAX_MESSAGE_LIST_RETRIES = 2
-        /** Slightly exceeds the adapter's 60s OCR batch timeout as a final callback safeguard. */
-        private const val MESSAGE_READ_CALLBACK_TIMEOUT_MS = 65_000L
         private val TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS = longArrayOf(350L, 700L, 1_200L)
         private const val MAX_OCR_DEBUG_TEXT_CHARS = 4_200
         private const val MAX_OCR_DEBUG_BATCHES_PER_WINDOW = 24
@@ -242,15 +237,40 @@ class AiReplyObservationRuntime(
     private var automationYieldedToUser = false
     /** Compatibility gate for an older persisted review latch; new unknown-source inputs never set it. */
     private var manualReviewRequired = false
-    private var messageReadInFlight = false
-    private var messageReadTimeoutTask: ScheduledTask? = null
-    private var pendingMessageReadSnapshot: ChatPageSnapshot? = null
-    private var messageReadGeneration = 0L
     private val loggedOcrDebugFingerprints = LinkedHashSet<String>()
     private val temporaryContactMessageLedger = TemporaryContactMessageLedger(threshold = 10)
     /** Session keys awaiting an externally verified intercept-toggle result, in threshold order. */
     private val pendingInterceptionContactKeys = LinkedHashSet<String>()
     private var ocrDebugBatchLimitLogged = false
+
+    /** Owns asynchronous OCR/message callback lifetime; Runtime handles only validated results. */
+    private val messageReadCoordinator by lazy(LazyThreadSafetyMode.NONE) {
+        ChatMessageReadCoordinator(
+            scheduler = scheduler,
+            messagePort = chatMessagePort,
+            isReadRequestAllowed = {
+                isAiReplyActive() && chatPagePort.supportsTargetPackage(targetPackage())
+            },
+            inspectActivePage = { chatPagePort.inspectChatPage() },
+            isResultCurrent = ::isMessageReadResultCurrent,
+            shouldDrainPendingSnapshot = { !isReadOnlyGreetingMessageRead() },
+            onValidatedResult = { requestedSnapshot, batch, activeSnapshot ->
+                lastPageInspection = activeSnapshot
+                handleMessageReadBatch(batch, requestedSnapshot)
+            },
+            onTimeout = { timeoutMs ->
+                onLog(
+                    "AI 模式消息读取超时：异步适配器未在 ${timeoutMs}ms 内返回；" +
+                        "已丢弃该读取代次并安排新鲜页面复核"
+                )
+                scheduleMessageListRetry()
+            },
+            onAdapterFailure = {
+                onLog("AI 模式消息读取失败：读取适配器异常；未保留消息正文")
+                cancelMessageReadRetry()
+            }
+        )
+    }
 
     private val startupReadinessCoordinator by lazy(LazyThreadSafetyMode.NONE) {
         AiReplyStartupReadinessCoordinator(
@@ -2549,153 +2569,39 @@ class AiReplyObservationRuntime(
                 return
             }
         }
-        if (messageReadInFlight) {
-            pendingMessageReadSnapshot = snapshot
-            return
-        }
-        messageReadInFlight = true
-        val requestGeneration = messageReadGeneration
-        messageReadTimeoutTask?.cancel()
-
-        // The OCR adapter may invoke its callback on a worker thread. Arbitrate callback and
-        // watchdog completion atomically, and keep a local handle so the callback can cancel the
-        // watchdog as soon as the result arrives (before its main-thread delivery is queued).
-        // Otherwise the 65s watchdog remains ahead of the queued zero-delay delivery and can
-        // invalidate a perfectly valid result while the scheduler is waiting to process it.
-        val callbackGate = Any()
-        var callbackReceived = false
-        var requestClosedWithoutCallback = false
-        val timeoutTaskRef = AtomicReference<ScheduledTask?>()
-        val timeoutTask = scheduler.schedule(MESSAGE_READ_CALLBACK_TIMEOUT_MS) {
-            val shouldHandleTimeout = synchronized(callbackGate) {
-                if (callbackReceived || requestClosedWithoutCallback) {
-                    false
-                } else {
-                    requestClosedWithoutCallback = true
-                    true
-                }
-            }
-            if (!shouldHandleTimeout || requestGeneration != messageReadGeneration || !messageReadInFlight) {
-                return@schedule
-            }
-            messageReadTimeoutTask = null
-            // Invalidate the callback before freeing the in-flight gate. A late OCR result must
-            // not complete this read or clear the timeout for a newer request.
-            messageReadGeneration += 1L
-            messageReadInFlight = false
-            pendingMessageReadSnapshot = null
-            onLog("AI 模式消息读取超时：异步适配器未在 ${MESSAGE_READ_CALLBACK_TIMEOUT_MS}ms 内返回；已丢弃该读取代次并安排新鲜页面复核")
-            scheduleMessageListRetry()
-        }
-        messageReadTimeoutTask = timeoutTask
-        timeoutTaskRef.set(timeoutTask)
-
-        val callThread = Thread.currentThread()
-        val callReturned = AtomicBoolean(false)
-        try {
-            chatMessagePort.readRecentMessagesAsync(snapshot, limit = MAX_VISIBLE_MESSAGES) { batch ->
-                val shouldDeliver = synchronized(callbackGate) {
-                    if (callbackReceived) {
-                        false
-                    } else {
-                        callbackReceived = true
-                        // Cancel on callback receipt, not when the queued delivery eventually runs.
-                        // This local handle may be cancelled from the adapter callback thread.
-                        if (!requestClosedWithoutCallback) timeoutTaskRef.get()?.cancel()
-                        true
-                    }
-                }
-                if (shouldDeliver) {
-                    val deliver = {
-                        completeMessageRead(
-                            snapshot = snapshot,
-                            batch = batch,
-                            requestGeneration = requestGeneration,
-                            revalidateActivePage = callReturned.get() || Thread.currentThread() != callThread
-                        )
-                    }
-                    if (!callReturned.get() && Thread.currentThread() == callThread) {
-                        // Keep legacy synchronous adapters synchronous; only screenshot/OCR callbacks
-                        // cross the scheduler boundary and require a fresh page validation.
-                        deliver()
-                    } else {
-                        scheduler.schedule(0L, deliver)
-                    }
-                }
-            }
-        } catch (_: Exception) {
-            // An adapter exception closes this attempt only when no callback has already won.
-            val shouldHandleException = synchronized(callbackGate) {
-                if (callbackReceived || requestClosedWithoutCallback) {
-                    false
-                } else {
-                    requestClosedWithoutCallback = true
-                    true
-                }
-            }
-            if (shouldHandleException) {
-                if (requestGeneration == messageReadGeneration) messageReadGeneration += 1L
-                timeoutTaskRef.get()?.cancel()
-                messageReadTimeoutTask = null
-                messageReadInFlight = false
-                onLog("AI 模式消息读取失败：读取适配器异常；未保留消息正文")
-                cancelMessageReadRetry()
-            }
-        } finally {
-            callReturned.set(true)
-        }
+        messageReadCoordinator.request(snapshot)
     }
 
-    private fun completeMessageRead(
+    /**
+     * Revalidates the active page/window/session before any message batch reaches business
+     * callbacks or sample persistence. The received-greetings detail path intentionally has a
+     * narrower read-only contract because it does not own a private-message session key.
+     */
+    private fun isMessageReadResultCurrent(
         snapshot: ChatPageSnapshot,
         batch: ChatMessageBatch,
-        requestGeneration: Long,
-        revalidateActivePage: Boolean
-    ) {
-        if (requestGeneration != messageReadGeneration) return
-        messageReadTimeoutTask?.cancel()
-        messageReadTimeoutTask = null
-        messageReadInFlight = false
-        val readOnlyGreetingRequest = sessionRunStarted && receivedGreetingsTaskActive &&
-            receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
-        if (isAiReplyActive() && chatPagePort.supportsTargetPackage(targetPackage())) {
-            val current = if (revalidateActivePage) {
-                runCatching { chatPagePort.inspectChatPage() }.getOrNull()
-            } else {
-                snapshot
-            }
-            val expectedWindowSessionKey = windowSessionKey(snapshot)
-            val readOnlyGreetingDetail = sessionRunStarted && receivedGreetingsTaskActive &&
-                receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
-            val stillSameChat = current?.let { active ->
-                if (readOnlyGreetingDetail) {
-                    active.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
-                        active.packageName == snapshot.packageName &&
-                        active.hasSameWindowIdentity(snapshot) &&
-                        active.windowGeneration == snapshot.windowGeneration &&
-                        (expectedWindowSessionKey == null ||
-                            batch.windowSessionKey == expectedWindowSessionKey)
-                } else {
-                    active.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
-                        active.packageName == snapshot.packageName &&
-                        active.hasSameWindowIdentity(snapshot) &&
-                        hasSameWindowSession(snapshot, active) &&
-                        expectedWindowSessionKey != null &&
-                        (currentSessionWindowKey == null || currentSessionWindowKey == expectedWindowSessionKey) &&
-                        batch.windowSessionKey == expectedWindowSessionKey
-                }
-            } == true
-            if (stillSameChat) {
-                lastPageInspection = current
-                handleMessageReadBatch(batch, snapshot)
-            }
+        active: ChatPageSnapshot
+    ): Boolean {
+        val expectedWindowSessionKey = windowSessionKey(snapshot)
+        if (isReadOnlyGreetingMessageRead()) {
+            return active.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+                active.packageName == snapshot.packageName &&
+                active.hasSameWindowIdentity(snapshot) &&
+                active.windowGeneration == snapshot.windowGeneration &&
+                (expectedWindowSessionKey == null || batch.windowSessionKey == expectedWindowSessionKey)
         }
-        val pending = pendingMessageReadSnapshot
-        pendingMessageReadSnapshot = null
-        if (!readOnlyGreetingRequest && pending != null && pending.stableKey() != snapshot.stableKey()) {
-            readVisibleMessages(pending)
-        }
+        return active.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            active.packageName == snapshot.packageName &&
+            active.hasSameWindowIdentity(snapshot) &&
+            hasSameWindowSession(snapshot, active) &&
+            expectedWindowSessionKey != null &&
+            (currentSessionWindowKey == null || currentSessionWindowKey == expectedWindowSessionKey) &&
+            batch.windowSessionKey == expectedWindowSessionKey
     }
+
+    private fun isReadOnlyGreetingMessageRead(): Boolean =
+        sessionRunStarted && receivedGreetingsTaskActive &&
+            receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
 
     private fun handleMessageReadBatch(batch: ChatMessageBatch, snapshot: ChatPageSnapshot) {
         if (sessionRunStarted) {
@@ -3436,11 +3342,7 @@ class AiReplyObservationRuntime(
         currentSessionWindowKey = null
         currentSessionName = null
         currentSessionCandidate = null
-        messageReadInFlight = false
-        messageReadTimeoutTask?.cancel()
-        messageReadTimeoutTask = null
-        pendingMessageReadSnapshot = null
-        messageReadGeneration += 1L
+        messageReadCoordinator.invalidatePending()
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
         onLog(
             "AI Reply：切换收到的招呼只读 OCR 任务；原因=$reason；" +
@@ -3496,11 +3398,7 @@ class AiReplyObservationRuntime(
         currentSessionName = null
         currentSessionCandidate = null
         currentSessionReadCaptured = false
-        messageReadInFlight = false
-        messageReadTimeoutTask?.cancel()
-        messageReadTimeoutTask = null
-        pendingMessageReadSnapshot = null
-        messageReadGeneration += 1L
+        messageReadCoordinator.invalidatePending()
 
         receivedGreetingsTaskFlow.markStarted()
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
@@ -4572,11 +4470,7 @@ class AiReplyObservationRuntime(
     }
 
     private fun invalidatePendingMessageRead() {
-        messageReadGeneration += 1L
-        messageReadInFlight = false
-        messageReadTimeoutTask?.cancel()
-        messageReadTimeoutTask = null
-        pendingMessageReadSnapshot = null
+        messageReadCoordinator.invalidatePending()
         lastMessageFingerprint = ""
         loggedOcrDebugFingerprints.clear()
         ocrDebugBatchLimitLogged = false
