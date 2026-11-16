@@ -307,14 +307,8 @@ class AiReplyObservationRuntime(
         PAUSED
     }
 
-    private enum class SessionListTraversalPhase {
-        POSITIONING_AT_BOTTOM,
-        SCANNING_BOTTOM_TO_TOP
-    }
-
     private var sessionManagerState = SessionManagerState.STOPPED
-    private var sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-    private var sessionListAtTop = false
+    private val privateMessagesTraversalTaskExecutor = PrivateMessagesTraversalTaskExecutor()
     /** Archive lifecycle is independent from the optional automatic session traversal state. */
     private var sampleCaptureActive = false
     private var passiveManualObservation = false
@@ -339,23 +333,8 @@ class AiReplyObservationRuntime(
     private var unknownCounterResetTask: ScheduledTask? = null
     private var unknownCounterResetRevision = 0L
     private var lastUnknownBehaviourAtUptimeMs = Long.MIN_VALUE
-    private val attemptedSessionKeys = LinkedHashSet<String>()
-    /** Names colliding within a visible list snapshot stay blocked for the entire run. */
-    private val ambiguousSessionIdentityKeys = LinkedHashSet<String>()
-    private var sessionActionCount = 0
-    /** Private-message quota state is owned by PrivateMessagesTaskController. */
-    private var initialInboxPositionCheckCompleted = false
-    /** True only after Android reports completion of the mandatory first upward list swipe. */
-    private var initialUnreadGateSwipeCompleted = false
-    /** Stable identities of explicitly unread private rows observed while positioning at the bottom. */
-    private val lockedUnreadSessionKeys = LinkedHashSet<String>()
-    /** Becomes true once the bottom boundary is verified; later new unread rows are next-cycle work. */
-    private var lockedUnreadSetFinalized = false
-    private var normalInboxHadUnread = false
-    private var normalInboxUnreadStateUnknown = false
     /** Set by relevant target-app page-change events; probe admission never consults InputOrigin. */
     private var receivedGreetingsPageProbePending = false
-    private var sessionListStabilityRetryCount = 0
     /** Short-lived empty accessibility roots are retried without replacing the last confirmed page. */
     private val transientEmptySnapshotRecovery = AiReplySessionTraversalCoordinator(
         TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS
@@ -363,18 +342,6 @@ class AiReplyObservationRuntime(
     /** Generation invalidates callbacks from gestures submitted before a human hand-off. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
-    private var lastUnreadAuditFingerprint = ""
-    private var noProgressScrollCount = 0
-    private var pendingScrollBaseline: List<String>? = null
-    private var pendingScrollToTop = false
-    private var lastStableSessionListVisibleKeys: List<String>? = null
-    private var cancelledScrollRecoveryCount = 0
-    /** Viewports are archived independently from whether their rows are eligible for navigation. */
-    private val capturedSessionListFingerprints = LinkedHashSet<String>()
-    /** A no-motion boundary is provisional until delayed, independent fresh snapshots agree. */
-    private var pendingBoundaryConfirmationKeys: List<String>? = null
-    private var pendingBoundaryConfirmationToTop = false
-    private var boundaryStabilityConfirmationCount = 0
 
 
     /**
@@ -499,14 +466,13 @@ class AiReplyObservationRuntime(
         if (sessionRunStarted && receivedGreetingsTaskActive &&
             sessionManagerState == SessionManagerState.BROWSING_RECEIVED_GREETINGS
         ) {
-            val traversalBefore = runCatching { receivedGreetingsTaskExecutor.traversalStatus() }
-                .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
-            if (traversalBefore == ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND) {
+            val pageProgress = receivedGreetingsTaskExecutor.evaluatePageProgress(inspection.pageKind)
+            if (pageProgress.decision == ReceivedGreetingsTaskExecutor.PageDecision.ENTRY_NOT_FOUND) {
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("收到的招呼入口未发现：普通消息列表已完成双向搜索并复核两端边界；这是已确认的入口缺失结果，不是单次页面核验失败")
                 return
             }
-            if (traversalBefore == ReceivedGreetingsTraversalStatus.COMPLETE) {
+            if (pageProgress.decision == ReceivedGreetingsTaskExecutor.PageDecision.COMPLETE) {
                 if (completeReceivedGreetingsTaskAtCurrentPage()) return
                 val returned = runCatching {
                     receivedGreetingsTaskExecutor.returnForPriorityCheck()
@@ -521,24 +487,19 @@ class AiReplyObservationRuntime(
                 }
                 return
             }
-            if (traversalBefore == ReceivedGreetingsTraversalStatus.DETAIL_READY &&
-                inspection.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE
-            ) {
+            if (pageProgress.decision == ReceivedGreetingsTaskExecutor.PageDecision.WAIT_FOR_DETAIL_PAGE) {
                 scheduleReceivedGreetingsRecoveryRetry(
                     "适配器报告详情候选但当前页面快照尚非聊天详情；等待同窗口新鲜快照，不进入普通消息列表流程"
                 )
                 return
             }
-            if (traversalBefore != ReceivedGreetingsTraversalStatus.DETAIL_READY) {
+            if (pageProgress.decision == ReceivedGreetingsTaskExecutor.PageDecision.ADVANCE_REQUIRED) {
                 // Keep invoking the adapter's bounded idle step even when the current page is
                 // still the ordinary CHAT_LIST. Entry discovery can require scrolling through
                 // the Message list; one failed viewport lookup must not silently strand the task.
-                val observed = runCatching { receivedGreetingsTaskExecutor.performIdleStep() }
-                    .getOrDefault(false)
-                val nextStatus = runCatching { receivedGreetingsTaskExecutor.traversalStatus() }
-                    .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
-                if (!observed) {
-                    if (nextStatus == ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND) {
+                val stepObservation = receivedGreetingsTaskExecutor.performIdleStepAndInspect()
+                if (stepObservation.decision == ReceivedGreetingsTaskExecutor.StepDecision.RETRY_REQUIRED) {
+                    if (stepObservation.status == ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND) {
                         sessionManagerState = SessionManagerState.PAUSED
                         onLog("收到的招呼导航暂停：已完成普通消息列表双向搜索，入口未出现")
                     } else {
@@ -548,8 +509,8 @@ class AiReplyObservationRuntime(
                     }
                 } else {
                     receivedGreetingsTaskController.resetRecoveryRetryCount()
-                    when (nextStatus) {
-                        ReceivedGreetingsTraversalStatus.COMPLETE -> {
+                    when (stepObservation.decision) {
+                        ReceivedGreetingsTaskExecutor.StepDecision.COMPLETE -> {
                             if (completeReceivedGreetingsTaskAtCurrentPage()) return
                             onLog("收到的招呼导航：适配器报告列表边界候选；仍需完成安全返回与普通列表页面复核")
                             val returned = runCatching {
@@ -564,7 +525,7 @@ class AiReplyObservationRuntime(
                             }
                             return
                         }
-                        ReceivedGreetingsTraversalStatus.SCANNING -> {
+                        ReceivedGreetingsTaskExecutor.StepDecision.LIST_CONTINUES -> {
                             // The generic page inspector can still call the transition screen
                             // NON_CHAT while the adapter has independently confirmed the
                             // received-greetings list. Keep this adapter-owned workflow alive;
@@ -572,27 +533,21 @@ class AiReplyObservationRuntime(
                             onLog("收到的招呼只读测试：已验证列表页面；优先采集未读行头像身份和聊天详情 OCR，完成后再滚动；不回复")
                             scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                         }
-                        ReceivedGreetingsTraversalStatus.PROFILE_CARD -> {
+                        ReceivedGreetingsTaskExecutor.StepDecision.PROFILE_CARD_PENDING -> {
                             onLog("收到的招呼导航：已识别资料卡；等待 NewSayHiSessionListActivity；继续复核顶部‘列表’控件；不触碰通过/拒绝按钮")
                             scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                         }
-                        ReceivedGreetingsTraversalStatus.NAVIGATING -> {
-                            onLog("收到的招呼导航：入口定位/页面切换仍在进行；保留导航阶段并等待新快照")
-                            scheduleFullInspectionAfter(RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS)
-                        }
-                        ReceivedGreetingsTraversalStatus.UNKNOWN -> {
-                            // UNKNOWN is an explicit adapter status change, not proof that the
-                            // ordinary inbox is safe to inspect. Keep the greetings workflow
-                            // active, report the transition, and retry with the bounded
-                            // navigation cadence without sampling stale inbox rows.
-                            onLog("收到的招呼导航：页面状态已变化为 UNKNOWN；保留导航阶段并等待新快照")
-                            scheduleFullInspectionAfter(RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS)
-                        }
-                        ReceivedGreetingsTraversalStatus.DETAIL_READY,
-                        ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND -> {
-                            onLog("收到的招呼导航：页面状态已变化为 ${nextStatus.name}；等待下一次页面级复核")
+                        ReceivedGreetingsTaskExecutor.StepDecision.ENTRY_NOT_FOUND_RECHECK -> {
+                            onLog("收到的招呼导航：页面状态已变化为 ENTRY_NOT_FOUND；等待下一次页面级复核")
                             scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                         }
+                        ReceivedGreetingsTaskExecutor.StepDecision.PAGE_TRANSITION_PENDING -> {
+                            // NAVIGATING, DETAIL_READY and UNKNOWN require a fresh page observation
+                            // before the traversal can safely continue.
+                            onLog("收到的招呼导航：页面状态已变化为 ${stepObservation.status.name}；保留当前阶段并等待新快照")
+                            scheduleFullInspectionAfter(RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS)
+                        }
+                        ReceivedGreetingsTaskExecutor.StepDecision.RETRY_REQUIRED -> Unit // Handled above.
                     }
                 }
                 return
@@ -610,7 +565,7 @@ class AiReplyObservationRuntime(
                 SessionManagerState.WAITING_FOR_SESSION_LIST,
                 SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM,
                 SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
-            ) && (previous?.pageKind == ChatPageKind.CHAT_LIST || sessionListStabilityRetryCount > 0)
+            ) && (previous?.pageKind == ChatPageKind.CHAT_LIST || privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount > 0)
         ) {
             scheduleSessionListStabilityRetry("页面结构暂时不可用")
             return
@@ -627,23 +582,12 @@ class AiReplyObservationRuntime(
                 when {
                     sessionRunStarted && !automationYieldedToUser && awaitingNormalInboxAfterGreetingsReturn -> {
                         receivedGreetingsTaskController.markTraversalReturnedToInbox()
-                        sessionActionCount = 0
+                        privateMessagesTraversalTaskExecutor.sessionActionCount = 0
                         privateMessagesTaskController.resetQuota()
                         // The greeting branch returned to the already-established inbox context.
                         // Start a fresh quota/identity set without replaying the startup admission swipe.
-                        lockedUnreadSessionKeys.clear()
-                        lockedUnreadSetFinalized = false
+                        privateMessagesTraversalTaskExecutor.resetForReturnedInbox()
                         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                        attemptedSessionKeys.clear()
-                        initialInboxPositionCheckCompleted = true
-                        sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-                        sessionListAtTop = false
-                        noProgressScrollCount = 0
-                        pendingScrollBaseline = null
-                        pendingScrollToTop = false
-                        lastStableSessionListVisibleKeys = null
-                        normalInboxHadUnread = false
-                        normalInboxUnreadStateUnknown = false
                         val eligibleUnread = inspection.chatListCandidates.count {
                             it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
                         }
@@ -653,14 +597,14 @@ class AiReplyObservationRuntime(
                         onLog("AI Reply 测试遍历：收到的招呼列表已返回普通消息页；当前位置明确未读=$eligibleUnread；未知=$eligibleUnknown")
                         when {
                             eligibleUnknown > 0 -> {
-                                normalInboxUnreadStateUnknown = true
+                                privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = true
                                 sessionManagerState = SessionManagerState.PAUSED
                                 onLog("AI Reply 测试遍历暂停：返回普通消息页存在 UNKNOWN 未读状态；不将未知判定为无消息")
                             }
                             eligibleUnread > 0 -> {
-                                normalInboxHadUnread = true
-                                sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-                                sessionListAtTop = false
+                                privateMessagesTraversalTaskExecutor.normalInboxHadUnread = true
+                                privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+                                privateMessagesTraversalTaskExecutor.atTop = false
                                 sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
                                 handleSessionListPage(inspection)
                             }
@@ -716,24 +660,22 @@ class AiReplyObservationRuntime(
                 if (sessionRunStarted && receivedGreetingsTaskActive &&
                     sessionManagerState == SessionManagerState.BROWSING_RECEIVED_GREETINGS
                 ) {
-                    val observed = runCatching { receivedGreetingsTaskExecutor.performIdleStep() }
-                        .getOrDefault(false)
-                    val traversalStatus = runCatching { receivedGreetingsTaskExecutor.traversalStatus() }
-                        .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
-                    when {
-                        !observed -> {
+                    val stepObservation = receivedGreetingsTaskExecutor.performIdleStepAndInspect()
+                    val traversalStatus = stepObservation.status
+                    when (stepObservation.decision) {
+                        ReceivedGreetingsTaskExecutor.StepDecision.RETRY_REQUIRED -> {
                             scheduleReceivedGreetingsRecoveryRetry(
                                 if (traversalStatus == ReceivedGreetingsTraversalStatus.SCANNING)
                                     "已识别列表，但本轮快照/安全滚动检查暂未完成"
                                 else "无法验证当前页面或提交安全滚动；不执行用户行点击"
                             )
                         }
-                        traversalStatus == ReceivedGreetingsTraversalStatus.SCANNING -> {
+                        ReceivedGreetingsTaskExecutor.StepDecision.LIST_CONTINUES -> {
                             receivedGreetingsTaskController.resetRecoveryRetryCount()
                             onLog("收到的招呼只读测试：已验证列表页面；优先采集未读行头像身份和聊天详情 OCR，完成后再滚动；不回复")
                             scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                         }
-                        traversalStatus == ReceivedGreetingsTraversalStatus.COMPLETE -> {
+                        ReceivedGreetingsTaskExecutor.StepDecision.COMPLETE -> {
                             if (completeReceivedGreetingsTaskAtCurrentPage()) return
                             val returned = runCatching {
                                 receivedGreetingsTaskExecutor.returnForPriorityCheck()
@@ -747,12 +689,17 @@ class AiReplyObservationRuntime(
                                 scheduleReceivedGreetingsRecoveryRetry("列表边界已确认，但返回普通消息页暂未通过安全检查")
                             }
                         }
-                        traversalStatus == ReceivedGreetingsTraversalStatus.PROFILE_CARD -> {
+                        ReceivedGreetingsTaskExecutor.StepDecision.PROFILE_CARD_PENDING -> {
                             scheduleReceivedGreetingsRecoveryRetry(
                                 "资料卡顶部‘列表’控件尚未切换到已验证的招呼列表页面；不触碰通过/拒绝按钮"
                             )
                         }
-                        else -> {
+                        ReceivedGreetingsTaskExecutor.StepDecision.ENTRY_NOT_FOUND_RECHECK -> {
+                            scheduleReceivedGreetingsRecoveryRetry(
+                                "适配器报告入口未发现，但本次步骤已被接受；等待新鲜页面复核"
+                            )
+                        }
+                        ReceivedGreetingsTaskExecutor.StepDecision.PAGE_TRANSITION_PENDING -> {
                             scheduleReceivedGreetingsRecoveryRetry(
                                 "入口/页面仍在切换或当前状态暂时未知；不执行盲目滑动或返回"
                             )
@@ -786,7 +733,7 @@ class AiReplyObservationRuntime(
      */
     private fun capturePassiveSessionList(snapshot: ChatPageSnapshot) {
         val fingerprint = snapshot.stableKey()
-        if (!capturedSessionListFingerprints.add(fingerprint)) return
+        if (!privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.add(fingerprint)) return
         chatSessionManagementPort.captureSessionListSample(snapshot) { screenshotPath ->
             scheduler.schedule(0L) {
                 if (!isAiReplyActive() || !isManualObservationEnabled()) {
@@ -797,7 +744,7 @@ class AiReplyObservationRuntime(
                         "明确未读=${snapshot.chatListCandidates.count { it.unreadStatus == ChatUnreadStatus.UNREAD }}；" +
                         "已读=${snapshot.chatListCandidates.count { it.unreadStatus == ChatUnreadStatus.READ }}；" +
                         "未知=${snapshot.chatListCandidates.count { it.unreadStatus == ChatUnreadStatus.UNKNOWN }}；" +
-                        "累计不同视口=${capturedSessionListFingerprints.size}；" +
+                        "累计不同视口=${privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.size}；" +
                         "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}；不执行列表手势或点击"
                 )
             }
@@ -1110,11 +1057,11 @@ class AiReplyObservationRuntime(
         } else {
             onLog("人工接管[ACTIVE_GESTURE_INVALIDATED]：没有活动自主手势；任务代次=$sessionActionGeneration")
         }
-        pendingScrollBaseline = null
-        pendingScrollToTop = false
-        pendingBoundaryConfirmationKeys = null
-        pendingBoundaryConfirmationToTop = false
-        boundaryStabilityConfirmationCount = 0
+        privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+        privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
+        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
+        privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
         pageInspectionTask?.cancel()
         pageInspectionTask = null
         regionRefreshTask?.cancel()
@@ -1909,25 +1856,23 @@ class AiReplyObservationRuntime(
         }
 
         // A fresh page is now authoritative. Re-run the unread gate before any positioning swipe.
-        initialInboxPositionCheckCompleted = false
-        initialUnreadGateSwipeCompleted = false
-        lockedUnreadSessionKeys.clear()
-        lockedUnreadSetFinalized = false
-        normalInboxHadUnread = false
-        normalInboxUnreadStateUnknown = false
+        privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
+        privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = false
+        privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.clear()
+        privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized = false
+        privateMessagesTraversalTaskExecutor.normalInboxHadUnread = false
+        privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = false
         // Human navigation invalidates the old viewport position. The first fresh snapshot must
         // pass the unread gate before any bottom-positioning swipe can be submitted.
-        sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-        sessionListAtTop = false
-        noProgressScrollCount = 0
-        sessionListStabilityRetryCount = 0
-        pendingScrollBaseline = null
-        pendingScrollToTop = false
-        pendingBoundaryConfirmationKeys = null
-        pendingBoundaryConfirmationToTop = false
-        boundaryStabilityConfirmationCount = 0
-        lastStableSessionListVisibleKeys = null
-        cancelledScrollRecoveryCount = 0
+        privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
+        privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount = 0
+        privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+        privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
+        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
+        privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
+        privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
+        privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount = 0
         currentSessionKey = null
         currentSessionName = null
         currentSessionCandidate = null
@@ -2286,39 +2231,18 @@ class AiReplyObservationRuntime(
         userHandoffCanResumeAutonomous = false
         sessionManagerState = SessionManagerState.STOPPED
         taskOwnership.reset("运行时重置：$reason")
-        sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-        sessionListAtTop = false
         currentSessionKey = null
         currentSessionName = null
         currentSessionCandidate = null
         currentSessionReadCaptured = false
         currentSessionWindowKey = null
-        capturedSessionListFingerprints.clear()
+        privateMessagesTraversalTaskExecutor.reset()
         lastMessageFingerprint = ""
-        pendingBoundaryConfirmationKeys = null
-        pendingBoundaryConfirmationToTop = false
-        boundaryStabilityConfirmationCount = 0
-        attemptedSessionKeys.clear()
-        ambiguousSessionIdentityKeys.clear()
         temporaryContactMessageLedger.clearAll()
         pendingInterceptionContactKeys.clear()
-        sessionActionCount = 0
         privateMessagesTaskController.resetQuota()
         receivedGreetingsTaskController.reset()
-        initialInboxPositionCheckCompleted = false
-        initialUnreadGateSwipeCompleted = false
-        lockedUnreadSessionKeys.clear()
-        lockedUnreadSetFinalized = false
-        normalInboxHadUnread = false
-        normalInboxUnreadStateUnknown = false
         receivedGreetingsPageProbePending = false
-        sessionListStabilityRetryCount = 0
-        lastUnreadAuditFingerprint = ""
-        noProgressScrollCount = 0
-        pendingScrollBaseline = null
-        pendingScrollToTop = false
-        lastStableSessionListVisibleKeys = null
-        cancelledScrollRecoveryCount = 0
     }
 
     /**
@@ -2399,23 +2323,23 @@ class AiReplyObservationRuntime(
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         privateMessagesTaskController.resetQuota()
         receivedGreetingsTaskController.reset()
-        initialInboxPositionCheckCompleted = false
-        initialUnreadGateSwipeCompleted = false
-        lockedUnreadSessionKeys.clear()
-        lockedUnreadSetFinalized = false
-        normalInboxHadUnread = false
-        normalInboxUnreadStateUnknown = false
+        privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
+        privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = false
+        privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.clear()
+        privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized = false
+        privateMessagesTraversalTaskExecutor.normalInboxHadUnread = false
+        privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = false
         receivedGreetingsPageProbePending = false
         pageObservationCoordinator.resetReceivedGreetingsWatch()
-        sessionActionCount = 0
+        privateMessagesTraversalTaskExecutor.sessionActionCount = 0
         userHandoffCanResumeAutonomous = false
-        sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-        sessionListAtTop = false
-        noProgressScrollCount = 0
-        pendingScrollBaseline = null
-        pendingScrollToTop = false
-        lastStableSessionListVisibleKeys = null
-        capturedSessionListFingerprints.clear()
+        privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+        privateMessagesTraversalTaskExecutor.atTop = false
+        privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
+        privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+        privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+        privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
+        privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.clear()
         lastMessageFingerprint = ""
         archivedManualMessageFingerprints.clear()
         cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
@@ -2428,9 +2352,9 @@ class AiReplyObservationRuntime(
         messageTabPositionConfirmedForCycle = false
         messageTabNavigationAnchorBeforeTap = null
         automationYieldedToUser = false
-        pendingBoundaryConfirmationKeys = null
-        pendingBoundaryConfirmationToTop = false
-        boundaryStabilityConfirmationCount = 0
+        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
+        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
+        privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
         sessionManagerState = if (sessionRunStarted) {
             SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
         } else {
@@ -3030,7 +2954,7 @@ class AiReplyObservationRuntime(
     }
 
     private fun handleSessionListPage(snapshot: ChatPageSnapshot) {
-        if (pendingBoundaryConfirmationKeys != null) {
+        if (privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys != null) {
             // The delayed boundary verifier owns this interval. Ignore ordinary page events so
             // an early accessibility callback cannot turn a provisional no-motion result into
             // a completed traversal.
@@ -3053,39 +2977,21 @@ class AiReplyObservationRuntime(
 
         // The first list snapshot is a read-only current-position check. It must happen before
         // the positioning phase is allowed to submit any swipe gesture.
-        if (!initialInboxPositionCheckCompleted && !receivedGreetingsTaskActive) {
-            initialInboxPositionCheckCompleted = true
+        if (!privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted && !receivedGreetingsTaskActive) {
+            privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = true
             // This snapshot only establishes the current Message work area. The required
             // first upward swipe must complete before unread/no-unread is decided.
-            normalInboxHadUnread = false
-            normalInboxUnreadStateUnknown = false
+            privateMessagesTraversalTaskExecutor.normalInboxHadUnread = false
+            privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = false
             onLog(
                 "AI Reply 启动检查：已确认消息工作区域；当前视口行=${snapshot.chatListCandidates.size}；" +
                     "先执行一次向上滑动，手势成功后再判定未读，不使用滑动前快照作结论"
             )
         }
-        if (!receivedGreetingsTaskActive) {
-            val visibleUnread = snapshot.chatListCandidates.any {
-                it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
-            }
-            val visibleUnknown = snapshot.chatListCandidates.any {
-                it.unreadStatus == ChatUnreadStatus.UNKNOWN && ChatSessionManagementPolicy.isEligible(it)
-            }
-            if (sessionListTraversalPhase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM) {
-                // Before the first bottom boundary, each newly exposed viewport contributes to
-                // the locked set. After finalization, repositioning must not admit new messages.
-                if (!lockedUnreadSetFinalized) {
-                    normalInboxHadUnread = visibleUnread
-                    normalInboxUnreadStateUnknown = visibleUnknown
-                } else {
-                    if (visibleUnknown) normalInboxUnreadStateUnknown = true
-                }
-            } else {
-                // Once traversal starts, retain whether any visited viewport had unknown status.
-                if (visibleUnread) normalInboxHadUnread = true
-                if (visibleUnknown) normalInboxUnreadStateUnknown = true
-            }
-        }
+        privateMessagesTraversalTaskExecutor.recordViewportUnreadEvidence(
+            snapshot,
+            receivedGreetingsActive = receivedGreetingsTaskActive
+        )
 
         if (sessionManagerState == SessionManagerState.RETURNING_TO_SESSION_LIST) {
             sessionTransitionTask?.cancel()
@@ -3112,12 +3018,12 @@ class AiReplyObservationRuntime(
             }
         }
 
-        val snapshotAmbiguousKeys = ChatSessionManagementPolicy.ambiguousSessionIdentityKeys(
+        val snapshotAmbiguousKeys = privateMessagesTraversalTaskExecutor.ambiguousIdentityKeys(
             snapshot.chatListCandidates
         )
-        val newlyAmbiguousKeys = snapshotAmbiguousKeys - ambiguousSessionIdentityKeys
+        val newlyAmbiguousKeys = snapshotAmbiguousKeys - privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys
         if (snapshotAmbiguousKeys.isNotEmpty()) {
-            ambiguousSessionIdentityKeys += snapshotAmbiguousKeys
+            privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys += snapshotAmbiguousKeys
         }
         if (newlyAmbiguousKeys.isNotEmpty()) {
             newlyAmbiguousKeys.forEach(chatSessionManagementPort::blockSessionIdentityKey)
@@ -3137,8 +3043,8 @@ class AiReplyObservationRuntime(
         val unreadAuditFingerprint =
             "${sessionManagerState.name}:${snapshot.stableKey()}:" +
                 "${snapshot.chatListUnreadDiagnostics}:${snapshotAmbiguousKeys.sorted().joinToString(",")}"
-        if (unreadAuditFingerprint != lastUnreadAuditFingerprint) {
-            lastUnreadAuditFingerprint = unreadAuditFingerprint
+        if (unreadAuditFingerprint != privateMessagesTraversalTaskExecutor.lastUnreadAuditFingerprint) {
+            privateMessagesTraversalTaskExecutor.lastUnreadAuditFingerprint = unreadAuditFingerprint
             onLog(
                 "AI 会话管理：未读证据审计；" + formatUnreadAudit(snapshot, snapshotAmbiguousKeys) +
                     "；复查状态=${sessionManagerState.name}"
@@ -3149,47 +3055,36 @@ class AiReplyObservationRuntime(
         // blocked identities. This is observation-only: blocked keys remain excluded by
         // selectNext() and attemptOpenSession(), and can never become tap candidates here.
         val wasWaitingForUnread = sessionManagerState == SessionManagerState.WAITING_FOR_UNREAD
-        val hadPendingScrollBaseline = pendingScrollBaseline != null
-        val visibleKeys = visibleSessionKeys(snapshot)
-        pendingScrollBaseline?.let { baseline ->
-            val positionChanged = visibleKeys != baseline
-            val wasScrollingToTop = pendingScrollToTop
-            pendingScrollBaseline = null
-            pendingScrollToTop = false
-            if (wasScrollingToTop) {
-                if (positionChanged) {
-                    // The swipe exposed a new viewport. Inspect this exact snapshot before
-                    // issuing another top-directed swipe, otherwise intermediate unread rows
-                    // would be skipped while the runtime rapidly scrolls to the top.
-                    noProgressScrollCount = 0
-                    sessionListAtTop = false
-                    onLog("AI 会话管理：顶部方向滑动后可见会话行发生变化；先审视当前新区域")
-                } else {
-                    // Require two consecutive unchanged fresh snapshots at the top boundary. A
-                    // completed gesture alone, or one temporarily blocked swipe, is not proof.
-                    noProgressScrollCount += 1
-                    if (noProgressScrollCount < MAX_NO_PROGRESS_SCROLLS) {
-                        sessionListAtTop = false
-                        onLog("AI 会话管理：顶部定位后新快照未见位置变化；稳定确认计数=$noProgressScrollCount")
-                        scrollSessionList(snapshot, toTop = true)
-                        return
-                    }
-                    beginBoundaryStabilityConfirmation(visibleKeys, toTop = true, snapshot = snapshot)
-                    return
-                }
-            } else if (!positionChanged) {
-                noProgressScrollCount += 1
-                onLog("AI 会话管理：滚动后可见行顺序与身份集合未变化；底部定位无进展计数=$noProgressScrollCount")
-                if (sessionListTraversalPhase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM &&
-                    noProgressScrollCount >= MAX_NO_PROGRESS_SCROLLS
-                ) {
-                    beginBoundaryStabilityConfirmation(visibleKeys, toTop = false, snapshot = snapshot)
-                    return
-                }
-            } else {
-                noProgressScrollCount = 0
-                sessionListAtTop = false
+        val hadPendingScrollBaseline = privateMessagesTraversalTaskExecutor.pendingScrollBaseline != null
+        val visibleKeys = privateMessagesTraversalTaskExecutor.visibleSessionKeys(snapshot)
+        when (privateMessagesTraversalTaskExecutor.consumePendingScrollObservation(
+            visibleKeys = visibleKeys,
+            maxNoProgressScrolls = MAX_NO_PROGRESS_SCROLLS
+        )) {
+            PrivateMessagesScrollObservationDecision.NO_PENDING_SCROLL -> Unit
+            PrivateMessagesScrollObservationDecision.TOP_VIEWPORT_CHANGED -> {
+                // The swipe exposed a new viewport. Inspect this exact snapshot before issuing
+                // another top-directed swipe, otherwise intermediate unread rows could be skipped.
+                onLog("AI 会话管理：顶部方向滑动后可见会话行发生变化；先审视当前新区域")
             }
+            PrivateMessagesScrollObservationDecision.TOP_NO_PROGRESS_RETRY -> {
+                onLog("AI 会话管理：顶部定位后新快照未见位置变化；稳定确认计数=${privateMessagesTraversalTaskExecutor.noProgressScrollCount}")
+                scrollSessionList(snapshot, toTop = true)
+                return
+            }
+            PrivateMessagesScrollObservationDecision.TOP_BOUNDARY_CANDIDATE -> {
+                beginBoundaryStabilityConfirmation(visibleKeys, toTop = true, snapshot = snapshot)
+                return
+            }
+            PrivateMessagesScrollObservationDecision.BOTTOM_NO_PROGRESS -> {
+                onLog("AI 会话管理：滚动后可见行顺序与身份集合未变化；底部定位无进展计数=${privateMessagesTraversalTaskExecutor.noProgressScrollCount}")
+            }
+            PrivateMessagesScrollObservationDecision.BOTTOM_BOUNDARY_CANDIDATE -> {
+                onLog("AI 会话管理：滚动后可见行顺序与身份集合未变化；底部定位无进展计数=${privateMessagesTraversalTaskExecutor.noProgressScrollCount}")
+                beginBoundaryStabilityConfirmation(visibleKeys, toTop = false, snapshot = snapshot)
+                return
+            }
+            PrivateMessagesScrollObservationDecision.BOTTOM_VIEWPORT_CHANGED -> Unit
         }
 
         // A viewport identity change without one of our pending scroll gestures means the
@@ -3197,32 +3092,20 @@ class AiReplyObservationRuntime(
         // a detail-page visit). Re-establish the bottom before continuing; do not tap rows
         // from a position whose place in the traversal is unknown. Parked events remain
         // current-page probes and deliberately do not trigger a full reposition.
-        if (!hadPendingScrollBaseline && !wasWaitingForUnread && visibleKeys.isNotEmpty() &&
-            sessionListTraversalPhase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        if (privateMessagesTraversalTaskExecutor.reconcileUnrequestedViewportChange(
+                hadPendingScrollBaseline = hadPendingScrollBaseline,
+                wasWaitingForUnread = wasWaitingForUnread,
+                visibleKeys = visibleKeys,
+                snapshot = snapshot
+            )
         ) {
-            val previousVisibleKeys = lastStableSessionListVisibleKeys
-            if (previousVisibleKeys != null && previousVisibleKeys != visibleKeys) {
-                sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-                sessionListAtTop = false
-                noProgressScrollCount = 0
-                sessionListStabilityRetryCount = 0
-                // Repositioning is based on this fresh viewport, not stale unread evidence from
-                // the page visited before opening a session. Any currently visible UNREAD row
-                // is still handled first by the admission gate below; UNKNOWN still blocks the swipe.
-                normalInboxHadUnread = snapshot.chatListCandidates.any {
-                    it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
-                }
-                normalInboxUnreadStateUnknown = snapshot.chatListCandidates.any {
-                    it.unreadStatus == ChatUnreadStatus.UNKNOWN && ChatSessionManagementPolicy.isEligible(it)
-                }
-                sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
-                onLog(
-                    "AI 会话管理：未发出滚动手势时可见会话身份序列发生变化；当前列表位置不可信；" +
-                        "以最新视口重新核对未读状态；保留本轮已处理身份，重新定位底部后继续审视"
-                )
-            }
+            sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
+            onLog(
+                "AI 会话管理：未发出滚动手势时可见会话身份序列发生变化；当前列表位置不可信；" +
+                    "以最新视口重新核对未读状态；保留本轮已处理身份，重新定位底部后继续审视"
+            )
         }
-        if (visibleKeys.isNotEmpty()) lastStableSessionListVisibleKeys = visibleKeys
+        if (visibleKeys.isNotEmpty()) privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = visibleKeys
 
         if (snapshot.chatListCandidates.isEmpty()) {
             if (sessionManagerState == SessionManagerState.WAITING_FOR_UNREAD) {
@@ -3238,43 +3121,32 @@ class AiReplyObservationRuntime(
             scheduleSessionListStabilityRetry("当前列表暂未提取到会话行")
             return
         }
-        sessionListStabilityRetryCount = 0
+        privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount = 0
 
-        if (sessionListTraversalPhase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM &&
+        if (privateMessagesTraversalTaskExecutor.phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM &&
             !wasWaitingForUnread
         ) {
-            if (!initialUnreadGateSwipeCompleted) {
-                // First successful upward swipe is a mandatory admission probe.
-                sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
-                onLog("AI Reply 启动准入：执行进入消息工作区后的首次向上滑动；完成后才检查未读")
-                scrollSessionList(snapshot, toTop = false)
-                return
-            }
-            val viewportUnread = snapshot.chatListCandidates.filter {
-                it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
-            }
-            if (!lockedUnreadSetFinalized) {
-                lockedUnreadSessionKeys += viewportUnread.map(ChatSessionManagementPolicy::stableSessionKey)
-                normalInboxHadUnread = lockedUnreadSessionKeys.isNotEmpty()
-            }
-            if (snapshot.chatListCandidates.any {
-                    ChatSessionManagementPolicy.isEligible(it) && it.unreadStatus == ChatUnreadStatus.UNKNOWN
+            when (privateMessagesTraversalTaskExecutor.evaluateUnreadAdmission(snapshot)) {
+                PrivateMessagesUnreadAdmissionDecision.FIRST_SWIPE_REQUIRED -> {
+                    // First successful upward swipe is a mandatory admission probe.
+                    sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
+                    onLog("AI Reply 启动准入：执行进入消息工作区后的首次向上滑动；完成后才检查未读")
+                    scrollSessionList(snapshot, toTop = false)
+                    return
                 }
-            ) normalInboxUnreadStateUnknown = true
-            when {
-                normalInboxUnreadStateUnknown -> {
+                PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED -> {
                     sessionManagerState = SessionManagerState.PAUSED
                     onLog("AI Reply 启动准入[UNREAD_STATE_UNKNOWN]：首次成功滑动后的视口存在 UNKNOWN；暂停，不把未知当作无未读")
                     return
                 }
-                lockedUnreadSessionKeys.isEmpty() -> {
+                PrivateMessagesUnreadAdmissionDecision.NO_UNREAD -> {
                     onLog("AI Reply 启动准入[NO_UNREAD_AFTER_FIRST_SWIPE]：首次成功向上滑动后的视口没有明确未读；不再滑动到底部，直接切换收到的招呼任务")
                     startReceivedGreetingsTask("进入消息工作区后首次成功向上滑动，确认当前视口没有明确未读私人消息")
                     return
                 }
-                else -> {
+                PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING -> {
                     sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
-                    onLog("AI Reply 启动准入[UNREAD_LOCKING]：已锁定明确未读身份=${lockedUnreadSessionKeys.size}；继续向上滑动收集其余未读行，定位列表底部")
+                    onLog("AI Reply 启动准入[UNREAD_LOCKING]：已锁定明确未读身份=${privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.size}；继续向上滑动收集其余未读行，定位列表底部")
                     scrollSessionList(snapshot, toTop = false)
                     return
                 }
@@ -3285,17 +3157,11 @@ class AiReplyObservationRuntime(
                 it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
             }
         ) {
-            attemptedSessionKeys.clear()
+            privateMessagesTraversalTaskExecutor.attemptedSessionKeys.clear()
         }
-        val eligibleForThisTask = if (lockedUnreadSessionKeys.isNotEmpty()) {
-            snapshot.chatListCandidates.filter {
-                ChatSessionManagementPolicy.stableSessionKey(it) in lockedUnreadSessionKeys
-            }
-        } else snapshot.chatListCandidates
-        val next = ChatSessionManagementPolicy.selectNext(
-            eligibleForThisTask,
-            attemptedSessionKeys,
-            ambiguousSessionIdentityKeys
+        val next = privateMessagesTraversalTaskExecutor.selectNextCandidate(
+            snapshot.chatListCandidates,
+            privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys
         )
 
         // ChatPageSnapshot.stableKey() captures page/window/viewport structure and redacted
@@ -3321,7 +3187,7 @@ class AiReplyObservationRuntime(
             // Archive every distinct viewport even when all visible rows are blocked, read,
             // unknown, or otherwise ineligible. Sampling is observation-only and never grants
             // permission to click a row.
-            if (capturedSessionListFingerprints.add(structuralFingerprint)) {
+            if (privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.add(structuralFingerprint)) {
                 sessionManagerState = SessionManagerState.CAPTURING_SESSION_LIST
                 chatSessionManagementPort.captureSessionListSample(snapshot) { screenshotPath ->
                     scheduler.schedule(0L) {
@@ -3336,7 +3202,7 @@ class AiReplyObservationRuntime(
                                 "未读=${snapshot.chatListCandidates.count { it.unreadStatus.name == "UNREAD" }}；" +
                                 "未知=${snapshot.chatListCandidates.count { it.unreadStatus.name == "UNKNOWN" }}；" +
                                 "身份冲突键数=${snapshotAmbiguousKeys.size}；" +
-                                "累计不同视口=${capturedSessionListFingerprints.size}；" +
+                                "累计不同视口=${privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.size}；" +
                                 "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}"
                         )
                         continueSessionListWithoutCandidate(snapshot)
@@ -3351,12 +3217,12 @@ class AiReplyObservationRuntime(
         if (wasWaitingForUnread) {
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
-                sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-            sessionListAtTop = false
-            noProgressScrollCount = 0
-            pendingScrollBaseline = null
-            pendingScrollToTop = false
-            lastStableSessionListVisibleKeys = null
+            privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+            privateMessagesTraversalTaskExecutor.atTop = false
+            privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
+            privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+            privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+            privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
             sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
             onLog("AI Reply 低频待机结束：当前页发现明确未读；先确认当前位置，再重新定位普通消息列表底部并由下往上处理")
             scrollSessionList(snapshot, toTop = false)
@@ -3365,7 +3231,7 @@ class AiReplyObservationRuntime(
             sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
         }
 
-        if (capturedSessionListFingerprints.add(structuralFingerprint)) {
+        if (privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.add(structuralFingerprint)) {
             sessionManagerState = SessionManagerState.CAPTURING_SESSION_LIST
             chatSessionManagementPort.captureSessionListSample(snapshot) { screenshotPath ->
                 scheduler.schedule(0L) {
@@ -3380,7 +3246,7 @@ class AiReplyObservationRuntime(
                             "未读=${snapshot.chatListCandidates.count { it.unreadStatus.name == "UNREAD" }}；" +
                             "未知=${snapshot.chatListCandidates.count { it.unreadStatus.name == "UNKNOWN" }}；" +
                             "身份冲突键数=${snapshotAmbiguousKeys.size}；" +
-                            "累计不同视口=${capturedSessionListFingerprints.size}；" +
+                            "累计不同视口=${privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.size}；" +
                             "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}"
                     )
                     attemptOpenSession(next)
@@ -3390,21 +3256,6 @@ class AiReplyObservationRuntime(
             attemptOpenSession(next)
         }
     }
-
-    private fun visibleSessionKeys(snapshot: ChatPageSnapshot): List<String> =
-        ChatSessionManagementPolicy.orderBottomToTop(
-            snapshot.chatListCandidates.filter {
-                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
-            }
-        ).mapNotNull { candidate ->
-            val identityKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
-            if (identityKey.isBlank()) return@mapNotNull null
-            // Stable identity plus physical row geometry measures real viewport movement.
-            // Row indexes are deliberately omitted because inserting/removing dynamic cards above
-            // the inbox changes indexes without changing the visible conversation set.
-            "$identityKey@${candidate.rowBounds.left},${candidate.rowBounds.top}," +
-                "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
-        }
 
     private fun beginBoundaryStabilityConfirmation(
         visibleKeys: List<String>,
@@ -3419,9 +3270,9 @@ class AiReplyObservationRuntime(
         if (snapshot.nodeTreeProbeTruncated) {
             onLog("AI 会话管理：辅助节点树探针已截断；主会话列表提取器仍完整，使用已确认主列表进行有限边界复核")
         }
-        pendingBoundaryConfirmationKeys = visibleKeys
-        pendingBoundaryConfirmationToTop = toTop
-        boundaryStabilityConfirmationCount = 0
+        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = visibleKeys
+        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = toTop
+        privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         onLog(
             if (toTop) {
@@ -3432,8 +3283,8 @@ class AiReplyObservationRuntime(
         )
         val expectedWindowIdentity = snapshot.windowIdentityKey()
         if (expectedWindowIdentity.isNullOrBlank()) {
-            pendingBoundaryConfirmationKeys = null
-            boundaryStabilityConfirmationCount = 0
+            privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
+            privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
             sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
             onLog("AI 会话管理：边界候选缺少有效 windowId/generation；不确认边界，重新获取当前页面快照")
             scheduleSessionListStabilityRetry("边界候选缺少当前窗口身份")
@@ -3446,7 +3297,7 @@ class AiReplyObservationRuntime(
         sessionTransitionTask?.cancel()
         sessionTransitionTask = scheduler.schedule(SESSION_BOUNDARY_SETTLE_DELAY_MS) {
             sessionTransitionTask = null
-            if (!isAiReplyActive() || !sessionRunStarted || pendingBoundaryConfirmationKeys == null) {
+            if (!isAiReplyActive() || !sessionRunStarted || privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys == null) {
                 return@schedule
             }
             val fresh = inspectFreshPageSnapshot()
@@ -3454,8 +3305,8 @@ class AiReplyObservationRuntime(
                 fresh.packageName == targetPackage() &&
                 fresh.windowIdentityKey() == expectedWindowIdentity
             ) {
-                pendingBoundaryConfirmationKeys = null
-                boundaryStabilityConfirmationCount = 0
+                privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
+                privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                 onLog("AI 会话管理：延迟边界复核的页面树不完整；不判为非聊天页面，重新采集主列表与导航锚点")
                 scheduleSessionListStabilityRetry("延迟边界复核页面树不完整")
@@ -3465,16 +3316,16 @@ class AiReplyObservationRuntime(
                 fresh.packageName != targetPackage() ||
                 fresh.windowIdentityKey() != expectedWindowIdentity
             ) {
-                pendingBoundaryConfirmationKeys = null
-                boundaryStabilityConfirmationCount = 0
+                privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
+                privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话管理已暂停：延迟边界复核未能确认同一会话列表页面；不判定遍历完成")
                 return@schedule
             }
-            val currentKeys = visibleSessionKeys(fresh)
+            val currentKeys = privateMessagesTraversalTaskExecutor.visibleSessionKeys(fresh)
             if (currentKeys.isEmpty() || fresh.chatListExtractionTruncated) {
-                pendingBoundaryConfirmationKeys = null
-                boundaryStabilityConfirmationCount = 0
+                privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
+                privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
                 onLog("AI 会话管理：延迟边界复核快照不完整；不确认边界，转入列表稳定性重试")
                 scheduleSessionListStabilityRetry("延迟边界复核快照不完整")
                 return@schedule
@@ -3482,13 +3333,13 @@ class AiReplyObservationRuntime(
             if (fresh.nodeTreeProbeTruncated) {
                 onLog("AI 会话管理：延迟复核的辅助节点树探针仍不完整；主列表提取和页面锚点一致，继续有限稳定确认")
             }
-            val expectedKeys = pendingBoundaryConfirmationKeys
+            val expectedKeys = privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys
             if (currentKeys != expectedKeys) {
-                val wasTopCheck = pendingBoundaryConfirmationToTop
-                pendingBoundaryConfirmationKeys = null
-                boundaryStabilityConfirmationCount = 0
-                noProgressScrollCount = 0
-                sessionListAtTop = false
+                val wasTopCheck = privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop
+                privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
+                privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
+                privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
+                privateMessagesTraversalTaskExecutor.atTop = false
                 sessionManagerState = if (wasTopCheck) {
                     SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
                 } else {
@@ -3498,28 +3349,28 @@ class AiReplyObservationRuntime(
                 handleSessionListPage(fresh)
                 return@schedule
             }
-            boundaryStabilityConfirmationCount++
-            if (boundaryStabilityConfirmationCount < MAX_BOUNDARY_STABILITY_CONFIRMATIONS) {
+            privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount++
+            if (privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount < MAX_BOUNDARY_STABILITY_CONFIRMATIONS) {
                 onLog(
                     "AI 会话管理：边界候选延迟快照一致；继续独立稳定复核=" +
-                        "$boundaryStabilityConfirmationCount/$MAX_BOUNDARY_STABILITY_CONFIRMATIONS"
+                        "$privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount/$MAX_BOUNDARY_STABILITY_CONFIRMATIONS"
                 )
                 scheduleBoundaryStabilityConfirmation(expectedWindowIdentity)
                 return@schedule
             }
 
-            val confirmedTop = pendingBoundaryConfirmationToTop
-            pendingBoundaryConfirmationKeys = null
-            boundaryStabilityConfirmationCount = 0
-            noProgressScrollCount = 0
+            val confirmedTop = privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop
+            privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
+            privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
+            privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
             if (confirmedTop) {
-                sessionListAtTop = true
+                privateMessagesTraversalTaskExecutor.atTop = true
                 sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
                 onLog("AI 会话管理：顶部边界经延迟独立快照复核通过；检查顶部当前可见会话行")
             } else {
-                sessionListTraversalPhase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
-                sessionListAtTop = false
-                lockedUnreadSetFinalized = true
+                privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+                privateMessagesTraversalTaskExecutor.atTop = false
+                privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized = true
                 sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
                 onLog("AI 会话管理：底部边界经延迟独立快照复核通过；未读身份集合已冻结；进入从底部向顶部的处理阶段")
             }
@@ -3528,8 +3379,8 @@ class AiReplyObservationRuntime(
     }
 
     private fun continueSessionListWithoutCandidate(snapshot: ChatPageSnapshot) {
-        if (sessionListTraversalPhase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM) {
-            if (normalInboxUnreadStateUnknown) {
+        if (privateMessagesTraversalTaskExecutor.phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM) {
+            if (privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown) {
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                 onLog("AI Reply 启动准入[POSITIONING_BLOCKED_BY_UNKNOWN]：未读状态无法确认；不执行底部定位滑动，等待新页面证据")
             } else {
@@ -3537,16 +3388,16 @@ class AiReplyObservationRuntime(
             }
             return
         }
-        if (sessionListAtTop) {
-            noProgressScrollCount = 0
-            sessionListStabilityRetryCount = 0
+        if (privateMessagesTraversalTaskExecutor.atTop) {
+            privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
+            privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount = 0
             when {
-                normalInboxUnreadStateUnknown -> {
+                privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown -> {
                     sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                     onLog("AI Reply 测试遍历暂停：完整扫描中存在未读状态 UNKNOWN 的会话行，不能将未知当作无未读")
                 }
                 else -> startReceivedGreetingsTask(
-                    if (normalInboxHadUnread) "普通聊天列表已完成由下至上扫描，当前没有剩余符合条件的未读会话"
+                    if (privateMessagesTraversalTaskExecutor.normalInboxHadUnread) "普通聊天列表已完成由下至上扫描，当前没有剩余符合条件的未读会话"
                     else "普通聊天列表已完成筛选，没有符合条件的新消息"
                 )
             }
@@ -3586,19 +3437,19 @@ class AiReplyObservationRuntime(
             }
             onLog("AI Reply 低频待机复查：当前位置明确未读=$unread；未读状态未知=$unknown；页面行数=${fresh.chatListCandidates.size}")
             if (unknown > 0) {
-                normalInboxUnreadStateUnknown = true
+                privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = true
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI Reply 低频待机复查暂停：当前列表存在 UNKNOWN 未读状态，不能按无消息处理")
             } else if (unread > 0) {
-                normalInboxHadUnread = true
-                attemptedSessionKeys.clear()
-                noProgressScrollCount = 0
-                pendingScrollBaseline = null
-                pendingScrollToTop = false
-                lastStableSessionListVisibleKeys = null
-                sessionListStabilityRetryCount = 0
-                sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-                sessionListAtTop = false
+                privateMessagesTraversalTaskExecutor.normalInboxHadUnread = true
+                privateMessagesTraversalTaskExecutor.attemptedSessionKeys.clear()
+                privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
+                privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+                privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+                privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
+                privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount = 0
+                privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+                privateMessagesTraversalTaskExecutor.atTop = false
                 sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
                 handleSessionListPage(fresh)
             } else {
@@ -3614,12 +3465,12 @@ class AiReplyObservationRuntime(
      */
     private fun startReceivedGreetingsTask(reason: String) {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
-        val noUnreadFastPath = initialUnreadGateSwipeCompleted && lockedUnreadSessionKeys.isEmpty() &&
-            !normalInboxHadUnread && !normalInboxUnreadStateUnknown
+        val noUnreadFastPath = privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted && privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.isEmpty() &&
+            !privateMessagesTraversalTaskExecutor.normalInboxHadUnread && !privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown
         val quotaReached = privateMessagesTaskController.quotaReached()
         if ((!noUnreadFastPath && !quotaReached &&
-                (sessionListTraversalPhase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP || !sessionListAtTop)) ||
-            normalInboxUnreadStateUnknown
+                (privateMessagesTraversalTaskExecutor.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP || !privateMessagesTraversalTaskExecutor.atTop)) ||
+            privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown
         ) {
             sessionManagerState = SessionManagerState.PAUSED
             onLog(
@@ -3636,7 +3487,7 @@ class AiReplyObservationRuntime(
         sessionActionGeneration += 1L
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
-        val ordinarySessionClickCount = sessionActionCount
+        val ordinarySessionClickCount = privateMessagesTraversalTaskExecutor.sessionActionCount
         runCatching { receivedGreetingsTaskExecutor.beginNavigationTask() }
         receivedGreetingsTaskController.markNavigationStarted()
         currentSessionKey = null
@@ -3648,7 +3499,7 @@ class AiReplyObservationRuntime(
         messageReadTimeoutTask = null
         pendingMessageReadSnapshot = null
         messageReadGeneration += 1L
-        sessionActionCount = 0
+        privateMessagesTraversalTaskExecutor.sessionActionCount = 0
         sessionManagerState = SessionManagerState.BROWSING_RECEIVED_GREETINGS
         onLog(
             "AI Reply：切换收到的招呼只读 OCR 任务；原因=$reason；" +
@@ -3713,7 +3564,7 @@ class AiReplyObservationRuntime(
         messageReadGeneration += 1L
 
         receivedGreetingsTaskController.markStarted()
-        sessionActionCount = 0
+        privateMessagesTraversalTaskExecutor.sessionActionCount = 0
 
         cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
         unknownCounterResetTask?.cancel()
@@ -3783,15 +3634,15 @@ class AiReplyObservationRuntime(
         val eligibleUnread = unreadPrivate.filter(ChatSessionManagementPolicy::isEligible)
         val blockedUnread = eligibleUnread.count {
             ChatSessionManagementPolicy.stableSessionKey(it) in snapshotAmbiguousKeys ||
-                ChatSessionManagementPolicy.stableSessionKey(it) in ambiguousSessionIdentityKeys
+                ChatSessionManagementPolicy.stableSessionKey(it) in privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys
         }
         val attemptedUnread = eligibleUnread.count {
-            ChatSessionManagementPolicy.stableSessionKey(it) in attemptedSessionKeys
+            ChatSessionManagementPolicy.stableSessionKey(it) in privateMessagesTraversalTaskExecutor.attemptedSessionKeys
         }
         val actionableUnread = eligibleUnread.count {
             val key = ChatSessionManagementPolicy.stableSessionKey(it)
-            key !in snapshotAmbiguousKeys && key !in ambiguousSessionIdentityKeys &&
-                key !in attemptedSessionKeys
+            key !in snapshotAmbiguousKeys && key !in privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys &&
+                key !in privateMessagesTraversalTaskExecutor.attemptedSessionKeys
         }
         val diagnostics = snapshot.chatListUnreadDiagnostics
         return "行=${candidates.size}" +
@@ -3828,7 +3679,7 @@ class AiReplyObservationRuntime(
             sessionManagerState == SessionManagerState.STOPPED
         ) return
         sessionTransitionTask?.cancel()
-        if (sessionListStabilityRetryCount >= MAX_SESSION_LIST_STABILITY_RETRIES) {
+        if (privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount >= MAX_SESSION_LIST_STABILITY_RETRIES) {
             sessionManagerState = SessionManagerState.PAUSED
             onLog(
                 "AI 会话管理已暂停：会话列表连续 $MAX_SESSION_LIST_STABILITY_RETRIES 次未稳定（$reason）；" +
@@ -3836,8 +3687,8 @@ class AiReplyObservationRuntime(
             )
             return
         }
-        sessionListStabilityRetryCount += 1
-        val attempt = sessionListStabilityRetryCount
+        privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount += 1
+        val attempt = privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         onLog(
             "AI 会话管理：$reason；进行第 $attempt/$MAX_SESSION_LIST_STABILITY_RETRIES 次短间隔复核，" +
@@ -3871,7 +3722,7 @@ class AiReplyObservationRuntime(
         val actionGeneration = sessionActionGeneration
         val attempt = privateMessagesTaskExecutor.openSession(
             candidate = candidate,
-            blockedIdentityKeys = ambiguousSessionIdentityKeys
+            blockedIdentityKeys = privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys
         ) { requestId, snapshot, selectedKey, result ->
             scheduler.schedule(0L) {
                 if (activeSessionGestureRequestId == requestId) activeSessionGestureRequestId = null
@@ -3899,7 +3750,7 @@ class AiReplyObservationRuntime(
                             PrivateMessagesTaskExecutor.RejectionReason.PAGE_CHANGED ->
                                 "AI 会话管理：点击前复核发现页面已变化；取消本次会话操作"
                             PrivateMessagesTaskExecutor.RejectionReason.AMBIGUOUS_SESSION_IDENTITY -> {
-                                ambiguousSessionIdentityKeys += attempt.selectedKey
+                                privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys += attempt.selectedKey
                                 "AI 会话管理：点击前复核发现目标昵称已被本轮阻止或当前快照存在重复行；拒绝点击"
                             }
                             PrivateMessagesTaskExecutor.RejectionReason.SESSION_ROW_NOT_FOUND ->
@@ -3927,7 +3778,7 @@ class AiReplyObservationRuntime(
                 when (attempt.submission) {
                     GestureSubmission.DEFERRED_NOT_READY -> {
                         if (activeSessionGestureRequestId == attempt.requestId) activeSessionGestureRequestId = null
-                        attemptedSessionKeys.remove(attempt.selectedKey)
+                        privateMessagesTraversalTaskExecutor.attemptedSessionKeys.remove(attempt.selectedKey)
                         currentSessionKey = null
                         currentSessionName = null
                         currentSessionCandidate = null
@@ -3962,8 +3813,8 @@ class AiReplyObservationRuntime(
                         currentSessionReadCaptured = false
                         currentSessionWindowKey = null
                         sessionManagerState = SessionManagerState.OPENING_SESSION
-                        attemptedSessionKeys += attempt.selectedKey
-                        sessionActionCount += 1
+                        privateMessagesTraversalTaskExecutor.attemptedSessionKeys += attempt.selectedKey
+                        privateMessagesTraversalTaskExecutor.sessionActionCount += 1
                         readinessDeferredRetryCount = 0
                         readinessDeferredRetryLimitLogged = false
                     }
@@ -3996,8 +3847,8 @@ class AiReplyObservationRuntime(
         if (result.status == GestureExecutionStatus.DEFERRED) {
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
-            attemptedSessionKeys.remove(selectedKey)
-            sessionActionCount = (sessionActionCount - 1).coerceAtLeast(0)
+            privateMessagesTraversalTaskExecutor.attemptedSessionKeys.remove(selectedKey)
+            privateMessagesTraversalTaskExecutor.sessionActionCount = (privateMessagesTraversalTaskExecutor.sessionActionCount - 1).coerceAtLeast(0)
             currentSessionKey = null
             currentSessionName = null
             currentSessionCandidate = null
@@ -4300,8 +4151,8 @@ class AiReplyObservationRuntime(
         if (sameWindowTransientUnknown) {
             // The swipe has not been submitted. Keep the traversal phase and direction intent;
             // the next stability inspection will rebuild the viewport from a new node tree.
-            pendingScrollBaseline = null
-            pendingScrollToTop = false
+            privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+            privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
             sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
             onLog(
                 "AI 会话管理：滚动前页面暂时UNKNOWN，但应用、windowId 和窗口代次未变化；" +
@@ -4358,8 +4209,8 @@ class AiReplyObservationRuntime(
         val sourceWindow = fresh.messageListTarget?.window
             ?: fresh.chatListCandidates.firstOrNull()?.rowTarget?.window
         val executionContext = sourceWindow?.let { gesturePolicy.captureContext(it) } ?: run {
-            pendingScrollBaseline = null
-            pendingScrollToTop = false
+            privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+            privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
             sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话管理已暂停：列表滚动坐标缺少匹配的窗口/显示上下文；不使用旧坐标")
             return
@@ -4383,12 +4234,12 @@ class AiReplyObservationRuntime(
             onLog("AI 会话滚动[OWNERSHIP_REJECTED]：构造手势后任务租约已变化；拒绝派发旧滑动")
             return
         }
-        val freshAmbiguousIdentityKeys = ChatSessionManagementPolicy.ambiguousSessionIdentityKeys(
+        val freshAmbiguousIdentityKeys = privateMessagesTraversalTaskExecutor.ambiguousIdentityKeys(
             fresh.chatListCandidates
         )
-        val newlyAmbiguousFreshKeys = freshAmbiguousIdentityKeys - ambiguousSessionIdentityKeys
+        val newlyAmbiguousFreshKeys = freshAmbiguousIdentityKeys - privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys
         if (newlyAmbiguousFreshKeys.isNotEmpty()) {
-            ambiguousSessionIdentityKeys += newlyAmbiguousFreshKeys
+            privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys += newlyAmbiguousFreshKeys
             // Keep the message index in sync with the runtime guard. A collision discovered
             // during pre-scroll inspection must revoke AI eligibility from already stored samples.
             newlyAmbiguousFreshKeys.forEach(chatSessionManagementPort::blockSessionIdentityKey)
@@ -4410,8 +4261,8 @@ class AiReplyObservationRuntime(
         // An identity-only baseline here would never equal that geometry-aware snapshot,
         // causing every completed swipe to be misclassified as movement and preventing
         // the no-progress boundary confirmation from ever starting.
-        pendingScrollBaseline = visibleSessionKeys(fresh)
-        pendingScrollToTop = toTop
+        privateMessagesTraversalTaskExecutor.pendingScrollBaseline = privateMessagesTraversalTaskExecutor.visibleSessionKeys(fresh)
+        privateMessagesTraversalTaskExecutor.pendingScrollToTop = toTop
         sessionManagerState = SessionManagerState.SCROLLING_SESSION_LIST
         val actionGeneration = sessionActionGeneration
         activeSessionGestureRequestId = request.id
@@ -4434,18 +4285,18 @@ class AiReplyObservationRuntime(
                     if (sessionManagerState != SessionManagerState.SCROLLING_SESSION_LIST) return@schedule
                     when (result.status) {
                         GestureExecutionStatus.COMPLETED -> {
-                            val wasInitialAdmissionSwipe = !toTop && !initialUnreadGateSwipeCompleted
+                            val wasInitialAdmissionSwipe = !toTop && !privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted
                             if (wasInitialAdmissionSwipe) {
-                                initialUnreadGateSwipeCompleted = true
+                                privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = true
                                 // This first gesture is an admission probe, not bottom-boundary
                                 // positioning. Its post-gesture snapshot must be inspected even
                                 // when the visible rows did not move, so discard boundary tracking.
-                                pendingScrollBaseline = null
-                                pendingScrollToTop = false
-                                noProgressScrollCount = 0
+                                privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+                                privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+                                privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
                                 onLog("AI Reply 启动准入：首次向上滑动已由 Android 确认成功；将用滑动后的新快照判定未读")
                             }
-                            cancelledScrollRecoveryCount = 0
+                            privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount = 0
                             readinessDeferredRetryCount = 0
                             readinessDeferredRetryLimitLogged = false
                             startupReadinessCoordinator.markInitializationComplete("首个自主列表滑动已由 Android 完成")
@@ -4462,11 +4313,11 @@ class AiReplyObservationRuntime(
                         GestureExecutionStatus.CANCELLED -> {
                             // A cancelled gesture is not proof of reaching either list boundary.
                             // Discard the old baseline and reacquire the page before any retry.
-                            pendingScrollBaseline = null
-                            pendingScrollToTop = false
-                            cancelledScrollRecoveryCount += 1
+                            privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+                            privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+                            privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount += 1
                             onLog(
-                                "AI 会话管理：列表滚动被系统取消；第 $cancelledScrollRecoveryCount/" +
+                                "AI 会话管理：列表滚动被系统取消；第 $privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount/" +
                                     "$MAX_CANCELLED_SCROLL_RECOVERIES 次恢复检查；重新读取页面与列表位置"
                             )
                             sessionTransitionTask?.cancel()
@@ -4486,7 +4337,7 @@ class AiReplyObservationRuntime(
                                         "AI 会话管理已暂停：滚动取消后页面复核失败；可能发生页面切换或服务中断；" +
                                             "不判定遍历完成，也不继续使用旧列表坐标"
                                     )
-                                } else if (cancelledScrollRecoveryCount <= MAX_CANCELLED_SCROLL_RECOVERIES) {
+                                } else if (privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount <= MAX_CANCELLED_SCROLL_RECOVERIES) {
                                     sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                                     onLog("AI 会话管理：取消后确认仍处于会话列表；使用新快照进行有限重试")
                                     scrollSessionList(refreshed, toTop)
@@ -4497,8 +4348,8 @@ class AiReplyObservationRuntime(
                             }
                         }
                         GestureExecutionStatus.DEFERRED -> {
-                            pendingScrollBaseline = null
-                            pendingScrollToTop = false
+                            privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+                            privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
                             sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                             onLog("AI 会话管理[DEFERRED]：列表滑动在实际派发前遇到启动保护；结束旧轨迹，等待新快照后重算")
                             scheduleAiReadinessRetry("列表滚动等待目标页面就绪") { latest ->
@@ -4509,8 +4360,8 @@ class AiReplyObservationRuntime(
                         }
                         GestureExecutionStatus.REJECTED,
                         GestureExecutionStatus.FAILED -> {
-                            pendingScrollBaseline = null
-                            pendingScrollToTop = false
+                            privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+                            privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
                             sessionManagerState = SessionManagerState.PAUSED
                             onLog("AI 会话管理已暂停：列表滚动执行失败（${result.status}）；不判定遍历完成")
                         }
@@ -4521,8 +4372,8 @@ class AiReplyObservationRuntime(
         when (submission) {
             GestureSubmission.DEFERRED_NOT_READY -> {
                 if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                pendingScrollBaseline = null
-                pendingScrollToTop = false
+                privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+                privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                 onLog("AI 会话管理[DEFERRED_NOT_READY]：列表滚动未派发；保留滚动方向，等待静默结束并用新视口重算轨迹")
                 scheduleAiReadinessRetry("列表滚动等待目标页面就绪") { latest ->
@@ -4533,8 +4384,8 @@ class AiReplyObservationRuntime(
             }
             GestureSubmission.REJECTED -> {
                 if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                pendingScrollBaseline = null
-                pendingScrollToTop = false
+                privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+                privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话管理已暂停：系统明确拒绝列表滚动派发；尚未执行页面验证，不判定为页面验证失败")
             }
@@ -4561,8 +4412,8 @@ class AiReplyObservationRuntime(
         ) return
         if (sessionSafeViewportRetryTask != null) return
 
-        pendingScrollBaseline = null
-        pendingScrollToTop = false
+        privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+        privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
 
         val delayMs = if (sessionSafeViewportRetryCount < SESSION_SAFE_VIEWPORT_FAST_RETRIES) {

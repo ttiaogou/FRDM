@@ -1,6 +1,7 @@
 package com.freedom.features.aireply
 
 import com.freedom.features.aireply.ports.ChatPagePort
+import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
@@ -15,6 +16,65 @@ internal class ReceivedGreetingsTaskExecutor(
     private val pagePort: ChatPagePort,
     private val ownsTask: () -> Boolean
 ) {
+    enum class PageDecision {
+        ENTRY_NOT_FOUND,
+        COMPLETE,
+        WAIT_FOR_DETAIL_PAGE,
+        DETAIL_READY,
+        ADVANCE_REQUIRED
+    }
+
+    data class PageProgress(
+        val status: ReceivedGreetingsTraversalStatus,
+        val decision: PageDecision
+    )
+
+    enum class StepDecision {
+        RETRY_REQUIRED,
+        ENTRY_NOT_FOUND_RECHECK,
+        COMPLETE,
+        LIST_CONTINUES,
+        PROFILE_CARD_PENDING,
+        PAGE_TRANSITION_PENDING
+    }
+
+    data class StepObservation(
+        val accepted: Boolean,
+        val status: ReceivedGreetingsTraversalStatus,
+        val decision: StepDecision
+    )
+
+    /** Converts adapter evidence into one application-level traversal decision. */
+    fun evaluatePageProgress(pageKind: ChatPageKind): PageProgress {
+        val status = traversalStatus()
+        val decision = when (status) {
+            ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND -> PageDecision.ENTRY_NOT_FOUND
+            ReceivedGreetingsTraversalStatus.COMPLETE -> PageDecision.COMPLETE
+            ReceivedGreetingsTraversalStatus.DETAIL_READY -> if (
+                pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE
+            ) PageDecision.DETAIL_READY else PageDecision.WAIT_FOR_DETAIL_PAGE
+            ReceivedGreetingsTraversalStatus.NAVIGATING,
+            ReceivedGreetingsTraversalStatus.SCANNING,
+            ReceivedGreetingsTraversalStatus.PROFILE_CARD,
+            ReceivedGreetingsTraversalStatus.UNKNOWN -> PageDecision.ADVANCE_REQUIRED
+        }
+        return PageProgress(status, decision)
+    }
+
+    /** Performs one bounded adapter step and captures its resulting status exactly once. */
+    fun performIdleStepAndInspect(): StepObservation {
+        val accepted = performIdleStep()
+        val status = traversalStatus()
+        val decision = when {
+            !accepted -> StepDecision.RETRY_REQUIRED
+            status == ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND -> StepDecision.ENTRY_NOT_FOUND_RECHECK
+            status == ReceivedGreetingsTraversalStatus.COMPLETE -> StepDecision.COMPLETE
+            status == ReceivedGreetingsTraversalStatus.SCANNING -> StepDecision.LIST_CONTINUES
+            status == ReceivedGreetingsTraversalStatus.PROFILE_CARD -> StepDecision.PROFILE_CARD_PENDING
+            else -> StepDecision.PAGE_TRANSITION_PENDING
+        }
+        return StepObservation(accepted, status, decision)
+    }
     fun supportsWorkflow(): Boolean = pagePort.supportsReceivedGreetingsIdleWorkflow()
 
     fun observeManuallyOpenedPage(): ReceivedGreetingsPageArrivalStatus =
