@@ -1,5 +1,6 @@
 package com.freedom.features.aireply.ai
 
+import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
@@ -23,8 +24,7 @@ class ConversationContextManager(
         identityConfidence: String,
         batch: ChatMessageBatch
     ): ConversationContext {
-        require(contactId.isNotBlank() && conversationId.isNotBlank())
-        require(identityConfidence.isNotBlank())
+        requireVerifiedIdentity(contactId, conversationId, identityConfidence)
         val eligible = batch.messages.filter(ChatMessage::isAiInputEligible)
         val inputs = eligible.map { message ->
             ConversationMessageInput(
@@ -37,15 +37,57 @@ class ConversationContextManager(
                 bounds = message.bounds
             )
         }
-        val stored = repository.persistMessages(
-            contactId, conversationId, identityConfidence, batch.capturedAtMillis, inputs
+        // The Momo adapter may already have persisted this exact validated batch while saving
+        // its read-only chat sample. Only write observations that are actually missing; this
+        // preserves recovery when that write failed without counting one UI observation twice.
+        val existing = repository.messagesForConversation(contactId, conversationId)
+        val missingInputs = inputs.filter { input ->
+            existing.none { record ->
+                record.identityConfidence == identityConfidence &&
+                    record.messageFingerprint == input.messageFingerprint &&
+                    record.direction == input.direction && record.type == input.type &&
+                    record.content == input.content && record.contentQuality == input.contentQuality &&
+                    record.directionEvidence == input.directionEvidence
+            }
+        }
+        val stored = if (missingInputs.isEmpty()) {
+            com.freedom.features.conversation.domain.message.MessageStoreResult()
+        } else {
+            repository.persistMessages(
+                contactId, conversationId, identityConfidence, batch.capturedAtMillis, missingInputs
+            )
+        }
+        return loadForConversation(contactId, conversationId, identityConfidence).copy(
+            insertedCount = stored.insertedCount,
+            duplicateCount = stored.duplicateObservationCount,
+            rejectedCount = stored.rejectedCount
         )
-        val history = repository.messagesForContact(contactId)
+    }
+
+    /** Loads already-persisted history for exactly one verified contact/conversation pair. */
+    fun loadForConversation(
+        contactId: String,
+        conversationId: String,
+        identityConfidence: String
+    ): ConversationContext {
+        requireVerifiedIdentity(contactId, conversationId, identityConfidence)
+        val history = repository.messagesForConversation(contactId, conversationId)
             .asSequence()
-            .filter { it.contentQuality == "VERIFIED" && it.type == "TEXT" && !it.content.isNullOrBlank() }
+            .filter {
+                it.contactId == contactId && it.conversationId == conversationId &&
+                    it.identityConfidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED.name &&
+                    it.contentQuality == "VERIFIED" && it.type == "TEXT" &&
+                    !it.content.isNullOrBlank()
+            }
+            .sortedWith(
+                compareBy<com.freedom.features.conversation.domain.message.StoredConversationMessage> {
+                    it.firstObservedAtMillis
+                }.thenBy { it.bounds.top }
+                    .thenBy { it.bounds.bottom }
+                    .thenBy { it.recordId }
+            )
             .toList()
             .takeLast(maxHistoryMessages)
-            .asSequence()
             .mapNotNull { record ->
                 val role = when (record.direction) {
                     ChatMessageDirection.INCOMING.name -> AiModelMessage.Role.USER
@@ -53,16 +95,27 @@ class ConversationContextManager(
                     else -> null
                 } ?: return@mapNotNull null
                 AiModelMessage(role, record.content!!.take(maxMessageChars))
-            }.toList()
+            }
         return ConversationContext(
             contactId = contactId,
             conversationId = conversationId,
             messages = history,
-            insertedCount = stored.insertedCount,
-            duplicateCount = stored.duplicateObservationCount,
-            rejectedCount = stored.rejectedCount,
+            insertedCount = 0,
+            duplicateCount = 0,
+            rejectedCount = 0,
             hasVerifiedIncoming = history.any { it.role == AiModelMessage.Role.USER }
         )
+    }
+
+    private fun requireVerifiedIdentity(
+        contactId: String,
+        conversationId: String,
+        identityConfidence: String
+    ) {
+        require(contactId.isNotBlank() && conversationId.isNotBlank())
+        require(identityConfidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED.name) {
+            "Conversation AI context requires a platform-verified contact identity"
+        }
     }
 }
 

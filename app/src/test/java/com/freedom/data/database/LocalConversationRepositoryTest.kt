@@ -147,6 +147,38 @@ class LocalConversationRepositoryTest {
     }
 
     @Test
+    fun messagesForConversationFiltersExactSessionAndOrdersMessagesWithinObservationByScreenPosition() {
+        val directory = Files.createTempDirectory("freedom-conversation-scope").toFile()
+        try {
+            val repository = LocalConversationRepository(
+                directory, TestConversationStoreCipher(), nowMillis = { 500L }
+            )
+            repository.persistMessages(
+                "contact-1",
+                "momo-direct-contact-1",
+                ContactIdentityConfidence.PLATFORM_ID_VERIFIED.name,
+                100L,
+                listOf(
+                    sampleMessage("lower", "第二条").copy(bounds = ScreenRect(0, 80, 100, 120)),
+                    sampleMessage("upper", "第一条").copy(bounds = ScreenRect(0, 20, 100, 60))
+                )
+            )
+            repository.persistMessages(
+                "contact-1", "another-conversation",
+                ContactIdentityConfidence.PLATFORM_ID_VERIFIED.name, 90L,
+                listOf(sampleMessage("other", "其他会话"))
+            )
+
+            val history = repository.messagesForConversation("contact-1", "momo-direct-contact-1")
+
+            assertEquals(listOf("第一条", "第二条"), history.mapNotNull { it.content })
+            assertTrue(history.all { it.conversationId == "momo-direct-contact-1" })
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun expiredConversationHistoryIsRemovedOnNextRepositoryAccess() {
         val directory = Files.createTempDirectory("freedom-conversation-retention").toFile()
         try {

@@ -63,8 +63,10 @@ import com.freedom.data.database.LocalConversationRepository
 import com.freedom.data.social.momo.MomoSayHiTraversalCheckpointDataStore
 import com.freedom.data.samples.MomoChatSampleArchiveDataStore
 import com.freedom.features.aireply.AiReplyObservationRuntime
+import com.freedom.features.aireply.ai.ConversationContextManager
 import com.freedom.features.aireply.ai.AiModelConfigurationRepository
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
+import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.ports.ConversationRepository
 import com.freedom.gesture.api.GestureApi as PublicGestureApi
 import com.freedom.application.gesture.GestureRuntimeFactory
@@ -106,6 +108,9 @@ class AppCompositionRoot(context: Context) {
     }
     val conversationRepository: ConversationRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         LocalConversationRepository(File(appContext.filesDir, "conversation_store"))
+    }
+    val conversationContextManager: ConversationContextManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ConversationContextManager(conversationRepository)
     }
     val sayHiTraversalCheckpointRepository: MomoSayHiTraversalCheckpointRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MomoSayHiTraversalCheckpointDataStore(appContext)
@@ -314,6 +319,31 @@ internal class AccessibilityServiceDependencies internal constructor(
             onLog = addLog,
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
+            onVerifiedConversationObserved = { batch, identity ->
+                val verifiedIdentity = identity?.takeIf {
+                    it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                }
+                val contactId = verifiedIdentity?.contactId?.takeIf(String::isNotBlank)
+                if (verifiedIdentity != null && contactId != null) {
+                    val conversationId = "momo-direct-$contactId"
+                    val context = root.conversationContextManager.recordAndLoad(
+                        contactId = contactId,
+                        conversationId = conversationId,
+                        identityConfidence = verifiedIdentity.confidence.name,
+                        batch = batch
+                    )
+                    val incomingCount = context.messages.count { it.role.name == "USER" }
+                    val outgoingCount = context.messages.size - incomingCount
+                    addLog(
+                        "AI 会话上下文已整理：可用历史=${context.messages.size}；" +
+                            "对方消息=$incomingCount；自己消息=$outgoingCount；" +
+                            "当前观察批次=${batch.messages.size}；联系人身份=平台已验证；" +
+                            "未输出消息正文"
+                    )
+                } else {
+                    addLog("AI 会话上下文未加载：联系人身份尚未达到平台 ID 验证级别")
+                }
+            },
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             sharedPageObservationCoordinator = pageObservationCoordinator

@@ -146,6 +146,25 @@ internal class LocalConversationRepository(
             .sortedWith(compareBy<StoredConversationMessage> { it.firstObservedAtMillis }.thenBy { it.recordId })
     }
 
+    @Synchronized
+    override fun messagesForConversation(
+        contactId: String,
+        conversationId: String
+    ): List<StoredConversationMessage> {
+        pruneExpiredData(nowMillis())
+        return messages.values
+            .filter { it.contactId == contactId && it.conversationId == conversationId }
+            .sortedWith(
+                compareBy<StoredConversationMessage> { it.firstObservedAtMillis }
+                    // Every message in one visible batch shares capturedAtMillis. The validated
+                    // message parser emits rows top-to-bottom, so screen position preserves the
+                    // conversation order within that observation.
+                    .thenBy { it.bounds.top }
+                    .thenBy { it.bounds.bottom }
+                    .thenBy { it.recordId }
+            )
+    }
+
     private fun loadContacts(): LinkedHashMap<String, ContactProfile> {
         val result = LinkedHashMap<String, ContactProfile>()
         val stored = readStore(contactsFile) ?: return result

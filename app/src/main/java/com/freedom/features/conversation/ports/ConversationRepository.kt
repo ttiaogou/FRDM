@@ -27,4 +27,17 @@ interface ConversationRepository {
     fun contactsSnapshot(): List<ContactProfile> = emptyList()
 
     fun messagesForContact(contactId: String): List<StoredConversationMessage> = emptyList()
+
+    /** Returns one exact conversation in oldest-to-newest observation order. */
+    fun messagesForConversation(
+        contactId: String,
+        conversationId: String
+    ): List<StoredConversationMessage> = messagesForContact(contactId)
+        .filter { it.conversationId == conversationId }
+        .sortedWith(
+            compareBy<StoredConversationMessage> { it.firstObservedAtMillis }
+                .thenBy { it.bounds.top }
+                .thenBy { it.bounds.bottom }
+                .thenBy { it.recordId }
+        )
 }

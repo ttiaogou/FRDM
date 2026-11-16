@@ -18,6 +18,8 @@ import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.accessibility.gesture.GestureExecutionResult
 import com.freedom.core.accessibility.gesture.GestureExecutionStatus
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
+import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
+import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import com.freedom.features.aireply.domain.contact.TemporaryContactMessageLedger
 import com.freedom.features.aireply.domain.contact.ContactSendCountUpdate
 import com.freedom.features.aireply.ports.ChatMessagePort
@@ -52,6 +54,8 @@ class AiReplyObservationRuntime(
     private val fullInspectionDebounceMs: Long,
     private val regionRefreshDebounceMs: Long,
     private val onMessagesObserved: (ChatMessageBatch) -> Unit = {},
+    /** Called after verified session history has been persisted, with its row identity evidence. */
+    private val onVerifiedConversationObserved: (ChatMessageBatch, ContactRowIdentity?) -> Unit = { _, _ -> },
     /** Inclusive random bounds are injectable so task scheduling can be tested deterministically. */
     private val chooseRandomInt: (Int, Int) -> Int = { minimum, maximum ->
         java.util.concurrent.ThreadLocalRandom.current().nextInt(minimum, maximum + 1)
@@ -1246,11 +1250,30 @@ class AiReplyObservationRuntime(
         if (sessionRunStarted && currentSessionKey != null &&
             sessionManagerState == SessionManagerState.READING_SESSION && !currentSessionReadCaptured
         ) {
+            val contactIdentity = currentSessionCandidate?.contactIdentity
             val sampleIndex = runCatching {
                 chatSessionManagementPort.persistChatSample(
-                    snapshot, batch, currentSessionName, currentSessionCandidate?.contactIdentity
+                    snapshot, batch, currentSessionName, contactIdentity
                 )
             }.getOrDefault(0)
+            // The adapter persists conversation messages only when the selected inbox identity
+            // is platform-verified and the live chat header still matches that exact row. Load
+            // the AI context only after that persistence call has completed. Nickname-only rows
+            // deliberately remain ineligible for cross-session history lookup.
+            val verifiedContactIdentity = contactIdentity?.takeIf {
+                it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                    !it.contactId.isNullOrBlank()
+            }
+            if (observerBatch.messages.isNotEmpty() && verifiedContactIdentity != null &&
+                ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null
+            ) {
+                runCatching { onVerifiedConversationObserved(observerBatch, verifiedContactIdentity) }
+                    .onFailure {
+                        onLog("AI 会话上下文回调异常；异常诊断不包含消息正文")
+                    }
+            } else if (observerBatch.messages.isNotEmpty()) {
+                onLog("AI 会话上下文暂不生成：当前联系人缺少已验证的平台身份或聊天标题未匹配；不按昵称读取历史")
+            }
             privateMessagesTraversalTaskExecutor.setSessionReadCaptured(sampleIndex > 0)
             if (sampleIndex > 0) {
                 onLog("AI 会话管理：聊天样本已保存；样本序号=$sampleIndex；消息=${batch.messages.size}；OCR区域=${batch.ocrTargets.size}；方向不明=${batch.messages.count { it.direction == com.freedom.features.aireply.domain.message.ChatMessageDirection.UNKNOWN }}")
