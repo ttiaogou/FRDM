@@ -48,6 +48,7 @@ import com.freedom.core.logging.RunLogCategory
 import com.freedom.core.logging.RunLogLevel
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import com.freedom.core.runtime.TargetAppReadinessController
 import com.freedom.data.MonitorStoreRepository
@@ -221,6 +222,10 @@ internal class AccessibilityServiceDependencies internal constructor(
     val taskScheduler: HandlerTaskScheduler by lazy(LazyThreadSafetyMode.NONE) {
         HandlerTaskScheduler(mainHandler)
     }
+    /** One service-scoped page-observation coordinator shared by AI Reply and AccountBrowse. */
+    val pageObservationCoordinator: PageObservationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
+        PageObservationCoordinator(taskScheduler)
+    }
     val accessibilityGateway: AndroidAccessibilityGateway by lazy(LazyThreadSafetyMode.NONE) {
         AndroidAccessibilityGateway(
             service = service,
@@ -314,7 +319,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             onManualReviewRequired = persistManualReviewHold,
             onRequestScreenOff = requestScreenOff,
             taskCoordinator = root.taskCoordinator,
-            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() }
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+            sharedPageObservationCoordinator = pageObservationCoordinator
         )
     }
     val accountBrowseWorkflow by lazy(LazyThreadSafetyMode.NONE) {
@@ -336,7 +342,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                 monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
             },
             onManualReviewRequired = persistManualReviewHold,
-            onRequestScreenOff = requestScreenOff
+            onRequestScreenOff = requestScreenOff,
+            pageObservationCoordinator = pageObservationCoordinator
         )
     }
     val accountBrowseRuntimeAdapter by lazy(LazyThreadSafetyMode.NONE) {

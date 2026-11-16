@@ -11,6 +11,7 @@ import com.freedom.core.accessibility.events.InputOriginEvidence
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.UnknownInteractionArbiter
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
@@ -69,7 +70,8 @@ class AiReplyObservationRuntime(
     },
     /** Shared task/UI ownership; nullable only for isolated legacy unit fixtures. */
     private val taskCoordinator: TaskCoordinator? = null,
-    private val currentRunGeneration: () -> Long = { 0L }
+    private val currentRunGeneration: () -> Long = { 0L },
+    private val sharedPageObservationCoordinator: PageObservationCoordinator? = null
 ) {
     companion object {
         private const val MAX_LOGGED_STRUCTURE_EVIDENCE = 256
@@ -202,7 +204,8 @@ class AiReplyObservationRuntime(
             fallbackDelayMs = {
                 chooseRandomInt(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS)
                     .coerceIn(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS) * 1_000L
-            }
+            },
+            sharedCoordinator = sharedPageObservationCoordinator
         )
     }
     private var messageReadRetryTask: ScheduledTask? = null
@@ -291,24 +294,12 @@ class AiReplyObservationRuntime(
         OTHER_UPDATE
     }
 
-    private enum class SessionManagerState {
-        STOPPED,
-        POSITIONING_SESSION_LIST_AT_BOTTOM,
-        SCANNING_SESSION_LIST_BOTTOM_TO_TOP,
-        WAITING_FOR_SESSION_LIST,
-        CAPTURING_SESSION_LIST,
-        OPENING_SESSION,
-        READING_SESSION,
-        RETURNING_TO_SESSION_LIST,
-        SCROLLING_SESSION_LIST,
-        WAITING_FOR_UNREAD,
-        BROWSING_RECEIVED_GREETINGS,
-        COMPLETED,
-        PAUSED
-    }
 
-    private var sessionManagerState = SessionManagerState.STOPPED
+
     private val privateMessagesTraversalTaskExecutor = PrivateMessagesTraversalTaskExecutor()
+    private var sessionManagerState: SessionManagerState
+        get() = privateMessagesTraversalTaskExecutor.executionState
+        set(value) { privateMessagesTraversalTaskExecutor.executionState = value }
     /** Archive lifecycle is independent from the optional automatic session traversal state. */
     private var sampleCaptureActive = false
     private var passiveManualObservation = false
@@ -316,14 +307,29 @@ class AiReplyObservationRuntime(
     /** Startup stays provisional until the first autonomous gesture is accepted by Android. */
     /** Captured before a hand-off so passive-only capture can never become autonomous browsing. */
     private var userHandoffCanResumeAutonomous = false
-    private var currentSessionKey: String? = null
-    private var currentSessionName: String? = null
-    private var currentSessionCandidate: ChatListCandidateSnapshot? = null
-    private var currentSessionReadCaptured = false
-    private var currentSessionWindowKey: String? = null
-    /** Prevents an event-driven inspection and delayed fallback from recording the same mismatch twice. */
-    private val headerMismatchGuard = Any()
-    private var headerMismatchRecordedForCurrentAttempt = false
+    // Compatibility accessors keep this large coordinator readable while the executor owns the
+    // actual traversal/session state. All writes still cross the same single owner.
+    private var currentSessionKey: String?
+        get() = privateMessagesTraversalTaskExecutor.currentSessionKey
+        set(value) { privateMessagesTraversalTaskExecutor.currentSessionKey = value }
+    private var currentSessionName: String?
+        get() = privateMessagesTraversalTaskExecutor.currentSessionName
+        set(value) { privateMessagesTraversalTaskExecutor.currentSessionName = value }
+    private var currentSessionCandidate: ChatListCandidateSnapshot?
+        get() = privateMessagesTraversalTaskExecutor.currentSessionCandidate
+        set(value) { privateMessagesTraversalTaskExecutor.currentSessionCandidate = value }
+    private var currentSessionReadCaptured: Boolean
+        get() = privateMessagesTraversalTaskExecutor.currentSessionReadCaptured
+        set(value) { privateMessagesTraversalTaskExecutor.currentSessionReadCaptured = value }
+    private var currentSessionWindowKey: String?
+        get() = privateMessagesTraversalTaskExecutor.currentSessionWindowKey
+        set(value) { privateMessagesTraversalTaskExecutor.currentSessionWindowKey = value }
+    /** Prevents duplicate mismatch handling; the per-attempt guard belongs to the traversal executor. */
+    private val headerMismatchGuard: Any
+        get() = privateMessagesTraversalTaskExecutor.headerMismatchGuard
+    private var headerMismatchRecordedForCurrentAttempt: Boolean
+        get() = privateMessagesTraversalTaskExecutor.headerMismatchRecordedForCurrentAttempt
+        set(value) { privateMessagesTraversalTaskExecutor.headerMismatchRecordedForCurrentAttempt = value }
     private var sessionTransitionTask: ScheduledTask? = null
     /** Retains the scroll direction while the live mf_view exclusion leaves no safe rectangle. */
     private var sessionSafeViewportRetryTask: ScheduledTask? = null
@@ -463,9 +469,7 @@ class AiReplyObservationRuntime(
             }
         }
 
-        if (sessionRunStarted && receivedGreetingsTaskActive &&
-            sessionManagerState == SessionManagerState.BROWSING_RECEIVED_GREETINGS
-        ) {
+        if (sessionRunStarted && receivedGreetingsTaskActive) {
             val pageProgress = receivedGreetingsTaskExecutor.evaluatePageProgress(inspection.pageKind)
             if (pageProgress.decision == ReceivedGreetingsTaskExecutor.PageDecision.ENTRY_NOT_FOUND) {
                 sessionManagerState = SessionManagerState.PAUSED
@@ -616,9 +620,7 @@ class AiReplyObservationRuntime(
                 }
             }
             ChatPageKind.CHAT_DETAIL_CANDIDATE -> {
-                if (sessionRunStarted && receivedGreetingsTaskActive &&
-                    sessionManagerState == SessionManagerState.BROWSING_RECEIVED_GREETINGS
-                ) {
+                if (sessionRunStarted && receivedGreetingsTaskActive) {
                     val detailStatus = runCatching { receivedGreetingsTaskExecutor.traversalStatus() }
                         .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
                     if (detailStatus == ReceivedGreetingsTraversalStatus.DETAIL_READY) {
@@ -657,9 +659,7 @@ class AiReplyObservationRuntime(
                 }
             }
             ChatPageKind.UNKNOWN, ChatPageKind.NON_CHAT -> {
-                if (sessionRunStarted && receivedGreetingsTaskActive &&
-                    sessionManagerState == SessionManagerState.BROWSING_RECEIVED_GREETINGS
-                ) {
+                if (sessionRunStarted && receivedGreetingsTaskActive) {
                     val stepObservation = receivedGreetingsTaskExecutor.performIdleStepAndInspect()
                     val traversalStatus = stepObservation.status
                     when (stepObservation.decision) {
@@ -2781,7 +2781,7 @@ class AiReplyObservationRuntime(
                     snapshot, batch, currentSessionName, currentSessionCandidate?.contactIdentity
                 )
             }.getOrDefault(0)
-            currentSessionReadCaptured = sampleIndex > 0
+            privateMessagesTraversalTaskExecutor.setSessionReadCaptured(sampleIndex > 0)
             if (sampleIndex > 0) {
                 onLog("AI 会话管理：聊天样本已保存；样本序号=$sampleIndex；消息=${batch.messages.size}；OCR区域=${batch.ocrTargets.size}；方向不明=${batch.messages.count { it.direction == com.freedom.features.aireply.domain.message.ChatMessageDirection.UNKNOWN }}")
             } else {
@@ -2965,7 +2965,6 @@ class AiReplyObservationRuntime(
                 SessionManagerState.OPENING_SESSION,
                 SessionManagerState.READING_SESSION,
                 SessionManagerState.SCROLLING_SESSION_LIST,
-                SessionManagerState.BROWSING_RECEIVED_GREETINGS,
                 SessionManagerState.COMPLETED,
                 SessionManagerState.PAUSED
             )
@@ -3500,7 +3499,6 @@ class AiReplyObservationRuntime(
         pendingMessageReadSnapshot = null
         messageReadGeneration += 1L
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
-        sessionManagerState = SessionManagerState.BROWSING_RECEIVED_GREETINGS
         onLog(
             "AI Reply：切换收到的招呼只读 OCR 任务；原因=$reason；" +
                 "私人聊天成功归档数=$normalCompletedObservationCount/$normalInboxTaskTargetCount；" +
@@ -3579,7 +3577,6 @@ class AiReplyObservationRuntime(
         automationYieldedToUser = false
         userHandoffCanResumeAutonomous = false
         startupReadinessCoordinator.markReceivedGreetingsWorkAreaConfirmed()
-        sessionManagerState = SessionManagerState.BROWSING_RECEIVED_GREETINGS
 
         onLog("收到的招呼人工任务[STARTED]：已确认用户手动打开的列表；暂停私人消息任务并接管当前页面；不点击入口、不返回消息列表")
         val firstStepAccepted = runCatching {
@@ -3803,15 +3800,12 @@ class AiReplyObservationRuntime(
                         return
                     }
                     GestureSubmission.ACCEPTED -> {
-                        currentSessionKey = attempt.selectedKey
-                        synchronized(headerMismatchGuard) {
-                            headerMismatchRecordedForCurrentAttempt = false
-                        }
-                        // Use the name from the just-revalidated row, not the older pre-screenshot snapshot.
-                        currentSessionName = attempt.candidate.nameText
-                        currentSessionCandidate = attempt.candidate
-                        currentSessionReadCaptured = false
-                        currentSessionWindowKey = null
+                        // Store the exact just-revalidated row as one executor-owned session context.
+                        privateMessagesTraversalTaskExecutor.beginSession(
+                            candidate = attempt.candidate,
+                            sessionKey = attempt.selectedKey,
+                            windowKey = null
+                        )
                         sessionManagerState = SessionManagerState.OPENING_SESSION
                         privateMessagesTraversalTaskExecutor.attemptedSessionKeys += attempt.selectedKey
                         privateMessagesTraversalTaskExecutor.sessionActionCount += 1
@@ -4557,9 +4551,7 @@ class AiReplyObservationRuntime(
      * active; this prevents a retry budget from silently converting a recoverable page into PAUSED.
      */
     private fun scheduleReceivedGreetingsRecoveryRetry(reason: String) {
-        if (!sessionRunStarted || !receivedGreetingsTaskActive ||
-            sessionManagerState != SessionManagerState.BROWSING_RECEIVED_GREETINGS
-        ) return
+        if (!sessionRunStarted || !receivedGreetingsTaskActive) return
         val retryCount = receivedGreetingsTaskController.nextRecoveryRetryCount()
         val delayMs = ReceivedGreetingsRetrySchedule.delayForRetry(retryCount)
         onLog(

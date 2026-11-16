@@ -184,6 +184,36 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun executionerOwnsCurrentSessionContextAndClearsItAtResetBoundary() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val selected = candidate(3, "Selected session", ChatUnreadStatus.UNREAD)
+
+        executor.executionState = SessionManagerState.OPENING_SESSION
+        executor.beginSession(
+            candidate = selected,
+            sessionKey = key(selected),
+            windowKey = "window-3"
+        )
+        executor.setSessionReadCaptured(true)
+
+        assertEquals(SessionManagerState.OPENING_SESSION, executor.executionState)
+        assertEquals(key(selected), executor.currentSessionKey)
+        assertEquals("Selected session", executor.currentSessionName)
+        assertEquals(selected, executor.currentSessionCandidate)
+        assertTrue(executor.currentSessionReadCaptured)
+        assertEquals("window-3", executor.currentSessionWindowKey)
+
+        executor.reset()
+
+        assertEquals(SessionManagerState.STOPPED, executor.executionState)
+        assertEquals(null, executor.currentSessionKey)
+        assertEquals(null, executor.currentSessionName)
+        assertEquals(null, executor.currentSessionCandidate)
+        assertFalse(executor.currentSessionReadCaptured)
+        assertEquals(null, executor.currentSessionWindowKey)
+    }
+
+    @Test
     fun returnedInboxResetClearsOnlyTheNewPassStateAndKeepsRunAuditHistory() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP

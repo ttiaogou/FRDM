@@ -18,6 +18,8 @@ import com.freedom.core.accessibility.events.AccessibilityEventType
 import com.freedom.core.accessibility.overlay.OverlayPort
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
+import com.freedom.core.runtime.PageObservationCoordinator
+import com.freedom.core.runtime.PageObservationSubscription
 import com.freedom.features.accountbrowse.AccountBrowseInteractionContext
 import com.freedom.features.accountbrowse.AccountBrowseInteractionEventClassifier
 import com.freedom.features.accountbrowse.AccountBrowseInteractionEvidence
@@ -53,13 +55,26 @@ internal class AndroidAccountBrowseWorkflow(
     private val onLog: (String) -> Unit,
     private val isManualReviewRequired: () -> Boolean = { false },
     private val onManualReviewRequired: (String) -> Unit = {},
-    private val onRequestScreenOff: () -> Boolean = { false }
+    private val onRequestScreenOff: () -> Boolean = { false },
+    private val pageObservationCoordinator: PageObservationCoordinator? = null
 ) {
     private val displayMetrics get() = accessibilityGateway.displayMetrics()
     private val navigationExecutor = AccountBrowseNavigationExecutor(gesturePolicy) { displayMetrics }
     private val scrollExecutor = AccountBrowseScrollExecutor()
     private val popupExecutor = AccountBrowsePopupExecutor()
     private val recoveryExecutor = AccountBrowseRecoveryExecutor()
+
+    private val observationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
+        pageObservationCoordinator ?: PageObservationCoordinator(taskScheduler)
+    }
+    private val pageObservationChannel: PageObservationSubscription by lazy(LazyThreadSafetyMode.NONE) {
+        observationCoordinator.registerChannel(
+            channelId = ACCOUNT_BROWSE_PAGE_OBSERVATION_CHANNEL,
+            quietPeriodMs = PAGE_OBSERVATION_QUIET_PERIOD_MS,
+            maxWaitMs = PAGE_OBSERVATION_MAX_WAIT_MS,
+            onObservationRequested = ::onCoalescedPageObservationRequested
+        )
+    }
 
     internal var phase: AccountBrowsePhase
         get() = accountBrowseRuntime.phase
@@ -169,6 +184,9 @@ internal class AndroidAccountBrowseWorkflow(
         manualHandoffCoordinator.cancelOverlayPassthroughWatchdog()
 
     internal fun cancelScheduledStep() = accountBrowseRuntime.cancelScheduledStep()
+
+    /** Cancels only the shared page-observation request owned by AccountBrowse. */
+    internal fun cancelPageObservation() = pageObservationChannel.cancel()
     internal fun recordManualTakeoverWhilePaused(
         activityClass: String,
         sourceFingerprint: String,
@@ -192,6 +210,7 @@ internal class AndroidAccountBrowseWorkflow(
         overlayPort.clearGestureTrail()
         restoreMonitorOverlayTouchPassthrough()
         cancelScheduledStep()
+        pageObservationChannel.cancel()
         manualHandoffCoordinator.cleanup()
         gestureDispatchSyncTask?.cancel()
         gestureDispatchSyncTask = null
@@ -298,6 +317,7 @@ internal class AndroidAccountBrowseWorkflow(
             }
         }
         if (accountBrowsePhase == AccountBrowsePhase.IDLE) startAccountBrowseIfNeeded()
+        if (eventType in PAGE_OBSERVATION_EVENT_TYPES) pageObservationChannel.requestSnapshot()
     }
 
     internal fun onRefreshVerificationEvent(eventType: Int, className: String, now: Long) {
@@ -315,6 +335,18 @@ internal class AndroidAccountBrowseWorkflow(
                 )
             }
         }
+    }
+
+    /**
+     * Shared page observation only wakes the existing read-only verification phases. The
+     * AccountBrowseScheduler keeps ownership of phase timing and does not replace an already
+     * pending step, so event bursts cannot skip countdown, dwell, or gesture phases.
+     */
+    private fun onCoalescedPageObservationRequested() {
+        if (!isMonitoringRunning() || !isBrowseModeActive() || accountBrowseSession.touchActive ||
+            isManualReviewRequired() || accountBrowsePhase !in PAGE_OBSERVATION_PHASES
+        ) return
+        accountBrowseRuntime.scheduleStep(PAGE_STATE_POLL_MS)
     }
 
     private fun isRecyclerViewClass(className: String): Boolean =
@@ -367,6 +399,7 @@ internal class AndroidAccountBrowseWorkflow(
         accountBrowseRuntime.resetSession(
             beforeReset = {
                 restoreMonitorOverlayTouchPassthrough()
+                pageObservationChannel.cancel()
                 accountBrowseRuntime.cancelScheduledStep()
                 cancelManualTouchResume()
             },
@@ -408,6 +441,7 @@ internal class AndroidAccountBrowseWorkflow(
             },
             beforePause = {
                 restoreMonitorOverlayTouchPassthrough()
+                pageObservationChannel.cancel()
                 accountBrowseRuntime.cancelScheduledStep()
             },
             hideCountdown = ::hideFirstSwipeCountdown,
@@ -2602,6 +2636,27 @@ internal class AndroidAccountBrowseWorkflow(
     private fun ScreenRect.toShortString(): String = "[$left,$top][$right,$bottom]"
 
     companion object {
+
+        private const val ACCOUNT_BROWSE_PAGE_OBSERVATION_CHANNEL = "ACCOUNT_BROWSE_PAGE_OBSERVATION"
+        private const val PAGE_OBSERVATION_QUIET_PERIOD_MS = 300L
+        private const val PAGE_OBSERVATION_MAX_WAIT_MS = 1_200L
+        private val PAGE_OBSERVATION_EVENT_TYPES = setOf(
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_SELECTED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED
+        )
+        private val PAGE_OBSERVATION_PHASES = setOf(
+            AccountBrowsePhase.VERIFY_DYNAMIC_FEED_REFRESH,
+            AccountBrowsePhase.WAIT_FOR_FEED_STABLE,
+            AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE,
+            AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD,
+            AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN,
+            AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE,
+            AccountBrowsePhase.WAIT_FOR_LIST_RETURN
+        )
 
         private const val NAV_ACTION_DYNAMIC_TAB = "DYNAMIC_TAB"
         private const val NAV_ACTION_HOME_TAB = "HOME_TAB"

@@ -7,7 +7,7 @@ import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.runtime.ModeRuntimePort
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.TaskCoordinator
-import com.freedom.core.runtime.TaskLease
+import com.freedom.core.runtime.TaskExecutionController
 
 /** Routes normalized lifecycle and accessibility events into the AccountBrowse Android adapter. */
 internal class AccountBrowseModeRuntimeAdapter(
@@ -21,9 +21,14 @@ internal class AccountBrowseModeRuntimeAdapter(
 ) : ModeRuntimePort {
     override val mode: RunMode = RunMode.ACCOUNT_BROWSE
     private var awaitingServiceReconnect = false
-    private var taskLease: TaskLease? = null
+    private val taskExecutionController = TaskExecutionController(
+        coordinator = taskCoordinator,
+        currentRunGeneration = currentRunGeneration,
+        onLog = onLog
+    )
 
     override fun onRunStarted() {
+        taskExecutionController.beginRun(currentRunGeneration())
         if (!ensureTaskOwnership("自动浏览启动")) {
             throw IllegalStateException("AccountBrowse could not acquire the exclusive UI operation lease")
         }
@@ -49,6 +54,7 @@ internal class AccountBrowseModeRuntimeAdapter(
 
     override fun onAccessibilityServiceConnected() {
         if (awaitingServiceReconnect) {
+            taskExecutionController.beginRun(currentRunGeneration())
             if (!ensureTaskOwnership("无障碍服务重连")) return
             awaitingServiceReconnect = false
             onReadinessStarting(mode, "AccountBrowse 服务重连；重新等待目标应用正式就绪")
@@ -60,6 +66,7 @@ internal class AccountBrowseModeRuntimeAdapter(
         onReadinessInvalidated("无障碍服务断开；目标应用就绪状态失效")
         awaitingServiceReconnect = true
         workflow().cancelScheduledStep()
+        workflow().cancelPageObservation()
     }
 
     override fun onExternalRefresh() {
@@ -129,34 +136,11 @@ internal class AccountBrowseModeRuntimeAdapter(
         }
     }
 
-    private fun ensureTaskOwnership(reason: String): Boolean {
-        taskLease?.let { current ->
-            if (taskCoordinator.isCurrent(current)) return true
-        }
-        val lease = taskCoordinator.tryAcquire(TASK_ID, currentRunGeneration())
-        if (lease == null) {
-            onLog(
-                "任务协调[REJECTED]：task=$TASK_ID；reason=$reason；" +
-                    "activeTask=${taskCoordinator.activeTaskId() ?: "NONE"}；拒绝自动浏览操作"
-            )
-            return false
-        }
-        taskLease = lease
-        onLog("任务协调[ACQUIRED]：task=$TASK_ID；reason=$reason；runGeneration=${lease.runGeneration}；已取得 UI 操作权")
-        return true
-    }
+    private fun ensureTaskOwnership(reason: String): Boolean =
+        taskExecutionController.claim(TASK_ID, reason)
 
     private fun releaseTaskOwnership(reason: String) {
-        val lease = taskLease ?: return
-        val released = taskCoordinator.release(lease)
-        taskLease = null
-        onLog(
-            if (released) {
-                "任务协调[RELEASED]：task=$TASK_ID；reason=$reason；已释放 UI 操作权"
-            } else {
-                "任务协调[STALE_RELEASE_IGNORED]：task=$TASK_ID；reason=$reason；租约已过期或已转交"
-            }
-        )
+        taskExecutionController.release(TASK_ID, reason)
     }
 
     private companion object {

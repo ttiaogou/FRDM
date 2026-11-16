@@ -1,16 +1,14 @@
 package com.freedom.features.aireply
 
 import com.freedom.core.runtime.PageObservationCoordinator as SharedPageObservationCoordinator
+import com.freedom.core.runtime.PageObservationSubscription
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 
 /**
- * AI Reply composition point for shared page-snapshot scheduling and the Received Greetings
- * arrival watcher. The generic event-coalescing mechanism lives in Core; the page-specific
- * retry/watchdog remains in the AI Reply feature.
- *
- * This facade retains the existing call surface so the current inbox workflow and its business
- * state transitions are not changed during the architectural extraction.
+ * AI Reply registrations in the service-scoped page-observation coordinator plus its greetings
+ * arrival watcher. The generic coalescing mechanism is shared with AccountBrowse; page recognition,
+ * stability confirmation and low-frequency fallback remain owned by AI Reply.
  */
 internal class MomoPageObservationCoordinator(
     scheduler: TaskScheduler,
@@ -24,15 +22,21 @@ internal class MomoPageObservationCoordinator(
     onFallbackCheckRequested: () -> Unit,
     retryDelayMs: Long = 350L,
     maxStabilityRetries: Int = 8,
-    fallbackDelayMs: () -> Long
+    fallbackDelayMs: () -> Long,
+    sharedCoordinator: SharedPageObservationCoordinator? = null
 ) {
-    private val sharedCoordinator = SharedPageObservationCoordinator(
-        scheduler = scheduler,
-        fullPageDebounceMs = fullInspectionDebounceMs,
-        knownRegionDebounceMs = regionRefreshDebounceMs,
-        maxEventBurstWaitMs = maxEventBurstInspectionWaitMs,
-        runFullPageSnapshot = runFullInspection,
-        runKnownRegionSnapshot = runRegionRefresh
+    private val observationCoordinator = sharedCoordinator ?: SharedPageObservationCoordinator(scheduler)
+    private val fullPageChannel: PageObservationSubscription = observationCoordinator.registerChannel(
+        channelId = FULL_INSPECTION_CHANNEL,
+        quietPeriodMs = fullInspectionDebounceMs,
+        maxWaitMs = maxEventBurstInspectionWaitMs,
+        onObservationRequested = runFullInspection
+    )
+    private val regionRefreshChannel: PageObservationSubscription = observationCoordinator.registerChannel(
+        channelId = REGION_REFRESH_CHANNEL,
+        quietPeriodMs = regionRefreshDebounceMs,
+        maxWaitMs = maxEventBurstInspectionWaitMs,
+        onObservationRequested = runRegionRefresh
     )
     private val receivedGreetingsWatcher = ReceivedGreetingsPageArrivalWatcher(
         scheduler = scheduler,
@@ -44,15 +48,15 @@ internal class MomoPageObservationCoordinator(
         fallbackDelayMs = fallbackDelayMs
     )
 
-    fun signalFullInspection() = sharedCoordinator.requestFullPageSnapshot()
+    fun signalFullInspection() = fullPageChannel.requestSnapshot()
 
-    fun signalRegionRefresh() = sharedCoordinator.requestKnownRegionSnapshot()
+    fun signalRegionRefresh() = regionRefreshChannel.requestSnapshot()
 
-    fun cancelFullInspection() = sharedCoordinator.cancelFullPageSnapshot()
+    fun cancelFullInspection() = fullPageChannel.cancel()
 
-    fun cancelRegionRefresh() = sharedCoordinator.cancelKnownRegionSnapshot()
+    fun cancelRegionRefresh() = regionRefreshChannel.cancel()
 
-    fun isFullInspectionPending(): Boolean = sharedCoordinator.isFullPageSnapshotPending()
+    fun isFullInspectionPending(): Boolean = fullPageChannel.isPending()
 
     fun onPageChangeEvent() = receivedGreetingsWatcher.onPageChangeEvent()
 
@@ -62,7 +66,13 @@ internal class MomoPageObservationCoordinator(
     fun resetReceivedGreetingsWatch() = receivedGreetingsWatcher.reset()
 
     fun reset() {
-        sharedCoordinator.reset()
+        fullPageChannel.cancel()
+        regionRefreshChannel.cancel()
         receivedGreetingsWatcher.reset()
+    }
+
+    private companion object {
+        const val FULL_INSPECTION_CHANNEL = "AI_REPLY_FULL_INSPECTION"
+        const val REGION_REFRESH_CHANNEL = "AI_REPLY_KNOWN_REGION_REFRESH"
     }
 }

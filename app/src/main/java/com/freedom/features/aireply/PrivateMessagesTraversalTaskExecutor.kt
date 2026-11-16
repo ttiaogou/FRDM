@@ -17,6 +17,22 @@ internal enum class SessionListTraversalPhase {
     SCANNING_BOTTOM_TO_TOP
 }
 
+/** 高层私聊会话流程状态。执行器持有状态，运行时仅负责调度外部副作用。 */
+internal enum class SessionManagerState {
+    STOPPED,
+    POSITIONING_SESSION_LIST_AT_BOTTOM,
+    SCANNING_SESSION_LIST_BOTTOM_TO_TOP,
+    WAITING_FOR_SESSION_LIST,
+    CAPTURING_SESSION_LIST,
+    OPENING_SESSION,
+    READING_SESSION,
+    RETURNING_TO_SESSION_LIST,
+    SCROLLING_SESSION_LIST,
+    WAITING_FOR_UNREAD,
+    COMPLETED,
+    PAUSED
+}
+
 internal data class PrivateMessagesUnreadEvidence(
     val hasUnread: Boolean,
     val hasUnknown: Boolean
@@ -40,6 +56,16 @@ internal enum class PrivateMessagesScrollObservationDecision {
 }
 
 internal class PrivateMessagesTraversalTaskExecutor {
+    /** 私聊流程和当前会话上下文由此执行器独占持有。 */
+    var executionState: SessionManagerState = SessionManagerState.STOPPED
+    var currentSessionKey: String? = null
+    var currentSessionName: String? = null
+    var currentSessionCandidate: ChatListCandidateSnapshot? = null
+    var currentSessionReadCaptured: Boolean = false
+    var currentSessionWindowKey: String? = null
+    val headerMismatchGuard = Any()
+    var headerMismatchRecordedForCurrentAttempt: Boolean = false
+
     var phase: SessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
     var atTop: Boolean = false
 
@@ -223,6 +249,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
 
     /** Clears all traversal state at the AI Reply runtime reset boundary. */
     fun reset() {
+        executionState = SessionManagerState.STOPPED
+        clearCurrentSession()
+        headerMismatchRecordedForCurrentAttempt = false
         phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
         atTop = false
         initialInboxPositionCheckCompleted = false
@@ -252,6 +281,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * The startup admission swipe is not replayed because the inbox context was already established.
      */
     fun resetForReturnedInbox() {
+        executionState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
+        clearCurrentSession()
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
         attemptedSessionKeys.clear()
@@ -265,4 +296,32 @@ internal class PrivateMessagesTraversalTaskExecutor {
         normalInboxHadUnread = false
         normalInboxUnreadStateUnknown = false
     }
+
+    fun clearCurrentSession() {
+        currentSessionKey = null
+        currentSessionName = null
+        currentSessionCandidate = null
+        currentSessionReadCaptured = false
+        currentSessionWindowKey = null
+    }
+
+    fun beginSession(
+        candidate: ChatListCandidateSnapshot,
+        sessionKey: String,
+        windowKey: String?
+    ) {
+        currentSessionKey = sessionKey
+        currentSessionName = candidate.nameText
+        currentSessionCandidate = candidate
+        currentSessionReadCaptured = false
+        currentSessionWindowKey = windowKey
+        synchronized(headerMismatchGuard) {
+            headerMismatchRecordedForCurrentAttempt = false
+        }
+    }
+
+    fun setSessionReadCaptured(captured: Boolean) {
+        currentSessionReadCaptured = captured
+    }
+
 }

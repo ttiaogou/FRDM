@@ -89,6 +89,66 @@ class PageObservationCoordinatorTest {
         assertFalse(coordinator.isKnownRegionSnapshotPending())
     }
 
+    @Test
+    fun sharedCoordinatorCoalescesBusinessChannelsIndependently() {
+        val scheduler = FakeScheduler()
+        val coordinator = PageObservationCoordinator(scheduler)
+        var aiReplySnapshots = 0
+        var accountBrowseSnapshots = 0
+        val aiReply = coordinator.registerChannel(
+            channelId = "AI_REPLY_FULL_INSPECTION",
+            quietPeriodMs = 250L,
+            maxWaitMs = 1_000L,
+            onObservationRequested = { aiReplySnapshots++ }
+        )
+        val accountBrowse = coordinator.registerChannel(
+            channelId = "ACCOUNT_BROWSE_PAGE_OBSERVATION",
+            quietPeriodMs = 300L,
+            maxWaitMs = 1_200L,
+            onObservationRequested = { accountBrowseSnapshots++ }
+        )
+
+        aiReply.requestSnapshot()
+        aiReply.requestSnapshot()
+        accountBrowse.requestSnapshot()
+        accountBrowse.requestSnapshot()
+
+        assertEquals(
+            setOf("AI_REPLY_FULL_INSPECTION", "ACCOUNT_BROWSE_PAGE_OBSERVATION"),
+            coordinator.registeredChannelIds()
+        )
+        assertEquals(2, scheduler.pendingCount())
+
+        aiReply.cancel()
+        assertFalse(aiReply.isPending())
+        assertTrue(accountBrowse.isPending())
+        scheduler.runNextWithDelay(300L)
+        assertEquals(0, aiReplySnapshots)
+        assertEquals(1, accountBrowseSnapshots)
+        assertFalse(accountBrowse.isPending())
+
+        aiReply.close()
+        accountBrowse.close()
+        assertTrue(coordinator.registeredChannelIds().isEmpty())
+    }
+
+    @Test
+    fun closingOneSharedChannelDoesNotCancelAnotherBusinessChannel() {
+        val scheduler = FakeScheduler()
+        val coordinator = PageObservationCoordinator(scheduler)
+        var observations = 0
+        val first = coordinator.registerChannel("first", 200L, 800L) { observations += 1 }
+        val second = coordinator.registerChannel("second", 200L, 800L) { observations += 10 }
+
+        first.requestSnapshot()
+        second.requestSnapshot()
+        first.close()
+
+        assertEquals(setOf("second"), coordinator.registeredChannelIds())
+        scheduler.runNextWithDelay(200L)
+        assertEquals(10, observations)
+    }
+
     private class FakeScheduler : TaskScheduler {
         private data class Entry(
             val delay: Long,
