@@ -70,7 +70,7 @@ internal class AiModelConfigurationScreen(
             content,
             label = "API Base URL",
             value = configuration.apiBaseUrl,
-            hint = "例如 https://api.example.com/v1",
+            hint = "例如 https://api.example.com/v1（OpenAI 兼容）",
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         )
         val modelInput = addField(
@@ -132,7 +132,7 @@ internal class AiModelConfigurationScreen(
         )
 
         content.addView(TextView(activity).apply {
-            text = "API Key 与其他模型配置使用独立 Android Keystore 密钥，通过 AES-GCM 加密后保存在应用私有存储中。API 地址仅接受 HTTPS。当前阶段只保存连接配置，尚未发送模型请求；云端处理仍受“云端模型处理授权”开关控制。"
+            text = "当前支持 OpenAI 兼容的 Chat Completions 接口：请填写服务商提供的 API Base URL（通常以 /v1 结尾），系统会自动追加 /chat/completions。API Key 与模型配置使用 Android Keystore + AES-GCM 加密保存在应用私有存储中；API 地址仅接受 HTTPS。请求仅在开启“云端模型处理授权”后执行，生成内容只会填入聊天输入框，不会自动发送。"
             textSize = 12f
             setTextColor(FreedomUi.MUTED)
             setLineSpacing(dp(2).toFloat(), 1f)

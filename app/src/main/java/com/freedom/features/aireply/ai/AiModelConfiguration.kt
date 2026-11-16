@@ -3,7 +3,7 @@ package com.freedom.features.aireply.ai
 import java.net.URI
 
 /**
- * User-owned configuration for a future cloud model adapter.
+ * User-owned configuration for the OpenAI-compatible remote chat-completions adapter.
  * The API key is deliberately excluded from toString() to prevent accidental log disclosure.
  */
 data class AiModelConfiguration(

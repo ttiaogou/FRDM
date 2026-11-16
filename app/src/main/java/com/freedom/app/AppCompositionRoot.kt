@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Build
 import com.freedom.accessibility.FreedomAccessibilityService
 import com.freedom.adapters.accessibility.android.AndroidAccessibilityEventPipeline
+import com.freedom.adapters.ai.OpenAiCompatibleAiModelTransport
 import com.freedom.adapters.accessibility.android.AndroidAccessibilityGateway
 import com.freedom.adapters.accessibility.android.AndroidAccessibilityServiceRecoveryCoordinator
 import com.freedom.adapters.accessibility.android.AndroidGestureVisualizer
@@ -28,6 +29,8 @@ import com.freedom.adapters.runtime.android.AccountBrowseModeRuntimeAdapter
 import com.freedom.adapters.runtime.android.AiReplyModeRuntimeAdapter
 import com.freedom.adapters.runtime.android.HandlerTaskScheduler
 import com.freedom.adapters.social.momo.MomoAppDescriptor
+import com.freedom.features.aireply.ai.AiReplyDraftCoordinator
+import com.freedom.features.aireply.ai.TransportBackedAiModelProvider
 import com.freedom.adapters.social.momo.MomoSocialAdapter
 import com.freedom.application.ports.AiModelCloudConsentSettings
 import com.freedom.application.ports.GestureCalibrationPresentationPort
@@ -312,6 +315,31 @@ internal class AccessibilityServiceDependencies internal constructor(
         )
     }
     val momoSocialAdapter: MomoSocialAdapter by momoSocialAdapterDelegate
+    private val aiReplyDraftCoordinatorDelegate = lazy(LazyThreadSafetyMode.NONE) {
+        AiReplyDraftCoordinator(
+            configurationRepository = root.aiModelConfigurationRepository,
+            cloudConsent = root.aiModelCloudConsent,
+            personalizationRepository = root.aiReplyPersonalizationRepository,
+            inputPort = momoSocialAdapter,
+            scheduler = taskScheduler,
+            isAiReplyActive = {
+                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
+            },
+            isManualReviewRequired = {
+                monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
+            },
+            onLog = addLog,
+            createProvider = { configuration ->
+                TransportBackedAiModelProvider(
+                    providerName = OpenAiCompatibleAiModelTransport.PROVIDER_NAME,
+                    modelName = configuration.modelName,
+                    transport = OpenAiCompatibleAiModelTransport(configuration),
+                    cloudConsent = root.aiModelCloudConsent
+                )
+            }
+        )
+    }
+    val aiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate
     val aiReplyObservationRuntime by lazy(LazyThreadSafetyMode.NONE) {
         AiReplyObservationRuntime(
             scheduler = taskScheduler,
@@ -326,7 +354,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             onLog = addLog,
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
-            onVerifiedConversationObserved = { batch, identity ->
+            onVerifiedConversationObserved = { batch, identity, snapshot ->
                 val verifiedIdentity = identity?.takeIf {
                     it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
                 }
@@ -347,13 +375,26 @@ internal class AccessibilityServiceDependencies internal constructor(
                             "当前观察批次=${batch.messages.size}；联系人身份=平台已验证；" +
                             "未输出消息正文"
                     )
+                    aiReplyDraftCoordinator.generateAndFill(
+                        batch = batch,
+                        identity = verifiedIdentity,
+                        snapshot = snapshot,
+                        context = context
+                    )
                 } else {
                     addLog("AI 会话上下文未加载：联系人身份尚未达到平台 ID 验证级别")
                 }
             },
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
-            sharedPageObservationCoordinator = pageObservationCoordinator
+            sharedPageObservationCoordinator = pageObservationCoordinator,
+            isConversationDraftPending = { aiReplyDraftCoordinator.isPending },
+            isDraftAwaitingUserSend = { aiReplyDraftCoordinator.isAwaitingUserSend },
+            onDraftRuntimeReset = {
+                if (aiReplyDraftCoordinatorDelegate.isInitialized()) {
+                    aiReplyDraftCoordinator.resetForRuntimeReset()
+                }
+            }
         )
     }
     val accountBrowseWorkflow by lazy(LazyThreadSafetyMode.NONE) {

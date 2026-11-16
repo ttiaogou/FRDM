@@ -17,6 +17,9 @@ import com.freedom.adapters.accessibility.android.AndroidDialogWindowObservation
 import com.freedom.adapters.accessibility.android.AndroidTargetWindowRoot
 import com.freedom.adapters.accessibility.android.MonitorOverlay
 import com.freedom.core.accessibility.api.AccessibilityGateway
+import com.freedom.core.accessibility.api.NodeAction
+import com.freedom.core.accessibility.api.NodeActionRequest
+import com.freedom.core.accessibility.api.AccessibilityNodeField
 import com.freedom.core.accessibility.api.TreeInspectionRequest
 import com.freedom.core.accessibility.api.NodeTextCapture
 import com.freedom.core.accessibility.api.AccessibilityTreeLimits
@@ -46,6 +49,10 @@ import com.freedom.features.aireply.ports.ChatPageNodeEvidence
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
+import com.freedom.features.aireply.ports.ChatDraftInputPort
+import com.freedom.features.aireply.ports.ChatDraftInputTarget
+import com.freedom.features.aireply.ports.ChatDraftInputResult
+import com.freedom.features.aireply.ports.ChatDraftInputStatus
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
@@ -87,7 +94,7 @@ internal class MomoSocialAdapter(
     private val sayHiTraversalCheckpointRepository: MomoSayHiTraversalCheckpointRepository,
     private val ocrReviewRepository: OcrReviewRepository,
     private val sampleArchivePort: SessionSampleArchivePort
-) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort {
+) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort {
 
     private data class Config(
         val page: MomoPageInspector.Config,
@@ -4338,6 +4345,106 @@ internal class MomoSocialAdapter(
         }
         onLog("消息工作区域入口：已提交经过双快照验证的消息标签导航；等待新鲜页面指纹确认")
         return true
+    }
+
+    override fun writeDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult {
+        if (text.isBlank() || text.length > 2_000) {
+            return ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "DRAFT_TEXT_INVALID")
+        }
+        val liveTarget = resolveLiveDraftInputTarget(target)
+            ?: return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_TARGET_STALE")
+        val field = inspectDraftInputNode(liveTarget)
+            ?: return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "INPUT_NODE_UNAVAILABLE")
+        if (!field.editable || !field.visible || !field.enabled || field.password) {
+            return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_EDITABLE, "INPUT_FIELD_NOT_EDITABLE")
+        }
+        if (AccessibilityNodeField.TEXT in field.captureEvidence.failedFields ||
+            AccessibilityNodeField.TEXT in field.captureEvidence.notCapturedFields
+        ) {
+            return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "INPUT_TEXT_CAPTURE_UNAVAILABLE")
+        }
+        if (field.text == text && !field.showingHintText) {
+            return ChatDraftInputResult(ChatDraftInputStatus.ALREADY_PRESENT)
+        }
+        if (!field.text.isNullOrBlank() && !field.showingHintText) {
+            // Never replace text the user has already typed.
+            return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_EMPTY, "USER_INPUT_PRESERVED")
+        }
+        val focus = runCatching {
+            accessibilityGateway.performNodeAction(NodeActionRequest(liveTarget, NodeAction.FOCUS))
+        }.getOrNull()
+        if (focus?.accepted != true) {
+            return ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "INPUT_FOCUS_REJECTED")
+        }
+        val setText = runCatching {
+            accessibilityGateway.performNodeAction(
+                NodeActionRequest(liveTarget, NodeAction.SET_TEXT, textArgument = text)
+            )
+        }.getOrNull()
+        return if (setText?.accepted == true && setText.performed) {
+            ChatDraftInputResult(ChatDraftInputStatus.WRITTEN)
+        } else {
+            ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "INPUT_SET_TEXT_REJECTED")
+        }
+    }
+
+    override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult {
+        val liveTarget = resolveLiveDraftInputTarget(target)
+            ?: return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_TARGET_STALE")
+        val field = inspectDraftInputNode(liveTarget)
+            ?: return ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED, "INPUT_REINSPECTION_FAILED")
+        if (!field.editable || !field.visible || !field.enabled || field.password || field.showingHintText) {
+            return ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED, "INPUT_FIELD_STATE_CHANGED")
+        }
+        return if (field.text == text) {
+            ChatDraftInputResult(ChatDraftInputStatus.VERIFIED)
+        } else {
+            ChatDraftInputResult(ChatDraftInputStatus.TEXT_MISMATCH, "INPUT_TEXT_MISMATCH")
+        }
+    }
+
+    /** Obtain a new absolute node locator only after the same package/window/chat is observed. */
+    private fun resolveLiveDraftInputTarget(target: ChatDraftInputTarget): NodeTarget? {
+        if (target.packageName != targetPackage || target.windowIdentityKey.isBlank() ||
+            target.conversationIdentityKey.isBlank() || target.windowSessionKey.isBlank()
+        ) return null
+        val current = runCatching { inspectChatPage() }.getOrNull() ?: return null
+        if (current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            current.packageName != target.packageName ||
+            current.activityClass != target.activityClass ||
+            current.windowIdentityKey() != target.windowIdentityKey ||
+            current.conversationIdentityKey() != target.conversationIdentityKey
+        ) return null
+        val liveWindow = current.inputFieldTarget?.window ?: return null
+        val liveConversationKey = current.conversationIdentityKey() ?: return null
+        val currentWindowSessionKey =
+            "${liveWindow.packageName}|${liveWindow.windowId}|${liveWindow.generation}|conversation=$liveConversationKey"
+        if (currentWindowSessionKey != target.windowSessionKey ||
+            !accessibilityGateway.isWindowCurrent(liveWindow)
+        ) return null
+        val liveTarget = current.inputFieldTarget ?: return null
+        if (liveTarget.window != target.nodeTarget.window || liveTarget.path != target.nodeTarget.path) return null
+        return liveTarget
+    }
+
+    private fun inspectDraftInputNode(target: NodeTarget): com.freedom.core.accessibility.api.AccessibilityNodeSnapshot? {
+        val tree = runCatching {
+            accessibilityGateway.inspectNodeSubtree(
+                target,
+                TreeInspectionRequest(
+                    maxNodes = 8,
+                    textCapture = NodeTextCapture.EPHEMERAL,
+                    maxDepth = 2,
+                    maxDurationMs = 500L
+                )
+            )
+        }.getOrNull() ?: return null
+        if (tree.truncated || tree.timeBudgetExceeded ||
+            tree.windowId != target.window.windowId ||
+            tree.nodes.isEmpty()
+        ) return null
+        return tree.nodes.firstOrNull { it.path == target.path }
+            ?.takeIf { it.packageName == target.window.packageName && it.windowId == target.window.windowId }
     }
 
     override fun inspectChatPage(): ChatPageSnapshot {

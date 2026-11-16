@@ -55,8 +55,8 @@ class AiReplyObservationRuntime(
     private val fullInspectionDebounceMs: Long,
     private val regionRefreshDebounceMs: Long,
     private val onMessagesObserved: (ChatMessageBatch) -> Unit = {},
-    /** Called after verified session history has been persisted, with its row identity evidence. */
-    private val onVerifiedConversationObserved: (ChatMessageBatch, ContactRowIdentity?) -> Unit = { _, _ -> },
+    /** Called after verified session history has been persisted, with the exact chat snapshot. */
+    private val onVerifiedConversationObserved: (ChatMessageBatch, ContactRowIdentity?, ChatPageSnapshot) -> Unit = { _, _, _ -> },
     /** Inclusive random bounds are injectable so task scheduling can be tested deterministically. */
     private val chooseRandomInt: (Int, Int) -> Int = { minimum, maximum ->
         java.util.concurrent.ThreadLocalRandom.current().nextInt(minimum, maximum + 1)
@@ -64,7 +64,13 @@ class AiReplyObservationRuntime(
     /** Shared task/UI ownership; nullable only for isolated legacy unit fixtures. */
     private val taskCoordinator: TaskCoordinator? = null,
     private val currentRunGeneration: () -> Long = { 0L },
-    private val sharedPageObservationCoordinator: PageObservationCoordinator? = null
+    private val sharedPageObservationCoordinator: PageObservationCoordinator? = null,
+    /** Prevents leaving the chat while a bounded model request/draft verification is in flight. */
+    private val isConversationDraftPending: () -> Boolean = { false },
+    /** A verified draft stays on screen so the user can review it and press Send manually. */
+    private val isDraftAwaitingUserSend: () -> Boolean = { false },
+    /** Invalidates late model callbacks when this runtime is reset. */
+    private val onDraftRuntimeReset: () -> Unit = {}
 ) {
     companion object {
         private const val MAX_VISIBLE_MESSAGES = 20
@@ -78,6 +84,8 @@ class AiReplyObservationRuntime(
         private const val SESSION_OPEN_VERIFY_DELAY_MS = 2_200L
         private const val SESSION_RETURN_DELAY_MS = 1_500L
         private const val SESSION_RETURN_VERIFY_DELAY_MS = 900L
+        private const val DRAFT_PENDING_POLL_DELAY_MS = 500L
+        private const val MAX_DRAFT_PENDING_WAIT_MS = 185_000L
         private const val MAX_NO_PROGRESS_SCROLLS = 2
         private const val SESSION_BOUNDARY_SETTLE_DELAY_MS = 650L
         private const val MAX_BOUNDARY_STABILITY_CONFIRMATIONS = 2
@@ -846,6 +854,7 @@ class AiReplyObservationRuntime(
 
     /** Cancel all pending observations when the target changes, run stops, or Service reconnects. */
     fun reset(reason: String = "未指定") {
+        runCatching { onDraftRuntimeReset() }
         sessionActionGeneration += 1L
         startupReadinessCoordinator.cancelRecovery()
         val interruptedGestureRequestId = activeSessionGestureRequestId
@@ -1268,7 +1277,7 @@ class AiReplyObservationRuntime(
             if (observerBatch.messages.isNotEmpty() && verifiedContactIdentity != null &&
                 ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null
             ) {
-                runCatching { onVerifiedConversationObserved(observerBatch, verifiedContactIdentity) }
+                runCatching { onVerifiedConversationObserved(observerBatch, verifiedContactIdentity, snapshot) }
                     .onFailure {
                         onLog("AI 会话上下文回调异常；异常诊断不包含消息正文")
                     }
@@ -2520,11 +2529,44 @@ class AiReplyObservationRuntime(
     private fun normalizeSessionTitle(value: String?): String =
         ChatSessionManagementPolicy.normalizeSessionTitle(value)
 
-    private fun scheduleReturnToSessionList(snapshot: ChatPageSnapshot) {
+    private fun scheduleReturnToSessionList(
+        snapshot: ChatPageSnapshot,
+        draftPendingWaitedMs: Long = 0L
+    ) {
         if (sessionManagerState != SessionManagerState.READING_SESSION) return
         if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
             sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话返回被阻止：私人消息任务未持有 UI 操作权")
+            return
+        }
+        val awaitingUserSend = runCatching { isDraftAwaitingUserSend() }.getOrDefault(true)
+        if (awaitingUserSend) {
+            sessionTransitionTask?.cancel()
+            sessionTransitionTask = null
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 回复草稿已填入并校验：保留当前聊天页面，等待用户检查内容并手动点击发送；未提交发送动作")
+            return
+        }
+        val draftPending = runCatching { isConversationDraftPending() }.getOrDefault(true)
+        if (draftPending) {
+            if (draftPendingWaitedMs >= MAX_DRAFT_PENDING_WAIT_MS) {
+                sessionTransitionTask?.cancel()
+                sessionTransitionTask = null
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 会话管理已暂停：模型请求/草稿校验超过等待上限；保持当前聊天页面，不执行返回动作")
+                return
+            }
+            sessionTransitionTask?.cancel()
+            sessionTransitionTask = scheduler.schedule(DRAFT_PENDING_POLL_DELAY_MS) {
+                sessionTransitionTask = null
+                if (!isAiReplyActive() || !sessionRunStarted ||
+                    sessionManagerState != SessionManagerState.READING_SESSION
+                ) return@schedule
+                scheduleReturnToSessionList(
+                    snapshot,
+                    draftPendingWaitedMs + DRAFT_PENDING_POLL_DELAY_MS
+                )
+            }
             return
         }
         sessionTransitionTask?.cancel()

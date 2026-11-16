@@ -68,7 +68,7 @@ sealed interface AiModelFailure {
     data object TimedOut : AiModelFailure
 }
 
-/** Explicit adapter boundary for a future HTTP/provider SDK integration. */
+/** Explicit adapter boundary for HTTP/provider implementations. */
 interface AiModelTransport {
     fun execute(request: AiModelRequest): Result<AiModelResult>
 }
