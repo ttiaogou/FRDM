@@ -11,6 +11,7 @@ import com.freedom.core.accessibility.gesture.GestureIntentRequest
 import com.freedom.core.accessibility.gesture.GestureVisualizationPort
 import com.freedom.core.accessibility.gesture.toGestureCoordinateContext
 import com.freedom.core.runtime.TaskScheduler
+import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.accessibility.api.GestureSubmission
 
 /**
@@ -31,6 +32,7 @@ object GestureRuntimeFactory {
         scheduler: TaskScheduler? = null,
         currentPageGeneration: () -> Long = { 0L },
         currentRunGeneration: () -> Long = { 0L },
+        taskCoordinator: TaskCoordinator? = null,
         isTargetWindowCurrent: (WindowRef) -> Boolean = { window ->
             window.generation == runCatching(currentPageGeneration).getOrDefault(0L)
         },
@@ -60,6 +62,7 @@ object GestureRuntimeFactory {
             currentRunGeneration = currentRunGeneration,
             isTargetWindowCurrent = isTargetWindowCurrent,
             currentCoordinateContext = liveCoordinates,
+            taskCoordinator = taskCoordinator,
             uptimeClockMillis = uptimeClockMillis
         )
         val pipeline = GesturePolicyPipeline(
@@ -70,7 +73,8 @@ object GestureRuntimeFactory {
             currentGestureWindow = currentGestureWindow,
             isGestureWindowCurrent = isGestureWindowCurrent,
             currentCoordinateContext = liveCoordinates,
-            policySettingsProvider = policySettingsProvider
+            policySettingsProvider = policySettingsProvider,
+            taskCoordinator = taskCoordinator
         )
         return DefaultGestureRuntimeHandle(coordinator, pipeline)
     }

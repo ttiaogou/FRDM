@@ -10,6 +10,7 @@ import com.freedom.core.accessibility.gesture.GestureIntent
 import com.freedom.core.accessibility.gesture.toGestureCoordinateContext
 import com.freedom.core.accessibility.gesture.GestureExecutionListener
 import com.freedom.core.accessibility.gesture.GestureIntentRequest
+import com.freedom.core.runtime.TaskCoordinator
 import kotlin.random.Random
 
 /**
@@ -29,7 +30,8 @@ internal class GesturePolicyPipeline(
     private val currentCoordinateContext: () -> GestureCoordinateContext? = {
         runCatching(displayMetrics).getOrNull()?.toGestureCoordinateContext()
     },
-    policySettingsProvider: GesturePolicySettingsProvider = DefaultGesturePolicySettingsProvider
+    policySettingsProvider: GesturePolicySettingsProvider = DefaultGesturePolicySettingsProvider,
+    private val taskCoordinator: TaskCoordinator? = null
 ) : GestureApi {
     private val validator = GesturePolicyValidator(displayMetrics)
     private val policyManager = GesturePolicyManager(policySettingsProvider, random)
@@ -48,8 +50,18 @@ internal class GesturePolicyPipeline(
         if (expectedCoordinates != null && expectedCoordinates != coordinates) return null
         // Recheck after reading display state: rotation may advance the window generation mid-capture.
         if (!runCatching { isGestureWindowCurrent(boundWindow) }.getOrDefault(false)) return null
+        // Bind the exact active task capability now; a later transfer invalidates this snapshot
+        // even when the run generation, window and display remain unchanged.
+        val coordinator = taskCoordinator
+        val taskLease = if (coordinator == null) null else {
+            runCatching { coordinator.currentLease() }.getOrElse { return null }
+        }
+        if (taskLease != null &&
+            (taskLease.runGeneration != generation ||
+                !runCatching { coordinator?.isCurrent(taskLease) == true }.getOrDefault(false))
+        ) return null
         return runCatching {
-            GestureExecutionContext(generation, boundWindow, coordinates)
+            GestureExecutionContext(generation, boundWindow, coordinates, taskLease)
         }.getOrNull()
     }
 
@@ -128,6 +140,14 @@ internal class GesturePolicyPipeline(
     private fun validateExecutionContext(context: GestureExecutionContext): String? = when {
         context.runGeneration != runCatching(currentRunGeneration).getOrDefault(-1L) ->
             "run_generation_changed"
+        context.taskLease?.let { lease ->
+            lease.runGeneration != context.runGeneration ||
+                runCatching { taskCoordinator?.isCurrent(lease) }.getOrNull() != true
+        } == true ->
+            "task_lease_changed"
+        context.taskLease == null &&
+            runCatching { taskCoordinator?.currentLease() != null }.getOrDefault(true) ->
+            "task_lease_missing"
         !runCatching { isGestureWindowCurrent(context.targetWindow) }.getOrDefault(false) ->
             "target_window_changed"
         runCatching(currentCoordinateContext).getOrNull() != context.coordinateContext ->

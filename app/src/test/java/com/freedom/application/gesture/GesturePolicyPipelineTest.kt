@@ -16,6 +16,8 @@ import com.freedom.core.accessibility.gesture.toGestureCoordinateContext
 import com.freedom.core.accessibility.gesture.GestureIntent
 import com.freedom.core.accessibility.gesture.GestureIntentRequest
 import com.freedom.core.accessibility.gesture.GestureKind
+import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -486,6 +488,76 @@ class GesturePolicyPipelineTest {
         assertEquals(0, executor.executeCount)
     }
 
+
+
+    @Test
+    fun capturedGestureContextRetainsTheCurrentTaskLeaseAndRejectsAfterTransfer() {
+        val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val privateTaskLease = requireNotNull(taskCoordinator.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", 4L))
+        val executor = RecordingExecutor()
+        val pipeline = GesturePolicyPipeline(
+            executor = executor,
+            displayMetrics = displayMetrics,
+            random = Random(1234),
+            currentRunGeneration = { 4L },
+            currentGestureWindow = { testWindow },
+            isGestureWindowCurrent = { it == testWindow },
+            currentCoordinateContext = { displayMetrics().toGestureCoordinateContext() },
+            taskCoordinator = taskCoordinator
+        )
+
+        val capturedContext = requireNotNull(pipeline.captureContext(testWindow))
+        assertEquals(privateTaskLease, capturedContext.taskLease)
+        val request = GestureIntentRequest(
+            id = "captured-task-gesture",
+            intent = GestureIntent.Tap(
+                preferredBounds = ScreenRect(120, 220, 520, 620),
+                targetBounds = ScreenRect(100, 200, 540, 640),
+                durationMs = 90L
+            ),
+            description = "must not execute after task ownership transfer",
+            executionContext = capturedContext
+        )
+
+        requireNotNull(taskCoordinator.transfer(privateTaskLease, "AI_REPLY_RECEIVED_GREETINGS"))
+
+        assertEquals(GestureSubmission.REJECTED, pipeline.execute(request) {})
+        assertEquals(0, executor.executeCount)
+    }
+
+
+    @Test
+    fun tasklessGestureContextCannotBypassOwnershipAcquiredAfterCapture() {
+        val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val executor = RecordingExecutor()
+        val pipeline = GesturePolicyPipeline(
+            executor = executor,
+            displayMetrics = displayMetrics,
+            random = Random(1234),
+            currentRunGeneration = { 4L },
+            currentGestureWindow = { testWindow },
+            isGestureWindowCurrent = { it == testWindow },
+            currentCoordinateContext = { displayMetrics().toGestureCoordinateContext() },
+            taskCoordinator = taskCoordinator
+        )
+        val contextCapturedWithoutTask = requireNotNull(pipeline.captureContext(testWindow))
+        assertNull(contextCapturedWithoutTask.taskLease)
+        requireNotNull(taskCoordinator.tryAcquire("ACCOUNT_BROWSE", 4L))
+
+        val request = GestureIntentRequest(
+            id = "taskless-context-after-task-acquire",
+            intent = GestureIntent.Tap(
+                preferredBounds = ScreenRect(120, 220, 520, 620),
+                targetBounds = ScreenRect(100, 200, 540, 640),
+                durationMs = 90L
+            ),
+            description = "cannot bypass a newly active task lease",
+            executionContext = contextCapturedWithoutTask
+        )
+
+        assertEquals(GestureSubmission.REJECTED, pipeline.execute(request) {})
+        assertEquals(0, executor.executeCount)
+    }
 
     @Test
     fun compiledGestureCommandDefensivelyFreezesPathLists() {

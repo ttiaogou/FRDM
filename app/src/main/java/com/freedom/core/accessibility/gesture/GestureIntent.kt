@@ -4,6 +4,7 @@ import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.DisplayMetricsSnapshot
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.accessibility.api.WindowRef
+import com.freedom.core.runtime.TaskLease
 
 /**
  * Business-facing gesture intent. It describes what should be touched, never a physical path.
@@ -102,7 +103,9 @@ fun DisplayMetricsSnapshot.toGestureCoordinateContext(): GestureCoordinateContex
 data class GestureExecutionContext(
     val runGeneration: Long,
     val targetWindow: WindowRef,
-    val coordinateContext: GestureCoordinateContext
+    val coordinateContext: GestureCoordinateContext,
+    /** Exact business-task capability captured with this gesture, when a task owns UI control. */
+    val taskLease: TaskLease? = null
 ) {
     init {
         require(runGeneration >= 0L) { "runGeneration must be non-negative" }

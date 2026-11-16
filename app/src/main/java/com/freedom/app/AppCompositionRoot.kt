@@ -252,6 +252,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             onDiagnostic = addLog,
             scheduler = taskScheduler,
             currentPageGeneration = accessibilityGateway::currentWindowGeneration,
+            taskCoordinator = root.taskCoordinator,
             currentRunGeneration = runSessionCoordinator::currentRunGeneration,
             isTargetWindowCurrent = accessibilityGateway::isGestureWindowCurrent,
             currentGestureWindow = accessibilityGateway::currentGestureWindow,

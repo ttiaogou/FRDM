@@ -43,6 +43,25 @@ class TaskCoordinatorTest {
     }
 
     @Test
+    fun currentLeaseAndGuardOnlyExposeTheExactActiveTaskCapability() {
+        val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val oldLease = requireNotNull(coordinator.tryAcquire("ai.private_messages", 5L))
+
+        assertEquals(oldLease, coordinator.currentLease())
+        val nextLease = requireNotNull(coordinator.transfer(oldLease, "ai.received_greetings"))
+
+        assertEquals(nextLease, coordinator.currentLease())
+        var oldActionRan = false
+        assertNull(coordinator.withCurrentLease(oldLease) {
+            oldActionRan = true
+            "old"
+        })
+        assertFalse(oldActionRan)
+
+        assertEquals("current", coordinator.withCurrentLease(nextLease) { "current" })
+    }
+
+    @Test
     fun nextRunReleasesPreviousTaskAndRejectsLateOldGenerationWork() {
         val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
         val oldTask = requireNotNull(coordinator.tryAcquire("account_browse", 10L))

@@ -72,6 +72,7 @@ class AiReplyObservationRuntime(
     private val sharedPageObservationCoordinator: PageObservationCoordinator? = null
 ) {
     companion object {
+        private const val MAX_VISIBLE_MESSAGES = 20
         private const val MAX_LOGGED_STRUCTURE_EVIDENCE = 256
         private const val MAX_STRUCTURE_LOG_LINE_CHARS = 3_500
         private const val MESSAGE_LIST_RETRY_DELAY_MS = 120L
@@ -248,6 +249,7 @@ class AiReplyObservationRuntime(
         ChatMessageReadCoordinator(
             scheduler = scheduler,
             messagePort = chatMessagePort,
+            messageLimit = MAX_VISIBLE_MESSAGES,
             isReadRequestAllowed = {
                 isAiReplyActive() && chatPagePort.supportsTargetPackage(targetPackage())
             },

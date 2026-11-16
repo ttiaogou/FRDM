@@ -71,6 +71,21 @@ class TaskCoordinator(
         activeLease == lease && lease.runGeneration == latestRunGeneration &&
             uiOperationOwnership.isCurrent(lease.uiOperationLease)
 
+    /** Returns the exact current capability for binding newly captured task gestures. */
+    @Synchronized
+    fun currentLease(): TaskLease? = activeLease?.takeIf(::isCurrent)
+
+    /**
+     * Runs [action] while holding the task-lease monitor. This closes the check/dispatch race:
+     * transfer or release cannot invalidate the capability between final validation and the
+     * platform dispatch submission.
+     */
+    @Synchronized
+    fun <T> withCurrentLease(lease: TaskLease, action: () -> T): T? {
+        if (!isCurrent(lease)) return null
+        return action()
+    }
+
     @Synchronized
     fun activeTaskId(): String? = activeLease?.taskId
 

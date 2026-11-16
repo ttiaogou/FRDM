@@ -17,6 +17,7 @@ import com.freedom.core.accessibility.gesture.toGestureCoordinateContext
 import com.freedom.core.accessibility.gesture.GestureVisualizationPort
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
+import com.freedom.core.runtime.TaskCoordinator
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -39,6 +40,7 @@ internal class GestureExecutionCoordinator(
     private val currentCoordinateContext: () -> GestureCoordinateContext? = {
         runCatching(displayMetrics).getOrNull()?.toGestureCoordinateContext()
     },
+    private val taskCoordinator: TaskCoordinator? = null,
     private val maxPendingCommands: Int = DEFAULT_MAX_PENDING_COMMANDS,
     private val uptimeClockMillis: () -> Long = { System.nanoTime() / 1_000_000L }
 ) : InterruptibleGestureExecutor {
@@ -284,24 +286,46 @@ internal class GestureExecutionCoordinator(
                     execution.resultDelivered.compareAndSet(false, true)
                     null
                 } else {
-                    execution.dispatchStarted = true
                     // The platform port invokes this at its real dispatch boundary, after
                     // readiness checks, gesture construction and the coordinator pre-delay.
-                    runCatching {
-                        dispatcher.dispatchGesture(command.gesture,
-                            GestureResultListener { result ->
-                            when (result) {
-                                GestureCompletion.COMPLETED -> settleFromPlatform(
-                                    execution, GestureExecutionStatus.COMPLETED
-                                )
-                                GestureCompletion.CANCELLED -> settleFromPlatform(
-                                    execution, GestureExecutionStatus.CANCELLED, "android_gesture_cancelled"
-                                )
+                    // A task-bound command submits while TaskCoordinator still holds the exact
+                    // lease monitor, making lease validation and dispatch one atomic boundary.
+                    val submitToPlatform = {
+                        execution.dispatchStarted = true
+                        runCatching {
+                            dispatcher.dispatchGesture(command.gesture,
+                                GestureResultListener { result ->
+                                when (result) {
+                                    GestureCompletion.COMPLETED -> settleFromPlatform(
+                                        execution, GestureExecutionStatus.COMPLETED
+                                    )
+                                    GestureCompletion.CANCELLED -> settleFromPlatform(
+                                        execution, GestureExecutionStatus.CANCELLED, "android_gesture_cancelled"
+                                    )
+                                }
+                            }) {
+                                runCatching {
+                                    execution.listener.onDispatched(command.id, uptimeClockMillis())
+                                }
                             }
-                        }) {
-                            runCatching {
-                                execution.listener.onDispatched(command.id, uptimeClockMillis())
-                            }
+                        }
+                    }
+                    val taskLease = command.executionContext.taskLease
+                    if (taskLease == null) {
+                        submitToPlatform()
+                    } else {
+                        val guardedSubmission = runCatching {
+                            taskCoordinator?.withCurrentLease(taskLease, submitToPlatform)
+                        }.getOrNull()
+                        if (guardedSubmission == null) {
+                            contextFailureBeforeDispatch =
+                                "execution_context_changed_before_dispatch:task_lease_changed"
+                            execution.cancellationRequestedReason = contextFailureBeforeDispatch
+                            execution.platformSettled = true
+                            execution.resultDelivered.compareAndSet(false, true)
+                            null
+                        } else {
+                            guardedSubmission
                         }
                     }
                 }
@@ -832,6 +856,14 @@ internal class GestureExecutionCoordinator(
     ): String? = when {
         context.runGeneration != runCatching(currentRunGeneration).getOrDefault(-1L) ->
             "run_generation_changed"
+        context.taskLease?.let { lease ->
+            lease.runGeneration != context.runGeneration ||
+                runCatching { taskCoordinator?.isCurrent(lease) }.getOrNull() != true
+        } == true ->
+            "task_lease_changed"
+        context.taskLease == null &&
+            runCatching { taskCoordinator?.currentLease() != null }.getOrDefault(true) ->
+            "task_lease_missing"
         runCatching(currentCoordinateContext).getOrNull() != context.coordinateContext ->
             "coordinate_context_changed"
         !allowExpectedWindowTransition &&

@@ -22,6 +22,9 @@ import kotlin.random.Random
 import com.freedom.core.accessibility.gesture.GestureVisualizationPort
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
+import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.TaskLease
+import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -411,6 +414,45 @@ class GestureExecutionCoordinatorTest {
         assertEquals(GestureExecutionStatus.COMPLETED, results["first"]?.status)
         assertEquals(GestureExecutionStatus.COMPLETED, results["second"]?.status)
         assertEquals(GestureExecutionStatus.CANCELLED, results["third"]?.status)
+    }
+
+
+    @Test
+    fun queuedGestureIsRejectedWhenItsTaskLeaseIsTransferredBeforeDispatch() {
+        val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val oldLease = requireNotNull(taskCoordinator.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", 0L))
+        val events = mutableListOf<String>()
+        val dispatcher = FakeDispatcher(events)
+        val visualizer = FakeVisualizer(events)
+        val coordinator = GestureExecutionCoordinator(
+            displayMetrics = { DisplayMetricsSnapshot(1_080, 2_400, 3f) },
+            dispatcher = dispatcher,
+            visualizer = visualizer,
+            taskCoordinator = taskCoordinator
+        )
+        var staleResult: GestureExecutionResult? = null
+
+        assertEquals(
+            GestureSubmission.ACCEPTED,
+            coordinator.executeApproved(validSwipe(id = "active-before-transfer", taskLease = oldLease), {})
+        )
+        assertEquals(
+            GestureSubmission.ACCEPTED,
+            coordinator.executeApproved(
+                validSwipe(id = "queued-old-task", taskLease = oldLease)
+            ) { staleResult = it }
+        )
+
+        val newLease = requireNotNull(
+            taskCoordinator.transfer(oldLease, "AI_REPLY_RECEIVED_GREETINGS")
+        )
+        dispatcher.callbacks.single().onResult(GestureCompletion.COMPLETED)
+
+        assertEquals(1, dispatcher.callbacks.size)
+        assertEquals(listOf("show", "dispatch"), events)
+        assertEquals(GestureExecutionStatus.REJECTED, staleResult?.status)
+        assertTrue(staleResult?.reason.orEmpty().contains("task_lease_changed"))
+        assertTrue(taskCoordinator.isCurrent(newLease))
     }
 
     @Test
@@ -1009,11 +1051,13 @@ class GestureExecutionCoordinatorTest {
 
     private fun gestureContext(
         runGeneration: Long = 0L,
-        windowGeneration: Long = 0L
+        windowGeneration: Long = 0L,
+        taskLease: TaskLease? = null
     ) = GestureExecutionContext(
         runGeneration = runGeneration,
         targetWindow = WindowRef("com.immomo.momo", "FeedActivity", windowGeneration, 13),
-        coordinateContext = DisplayMetricsSnapshot(1_080, 2_400, 3f).toGestureCoordinateContext()
+        coordinateContext = DisplayMetricsSnapshot(1_080, 2_400, 3f).toGestureCoordinateContext(),
+        taskLease = taskLease
     )
 
     private fun validSwipe(
@@ -1021,7 +1065,8 @@ class GestureExecutionCoordinatorTest {
         xEnd: Float = 900f,
         runGeneration: Long = 0L,
         windowGeneration: Long = 0L,
-        preDispatchDelayMs: Long = 0L
+        preDispatchDelayMs: Long = 0L,
+        taskLease: TaskLease? = null
     ): GestureCommand {
         val plan = checkNotNull(
             GestureGeometryPolicy.createVerticalSwipe(
@@ -1052,7 +1097,7 @@ class GestureExecutionCoordinatorTest {
                 additionalStrokes = strokes.drop(1)
             ),
             validationRegion = checkNotNull(GestureGeometryPolicy.validationRegion(plan.safeBounds)),
-            executionContext = gestureContext(runGeneration, windowGeneration),
+            executionContext = gestureContext(runGeneration, windowGeneration, taskLease),
             description = "test swipe",
             preDispatchDelayMs = preDispatchDelayMs
         )
