@@ -128,17 +128,19 @@ class AiReplyObservationRuntimeTest {
 
         runtime.scheduleInitialObservation(passiveOnly = false)
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", taskCoordinator.activeTaskId())
-        scheduler.runNextWithDelay(180L)
+        runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN))
+        scheduler.runNextWithDelay(300L)
 
+        assertEquals(1, port.manualGreetingsArrivalObservations)
         assertEquals(0, gestureCount)
         assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
-        assertTrue(logs.any { it.contains("收到的招呼页面监听[WAITING]") })
 
         port.manualGreetingsArrivalStatuses = listOf(
             ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
             ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
         )
-        scheduler.runNextWithDelay(180L)
+        runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN))
+        scheduler.runNextWithDelay(300L)
         assertEquals(0, gestureCount)
         scheduler.runNextWithDelay(350L)
 
@@ -212,7 +214,8 @@ class AiReplyObservationRuntimeTest {
         )
         scheduler.runNextWithDelay(300L) // A debounced fresh page snapshot probes the manual arrival.
 
-        assertTrue(logs.any { it.contains("收到的招呼页面监听[WAITING]") })
+        assertEquals(1, port.manualGreetingsArrivalObservations)
+        assertTrue(scheduler.hasPendingDelay(350L))
         assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
         assertEquals(0, gestures)
         scheduler.runNextWithDelay(350L) // A second fresh same-window list snapshot confirms arrival.
@@ -271,7 +274,7 @@ class AiReplyObservationRuntimeTest {
 
             assertEquals("First read-only probe must run for $origin", 1, port.manualGreetingsArrivalObservations)
             assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
-            assertTrue(logs.any { it.contains("收到的招呼页面监听[WAITING]") })
+            assertTrue(scheduler.hasPendingDelay(350L))
 
             scheduler.runNextWithDelay(350L)
 
@@ -330,7 +333,7 @@ class AiReplyObservationRuntimeTest {
         assertEquals(3, port.manualGreetingsArrivalObservations)
         assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
         assertEquals(1, port.receivedGreetingsIdleSteps)
-        assertTrue(logs.any { it.contains("收到的招呼页面监听[LOW_FREQUENCY_FALLBACK]") })
+        assertTrue(logs.any { it.contains("收到的招呼页面观察[LOW_FREQUENCY_CHECK]") })
         assertTrue(logs.any { it.contains("收到的招呼人工任务[STARTED]") })
     }
 
@@ -568,6 +571,7 @@ class AiReplyObservationRuntimeTest {
         )
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
             page = inbox
             manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.UNKNOWN
         }
@@ -2238,7 +2242,7 @@ class AiReplyObservationRuntimeTest {
         runUntilLog(scheduler, logs, "收到的招呼任务[COMPLETE_STAY_ON_PAGE]")
         assertEquals(0, port.receivedGreetingsPriorityReturns)
         assertEquals(nonChat, port.page)
-        assertTrue(logs.any { it.contains("保持当前收到的招呼页面") })
+        assertTrue(logs.any { it.contains("保持当前页面") })
         assertFalse(logs.any { it.contains("已请求返回普通消息页") })
         assertFalse(logs.any { it.contains("模拟回复人数") })
     }
@@ -3276,6 +3280,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation(passiveOnly = false)
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
         events.forEach(runtime::schedule)
+        runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
         scheduler.runNextWithDelay(300L)
 
         assertTrue("A fresh page inspection must still run", port.fullInspections > 0)
