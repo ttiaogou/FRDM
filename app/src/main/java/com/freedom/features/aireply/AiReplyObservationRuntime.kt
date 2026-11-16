@@ -137,14 +137,33 @@ class AiReplyObservationRuntime(
 
     private var pageInspectionTask: ScheduledTask? = null
     private var regionRefreshTask: ScheduledTask? = null
-    private val messageObservationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
-        AiReplyMessageObservationCoordinator(
+    private val inboxPageRecognizer = MomoInboxPageRecognizer()
+    private val receivedGreetingsPageRecognizer by lazy(LazyThreadSafetyMode.NONE) {
+        MomoReceivedGreetingsPageRecognizer {
+            if (userControlPhase == UserControlPhase.TOUCHING ||
+                !sessionRunStarted || !chatPagePort.supportsReceivedGreetingsIdleWorkflow()
+            ) {
+                ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION
+            } else {
+                chatPagePort.observeManuallyOpenedReceivedGreetingsPage()
+            }
+        }
+    }
+    private val pageObservationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
+        MomoPageObservationCoordinator(
             scheduler = scheduler,
             fullInspectionDebounceMs = fullInspectionDebounceMs,
             regionRefreshDebounceMs = regionRefreshDebounceMs,
-            maxWaitMs = MAX_EVENT_BURST_INSPECTION_WAIT_MS,
+            maxEventBurstInspectionWaitMs = MAX_EVENT_BURST_INSPECTION_WAIT_MS,
+            receivedGreetingsPageRecognizer = receivedGreetingsPageRecognizer,
             runFullInspection = ::runFullInspection,
-            runRegionRefresh = ::runRegionRefresh
+            runRegionRefresh = ::runRegionRefresh,
+            onReceivedGreetingsConfirmed = ::startReceivedGreetingsTaskFromConfirmedPage,
+            onFallbackCheckRequested = ::requestReceivedGreetingsFallbackCheck,
+            fallbackDelayMs = {
+                chooseRandomInt(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS)
+                    .coerceIn(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS) * 1_000L
+            }
         )
     }
     private var messageReadRetryTask: ScheduledTask? = null
@@ -326,28 +345,6 @@ class AiReplyObservationRuntime(
     private var pendingBoundaryConfirmationToTop = false
     private var boundaryStabilityConfirmationCount = 0
 
-    private val receivedGreetingsCoordinator by lazy(LazyThreadSafetyMode.NONE) {
-        AiReplyReceivedGreetingsCoordinator(
-            scheduler = scheduler,
-            observePage = {
-                if (userControlPhase == UserControlPhase.TOUCHING ||
-                    !sessionRunStarted || !chatPagePort.supportsReceivedGreetingsIdleWorkflow()
-                ) {
-                    ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION
-                } else {
-                    runCatching { chatPagePort.observeManuallyOpenedReceivedGreetingsPage() }
-                        .getOrDefault(ReceivedGreetingsPageArrivalStatus.UNKNOWN)
-                }
-            },
-            onConfirmed = ::startReceivedGreetingsTaskFromConfirmedPage,
-            onFallbackCheckRequested = ::requestReceivedGreetingsFallbackCheck,
-            fallbackDelayMs = {
-                chooseRandomInt(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS)
-                    .coerceIn(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS) * 1_000L
-            }
-        )
-    }
-
 
     /**
      * Low-frequency watcher callback. It requests a read-only page inspection or, during an
@@ -360,7 +357,7 @@ class AiReplyObservationRuntime(
             !chatPagePort.supportsReceivedGreetingsIdleWorkflow()
         ) return
         if (manualReviewIsRequired()) {
-            receivedGreetingsCoordinator.reset()
+            pageObservationCoordinator.resetReceivedGreetingsWatch()
             onLog("收到的招呼页面监听[FALLBACK_HELD]：当前存在待人工复核锁定；不自动接管任务")
             return
         }
@@ -378,7 +375,7 @@ class AiReplyObservationRuntime(
                     fallBackToQuietWhenUnconfirmed = false
                 )
             }
-            else -> messageObservationCoordinator.signalFullInspection()
+            else -> pageObservationCoordinator.signalFullInspection()
         }
     }
 
@@ -415,8 +412,8 @@ class AiReplyObservationRuntime(
     private fun handleInspectionSnapshot(incomingInspection: ChatPageSnapshot) {
         val previous = lastPageInspection
         val inspection = stabilizeIncomingPageSnapshot(incomingInspection)
-        if (previous?.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
-            (inspection.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+        if (previous != null && inboxPageRecognizer.isChatDetail(previous) &&
+            (!inboxPageRecognizer.isChatDetail(inspection) ||
                 !hasSameWindowSession(previous, inspection))
         ) {
             invalidatePendingMessageRead()
@@ -435,7 +432,7 @@ class AiReplyObservationRuntime(
             chatPagePort.supportsReceivedGreetingsIdleWorkflow()
         ) {
             receivedGreetingsPageProbePending = false
-            val arrivalStatus = receivedGreetingsCoordinator.onPageSnapshotAvailable()
+            val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable()
             when (arrivalStatus) {
                 ReceivedGreetingsPageArrivalStatus.NOT_TARGET,
                 ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION -> Unit
@@ -1075,8 +1072,8 @@ class AiReplyObservationRuntime(
         pageInspectionTask = null
         regionRefreshTask?.cancel()
         regionRefreshTask = null
-        messageObservationCoordinator.cancelFullInspection()
-        messageObservationCoordinator.cancelRegionRefresh()
+        pageObservationCoordinator.cancelFullInspection()
+        pageObservationCoordinator.cancelRegionRefresh()
         invalidatePendingMessageRead()
         onLog(
             "AI 用户优先权：检测到$reason；已让出界面控制权并撤销待执行自动遍历任务；" +
@@ -1278,7 +1275,7 @@ class AiReplyObservationRuntime(
         if (sessionRunStarted && userHandoffCanResumeAutonomous &&
             chatPagePort.supportsReceivedGreetingsIdleWorkflow()
         ) {
-            val arrivalStatus = receivedGreetingsCoordinator.onPageSnapshotAvailable()
+            val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable()
             receivedGreetingsPageProbePending = false
             if (receivedGreetingsTaskCompletedAwaitingUserExit) {
                 val current = inspectFreshPageSnapshot()
@@ -2153,8 +2150,7 @@ class AiReplyObservationRuntime(
         regionRefreshTask?.cancel()
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
-        messageObservationCoordinator.cancelFullInspection()
-        messageObservationCoordinator.cancelRegionRefresh()
+        pageObservationCoordinator.reset()
         sessionTransitionTask?.cancel()
         cancelMessageReadRetry()
         pageInspectionTask = null
@@ -2198,7 +2194,6 @@ class AiReplyObservationRuntime(
         sampleCaptureActive = false
         passiveManualObservation = false
         sessionRunStarted = false
-        receivedGreetingsCoordinator.reset()
         startupReadinessCoordinator.resetState(sessionStarted = false)
         userHandoffCanResumeAutonomous = false
         sessionManagerState = SessionManagerState.STOPPED
@@ -2301,7 +2296,7 @@ class AiReplyObservationRuntime(
         receivedGreetingsPageProbePending = false
         receivedGreetingsTaskCompletedAwaitingUserExit = false
         receivedGreetingsPageRetryCount = 0
-        receivedGreetingsCoordinator.reset()
+        pageObservationCoordinator.resetReceivedGreetingsWatch()
         sessionActionCount = 0
         userHandoffCanResumeAutonomous = false
         sessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
@@ -2381,8 +2376,8 @@ class AiReplyObservationRuntime(
             userControlPhase = UserControlPhase.IDLE
             if (event.type in PAGE_CHANGE_RECHECK_EVENT_TYPES) {
                 pendingUserPageInspection = true
-                if (pageInspectionTask == null && !messageObservationCoordinator.isFullInspectionPending()) {
-                    messageObservationCoordinator.signalFullInspection()
+                if (pageInspectionTask == null && !pageObservationCoordinator.isFullInspectionPending()) {
+                    pageObservationCoordinator.signalFullInspection()
                 }
                 onLog("输入仲裁[READ_ONLY_OBSERVATION]：来源复核锁定期间只采集当前页面；不运行自主点击/滚动")
             }
@@ -2399,7 +2394,7 @@ class AiReplyObservationRuntime(
             !receivedGreetingsTaskActive && !receivedGreetingsTaskCompletedAwaitingUserExit &&
             chatPagePort.supportsReceivedGreetingsIdleWorkflow() && receivedGreetingsPageChangeSignal
         ) {
-            receivedGreetingsCoordinator.onPageChangeEvent()
+            pageObservationCoordinator.onPageChangeEvent()
             receivedGreetingsPageProbePending = true
         }
         if (userControlPhase == UserControlPhase.TOUCHING) {
@@ -2450,8 +2445,7 @@ class AiReplyObservationRuntime(
         }
         val knownInspection = lastPageInspection
         val knownChatDetail = knownInspection?.let {
-            it.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
-                it.messageListTarget != null
+            inboxPageRecognizer.isChatDetail(it) && it.messageListTarget != null
         } == true
         // Preserve the 2.1 rule: any click/selection from a known chat list can
         // navigate to a detail page even when the clicked row has no chat-related ViewId/text.
@@ -2470,7 +2464,7 @@ class AiReplyObservationRuntime(
             invalidatePendingMessageRead()
             regionRefreshTask?.cancel()
             regionRefreshTask = null
-            messageObservationCoordinator.cancelRegionRefresh()
+            pageObservationCoordinator.cancelRegionRefresh()
             lastRegionFingerprint = ""
         }
         val hasChatNavigationEvidence = chatListNavigation || event.signals.any {
@@ -2501,18 +2495,18 @@ class AiReplyObservationRuntime(
         if (requiresFullInspection || passiveNonChatObservation || receivedGreetingsPageProbePending) {
             regionRefreshTask?.cancel()
             regionRefreshTask = null
-            messageObservationCoordinator.cancelRegionRefresh()
+            pageObservationCoordinator.cancelRegionRefresh()
             pageInspectionTask?.cancel()
             pageInspectionTask = null
-            messageObservationCoordinator.signalFullInspection()
+            pageObservationCoordinator.signalFullInspection()
             return
         }
 
         if (knownChatDetail && AccessibilityEventPolicy.requiresKnownChatRegionRefresh(event.type)) {
             cancelMessageReadRetry()
             regionRefreshTask?.cancel()
-            messageObservationCoordinator.cancelFullInspection()
-            messageObservationCoordinator.signalRegionRefresh()
+            pageObservationCoordinator.cancelFullInspection()
+            pageObservationCoordinator.signalRegionRefresh()
         }
     }
 
@@ -4598,8 +4592,8 @@ class AiReplyObservationRuntime(
             return
         }
         cancelMessageReadRetry()
-        messageObservationCoordinator.cancelFullInspection()
-        messageObservationCoordinator.cancelRegionRefresh()
+        pageObservationCoordinator.cancelFullInspection()
+        pageObservationCoordinator.cancelRegionRefresh()
         pageInspectionTask?.cancel()
         pageInspectionTask = scheduler.schedule(delayMs, ::runFullInspection)
     }
