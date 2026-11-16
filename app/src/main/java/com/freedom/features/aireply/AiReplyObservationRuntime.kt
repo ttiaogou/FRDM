@@ -152,10 +152,10 @@ class AiReplyObservationRuntime(
         ownership = taskOwnership,
         chooseRandomInt = chooseRandomInt
     )
-    private val receivedGreetingsTaskController = ReceivedGreetingsTaskController(taskOwnership)
-    private val receivedGreetingsTaskExecutor = ReceivedGreetingsTaskExecutor(chatPagePort) {
-        ownsTask(RECEIVED_GREETINGS_TASK_ID)
-    }
+    private val receivedGreetingsTaskFlow = ReceivedGreetingsTaskFlowController(
+        ownership = taskOwnership,
+        pagePort = chatPagePort
+    )
     private val privateMessagesTaskExecutor by lazy(LazyThreadSafetyMode.NONE) {
         PrivateMessagesTaskExecutor(
             sessionPort = chatSessionManagementPort,
@@ -170,11 +170,11 @@ class AiReplyObservationRuntime(
     private val normalInboxTaskTargetCount: Int
         get() = privateMessagesTaskController.targetObservationCount
     private val receivedGreetingsTaskActive: Boolean
-        get() = receivedGreetingsTaskController.isActive
+        get() = receivedGreetingsTaskFlow.isActive
     private val receivedGreetingsTaskCompletedAwaitingUserExit: Boolean
-        get() = receivedGreetingsTaskController.completedAwaitingUserExit
+        get() = receivedGreetingsTaskFlow.completedAwaitingUserExit
     private val awaitingNormalInboxAfterGreetingsReturn: Boolean
-        get() = receivedGreetingsTaskController.awaitingNormalInboxAfterReturn
+        get() = receivedGreetingsTaskFlow.awaitingNormalInboxAfterReturn
 
     private var pageInspectionTask: ScheduledTask? = null
     private var regionRefreshTask: ScheduledTask? = null
@@ -182,11 +182,11 @@ class AiReplyObservationRuntime(
     private val receivedGreetingsPageRecognizer by lazy(LazyThreadSafetyMode.NONE) {
         MomoReceivedGreetingsPageRecognizer {
             if (userControlPhase == UserControlPhase.TOUCHING ||
-                !sessionRunStarted || !receivedGreetingsTaskExecutor.supportsWorkflow()
+                !sessionRunStarted || !receivedGreetingsTaskFlow.supportsWorkflow()
             ) {
                 ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION
             } else {
-                receivedGreetingsTaskExecutor.observeManuallyOpenedPage()
+                receivedGreetingsTaskFlow.observeManuallyOpenedPage()
             }
         }
     }
@@ -358,7 +358,7 @@ class AiReplyObservationRuntime(
     private fun requestReceivedGreetingsFallbackCheck() {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
             receivedGreetingsTaskCompletedAwaitingUserExit ||
-            !receivedGreetingsTaskExecutor.supportsWorkflow()
+            !receivedGreetingsTaskFlow.supportsWorkflow()
         ) return
         if (manualReviewIsRequired()) {
             pageObservationCoordinator.resetReceivedGreetingsWatch()
@@ -452,7 +452,7 @@ class AiReplyObservationRuntime(
         if (receivedGreetingsPageProbePending && sessionRunStarted &&
             !receivedGreetingsTaskActive && !receivedGreetingsTaskCompletedAwaitingUserExit &&
             userControlPhase == UserControlPhase.IDLE && !automationYieldedToUser &&
-            receivedGreetingsTaskExecutor.supportsWorkflow()
+            receivedGreetingsTaskFlow.supportsWorkflow()
         ) {
             receivedGreetingsPageProbePending = false
             val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable()
@@ -470,92 +470,67 @@ class AiReplyObservationRuntime(
         }
 
         if (sessionRunStarted && receivedGreetingsTaskActive) {
-            val pageProgress = receivedGreetingsTaskExecutor.evaluatePageProgress(inspection.pageKind)
-            if (pageProgress.decision == ReceivedGreetingsTaskExecutor.PageDecision.ENTRY_NOT_FOUND) {
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog("收到的招呼入口未发现：普通消息列表已完成双向搜索并复核两端边界；这是已确认的入口缺失结果，不是单次页面核验失败")
-                return
-            }
-            if (pageProgress.decision == ReceivedGreetingsTaskExecutor.PageDecision.COMPLETE) {
-                if (completeReceivedGreetingsTaskAtCurrentPage()) return
-                val returned = runCatching {
-                    receivedGreetingsTaskExecutor.returnForPriorityCheck()
-                }.getOrDefault(false)
-                if (returned) {
-                    receivedGreetingsTaskController.markAwaitingNormalInboxAfterReturn()
-                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                    onLog("收到的招呼遍历已通过适配器完整性检查；已请求返回普通消息页，等待页面身份复核")
-                    scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
-                } else {
-                    scheduleReceivedGreetingsRecoveryRetry("遍历已确认到达边界，但本轮未通过安全返回检查；保留完成快照和任务现场")
+            val decision = receivedGreetingsTaskFlow.evaluatePageSnapshot(inspection.pageKind)
+            when (decision.kind) {
+                ReceivedGreetingsTaskFlowController.DecisionKind.ENTRY_NOT_FOUND -> {
+                    sessionManagerState = SessionManagerState.PAUSED
+                    onLog("收到的招呼入口未发现：普通消息列表已完成双向搜索并复核两端边界；这是已确认的入口缺失结果，不是单次页面核验失败")
+                    return
                 }
-                return
-            }
-            if (pageProgress.decision == ReceivedGreetingsTaskExecutor.PageDecision.WAIT_FOR_DETAIL_PAGE) {
-                scheduleReceivedGreetingsRecoveryRetry(
-                    "适配器报告详情候选但当前页面快照尚非聊天详情；等待同窗口新鲜快照，不进入普通消息列表流程"
-                )
-                return
-            }
-            if (pageProgress.decision == ReceivedGreetingsTaskExecutor.PageDecision.ADVANCE_REQUIRED) {
-                // Keep invoking the adapter's bounded idle step even when the current page is
-                // still the ordinary CHAT_LIST. Entry discovery can require scrolling through
-                // the Message list; one failed viewport lookup must not silently strand the task.
-                val stepObservation = receivedGreetingsTaskExecutor.performIdleStepAndInspect()
-                if (stepObservation.decision == ReceivedGreetingsTaskExecutor.StepDecision.RETRY_REQUIRED) {
-                    if (stepObservation.status == ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND) {
-                        sessionManagerState = SessionManagerState.PAUSED
-                        onLog("收到的招呼导航暂停：已完成普通消息列表双向搜索，入口未出现")
+                ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE -> {
+                    if (completeReceivedGreetingsTaskAtCurrentPage()) return
+                    val returned = runCatching {
+                        receivedGreetingsTaskFlow.returnForPriorityCheck()
+                    }.getOrDefault(false)
+                    if (returned) {
+                        receivedGreetingsTaskFlow.markAwaitingNormalInboxAfterReturn()
+                        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                        if (decision.origin == ReceivedGreetingsTaskFlowController.DecisionOrigin.PAGE_PROGRESS) {
+                            onLog("收到的招呼遍历已通过适配器完整性检查；已请求返回普通消息页，等待页面身份复核")
+                        } else {
+                            onLog("收到的招呼导航：适配器报告列表边界候选；仍需完成安全返回与普通列表页面复核")
+                        }
+                        scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
                     } else {
                         scheduleReceivedGreetingsRecoveryRetry(
-                            "页面身份/安全导航步骤暂未确认；保留导航现场，不盲目点击或返回"
+                            if (decision.origin == ReceivedGreetingsTaskFlowController.DecisionOrigin.PAGE_PROGRESS)
+                                "遍历已确认到达边界，但本轮未通过安全返回检查；保留完成快照和任务现场"
+                            else "列表完整性刚刚确认，但安全返回暂未通过"
                         )
                     }
-                } else {
-                    receivedGreetingsTaskController.resetRecoveryRetryCount()
-                    when (stepObservation.decision) {
-                        ReceivedGreetingsTaskExecutor.StepDecision.COMPLETE -> {
-                            if (completeReceivedGreetingsTaskAtCurrentPage()) return
-                            onLog("收到的招呼导航：适配器报告列表边界候选；仍需完成安全返回与普通列表页面复核")
-                            val returned = runCatching {
-                                receivedGreetingsTaskExecutor.returnForPriorityCheck()
-                            }.getOrDefault(false)
-                            if (returned) {
-                                receivedGreetingsTaskController.markAwaitingNormalInboxAfterReturn()
-                                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                                scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
-                            } else {
-                                scheduleReceivedGreetingsRecoveryRetry("列表完整性刚刚确认，但安全返回暂未通过")
-                            }
-                            return
-                        }
-                        ReceivedGreetingsTaskExecutor.StepDecision.LIST_CONTINUES -> {
-                            // The generic page inspector can still call the transition screen
-                            // NON_CHAT while the adapter has independently confirmed the
-                            // received-greetings list. Keep this adapter-owned workflow alive;
-                            // do not strand the list merely because the generic classifier lags.
-                            onLog("收到的招呼只读测试：已验证列表页面；优先采集未读行头像身份和聊天详情 OCR，完成后再滚动；不回复")
-                            scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
-                        }
-                        ReceivedGreetingsTaskExecutor.StepDecision.PROFILE_CARD_PENDING -> {
-                            onLog("收到的招呼导航：已识别资料卡；等待 NewSayHiSessionListActivity；继续复核顶部‘列表’控件；不触碰通过/拒绝按钮")
-                            scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
-                        }
-                        ReceivedGreetingsTaskExecutor.StepDecision.ENTRY_NOT_FOUND_RECHECK -> {
-                            onLog("收到的招呼导航：页面状态已变化为 ENTRY_NOT_FOUND；等待下一次页面级复核")
-                            scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
-                        }
-                        ReceivedGreetingsTaskExecutor.StepDecision.PAGE_TRANSITION_PENDING -> {
-                            // NAVIGATING, DETAIL_READY and UNKNOWN require a fresh page observation
-                            // before the traversal can safely continue.
-                            onLog("收到的招呼导航：页面状态已变化为 ${stepObservation.status.name}；保留当前阶段并等待新快照")
-                            scheduleFullInspectionAfter(RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS)
-                        }
-                        ReceivedGreetingsTaskExecutor.StepDecision.RETRY_REQUIRED -> Unit // Handled above.
-                    }
+                    return
                 }
-                return
+                ReceivedGreetingsTaskFlowController.DecisionKind.WAIT_FOR_DETAIL_PAGE -> {
+                    scheduleReceivedGreetingsRecoveryRetry(
+                        "适配器报告详情候选但当前页面快照尚非聊天详情；等待同窗口新鲜快照，不进入普通消息列表流程"
+                    )
+                    return
+                }
+                ReceivedGreetingsTaskFlowController.DecisionKind.DETAIL_READY -> Unit
+                ReceivedGreetingsTaskFlowController.DecisionKind.RETRY_REQUIRED -> {
+                    scheduleReceivedGreetingsRecoveryRetry(
+                        "页面身份/安全导航步骤暂未确认；保留导航现场，不盲目点击或返回"
+                    )
+                    return
+                }
+                ReceivedGreetingsTaskFlowController.DecisionKind.LIST_CONTINUES -> {
+                    onLog("收到的招呼只读测试：已验证列表页面；优先采集未读行头像身份和聊天详情 OCR，完成后再滚动；不回复")
+                    scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
+                }
+                ReceivedGreetingsTaskFlowController.DecisionKind.PROFILE_CARD_PENDING -> {
+                    onLog("收到的招呼导航：已识别资料卡；等待 NewSayHiSessionListActivity；继续复核顶部‘列表’控件；不触碰通过/拒绝按钮")
+                    scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
+                }
+                ReceivedGreetingsTaskFlowController.DecisionKind.ENTRY_NOT_FOUND_RECHECK -> {
+                    onLog("收到的招呼导航：页面状态已变化为 ENTRY_NOT_FOUND；等待下一次页面级复核")
+                    scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
+                }
+                ReceivedGreetingsTaskFlowController.DecisionKind.PAGE_TRANSITION_PENDING -> {
+                    onLog("收到的招呼导航：页面状态已变化为 ${decision.status.name}；保留当前阶段并等待新快照")
+                    scheduleFullInspectionAfter(RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS)
+                }
             }
+            if (decision.kind != ReceivedGreetingsTaskFlowController.DecisionKind.DETAIL_READY) return
         }
         if (sessionRunStarted && startupReadinessCoordinator.initializationPending &&
             chatPagePort.supportsVerifiedMessageWorkAreaNavigation() && !startupReadinessCoordinator.workAreaConfirmed
@@ -585,7 +560,7 @@ class AiReplyObservationRuntime(
             ChatPageKind.CHAT_LIST -> {
                 when {
                     sessionRunStarted && !automationYieldedToUser && awaitingNormalInboxAfterGreetingsReturn -> {
-                        receivedGreetingsTaskController.markTraversalReturnedToInbox()
+                        receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
                         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
                         privateMessagesTaskController.resetQuota()
                         // The greeting branch returned to the already-established inbox context.
@@ -621,7 +596,7 @@ class AiReplyObservationRuntime(
             }
             ChatPageKind.CHAT_DETAIL_CANDIDATE -> {
                 if (sessionRunStarted && receivedGreetingsTaskActive) {
-                    val detailStatus = runCatching { receivedGreetingsTaskExecutor.traversalStatus() }
+                    val detailStatus = runCatching { receivedGreetingsTaskFlow.traversalStatus() }
                         .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
                     if (detailStatus == ReceivedGreetingsTraversalStatus.DETAIL_READY) {
                         // This is the intentionally read-only OCR validation path. It never enters
@@ -660,28 +635,26 @@ class AiReplyObservationRuntime(
             }
             ChatPageKind.UNKNOWN, ChatPageKind.NON_CHAT -> {
                 if (sessionRunStarted && receivedGreetingsTaskActive) {
-                    val stepObservation = receivedGreetingsTaskExecutor.performIdleStepAndInspect()
-                    val traversalStatus = stepObservation.status
-                    when (stepObservation.decision) {
-                        ReceivedGreetingsTaskExecutor.StepDecision.RETRY_REQUIRED -> {
+                    val decision = receivedGreetingsTaskFlow.evaluateUnclassifiedPageSnapshot()
+                    when (decision.kind) {
+                        ReceivedGreetingsTaskFlowController.DecisionKind.RETRY_REQUIRED -> {
                             scheduleReceivedGreetingsRecoveryRetry(
-                                if (traversalStatus == ReceivedGreetingsTraversalStatus.SCANNING)
+                                if (decision.status == ReceivedGreetingsTraversalStatus.SCANNING)
                                     "已识别列表，但本轮快照/安全滚动检查暂未完成"
                                 else "无法验证当前页面或提交安全滚动；不执行用户行点击"
                             )
                         }
-                        ReceivedGreetingsTaskExecutor.StepDecision.LIST_CONTINUES -> {
-                            receivedGreetingsTaskController.resetRecoveryRetryCount()
+                        ReceivedGreetingsTaskFlowController.DecisionKind.LIST_CONTINUES -> {
                             onLog("收到的招呼只读测试：已验证列表页面；优先采集未读行头像身份和聊天详情 OCR，完成后再滚动；不回复")
                             scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                         }
-                        ReceivedGreetingsTaskExecutor.StepDecision.COMPLETE -> {
+                        ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE -> {
                             if (completeReceivedGreetingsTaskAtCurrentPage()) return
                             val returned = runCatching {
-                                receivedGreetingsTaskExecutor.returnForPriorityCheck()
+                                receivedGreetingsTaskFlow.returnForPriorityCheck()
                             }.getOrDefault(false)
                             if (returned) {
-                                receivedGreetingsTaskController.markAwaitingNormalInboxAfterReturn()
+                                receivedGreetingsTaskFlow.markAwaitingNormalInboxAfterReturn()
                                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                                 onLog("收到的招呼测试遍历：列表扫描到达边界；已请求返回普通消息页，等待页面身份复核")
                                 scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
@@ -689,25 +662,40 @@ class AiReplyObservationRuntime(
                                 scheduleReceivedGreetingsRecoveryRetry("列表边界已确认，但返回普通消息页暂未通过安全检查")
                             }
                         }
-                        ReceivedGreetingsTaskExecutor.StepDecision.PROFILE_CARD_PENDING -> {
+                        ReceivedGreetingsTaskFlowController.DecisionKind.PROFILE_CARD_PENDING -> {
                             scheduleReceivedGreetingsRecoveryRetry(
                                 "资料卡顶部‘列表’控件尚未切换到已验证的招呼列表页面；不触碰通过/拒绝按钮"
                             )
                         }
-                        ReceivedGreetingsTaskExecutor.StepDecision.ENTRY_NOT_FOUND_RECHECK -> {
+                        ReceivedGreetingsTaskFlowController.DecisionKind.ENTRY_NOT_FOUND_RECHECK -> {
                             scheduleReceivedGreetingsRecoveryRetry(
                                 "适配器报告入口未发现，但本次步骤已被接受；等待新鲜页面复核"
                             )
                         }
-                        ReceivedGreetingsTaskExecutor.StepDecision.PAGE_TRANSITION_PENDING -> {
+                        ReceivedGreetingsTaskFlowController.DecisionKind.PAGE_TRANSITION_PENDING -> {
                             scheduleReceivedGreetingsRecoveryRetry(
                                 "入口/页面仍在切换或当前状态暂时未知；不执行盲目滑动或返回"
+                            )
+                        }
+                        ReceivedGreetingsTaskFlowController.DecisionKind.ENTRY_NOT_FOUND -> {
+                            scheduleReceivedGreetingsRecoveryRetry(
+                                "收到的招呼入口状态暂未稳定；等待新鲜页面复核"
+                            )
+                        }
+                        ReceivedGreetingsTaskFlowController.DecisionKind.WAIT_FOR_DETAIL_PAGE -> {
+                            scheduleReceivedGreetingsRecoveryRetry(
+                                "收到的招呼详情页面尚未稳定；等待同窗口新鲜快照"
+                            )
+                        }
+                        ReceivedGreetingsTaskFlowController.DecisionKind.DETAIL_READY -> {
+                            scheduleReceivedGreetingsRecoveryRetry(
+                                "详情状态需要目标页面快照复核；不在未知页面推进详情操作"
                             )
                         }
                     }
                 }
                 if (isManualObservationEnabled()) {
-                    val observed = runCatching { receivedGreetingsTaskExecutor.observePageReadOnly() }.getOrDefault(false)
+                    val observed = runCatching { receivedGreetingsTaskFlow.observePageReadOnly() }.getOrDefault(false)
                     if (observed) {
                         onLog("AI 被动观察：已识别并采集人工打开的收到招呼页面；未执行点击或滚动")
                     } else {
@@ -1267,7 +1255,7 @@ class AiReplyObservationRuntime(
         // Give the page-arrival watcher first refusal before the legacy recovery guard can tap
         // Message or navigate away from an intermediate greetings page.
         if (sessionRunStarted && userHandoffCanResumeAutonomous &&
-            receivedGreetingsTaskExecutor.supportsWorkflow()
+            receivedGreetingsTaskFlow.supportsWorkflow()
         ) {
             val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable()
             receivedGreetingsPageProbePending = false
@@ -1282,7 +1270,7 @@ class AiReplyObservationRuntime(
                         onLog("私人消息任务恢复暂停[OWNERSHIP_REJECTED]：用户已返回消息列表，但未取得 UI 操作权")
                         return
                     }
-                    receivedGreetingsTaskController.acknowledgeCompletedTaskExit()
+                    receivedGreetingsTaskFlow.acknowledgeCompletedTaskExit()
                     sessionActionGeneration += 1L
                     onLog("收到的招呼人工任务[USER_RETURNED_TO_INBOX]：已确认用户返回消息列表；重新取得 UI 操作权并交还现有私人消息恢复流程")
                 } else {
@@ -2241,7 +2229,7 @@ class AiReplyObservationRuntime(
         temporaryContactMessageLedger.clearAll()
         pendingInterceptionContactKeys.clear()
         privateMessagesTaskController.resetQuota()
-        receivedGreetingsTaskController.reset()
+        receivedGreetingsTaskFlow.reset()
         receivedGreetingsPageProbePending = false
     }
 
@@ -2251,20 +2239,20 @@ class AiReplyObservationRuntime(
      */
     private fun claimTaskOwnership(taskId: String, reason: String): Boolean = when (taskId) {
         PrivateMessagesTaskController.TASK_ID -> privateMessagesTaskController.claimOwnership(reason)
-        ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskController.claimOwnership(reason)
+        ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskFlow.claimOwnership(reason)
         else -> false
     }
 
     private fun ownsTask(taskId: String): Boolean = when (taskId) {
         PrivateMessagesTaskController.TASK_ID -> privateMessagesTaskController.ownsTask()
-        ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskController.ownsTask()
+        ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskFlow.ownsTask()
         else -> false
     }
 
     private fun releaseTaskOwnership(reason: String) {
         when (taskOwnership.activeTaskId()) {
             PrivateMessagesTaskController.TASK_ID -> privateMessagesTaskController.releaseOwnership(reason)
-            ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskController.releaseOwnership(reason)
+            ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskFlow.releaseOwnership(reason)
             else -> taskOwnership.releaseCurrent(reason)
         }
     }
@@ -2322,7 +2310,7 @@ class AiReplyObservationRuntime(
         }
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         privateMessagesTaskController.resetQuota()
-        receivedGreetingsTaskController.reset()
+        receivedGreetingsTaskFlow.reset()
         privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
         privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = false
         privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.clear()
@@ -2426,7 +2414,7 @@ class AiReplyObservationRuntime(
         val receivedGreetingsPageChangeSignal = event.type in PAGE_CHANGE_RECHECK_EVENT_TYPES
         if (sessionRunStarted &&
             !receivedGreetingsTaskActive && !receivedGreetingsTaskCompletedAwaitingUserExit &&
-            receivedGreetingsTaskExecutor.supportsWorkflow() && receivedGreetingsPageChangeSignal
+            receivedGreetingsTaskFlow.supportsWorkflow() && receivedGreetingsPageChangeSignal
         ) {
             pageObservationCoordinator.onPageChangeEvent()
             receivedGreetingsPageProbePending = true
@@ -2669,7 +2657,7 @@ class AiReplyObservationRuntime(
         messageReadTimeoutTask = null
         messageReadInFlight = false
         val readOnlyGreetingRequest = sessionRunStarted && receivedGreetingsTaskActive &&
-            receivedGreetingsTaskExecutor.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
+            receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
         if (isAiReplyActive() && chatPagePort.supportsTargetPackage(targetPackage())) {
             val current = if (revalidateActivePage) {
                 runCatching { chatPagePort.inspectChatPage() }.getOrNull()
@@ -2678,7 +2666,7 @@ class AiReplyObservationRuntime(
             }
             val expectedWindowSessionKey = windowSessionKey(snapshot)
             val readOnlyGreetingDetail = sessionRunStarted && receivedGreetingsTaskActive &&
-                receivedGreetingsTaskExecutor.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
+                receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
             val stillSameChat = current?.let { active ->
                 if (readOnlyGreetingDetail) {
                     active.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
@@ -2724,15 +2712,15 @@ class AiReplyObservationRuntime(
         // Received-greeting details are an OCR calibration task only. Do not expose their
         // contents to the future AI observer callback and do not enter any reply/send state.
         if (sessionRunStarted && receivedGreetingsTaskActive &&
-            receivedGreetingsTaskExecutor.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
+            receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
         ) {
             logTemporaryOcrResults(batch)
             val sampleIndex = runCatching {
                 chatSessionManagementPort.persistChatSample(
                     snapshot,
                     batch,
-                    sessionName = receivedGreetingsTaskExecutor.currentDisplayName(),
-                    contactIdentity = receivedGreetingsTaskExecutor.currentContactIdentity()
+                    sessionName = receivedGreetingsTaskFlow.currentDisplayName(),
+                    contactIdentity = receivedGreetingsTaskFlow.currentContactIdentity()
                 )
             }.getOrDefault(0)
             onLog(
@@ -2740,11 +2728,11 @@ class AiReplyObservationRuntime(
                     "读取状态=${batch.status.name}；消息行=${batch.messages.size}；" +
                     "OCR目标=${batch.ocrTargets.size}；已识别=${batch.ocrRecognizedTargetCount}；" +
                     "失败=${batch.ocrFailedTargetCount}；截断=${batch.truncated}；" +
-                    "唯一身份=${if (receivedGreetingsTaskExecutor.currentContactIdentity() != null) "已验证" else "未验证"}；" +
+                    "唯一身份=${if (receivedGreetingsTaskFlow.currentContactIdentity() != null) "已验证" else "未验证"}；" +
                     "未调用 AI 消息回调，不输入、不发送"
             )
             val returned = runCatching {
-                receivedGreetingsTaskExecutor.completeDetailInspection(sampleIndex > 0)
+                receivedGreetingsTaskFlow.completeDetailInspection(sampleIndex > 0)
             }.getOrDefault(false)
             if (returned) {
                 scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
@@ -3443,8 +3431,7 @@ class AiReplyObservationRuntime(
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
         val ordinarySessionClickCount = privateMessagesTraversalTaskExecutor.sessionActionCount
-        runCatching { receivedGreetingsTaskExecutor.beginNavigationTask() }
-        receivedGreetingsTaskController.markNavigationStarted()
+        val workflowSupported = receivedGreetingsTaskFlow.beginNavigationTask()
         currentSessionKey = null
         currentSessionWindowKey = null
         currentSessionName = null
@@ -3460,12 +3447,12 @@ class AiReplyObservationRuntime(
                 "私人聊天成功归档数=$normalCompletedObservationCount/$normalInboxTaskTargetCount；" +
                 "普通聊天会话点击次数=$ordinarySessionClickCount；头像身份与详情 OCR 不触发回复"
         )
-        if (!receivedGreetingsTaskExecutor.supportsWorkflow()) {
+        if (!workflowSupported) {
             sessionManagerState = SessionManagerState.PAUSED
             onLog("AI Reply 收到的招呼支线暂停：当前社交适配器未声明支持该入口/页面识别能力")
             return
         }
-        val accepted = runCatching { receivedGreetingsTaskExecutor.performIdleStep() }.getOrDefault(false)
+        val accepted = receivedGreetingsTaskFlow.performInitialIdleStep()
         if (!accepted) {
             scheduleReceivedGreetingsRecoveryRetry(
                 "首次入口导航步骤暂未完成；保留任务和导航状态，不尝试备用坐标"
@@ -3496,9 +3483,7 @@ class AiReplyObservationRuntime(
         }
         receivedGreetingsPageProbePending = false
 
-        val accepted = runCatching {
-            receivedGreetingsTaskExecutor.beginFromConfirmedList()
-        }.getOrDefault(false)
+        val accepted = receivedGreetingsTaskFlow.beginFromConfirmedList()
         if (!accepted) {
             onLog("收到的招呼人工任务启动[REJECTED]：确认后的当前列表未通过第二次窗口/阶段复核；不执行任何导航动作")
             return
@@ -3517,7 +3502,7 @@ class AiReplyObservationRuntime(
         pendingMessageReadSnapshot = null
         messageReadGeneration += 1L
 
-        receivedGreetingsTaskController.markStarted()
+        receivedGreetingsTaskFlow.markStarted()
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
 
         cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
@@ -3535,9 +3520,7 @@ class AiReplyObservationRuntime(
         startupReadinessCoordinator.markReceivedGreetingsWorkAreaConfirmed()
 
         onLog("收到的招呼人工任务[STARTED]：已确认用户手动打开的列表；暂停私人消息任务并接管当前页面；不点击入口、不返回消息列表")
-        val firstStepAccepted = runCatching {
-            receivedGreetingsTaskExecutor.performIdleStep()
-        }.getOrDefault(false)
+        val firstStepAccepted = receivedGreetingsTaskFlow.performInitialIdleStep()
         if (!firstStepAccepted) {
             scheduleReceivedGreetingsRecoveryRetry("人工打开的列表已接管，但首次只读遍历检查暂未完成")
             return
@@ -3556,7 +3539,7 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼任务完成检查被阻止：租约已失效；按安全原则保持当前页面，不执行返回导航")
             return true
         }
-        receivedGreetingsTaskController.markCompletedAwaitingUserExit()
+        receivedGreetingsTaskFlow.markCompletedAwaitingUserExit()
         sessionActionGeneration += 1L
         releaseTaskOwnership("收到的招呼任务完成；保持当前页面等待用户离开")
         cancelUserControlRecoveryTasks(cancelMessageTabWatch = true)
@@ -4508,8 +4491,9 @@ class AiReplyObservationRuntime(
      */
     private fun scheduleReceivedGreetingsRecoveryRetry(reason: String) {
         if (!sessionRunStarted || !receivedGreetingsTaskActive) return
-        val retryCount = receivedGreetingsTaskController.nextRecoveryRetryCount()
-        val delayMs = ReceivedGreetingsRetrySchedule.delayForRetry(retryCount)
+        val retryPlan = receivedGreetingsTaskFlow.nextRecoveryRetryPlan()
+        val retryCount = retryPlan.retryCount
+        val delayMs = retryPlan.delayMs
         onLog(
             "收到的招呼自动恢复[RETRY]：$reason；第${retryCount}次新鲜快照复核；" +
                 "delay=${delayMs}ms；任务和当前用户进度保持不变"
