@@ -451,25 +451,12 @@ internal class AndroidAccessibilityGateway(
                         return@withActiveTargetRoot false
                     }
                 }
-                val arguments = if (request.action == NodeAction.SET_TEXT && request.textArgument != null) {
-                    Bundle().apply {
-                        putCharSequence(
-                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                            request.textArgument
-                        )
-                    }
-                } else null
-                val action = when (request.action) {
-                    NodeAction.FOCUS -> AccessibilityNodeInfo.ACTION_FOCUS
-                    NodeAction.SET_TEXT -> AccessibilityNodeInfo.ACTION_SET_TEXT
-                    NodeAction.DISMISS -> AccessibilityNodeInfo.ACTION_DISMISS
-                }
                 // Re-evaluate from the live foreground root as close as possible to performAction.
                 // The previously resolved node is never treated as a reusable readiness token.
                 if (inspectAutonomousDispatchReadiness() != null) {
                     return@withActiveTargetRoot false
                 }
-                runCatching { target.performAction(action, arguments) }.getOrDefault(false)
+                runCatching { performSemanticNodeAction(target, request.action, request.textArgument) }.getOrDefault(false)
             } finally {
                 recycle(target)
             }
@@ -735,6 +722,33 @@ internal class AndroidAccessibilityGateway(
         }
     }
 
+    /**
+     * 执行当前输入框的非触摸语义动作。调用方须在本次活动根节点回调中
+     * 取得正确输入框并同步调用；不保存节点，不重放旧路径或旧窗口代次。
+     */
+    override fun performCurrentInputAction(
+        node: AccessibilityNodeInfo,
+        action: NodeAction,
+        text: String?
+    ): Boolean = when (action) {
+        NodeAction.FOCUS -> node.isFocused || performSemanticNodeAction(node, action, null)
+        NodeAction.SET_TEXT -> text != null && performSemanticNodeAction(node, action, text)
+        NodeAction.DISMISS -> false
+    }
+
+    /** 所有非触摸节点动作共用此唯一平台调用点，原有目标校验仍由各自入口负责。 */
+    private fun performSemanticNodeAction(node: AccessibilityNodeInfo, action: NodeAction, text: String?): Boolean {
+        val arguments = if (action == NodeAction.SET_TEXT && text != null) {
+            Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }
+        } else null
+        val platformAction = when (action) {
+            NodeAction.FOCUS -> AccessibilityNodeInfo.ACTION_FOCUS
+            NodeAction.SET_TEXT -> AccessibilityNodeInfo.ACTION_SET_TEXT
+            NodeAction.DISMISS -> AccessibilityNodeInfo.ACTION_DISMISS
+        }
+        return node.performAction(platformAction, arguments)
+    }
+
     override fun <T> withActiveTargetRoot(block: (AccessibilityNodeInfo, WindowRef) -> T): T? {
         val root = acquireTargetRoot(allowVisibleWindowFallback = false) ?: return null
         return try {
@@ -983,6 +997,8 @@ internal data class AndroidTargetWindowRoot(
 )
 
 internal interface AndroidActiveWindowRootAccess {
+    /** 仅同步操作当前回调中的输入框；允许 FOCUS / SET_TEXT，不提供触摸动作。 */
+    fun performCurrentInputAction(node: AccessibilityNodeInfo, action: NodeAction, text: String? = null): Boolean
     fun <T> withActiveTargetRoot(block: (AccessibilityNodeInfo, WindowRef) -> T): T?
     fun <T> withActiveWindowRoot(block: (AccessibilityNodeInfo) -> T): T?
     fun <T> withTargetWindowRoots(block: (List<AndroidTargetWindowRoot>) -> T): T?

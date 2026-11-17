@@ -4352,13 +4352,9 @@ internal class MomoSocialAdapter(
             withCurrentDraftInput { node ->
                 operation(object : MomoDraftInputController.Field {
                     override fun readText(): String = draftInputText(node)
-                    override fun focus(): Boolean = node.isFocused || node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-                    override fun setText(text: String): Boolean {
-                        val arguments = android.os.Bundle().apply {
-                            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-                        }
-                        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-                    }
+                    override fun focus(): Boolean = rootAccess.performCurrentInputAction(node, NodeAction.FOCUS)
+                    override fun setText(text: String): Boolean =
+                        rootAccess.performCurrentInputAction(node, NodeAction.SET_TEXT, text)
                 })
             }
         }
