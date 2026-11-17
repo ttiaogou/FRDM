@@ -2,7 +2,7 @@ package com.freedom.features.aireply.ai
 
 import com.freedom.features.aireply.domain.message.*
 
-/** 草稿仅使用已验证文字；批次缺口必须由最新完整行证据消除。 */
+/** 草稿仅使用已验证文字；写入安全性由当前会话和输入框的实时校验确认。 */
 internal object VisibleDraftContext {
     data class Admission(val accepted: Boolean, val retryable: Boolean, val reason: String)
 
@@ -17,13 +17,11 @@ internal object VisibleDraftContext {
         val latest = batch.messagesBottomToTop.firstOrNull() ?: return retry("LATEST_MESSAGE_UNAVAILABLE")
         // A truncated viewport cannot prove that the latest visible row is the
         // actual conversation tail, so it remains ineligible for automatic
-        // drafting. OCR/row failures can still be tolerated when the adapter
-        // explicitly confirms the complete tail row below.
+        // drafting. An unrelated dynamic/system card or a partially read row
+        // does not prove that the active input field is covered or that the
+        // chat changed. The writer re-inspects the live conversation and
+        // editable input immediately before and after SET_TEXT.
         if (batch.truncated) return retry("MESSAGE_LIST_TRUNCATED")
-        val hasGap = batch.unrecognizedRowCount > 0 || batch.ocrFailedTargetCount > 0 ||
-            batch.status == MessageReadStatus.OCR_PARTIAL
-        val tail = batch.completeTailRowBounds
-        if ((hasGap && tail == null) || (tail != null && latest.bounds != tail)) return retry("LATEST_ROW_NOT_CONFIRMED")
         if (latest.type != ChatMessageType.TEXT) return Admission(false, false, "LATEST_MESSAGE_UNSUPPORTED")
         if (latest.direction == ChatMessageDirection.OUTGOING) return Admission(false, false, "LATEST_MESSAGE_OUTGOING")
         if (!eligible(latest)) return retry("LATEST_TEXT_OR_DIRECTION_UNVERIFIED")

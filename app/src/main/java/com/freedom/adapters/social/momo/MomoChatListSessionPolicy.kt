@@ -457,15 +457,18 @@ internal object MomoChatListSessionPolicy {
 
     /**
      * Classifies only from evidence observed in the supplied Momo inbox. Known feature rows are
-     * explicitly excluded. A normal chat row must also expose a valid timestamp node; rows that
-     * do not meet this minimum are retained for diagnostics but are never clicked.
+     * explicitly excluded. A normal chat row must also expose a valid timestamp node. The sole
+     * observed exception is a row that contains a geometrically confirmed session_fire node:
+     * Momo renders that feature row without the ordinary timestamp. Its unread state remains
+     * independently determined by the same-row status_new badge.
      */
     fun classifyRow(
         name: String?,
         preview: String?,
         timestamp: String?,
         timestampBoundsValid: Boolean,
-        timestampBoundsWithinRow: Boolean = timestampBoundsValid
+        timestampBoundsWithinRow: Boolean = timestampBoundsValid,
+        fireFeatureConfirmed: Boolean = false
     ): MomoChatListRowClassification {
         val normalizedName = name.orEmpty().trim().replace(Regex("\\s+"), " ")
         if (normalizedName in SYSTEM_ENTRY_NAMES) {
@@ -487,6 +490,12 @@ internal object MomoChatListSessionPolicy {
             )
         }
         if (timestamp.isNullOrBlank() || !timestampBoundsValid || !timestampBoundsWithinRow) {
+            if (fireFeatureConfirmed) {
+                return MomoChatListRowClassification(
+                    MomoChatListRowClassification.PRIVATE_CHAT,
+                    "FIRE_FEATURE_ROW_TIMESTAMP_OPTIONAL"
+                )
+            }
             return MomoChatListRowClassification(
                 MomoChatListRowClassification.UNCLASSIFIED,
                 when {

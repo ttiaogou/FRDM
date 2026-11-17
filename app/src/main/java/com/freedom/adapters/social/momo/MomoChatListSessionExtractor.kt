@@ -642,12 +642,18 @@ internal class MomoChatListSessionExtractor(
                 bounds.left >= rowBounds.left && bounds.top >= rowBounds.top &&
                 bounds.right <= rowBounds.right && bounds.bottom <= rowBounds.bottom
         } == true
+        val fireFeatureConfirmed = firePath != null && fireBounds?.let { bounds ->
+            MomoChatListSessionPolicy.hasValidBounds(bounds) &&
+                bounds.left >= rowBounds.left && bounds.top >= rowBounds.top &&
+                bounds.right <= rowBounds.right && bounds.bottom <= rowBounds.bottom
+        } == true
         val classification = MomoChatListSessionPolicy.classifyRow(
             name.value,
             preview.value,
             timestamp.value,
             timestamp.boundsValid,
-            timestampBoundsWithinRow
+            timestampBoundsWithinRow,
+            fireFeatureConfirmed
         )
         val hasOtherUnreadMarker = unreadNodeEvidence.any { evidence ->
             MomoChatListSessionPolicy.isOtherUnreadMarker(

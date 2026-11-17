@@ -60,6 +60,21 @@ class VisibleDraftContextTest {
         assertNull(VisibleDraftContext.build(batch.copy(windowSessionKey = null)))
     }
 
+    @Test fun unrecognizedDynamicCardDoesNotBlockVerifiedLatestIncoming() {
+        val latest = message(100)
+        val partial = batch(latest).copy(
+            status = MessageReadStatus.OCR_PARTIAL,
+            ocrFailedTargetCount = 1,
+            unrecognizedRowCount = 1,
+            completeTailRowBounds = null
+        )
+
+        val admission = VisibleDraftContext.assess(partial)
+
+        assertTrue(admission.accepted)
+        assertEquals("LATEST_INCOMING_VERIFIED", admission.reason)
+    }
+
     @Test fun contextIsBoundedAndChronologicalWithoutHistoryLookup() {
         val latest = message(800)
         val context = VisibleDraftContext.build(batch(*(1..40).reversed().map { message(it * 20) }.toTypedArray()).copy(completeTailRowBounds = latest.bounds))!!

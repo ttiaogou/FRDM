@@ -393,6 +393,26 @@ class MomoChatListSessionPolicyTest {
     }
 
     @Test
+    fun confirmedFireFeatureRowMayOmitOrdinaryTimestamp() {
+        val fireRow = MomoChatListSessionPolicy.classifyRow(
+            "信天翁", "火花快消失了，快来聊天点亮", null,
+            timestampBoundsValid = false,
+            timestampBoundsWithinRow = false,
+            fireFeatureConfirmed = true
+        )
+        val ordinaryRow = MomoChatListSessionPolicy.classifyRow(
+            "普通联系人", "你好", null,
+            timestampBoundsValid = false,
+            timestampBoundsWithinRow = false,
+            fireFeatureConfirmed = false
+        )
+
+        assertEquals(MomoChatListRowClassification.PRIVATE_CHAT, fireRow.selectionClass)
+        assertEquals("FIRE_FEATURE_ROW_TIMESTAMP_OPTIONAL", fireRow.reason)
+        assertEquals(MomoChatListRowClassification.UNCLASSIFIED, ordinaryRow.selectionClass)
+    }
+
+    @Test
     fun relativeTimestampStillRequiresValidGeometryInsideItsRow() {
         val outside = MomoChatListSessionPolicy.classifyRow(
             "喵喵喵", "75.13km·？", "13分钟前", timestampBoundsValid = true,
