@@ -7,6 +7,9 @@ import com.freedom.features.conversation.domain.message.StoredConversationMessag
 
 /** Local persistence boundary for contact identity and validated conversation observations. */
 interface ConversationRepository {
+    /** 原子确认当前账号并只返回该账号下的历史；旧库不具备账号证据，默认拒绝跨会话读取。 */
+    fun draftHistoryForCurrentVerifiedAccount(contactId: String): com.freedom.features.aireply.ai.VerifiedDraftHistory? = null
+
     fun findContactsByIdentityKeyHash(identityKeyHash: String): List<ContactProfile>
 
     fun upsertContact(profile: ContactProfile)

@@ -190,7 +190,9 @@ data class ChatMessageBatch(
     val ocrSampleTextByRowIndex: Map<Int, String> = emptyMap(),
     /** Plugin confidence values are diagnostics, not verified recognition accuracy. */
     val ocrConfidenceByRowIndex: Map<Int, Float> = emptyMap(),
-    val ocrLineCountByRowIndex: Map<Int, Int> = emptyMap()
+    val ocrLineCountByRowIndex: Map<Int, Int> = emptyMap(),
+    /** 适配器确认已读取列表末行且行内完整；null 表示末尾仍存在缺口。 */
+    val completeTailRowBounds: ScreenRect? = null
 ) {
     /** Backward-compatible name, but still enforces the automatic-input quality gate. */
     val latestIncomingMessage: ChatMessage?

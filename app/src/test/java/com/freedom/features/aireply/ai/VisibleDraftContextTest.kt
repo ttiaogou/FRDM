@@ -6,18 +6,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VisibleDraftContextTest {
-    private fun message(top: Int = 10) = ChatMessage("m$top", ChatMessageDirection.INCOMING,
+    private fun message(top: Int = 10, quality: MessageContentQuality = MessageContentQuality.VERIFIED) = ChatMessage("m$top", ChatMessageDirection.INCOMING,
         ChatMessageType.TEXT, "你好", ScreenRect(0, top, 100, top + 10),
-        DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.UNVERIFIED)
+        DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, quality)
     private fun batch(vararg messages: ChatMessage) = ChatMessageBatch(
         MessageReadStatus.SUCCESS, "window-chat", messages.toList(), messages.size, messages.size, false, 1L)
 
-    @Test fun readableOcrNeedsNoPreapprovalAndRetainsQuality() {
+    @Test fun independentlyVerifiedTextNeedsNoPreapproval() {
         val message = message()
-        val context = VisibleDraftContext.build(batch(message))!!
+        val context = VisibleDraftContext.build(batch(message).copy(completeTailRowBounds = message.bounds))!!
         assertTrue(context.currentWindowDraft)
-        assertFalse(context.hasVerifiedIncoming)
-        assertFalse(message.isAiInputEligible)
+        assertTrue(context.hasVerifiedIncoming)
+        assertTrue(message.isAiInputEligible)
         assertEquals("你好", context.messages.single().content)
         var calls = 0
         val engine = AiReplyDecisionEngine(object : AiModelProvider {
@@ -31,6 +31,14 @@ class VisibleDraftContextTest {
         assertEquals(AiReplyAction.REPLY, decision.action)
     }
 
+    @Test fun ordinaryUnverifiedOcrNeverEntersDraftContext() {
+        val message = message(quality = MessageContentQuality.UNVERIFIED)
+        val result = VisibleDraftContext.assess(batch(message).copy(completeTailRowBounds = message.bounds))
+        assertFalse(result.accepted)
+        assertTrue(result.retryable)
+        assertNull(VisibleDraftContext.build(batch(message).copy(completeTailRowBounds = message.bounds)))
+    }
+
     @Test fun latestUnsupportedMessageMustNotExposeOlderIncomingForReply() {
         val latest = message(100)
         val variants = listOf(
@@ -40,19 +48,21 @@ class VisibleDraftContextTest {
             latest.copy(contentQuality = MessageContentQuality.AMBIGUOUS),
             latest.copy(contentQuality = MessageContentQuality.FAILED),
             latest.copy(directionEvidence = DirectionEvidence.AMBIGUOUS))
-        variants.forEach { assertNull(VisibleDraftContext.build(batch(message(), it))) }
+        variants.forEach { assertNull(VisibleDraftContext.build(batch(message()).copy(messages = listOf(message(), it), completeTailRowBounds = it.bounds))) }
     }
 
     @Test fun partialAndStaleBatchesAreRejected() {
-        val batch = batch(message())
-        assertNull(VisibleDraftContext.build(batch.copy(status = MessageReadStatus.OCR_PARTIAL)))
+        val batch = batch(message()).copy(completeTailRowBounds = message().bounds)
+        val partial = batch.copy(status = MessageReadStatus.OCR_PARTIAL, ocrFailedTargetCount = 1, unrecognizedRowCount = 1)
+        assertNotNull(VisibleDraftContext.build(partial))
         assertNull(VisibleDraftContext.build(batch.copy(status = MessageReadStatus.WINDOW_STALE)))
         assertNull(VisibleDraftContext.build(batch.copy(truncated = true)))
         assertNull(VisibleDraftContext.build(batch.copy(windowSessionKey = null)))
     }
 
     @Test fun contextIsBoundedAndChronologicalWithoutHistoryLookup() {
-        val context = VisibleDraftContext.build(batch(*(1..40).reversed().map { message(it * 20) }.toTypedArray()))!!
+        val latest = message(800)
+        val context = VisibleDraftContext.build(batch(*(1..40).reversed().map { message(it * 20) }.toTypedArray()).copy(completeTailRowBounds = latest.bounds))!!
         assertEquals(30, context.messages.size)
         assertEquals("window-chat", context.conversationId)
         assertEquals("window-chat", context.contactId)

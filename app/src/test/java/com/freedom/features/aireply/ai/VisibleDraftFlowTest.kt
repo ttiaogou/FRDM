@@ -25,7 +25,8 @@ class VisibleDraftFlowTest {
             "pkg|21|7|conversation=${snapshot.conversationIdentityKey()}",
             listOf(ChatMessage("id", ChatMessageDirection.INCOMING, ChatMessageType.TEXT, "你好",
                 ScreenRect(0, 10, 100, 30), DirectionEvidence.LAYOUT_ID_AND_HIERARCHY,
-                MessageContentQuality.UNVERIFIED)), 1, 1, false, 1L)
+                MessageContentQuality.VERIFIED)), 1, 1, false, 1L,
+            completeTailRowBounds = ScreenRect(0, 10, 100, 30))
         val coordinator = AiReplyDraftCoordinator(
             configurationRepository = object : AiModelConfigurationRepository {
                 override fun load() = AiModelConfiguration(apiBaseUrl = "https://example.com/v1", modelName = "test", apiKey = "test")

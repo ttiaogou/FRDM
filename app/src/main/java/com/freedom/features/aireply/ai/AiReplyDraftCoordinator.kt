@@ -64,10 +64,20 @@ class AiReplyDraftCoordinator(
         }
     }
 
+    fun startupFailure(): String? {
+        if (!cloudConsent.isGranted()) return "CLOUD_PROCESSING_CONSENT_REQUIRED"
+        val configuration = runCatching { configurationRepository.load().normalized() }.getOrNull()
+            ?: return "MODEL_CONFIGURATION_LOAD_FAILED"
+        return if (configuration.isReadyForCloudProvider) null else "MODEL_CONFIGURATION_NOT_READY"
+    }
+
     /** 无生成前确认；仅使用当前窗口消息，绝不读取昵称关联历史。 */
-    fun generateVisibleDraft(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): Boolean {
-        val context = VisibleDraftContext.build(batch) ?: return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
-        return generateAndFill(batch, null, snapshot, context)
+    fun generateVisibleDraft(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
+                             visitToken: String = batch.windowSessionKey.orEmpty(),
+                             history: VerifiedDraftHistory? = null): Boolean {
+        val visible = VisibleDraftContext.build(batch, visitToken) ?: return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
+        val context = DraftHistoryMerger.merge(visible, batch, history)
+        return generateAndFill(batch, null, snapshot, context, visitToken)
     }
 
     /** Called only after platform identity and the current chat header have been verified. */
@@ -75,10 +85,11 @@ class AiReplyDraftCoordinator(
         batch: ChatMessageBatch,
         identity: ContactRowIdentity?,
         snapshot: ChatPageSnapshot,
-        context: ConversationContext
+        context: ConversationContext,
+        visitToken: String = batch.windowSessionKey.orEmpty()
     ): Boolean {
         val localDraft = context.currentWindowDraft
-        val contactId = if (localDraft) batch.windowSessionKey ?: return reject("CHAT_WINDOW_UNAVAILABLE")
+        val contactId = if (localDraft) VisibleDraftContext.build(batch, visitToken)?.contactId ?: return reject("CHAT_WINDOW_UNAVAILABLE")
             else identity?.contactId?.takeIf(String::isNotBlank) ?: return reject("CONTACT_ID_MISSING")
         if (!localDraft && identity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) {
             return reject("CONTACT_IDENTITY_UNVERIFIED")
@@ -98,7 +109,9 @@ class AiReplyDraftCoordinator(
         if (batch.windowSessionKey != expectedWindowSessionKey) {
             return reject("MESSAGE_WINDOW_MISMATCH")
         }
-        if (localDraft && context != VisibleDraftContext.build(batch)) return reject("VISIBLE_CONTEXT_MISMATCH")
+        val visible = if (localDraft) VisibleDraftContext.build(batch, visitToken) else null
+        if (localDraft && (visible == null || context.conversationId != visible.conversationId ||
+                context.messages.takeLast(visible.messages.size) != visible.messages)) return reject("VISIBLE_CONTEXT_MISMATCH")
         val latestIncoming = batch.messagesBottomToTop.firstOrNull {
             (if (localDraft) VisibleDraftContext.eligible(it) else it.isAiInputEligible) && it.direction == ChatMessageDirection.INCOMING
         } ?: return reject("NO_VERIFIED_INCOMING_MESSAGE")

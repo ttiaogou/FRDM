@@ -86,7 +86,8 @@ internal class MomoChatMessageReader(
         val unexposedMessageTextViewCount: Int = 0,
         val messageStructureEvidence: List<ChatMessageStructureEvidence> = emptyList(),
         val messageListUnavailableReason: String? = null,
-        val ocrTargets: List<ChatMessageOcrTarget> = emptyList()
+        val ocrTargets: List<ChatMessageOcrTarget> = emptyList(),
+        val completeTailRowBounds: ScreenRect? = null
     )
 
     init {
@@ -217,7 +218,8 @@ internal class MomoChatMessageReader(
             unexposedMessageTextViewCount = readResult.unexposedMessageTextViewCount,
             messageStructureEvidence = readResult.messageStructureEvidence,
             messageListUnavailableReason = readResult.messageListUnavailableReason,
-            ocrTargets = readResult.ocrTargets
+            ocrTargets = readResult.ocrTargets,
+            completeTailRowBounds = readResult.completeTailRowBounds
         )
     }
 
@@ -297,6 +299,7 @@ internal class MomoChatMessageReader(
         val firstIndex = (childCount - rowsToScan).coerceAtLeast(0)
         var truncated = childCount > rowsToScan
         var scannedRows = 0
+        var completeTailRowBounds: ScreenRect? = null
         var textEvidenceNodes = 0
         var descriptionEvidenceNodes = 0
         var unexposedMessageTextViews = 0
@@ -310,6 +313,15 @@ internal class MomoChatMessageReader(
             scannedRows++
             val rowRead = readRow(row, index, listBounds, coordinateSpaceReliable)
             truncated = truncated || rowRead.wasTruncated
+            if (index == childCount - 1 && !rowRead.wasTruncated && coordinateSpaceReliable) {
+                val tailBounds = rowRead.candidate?.rowBounds ?: rowRead.ocrTarget?.rowBounds
+                if (tailBounds != null && !tailBounds.isEmpty &&
+                    tailBounds.top >= listBounds.top && tailBounds.bottom <= listBounds.bottom &&
+                    tailBounds.left >= listBounds.left && tailBounds.right <= listBounds.right &&
+                    (rowRead.candidate?.text?.length ?: 0) <= 4_000) {
+                    completeTailRowBounds = tailBounds
+                }
+            }
             textEvidenceNodes += rowRead.textEvidenceCount
             descriptionEvidenceNodes += rowRead.descriptionEvidenceCount
             unexposedMessageTextViews += rowRead.unexposedMessageTextViewCount
@@ -350,7 +362,8 @@ internal class MomoChatMessageReader(
             directionDiagnostics = directionDiagnostics,
             unexposedMessageTextViewCount = unexposedMessageTextViews,
             messageStructureEvidence = messageStructureEvidence.take(MAX_STRUCTURE_DIAGNOSTICS),
-            ocrTargets = ocrTargets.take(MAX_OCR_TARGETS)
+            ocrTargets = ocrTargets.takeLast(MAX_OCR_TARGETS),
+            completeTailRowBounds = completeTailRowBounds
         )
     }
 

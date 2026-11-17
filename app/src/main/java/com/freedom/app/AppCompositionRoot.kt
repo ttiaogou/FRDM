@@ -366,8 +366,16 @@ internal class AccessibilityServiceDependencies internal constructor(
             onLog = addLog,
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
-            onDraftConversationObserved = { batch, snapshot ->
-                aiReplyDraftCoordinator.generateVisibleDraft(batch, snapshot)
+            draftStartupFailure = { aiReplyDraftCoordinator.startupFailure() },
+            onDraftConversationObserved = { batch, snapshot, identity, visitToken ->
+                val contactId = identity?.takeIf {
+                    it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                }?.contactId
+                val history = contactId?.let { id ->
+                    root.conversationRepository.draftHistoryForCurrentVerifiedAccount(id)?.takeIf { it.contactId == id }
+                }
+                if (history == null) addLog("AI 草稿上下文：无同账号已验证历史，使用本次会话；不按昵称加载旧库")
+                aiReplyDraftCoordinator.generateVisibleDraft(batch, snapshot, visitToken = visitToken, history = history)
             },
             onVerifiedConversationObserved = { batch, identity, snapshot ->
                 val verifiedIdentity = identity?.takeIf {

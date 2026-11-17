@@ -68,7 +68,8 @@ class AiReplyObservationRuntime(
     /** Prevents leaving the chat while a bounded model request/draft verification is in flight. */
     private val isConversationDraftPending: () -> Boolean = { false },
     /** Current-window draft callback; true reserves the page for generation/review. */
-    private val onDraftConversationObserved: (ChatMessageBatch, ChatPageSnapshot) -> Boolean = { _, _ -> false },
+    private val onDraftConversationObserved: (ChatMessageBatch, ChatPageSnapshot, ContactRowIdentity?, String) -> Boolean = { _, _, _, _ -> false },
+    private val draftStartupFailure: () -> String? = { null },
     /** A verified draft stays on screen so the user can review it and press Send manually. */
     private val isDraftAwaitingUserSend: () -> Boolean = { false },
     /** Invalidates late model callbacks when this runtime is reset. */
@@ -981,6 +982,15 @@ class AiReplyObservationRuntime(
     }
 
     fun scheduleInitialObservation(passiveOnly: Boolean = false) {
+        if (!passiveOnly) {
+            val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
+            if (failure != null) {
+                sessionRunStarted = false
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 回复启动被阻止：$failure；请修正配置后重新启动；未遍历列表")
+                return
+            }
+        }
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
         startupReadinessCoordinator.cancelRecovery()
@@ -1212,9 +1222,43 @@ class AiReplyObservationRuntime(
                 return
             }
         }
-        // 已通过当前窗口回调校验；草稿独立于只读归档和已验证历史。
-        val draftHoldsPage = runCatching { onDraftConversationObserved(batch, snapshot) }.getOrElse {
-            onLog("AI 草稿入口异常：[DRAFT_CALLBACK_FAILED]；未执行发送")
+        val greetingDetail = isReadOnlyGreetingMessageRead()
+        val privateDetail = sessionRunStarted && currentSessionCandidate != null &&
+            currentSessionWindowKey == windowSessionKey(snapshot) &&
+            ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null
+        val draftTargetConfirmed = !passiveManualObservation && (greetingDetail || privateDetail)
+        val draftAdmission = com.freedom.features.aireply.ai.VisibleDraftContext.assess(batch)
+        if (draftTargetConfirmed && draftAdmission.retryable) {
+            // 使用新快照重新 OCR；不把重试成功等同于内容已验证。
+            if (draftRetryTask != null) return
+            if (draftReadRetries < 2) {
+                draftReadRetries++
+                val visit = draftVisitToken
+                val run = sessionActionGeneration
+                onLog("AI 消息复读：${draftAdmission.reason}；attempt=$draftReadRetries/2；保持当前页面")
+                draftRetryTask = scheduler.schedule(700L * draftReadRetries) {
+                    draftRetryTask = null
+                    if (visit != draftVisitToken || run != sessionActionGeneration || !isAiReplyActive()) return@schedule
+                    val fresh = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+                    if (fresh == null || !hasSameWindowSession(snapshot, fresh)) {
+                        onLog("AI 消息复读停止：窗口或会话已变化")
+                        return@schedule
+                    }
+                    readVisibleMessages(fresh)
+                }
+                return
+            }
+            onLog("AI 消息复读停止：${draftAdmission.reason}；已达两次重试上限，不猜测内容")
+        }
+        val identity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()
+            else currentSessionCandidate?.contactIdentity
+        val draftHoldsPage = if (draftTargetConfirmed && draftAdmission.accepted) {
+            runCatching { onDraftConversationObserved(batch, snapshot, identity, draftVisitToken) }.getOrElse {
+                onLog("AI 草稿入口异常：[DRAFT_CALLBACK_FAILED]；未执行发送")
+                false
+            }
+        } else {
+            onLog("AI 草稿未准入：${if (!draftTargetConfirmed) "CHAT_ENTRY_NOT_BOUND" else draftAdmission.reason}")
             false
         } || isConversationDraftPending() || isDraftAwaitingUserSend()
         // Received-greeting details also support human-reviewed drafts. Do not expose their
@@ -2211,49 +2255,8 @@ class AiReplyObservationRuntime(
     private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) {
         if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID)) return
 
-        val candidateIdentity = candidate.contactIdentity
-        val hasVerifiedPlatformIdentity = candidateIdentity?.let {
-            it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
-                !it.contactId.isNullOrBlank()
-        } == true
-        if (candidate.selectionClass == "PRIVATE_CHAT" && !hasVerifiedPlatformIdentity) {
-            val captureResult = runCatching {
-                chatSessionManagementPort.requestContactIdentityCapture(candidate)
-            }.getOrDefault(ContactIdentityCaptureRequestResult.RETRY_LATER)
-            when (captureResult) {
-                ContactIdentityCaptureRequestResult.STARTED -> {
-                    if (!privateMessagesTraversalTaskExecutor.beginIdentityReturn(candidate, sessionActionGeneration)) {
-                        sessionManagerState = SessionManagerState.PAUSED
-                        onLog("AI 会话身份采集暂停：无法保存可信的原列表位置；不继续点击或滑动")
-                        return
-                    }
-                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                    onLog("AI 会话身份采集：目标联系人尚无已验证平台 ID；已请求头像资料采集，暂不打开会话或读取跨会话历史")
-                    scheduleFullInspectionAfter(350L)
-                    return
-                }
-                ContactIdentityCaptureRequestResult.IN_PROGRESS -> {
-                    sessionManagerState = SessionManagerState.PAUSED
-                    onLog("AI 会话身份采集暂停：存在无法关联到当前原行的采集事务")
-                    return
-                }
-                ContactIdentityCaptureRequestResult.RETRY_LATER -> {
-                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                    onLog("AI 会话身份采集：当前消息列表快照或窗口暂不满足采集条件；等待新快照，不使用旧坐标")
-                    scheduleFullInspectionAfter(500L)
-                    return
-                }
-                ContactIdentityCaptureRequestResult.REJECTED -> {
-                    val identityKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
-                    privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys += identityKey
-                    chatSessionManagementPort.blockSessionIdentityKey(identityKey)
-                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                    onLog("AI 会话身份采集[REJECTED]：无法安全确认平台用户 ID；本轮跳过该名称候选，不以昵称关联历史")
-                    scheduleFullInspectionAfter(350L)
-                    return
-                }
-                ContactIdentityCaptureRequestResult.NOT_SUPPORTED -> Unit
-            }
+        if (candidate.contactIdentity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) {
+            onLog("AI 会话身份：未确认平台 ID；使用本次访问临时上下文，不前置跳转资料采集；仍复核同名歧义、目标行及聊天标题")
         }
 
         val actionGeneration = sessionActionGeneration
@@ -3202,7 +3205,15 @@ class AiReplyObservationRuntime(
         }
     }
 
+    private var draftVisitToken = java.util.UUID.randomUUID().toString()
+    private var draftReadRetries = 0
+    private var draftRetryTask: ScheduledTask? = null
+
     private fun invalidatePendingMessageRead() {
+        draftVisitToken = java.util.UUID.randomUUID().toString()
+        draftReadRetries = 0
+        draftRetryTask?.cancel()
+        draftRetryTask = null
         messageReadCoordinator.invalidatePending()
         lastMessageFingerprint = ""
         loggedOcrDebugFingerprints.clear()
