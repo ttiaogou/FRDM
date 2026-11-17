@@ -2,30 +2,37 @@ package com.freedom.features.aireply.ai
 
 import com.freedom.features.aireply.domain.message.*
 
-/** 当前窗口草稿专用：允许可读 OCR，保留原可信度，不写入已验证历史。 */
+/** 草稿仅使用已验证文字；批次缺口必须由最新完整行证据消除。 */
 internal object VisibleDraftContext {
-    fun eligible(message: ChatMessage): Boolean = message.isTextMessage &&
-        message.direction != ChatMessageDirection.UNKNOWN &&
-        message.directionEvidence != DirectionEvidence.AMBIGUOUS &&
-        message.contentQuality in setOf(MessageContentQuality.VERIFIED, MessageContentQuality.UNVERIFIED)
+    data class Admission(val accepted: Boolean, val retryable: Boolean, val reason: String)
 
-    fun build(batch: ChatMessageBatch): ConversationContext? {
-        if (batch.status != MessageReadStatus.SUCCESS || batch.truncated ||
-            !batch.coordinateSpaceReliable || batch.unrecognizedRowCount > 0 ||
-            batch.ocrFailedTargetCount > 0) return null
-        val ordered = batch.messagesBottomToTop.asReversed()
-        // 不能跳过最新的媒体、失败、方向不明消息，误回复更早的文字。
-        val latest = ordered.lastOrNull() ?: return null
-        if (!eligible(latest) || latest.direction != ChatMessageDirection.INCOMING) return null
-        val key = batch.windowSessionKey?.takeIf(String::isNotBlank) ?: return null
-        val messages = ordered.filter(::eligible).takeLast(30).map {
-            AiModelMessage(
-                if (it.direction == ChatMessageDirection.INCOMING) AiModelMessage.Role.USER else AiModelMessage.Role.ASSISTANT,
-                it.content!!.take(2_000)
-            )
+    fun eligible(message: ChatMessage): Boolean = message.isAiInputEligible &&
+        message.directionEvidence != DirectionEvidence.AMBIGUOUS
+
+    fun assess(batch: ChatMessageBatch): Admission {
+        fun retry(reason: String) = Admission(false, true, reason)
+        if (batch.windowSessionKey.isNullOrBlank() || !batch.coordinateSpaceReliable) return retry("WINDOW_OR_GEOMETRY_UNCONFIRMED")
+        if (batch.status !in setOf(MessageReadStatus.SUCCESS, MessageReadStatus.OCR_PARTIAL,
+                MessageReadStatus.DIRECTION_UNKNOWN, MessageReadStatus.MESSAGE_TEXT_NOT_EXPOSED)) return retry("MESSAGE_READ_INCOMPLETE")
+        val latest = batch.messagesBottomToTop.firstOrNull() ?: return retry("LATEST_MESSAGE_UNAVAILABLE")
+        val hasGap = batch.truncated || batch.unrecognizedRowCount > 0 || batch.ocrFailedTargetCount > 0 ||
+            batch.status == MessageReadStatus.OCR_PARTIAL
+        val tail = batch.completeTailRowBounds
+        if ((hasGap && tail == null) || (tail != null && latest.bounds != tail)) return retry("LATEST_ROW_NOT_CONFIRMED")
+        if (latest.type != ChatMessageType.TEXT) return Admission(false, false, "LATEST_MESSAGE_UNSUPPORTED")
+        if (latest.direction == ChatMessageDirection.OUTGOING) return Admission(false, false, "LATEST_MESSAGE_OUTGOING")
+        if (!eligible(latest)) return retry("LATEST_TEXT_OR_DIRECTION_UNVERIFIED")
+        if (latest.content!!.length > 2_000) return Admission(false, false, "LATEST_MESSAGE_EXCEEDS_CONTEXT_LIMIT")
+        return Admission(true, false, "LATEST_INCOMING_VERIFIED")
+    }
+
+    fun build(batch: ChatMessageBatch, visitToken: String = batch.windowSessionKey.orEmpty()): ConversationContext? {
+        if (!assess(batch).accepted || visitToken.isBlank()) return null
+        val key = "${batch.windowSessionKey}|visit=$visitToken"
+        val messages = batch.messagesBottomToTop.asReversed().filter(::eligible).takeLast(30).map {
+            AiModelMessage(if (it.direction == ChatMessageDirection.INCOMING) AiModelMessage.Role.USER else AiModelMessage.Role.ASSISTANT,
+                it.content!!.take(2_000))
         }
-        return ConversationContext(key, key, messages, 0, 0, 0,
-            hasVerifiedIncoming = ordered.any { it.isAiInputEligible && it.direction == ChatMessageDirection.INCOMING },
-            currentWindowDraft = true)
+        return ConversationContext(key, key, messages, 0, 0, 0, true, currentWindowDraft = true)
     }
 }
