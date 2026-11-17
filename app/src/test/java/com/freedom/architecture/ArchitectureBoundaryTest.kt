@@ -579,7 +579,9 @@ class ArchitectureBoundaryTest {
 
         val verifierUnitTests = workflow.indexOf("python3 -m unittest discover -s tools/architecture")
         val architectureGate = workflow.indexOf("python3 tools/architecture/verify_boundaries.py")
-        val androidBuild = workflow.indexOf("gradle --no-daemon clean")
+        // The cache strategy is an implementation detail. The ordering contract is that the
+        // Gradle build invocation itself remains after both architecture checks.
+        val androidBuild = workflow.indexOf("gradle --no-daemon")
         assertTrue("CI must run verifier unit tests", verifierUnitTests >= 0)
         assertTrue("CI must run the static architecture verifier", architectureGate >= 0)
         assertTrue("Architecture verification must finish before the Android Gradle build", verifierUnitTests < architectureGate && architectureGate < androidBuild)
