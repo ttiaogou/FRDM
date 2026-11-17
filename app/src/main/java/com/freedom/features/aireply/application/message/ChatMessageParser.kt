@@ -24,7 +24,7 @@ data class ChatMessageCandidate(
     val isSystemMessage: Boolean = false,
     /** Optional semantic avatar bounds captured from the same visible row. */
     val avatarBounds: ScreenRect? = null,
-    /** Direct accessibility text is verified by default; OCR adapters must set a safer value. */
+    /** Text admitted by the adapter's structural message-read path is model-usable by default. */
     val contentQuality: MessageContentQuality = MessageContentQuality.VERIFIED
 ) {
     override fun toString(): String =

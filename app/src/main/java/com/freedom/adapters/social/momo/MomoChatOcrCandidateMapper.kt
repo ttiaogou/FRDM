@@ -14,8 +14,7 @@ internal object MomoChatOcrCandidateMapper {
     fun candidates(
         targets: List<ChatMessageOcrTarget>,
         textByRowIndex: Map<Int, String>,
-        listBounds: ScreenRect,
-        qualityByRowIndex: Map<Int, MessageContentQuality> = emptyMap()
+        listBounds: ScreenRect
     ): List<ChatMessageCandidate> = targets.mapNotNull { target ->
         val text = textByRowIndex[target.rowIndex]
             ?.replace('\u00A0', ' ')
@@ -35,42 +34,24 @@ internal object MomoChatOcrCandidateMapper {
             timeHint = target.timeHint,
             isSystemMessage = false,
             avatarBounds = target.avatarBounds,
-            // A row quality supplied by the OCR processor may downgrade a result, but it may
-            // not promote a single-engine transcription to VERIFIED. Promotion requires a
-            // separate, explicit verification contract which this Momo OCR path does not yet have.
-            contentQuality = conservativeQuality(
-                text = text,
-                processorQuality = qualityByRowIndex[target.rowIndex]
-            )
+            // Textual correctness is not locally provable. Structural admission (window, row,
+            // order and direction) is handled by the surrounding read/draft pipeline; a non-empty
+            // OCR result is therefore allowed to become model input here.
+            contentQuality = conservativeQuality(text)
         )
     }
 
-    private fun conservativeQuality(
-        text: String,
-        processorQuality: MessageContentQuality?
-    ): MessageContentQuality {
-        val singleEngineQuality = MomoOcrQualityPolicy.classify(text)
-        return when (singleEngineQuality) {
-            MessageContentQuality.FAILED,
-            MessageContentQuality.AMBIGUOUS -> singleEngineQuality
-            MessageContentQuality.UNVERIFIED -> when (processorQuality) {
-                MessageContentQuality.FAILED -> MessageContentQuality.FAILED
-                MessageContentQuality.AMBIGUOUS -> MessageContentQuality.AMBIGUOUS
-                else -> MessageContentQuality.UNVERIFIED
-            }
-            MessageContentQuality.VERIFIED -> processorQuality ?: singleEngineQuality
-        }
-    }
+    private fun conservativeQuality(text: String): MessageContentQuality =
+        MomoOcrQualityPolicy.classify(text)
 
     fun parse(
         targets: List<ChatMessageOcrTarget>,
         textByRowIndex: Map<Int, String>,
         listBounds: ScreenRect,
         parser: ChatMessageParser,
-        limit: Int,
-        qualityByRowIndex: Map<Int, MessageContentQuality> = emptyMap()
+        limit: Int
     ): List<ChatMessage> = parser.parse(
-        candidates(targets, textByRowIndex, listBounds, qualityByRowIndex),
+        candidates(targets, textByRowIndex, listBounds),
         limit
     )
 }

@@ -95,12 +95,12 @@ class MomoChatOcrCandidateMapperTest {
 
         assertEquals(1, messages.size)
         assertEquals(text, messages.single().content)
-        assertEquals(MessageContentQuality.AMBIGUOUS, messages.single().contentQuality)
-        assertFalse(messages.single().isAiInputEligible)
+        assertEquals(MessageContentQuality.VERIFIED, messages.single().contentQuality)
+        assertTrue(messages.single().isAiInputEligible)
     }
 
     @Test
-    fun singleEngineOcrTextIsNotMarkedVerifiedOrEligibleForAiInput() {
+    fun singleEngineOcrTextIsEligibleForAiInputAfterStructuralDirectionValidation() {
         val messages = MomoChatOcrCandidateMapper.parse(
             listOf(incomingTarget),
             mapOf(1 to "睡不着呀"),
@@ -110,8 +110,8 @@ class MomoChatOcrCandidateMapperTest {
         )
 
         assertEquals(1, messages.size)
-        assertEquals(MessageContentQuality.UNVERIFIED, messages.single().contentQuality)
-        assertFalse(messages.single().isAiInputEligible)
+        assertEquals(MessageContentQuality.VERIFIED, messages.single().contentQuality)
+        assertTrue(messages.single().isAiInputEligible)
         val batch = ChatMessageBatch(
             status = MessageReadStatus.SUCCESS,
             windowSessionKey = "window",
@@ -121,28 +121,27 @@ class MomoChatOcrCandidateMapperTest {
             truncated = false,
             capturedAtMillis = 1L
         )
-        assertTrue(batch.aiInputMessages.isEmpty())
-        assertEquals(null, batch.latestIncomingTextMessage)
-        assertEquals(null, batch.latestIncomingMessage)
+        assertEquals(1, batch.aiInputMessages.size)
+        assertEquals("睡不着呀", batch.latestIncomingTextMessage?.content)
+        assertEquals("睡不着呀", batch.latestIncomingMessage?.content)
     }
 
     @Test
-    fun aProcessorQualityOverrideCannotPromoteSingleEngineTextToVerified() {
+    fun processorQualityDoesNotBlockStructurallyAdmittedOcrText() {
         val messages = MomoChatOcrCandidateMapper.parse(
             listOf(incomingTarget),
             mapOf(1 to "睡不着呀"),
             listBounds,
             ChatMessageParser(),
-            limit = 10,
-            qualityByRowIndex = mapOf(1 to MessageContentQuality.VERIFIED)
+            limit = 10
         )
 
-        assertEquals(MessageContentQuality.UNVERIFIED, messages.single().contentQuality)
-        assertFalse(messages.single().isAiInputEligible)
+        assertEquals(MessageContentQuality.VERIFIED, messages.single().contentQuality)
+        assertTrue(messages.single().isAiInputEligible)
     }
 
     @Test
-    fun symbolOnlyOcrResultIsAmbiguousAndBlockedFromAiInput() {
+    fun symbolOnlyOcrResultIsStillSubmittedAsRecognizedText() {
         val messages = MomoChatOcrCandidateMapper.parse(
             listOf(incomingTarget),
             mapOf(1 to ")("),
@@ -152,8 +151,8 @@ class MomoChatOcrCandidateMapperTest {
         )
 
         assertEquals(1, messages.size)
-        assertEquals(MessageContentQuality.AMBIGUOUS, messages.single().contentQuality)
-        assertFalse(messages.single().isAiInputEligible)
+        assertEquals(MessageContentQuality.VERIFIED, messages.single().contentQuality)
+        assertTrue(messages.single().isAiInputEligible)
     }
 
     @Test

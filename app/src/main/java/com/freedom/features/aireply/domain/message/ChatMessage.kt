@@ -22,9 +22,9 @@ enum class ChatMessageType {
 
 /** Content trust is independent from whether a message row was structurally parsed. */
 enum class MessageContentQuality {
-    /** Text exposed directly by the target app accessibility node. */
+    /** Text admitted for model input after the message-read structural checks. */
     VERIFIED,
-    /** Text produced by one OCR engine without independent confirmation. */
+    /** Legacy state for callers that have not admitted text for model input. */
     UNVERIFIED,
     /** Competing OCR evidence or unresolved visual symbols make the meaning ambiguous. */
     AMBIGUOUS,

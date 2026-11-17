@@ -31,12 +31,12 @@ class VisibleDraftContextTest {
         assertEquals(AiReplyAction.REPLY, decision.action)
     }
 
-    @Test fun ordinaryUnverifiedOcrNeverEntersDraftContext() {
-        val message = message(quality = MessageContentQuality.UNVERIFIED)
+    @Test fun structurallyAdmittedOcrTextEntersDraftContext() {
+        val message = message(quality = MessageContentQuality.VERIFIED)
         val result = VisibleDraftContext.assess(batch(message).copy(completeTailRowBounds = message.bounds))
-        assertFalse(result.accepted)
-        assertTrue(result.retryable)
-        assertNull(VisibleDraftContext.build(batch(message).copy(completeTailRowBounds = message.bounds)))
+        assertTrue(result.accepted)
+        assertFalse(result.retryable)
+        assertNotNull(VisibleDraftContext.build(batch(message).copy(completeTailRowBounds = message.bounds)))
     }
 
     @Test fun latestUnsupportedMessageMustNotExposeOlderIncomingForReply() {

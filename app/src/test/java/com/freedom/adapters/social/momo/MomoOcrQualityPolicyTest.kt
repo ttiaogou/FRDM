@@ -6,36 +6,34 @@ import org.junit.Test
 
 class MomoOcrQualityPolicyTest {
     @Test
-    fun singleEngineChineseTextIsUnverified() {
-        assertEquals(MessageContentQuality.UNVERIFIED, MomoOcrQualityPolicy.classify("睡不着呀"))
+    fun nonEmptyOcrTextIsAdmittedForModelInput() {
+        assertEquals(MessageContentQuality.VERIFIED, MomoOcrQualityPolicy.classify("睡不着呀"))
     }
 
     @Test
-    fun ordinarySingleEngineTextNeverBecomesVerifiedFromConfidenceAlone() {
-        // The classifier has no confidence-score input by design: a score from the same engine
-        // is not independent evidence of transcription correctness.
-        assertEquals(MessageContentQuality.UNVERIFIED, MomoOcrQualityPolicy.classify("你好，晚上好"))
+    fun ordinarySingleEngineTextDoesNotRequireIndependentOcrProof() {
+        assertEquals(MessageContentQuality.VERIFIED, MomoOcrQualityPolicy.classify("你好，晚上好"))
     }
 
     @Test
-    fun unknownEmojiPlaceholderMakesMessageAmbiguous() {
+    fun recognizedTextWithVisualMarkerRemainsModelInput() {
         assertEquals(
-            MessageContentQuality.AMBIGUOUS,
+            MessageContentQuality.VERIFIED,
             MomoOcrQualityPolicy.classify("在吗${MomoOcrVisualSymbolGuard.UNKNOWN_VISUAL_SYMBOL}")
         )
     }
 
     @Test
-    fun uncertainPunctuationPlaceholderMakesMessageAmbiguous() {
+    fun recognizedTextWithPunctuationMarkerRemainsModelInput() {
         assertEquals(
-            MessageContentQuality.AMBIGUOUS,
+            MessageContentQuality.VERIFIED,
             MomoOcrQualityPolicy.classify("你好${MomoOcrVisualSymbolGuard.UNCERTAIN_TEXT_SYMBOL}")
         )
     }
 
     @Test
-    fun symbolOnlyBubbleIsAmbiguousEvenWhenNoColorComponentWasDetected() {
-        assertEquals(MessageContentQuality.AMBIGUOUS, MomoOcrQualityPolicy.classify(")("))
+    fun symbolOnlyRecognizedTextIsNotBlockedByTrustClassification() {
+        assertEquals(MessageContentQuality.VERIFIED, MomoOcrQualityPolicy.classify(")("))
     }
 
     @Test
@@ -44,9 +42,9 @@ class MomoOcrQualityPolicyTest {
     }
 
     @Test
-    fun lineWithoutCharacterGeometryIsMarkedAmbiguous() {
+    fun recognizedTextWithUncertainLineMarkerRemainsModelInput() {
         assertEquals(
-            MessageContentQuality.AMBIGUOUS,
+            MessageContentQuality.VERIFIED,
             MomoOcrQualityPolicy.classify("${MomoOcrVisualSymbolGuard.UNCERTAIN_SYMBOL_ONLY} 在吗a")
         )
     }

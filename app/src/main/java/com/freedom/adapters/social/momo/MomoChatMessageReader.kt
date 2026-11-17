@@ -237,8 +237,7 @@ internal class MomoChatMessageReader(
         val candidates = MomoChatOcrCandidateMapper.candidates(
             targets = batch.ocrTargets,
             textByRowIndex = result.textByRowIndex,
-            listBounds = listBounds,
-            qualityByRowIndex = result.qualityByRowIndex
+            listBounds = listBounds
         )
         val ocrMessages = parser.parse(candidates, limit)
         val messages = (batch.messages + ocrMessages)
