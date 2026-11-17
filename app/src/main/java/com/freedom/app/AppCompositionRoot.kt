@@ -366,6 +366,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             onLog = addLog,
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
+            onDraftConversationObserved = { batch, snapshot ->
+                aiReplyDraftCoordinator.generateVisibleDraft(batch, snapshot)
+            },
             onVerifiedConversationObserved = { batch, identity, snapshot ->
                 val verifiedIdentity = identity?.takeIf {
                     it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
@@ -387,12 +390,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                             "当前观察批次=${batch.messages.size}；联系人身份=平台已验证；" +
                             "未输出消息正文"
                     )
-                    aiReplyDraftCoordinator.generateAndFill(
-                        batch = batch,
-                        identity = verifiedIdentity,
-                        snapshot = snapshot,
-                        context = context
-                    )
+                    // 草稿由当前窗口入口统一生成；此回调仅维护已验证历史。
                 } else {
                     addLog("AI 会话上下文未加载：联系人身份尚未达到平台 ID 验证级别")
                 }

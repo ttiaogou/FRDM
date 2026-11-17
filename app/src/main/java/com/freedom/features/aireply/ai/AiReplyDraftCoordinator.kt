@@ -36,6 +36,7 @@ class AiReplyDraftCoordinator(
     private val onLog: (String) -> Unit,
     private val createProvider: (AiModelConfiguration) -> AiModelProvider,
     private val backgroundExecutor: Executor = newDraftExecutor(),
+    private val nowMillis: () -> Long = System::currentTimeMillis,
     private val chooseRandomInt: (Int, Int) -> Int = { min, max ->
         java.util.concurrent.ThreadLocalRandom.current().nextInt(min, max + 1)
     }
@@ -45,6 +46,8 @@ class AiReplyDraftCoordinator(
     private val generation = AtomicLong(0L)
     private val lock = Any()
     private val processedMessageKeys = LinkedHashSet<String>()
+    private val failedRequests = linkedMapOf<String, Pair<Int, Long>>()
+    private var activeMessageKey: String? = null
 
     val isPending: Boolean get() = pending.get()
     val isAwaitingUserSend: Boolean get() = awaitingUserSend.get()
@@ -56,21 +59,31 @@ class AiReplyDraftCoordinator(
             pending.set(false)
             awaitingUserSend.set(false)
             processedMessageKeys.clear()
+            failedRequests.clear()
+            activeMessageKey = null
         }
+    }
+
+    /** 无生成前确认；仅使用当前窗口消息，绝不读取昵称关联历史。 */
+    fun generateVisibleDraft(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): Boolean {
+        val context = VisibleDraftContext.build(batch) ?: return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
+        return generateAndFill(batch, null, snapshot, context)
     }
 
     /** Called only after platform identity and the current chat header have been verified. */
     fun generateAndFill(
         batch: ChatMessageBatch,
-        identity: ContactRowIdentity,
+        identity: ContactRowIdentity?,
         snapshot: ChatPageSnapshot,
         context: ConversationContext
     ): Boolean {
-        val contactId = identity.contactId?.takeIf(String::isNotBlank) ?: return reject("CONTACT_ID_MISSING")
-        if (identity.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) {
+        val localDraft = context.currentWindowDraft
+        val contactId = if (localDraft) batch.windowSessionKey ?: return reject("CHAT_WINDOW_UNAVAILABLE")
+            else identity?.contactId?.takeIf(String::isNotBlank) ?: return reject("CONTACT_ID_MISSING")
+        if (!localDraft && identity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) {
             return reject("CONTACT_IDENTITY_UNVERIFIED")
         }
-        if (context.contactId != contactId || context.identityConversationMismatch()) {
+        if (context.contactId != contactId || (!localDraft && context.identityConversationMismatch())) {
             return reject("CONVERSATION_CONTEXT_MISMATCH")
         }
         if (snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
@@ -85,15 +98,15 @@ class AiReplyDraftCoordinator(
         if (batch.windowSessionKey != expectedWindowSessionKey) {
             return reject("MESSAGE_WINDOW_MISMATCH")
         }
-        val latestIncoming = batch.messages.firstOrNull {
-            it.isAiInputEligible && it.direction == ChatMessageDirection.INCOMING
+        if (localDraft && context != VisibleDraftContext.build(batch)) return reject("VISIBLE_CONTEXT_MISMATCH")
+        val latestIncoming = batch.messagesBottomToTop.firstOrNull {
+            (if (localDraft) VisibleDraftContext.eligible(it) else it.isAiInputEligible) && it.direction == ChatMessageDirection.INCOMING
         } ?: return reject("NO_VERIFIED_INCOMING_MESSAGE")
         if (context.messages.isEmpty() || context.messages.last().role != AiModelMessage.Role.USER ||
-            context.messages.last().content != latestIncoming.content
+            context.messages.last().content != latestIncoming.content?.take(2_000)
         ) return reject("LATEST_CONTEXT_MESSAGE_NOT_INCOMING")
-        if (!context.hasVerifiedIncoming) return reject("NO_VERIFIED_INCOMING_CONTEXT")
+        if (!localDraft && !context.hasVerifiedIncoming) return reject("NO_VERIFIED_INCOMING_CONTEXT")
         if (!isAiReplyActive()) return reject("AI_REPLY_NOT_ACTIVE")
-        if (isManualReviewRequired()) return reject("MANUAL_REVIEW_REQUIRED")
         if (!cloudConsent.isGranted()) return reject("CLOUD_PROCESSING_CONSENT_REQUIRED")
 
         val configuration = runCatching { configurationRepository.load().normalized() }.getOrElse {
@@ -110,8 +123,14 @@ class AiReplyDraftCoordinator(
         )
         val dedupeKey = fingerprint("$contactId|$expectedWindowSessionKey|${latestIncoming.id}")
         val requestGeneration = synchronized(lock) {
+            if (awaitingUserSend.get()) return reject("DRAFT_AWAITING_USER_SEND")
             if (pending.get()) return reject("DRAFT_REQUEST_ALREADY_PENDING")
             if (dedupeKey in processedMessageKeys) return reject("DUPLICATE_INCOMING_MESSAGE")
+            val failure = failedRequests[dedupeKey]
+            if (failure != null && (failure.first >= 2 || nowMillis() < failure.second)) {
+                return reject("DRAFT_FAILURE_COOLDOWN_OR_RETRY_LIMIT")
+            }
+            activeMessageKey = dedupeKey
             processedMessageKeys += dedupeKey
             while (processedMessageKeys.size > MAX_PROCESSED_KEYS) {
                 val oldest = processedMessageKeys.firstOrNull() ?: break
@@ -144,7 +163,7 @@ class AiReplyDraftCoordinator(
         target: ChatDraftInputTarget,
         requestGeneration: Long
     ) {
-        if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) {
+        if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
             finish("AI_REPLY_STATE_CHANGED_BEFORE_REQUEST", requestGeneration)
             return
         }
@@ -155,7 +174,7 @@ class AiReplyDraftCoordinator(
         ).decide(
             AiReplyDecisionInput(
                 context = context,
-                contactIdentityVerified = true,
+                contactIdentityVerified = !context.currentWindowDraft,
                 manualReviewRequired = isManualReviewRequired(),
                 cooldownActive = false,
                 requestId = UUID.randomUUID().toString(),
@@ -166,7 +185,7 @@ class AiReplyDraftCoordinator(
             finish("MODEL_DECISION_${decision.reason}", requestGeneration)
             return
         }
-        if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) {
+        if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
             finish("AI_REPLY_STATE_CHANGED_AFTER_REQUEST", requestGeneration)
             return
         }
@@ -243,6 +262,17 @@ class AiReplyDraftCoordinator(
         synchronized(lock) {
             if (!isCurrentGeneration(requestGeneration)) return
             pending.set(false)
+            val key = activeMessageKey
+            activeMessageKey = null
+            // 仅模型/调度失败允许后续观察触发一次重试；输入过的草稿不得盲目重写。
+            if (key != null && reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED",
+                    "MODEL_DECISION_MODEL_CALL_FAILED", "MODEL_DECISION_EMPTY_MODEL_OUTPUT",
+                    "MODEL_DECISION_MODEL_OUTPUT_SCHEMA_INVALID")) {
+                val attempts = (failedRequests[key]?.first ?: 0) + 1
+                failedRequests[key] = attempts to (nowMillis() + 30_000L)
+                while (failedRequests.size > MAX_PROCESSED_KEYS) failedRequests.remove(failedRequests.keys.first())
+                processedMessageKeys.remove(key)
+            }
         }
         onLog("AI 回复草稿处理结束：$reasonCode；未执行发送动作")
     }

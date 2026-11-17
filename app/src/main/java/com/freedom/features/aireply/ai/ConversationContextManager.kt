@@ -126,5 +126,6 @@ data class ConversationContext(
     val insertedCount: Int,
     val duplicateCount: Int,
     val rejectedCount: Int,
-    val hasVerifiedIncoming: Boolean
+    val hasVerifiedIncoming: Boolean,
+    val currentWindowDraft: Boolean = false
 )

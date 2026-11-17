@@ -67,6 +67,8 @@ class AiReplyObservationRuntime(
     private val sharedPageObservationCoordinator: PageObservationCoordinator? = null,
     /** Prevents leaving the chat while a bounded model request/draft verification is in flight. */
     private val isConversationDraftPending: () -> Boolean = { false },
+    /** Current-window draft callback; true reserves the page for generation/review. */
+    private val onDraftConversationObserved: (ChatMessageBatch, ChatPageSnapshot) -> Boolean = { _, _ -> false },
     /** A verified draft stays on screen so the user can review it and press Send manually. */
     private val isDraftAwaitingUserSend: () -> Boolean = { false },
     /** Invalidates late model callbacks when this runtime is reset. */
@@ -365,6 +367,12 @@ class AiReplyObservationRuntime(
         val previous = lastPageInspection
         val inspection = stabilizeIncomingPageSnapshot(incomingInspection)
 
+        // 模型请求、分段填入及人工审核期间，不让遍历任务抢走页面。
+        if (isConversationDraftPending() || isDraftAwaitingUserSend()) {
+            lastPageInspection = inspection
+            return
+        }
+
         if (sessionRunStarted) {
             when {
                 receivedGreetingsTaskActive && !ownsTask(RECEIVED_GREETINGS_TASK_ID) -> {
@@ -593,8 +601,7 @@ class AiReplyObservationRuntime(
                     val detailStatus = runCatching { receivedGreetingsTaskFlow.traversalStatus() }
                         .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
                     if (detailStatus == ReceivedGreetingsTraversalStatus.DETAIL_READY) {
-                        // This is the intentionally read-only OCR validation path. It never enters
-                        // the ordinary inbox message observer/reply pipeline.
+                        // 读取结果进入独立的人工审核草稿入口，同时保留本地样本归档。
                         readVisibleMessages(inspection)
                     } else {
                         scheduleReceivedGreetingsRecoveryRetry(
@@ -1033,7 +1040,7 @@ class AiReplyObservationRuntime(
             sessionRunStarted -> {
                 onLog(
                     "AI Reply 测试遍历已启动：普通聊天按底部至顶部扫描；" +
-                        "只读进入会话并执行 OCR，不生成回复、不发送消息；样本目录=$directory"
+                        "进入会话执行 OCR 并自动生成审核草稿；仅人工发送；样本目录=$directory"
                 )
                 if (chatPagePort.supportsVerifiedMessageWorkAreaNavigation()) {
                     startupReadinessCoordinator.beginVerification()
@@ -1205,8 +1212,13 @@ class AiReplyObservationRuntime(
                 return
             }
         }
-        // Received-greeting details are an OCR calibration task only. Do not expose their
-        // contents to the future AI observer callback and do not enter any reply/send state.
+        // 已通过当前窗口回调校验；草稿独立于只读归档和已验证历史。
+        val draftHoldsPage = runCatching { onDraftConversationObserved(batch, snapshot) }.getOrElse {
+            onLog("AI 草稿入口异常：[DRAFT_CALLBACK_FAILED]；未执行发送")
+            false
+        } || isConversationDraftPending() || isDraftAwaitingUserSend()
+        // Received-greeting details also support human-reviewed drafts. Do not expose their
+        // Verified-history observers remain separate from this current-window draft path.
         if (sessionRunStarted && receivedGreetingsTaskActive &&
             receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.DETAIL_READY
         ) {
@@ -1225,8 +1237,12 @@ class AiReplyObservationRuntime(
                     "OCR目标=${batch.ocrTargets.size}；已识别=${batch.ocrRecognizedTargetCount}；" +
                     "失败=${batch.ocrFailedTargetCount}；截断=${batch.truncated}；" +
                     "唯一身份=${if (receivedGreetingsTaskFlow.currentContactIdentity() != null) "已验证" else "未验证"}；" +
-                    "未调用 AI 消息回调，不输入、不发送"
+                    "草稿由独立入口处理；不自动发送"
             )
+            if (draftHoldsPage) {
+                onLog("收到招呼：保持聊天页面等待草稿审核及人工发送；不自动返回")
+                return
+            }
             val returned = runCatching {
                 receivedGreetingsTaskFlow.completeDetailInspection(sampleIndex > 0)
             }.getOrDefault(false)
@@ -1323,7 +1339,7 @@ class AiReplyObservationRuntime(
                     "AI 被动观察：人工打开的聊天详情已归档；样本序号=$sampleIndex；" +
                         "可见消息=${batch.messages.size}；AI 可用消息=${observerBatch.messages.size}；" +
                         "方向不明=${batch.messages.count { it.direction == com.freedom.features.aireply.domain.message.ChatMessageDirection.UNKNOWN }}；" +
-                        "联系人身份未绑定；不执行输入或发送"
+                        "联系人身份未绑定；仅使用当前窗口生成审核草稿，不自动发送"
                 } else {
                     "AI 被动观察：人工聊天详情读取完成，但样本归档失败；未绑定联系人身份；不执行输入或发送"
                 }
