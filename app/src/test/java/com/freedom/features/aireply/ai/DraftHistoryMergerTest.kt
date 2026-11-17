@@ -77,6 +77,22 @@ class DraftHistoryMergerTest {
         assertEquals(listOf("更早消息", "最新"), result.messages.map { it.content })
     }
 
+    @Test fun resolvedLocalContactHistoryLoadsWithoutVisibleOverlap() {
+        val history = VerifiedDraftHistory("", "c1", "momo-direct-c1", listOf(
+            stored("old", "更早消息", "INCOMING", 1),
+            stored("future", "稍后消息", "INCOMING", 20)), lookupSource = "LOCAL_PLATFORM_CONTACT")
+        val result = DraftHistoryMerger.merge(visible, emptyBatch().copy(capturedAtMillis = 10), history)
+        assertEquals(listOf("更早消息", "最新"), result.messages.map { it.content })
+    }
+
+    @Test fun resolvedHistoryDoesNotImportOtherContactsOrUnverifiedMessages() {
+        val wrongContact = stored("other", "其他联系人", "INCOMING", 1).copy(contactId = "c2")
+        val unverified = stored("uncertain", "不可信文字", "INCOMING", 2).copy(contentQuality = "UNVERIFIED")
+        val history = VerifiedDraftHistory("", "c1", "momo-direct-c1", listOf(wrongContact, unverified),
+            lookupSource = "LOCAL_PLATFORM_CONTACT")
+        assertEquals(visible.messages, DraftHistoryMerger.merge(visible, emptyBatch().copy(capturedAtMillis = 10), history).messages)
+    }
+
     private fun emptyBatch() = ChatMessageBatch(
         MessageReadStatus.SUCCESS, "window", emptyList(), 0, 0, false, 1L)
 }

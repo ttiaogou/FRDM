@@ -17,18 +17,25 @@ internal object AiReplyDecisionJsonParser {
               "maxLength": 120,
               "pattern": "^[A-Z0-9_]+$"
             },
+            "reasonDetail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
             "draft": {
               "type": ["string", "null"],
               "maxLength": $maxDraftChars
             }
           },
-          "required": ["action", "reason", "draft"]
+          "required": ["action", "reason", "reasonDetail", "draft"]
         }
     """.trimIndent()
 
     fun parse(raw: String, maxDraftChars: Int): AiReplyDecision? = runCatching {
         val values = StrictJsonStringObjectReader(raw).read()
-        require(values.keys == REQUIRED_KEYS)
+        require(values.keys == REQUIRED_KEYS || values.keys == REQUIRED_KEYS + "reasonDetail")
+        val reasonDetail = values["reasonDetail"]
+        if ("reasonDetail" in values) require(!reasonDetail.isNullOrBlank() && reasonDetail.length <= 1000)
 
         val actionValue = values["action"] ?: error("action missing")
         val reason = values["reason"] ?: error("reason missing")
@@ -42,11 +49,11 @@ internal object AiReplyDecisionJsonParser {
                 require(!draft.isNullOrBlank())
                 require(draft.length <= maxDraftChars)
                 require(draft == draft.trim())
-                AiReplyDecision(action, reason, draft)
+                AiReplyDecision(action, reason, draft, reasonDetail = reasonDetail)
             }
             AiReplyAction.DO_NOT_REPLY, AiReplyAction.WAIT, AiReplyAction.HUMAN_REVIEW -> {
                 require(draft == null)
-                AiReplyDecision(action, reason)
+                AiReplyDecision(action, reason, reasonDetail = reasonDetail)
             }
         }
     }.getOrNull()

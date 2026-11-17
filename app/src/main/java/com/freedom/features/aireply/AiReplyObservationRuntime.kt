@@ -68,6 +68,7 @@ class AiReplyObservationRuntime(
     /** Prevents leaving the chat while a bounded model request/draft verification is in flight. */
     private val isConversationDraftPending: () -> Boolean = { false },
     /** Current-window draft callback; true reserves the page for generation/review. */
+    private val resolveConversationIdentity: (ContactRowIdentity?, String?) -> ContactRowIdentity? = { identity, _ -> identity },
     private val onDraftConversationObserved: (ChatMessageBatch, ChatPageSnapshot, ContactRowIdentity?, String) -> Boolean = { _, _, _, _ -> false },
     private val draftStartupFailure: () -> String? = { null },
     /** A verified draft stays on screen so the user can review it and press Send manually. */
@@ -1250,8 +1251,13 @@ class AiReplyObservationRuntime(
             }
             onLog("AI 消息复读停止：${draftAdmission.reason}；已达两次重试上限，不猜测内容")
         }
-        val identity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()
+        val rowIdentity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()
             else currentSessionCandidate?.contactIdentity
+        val identity = runCatching { resolveConversationIdentity(rowIdentity, snapshot.chatTitleText) }
+            .getOrElse {
+                onLog("AI 历史联系人解析失败：CONTACT_HISTORY_LOOKUP_FAILED；exception=${it.javaClass.simpleName}")
+                rowIdentity
+            }
         val draftHoldsPage = if (draftTargetConfirmed && draftAdmission.accepted) {
             runCatching { onDraftConversationObserved(batch, snapshot, identity, draftVisitToken) }.getOrElse {
                 onLog("AI 草稿入口异常：[DRAFT_CALLBACK_FAILED]；未执行发送")
@@ -1272,7 +1278,7 @@ class AiReplyObservationRuntime(
                     snapshot,
                     batch,
                     sessionName = receivedGreetingsTaskFlow.currentDisplayName(),
-                    contactIdentity = receivedGreetingsTaskFlow.currentContactIdentity()
+                    contactIdentity = identity
                 )
             }.getOrDefault(0)
             onLog(
@@ -1320,29 +1326,25 @@ class AiReplyObservationRuntime(
         if (sessionRunStarted && currentSessionKey != null &&
             sessionManagerState == SessionManagerState.READING_SESSION && !currentSessionReadCaptured
         ) {
-            val contactIdentity = currentSessionCandidate?.contactIdentity
+            val contactIdentity = identity
             val sampleIndex = runCatching {
                 chatSessionManagementPort.persistChatSample(
                     snapshot, batch, currentSessionName, contactIdentity
                 )
             }.getOrDefault(0)
-            // The adapter persists conversation messages only when the selected inbox identity
-            // is platform-verified and the live chat header still matches that exact row. Load
-            // the AI context only after that persistence call has completed. Nickname-only rows
-            // deliberately remain ineligible for cross-session history lookup.
+            // 当前行的绑定缺失时，已先通过昵称找回先前采集的平台联系人ID。
+            // 用同一已解析身份保存消息并加载历史，不因本次行快照缺少ID而丢失上下文。
             val verifiedContactIdentity = contactIdentity?.takeIf {
                 it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
                     !it.contactId.isNullOrBlank()
             }
-            if (observerBatch.messages.isNotEmpty() && verifiedContactIdentity != null &&
-                ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null
-            ) {
+            if (observerBatch.messages.isNotEmpty() && verifiedContactIdentity != null) {
                 runCatching { onVerifiedConversationObserved(observerBatch, verifiedContactIdentity, snapshot) }
                     .onFailure {
                         onLog("AI 会话上下文回调异常；异常诊断不包含消息正文")
                     }
             } else if (observerBatch.messages.isNotEmpty()) {
-                onLog("AI 会话上下文暂不生成：当前联系人缺少已验证的平台身份或聊天标题未匹配；不按昵称读取历史")
+                onLog("AI 会话历史未命中：当前ID及昵称均未能唯一匹配已采集的平台联系人；草稿仍使用本次可见消息")
             }
             privateMessagesTraversalTaskExecutor.setSessionReadCaptured(sampleIndex > 0)
             if (sampleIndex > 0) {

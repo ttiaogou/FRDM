@@ -2,7 +2,7 @@ package com.freedom.features.aireply.ports
 
 import com.freedom.core.accessibility.api.NodeTarget
 
-/** Short-lived, window-scoped locator used to validate one chat input field before draft entry. */
+/** Original request metadata for diagnostics; input uses a freshly located correct composer. */
 data class ChatDraftInputTarget(
     val packageName: String,
     val activityClass: String,
@@ -38,7 +38,8 @@ data class ChatDraftInputResult(
 
 /**
  * The only UI capability exposed to AI draft generation. There is intentionally no send method.
- * Implementations must revalidate the live window, conversation, and editable target each time.
+ * Implementations must locate the current correct writable composer each time.
+ * Stored window/activity/path metadata is diagnostic only and must not block a live composer.
  */
 interface ChatDraftInputPort {
     fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult

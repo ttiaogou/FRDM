@@ -176,6 +176,34 @@ class AiReplyDecisionEngineTest {
         assertEquals(0, provider.callCount)
     }
 
+    @Test fun ambiguousDecisionPreservesDetailedModelExplanationAndMetadata() {
+        val provider = object : AiModelProvider {
+            override fun generate(request: AiModelRequest) = AiModelResult(
+                """{"action":"HUMAN_REVIEW","reason":"SEXUAL_INNUENDO_AMBIGUOUS","reasonDetail":"表达存在歧义，缺少前文，无法确认是普通玩笑还是性暗示，因此交由人工判断。","draft":null}""",
+                "fake", "test", TokenUsage(40, 30), "stop")
+        }
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "detailed"))
+        assertEquals(AiReplyAction.HUMAN_REVIEW, result.action)
+        assertTrue(result.reasonDetail!!.contains("缺少前文"))
+        assertEquals("stop", result.finishReason)
+        assertEquals(30, result.usage?.outputTokens)
+        assertNull(result.draft)
+    }
+
+    @Test fun explanationIsRequiredBySchemaAndMalformedExplanationIsRejected() {
+        val provider = FakeProvider(replyJson("你好"))
+        AiReplyDecisionEngine(provider, grantedConsent).decide(AiReplyDecisionInput(context(), true, requestId = "schema-detail"))
+        val schema = (provider.lastRequest!!.responseFormat as AiModelResponseFormat.JsonSchema).schema
+        assertTrue(schema.contains("\"required\": [\"action\", \"reason\", \"reasonDetail\", \"draft\"]"))
+        for (detail in listOf("null", "\"\"", "\"${"x".repeat(1001)}\"")) {
+            val output = """{"action":"WAIT","reason":"AMBIGUOUS","reasonDetail":$detail,"draft":null}"""
+            val result = AiReplyDecisionEngine(FakeProvider(output), grantedConsent).decide(
+                AiReplyDecisionInput(context(), true, requestId = "bad-detail"))
+            assertEquals("MODEL_OUTPUT_SCHEMA_INVALID", result.reason)
+        }
+    }
+
     private fun replyJson(draft: String) =
         """{"action":"REPLY","reason":"GREETING","draft":"${draft.replace("\\", "\\\\").replace("\"", "\\\"")}"}"""
 }

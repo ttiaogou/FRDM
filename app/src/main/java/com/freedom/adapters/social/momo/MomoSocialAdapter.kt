@@ -4347,186 +4347,63 @@ internal class MomoSocialAdapter(
         return true
     }
 
-    override fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult {
-        if (text.isBlank() || text.length > 2_000) {
-            return ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "DRAFT_TEXT_INVALID")
-        }
-        val initialInput = reacquireLiveDraftInput(target)
-            ?: return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "INPUT_NODE_UNAVAILABLE")
-        val liveTarget = initialInput.target
-        val field = initialInput.field
-        if (!field.editable || !field.visible || !field.enabled || field.password) {
-            return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_EDITABLE, "INPUT_FIELD_NOT_EDITABLE")
-        }
-        if (AccessibilityNodeField.TEXT in field.captureEvidence.failedFields ||
-            AccessibilityNodeField.TEXT in field.captureEvidence.notCapturedFields
-        ) {
-            return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "INPUT_TEXT_CAPTURE_UNAVAILABLE")
-        }
-        val currentText = if (field.showingHintText) "" else field.text.orEmpty()
-        if (currentText != expectedText || !text.startsWith(expectedText)) {
-            return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_EMPTY, "USER_INPUT_PRESERVED")
-        }
-        val focus = runCatching {
-            accessibilityGateway.performNodeAction(NodeActionRequest(liveTarget, NodeAction.FOCUS))
-        }.getOrNull()
-        if (focus?.accepted != true) {
-            return ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "INPUT_FOCUS_REJECTED")
-        }
-        val refreshedInput = reacquireLiveDraftInput(target)
-            ?: return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "INPUT_NODE_UNAVAILABLE")
-        val refreshedTarget = refreshedInput.target
-        val refreshed = refreshedInput.field
-        if (!refreshed.editable || !refreshed.visible || !refreshed.enabled || refreshed.password ||
-            AccessibilityNodeField.TEXT in refreshed.captureEvidence.failedFields ||
-            AccessibilityNodeField.TEXT in refreshed.captureEvidence.notCapturedFields ||
-            (if (refreshed.showingHintText) "" else refreshed.text.orEmpty()) != expectedText
-        ) return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_EMPTY, "INPUT_CHANGED_BEFORE_WRITE")
-        val setText = runCatching {
-            accessibilityGateway.performNodeAction(
-                NodeActionRequest(refreshedTarget, NodeAction.SET_TEXT, textArgument = text)
-            )
-        }.getOrNull()
-        return if (setText?.accepted == true && setText.performed) {
-            ChatDraftInputResult(ChatDraftInputStatus.WRITTEN)
-        } else {
-            ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "INPUT_SET_TEXT_REJECTED")
+    private val draftInputController by lazy(LazyThreadSafetyMode.NONE) {
+        MomoDraftInputController { operation ->
+            withCurrentDraftInput { node ->
+                operation(object : MomoDraftInputController.Field {
+                    override fun readText(): String = draftInputText(node)
+                    override fun focus(): Boolean = node.isFocused || node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                    override fun setText(text: String): Boolean {
+                        val arguments = android.os.Bundle().apply {
+                            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+                        }
+                        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+                    }
+                })
+            }
         }
     }
 
-    override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult {
-        val liveInput = reacquireLiveDraftInput(target)
-            ?: return ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED, "INPUT_REINSPECTION_FAILED")
-        val field = liveInput.field
-        if (!field.editable || !field.visible || !field.enabled || field.password || field.showingHintText) {
-            return ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED, "INPUT_FIELD_STATE_CHANGED")
-        }
-        return if (field.text == text) {
-            ChatDraftInputResult(ChatDraftInputStatus.VERIFIED)
-        } else {
-            ChatDraftInputResult(ChatDraftInputStatus.TEXT_MISMATCH, "INPUT_TEXT_MISMATCH")
-        }
-    }
+    override fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult =
+        draftInputController.writeDraft(target, expectedText, text)
 
-    /** Obtain a new absolute node locator only after the same package/window/chat is observed. */
-    private fun resolveLiveDraftInputTarget(target: ChatDraftInputTarget): NodeTarget? {
-        if (target.packageName != targetPackage || target.windowIdentityKey.isBlank() ||
-            target.conversationIdentityKey.isBlank() || target.windowSessionKey.isBlank()
-        ) {
-            onLog("AI 草稿输入重新绑定失败：TARGET_METADATA_INVALID")
-            return null
-        }
-        val current = runCatching { inspectChatPage() }.getOrElse {
-            onLog("AI 草稿输入重新绑定失败：LIVE_CHAT_INSPECTION_FAILED")
-            return null
-        }
-        if (current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE) {
-            onLog("AI 草稿输入重新绑定失败：PAGE_KIND_CHANGED；current=${current.pageKind.name}")
-            return null
-        }
-        if (current.packageName != target.packageName) {
-            onLog("AI 草稿输入重新绑定失败：PACKAGE_CHANGED")
-            return null
-        }
-        if (current.activityClass != target.activityClass) {
-            onLog("AI 草稿输入重新绑定失败：ACTIVITY_CHANGED")
-            return null
-        }
-        val currentWindowKey = current.windowIdentityKey()
-        if (currentWindowKey == null) {
-            onLog("AI 草稿输入重新绑定失败：CURRENT_WINDOW_IDENTITY_UNAVAILABLE")
-            return null
-        }
-        if (currentWindowKey != target.windowIdentityKey) {
-            onLog(
-                "AI 草稿输入重新绑定：WINDOW_IDENTITY_CHANGED；" +
-                    "target=${target.windowIdentityKey.redactWindowKey()}；current=${currentWindowKey.redactWindowKey()}"
-            )
-        }
-        val currentConversationKey = current.conversationIdentityKey()
-        if (currentConversationKey == null) {
-            onLog("AI 草稿输入重新绑定失败：CURRENT_CONVERSATION_IDENTITY_UNAVAILABLE")
-            return null
-        }
-        if (currentConversationKey != target.conversationIdentityKey) {
-            onLog("AI 草稿输入重新绑定失败：CONVERSATION_CHANGED")
-            return null
-        }
-        val liveWindow = current.inputFieldTarget?.window
-        if (liveWindow == null) {
-            onLog("AI 草稿输入重新绑定失败：CURRENT_INPUT_WINDOW_UNAVAILABLE")
-            return null
-        }
-        val currentWindowSessionKey =
-            "${liveWindow.packageName}|${liveWindow.windowId}|${liveWindow.generation}|conversation=$currentConversationKey"
-        if (currentWindowSessionKey != target.windowSessionKey) {
-            onLog(
-                "AI 草稿输入重新绑定：WINDOW_SESSION_CHANGED；" +
-                    "target=${target.windowSessionKey.redactWindowKey()}；current=${currentWindowSessionKey.redactWindowKey()}"
-            )
-        }
-        if (!accessibilityGateway.isWindowCurrent(liveWindow)) {
-            onLog("AI 草稿输入重新绑定失败：CURRENT_WINDOW_NOT_ACTIVE")
-            return null
-        }
-        val liveTarget = current.inputFieldTarget ?: run {
-            onLog("AI 草稿输入重新绑定失败：CURRENT_INPUT_NODE_UNAVAILABLE")
-            return null
-        }
-        if (liveTarget.window != target.nodeTarget.window || liveTarget.path != target.nodeTarget.path) {
-            onLog(
-                "AI 草稿输入重新绑定：INPUT_NODE_REACQUIRED；" +
-                    "oldPath=${target.nodeTarget.path.childIndices.joinToString("/")};" +
-                    "newPath=${liveTarget.path.childIndices.joinToString("/")}"
-            )
-        }
-        return liveTarget
-    }
+    override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult =
+        draftInputController.verifyDraft(target, text)
 
-    /**
-     * Reacquires the composer from the current, identity-verified chat snapshot. A path is only
-     * a locator for this attempt: transient subtree truncation or a composer replacement must
-     * not discard a draft when the same chat still exposes a writable input.
-     */
-    private data class LiveDraftInput(
-        val target: NodeTarget,
-        val field: com.freedom.core.accessibility.api.AccessibilityNodeSnapshot
-    )
+    private fun draftInputText(input: AccessibilityNodeInfo): String =
+        if (input.isShowingHintText) "" else input.text?.toString().orEmpty()
 
-    private fun reacquireLiveDraftInput(target: ChatDraftInputTarget): LiveDraftInput? {
-        repeat(2) { attempt ->
-            val liveTarget = resolveLiveDraftInputTarget(target) ?: return null
-            val field = inspectDraftInputNode(liveTarget)
-            if (field != null) return LiveDraftInput(liveTarget, field)
-            onLog(
-                "AI 草稿输入重新绑定：CURRENT_INPUT_NODE_RETRY；attempt=${attempt + 1}/2；" +
-                    "同一聊天身份已通过，重新读取当前输入框"
-            )
+    /** 节点仅在本次回调中使用并释放；不依赖全树快照、旧路径或子树快照。 */
+    private fun withCurrentDraftInput(
+        block: (AccessibilityNodeInfo) -> ChatDraftInputResult
+    ): ChatDraftInputResult {
+        return try {
+            rootAccess.withActiveWindowRoot { root ->
+                val candidates = root.findAccessibilityNodeInfosByViewId(MomoChatPageContract.CHAT_COMPOSER_VIEW_ID).orEmpty()
+                try {
+                    val writable = candidates.filter { node ->
+                        node.viewIdResourceName == MomoChatPageContract.CHAT_COMPOSER_VIEW_ID &&
+                            node.isEditable && node.isEnabled && node.isVisibleToUser && !node.isPassword
+                    }
+                    when (writable.size) {
+                        1 -> block(writable.single())
+                        0 -> {
+                            onLog("AI 草稿输入定位失败：CURRENT_WRITABLE_INPUT_NOT_FOUND；精确ID候选=${candidates.size}")
+                            ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "CURRENT_WRITABLE_INPUT_NOT_FOUND")
+                        }
+                        else -> {
+                            onLog("AI 草稿输入定位失败：CURRENT_INPUT_AMBIGUOUS；可写候选=${writable.size}")
+                            ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "CURRENT_INPUT_AMBIGUOUS")
+                        }
+                    }
+                } finally {
+                    candidates.forEach { node -> runCatching { node.recycle() } }
+                }
+            } ?: ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "ACTIVE_INPUT_ROOT_UNAVAILABLE")
+        } catch (failure: Exception) {
+            onLog("AI 草稿输入操作异常：INPUT_NODE_ACCESS_FAILED；exception=${failure.javaClass.simpleName}")
+            ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "INPUT_NODE_ACCESS_FAILED")
         }
-        return null
-    }
-
-    private fun String.redactWindowKey(): String =
-        replace(Regex("windowId=[^|]+"), "windowId=<changed>")
-            .replace(Regex("generation=[^|]+"), "generation=<changed>")
-
-    private fun inspectDraftInputNode(target: NodeTarget): com.freedom.core.accessibility.api.AccessibilityNodeSnapshot? {
-        val tree = runCatching {
-            accessibilityGateway.inspectNodeSubtree(
-                target,
-                TreeInspectionRequest(
-                    maxNodes = 8,
-                    textCapture = NodeTextCapture.EPHEMERAL,
-                    maxDepth = 2,
-                    maxDurationMs = 500L
-                )
-            )
-        }.getOrNull() ?: return null
-        if (tree.windowId != target.window.windowId ||
-            tree.nodes.isEmpty()
-        ) return null
-        return tree.nodes.firstOrNull { it.path == target.path }
-            ?.takeIf { it.packageName == target.window.packageName && it.windowId == target.window.windowId }
     }
 
     override fun inspectChatPage(): ChatPageSnapshot {
@@ -5506,7 +5383,7 @@ internal class MomoSocialAdapter(
         return sampleIndex
     }
 
-    /** Persists only batches tied to the exact inbox identity and a freshly validated chat header. */
+    /** 使用当前行或昵称找回的已采集平台联系人身份保存消息。 */
     private fun persistConversationMessagesIfVerified(
         snapshot: ChatPageSnapshot,
         batch: ChatMessageBatch,
@@ -5515,7 +5392,6 @@ internal class MomoSocialAdapter(
     ) {
         val contactId = identity?.contactId?.takeIf(String::isNotBlank) ?: return
         if (identity.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) return
-        if (ChatSessionManagementPolicy.matchChatHeader(sessionName, snapshot.chatTitleText) == null) return
         if (batch.windowSessionKey.isNullOrBlank() || batch.messages.isEmpty()) return
 
         val inputs = batch.messages.map { message ->

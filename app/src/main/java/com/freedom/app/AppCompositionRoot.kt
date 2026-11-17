@@ -374,14 +374,18 @@ internal class AccessibilityServiceDependencies internal constructor(
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
             draftStartupFailure = { aiReplyDraftCoordinator.startupFailure() },
+            resolveConversationIdentity = { identity, title ->
+                com.freedom.features.conversation.domain.contact.ContactHistoryResolver(root.conversationRepository)
+                    .resolve(identity, title)
+            },
             onDraftConversationObserved = { batch, snapshot, identity, visitToken ->
-                val contactId = identity?.takeIf {
-                    it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
-                }?.contactId
-                val history = contactId?.let { id ->
-                    root.conversationRepository.draftHistoryForCurrentVerifiedAccount(id)?.takeIf { it.contactId == id }
-                }
-                if (history == null) addLog("AI 草稿上下文：无同账号已验证历史，使用本次会话；不按昵称加载旧库")
+                val history = runCatching {
+                    com.freedom.features.conversation.domain.contact.ContactHistoryResolver(root.conversationRepository)
+                        .loadDraftHistory(identity, snapshot.chatTitleText)
+                }.onFailure {
+                    addLog("AI 草稿历史读取失败：CONTACT_HISTORY_READ_FAILED；exception=${it.javaClass.simpleName}")
+                }.getOrNull()
+                addLog("AI 草稿上下文：source=${history?.lookupSource ?: "VISIBLE_ONLY"}；历史记录=${history?.messages?.size ?: 0}；按已采集ID或昵称关联联系人")
                 aiReplyDraftCoordinator.generateVisibleDraft(batch, snapshot, visitToken = visitToken, history = history)
             },
             onVerifiedConversationObserved = { batch, identity, snapshot ->

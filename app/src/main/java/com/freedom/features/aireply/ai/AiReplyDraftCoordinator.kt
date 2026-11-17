@@ -74,7 +74,7 @@ class AiReplyDraftCoordinator(
         return if (configuration.isReadyForCloudProvider) null else "MODEL_CONFIGURATION_NOT_READY"
     }
 
-    /** 无生成前确认；仅使用当前窗口消息，绝不读取昵称关联历史。 */
+    /** 无生成前确认；合并已解析联系人历史与当前窗口消息。 */
     fun generateVisibleDraft(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
                              visitToken: String = batch.windowSessionKey.orEmpty(),
                              history: VerifiedDraftHistory? = null): Boolean {
@@ -217,6 +217,16 @@ class AiReplyDraftCoordinator(
                 personalization = personalizationRepository.load()
             )
         )
+        if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
+            fun safeLog(value: String?): String = AiModelDataRedactor.redact(value.orEmpty())
+                .replace(Regex("[\\r\\n\\t\\p{Cntrl}]"), " ").take(1_000)
+            onLog("AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
+                "reason=${safeLog(decision.reason)}；reasonDetail=${safeLog(decision.reasonDetail ?: "模型未提供详细解释；请核查模型响应协议")}；" +
+                "provider=${safeLog(decision.provider)}；model=${safeLog(decision.model)}；" +
+                "finishReason=${safeLog(decision.finishReason)}；contextMessages=${context.messages.size}；" +
+                "inputTokens=${decision.usage?.inputTokens}；outputTokens=${decision.usage?.outputTokens}；" +
+                "draftPresent=${!decision.draft.isNullOrBlank()}")
+        }
         if (decision.reason == "MODEL_CALL_FAILED") {
             finish("MODEL_DECISION_MODEL_CALL_FAILED", requestGeneration)
             return

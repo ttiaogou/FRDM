@@ -14,6 +14,8 @@ class VisibleDraftFlowTest {
         var active = true
         var consent = true
         var text = ""
+        val logs = mutableListOf<String>()
+        var modelOutput = """{"action":"REPLY","reason":"OK","draft":"你好呀"}"""
         var calls = 0
         var fail = false
         var now = 0L
@@ -53,12 +55,12 @@ class VisibleDraftFlowTest {
                     return ScheduledTask { tasks.remove(task) }
                 }
             },
-            isAiReplyActive = { active }, isManualReviewRequired = { false }, onLog = {},
+            isAiReplyActive = { active }, isManualReviewRequired = { false }, onLog = { logs.add(it) },
             createProvider = { object : AiModelProvider {
                 override fun generate(request: AiModelRequest): AiModelResult {
                     calls++
                     if (fail) error("simulated transport failure")
-                    return AiModelResult("""{"action":"REPLY","reason":"OK","draft":"你好呀"}""", "fake", "fake")
+                    return AiModelResult(modelOutput, "fake", "fake", TokenUsage(10, 20), "stop")
                 }
             } }, backgroundExecutor = Executor { it.run() }, nowMillis = { now }, chooseRandomInt = { min, _ -> min })
         fun drain() { while (tasks.isNotEmpty()) tasks.removeAt(0).invoke() }
@@ -74,6 +76,23 @@ class VisibleDraftFlowTest {
         assertTrue(f.coordinator.isAwaitingUserSend)
         assertFalse(f.coordinator.isPending)
         assertFalse(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+    }
+
+    @Test fun nonReplyDecisionLogsExplanationWithoutWritingOrLeakingPhoneNumber() {
+        val f = Fixture()
+        f.modelOutput = """{"action":"HUMAN_REVIEW","reason":"SEXUAL_INNUENDO_AMBIGUOUS","reasonDetail":"缺少前文无法确认含义；涉及电话13800138000，需人工判断。","draft":null}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val log = f.logs.single { it.startsWith("AI 模型决策详情：") }
+        assertTrue(log.contains("action=HUMAN_REVIEW"))
+        assertTrue(log.contains("reason=SEXUAL_INNUENDO_AMBIGUOUS"))
+        assertTrue(log.contains("缺少前文无法确认含义"))
+        assertTrue(log.contains("provider=fake"))
+        assertTrue(log.contains("finishReason=stop"))
+        assertTrue(log.contains("outputTokens=20"))
+        assertFalse(log.contains("13800138000"))
+        assertEquals("", f.text)
+        assertFalse(f.coordinator.isAwaitingUserSend)
     }
 
     @Test fun transientModelFailureRetriesOnceAfterCooldown() {

@@ -45,15 +45,15 @@ class AiReplyDecisionEngine(
                 provider = result.provider,
                 model = result.model
             )
-        return parsed.copy(provider = result.provider, model = result.model)
+        return parsed.copy(provider = result.provider, model = result.model, finishReason = result.finishReason, usage = result.usage)
     }
 
     companion object {
         const val DEFAULT_TEMPERATURE = 0.4
         const val DEFAULT_MAX_OUTPUT_TOKENS = 512
         const val DEFAULT_SYSTEM_INSTRUCTION = "You are a careful conversation assistant. Use only the supplied conversation history. " +
-            "Return one JSON object matching the supplied strict JSON Schema: action, reason, draft. " +
-            "Use a short uppercase reason code. Set draft to a string only for REPLY; otherwise set draft to null. " +
+            "Return one JSON object matching the supplied strict JSON Schema: action, reason, reasonDetail, draft. " +
+            "Use a short uppercase reason code. In reasonDetail, explain in Chinese the concrete basis for this decision, the ambiguity or missing context, and why a draft was not produced when applicable. Do not invent facts or repeat private identifiers. Set draft to a string only for REPLY; otherwise set draft to null. " +
             "Never claim to have performed actions. If context is insufficient, choose WAIT. " +
             "If sensitive, risky, ambiguous, or requiring a consequential decision, choose HUMAN_REVIEW. " +
             "Do not volunteer your AI identity when it is irrelevant to the conversation; if directly asked whether you are an AI, answer truthfully and never claim to be human. " +
@@ -77,5 +77,8 @@ data class AiReplyDecision(
     val reason: String,
     val draft: String? = null,
     val provider: String? = null,
-    val model: String? = null
+    val model: String? = null,
+    val reasonDetail: String? = null,
+    val finishReason: String? = null,
+    val usage: TokenUsage? = null
 )
