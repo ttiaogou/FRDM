@@ -5395,7 +5395,7 @@ internal class MomoSocialAdapter(
 
         val inputs = batch.messages.map { message ->
             ConversationMessageInput(
-                messageFingerprint = message.id,
+                messageFingerprint = message.stableLogicalMessageId,
                 direction = message.direction.name,
                 type = message.type.name,
                 content = message.content,

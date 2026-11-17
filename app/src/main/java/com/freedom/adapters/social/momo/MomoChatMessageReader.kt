@@ -241,7 +241,7 @@ internal class MomoChatMessageReader(
         )
         val ocrMessages = parser.parse(candidates, limit)
         val messages = (batch.messages + ocrMessages)
-            .distinctBy { it.id }
+            .distinctBy { it.stableLogicalMessageId }
             .sortedBy { it.bounds.top }
             .takeLast(limit)
         val status = MomoChatMessageReadStatusPolicy.afterOcr(

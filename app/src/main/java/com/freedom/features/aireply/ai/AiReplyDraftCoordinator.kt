@@ -39,7 +39,8 @@ class AiReplyDraftCoordinator(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val chooseRandomInt: (Int, Int) -> Int = { min, max ->
         java.util.concurrent.ThreadLocalRandom.current().nextInt(min, max + 1)
-    }
+    },
+    private val replyTaskRepository: ReplyTaskRepository? = null
 ) {
     private val pending = AtomicBoolean(false)
     private val awaitingUserSend = AtomicBoolean(false)
@@ -134,7 +135,13 @@ class AiReplyDraftCoordinator(
             windowSessionKey = expectedWindowSessionKey,
             nodeTarget = inputTarget
         )
-        val dedupeKey = fingerprint("$contactId|$expectedWindowSessionKey|${latestIncoming.id}")
+        // Window generation is a stale-callback guard, not a new model task identity.
+        val dedupeConversationKey = conversationIdentity
+        val dedupeKey = fingerprint("$contactId|$dedupeConversationKey|${latestIncoming.stableLogicalMessageId}|${latestIncoming.effectiveContentRevision}")
+        val persistedTask = replyTaskRepository?.find(dedupeKey)
+        if (persistedTask != null && persistedTask.status in setOf(ReplyTaskStatus.REQUESTED, ReplyTaskStatus.COMPLETED, ReplyTaskStatus.UNKNOWN)) {
+            return reject("PERSISTED_REPLY_TASK_${persistedTask.status.name}")
+        }
         val requestGeneration = synchronized(lock) {
             if (awaitingUserSend.get()) return reject("DRAFT_AWAITING_USER_SEND")
             if (pending.get()) return reject("DRAFT_REQUEST_ALREADY_PENDING")
@@ -152,6 +159,15 @@ class AiReplyDraftCoordinator(
             pending.set(true)
             generation.get()
         }
+        replyTaskRepository?.save(ReplyTaskRecord(
+            requestKey = dedupeKey,
+            conversationKey = dedupeConversationKey,
+            logicalMessageId = latestIncoming.stableLogicalMessageId,
+            contentRevision = latestIncoming.effectiveContentRevision,
+            status = ReplyTaskStatus.REQUESTED,
+            requestId = UUID.randomUUID().toString(),
+            updatedAtMillis = nowMillis()
+        ))
         val accepted = runCatching {
             backgroundExecutor.execute {
                 try {
@@ -195,9 +211,11 @@ class AiReplyDraftCoordinator(
             )
         )
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
+            updateTaskStatus(ReplyTaskStatus.COMPLETED, requestGeneration)
             finish("MODEL_DECISION_${decision.reason}", requestGeneration)
             return
         }
+        updateTaskStatus(ReplyTaskStatus.COMPLETED, requestGeneration)
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
             finish("AI_REPLY_STATE_CHANGED_AFTER_REQUEST", requestGeneration)
             return
@@ -272,6 +290,9 @@ class AiReplyDraftCoordinator(
         generation.get() == requestGeneration
 
     private fun finish(reasonCode: String, requestGeneration: Long) {
+        if (reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED", "MODEL_DECISION_MODEL_CALL_FAILED")) {
+            updateTaskStatus(if (reasonCode == "MODEL_DECISION_MODEL_CALL_FAILED") ReplyTaskStatus.UNKNOWN else ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
+        }
         synchronized(lock) {
             if (!isCurrentGeneration(requestGeneration)) return
             pending.set(false)
@@ -288,6 +309,13 @@ class AiReplyDraftCoordinator(
             }
         }
         onLog("AI 回复草稿处理结束：$reasonCode；未执行发送动作")
+    }
+
+    private fun updateTaskStatus(status: ReplyTaskStatus, requestGeneration: Long) {
+        if (!isCurrentGeneration(requestGeneration)) return
+        val key = synchronized(lock) { activeMessageKey } ?: return
+        val old = replyTaskRepository?.find(key) ?: return
+        replyTaskRepository.save(old.copy(status = status, updatedAtMillis = nowMillis()))
     }
 
     private fun reject(reasonCode: String): Boolean {

@@ -28,7 +28,7 @@ class ConversationContextManager(
         val eligible = batch.messages.filter(ChatMessage::isAiInputEligible)
         val inputs = eligible.map { message ->
             ConversationMessageInput(
-                messageFingerprint = message.id,
+                messageFingerprint = message.stableLogicalMessageId,
                 direction = message.direction.name,
                 type = message.type.name,
                 content = message.content?.take(maxMessageChars),
@@ -45,9 +45,7 @@ class ConversationContextManager(
             existing.none { record ->
                 record.identityConfidence == identityConfidence &&
                     record.messageFingerprint == input.messageFingerprint &&
-                    record.direction == input.direction && record.type == input.type &&
-                    record.content == input.content && record.contentQuality == input.contentQuality &&
-                    record.directionEvidence == input.directionEvidence
+                    record.direction == input.direction && record.type == input.type
             }
         }
         val stored = if (missingInputs.isEmpty()) {

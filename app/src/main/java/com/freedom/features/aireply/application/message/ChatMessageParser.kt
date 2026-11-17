@@ -2,12 +2,11 @@ package com.freedom.features.aireply.application.message
 
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.features.aireply.domain.message.ChatMessage
+import com.freedom.features.aireply.domain.message.ChatMessageIdentity
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
 import com.freedom.features.aireply.domain.message.ChatMessageType
 import com.freedom.features.aireply.domain.message.DirectionEvidence
 import com.freedom.features.aireply.domain.message.MessageContentQuality
-import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
 
 /** A platform-neutral candidate extracted from one visible row by a social-app adapter. */
 data class ChatMessageCandidate(
@@ -25,7 +24,8 @@ data class ChatMessageCandidate(
     /** Optional semantic avatar bounds captured from the same visible row. */
     val avatarBounds: ScreenRect? = null,
     /** Text admitted by the adapter's structural message-read path is model-usable by default. */
-    val contentQuality: MessageContentQuality = MessageContentQuality.VERIFIED
+    val contentQuality: MessageContentQuality = MessageContentQuality.VERIFIED,
+    val neighborSignature: String? = null
 ) {
     override fun toString(): String =
         "ChatMessageCandidate(rowIndex=$rowIndex,typeHint=$typeHint," +
@@ -62,7 +62,7 @@ class ChatMessageParser(
         val messages = ArrayList<ChatMessage>(minOf(limit, ordered.size))
         val duplicateOccurrences = HashMap<String, Int>()
 
-        ordered.forEach { candidate ->
+        ordered.forEachIndexed { orderedIndex, candidate ->
             val normalizedText = normalizeText(candidate.text)
             val system = candidate.isSystemMessage || isKnownSystemText(normalizedText)
             val filteredText = normalizedText.takeUnless(::isMetadataOnlyText)
@@ -72,8 +72,8 @@ class ChatMessageParser(
                 !filteredText.isNullOrBlank() -> ChatMessageType.TEXT
                 else -> ChatMessageType.UNKNOWN
             }
-            if (type == ChatMessageType.UNKNOWN) return@forEach
-            if (type == ChatMessageType.TEXT && filteredText.isNullOrBlank()) return@forEach
+            if (type == ChatMessageType.UNKNOWN) return@forEachIndexed
+            if (type == ChatMessageType.TEXT && filteredText.isNullOrBlank()) return@forEachIndexed
 
             val (direction, evidence) = if (system) {
                 ChatMessageDirection.UNKNOWN to DirectionEvidence.AMBIGUOUS
@@ -86,7 +86,14 @@ class ChatMessageParser(
                 // Non-text payloads are not extracted in Stage 3.
                 null
             }
-            val baseId = fingerprint(type, direction, content, candidate.timeHint)
+            val logicalId = ChatMessageIdentity.logicalMessageId(
+                type, direction, candidate.rowBounds, candidate.bubbleBounds,
+                candidate.avatarBounds, candidate.timeHint,
+                candidate.neighborSignature ?: ChatMessageIdentity.neighborSignature(
+                    ordered.map { it.rowBounds }, orderedIndex
+                )
+            )
+            val baseId = logicalId
             val occurrence = (duplicateOccurrences[baseId] ?: 0) + 1
             duplicateOccurrences[baseId] = occurrence
             val id = if (occurrence == 1) baseId else "$baseId-$occurrence"
@@ -97,7 +104,10 @@ class ChatMessageParser(
                 content = content,
                 bounds = candidate.rowBounds,
                 directionEvidence = evidence,
-                contentQuality = candidate.contentQuality
+                contentQuality = candidate.contentQuality,
+                logicalMessageId = logicalId,
+                contentRevision = ChatMessageIdentity.contentRevision(content),
+                observationRowIndex = candidate.rowIndex
             )
         }
         return messages.takeLast(limit)
@@ -184,23 +194,6 @@ class ChatMessageParser(
 
     private fun isKnownSystemText(text: String?): Boolean =
         !text.isNullOrBlank() && SYSTEM_TEXT_HINTS.any(text::contains)
-
-    private fun fingerprint(
-        type: ChatMessageType,
-        direction: ChatMessageDirection,
-        content: String?,
-        timeHint: String?
-    ): String {
-        val source = listOf(
-            type.name,
-            direction.name,
-            content.orEmpty(),
-            timeHint.orEmpty().trim()
-        ).joinToString("\u001f")
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(source.toByteArray(StandardCharsets.UTF_8))
-        return "momo-${digest.take(12).joinToString("") { byte -> "%02x".format(byte) }}"
-    }
 
     private companion object {
         const val MAX_MESSAGE_TEXT_LENGTH = 4_000

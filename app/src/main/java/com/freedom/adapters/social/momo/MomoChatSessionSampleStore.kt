@@ -365,7 +365,7 @@ internal class MomoChatSessionSampleStore(
         val messages = JSONArray()
         batch.messages.forEach { message ->
             messages.put(JSONObject()
-                .put("id", message.id)
+                .put("id", message.stableLogicalMessageId)
                 .put("direction", message.direction.name)
                 .put("type", message.type.name)
                 .put("text", message.content.orEmpty())

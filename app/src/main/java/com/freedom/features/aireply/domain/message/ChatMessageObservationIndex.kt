@@ -60,10 +60,10 @@ class ChatMessageObservationIndex {
 
         val sessionRecords = recordsBySession.getOrPut(normalizedKey) { LinkedHashMap() }
         batch.messages.forEach { message ->
-            val fingerprint = message.id.trim()
+            val fingerprint = message.stableLogicalMessageId.trim()
             if (fingerprint.isEmpty()) return@forEach
 
-            val sameFingerprintRecords = sessionRecords.values.filter { it.message.id == fingerprint }
+            val sameFingerprintRecords = sessionRecords.values.filter { it.message.stableLogicalMessageId == fingerprint }
             val existing = sameFingerprintRecords.firstOrNull { sameMessagePayload(it.message, message) }
             if (existing != null) {
                 existing.observationCount += 1
@@ -123,7 +123,7 @@ class ChatMessageObservationIndex {
         val textRecords = records.filter { it.message.type == ChatMessageType.TEXT }
         val observationCount = records.sumOf { it.observationCount }
         val uniqueFingerprintCount = records
-            .map { it.sessionKey to it.message.id }
+            .map { it.sessionKey to it.message.stableLogicalMessageId }
             .distinct()
             .size
         return ChatMessageObservationSummary(
@@ -149,7 +149,7 @@ class ChatMessageObservationIndex {
             // Count colliding fingerprint groups, not the number of affected variant records.
             // A single fingerprint with three conflicting payload variants is one collision.
             fingerprintCollisionCount = records
-                .groupBy { it.sessionKey to it.message.id }
+                .groupBy { it.sessionKey to it.message.stableLogicalMessageId }
                 .values
                 .count { variants -> variants.any { it.fingerprintCollision } }
         )
@@ -174,7 +174,7 @@ class ChatMessageObservationIndex {
 
     private fun sameMessagePayload(first: ChatMessage, second: ChatMessage): Boolean =
         first.direction == second.direction && first.type == second.type &&
-            first.content == second.content
+            (first.logicalMessageId != null && second.logicalMessageId != null || first.content == second.content)
 
     private fun mergeEvidence(existing: ChatMessage, incoming: ChatMessage): ChatMessage {
         val selectedQuality = if (qualityRank(incoming.contentQuality) > qualityRank(existing.contentQuality)) {
@@ -187,6 +187,9 @@ class ChatMessageObservationIndex {
             directionEvidenceRank(existing.directionEvidence)
         ) incoming.directionEvidence else existing.directionEvidence
         return existing.copy(
+            content = incoming.content,
+            contentRevision = incoming.effectiveContentRevision,
+            logicalMessageId = existing.stableLogicalMessageId,
             contentQuality = selectedQuality,
             directionEvidence = selectedDirectionEvidence
         )

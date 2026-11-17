@@ -129,8 +129,16 @@ data class ChatMessage(
     val content: String?,
     val bounds: ScreenRect,
     val directionEvidence: DirectionEvidence,
-    val contentQuality: MessageContentQuality = MessageContentQuality.VERIFIED
+    val contentQuality: MessageContentQuality = MessageContentQuality.VERIFIED,
+    val logicalMessageId: String? = null,
+    val contentRevision: String? = null,
+    val observationRowIndex: Int? = null
 ) {
+    val stableLogicalMessageId: String
+        get() = logicalMessageId ?: id
+
+    val effectiveContentRevision: String
+        get() = contentRevision ?: ChatMessageIdentity.contentRevision(content)
     val isTextMessage: Boolean
         get() = type == ChatMessageType.TEXT && !content.isNullOrBlank()
 
@@ -192,8 +200,11 @@ data class ChatMessageBatch(
     val ocrConfidenceByRowIndex: Map<Int, Float> = emptyMap(),
     val ocrLineCountByRowIndex: Map<Int, Int> = emptyMap(),
     /** 适配器确认已读取列表末行且行内完整；null 表示末尾仍存在缺口。 */
-    val completeTailRowBounds: ScreenRect? = null
+    val completeTailRowBounds: ScreenRect? = null,
+    val observationBatchId: String = ""
 ) {
+    val effectiveObservationBatchId: String
+        get() = observationBatchId.ifBlank { "${windowSessionKey.orEmpty()}@${capturedAtMillis}" }
     /** Backward-compatible name, but still enforces the automatic-input quality gate. */
     val latestIncomingMessage: ChatMessage?
         get() = aiInputMessages.asReversed().firstOrNull {

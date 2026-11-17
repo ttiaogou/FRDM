@@ -5,6 +5,7 @@ import com.freedom.features.aireply.application.message.ChatMessageCandidate
 import com.freedom.features.aireply.application.message.ChatMessageParser
 import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
+import com.freedom.features.aireply.domain.message.ChatMessageIdentity
 import com.freedom.features.aireply.domain.message.ChatMessageOcrTarget
 import com.freedom.features.aireply.domain.message.ChatMessageType
 import com.freedom.features.aireply.domain.message.MessageContentQuality
@@ -37,7 +38,10 @@ internal object MomoChatOcrCandidateMapper {
             // Textual correctness is not locally provable. Structural admission (window, row,
             // order and direction) is handled by the surrounding read/draft pipeline; a non-empty
             // OCR result is therefore allowed to become model input here.
-            contentQuality = conservativeQuality(text)
+            contentQuality = conservativeQuality(text),
+            neighborSignature = ChatMessageIdentity.neighborSignature(
+                targets.map { it.rowBounds }, targets.indexOf(target)
+            )
         )
     }
 

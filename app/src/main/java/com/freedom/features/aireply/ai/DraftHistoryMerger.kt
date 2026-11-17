@@ -16,7 +16,7 @@ internal object DraftHistoryMerger {
         if (history == null || history.accountKey.isBlank() || history.contactId.isBlank() ||
             history.conversationId != "momo-direct-${history.contactId}") return visible
         val current = batch.messages.filter(VisibleDraftContext::eligible)
-        val ids = current.map { it.id }.toSet()
+        val ids = current.map { it.stableLogicalMessageId }.toSet()
         val records = history.messages.filter {
             it.contactId == history.contactId && it.conversationId == history.conversationId &&
                 it.identityConfidence == "PLATFORM_ID_VERIFIED" && it.type == "TEXT" &&
@@ -25,7 +25,10 @@ internal object DraftHistoryMerger {
         }.sortedWith(compareBy<StoredConversationMessage> { it.firstObservedAtMillis }.thenBy { it.bounds.top }.thenBy { it.recordId })
         // 只在历史中存在当前可见消息锚点时拼接其前缀，不凭首次观察时间猜测真正先后。
         val anchor = records.indexOfFirst { record -> current.firstOrNull()?.let {
-            record.messageFingerprint == it.id && record.content == it.content && record.direction == it.direction.name
+            record.messageFingerprint == it.stableLogicalMessageId && record.direction == it.direction.name
+        } == true || current.firstOrNull()?.let {
+            // Legacy records may still carry the old text fingerprint.
+            record.content == it.content && record.direction == it.direction.name
         } == true }
         if (anchor < 0) return visible
         val prefix = records.take(anchor).filter { it.messageFingerprint !in ids }

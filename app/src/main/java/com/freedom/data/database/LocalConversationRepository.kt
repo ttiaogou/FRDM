@@ -97,6 +97,24 @@ internal class LocalConversationRepository(
                 listOf(contactId, conversationId, fingerprint, payloadHash, occurrence.toString())
                     .joinToString("\u001f")
             )
+            val logicalExisting = updated.values.firstOrNull {
+                it.contactId == contactId && it.conversationId == conversationId &&
+                    it.messageFingerprint == fingerprint && it.identityConfidence == identityConfidence
+            }
+            if (logicalExisting != null) {
+                updated[logicalExisting.recordId] = logicalExisting.copy(
+                    direction = message.direction,
+                    type = message.type,
+                    content = message.content,
+                    contentQuality = message.contentQuality,
+                    directionEvidence = message.directionEvidence,
+                    bounds = message.bounds,
+                    lastObservedAtMillis = maxOf(logicalExisting.lastObservedAtMillis, capturedAtMillis),
+                    observationCount = logicalExisting.observationCount + 1
+                )
+                duplicateObservations++
+                return@forEach
+            }
             val existing = updated[recordId]
             if (existing == null) {
                 updated[recordId] = StoredConversationMessage(
