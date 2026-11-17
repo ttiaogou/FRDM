@@ -1038,6 +1038,38 @@ class MomoChatListSessionPolicyTest {
     }
 
     @Test
+    fun fullyVisibleFireFeatureCanCompleteRowWithoutOrdinaryTimestamp() {
+        assertTrue(
+            MomoChatListSessionPolicy.missingStatusNewMeansRead(
+                selectionClass = MomoChatListRowClassification.PRIVATE_CHAT,
+                statusNewNodeCount = 0,
+                scanTruncated = false,
+                otherUnreadMarkerObserved = false,
+                rowVisibleToUser = true,
+                rowFullyInsideViewport = true,
+                nameFullyVisible = true,
+                previewFullyVisible = true,
+                timestampFullyVisible = false,
+                fireFeatureFullyVisible = true
+            )
+        )
+        assertFalse(
+            MomoChatListSessionPolicy.missingStatusNewMeansRead(
+                selectionClass = MomoChatListRowClassification.PRIVATE_CHAT,
+                statusNewNodeCount = 0,
+                scanTruncated = false,
+                otherUnreadMarkerObserved = false,
+                rowVisibleToUser = true,
+                rowFullyInsideViewport = true,
+                nameFullyVisible = true,
+                previewFullyVisible = true,
+                timestampFullyVisible = false,
+                fireFeatureFullyVisible = false
+            )
+        )
+    }
+
+    @Test
     fun systemStatusPointOnlyMarksTheVerifiedSubscriptionEntryAndNeverPrivateChats() {
         val confirmed = MomoChatListSessionPolicy.isConfirmedSubscriptionEntryStatusPointUnread(
             selectionClass = MomoChatListRowClassification.SYSTEM_ENTRY,

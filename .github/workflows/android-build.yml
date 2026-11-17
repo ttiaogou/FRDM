@@ -100,7 +100,7 @@ jobs:
       - name: Test modules and build Freedom and OCR plugin debug APKs
         run: |
           mkdir -p "$HOME/.cache/freedom-ocr"
-          gradle --no-daemon clean \
+          gradle --no-daemon --build-cache \
             -PfreedomOcrCacheDir="$HOME/.cache/freedom-ocr" \
             :core:test \
             :business:test \

@@ -364,6 +364,11 @@ internal object MomoChatListSessionPolicy {
     /**
      * Confirms READ from an absent status_new node only for a completely scanned private-user
      * item_layout. System/unclassified rows and truncated scans never inherit this rule.
+     *
+     * A fully visible session_fire node may substitute for an absent ordinary timestamp. The
+     * fire layout intentionally omits the timestamp on some rows, so requiring both would turn
+     * an otherwise complete row into UNKNOWN. This is absence evidence only: session_fire never
+     * creates UNREAD by itself.
      */
     fun missingStatusNewMeansRead(
         selectionClass: String,
@@ -374,11 +379,12 @@ internal object MomoChatListSessionPolicy {
         rowFullyInsideViewport: Boolean,
         nameFullyVisible: Boolean,
         previewFullyVisible: Boolean,
-        timestampFullyVisible: Boolean
+        timestampFullyVisible: Boolean,
+        fireFeatureFullyVisible: Boolean = false
     ): Boolean = selectionClass == MomoChatListRowClassification.PRIVATE_CHAT &&
         statusNewNodeCount == 0 && !scanTruncated && !otherUnreadMarkerObserved &&
         rowVisibleToUser && rowFullyInsideViewport && nameFullyVisible &&
-        previewFullyVisible && timestampFullyVisible
+        previewFullyVisible && (timestampFullyVisible || fireFeatureFullyVisible)
 
     /** A red status point is trusted only for the specifically observed system row, never a private chat. */
     fun isConfirmedSubscriptionEntryStatusPointUnread(

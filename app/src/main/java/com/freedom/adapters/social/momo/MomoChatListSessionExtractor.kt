@@ -677,6 +677,11 @@ internal class MomoChatListSessionExtractor(
                 bounds.left >= rowBounds.left && bounds.top >= rowBounds.top &&
                     bounds.right <= rowBounds.right && bounds.bottom <= rowBounds.bottom
             } == true
+        // session_fire is an image node. On some Android versions ImageView reports
+        // visibleToUser=false despite having valid on-screen bounds, so use the exact node's
+        // contained geometry together with the fully visible row rather than that flag.
+        val fireFeatureFullyVisible = rowFullyVisible && fireFeatureConfirmed &&
+            (fireBounds?.let { bounds -> MomoChatListSessionPolicy.fullyInsideViewport(bounds, viewport) } == true)
         if (MomoChatListSessionPolicy.missingStatusNewMeansRead(
                 selectionClass = classification.selectionClass,
                 statusNewNodeCount = statusNewNodeObservationCount,
@@ -686,7 +691,8 @@ internal class MomoChatListSessionExtractor(
                 rowFullyInsideViewport = rowFullyVisible,
                 nameFullyVisible = nameFullyVisible,
                 previewFullyVisible = previewFullyVisible,
-                timestampFullyVisible = timestampFullyVisible
+                timestampFullyVisible = timestampFullyVisible,
+                fireFeatureFullyVisible = fireFeatureFullyVisible
             ) && unreadEvidence.status == ChatUnreadStatus.UNKNOWN
         ) {
             unreadEvidence = MomoChatUnreadEvidence(
