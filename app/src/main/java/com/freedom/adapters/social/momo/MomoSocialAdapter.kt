@@ -5401,7 +5401,10 @@ internal class MomoSocialAdapter(
                 content = message.content,
                 contentQuality = message.contentQuality.name,
                 directionEvidence = message.directionEvidence.name,
-                bounds = message.bounds
+                bounds = message.bounds,
+                contentRevision = message.effectiveContentRevision,
+                observationBatchId = batch.effectiveObservationBatchId,
+                observationRowIndex = message.observationRowIndex
             )
         }
         runCatching {

@@ -39,6 +39,44 @@ class DraftHistoryMergerTest {
         assertEquals(visible.messages, result.messages)
     }
 
+    @Test fun laterVisibleRowCanAnchorWhenTheFirstVisibleRowIsNew() {
+        val batch = emptyBatch().copy(messages = listOf(
+            ChatMessage("new-row", ChatMessageDirection.INCOMING, ChatMessageType.TEXT, "刚出现",
+                ScreenRect(0, 10, 10, 11), DirectionEvidence.BUBBLE_GEOMETRY, MessageContentQuality.VERIFIED),
+            ChatMessage("anchor-row", ChatMessageDirection.INCOMING, ChatMessageType.TEXT, "已有锚点",
+                ScreenRect(0, 20, 10, 21), DirectionEvidence.BUBBLE_GEOMETRY, MessageContentQuality.VERIFIED)
+        ))
+        val history = VerifiedDraftHistory("account-1", "c1", "momo-direct-c1", listOf(
+            stored("old", "更早消息", "INCOMING", 1),
+            stored("anchor-row", "已有锚点", "INCOMING", 2)
+        ))
+
+        val result = DraftHistoryMerger.merge(visible, batch, history)
+
+        assertEquals(listOf("更早消息", "最新"), result.messages.map { it.content })
+    }
+
+    @Test fun ocrCorrectionKeepsTheSameLogicalHistoryAnchor() {
+        val corrected = ChatMessage(
+            id = "logical-1",
+            direction = ChatMessageDirection.INCOMING,
+            type = ChatMessageType.TEXT,
+            content = "修正后的文字",
+            bounds = ScreenRect(0, 20, 10, 21),
+            directionEvidence = DirectionEvidence.BUBBLE_GEOMETRY,
+            contentQuality = MessageContentQuality.VERIFIED,
+            logicalMessageId = "logical-1"
+        )
+        val history = VerifiedDraftHistory("account-1", "c1", "momo-direct-c1", listOf(
+            stored("old", "更早消息", "INCOMING", 1),
+            stored("logical-1", "初次 OCR 文字", "INCOMING", 2)
+        ))
+
+        val result = DraftHistoryMerger.merge(visible, emptyBatch().copy(messages = listOf(corrected)), history)
+
+        assertEquals(listOf("更早消息", "最新"), result.messages.map { it.content })
+    }
+
     private fun emptyBatch() = ChatMessageBatch(
         MessageReadStatus.SUCCESS, "window", emptyList(), 0, 0, false, 1L)
 }

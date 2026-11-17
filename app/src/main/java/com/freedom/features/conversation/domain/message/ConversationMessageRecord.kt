@@ -10,7 +10,10 @@ data class ConversationMessageInput(
     val content: String?,
     val contentQuality: String,
     val directionEvidence: String,
-    val bounds: ScreenRect
+    val bounds: ScreenRect,
+    val contentRevision: String = "",
+    val observationBatchId: String = "",
+    val observationRowIndex: Int? = null
 )
 
 data class StoredConversationMessage(
@@ -27,7 +30,10 @@ data class StoredConversationMessage(
     val identityConfidence: String,
     val firstObservedAtMillis: Long,
     val lastObservedAtMillis: Long,
-    val observationCount: Int
+    val observationCount: Int,
+    val contentRevision: String = "",
+    val observationBatchId: String = "",
+    val observationRowIndex: Int? = null
 )
 
 data class MessageStoreResult(

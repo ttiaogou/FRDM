@@ -22,15 +22,29 @@ internal object DraftHistoryMerger {
                 it.identityConfidence == "PLATFORM_ID_VERIFIED" && it.type == "TEXT" &&
                 it.contentQuality == "VERIFIED" && it.directionEvidence != "AMBIGUOUS" &&
                 !it.content.isNullOrBlank() && it.direction in setOf("INCOMING", "OUTGOING")
-        }.sortedWith(compareBy<StoredConversationMessage> { it.firstObservedAtMillis }.thenBy { it.bounds.top }.thenBy { it.recordId })
-        // 只在历史中存在当前可见消息锚点时拼接其前缀，不凭首次观察时间猜测真正先后。
-        val anchor = records.indexOfFirst { record -> current.firstOrNull()?.let {
-            record.messageFingerprint == it.stableLogicalMessageId && record.direction == it.direction.name
-        } == true || current.firstOrNull()?.let {
-            // Legacy records may still carry the old text fingerprint.
-            record.content == it.content && record.direction == it.direction.name
-        } == true }
-        if (anchor < 0) return visible
+        }.sortedWith(
+            compareBy<StoredConversationMessage> { it.firstObservedAtMillis }
+                .thenBy { it.observationBatchId }
+                .thenBy { it.observationRowIndex ?: Int.MAX_VALUE }
+                .thenBy { it.bounds.top }
+                .thenBy { it.recordId }
+        )
+        // Anchor against any current visible row, not only the first row. A newly scrolled
+        // viewport can contain messages that were not persisted in the previous run, while a
+        // later visible row still provides a valid conversation boundary.
+        val logicalAnchor = current.asSequence().mapNotNull { message ->
+            records.indexOfFirst { record ->
+                record.messageFingerprint == message.stableLogicalMessageId &&
+                    record.direction == message.direction.name
+            }.takeIf { it >= 0 }
+        }.firstOrNull()
+        val legacyAnchor = if (logicalAnchor == null) current.asSequence().mapNotNull { message ->
+            records.indexOfFirst { record ->
+                // Legacy records may still carry a text-derived fingerprint.
+                record.content == message.content && record.direction == message.direction.name
+            }.takeIf { it >= 0 }
+        }.firstOrNull() else null
+        val anchor = logicalAnchor ?: legacyAnchor ?: return visible
         val prefix = records.take(anchor).filter { it.messageFingerprint !in ids }
             .distinctBy { it.messageFingerprint }.takeLast((30 - visible.messages.size).coerceAtLeast(0))
             .map { AiModelMessage(if (it.direction == "INCOMING") AiModelMessage.Role.USER else AiModelMessage.Role.ASSISTANT, it.content!!.take(2_000)) }

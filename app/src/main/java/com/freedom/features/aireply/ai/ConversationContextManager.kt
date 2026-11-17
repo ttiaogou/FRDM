@@ -34,7 +34,10 @@ class ConversationContextManager(
                 content = message.content?.take(maxMessageChars),
                 contentQuality = message.contentQuality.name,
                 directionEvidence = message.directionEvidence.name,
-                bounds = message.bounds
+                bounds = message.bounds,
+                contentRevision = message.effectiveContentRevision,
+                observationBatchId = batch.effectiveObservationBatchId,
+                observationRowIndex = message.observationRowIndex
             )
         }
         // The Momo adapter may already have persisted this exact validated batch while saving
@@ -45,7 +48,13 @@ class ConversationContextManager(
             existing.none { record ->
                 record.identityConfidence == identityConfidence &&
                     record.messageFingerprint == input.messageFingerprint &&
-                    record.direction == input.direction && record.type == input.type
+                    record.direction == input.direction && record.type == input.type &&
+                    record.content == input.content &&
+                    record.contentQuality == input.contentQuality &&
+                    record.directionEvidence == input.directionEvidence &&
+                    record.contentRevision == input.contentRevision &&
+                    record.observationBatchId == input.observationBatchId &&
+                    record.observationRowIndex == input.observationRowIndex
             }
         }
         val stored = if (missingInputs.isEmpty()) {
@@ -80,7 +89,9 @@ class ConversationContextManager(
             .sortedWith(
                 compareBy<com.freedom.features.conversation.domain.message.StoredConversationMessage> {
                     it.firstObservedAtMillis
-                }.thenBy { it.bounds.top }
+                }.thenBy { it.observationBatchId }
+                    .thenBy { it.observationRowIndex ?: Int.MAX_VALUE }
+                    .thenBy { it.bounds.top }
                     .thenBy { it.bounds.bottom }
                     .thenBy { it.recordId }
             )

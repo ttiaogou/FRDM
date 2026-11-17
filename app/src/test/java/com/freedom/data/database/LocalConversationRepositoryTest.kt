@@ -147,6 +147,29 @@ class LocalConversationRepositoryTest {
     }
 
     @Test
+    fun ocrCorrectionUpdatesExistingLogicalMessageInsteadOfInsertingAnotherRecord() {
+        val directory = Files.createTempDirectory("freedom-conversation-ocr-revision").toFile()
+        try {
+            val repository = LocalConversationRepository(directory, TestConversationStoreCipher(), nowMillis = { 300L })
+            val first = sampleMessage("logical-message", "初次 OCR").copy(contentRevision = "rev-1")
+            repository.persistMessages("contact-1", "conversation-1", "PLATFORM_ID_VERIFIED", 100L, listOf(first))
+
+            val corrected = first.copy(content = "修正后的 OCR", contentRevision = "rev-2")
+            val result = repository.persistMessages(
+                "contact-1", "conversation-1", "PLATFORM_ID_VERIFIED", 200L, listOf(corrected)
+            )
+
+            assertEquals(0, result.insertedCount)
+            assertEquals(1, result.duplicateObservationCount)
+            val stored = repository.messagesForConversation("contact-1", "conversation-1").single()
+            assertEquals("修正后的 OCR", stored.content)
+            assertEquals("rev-2", stored.contentRevision)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun messagesForConversationFiltersExactSessionAndOrdersMessagesWithinObservationByScreenPosition() {
         val directory = Files.createTempDirectory("freedom-conversation-scope").toFile()
         try {
@@ -173,6 +196,44 @@ class LocalConversationRepositoryTest {
 
             assertEquals(listOf("第一条", "第二条"), history.mapNotNull { it.content })
             assertTrue(history.all { it.conversationId == "momo-direct-contact-1" })
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun observationBatchAndRowOrderWinOverDelayedScreenRefreshPosition() {
+        val directory = Files.createTempDirectory("freedom-conversation-batch-order").toFile()
+        try {
+            val repository = LocalConversationRepository(
+                directory, TestConversationStoreCipher(), nowMillis = { 500L }
+            )
+            val firstBatch = listOf(
+                sampleMessage("first", "第一条").copy(
+                    observationBatchId = "batch-001", observationRowIndex = 0,
+                    bounds = ScreenRect(0, 400, 100, 440)
+                ),
+                sampleMessage("second", "第二条").copy(
+                    observationBatchId = "batch-001", observationRowIndex = 1,
+                    bounds = ScreenRect(0, 100, 100, 140)
+                )
+            )
+            repository.persistMessages(
+                "contact-1", "conversation-1", ContactIdentityConfidence.PLATFORM_ID_VERIFIED.name,
+                100L, firstBatch
+            )
+            repository.persistMessages(
+                "contact-1", "conversation-1", ContactIdentityConfidence.PLATFORM_ID_VERIFIED.name,
+                100L, listOf(
+                    sampleMessage("third", "第三条").copy(
+                        observationBatchId = "batch-002", observationRowIndex = 0,
+                        bounds = ScreenRect(0, 10, 100, 50)
+                    )
+                )
+            )
+
+            assertEquals(listOf("第一条", "第二条", "第三条"),
+                repository.messagesForConversation("contact-1", "conversation-1").mapNotNull { it.content })
         } finally {
             directory.deleteRecursively()
         }

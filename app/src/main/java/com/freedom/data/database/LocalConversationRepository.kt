@@ -109,6 +109,9 @@ internal class LocalConversationRepository(
                     contentQuality = message.contentQuality,
                     directionEvidence = message.directionEvidence,
                     bounds = message.bounds,
+                    contentRevision = message.contentRevision,
+                    observationBatchId = message.observationBatchId,
+                    observationRowIndex = message.observationRowIndex,
                     lastObservedAtMillis = maxOf(logicalExisting.lastObservedAtMillis, capturedAtMillis),
                     observationCount = logicalExisting.observationCount + 1
                 )
@@ -128,6 +131,9 @@ internal class LocalConversationRepository(
                     contentQuality = message.contentQuality,
                     directionEvidence = message.directionEvidence,
                     bounds = message.bounds,
+                    contentRevision = message.contentRevision,
+                    observationBatchId = message.observationBatchId,
+                    observationRowIndex = message.observationRowIndex,
                     identityConfidence = identityConfidence,
                     firstObservedAtMillis = capturedAtMillis,
                     lastObservedAtMillis = capturedAtMillis,
@@ -138,7 +144,14 @@ internal class LocalConversationRepository(
                 updated[recordId] = existing.copy(
                     lastObservedAtMillis = maxOf(existing.lastObservedAtMillis, capturedAtMillis),
                     observationCount = existing.observationCount + 1,
-                    identityConfidence = identityConfidence
+                    identityConfidence = identityConfidence,
+                    content = message.content,
+                    contentQuality = message.contentQuality,
+                    directionEvidence = message.directionEvidence,
+                    bounds = message.bounds,
+                    contentRevision = message.contentRevision,
+                    observationBatchId = message.observationBatchId,
+                    observationRowIndex = message.observationRowIndex
                 )
                 duplicateObservations++
             }
@@ -177,6 +190,8 @@ internal class LocalConversationRepository(
                     // Every message in one visible batch shares capturedAtMillis. The validated
                     // message parser emits rows top-to-bottom, so screen position preserves the
                     // conversation order within that observation.
+                    .thenBy { it.observationBatchId }
+                    .thenBy { it.observationRowIndex ?: Int.MAX_VALUE }
                     .thenBy { it.bounds.top }
                     .thenBy { it.bounds.bottom }
                     .thenBy { it.recordId }
@@ -211,7 +226,9 @@ internal class LocalConversationRepository(
         val stored = readStore(messagesFile) ?: return result
         stored.records.forEach { line ->
             val fields = line.split('\t')
-            if (fields.size != MESSAGE_FIELD_COUNT || fields[0] != RECORD_MESSAGE) return@forEach
+            if ((fields.size != LEGACY_MESSAGE_FIELD_COUNT && fields.size != MESSAGE_FIELD_COUNT) ||
+                fields[0] != RECORD_MESSAGE
+            ) return@forEach
             runCatching {
                 val message = StoredConversationMessage(
                     recordId = decode(fields[1]),
@@ -229,7 +246,10 @@ internal class LocalConversationRepository(
                     identityConfidence = decode(fields[14]),
                     firstObservedAtMillis = fields[15].toLong(),
                     lastObservedAtMillis = fields[16].toLong(),
-                    observationCount = fields[17].toInt()
+                    observationCount = fields[17].toInt(),
+                    contentRevision = fields.getOrNull(18)?.let { decode(it) }.orEmpty(),
+                    observationBatchId = fields.getOrNull(19)?.let { decode(it) }.orEmpty(),
+                    observationRowIndex = fields.getOrNull(20)?.takeIf(String::isNotBlank)?.toIntOrNull()
                 )
                 result[message.recordId] = message
             }
@@ -292,7 +312,10 @@ internal class LocalConversationRepository(
                 encode(message.identityConfidence),
                 message.firstObservedAtMillis.toString(),
                 message.lastObservedAtMillis.toString(),
-                message.observationCount.toString()
+                message.observationCount.toString(),
+                encode(message.contentRevision),
+                encode(message.observationBatchId),
+                message.observationRowIndex?.toString().orEmpty()
             ).joinToString("\t")
         })
     }
@@ -375,7 +398,8 @@ internal class LocalConversationRepository(
         const val RECORD_MESSAGE = "M"
         const val EMPTY_VALUE = "-"
         const val CONTACT_FIELD_COUNT = 8
-        const val MESSAGE_FIELD_COUNT = 18
+        const val LEGACY_MESSAGE_FIELD_COUNT = 18
+        const val MESSAGE_FIELD_COUNT = 21
     }
 }
 
