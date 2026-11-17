@@ -4351,10 +4351,10 @@ internal class MomoSocialAdapter(
         if (text.isBlank() || text.length > 2_000) {
             return ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "DRAFT_TEXT_INVALID")
         }
-        val liveTarget = resolveLiveDraftInputTarget(target)
-            ?: return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_TARGET_STALE")
-        val field = inspectDraftInputNode(liveTarget)
+        val initialInput = reacquireLiveDraftInput(target)
             ?: return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "INPUT_NODE_UNAVAILABLE")
+        val liveTarget = initialInput.target
+        val field = initialInput.field
         if (!field.editable || !field.visible || !field.enabled || field.password) {
             return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_EDITABLE, "INPUT_FIELD_NOT_EDITABLE")
         }
@@ -4373,10 +4373,10 @@ internal class MomoSocialAdapter(
         if (focus?.accepted != true) {
             return ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "INPUT_FOCUS_REJECTED")
         }
-        val refreshedTarget = resolveLiveDraftInputTarget(target)
-            ?: return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_TARGET_STALE")
-        val refreshed = inspectDraftInputNode(refreshedTarget)
+        val refreshedInput = reacquireLiveDraftInput(target)
             ?: return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "INPUT_NODE_UNAVAILABLE")
+        val refreshedTarget = refreshedInput.target
+        val refreshed = refreshedInput.field
         if (!refreshed.editable || !refreshed.visible || !refreshed.enabled || refreshed.password ||
             AccessibilityNodeField.TEXT in refreshed.captureEvidence.failedFields ||
             AccessibilityNodeField.TEXT in refreshed.captureEvidence.notCapturedFields ||
@@ -4395,10 +4395,9 @@ internal class MomoSocialAdapter(
     }
 
     override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult {
-        val liveTarget = resolveLiveDraftInputTarget(target)
-            ?: return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_TARGET_STALE")
-        val field = inspectDraftInputNode(liveTarget)
+        val liveInput = reacquireLiveDraftInput(target)
             ?: return ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED, "INPUT_REINSPECTION_FAILED")
+        val field = liveInput.field
         if (!field.editable || !field.visible || !field.enabled || field.password || field.showingHintText) {
             return ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED, "INPUT_FIELD_STATE_CHANGED")
         }
@@ -4484,6 +4483,29 @@ internal class MomoSocialAdapter(
         return liveTarget
     }
 
+    /**
+     * Reacquires the composer from the current, identity-verified chat snapshot. A path is only
+     * a locator for this attempt: transient subtree truncation or a composer replacement must
+     * not discard a draft when the same chat still exposes a writable input.
+     */
+    private data class LiveDraftInput(
+        val target: NodeTarget,
+        val field: com.freedom.core.accessibility.api.AccessibilityNodeSnapshot
+    )
+
+    private fun reacquireLiveDraftInput(target: ChatDraftInputTarget): LiveDraftInput? {
+        repeat(2) { attempt ->
+            val liveTarget = resolveLiveDraftInputTarget(target) ?: return null
+            val field = inspectDraftInputNode(liveTarget)
+            if (field != null) return LiveDraftInput(liveTarget, field)
+            onLog(
+                "AI 草稿输入重新绑定：CURRENT_INPUT_NODE_RETRY；attempt=${attempt + 1}/2；" +
+                    "同一聊天身份已通过，重新读取当前输入框"
+            )
+        }
+        return null
+    }
+
     private fun String.redactWindowKey(): String =
         replace(Regex("windowId=[^|]+"), "windowId=<changed>")
             .replace(Regex("generation=[^|]+"), "generation=<changed>")
@@ -4500,8 +4522,7 @@ internal class MomoSocialAdapter(
                 )
             )
         }.getOrNull() ?: return null
-        if (tree.truncated || tree.timeBudgetExceeded ||
-            tree.windowId != target.window.windowId ||
+        if (tree.windowId != target.window.windowId ||
             tree.nodes.isEmpty()
         ) return null
         return tree.nodes.firstOrNull { it.path == target.path }
@@ -4652,7 +4673,14 @@ internal class MomoSocialAdapter(
                     expectedClassName = inspection.messageListClassName?.takeIf(String::isNotBlank)
                 )
             },
-            inputFieldTarget = inspection.inputFieldPath?.let { NodeTarget(window, NodePath(it)) },
+            inputFieldTarget = inspection.inputFieldPath?.let {
+                NodeTarget(
+                    window = window,
+                    path = NodePath(it),
+                    expectedViewId = MomoChatPageContract.CHAT_COMPOSER_VIEW_ID,
+                    expectedClassName = "android.widget.EditText"
+                )
+            },
             structureEvidence = (treeEvidence.evidence + inspection.structureEvidence)
                 .distinctBy { evidence -> evidence.path }
                 .map { evidence ->
