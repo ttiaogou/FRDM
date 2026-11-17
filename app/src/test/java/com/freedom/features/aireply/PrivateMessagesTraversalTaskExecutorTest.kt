@@ -8,12 +8,88 @@ import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatNodeTextSource
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.ChatUnreadStatus
+import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
+import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PrivateMessagesTraversalTaskExecutorTest {
+    @Test
+    fun identityReturnMigratesFrozenUnreadAndPreservesViewport() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val original = candidate(1, "Alice", ChatUnreadStatus.UNREAD)
+        val other = candidate(0, "Bob", ChatUnreadStatus.READ)
+        val oldKey = key(original)
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.initialInboxTopPositioningCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.lockedUnreadSessionKeys += oldKey
+        executor.lastStableSessionListVisibleKeys = executor.visibleSessionKeys(snapshot(other, original))
+        assertTrue(executor.beginIdentityReturn(original, 4))
+        val verified = candidate(1, "Alice", ChatUnreadStatus.UNREAD).apply {
+            contactIdentity = ContactRowIdentity("s", "u", "contact-1", ContactIdentityConfidence.PLATFORM_ID_VERIFIED)
+        }
+        val returned = snapshot(other, verified).copy(windowGeneration = 1)
+        assertEquals(null, executor.selectNextCandidate(returned.chatListCandidates, executor.lockedUnreadSessionKeys))
+        val result = executor.reconcileIdentityReturn(returned, 4)
+        assertEquals(PrivateMessagesTraversalTaskExecutor.IdentityReturnStatus.RESTORED, result.status)
+        assertEquals(setOf(key(verified)), executor.lockedUnreadSessionKeys)
+        assertEquals(verified, executor.selectNextCandidate(returned.chatListCandidates, executor.lockedUnreadSessionKeys))
+        val evaluation = executor.evaluateListSnapshot(returned, false, 2)
+        assertFalse(evaluation.viewportPositionInvalidated)
+        assertEquals(verified, evaluation.nextCandidate)
+    }
+
+    @Test
+    fun identityReturnRejectsChangedPositionAmbiguityUnreadAndStaleGeneration() {
+        for (scenario in 0..8) {
+            val executor = PrivateMessagesTraversalTaskExecutor()
+            val original = candidate(1, "Alice", ChatUnreadStatus.UNREAD)
+            val other = candidate(0, "Bob", ChatUnreadStatus.READ)
+            val oldKey = key(original)
+            executor.lockedUnreadSessionKeys += oldKey
+            executor.lastStableSessionListVisibleKeys = executor.visibleSessionKeys(snapshot(other, original))
+            assertTrue(executor.beginIdentityReturn(original, 4))
+            val unread = when (scenario) {
+                2 -> ChatUnreadStatus.READ
+                5 -> ChatUnreadStatus.UNKNOWN
+                else -> ChatUnreadStatus.UNREAD
+            }
+            val verified = candidate(1, "Alice", unread).apply {
+                contactIdentity = ContactRowIdentity("s", "u", "contact-1", ContactIdentityConfidence.PLATFORM_ID_VERIFIED)
+            }
+            val currentOther = if (scenario == 0) candidate(0, "Bob", ChatUnreadStatus.READ, top = 120) else other
+            val returned = when (scenario) {
+                1 -> snapshot(currentOther, verified, candidate(2, "Alice", ChatUnreadStatus.UNREAD))
+                6 -> snapshot(currentOther)
+                7 -> snapshot(currentOther, verified).copy(activityClass = "OtherActivity")
+                8 -> snapshot(currentOther, verified).copy(chatListExtractionTruncated = true)
+                else -> snapshot(currentOther, verified)
+            }
+            if (scenario == 4) executor.attemptedSessionKeys += oldKey
+            val result = executor.reconcileIdentityReturn(returned.copy(windowGeneration = 1), if (scenario == 3) 5 else 4)
+            assertEquals(PrivateMessagesTraversalTaskExecutor.IdentityReturnStatus.REJECTED, result.status)
+            assertEquals(setOf(oldKey), executor.lockedUnreadSessionKeys)
+        }
+    }
+
+    @Test
+    fun identityReturnWaitsForVerifiedIdentityAndResetInvalidatesIt() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val original = candidate(0, "Alice", ChatUnreadStatus.UNREAD)
+        executor.lockedUnreadSessionKeys += key(original)
+        executor.lastStableSessionListVisibleKeys = executor.visibleSessionKeys(snapshot(original))
+        assertTrue(executor.beginIdentityReturn(original, 4))
+        assertEquals(PrivateMessagesTraversalTaskExecutor.IdentityReturnStatus.WAITING,
+            executor.reconcileIdentityReturn(snapshot(original).copy(windowGeneration = 1), 4).status)
+        executor.reset()
+        assertFalse(executor.identityReturnPending)
+        assertEquals(PrivateMessagesTraversalTaskExecutor.IdentityReturnStatus.REJECTED,
+            executor.reconcileIdentityReturn(snapshot(original).copy(windowGeneration = 1), 4).status)
+    }
+
     @Test
     fun mandatoryFirstSwipeAndTriStateUnreadAdmissionRemainDistinct() {
         val executor = PrivateMessagesTraversalTaskExecutor()

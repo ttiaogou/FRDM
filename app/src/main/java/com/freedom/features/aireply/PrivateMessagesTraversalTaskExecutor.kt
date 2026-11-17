@@ -2,8 +2,10 @@ package com.freedom.features.aireply
 
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ChatUnreadStatus
+import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 
 /**
  * Owns the private-message list traversal state and pure list decisions.
@@ -73,6 +75,75 @@ internal data class PrivateMessagesListSnapshotEvaluation(
 )
 
 internal class PrivateMessagesTraversalTaskExecutor {
+    private data class IdentityReturn(
+        val original: ChatListCandidateSnapshot,
+        val oldKey: String,
+        val baseline: List<String>,
+        val generation: Long
+    )
+    internal enum class IdentityReturnStatus { WAITING, RESTORED, REJECTED }
+    internal data class IdentityReturnResult(val status: IdentityReturnStatus, val candidate: ChatListCandidateSnapshot? = null)
+    private var identityReturn: IdentityReturn? = null
+    var identityReturnRetries: Int = 0
+    val identityReturnPending: Boolean get() = identityReturn != null
+    val identityReturnOldKey: String? get() = identityReturn?.oldKey
+
+    /** 仅保留普通快照数据；不跨页面保留 Android 节点。 */
+    fun beginIdentityReturn(candidate: ChatListCandidateSnapshot, generation: Long): Boolean {
+        val baseline = lastStableSessionListVisibleKeys ?: return false
+        val key = ChatSessionManagementPolicy.stableSessionKey(candidate)
+        if (identityReturn != null || key.isBlank() || baseline.none { it.startsWith("$key@") }) return false
+        identityReturn = IdentityReturn(candidate, key, baseline.toList(), generation)
+        identityReturnRetries = 0
+        return true
+    }
+
+    fun reconcileIdentityReturn(snapshot: ChatPageSnapshot, generation: Long): IdentityReturnResult {
+        val pending = identityReturn ?: return IdentityReturnResult(IdentityReturnStatus.REJECTED)
+        val original = pending.original
+        if (pending.generation != generation || snapshot.pageKind != ChatPageKind.CHAT_LIST ||
+            snapshot.chatListExtractionTruncated || original.rowTarget.window.windowId < 0 ||
+            snapshot.packageName != original.rowTarget.window.packageName ||
+            snapshot.activityClass != original.rowTarget.window.activityClass ||
+            snapshot.windowGeneration <= 0L
+        ) return IdentityReturnResult(IdentityReturnStatus.REJECTED)
+        val titleKey = ChatSessionManagementPolicy.stableSessionKeyForTitle(original.nameText)
+        val matches = snapshot.chatListCandidates.filter {
+            ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) == titleKey &&
+                it.selectionClass == "PRIVATE_CHAT"
+        }
+        if (titleKey.isBlank() || matches.size != 1) return IdentityReturnResult(IdentityReturnStatus.REJECTED)
+        val row = matches.single()
+        if (row.contactIdentity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED ||
+            row.contactIdentity?.contactId.isNullOrBlank()
+        ) return IdentityReturnResult(IdentityReturnStatus.WAITING)
+        val newKey = ChatSessionManagementPolicy.stableSessionKey(row)
+        if (row.rowIndex != original.rowIndex || row.rowTarget.path != original.rowTarget.path ||
+            row.rowBounds != original.rowBounds || row.avatarBounds != original.avatarBounds ||
+            row.avatarPath != original.avatarPath || row.nameNodePath != original.nameNodePath ||
+            row.rowTarget.window.windowId != original.rowTarget.window.windowId ||
+            row.rowTarget.window.packageName != snapshot.packageName ||
+            row.rowTarget.window.activityClass != snapshot.activityClass ||
+            row.rowTarget.window.generation != snapshot.windowGeneration ||
+            row.unreadStatus != ChatUnreadStatus.UNREAD || !ChatSessionManagementPolicy.isEligible(row) ||
+            newKey.isBlank() || newKey == pending.oldKey ||
+            snapshot.chatListCandidates.count { ChatSessionManagementPolicy.isEligible(it) && ChatSessionManagementPolicy.stableSessionKey(it) == newKey } != 1 ||
+            pending.oldKey !in lockedUnreadSessionKeys || newKey in lockedUnreadSessionKeys ||
+            pending.oldKey in attemptedSessionKeys || newKey in attemptedSessionKeys ||
+            pending.oldKey in ambiguousSessionIdentityKeys || newKey in ambiguousSessionIdentityKeys
+        ) return IdentityReturnResult(IdentityReturnStatus.REJECTED)
+        val expected = pending.baseline.map { entry ->
+            if (entry.startsWith("${pending.oldKey}@")) newKey + entry.substring(pending.oldKey.length) else entry
+        }
+        if (expected != visibleSessionKeys(snapshot)) return IdentityReturnResult(IdentityReturnStatus.REJECTED)
+        lockedUnreadSessionKeys.remove(pending.oldKey)
+        lockedUnreadSessionKeys.add(newKey)
+        lastStableSessionListVisibleKeys = expected
+        identityReturn = null
+        return IdentityReturnResult(IdentityReturnStatus.RESTORED, row)
+    }
+
+    fun clearIdentityReturn() { identityReturn = null; identityReturnRetries = 0 }
     /** 私聊流程和当前会话上下文由此执行器独占持有。 */
     var executionState: SessionManagerState = SessionManagerState.STOPPED
     var currentSessionKey: String? = null
@@ -353,6 +424,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
 
     /** Clears all traversal state at the AI Reply runtime reset boundary. */
     fun reset() {
+        clearIdentityReturn()
         executionState = SessionManagerState.STOPPED
         clearCurrentSession()
         headerMismatchRecordedForCurrentAttempt = false
@@ -386,6 +458,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * The startup admission swipe is not replayed because the inbox context was already established.
      */
     fun resetForReturnedInbox() {
+        clearIdentityReturn()
         executionState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
         clearCurrentSession()
         lockedUnreadSessionKeys.clear()

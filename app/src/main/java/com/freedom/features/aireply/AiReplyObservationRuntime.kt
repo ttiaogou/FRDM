@@ -1477,6 +1477,47 @@ class AiReplyObservationRuntime(
             return
         }
 
+        if (privateMessagesTraversalTaskExecutor.identityReturnPending) {
+            val oldKey = privateMessagesTraversalTaskExecutor.identityReturnOldKey
+            if (oldKey == null || chatSessionManagementPort.isSessionIdentityBlocked(oldKey)) {
+                privateMessagesTraversalTaskExecutor.clearIdentityReturn()
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 会话身份复核暂停：原身份已被隔离；不打开会话")
+                return
+            }
+            val result = privateMessagesTraversalTaskExecutor.reconcileIdentityReturn(snapshot, sessionActionGeneration)
+            when (result.status) {
+                PrivateMessagesTraversalTaskExecutor.IdentityReturnStatus.WAITING -> {
+                    privateMessagesTraversalTaskExecutor.identityReturnRetries++
+                    if (privateMessagesTraversalTaskExecutor.identityReturnRetries <= 3) {
+                        onLog("AI 会话身份复核：等待原行平台身份确认；暂不滑动或点击其他行")
+                        scheduleFullInspectionAfter(500L)
+                    } else {
+                        privateMessagesTraversalTaskExecutor.clearIdentityReturn()
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 会话身份复核暂停：未能确认原行平台身份；保留现场")
+                    }
+                }
+                PrivateMessagesTraversalTaskExecutor.IdentityReturnStatus.REJECTED -> {
+                    privateMessagesTraversalTaskExecutor.clearIdentityReturn()
+                    sessionManagerState = SessionManagerState.PAUSED
+                    onLog("AI 会话身份复核暂停：返回页面、原行、未读或列表位置不一致；保留现场")
+                }
+                PrivateMessagesTraversalTaskExecutor.IdentityReturnStatus.RESTORED -> {
+                    val candidate = result.candidate ?: return
+                    if (chatSessionManagementPort.isSessionIdentityBlocked(ChatSessionManagementPolicy.stableSessionKey(candidate))) {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 会话身份复核暂停：已验证身份被隔离；不打开会话")
+                        return
+                    }
+                    sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
+                    onLog("AI 会话身份复核：原行和未读身份已确认；使用新快照继续打开原会话")
+                    attemptOpenSession(candidate)
+                }
+            }
+            return
+        }
+
         // The first list snapshot is a read-only current-position check. It must happen before
         // the positioning phase is allowed to submit any swipe gesture.
         if (!privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted && !receivedGreetingsTaskActive) {
@@ -2164,11 +2205,20 @@ class AiReplyObservationRuntime(
                 chatSessionManagementPort.requestContactIdentityCapture(candidate)
             }.getOrDefault(ContactIdentityCaptureRequestResult.RETRY_LATER)
             when (captureResult) {
-                ContactIdentityCaptureRequestResult.STARTED,
-                ContactIdentityCaptureRequestResult.IN_PROGRESS -> {
+                ContactIdentityCaptureRequestResult.STARTED -> {
+                    if (!privateMessagesTraversalTaskExecutor.beginIdentityReturn(candidate, sessionActionGeneration)) {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 会话身份采集暂停：无法保存可信的原列表位置；不继续点击或滑动")
+                        return
+                    }
                     sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                     onLog("AI 会话身份采集：目标联系人尚无已验证平台 ID；已请求头像资料采集，暂不打开会话或读取跨会话历史")
                     scheduleFullInspectionAfter(350L)
+                    return
+                }
+                ContactIdentityCaptureRequestResult.IN_PROGRESS -> {
+                    sessionManagerState = SessionManagerState.PAUSED
+                    onLog("AI 会话身份采集暂停：存在无法关联到当前原行的采集事务")
                     return
                 }
                 ContactIdentityCaptureRequestResult.RETRY_LATER -> {
