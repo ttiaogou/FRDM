@@ -3,7 +3,6 @@ package com.freedom.data.database
 import com.freedom.features.aireply.ai.ReplyTaskRecord
 import com.freedom.features.aireply.ai.ReplyTaskRepository
 import com.freedom.features.aireply.ai.ReplyTaskStatus
-import android.os.Process
 import java.io.File
 import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
@@ -109,7 +108,7 @@ internal class LocalReplyTaskRepository(
 
     private fun writeRecords(records: Map<String, ReplyTaskRecord>) {
         file.parentFile?.mkdirs()
-        val temporary = File(file.parentFile, "${file.name}.${Process.myPid()}.${Thread.currentThread().id}.tmp")
+        val temporary = File(file.parentFile, "${file.name}.${java.util.UUID.randomUUID()}.tmp")
         val content = records.map { (key, value) ->
             listOf(
                 key, pack(value.requestKey), pack(value.conversationKey), pack(value.logicalMessageId),
