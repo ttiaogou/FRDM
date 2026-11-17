@@ -51,7 +51,7 @@ internal class MomoChatSampleSessionListStore(
                 .put("fireStatus", candidate.fireStatus.name)
                 .put("fireUnreadCount", candidate.fireUnreadCount)
                 .put("fireNodePath", candidate.fireNodePath?.childIndices?.joinToString("/"))
-                .put("fireBounds", MomoChatSampleDataMapper.rectJson(candidate.fireBounds))
+                .put("fireBounds", candidate.fireBounds?.let(MomoChatSampleDataMapper::rectJson))
                 // Absence is recorded explicitly but never converted into READ.
                 .put("statusNewNodePresent", candidate.statusNewNodePresent)
                 .put("statusNewNodeObservationCount", candidate.statusNewNodeObservationCount)
