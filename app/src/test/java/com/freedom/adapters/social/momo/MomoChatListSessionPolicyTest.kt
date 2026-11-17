@@ -10,6 +10,7 @@ import com.freedom.features.aireply.ports.ChatListUnreadNodeEvidence
 import com.freedom.features.aireply.ports.ChatNodeTextSource
 import com.freedom.features.aireply.ports.ChatUnreadEvidenceSource
 import com.freedom.features.aireply.ports.ChatUnreadStatus
+import com.freedom.features.aireply.ports.ChatFireStatus
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import org.junit.Assert.assertEquals
@@ -20,6 +21,40 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MomoChatListSessionPolicyTest {
+    @Test
+    fun firePresenceDoesNotBecomeUnreadWithoutSameRowUnreadEvidence() {
+        assertEquals(
+            ChatFireStatus.FIRE_PRESENT,
+            classifyMomoFireStatus(true, ChatUnreadStatus.READ, 0)
+        )
+        assertEquals(
+            ChatFireStatus.FIRE_UNKNOWN,
+            classifyMomoFireStatus(true, ChatUnreadStatus.UNKNOWN, null)
+        )
+    }
+
+    @Test
+    fun fireRowWithReliableUnreadBadgeBecomesIndependentFireUnreadState() {
+        assertEquals(
+            ChatFireStatus.FIRE_UNREAD,
+            classifyMomoFireStatus(true, ChatUnreadStatus.UNREAD, 2)
+        )
+        assertEquals(ChatFireStatus.NONE, classifyMomoFireStatus(false, ChatUnreadStatus.UNREAD, 2))
+    }
+
+    @Test
+    fun fireFeatureNodeNeverCreatesOrdinaryUnreadEvidenceByItself() {
+        val evidence = MomoChatListSessionPolicy.inspectUnreadEvidence(
+            viewId = "com.immomo.momo:id/session_fire",
+            text = "1",
+            contentDescription = "1",
+            boundsValid = true,
+            intersectsRow = true,
+            containedInRow = true,
+            visibleToUser = true
+        )
+        assertEquals(ChatUnreadStatus.UNKNOWN, evidence.status)
+    }
     @Test
     fun nodeTextTakesPrecedenceOverContentDescription() {
         val result = MomoChatListSessionPolicy.selectText("Alice", "Alice online")

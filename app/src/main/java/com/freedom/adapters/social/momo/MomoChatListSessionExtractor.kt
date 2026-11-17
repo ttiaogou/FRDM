@@ -248,7 +248,9 @@ internal class MomoChatListSessionExtractor(
         val statusPointNodeObservationCount: Int,
         val statusPointVisibleNodeCount: Int,
         val statusPointValidBoundsNodeCount: Int,
-        val statusPointContainedInRowNodeCount: Int
+        val statusPointContainedInRowNodeCount: Int,
+        val firePath: List<Int>?,
+        val fireBounds: ScreenRect?
     ) {
         fun toSnapshot(
             window: WindowRef,
@@ -260,6 +262,11 @@ internal class MomoChatListSessionExtractor(
             val effectiveUnread = if (!allowAbsentRead && absenceBasedRead) {
                 MomoChatUnreadEvidence()
             } else unreadEvidence
+            val fireStatus = classifyMomoFireStatus(
+                firePresent = firePath != null,
+                unreadStatus = effectiveUnread.status,
+                unreadCount = effectiveUnread.count
+            )
             return ChatListCandidateSnapshot(
             rowIndex = rowIndex,
             rowTarget = NodeTarget(
@@ -301,6 +308,10 @@ internal class MomoChatListSessionExtractor(
             unreadStatus = effectiveUnread.status,
             unreadCount = effectiveUnread.count,
             unreadEvidenceSource = effectiveUnread.source,
+            fireStatus = fireStatus,
+            fireUnreadCount = effectiveUnread.count.takeIf { fireStatus == com.freedom.features.aireply.ports.ChatFireStatus.FIRE_UNREAD },
+            fireNodePath = firePath?.let(::NodePath),
+            fireBounds = fireBounds,
             unreadNodeEvidence = unreadNodeEvidence,
             statusNewNodePresent = statusNewNodePresent,
             statusNewNodeObservationCount = statusNewNodeObservationCount,
@@ -425,6 +436,8 @@ internal class MomoChatListSessionExtractor(
         var statusPointVisibleNodeCount = 0
         var statusPointValidBoundsNodeCount = 0
         var statusPointContainedInRowNodeCount = 0
+        var firePath: List<Int>? = null
+        var fireBounds: ScreenRect? = null
         var statusPointContainerObservationCount = 0
         var statusPointContainerVisible = false
         var statusPointContainerBounds: ScreenRect? = null
@@ -451,6 +464,10 @@ internal class MomoChatListSessionExtractor(
                     val nodeDescription = safeString { node.contentDescription?.toString() }
                     val nodeBounds = boundsOf(node)
                     val isStatusNewNode = viewId.substringAfterLast('/') == STATUS_NEW_VIEW_ID
+                    if (MomoChatListSessionPolicy.isFireFeatureViewId(viewId) && firePath == null) {
+                        firePath = pending.path
+                        fireBounds = nodeBounds
+                    }
                     if (isStatusNewNode) {
                         statusNewNodePresent = true
                         statusNewNodeObservationCount++
@@ -737,7 +754,9 @@ internal class MomoChatListSessionExtractor(
             statusPointNodeObservationCount = statusPointNodeObservationCount,
             statusPointVisibleNodeCount = statusPointVisibleNodeCount,
             statusPointValidBoundsNodeCount = statusPointValidBoundsNodeCount,
-            statusPointContainedInRowNodeCount = statusPointContainedInRowNodeCount
+                statusPointContainedInRowNodeCount = statusPointContainedInRowNodeCount,
+                firePath = firePath,
+                fireBounds = fireBounds
             ),
             scannedNodeCount = visited,
             truncated = truncated,

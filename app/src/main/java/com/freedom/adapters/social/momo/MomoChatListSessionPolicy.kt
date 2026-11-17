@@ -3,6 +3,7 @@ package com.freedom.adapters.social.momo
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.features.aireply.ports.ChatUnreadEvidenceSource
 import com.freedom.features.aireply.ports.ChatUnreadStatus
+import com.freedom.features.aireply.ports.ChatFireStatus
 
 internal enum class MomoChatListTextSource {
     NODE_TEXT,
@@ -33,6 +34,18 @@ internal data class MomoChatUnreadEvidence(
     val source: ChatUnreadEvidenceSource = ChatUnreadEvidenceSource.NONE,
     val statusNewDisposition: MomoStatusNewDisposition = MomoStatusNewDisposition.NONE
 )
+
+internal fun classifyMomoFireStatus(
+    firePresent: Boolean,
+    unreadStatus: ChatUnreadStatus,
+    unreadCount: Int?
+): ChatFireStatus = when {
+    !firePresent -> ChatFireStatus.NONE
+    unreadStatus == ChatUnreadStatus.UNREAD && (unreadCount == null || unreadCount > 0) ->
+        ChatFireStatus.FIRE_UNREAD
+    unreadStatus == ChatUnreadStatus.UNKNOWN -> ChatFireStatus.FIRE_UNKNOWN
+    else -> ChatFireStatus.FIRE_PRESENT
+}
 
 internal data class MomoChatListRowClassification(
     val selectionClass: String,
@@ -208,8 +221,8 @@ internal object MomoChatListSessionPolicy {
      * Reads only explicit unread semantics. Ordinary preview text such as "我还没看" must not
      * become a badge signal. Within a confirmed private-user item_layout, Momo's exact
      * status_new TextView is authoritative only when the node is visible, geometrically valid,
-     * intersects and is contained by the exact row. The session_fire feature icon is explicitly
-     * excluded: it does not indicate unread state. A hidden, clipped, or malformed status_new
+     * intersects and is contained by the exact row. The session_fire feature icon is tracked
+     * independently and never creates ordinary unread evidence. A hidden, clipped, or malformed status_new
      * node remains UNKNOWN. An empty value is READ only after those checks; absence is considered
      * READ only after the row and all identifying fields are fully visible within the viewport.
      */
@@ -391,6 +404,9 @@ internal object MomoChatListSessionPolicy {
         return viewId.isNotBlank()
     }
 
+    fun isFireFeatureViewId(viewIdResourceName: String?): Boolean =
+        viewIdResourceName?.substringAfterLast('/')?.equals(FIRE_FEATURE_VIEW_ID_TOKEN, ignoreCase = true) == true
+
     /** Combines badge observations conservatively; contradictory signals become UNKNOWN. */
     fun mergeUnreadEvidence(
         current: MomoChatUnreadEvidence,
@@ -531,7 +547,7 @@ internal object MomoChatListSessionPolicy {
         Regex("\\d{1,3}天前")
     )
     private const val STATUS_NEW_VIEW_ID_TOKEN = "chatlist_item_tv_status_new"
-    private const val FIRE_FEATURE_VIEW_ID_TOKEN = "session_fire"
+        private const val FIRE_FEATURE_VIEW_ID_TOKEN = "session_fire"
     private const val PREVIEW_VIEW_ID_TOKEN = "chatlist_item_tv_content"
     private val UNREAD_VIEW_ID_TOKENS = listOf(
         "unread", "msg_count", "message_count", "msg_badge", "message_badge",

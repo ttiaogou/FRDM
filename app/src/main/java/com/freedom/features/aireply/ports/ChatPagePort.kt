@@ -28,6 +28,14 @@ enum class ChatUnreadStatus {
     UNKNOWN
 }
 
+/** Independent Momo fire-feature state; fire presence alone is not unread evidence. */
+enum class ChatFireStatus {
+    NONE,
+    FIRE_PRESENT,
+    FIRE_UNREAD,
+    FIRE_UNKNOWN
+}
+
 /** Redacted source category for the unread state; never stores the raw accessibility label. */
 enum class ChatUnreadEvidenceSource {
     ACCESSIBILITY_LABEL,
@@ -136,6 +144,13 @@ class ChatListCandidateSnapshot(
     val unreadCount: Int? = null,
     /** Redacted source category supporting unreadStatus. */
     val unreadEvidenceSource: ChatUnreadEvidenceSource = ChatUnreadEvidenceSource.NONE,
+    /** Fire-feature state is tracked independently from ordinary chat unread state. */
+    val fireStatus: ChatFireStatus = ChatFireStatus.NONE,
+    /** Count from a reliable unread badge on the same row as the fire feature, when present. */
+    val fireUnreadCount: Int? = null,
+    /** Short-lived fire-feature node locator/bounds bound to this exact row snapshot. */
+    val fireNodePath: NodePath? = null,
+    val fireBounds: ScreenRect? = null,
     /** Redacted badge-node observations supporting the tri-state unread result. */
     val unreadNodeEvidence: List<ChatListUnreadNodeEvidence> = emptyList(),
     /** Whether this row contained the exact Momo status_new node, even if it was empty/hidden. */
@@ -172,6 +187,9 @@ class ChatListCandidateSnapshot(
         timestampText?.length ?: 0, timestampText?.hashCode() ?: 0,
         selectionClass, selectionReason,
         unreadStatus.name, unreadCount, unreadEvidenceSource.name,
+        fireStatus.name, fireUnreadCount,
+        fireNodePath?.childIndices?.joinToString("/").orEmpty(),
+        fireBounds?.let { "${it.left},${it.top},${it.right},${it.bottom}" }.orEmpty(),
         statusNewNodePresent, statusNewNodeObservationCount,
         statusPointNodeObservationCount, statusPointVisibleNodeCount,
         statusPointValidBoundsNodeCount, statusPointContainedInRowNodeCount,
@@ -193,7 +211,8 @@ class ChatListCandidateSnapshot(
             "fullyInsideViewport=$fullyInsideViewport, rowBoundsValid=$rowBoundsValid, " +
             "selectionClass=$selectionClass, selectionReason=$selectionReason, " +
             "unreadStatus=$unreadStatus, unreadCount=$unreadCount, " +
-            "unreadEvidenceSource=$unreadEvidenceSource)"
+            "unreadEvidenceSource=$unreadEvidenceSource, fireStatus=$fireStatus, " +
+            "fireUnreadCount=$fireUnreadCount)"
 }
 
 /** Redacted structural evidence from the active chat-page tree; never stores node text. */

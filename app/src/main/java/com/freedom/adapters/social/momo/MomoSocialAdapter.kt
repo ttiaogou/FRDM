@@ -4413,25 +4413,80 @@ internal class MomoSocialAdapter(
     private fun resolveLiveDraftInputTarget(target: ChatDraftInputTarget): NodeTarget? {
         if (target.packageName != targetPackage || target.windowIdentityKey.isBlank() ||
             target.conversationIdentityKey.isBlank() || target.windowSessionKey.isBlank()
-        ) return null
-        val current = runCatching { inspectChatPage() }.getOrNull() ?: return null
-        if (current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
-            current.packageName != target.packageName ||
-            current.activityClass != target.activityClass ||
-            current.windowIdentityKey() != target.windowIdentityKey ||
-            current.conversationIdentityKey() != target.conversationIdentityKey
-        ) return null
-        val liveWindow = current.inputFieldTarget?.window ?: return null
-        val liveConversationKey = current.conversationIdentityKey() ?: return null
+        ) {
+            onLog("AI 草稿输入重新绑定失败：TARGET_METADATA_INVALID")
+            return null
+        }
+        val current = runCatching { inspectChatPage() }.getOrElse {
+            onLog("AI 草稿输入重新绑定失败：LIVE_CHAT_INSPECTION_FAILED")
+            return null
+        }
+        if (current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE) {
+            onLog("AI 草稿输入重新绑定失败：PAGE_KIND_CHANGED；current=${current.pageKind.name}")
+            return null
+        }
+        if (current.packageName != target.packageName) {
+            onLog("AI 草稿输入重新绑定失败：PACKAGE_CHANGED")
+            return null
+        }
+        if (current.activityClass != target.activityClass) {
+            onLog("AI 草稿输入重新绑定失败：ACTIVITY_CHANGED")
+            return null
+        }
+        val currentWindowKey = current.windowIdentityKey()
+        if (currentWindowKey == null) {
+            onLog("AI 草稿输入重新绑定失败：CURRENT_WINDOW_IDENTITY_UNAVAILABLE")
+            return null
+        }
+        if (currentWindowKey != target.windowIdentityKey) {
+            onLog(
+                "AI 草稿输入重新绑定：WINDOW_IDENTITY_CHANGED；" +
+                    "target=${target.windowIdentityKey.redactWindowKey()}；current=${currentWindowKey.redactWindowKey()}"
+            )
+        }
+        val currentConversationKey = current.conversationIdentityKey()
+        if (currentConversationKey == null) {
+            onLog("AI 草稿输入重新绑定失败：CURRENT_CONVERSATION_IDENTITY_UNAVAILABLE")
+            return null
+        }
+        if (currentConversationKey != target.conversationIdentityKey) {
+            onLog("AI 草稿输入重新绑定失败：CONVERSATION_CHANGED")
+            return null
+        }
+        val liveWindow = current.inputFieldTarget?.window
+        if (liveWindow == null) {
+            onLog("AI 草稿输入重新绑定失败：CURRENT_INPUT_WINDOW_UNAVAILABLE")
+            return null
+        }
         val currentWindowSessionKey =
-            "${liveWindow.packageName}|${liveWindow.windowId}|${liveWindow.generation}|conversation=$liveConversationKey"
-        if (currentWindowSessionKey != target.windowSessionKey ||
-            !accessibilityGateway.isWindowCurrent(liveWindow)
-        ) return null
-        val liveTarget = current.inputFieldTarget ?: return null
-        if (liveTarget.window != target.nodeTarget.window || liveTarget.path != target.nodeTarget.path) return null
+            "${liveWindow.packageName}|${liveWindow.windowId}|${liveWindow.generation}|conversation=$currentConversationKey"
+        if (currentWindowSessionKey != target.windowSessionKey) {
+            onLog(
+                "AI 草稿输入重新绑定：WINDOW_SESSION_CHANGED；" +
+                    "target=${target.windowSessionKey.redactWindowKey()}；current=${currentWindowSessionKey.redactWindowKey()}"
+            )
+        }
+        if (!accessibilityGateway.isWindowCurrent(liveWindow)) {
+            onLog("AI 草稿输入重新绑定失败：CURRENT_WINDOW_NOT_ACTIVE")
+            return null
+        }
+        val liveTarget = current.inputFieldTarget ?: run {
+            onLog("AI 草稿输入重新绑定失败：CURRENT_INPUT_NODE_UNAVAILABLE")
+            return null
+        }
+        if (liveTarget.window != target.nodeTarget.window || liveTarget.path != target.nodeTarget.path) {
+            onLog(
+                "AI 草稿输入重新绑定：INPUT_NODE_REACQUIRED；" +
+                    "oldPath=${target.nodeTarget.path.childIndices.joinToString("/")};" +
+                    "newPath=${liveTarget.path.childIndices.joinToString("/")}"
+            )
+        }
         return liveTarget
     }
+
+    private fun String.redactWindowKey(): String =
+        replace(Regex("windowId=[^|]+"), "windowId=<changed>")
+            .replace(Regex("generation=[^|]+"), "generation=<changed>")
 
     private fun inspectDraftInputNode(target: NodeTarget): com.freedom.core.accessibility.api.AccessibilityNodeSnapshot? {
         val tree = runCatching {
@@ -5197,6 +5252,51 @@ internal class MomoSocialAdapter(
                         minimumHeight = MIN_SAFE_SESSION_TAP_HEIGHT_PX
                     )
                 }
+            } finally {
+                runCatching { current?.recycle() }
+            }
+        }
+    }
+
+    override fun resolveFireTapBounds(
+        snapshot: ChatPageSnapshot,
+        candidate: ChatListCandidateSnapshot
+    ): ScreenRect? {
+        val firePath = candidate.fireNodePath ?: return null
+        if (snapshot.pageKind != ChatPageKind.CHAT_LIST ||
+            snapshot.packageName != targetPackage ||
+            !candidate.rowBoundsValid || !candidate.fullyInsideViewport ||
+            !candidate.hasReadableName
+        ) return null
+        return rootAccess.withActiveTargetRoot { root, window ->
+            if (!sameMomoWindowGeneration(window, candidate.rowTarget.window) ||
+                safeString { root.packageName?.toString().orEmpty() } != targetPackage
+            ) return@withActiveTargetRoot null
+            var current: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(root)
+            try {
+                for (index in firePath.childIndices) {
+                    val parent = current ?: return@withActiveTargetRoot null
+                    val child = safeNode { parent.getChild(index) }
+                    runCatching { parent.recycle() }
+                    current = child
+                    if (child == null) return@withActiveTargetRoot null
+                }
+                val fire = current ?: return@withActiveTargetRoot null
+                val viewId = safeString { fire.viewIdResourceName.orEmpty() }
+                val bounds = Rect()
+                runCatching { fire.getBoundsInScreen(bounds) }
+                val liveBounds = bounds.toScreenRect()
+                if (!MomoChatListSessionPolicy.isFireFeatureViewId(viewId) ||
+                    !MomoChatListSessionPolicy.hasValidBounds(liveBounds) ||
+                    !MomoChatListSessionPolicy.fullyInsideViewport(liveBounds, snapshot.chatListViewport ?: return@withActiveTargetRoot null) ||
+                    candidate.fireBounds?.let { expected ->
+                        abs(expected.left - liveBounds.left) > SESSION_ROW_BOUNDS_TOLERANCE_PX ||
+                            abs(expected.top - liveBounds.top) > SESSION_ROW_BOUNDS_TOLERANCE_PX ||
+                            abs(expected.right - liveBounds.right) > SESSION_ROW_BOUNDS_TOLERANCE_PX ||
+                            abs(expected.bottom - liveBounds.bottom) > SESSION_ROW_BOUNDS_TOLERANCE_PX
+                    } == true
+                ) return@withActiveTargetRoot null
+                liveBounds
             } finally {
                 runCatching { current?.recycle() }
             }

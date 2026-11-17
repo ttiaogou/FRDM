@@ -50,6 +50,12 @@ interface ChatSessionManagementPort {
         candidate: ChatListCandidateSnapshot
     ): ScreenRect?
 
+    /** Returns a fresh, row-bound fire-feature target when this row exposes one. */
+    fun resolveFireTapBounds(
+        snapshot: ChatPageSnapshot,
+        candidate: ChatListCandidateSnapshot
+    ): ScreenRect? = null
+
     /**
      * Returns a fresh list-swipe region that excludes any known floating touch overlays.
      * The default preserves existing adapters; platform adapters should reacquire live bounds.
