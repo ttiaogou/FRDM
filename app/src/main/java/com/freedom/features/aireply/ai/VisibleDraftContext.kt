@@ -15,7 +15,12 @@ internal object VisibleDraftContext {
         if (batch.status !in setOf(MessageReadStatus.SUCCESS, MessageReadStatus.OCR_PARTIAL,
                 MessageReadStatus.DIRECTION_UNKNOWN, MessageReadStatus.MESSAGE_TEXT_NOT_EXPOSED)) return retry("MESSAGE_READ_INCOMPLETE")
         val latest = batch.messagesBottomToTop.firstOrNull() ?: return retry("LATEST_MESSAGE_UNAVAILABLE")
-        val hasGap = batch.truncated || batch.unrecognizedRowCount > 0 || batch.ocrFailedTargetCount > 0 ||
+        // A truncated viewport cannot prove that the latest visible row is the
+        // actual conversation tail, so it remains ineligible for automatic
+        // drafting. OCR/row failures can still be tolerated when the adapter
+        // explicitly confirms the complete tail row below.
+        if (batch.truncated) return retry("MESSAGE_LIST_TRUNCATED")
+        val hasGap = batch.unrecognizedRowCount > 0 || batch.ocrFailedTargetCount > 0 ||
             batch.status == MessageReadStatus.OCR_PARTIAL
         val tail = batch.completeTailRowBounds
         if ((hasGap && tail == null) || (tail != null && latest.bounds != tail)) return retry("LATEST_ROW_NOT_CONFIRMED")
@@ -28,7 +33,7 @@ internal object VisibleDraftContext {
 
     fun build(batch: ChatMessageBatch, visitToken: String = batch.windowSessionKey.orEmpty()): ConversationContext? {
         if (!assess(batch).accepted || visitToken.isBlank()) return null
-        val key = "${batch.windowSessionKey}|visit=$visitToken"
+        val key = batch.windowSessionKey.orEmpty()
         val messages = batch.messagesBottomToTop.asReversed().filter(::eligible).takeLast(30).map {
             AiModelMessage(if (it.direction == ChatMessageDirection.INCOMING) AiModelMessage.Role.USER else AiModelMessage.Role.ASSISTANT,
                 it.content!!.take(2_000))
