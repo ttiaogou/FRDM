@@ -66,6 +66,7 @@ import com.freedom.data.ai.EncryptedAiModelConfigurationRepository
 import com.freedom.data.ai.AiReplyPersonalizationStore
 import com.freedom.data.database.LocalConversationRepository
 import com.freedom.data.database.LocalReplyTaskRepository
+import com.freedom.features.aireply.ai.ReplyTaskRepository
 import com.freedom.data.social.momo.MomoSayHiTraversalCheckpointDataStore
 import com.freedom.data.samples.MomoChatSampleArchiveDataStore
 import com.freedom.features.aireply.AiReplyObservationRuntime
@@ -121,7 +122,7 @@ class AppCompositionRoot(context: Context) {
         LocalConversationRepository(File(appContext.filesDir, "conversation_store"))
     }
 
-    val replyTaskRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+    val replyTaskRepository: ReplyTaskRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         LocalReplyTaskRepository(File(appContext.filesDir, "reply_task_store.tsv"))
     }
     val conversationContextManager: ConversationContextManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
