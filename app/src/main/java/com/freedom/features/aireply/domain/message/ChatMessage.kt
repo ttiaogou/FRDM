@@ -12,8 +12,12 @@ enum class ChatMessageDirection {
 enum class ChatMessageType {
     TEXT,
     IMAGE,
+    EMOJI,
     VOICE,
     VIDEO,
+    DYNAMIC_CARD,
+    INTERACTIVE_CARD,
+    /** Legacy generic card value retained for older callers and stored observations. */
     CARD,
     SYSTEM,
     UNKNOWN

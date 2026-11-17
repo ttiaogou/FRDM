@@ -546,7 +546,17 @@ internal class MomoChatMessageReader(
         val rowViewIds = signatures.map { signature ->
             signature.substringBefore(' ').trim()
         }
-        val hasMessageRowAnchor = MomoChatRowCandidatePolicy.hasMessageRowAnchor(rowViewIds)
+        // A resource ID alone is not enough: auxiliary cards and composer controls can expose
+        // message-like descendants. Require the actual message_root RelativeLayout as the
+        // primary row identity, then use the bubble/avatar/layout evidence as corroboration.
+        val hasRelativeMessageRoot = layoutNodeEvidence.any { node ->
+            node.viewId.substringAfterLast('/').substringAfterLast(':')
+                .equals("message_root", ignoreCase = true) &&
+                node.className.substringAfterLast('.')
+                    .equals("RelativeLayout", ignoreCase = true)
+        }
+        val hasMessageRowAnchor = hasRelativeMessageRoot &&
+            MomoChatRowCandidatePolicy.hasMessageRowAnchor(rowViewIds)
         val uniqueTexts = if (hasMessageRowAnchor) {
             textEvidence.distinctBy { it.value to it.bounds }
                 .filter { evidence ->
@@ -565,7 +575,9 @@ internal class MomoChatMessageReader(
         val timeHint = timestampHint
         // Media hints are meaningful only inside a verified message row. This prevents game or
         // promotional cards embedded in the RecyclerView from becoming synthetic message types.
-        val typeHint = if (hasMessageRowAnchor) MomoChatMessageTextEvidencePolicy.inferMessageType(signatures) else ChatMessageType.UNKNOWN
+        val typeHint = if (hasMessageRowAnchor) {
+            MomoChatMessageTextEvidencePolicy.inferMessageType(signatures, body?.value)
+        } else ChatMessageType.UNKNOWN
         val bodyText = body?.value
         val messageRoot = layoutNodeEvidence
             .filter { it.viewId == "message_root" || it.viewId.endsWith(":id/message_root") }

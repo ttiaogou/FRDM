@@ -23,13 +23,20 @@ internal object MomoChatOcrCandidateMapper {
             ?.takeIf(String::isNotBlank)
             ?: return@mapNotNull null
         if (MomoChatUiTextFilter.isNonMessageUiText(text)) return@mapNotNull null
+        val inferredType = MomoChatMessageTextEvidencePolicy.inferMessageType(
+            listOfNotNull(target.structureSignature), text
+        )
         ChatMessageCandidate(
             rowIndex = target.rowIndex,
             rowBounds = target.rowBounds,
             bubbleBounds = target.bubbleBounds,
             listBounds = listBounds,
             text = text,
-            typeHint = ChatMessageType.TEXT,
+            // OCR is only a content source. Preserve the structural type inferred from the
+            // previously validated row so a card or standalone emoji cannot become TEXT merely
+            // because its body was not exposed through accessibility.
+            typeHint = inferredType.takeUnless { it == ChatMessageType.UNKNOWN }
+                ?: ChatMessageType.TEXT,
             explicitDirectionHint = target.explicitDirectionHint,
             explicitDirectionEvidence = target.explicitDirectionEvidence,
             timeHint = target.timeHint,

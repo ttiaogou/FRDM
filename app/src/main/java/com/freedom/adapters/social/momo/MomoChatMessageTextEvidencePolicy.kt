@@ -27,6 +27,14 @@ internal object MomoChatMessageTextEvidencePolicy {
     private val VOICE_HINTS = setOf("msg_voice", "message_voice", "voice_wave", "audio_message")
     private val VIDEO_HINTS = setOf("msg_video", "message_video", "video_content")
     private val CARD_HINTS = setOf("msg_card", "message_card", "share_card", "link_card", "profile_card")
+    private val DYNAMIC_CARD_HINTS = setOf(
+        "card_view", "dynamic", "feed", "publish_dynamic"
+    )
+    private val INTERACTIVE_CARD_HINTS = setOf(
+        "cardcontainer", "message_btn_ai_chat", "message_btn_game_together",
+        "message_btn_gift_or_loc", "message_btn_gotoaudio", "message_btn_openemotes",
+        "message_btn_selectpic", "message_open_emotes_view", "game_content"
+    )
     private val IMAGE_DESCRIPTION_HINTS = setOf("图片消息", "照片消息", "image message", "photo message")
     private val VOICE_DESCRIPTION_HINTS = setOf("语音消息", "播放语音", "voice message", "audio message")
     private val VIDEO_DESCRIPTION_HINTS = setOf("视频消息", "video message")
@@ -55,21 +63,50 @@ internal object MomoChatMessageTextEvidencePolicy {
         }
     }
 
-    fun inferMessageType(signatures: List<String>): ChatMessageType {
+    fun inferMessageType(signatures: List<String>, bodyText: String? = null): ChatMessageType {
         val image = containsMessageMediaHint(signatures, IMAGE_HINTS, IMAGE_DESCRIPTION_HINTS) ||
             signatures.any { it.contains("imageview") && it.contains("msg") && !it.contains("avatar") }
         val voice = containsMessageMediaHint(signatures, VOICE_HINTS, VOICE_DESCRIPTION_HINTS)
         val video = containsMessageMediaHint(signatures, VIDEO_HINTS, VIDEO_DESCRIPTION_HINTS)
         val card = containsMessageMediaHint(signatures, CARD_HINTS, CARD_DESCRIPTION_HINTS)
-        val kinds = listOf(image, voice, video, card).count { it }
+        val interactiveCard = containsAnyHint(signatures, INTERACTIVE_CARD_HINTS)
+        val dynamicCard = bodyText.orEmpty().contains("发布了动态") ||
+            (containsAnyHint(signatures, DYNAMIC_CARD_HINTS) && !interactiveCard)
+        val emoji = isEmojiOnly(bodyText)
+        val kinds = listOf(image, voice, video, card, dynamicCard, interactiveCard, emoji).count { it }
         if (kinds != 1) return ChatMessageType.UNKNOWN
         return when {
             image -> ChatMessageType.IMAGE
+            emoji -> ChatMessageType.EMOJI
             voice -> ChatMessageType.VOICE
             video -> ChatMessageType.VIDEO
+            dynamicCard -> ChatMessageType.DYNAMIC_CARD
+            interactiveCard -> ChatMessageType.INTERACTIVE_CARD
             card -> ChatMessageType.CARD
             else -> ChatMessageType.UNKNOWN
         }
+    }
+
+    private fun containsAnyHint(signatures: List<String>, hints: Set<String>): Boolean =
+        signatures.any { signature ->
+            if (signature.contains("avatar") || signature.contains("head_icon") ||
+                signature.contains("user_icon")) false else hints.any(signature::contains)
+        }
+
+    /** A standalone pictogram is a separate message kind; emoji inside prose remains TEXT. */
+    private fun isEmojiOnly(value: String?): Boolean {
+        val text = value?.trim().orEmpty()
+        if (text.isEmpty()) return false
+        var sawEmoji = false
+        var valid = true
+        text.codePoints().toArray().forEach { codePoint ->
+            val emoji = codePoint in 0x1F000..0x1FAFF ||
+                codePoint in 0x2600..0x27BF || codePoint in 0x2300..0x23FF
+            val joiner = codePoint == 0x200D || codePoint == 0xFE0F || codePoint == 0x20E3
+            if (!emoji && !joiner) valid = false
+            sawEmoji = sawEmoji || emoji
+        }
+        return valid && sawEmoji
     }
 
     private fun containsMessageMediaHint(
