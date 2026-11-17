@@ -4673,14 +4673,11 @@ internal class MomoSocialAdapter(
                     expectedClassName = inspection.messageListClassName?.takeIf(String::isNotBlank)
                 )
             },
-            inputFieldTarget = inspection.inputFieldPath?.let {
-                NodeTarget(
-                    window = window,
-                    path = NodePath(it),
-                    expectedViewId = MomoChatPageContract.CHAT_COMPOSER_VIEW_ID,
-                    expectedClassName = "android.widget.EditText"
-                )
-            },
+            // The chat composer may be surfaced as a live editable container rather than the
+            // inner EditText. The current chat identity and editable-field state are verified
+            // immediately before writing, so do not reject a freshly discovered input solely
+            // because its implementation view ID/class changed during the model wait.
+            inputFieldTarget = inspection.inputFieldPath?.let { NodeTarget(window, NodePath(it)) },
             structureEvidence = (treeEvidence.evidence + inspection.structureEvidence)
                 .distinctBy { evidence -> evidence.path }
                 .map { evidence ->
