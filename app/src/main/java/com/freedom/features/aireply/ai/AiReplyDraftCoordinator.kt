@@ -49,6 +49,7 @@ class AiReplyDraftCoordinator(
     private val processedMessageKeys = LinkedHashSet<String>()
     private val failedRequests = linkedMapOf<String, Pair<Int, Long>>()
     private var activeMessageKey: String? = null
+    private var activeRequestId: String? = null
 
     val isPending: Boolean get() = pending.get()
     val isAwaitingUserSend: Boolean get() = awaitingUserSend.get()
@@ -62,6 +63,7 @@ class AiReplyDraftCoordinator(
             processedMessageKeys.clear()
             failedRequests.clear()
             activeMessageKey = null
+            activeRequestId = null
         }
     }
 
@@ -138,10 +140,16 @@ class AiReplyDraftCoordinator(
         // Window generation is a stale-callback guard, not a new model task identity.
         val dedupeConversationKey = conversationIdentity
         val dedupeKey = fingerprint("$contactId|$dedupeConversationKey|${latestIncoming.stableLogicalMessageId}|${latestIncoming.effectiveContentRevision}")
-        val persistedTask = replyTaskRepository?.find(dedupeKey)
-        if (persistedTask != null && persistedTask.status in setOf(ReplyTaskStatus.REQUESTED, ReplyTaskStatus.COMPLETED, ReplyTaskStatus.UNKNOWN)) {
-            return reject("PERSISTED_REPLY_TASK_${persistedTask.status.name}")
-        }
+        val requestId = UUID.randomUUID().toString()
+        val taskRecord = ReplyTaskRecord(
+            requestKey = dedupeKey,
+            conversationKey = dedupeConversationKey,
+            logicalMessageId = latestIncoming.stableLogicalMessageId,
+            contentRevision = latestIncoming.effectiveContentRevision,
+            status = ReplyTaskStatus.REQUESTED,
+            requestId = requestId,
+            updatedAtMillis = nowMillis()
+        )
         val requestGeneration = synchronized(lock) {
             if (awaitingUserSend.get()) return reject("DRAFT_AWAITING_USER_SEND")
             if (pending.get()) return reject("DRAFT_REQUEST_ALREADY_PENDING")
@@ -150,7 +158,14 @@ class AiReplyDraftCoordinator(
             if (failure != null && (failure.first >= 2 || nowMillis() < failure.second)) {
                 return reject("DRAFT_FAILURE_COOLDOWN_OR_RETRY_LIMIT")
             }
+            if (replyTaskRepository != null && !replyTaskRepository.tryClaim(
+                    taskRecord, REPLY_TASK_REQUEST_TIMEOUT_MILLIS
+                )) {
+                val status = replyTaskRepository.find(dedupeKey)?.status?.name ?: "CLAIM_FAILED"
+                return reject("PERSISTED_REPLY_TASK_$status")
+            }
             activeMessageKey = dedupeKey
+            activeRequestId = requestId
             processedMessageKeys += dedupeKey
             while (processedMessageKeys.size > MAX_PROCESSED_KEYS) {
                 val oldest = processedMessageKeys.firstOrNull() ?: break
@@ -159,19 +174,10 @@ class AiReplyDraftCoordinator(
             pending.set(true)
             generation.get()
         }
-        replyTaskRepository?.save(ReplyTaskRecord(
-            requestKey = dedupeKey,
-            conversationKey = dedupeConversationKey,
-            logicalMessageId = latestIncoming.stableLogicalMessageId,
-            contentRevision = latestIncoming.effectiveContentRevision,
-            status = ReplyTaskStatus.REQUESTED,
-            requestId = UUID.randomUUID().toString(),
-            updatedAtMillis = nowMillis()
-        ))
         val accepted = runCatching {
             backgroundExecutor.execute {
                 try {
-                    generateOnBackground(configuration, context, target, requestGeneration)
+                    generateOnBackground(configuration, context, target, requestGeneration, requestId)
                 } catch (_: Throwable) {
                     onLog("AI 回复草稿生成失败：[DRAFT_GENERATION_FAILED]")
                     finish("DRAFT_GENERATION_FAILED", requestGeneration)
@@ -190,7 +196,8 @@ class AiReplyDraftCoordinator(
         configuration: AiModelConfiguration,
         context: ConversationContext,
         target: ChatDraftInputTarget,
-        requestGeneration: Long
+        requestGeneration: Long,
+        requestId: String
     ) {
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
             finish("AI_REPLY_STATE_CHANGED_BEFORE_REQUEST", requestGeneration)
@@ -206,16 +213,19 @@ class AiReplyDraftCoordinator(
                 contactIdentityVerified = !context.currentWindowDraft,
                 manualReviewRequired = isManualReviewRequired(),
                 cooldownActive = false,
-                requestId = UUID.randomUUID().toString(),
+                requestId = requestId,
                 personalization = personalizationRepository.load()
             )
         )
+        if (decision.reason == "MODEL_CALL_FAILED") {
+            finish("MODEL_DECISION_MODEL_CALL_FAILED", requestGeneration)
+            return
+        }
+        updateTaskStatus(ReplyTaskStatus.MODEL_COMPLETED, requestGeneration)
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
-            updateTaskStatus(ReplyTaskStatus.COMPLETED, requestGeneration)
             finish("MODEL_DECISION_${decision.reason}", requestGeneration)
             return
         }
-        updateTaskStatus(ReplyTaskStatus.COMPLETED, requestGeneration)
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
             finish("AI_REPLY_STATE_CHANGED_AFTER_REQUEST", requestGeneration)
             return
@@ -280,6 +290,7 @@ class AiReplyDraftCoordinator(
                 if (!isCurrentGeneration(requestGeneration)) return
                 awaitingUserSend.set(true)
             }
+            updateTaskStatus(ReplyTaskStatus.DRAFT_APPLIED, requestGeneration)
             finish("DRAFT_ENTERED_USER_CONTENT_REVIEW_AND_SEND_REQUIRED", requestGeneration)
         } else {
             finish("DRAFT_VERIFY_${result.reasonCode}", requestGeneration)
@@ -298,6 +309,7 @@ class AiReplyDraftCoordinator(
             pending.set(false)
             val key = activeMessageKey
             activeMessageKey = null
+            activeRequestId = null
             // 仅模型/调度失败允许后续观察触发一次重试；输入过的草稿不得盲目重写。
             if (key != null && reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED",
                     "MODEL_DECISION_MODEL_CALL_FAILED", "MODEL_DECISION_EMPTY_MODEL_OUTPUT",
@@ -313,9 +325,10 @@ class AiReplyDraftCoordinator(
 
     private fun updateTaskStatus(status: ReplyTaskStatus, requestGeneration: Long) {
         if (!isCurrentGeneration(requestGeneration)) return
-        val key = synchronized(lock) { activeMessageKey } ?: return
-        val old = replyTaskRepository?.find(key) ?: return
-        replyTaskRepository.save(old.copy(status = status, updatedAtMillis = nowMillis()))
+        val owner = synchronized(lock) { activeMessageKey to activeRequestId }
+        val key = owner.first ?: return
+        val requestId = owner.second ?: return
+        replyTaskRepository?.updateStatus(key, requestId, status, nowMillis())
     }
 
     private fun reject(reasonCode: String): Boolean {
@@ -334,6 +347,7 @@ class AiReplyDraftCoordinator(
         private const val MAX_PROCESSED_KEYS = 256
         private const val MIN_VERIFY_DWELL_DELAY_MS = 500
         private const val MAX_VERIFY_DWELL_DELAY_MS = 900
+        private const val REPLY_TASK_REQUEST_TIMEOUT_MILLIS = 120_000L
 
         private fun newDraftExecutor() = Executors.newSingleThreadExecutor(ThreadFactory { runnable ->
             Thread(runnable, "frdm-ai-model-request").apply { isDaemon = true }
