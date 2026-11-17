@@ -4347,7 +4347,7 @@ internal class MomoSocialAdapter(
         return true
     }
 
-    override fun writeDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult {
+    override fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult {
         if (text.isBlank() || text.length > 2_000) {
             return ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "DRAFT_TEXT_INVALID")
         }
@@ -4363,11 +4363,8 @@ internal class MomoSocialAdapter(
         ) {
             return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "INPUT_TEXT_CAPTURE_UNAVAILABLE")
         }
-        if (field.text == text && !field.showingHintText) {
-            return ChatDraftInputResult(ChatDraftInputStatus.ALREADY_PRESENT)
-        }
-        if (!field.text.isNullOrBlank() && !field.showingHintText) {
-            // Never replace text the user has already typed.
+        val currentText = if (field.showingHintText) "" else field.text.orEmpty()
+        if (currentText != expectedText || !text.startsWith(expectedText)) {
             return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_EMPTY, "USER_INPUT_PRESERVED")
         }
         val focus = runCatching {
@@ -4376,9 +4373,18 @@ internal class MomoSocialAdapter(
         if (focus?.accepted != true) {
             return ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "INPUT_FOCUS_REJECTED")
         }
+        val refreshedTarget = resolveLiveDraftInputTarget(target)
+            ?: return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_TARGET_STALE")
+        val refreshed = inspectDraftInputNode(refreshedTarget)
+            ?: return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_FOUND, "INPUT_NODE_UNAVAILABLE")
+        if (!refreshed.editable || !refreshed.visible || !refreshed.enabled || refreshed.password ||
+            AccessibilityNodeField.TEXT in refreshed.captureEvidence.failedFields ||
+            AccessibilityNodeField.TEXT in refreshed.captureEvidence.notCapturedFields ||
+            (if (refreshed.showingHintText) "" else refreshed.text.orEmpty()) != expectedText
+        ) return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_EMPTY, "INPUT_CHANGED_BEFORE_WRITE")
         val setText = runCatching {
             accessibilityGateway.performNodeAction(
-                NodeActionRequest(liveTarget, NodeAction.SET_TEXT, textArgument = text)
+                NodeActionRequest(refreshedTarget, NodeAction.SET_TEXT, textArgument = text)
             )
         }.getOrNull()
         return if (setText?.accepted == true && setText.performed) {

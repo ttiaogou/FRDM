@@ -41,6 +41,6 @@ data class ChatDraftInputResult(
  * Implementations must revalidate the live window, conversation, and editable target each time.
  */
 interface ChatDraftInputPort {
-    fun writeDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult
+    fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult
     fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult
 }

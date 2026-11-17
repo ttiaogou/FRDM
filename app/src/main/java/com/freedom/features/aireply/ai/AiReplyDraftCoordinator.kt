@@ -51,9 +51,12 @@ class AiReplyDraftCoordinator(
 
     /** Invalidates late callbacks when the AI Reply runtime is stopped or rebuilt. */
     fun resetForRuntimeReset() {
-        generation.incrementAndGet()
-        awaitingUserSend.set(false)
-        synchronized(lock) { processedMessageKeys.clear() }
+        synchronized(lock) {
+            generation.incrementAndGet()
+            pending.set(false)
+            awaitingUserSend.set(false)
+            processedMessageKeys.clear()
+        }
     }
 
     /** Called only after platform identity and the current chat header have been verified. */
@@ -106,7 +109,7 @@ class AiReplyDraftCoordinator(
             nodeTarget = inputTarget
         )
         val dedupeKey = fingerprint("$contactId|$expectedWindowSessionKey|${latestIncoming.id}")
-        synchronized(lock) {
+        val requestGeneration = synchronized(lock) {
             if (pending.get()) return reject("DRAFT_REQUEST_ALREADY_PENDING")
             if (dedupeKey in processedMessageKeys) return reject("DUPLICATE_INCOMING_MESSAGE")
             processedMessageKeys += dedupeKey
@@ -115,21 +118,20 @@ class AiReplyDraftCoordinator(
                 processedMessageKeys.remove(oldest)
             }
             pending.set(true)
+            generation.get()
         }
-
-        val requestGeneration = generation.get()
         val accepted = runCatching {
             backgroundExecutor.execute {
                 try {
                     generateOnBackground(configuration, context, target, requestGeneration)
                 } catch (_: Throwable) {
                     onLog("AI 回复草稿生成失败：[DRAFT_GENERATION_FAILED]")
-                    pending.set(false)
+                    finish("DRAFT_GENERATION_FAILED", requestGeneration)
                 }
             }
         }.isSuccess
         if (!accepted) {
-            pending.set(false)
+            finish("BACKGROUND_EXECUTOR_REJECTED", requestGeneration)
             return reject("BACKGROUND_EXECUTOR_REJECTED")
         }
         onLog("AI 回复草稿：已提交后台模型请求；不会自动发送")
@@ -143,7 +145,7 @@ class AiReplyDraftCoordinator(
         requestGeneration: Long
     ) {
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) {
-            finish("AI_REPLY_STATE_CHANGED_BEFORE_REQUEST")
+            finish("AI_REPLY_STATE_CHANGED_BEFORE_REQUEST", requestGeneration)
             return
         }
         val provider = createProvider(configuration)
@@ -161,58 +163,88 @@ class AiReplyDraftCoordinator(
             )
         )
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
-            finish("MODEL_DECISION_${decision.reason}")
+            finish("MODEL_DECISION_${decision.reason}", requestGeneration)
             return
         }
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) {
-            finish("AI_REPLY_STATE_CHANGED_AFTER_REQUEST")
+            finish("AI_REPLY_STATE_CHANGED_AFTER_REQUEST", requestGeneration)
             return
         }
         scheduler.schedule(0L) {
             if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) {
-                finish("AI_REPLY_STATE_CHANGED_BEFORE_INPUT")
+                finish("AI_REPLY_STATE_CHANGED_BEFORE_INPUT", requestGeneration)
                 return@schedule
             }
-            val result = runCatching { inputPort.writeDraft(target, decision.draft) }
+            val segments = DraftSegments.split(decision.draft)
+            writeNext(target, decision.draft, segments, 0, "", requestGeneration)
+        }
+    }
+
+    internal fun writeNext(target: ChatDraftInputTarget, draft: String, segments: List<String>,
+                          index: Int, confirmed: String, requestGeneration: Long) {
+        if (!isCurrentGeneration(requestGeneration)) return
+        if (!isAiReplyActive() || isManualReviewRequired()) {
+            finish("AI_REPLY_STATE_CHANGED_BEFORE_INPUT", requestGeneration)
+            return
+        }
+        val expected = confirmed + segments[index]
+        val result = synchronized(lock) {
+            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) return
+            runCatching { inputPort.writeDraft(target, confirmed, expected) }
                 .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED) }
-            if (!result.succeeded) {
-                finish("DRAFT_INPUT_${result.reasonCode}")
+        }
+        if (!result.succeeded) {
+            finish("DRAFT_INPUT_${result.reasonCode}", requestGeneration)
+            return
+        }
+        val dwell = chooseRandomInt(MIN_VERIFY_DWELL_DELAY_MS, MAX_VERIFY_DWELL_DELAY_MS)
+            .coerceIn(MIN_VERIFY_DWELL_DELAY_MS, MAX_VERIFY_DWELL_DELAY_MS)
+        scheduler.schedule(dwell.toLong()) {
+            if (!isCurrentGeneration(requestGeneration)) return@schedule
+            if (!isAiReplyActive() || isManualReviewRequired()) {
+                finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
                 return@schedule
             }
-            if (result.status == ChatDraftInputStatus.ALREADY_PRESENT) {
-                scheduler.schedule(VERIFY_DWELL_DELAY_MS) {
-                    verifyAndFinish(target, decision.draft, requestGeneration)
-                }
+            val checked = runCatching { inputPort.verifyDraft(target, expected) }
+                .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
+            if (checked.status != ChatDraftInputStatus.VERIFIED) {
+                finish("DRAFT_VERIFY_${checked.reasonCode}", requestGeneration)
+            } else if (index + 1 < segments.size) {
+                writeNext(target, draft, segments, index + 1, expected, requestGeneration)
             } else {
-                val dwell = chooseRandomInt(MIN_VERIFY_DWELL_DELAY_MS, MAX_VERIFY_DWELL_DELAY_MS)
-                scheduler.schedule(dwell.toLong()) {
-                    verifyAndFinish(target, decision.draft, requestGeneration)
-                }
+                verifyAndFinish(target, draft, requestGeneration)
             }
         }
     }
 
     private fun verifyAndFinish(target: ChatDraftInputTarget, draft: String, requestGeneration: Long) {
-        if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) {
-            finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY")
+        if (!isCurrentGeneration(requestGeneration)) return
+        if (!isAiReplyActive() || isManualReviewRequired()) {
+            finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
             return
         }
         val result = runCatching { inputPort.verifyDraft(target, draft) }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
         if (result.status == ChatDraftInputStatus.VERIFIED) {
-            awaitingUserSend.set(true)
-            finish("DRAFT_ENTERED_AND_VERIFIED_USER_SEND_REQUIRED")
+            synchronized(lock) {
+                if (!isCurrentGeneration(requestGeneration)) return
+                awaitingUserSend.set(true)
+            }
+            finish("DRAFT_ENTERED_USER_CONTENT_REVIEW_AND_SEND_REQUIRED", requestGeneration)
         } else {
-            finish("DRAFT_VERIFY_${result.reasonCode}")
+            finish("DRAFT_VERIFY_${result.reasonCode}", requestGeneration)
         }
     }
 
     private fun isCurrentGeneration(requestGeneration: Long): Boolean =
         generation.get() == requestGeneration
 
-    private fun finish(reasonCode: String) {
+    private fun finish(reasonCode: String, requestGeneration: Long) {
+        synchronized(lock) {
+            if (!isCurrentGeneration(requestGeneration)) return
+            pending.set(false)
+        }
         onLog("AI 回复草稿处理结束：$reasonCode；未执行发送动作")
-        pending.set(false)
     }
 
     private fun reject(reasonCode: String): Boolean {
@@ -229,9 +261,8 @@ class AiReplyDraftCoordinator(
 
     companion object {
         private const val MAX_PROCESSED_KEYS = 256
-        private const val MIN_VERIFY_DWELL_DELAY_MS = 650
-        private const val MAX_VERIFY_DWELL_DELAY_MS = 950
-        private const val VERIFY_DWELL_DELAY_MS = 800L
+        private const val MIN_VERIFY_DWELL_DELAY_MS = 500
+        private const val MAX_VERIFY_DWELL_DELAY_MS = 900
 
         private fun newDraftExecutor() = Executors.newSingleThreadExecutor(ThreadFactory { runnable ->
             Thread(runnable, "frdm-ai-model-request").apply { isDaemon = true }
