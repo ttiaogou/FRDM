@@ -111,7 +111,13 @@ data class ChatMessageOcrTarget(
     val timeHint: String? = null,
     /** Direction resolved from Momo avatar-container IDs after same-message-root validation. */
     val explicitDirectionHint: ChatMessageDirection? = null,
-    val explicitDirectionEvidence: DirectionEvidence = DirectionEvidence.EXPLICIT_LAYOUT_HINT
+    val explicitDirectionEvidence: DirectionEvidence = DirectionEvidence.EXPLICIT_LAYOUT_HINT,
+    /** Row-level structure captured from the same message_root as the OCR body. */
+    val structureSignature: String? = null,
+    /** Neighbor signature is assigned after the complete visible batch has been collected. */
+    val neighborSignature: String? = null,
+    /** Identity-only direction evidence shared by structural and OCR observations. */
+    val identityDirectionHint: ChatMessageDirection? = null
 ) {
     override fun toString(): String =
         "ChatMessageOcrTarget(rowIndex=$rowIndex,rowBounds=$rowBounds," +
@@ -201,7 +207,8 @@ data class ChatMessageBatch(
     val ocrLineCountByRowIndex: Map<Int, Int> = emptyMap(),
     /** 适配器确认已读取列表末行且行内完整；null 表示末尾仍存在缺口。 */
     val completeTailRowBounds: ScreenRect? = null,
-    val observationBatchId: String = ""
+    val observationBatchId: String = "",
+    val windowSnapshotSignature: String = ""
 ) {
     val effectiveObservationBatchId: String
         get() = observationBatchId.ifBlank { "${windowSessionKey.orEmpty()}@${capturedAtMillis}" }

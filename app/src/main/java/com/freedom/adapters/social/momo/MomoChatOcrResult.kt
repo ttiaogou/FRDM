@@ -21,7 +21,9 @@ internal data class MomoChatOcrResult(
     /** Mean plugin confidence per row; this is not a measure of ground-truth accuracy. */
     val confidenceByRowIndex: Map<Int, Float> = emptyMap(),
     /** Number of valid OCR text/box lines returned for each cropped row. */
-    val lineCountByRowIndex: Map<Int, Int> = emptyMap()
+    val lineCountByRowIndex: Map<Int, Int> = emptyMap(),
+    /** Captured batch identity; blank is accepted only for legacy/unit-test callers. */
+    val observationBatchId: String = ""
 ) {
     override fun toString(): String =
         "MomoChatOcrResult(recognizedRows=${textByRowIndex.values.count(String::isNotBlank)}," +

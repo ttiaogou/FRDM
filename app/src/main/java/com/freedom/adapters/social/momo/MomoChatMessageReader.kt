@@ -11,6 +11,7 @@ import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageStructureEvidence
 import com.freedom.features.aireply.domain.message.ChatMessageOcrTarget
 import com.freedom.features.aireply.domain.message.ChatMessageDirectionDiagnostic
+import com.freedom.features.aireply.domain.message.ChatMessageIdentity
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
 import com.freedom.features.aireply.domain.message.DirectionEvidence
 import com.freedom.features.aireply.domain.message.ChatMessageType
@@ -219,7 +220,20 @@ internal class MomoChatMessageReader(
             messageStructureEvidence = readResult.messageStructureEvidence,
             messageListUnavailableReason = readResult.messageListUnavailableReason,
             ocrTargets = readResult.ocrTargets,
-            completeTailRowBounds = readResult.completeTailRowBounds
+            completeTailRowBounds = readResult.completeTailRowBounds,
+            observationBatchId = ChatMessageIdentity.observationBatchId(
+                readResult.windowSessionKey, timestamp,
+                (readResult.messages.map { it.bounds } + readResult.ocrTargets.map { it.rowBounds })
+                    .distinct()
+            ),
+            windowSnapshotSignature = ChatMessageIdentity.windowSnapshotSignature(
+                readResult.windowSessionKey,
+                readResult.coordinateRootBounds,
+                readResult.coordinateListBounds,
+                (readResult.messages.map { it.bounds } + readResult.ocrTargets.map { it.rowBounds })
+                    .distinct(),
+                readResult.ocrTargets.mapNotNull { it.structureSignature }
+            )
         )
     }
 
@@ -229,6 +243,17 @@ internal class MomoChatMessageReader(
         result: MomoChatOcrResult,
         limit: Int
     ): ChatMessageBatch {
+        if (result.observationBatchId.isNotBlank() &&
+            result.observationBatchId != batch.effectiveObservationBatchId
+        ) {
+            return batch.copy(
+                status = MomoChatMessageReadStatusPolicy.afterOcrException(),
+                ocrAttempted = true,
+                ocrAttemptedTargetCount = batch.ocrTargets.size,
+                ocrFailedTargetCount = batch.ocrTargets.size,
+                ocrFailureReason = "OCR 结果所属批次已过期，拒绝合并"
+            )
+        }
         val listBounds = if (batch.coordinateSpaceReliable) {
             batch.coordinateListBounds ?: ScreenRect(0, 0, 0, 0)
         } else {
@@ -329,7 +354,20 @@ internal class MomoChatMessageReader(
             rowRead.candidate?.let(candidates::add)
         }
 
-        val messages = parser.parse(candidates, limit)
+        // Assign neighborhood evidence only after the complete visible batch is known. This
+        // same map is copied to both structural candidates and OCR targets.
+        val orderedRowBounds = (candidates.map { it.rowIndex to it.rowBounds } +
+            ocrTargets.map { it.rowIndex to it.rowBounds })
+            .distinctBy { it.first }
+            .sortedBy { it.second.top }
+        val allBounds = orderedRowBounds.map { it.second }
+        val neighborByRow = orderedRowBounds.mapIndexed { index, (rowIndex, _) ->
+            rowIndex to ChatMessageIdentity.neighborSignature(allBounds, index)
+        }.toMap()
+        val normalizedCandidates = candidates.map { it.copy(neighborSignature = neighborByRow[it.rowIndex]) }
+        val normalizedOcrTargets = ocrTargets.map { it.copy(neighborSignature = neighborByRow[it.rowIndex]) }
+
+        val messages = parser.parse(normalizedCandidates, limit)
         val status = when {
             messages.isEmpty() && unexposedMessageTextViews > 0 ->
                 MessageReadStatus.MESSAGE_TEXT_NOT_EXPOSED
@@ -337,7 +375,7 @@ internal class MomoChatMessageReader(
             messages.all { it.direction == ChatMessageDirection.UNKNOWN } -> MessageReadStatus.DIRECTION_UNKNOWN
             else -> MessageReadStatus.SUCCESS
         }
-        val directionDiagnostics = candidates.mapNotNull { candidate ->
+        val directionDiagnostics = normalizedCandidates.mapNotNull { candidate ->
             if (candidate.isSystemMessage || candidate.typeHint == ChatMessageType.SYSTEM) {
                 return@mapNotNull null
             }
@@ -350,18 +388,18 @@ internal class MomoChatMessageReader(
             windowSessionKey = windowKey(window, conversationTitle),
             messages = messages,
             scannedRows = scannedRows,
-            candidateRows = candidates.size,
+            candidateRows = normalizedCandidates.size,
             truncated = truncated,
             textEvidenceNodeCount = textEvidenceNodes,
             descriptionEvidenceNodeCount = descriptionEvidenceNodes,
-            unrecognizedRows = (scannedRows - candidates.size).coerceAtLeast(0),
+            unrecognizedRows = (scannedRows - normalizedCandidates.size).coerceAtLeast(0),
             coordinateSpaceReliable = coordinateSpaceReliable,
             coordinateRootBounds = rootBounds,
             coordinateListBounds = listBounds,
             directionDiagnostics = directionDiagnostics,
             unexposedMessageTextViewCount = unexposedMessageTextViews,
             messageStructureEvidence = messageStructureEvidence.take(MAX_STRUCTURE_DIAGNOSTICS),
-            ocrTargets = ocrTargets.takeLast(MAX_OCR_TARGETS),
+            ocrTargets = normalizedOcrTargets.takeLast(MAX_OCR_TARGETS),
             completeTailRowBounds = completeTailRowBounds
         )
     }
@@ -529,6 +567,19 @@ internal class MomoChatMessageReader(
         // promotional cards embedded in the RecyclerView from becoming synthetic message types.
         val typeHint = if (hasMessageRowAnchor) MomoChatMessageTextEvidencePolicy.inferMessageType(signatures) else ChatMessageType.UNKNOWN
         val bodyText = body?.value
+        val messageRoot = layoutNodeEvidence
+            .filter { it.viewId == "message_root" || it.viewId.endsWith(":id/message_root") }
+            .minByOrNull { it.path.size }
+        val structureSignature = messageRoot?.let { root ->
+            val rootPath = root.path
+            val nodes = layoutNodeEvidence
+                .filter { it.path.size >= rootPath.size && it.path.take(rootPath.size) == rootPath }
+                .joinToString(",") { node ->
+                    val relativePath = node.path.drop(rootPath.size).joinToString(".")
+                    "$relativePath:${node.viewId}:${node.className}"
+                }
+            "root=${root.viewId};nodes=$nodes"
+        }
         val structuralBody = unexposedMessageTextViews.maxByOrNull {
             it.bounds.width.toLong() * it.bounds.height.toLong()
         }
@@ -559,6 +610,7 @@ internal class MomoChatMessageReader(
             )
         val bodyDirection = directionFor(body)
         val structuralBodyDirection = directionFor(structuralBody)
+        val identityDirection = structuralBodyDirection.direction ?: bodyDirection.direction
         val structureEvidence = structuralBody?.let {
             ChatMessageStructureEvidence(
                 rowIndex = rowIndex,
@@ -581,7 +633,9 @@ internal class MomoChatMessageReader(
                 avatarBounds = structuralAvatarBounds,
                 timeHint = timeHint,
                 explicitDirectionHint = structuralBodyDirection.direction,
-                explicitDirectionEvidence = structuralBodyDirection.evidence
+                explicitDirectionEvidence = structuralBodyDirection.evidence,
+                structureSignature = structureSignature,
+                identityDirectionHint = identityDirection
             )
         }
         // Momo-specific centered prompts and toolbar labels are UI, not chat messages.
@@ -613,7 +667,11 @@ internal class MomoChatMessageReader(
                 explicitDirectionEvidence = DirectionEvidence.AMBIGUOUS,
                 timeHint = timeHint,
                 isSystemMessage = true,
-                avatarBounds = avatarBounds
+                avatarBounds = avatarBounds,
+                structureSignature = structureSignature,
+                identityDirectionHint = identityDirection,
+                identityBubbleBounds = structuralBubbleBounds,
+                identityAvatarBounds = structuralAvatarBounds
             )
             typeHint != ChatMessageType.UNKNOWN -> ChatMessageCandidate(
                 rowIndex = rowIndex,
@@ -626,7 +684,11 @@ internal class MomoChatMessageReader(
                 explicitDirectionEvidence = bodyDirection.evidence,
                 timeHint = timeHint,
                 isSystemMessage = false,
-                avatarBounds = avatarBounds
+                avatarBounds = avatarBounds,
+                structureSignature = structureSignature,
+                identityDirectionHint = identityDirection,
+                identityBubbleBounds = structuralBubbleBounds,
+                identityAvatarBounds = structuralAvatarBounds
             )
             !bodyText.isNullOrBlank() -> ChatMessageCandidate(
                 rowIndex = rowIndex,
@@ -639,7 +701,11 @@ internal class MomoChatMessageReader(
                 explicitDirectionEvidence = bodyDirection.evidence,
                 timeHint = timeHint,
                 isSystemMessage = false,
-                avatarBounds = avatarBounds
+                avatarBounds = avatarBounds,
+                structureSignature = structureSignature,
+                identityDirectionHint = identityDirection,
+                identityBubbleBounds = structuralBubbleBounds,
+                identityAvatarBounds = structuralAvatarBounds
             )
             else -> null
         }

@@ -25,7 +25,11 @@ data class ChatMessageCandidate(
     val avatarBounds: ScreenRect? = null,
     /** Text admitted by the adapter's structural message-read path is model-usable by default. */
     val contentQuality: MessageContentQuality = MessageContentQuality.VERIFIED,
-    val neighborSignature: String? = null
+    val neighborSignature: String? = null,
+    val structureSignature: String? = null,
+    val identityDirectionHint: ChatMessageDirection? = null,
+    val identityBubbleBounds: ScreenRect? = null,
+    val identityAvatarBounds: ScreenRect? = null
 ) {
     override fun toString(): String =
         "ChatMessageCandidate(rowIndex=$rowIndex,typeHint=$typeHint," +
@@ -87,11 +91,12 @@ class ChatMessageParser(
                 null
             }
             val logicalId = ChatMessageIdentity.logicalMessageId(
-                type, direction, candidate.rowBounds, candidate.bubbleBounds,
-                candidate.avatarBounds, candidate.timeHint,
+                type, candidate.identityDirectionHint ?: direction, candidate.rowBounds,
+                candidate.identityBubbleBounds ?: candidate.bubbleBounds,
+                candidate.identityAvatarBounds ?: candidate.avatarBounds, candidate.timeHint,
                 candidate.neighborSignature ?: ChatMessageIdentity.neighborSignature(
                     ordered.map { it.rowBounds }, orderedIndex
-                )
+                ), candidate.structureSignature
             )
             val baseId = logicalId
             val occurrence = (duplicateOccurrences[baseId] ?: 0) + 1

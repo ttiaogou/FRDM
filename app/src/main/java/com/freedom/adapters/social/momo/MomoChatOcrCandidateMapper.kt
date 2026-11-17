@@ -39,9 +39,9 @@ internal object MomoChatOcrCandidateMapper {
             // order and direction) is handled by the surrounding read/draft pipeline; a non-empty
             // OCR result is therefore allowed to become model input here.
             contentQuality = conservativeQuality(text),
-            neighborSignature = ChatMessageIdentity.neighborSignature(
-                targets.map { it.rowBounds }, targets.indexOf(target)
-            )
+            neighborSignature = target.neighborSignature,
+            structureSignature = target.structureSignature,
+            identityDirectionHint = target.identityDirectionHint
         )
     }
 

@@ -13,8 +13,9 @@ object ChatMessageIdentity {
         bubbleBounds: ScreenRect?,
         avatarBounds: ScreenRect?,
         timeHint: String?,
-        neighborSignature: String? = null
-    ): String = "logical-${sha256(listOf(type.name, direction.name, rect(rowBounds), rect(bubbleBounds), rect(avatarBounds), timeHint.orEmpty().trim(), neighborSignature.orEmpty()).joinToString("\u001f"))}"
+        neighborSignature: String? = null,
+        structureSignature: String? = null
+    ): String = "logical-${sha256(listOf(type.name, direction.name, rect(rowBounds), rect(bubbleBounds), rect(avatarBounds), timeHint.orEmpty().trim(), neighborSignature.orEmpty(), structureSignature.orEmpty()).joinToString("\u001f"))}"
 
     fun contentRevision(content: String?): String = "ocr-${sha256(content.orEmpty().trim())}"
 
@@ -23,6 +24,20 @@ object ChatMessageIdentity {
         rows.getOrNull(index)?.let(::rect),
         rows.getOrNull(index + 1)?.let(::rect)
     ).joinToString("|")
+
+    fun observationBatchId(windowSessionKey: String?, capturedAtMillis: Long, rows: List<ScreenRect>): String =
+        "batch-${sha256(listOf(windowSessionKey.orEmpty(), capturedAtMillis.toString(), rows.joinToString("|") { rect(it) }).joinToString("\u001f"))}"
+
+    fun windowSnapshotSignature(
+        windowSessionKey: String?,
+        rootBounds: ScreenRect?,
+        listBounds: ScreenRect?,
+        rows: List<ScreenRect>,
+        structureSignatures: List<String>
+    ): String = sha256(listOf(
+        windowSessionKey.orEmpty(), rect(rootBounds), rect(listBounds),
+        rows.joinToString("|") { rect(it) }, structureSignatures.joinToString("|")
+    ).joinToString("\u001f"))
 
     private fun rect(value: ScreenRect?): String = value?.let { "${it.left},${it.top},${it.right},${it.bottom}" } ?: "-"
 

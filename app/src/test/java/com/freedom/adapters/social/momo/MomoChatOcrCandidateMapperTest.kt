@@ -2,6 +2,7 @@ package com.freedom.adapters.social.momo
 
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.features.aireply.application.message.ChatMessageParser
+import com.freedom.features.aireply.application.message.ChatMessageCandidate
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.MessageReadStatus
@@ -29,6 +30,41 @@ class MomoChatOcrCandidateMapperTest {
         bubbleBounds = ScreenRect(390, 635, 650, 730),
         avatarBounds = ScreenRect(655, 640, 705, 690)
     )
+
+    @Test
+    fun structuralAndOcrObservationsShareLogicalIdentity() {
+        val target = incomingTarget.copy(
+            timeHint = "21:03",
+            structureSignature = "root=message_root;nodes=0:message_root,0.1:leftcontainer",
+            neighborSignature = "prev|current|next",
+            identityDirectionHint = ChatMessageDirection.INCOMING
+        )
+        val structural = ChatMessageCandidate(
+            rowIndex = target.rowIndex,
+            rowBounds = target.rowBounds,
+            bubbleBounds = target.bubbleBounds,
+            listBounds = listBounds,
+            text = "旧识别",
+            typeHint = com.freedom.features.aireply.domain.message.ChatMessageType.TEXT,
+            explicitDirectionHint = ChatMessageDirection.INCOMING,
+            explicitDirectionEvidence = DirectionEvidence.LAYOUT_ID_AND_HIERARCHY,
+            timeHint = target.timeHint,
+            avatarBounds = target.avatarBounds,
+            neighborSignature = target.neighborSignature,
+            structureSignature = target.structureSignature,
+            identityDirectionHint = target.identityDirectionHint,
+            identityBubbleBounds = target.bubbleBounds,
+            identityAvatarBounds = target.avatarBounds
+        )
+        val structuralMessage = ChatMessageParser().parse(listOf(structural)).single()
+        val ocrMessage = MomoChatOcrCandidateMapper.parse(
+            listOf(target), mapOf(target.rowIndex to "新识别"), listBounds, ChatMessageParser(), 10
+        ).single()
+
+        assertEquals(structuralMessage.logicalMessageId, ocrMessage.logicalMessageId)
+        assertEquals("旧识别", structuralMessage.content)
+        assertEquals("新识别", ocrMessage.content)
+    }
 
     @Test
     fun longIncomingBubbleUsesExistingAvatarGeometry() {

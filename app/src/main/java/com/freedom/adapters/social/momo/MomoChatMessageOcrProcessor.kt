@@ -137,7 +137,8 @@ internal class MomoChatMessageOcrProcessor(
                             // persists any capture-derived sample data.
                             onComplete(result.copy(
                                 captureDescription = captureDescription,
-                                sampleScreenshotPath = result.sampleScreenshotPath ?: sampleScreenshotPath
+                                sampleScreenshotPath = result.sampleScreenshotPath ?: sampleScreenshotPath,
+                                observationBatchId = batch.effectiveObservationBatchId
                             ))
                         } finally {
                             // The worker owns the bitmap until it exits; caller timeout must not
@@ -228,7 +229,8 @@ internal class MomoChatMessageOcrProcessor(
                         emptyMap(),
                         targets.size,
                         targets.size,
-                        "启动系统截图失败：${failure.message?.takeIf { it.isNotBlank() } ?: failure.javaClass.simpleName}"
+                        "启动系统截图失败：${failure.message?.takeIf { it.isNotBlank() } ?: failure.javaClass.simpleName}",
+                        observationBatchId = batch.effectiveObservationBatchId
                     )
                 )
             }
