@@ -1,26 +1,31 @@
 package com.freedom.features.aireply.ai
 
-import org.junit.Assert.*
-import org.junit.Test
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class DraftSegmentsTest {
-    @Test fun shortTextIsSplitAndSingleGraphemeIsPreserved() {
-        assertEquals(listOf("你", "好"), DraftSegments.split("你好"))
-        assertEquals(listOf("👨‍👩‍👧‍👦"), DraftSegments.split("👨‍👩‍👧‍👦"))
+    @Test
+    fun keepsEveryNonSingletonSegmentBetweenTwoAndThreeGraphemes() {
+        for (length in listOf(1, 2, 3, 4, 8)) {
+            val parts = DraftSegments.split("字".repeat(length))
+            assertEquals(length, parts.sumOf { it.codePointCount(0, it.length) })
+            assertTrue(parts.all { it.codePointCount(0, it.length) == 1 || it.codePointCount(0, it.length) in 2..3 })
+        }
     }
 
-    @Test fun emojiAndCombiningMarksAreNotSplit() {
-        val text = "你好👨‍👩‍👧‍👦e\u0301🇨🇳再见朋友们"
-        val segments = DraftSegments.split(text)
-        assertEquals(text, segments.joinToString(""))
-        assertEquals(1, segments.count { it.contains("👨‍👩‍👧‍👦") })
-        assertEquals(1, segments.count { it.contains("e\u0301") })
-        assertEquals(1, segments.count { it.contains("🇨🇳") })
+    @Test
+    fun preservesEmojiAndCombiningGraphemes() {
+        val text = "A👩‍🚀e\u0301。B"
+        val parts = DraftSegments.split(text)
+        assertEquals(text, parts.joinToString(""))
+        assertTrue(parts.none { it == "👩" || it == "‍" || it == "🚀" || it == "e" })
     }
 
-    @Test fun longTextUsesBoundedSegments() {
-        val segments = DraftSegments.split("abcdefghijklmnopqrstuvwx")
-        assertEquals("abcdefghijklmnopqrstuvwx", segments.joinToString(""))
-        assertTrue(segments.all { it.length in 3..8 })
+    @Test
+    fun messageBoundariesComeFromLinesOrExplicitDelimiter() {
+        assertEquals(listOf("第一条", "第二条"), ReplyMessageSegments.split("第一条\n第二条"))
+        assertEquals(listOf("第一条", "第二条"), ReplyMessageSegments.split("第一条<MSG>第二条"))
+        assertEquals(listOf("第一条。第二条"), ReplyMessageSegments.split("第一条。第二条"))
     }
 }

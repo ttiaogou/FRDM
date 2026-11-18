@@ -259,7 +259,10 @@ class AiReplyDraftCoordinator(
                 finish("AI_REPLY_STATE_CHANGED_BEFORE_INPUT", requestGeneration)
                 return@schedule
             }
-            val segments = DraftSegments.split(decision.draft)
+            // The model owns message boundaries; the existing input cadence still owns
+            // 2-3-grapheme writes inside each queued message. Sending remains manual.
+            val messageQueue = ReplyMessageSegments.split(decision.draft)
+            val segments = messageQueue.flatMap(DraftSegments::split)
             writeNext(target, decision.draft, segments, 0, "", requestGeneration)
         }
     }
@@ -302,21 +305,71 @@ class AiReplyDraftCoordinator(
                 finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
                 return@schedule
             }
-            val checked = runCatching { inputPort.verifyDraft(target, expected) }
-                .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
-            if (checked.status != ChatDraftInputStatus.VERIFIED) {
-                onLog(
-                    "AI 草稿状态：LOCAL_DRAFT_VALIDATION_REJECTED；本地回读校验未通过；" +
-                        "中文原因=${checked.reasonCode}"
-                )
-                finish("DRAFT_VERIFY_${checked.reasonCode}", requestGeneration)
-            } else if (index + 1 < segments.size) {
+            verifySegment(
+                target = target,
+                draft = draft,
+                segments = segments,
+                index = index,
+                expected = expected,
+                requestGeneration = requestGeneration,
+                attempt = 0
+            )
+        }
+    }
+
+    private fun verifySegment(
+        target: ChatDraftInputTarget,
+        draft: String,
+        segments: List<String>,
+        index: Int,
+        expected: String,
+        requestGeneration: Long,
+        attempt: Int
+    ) {
+        if (!isCurrentGeneration(requestGeneration)) return
+        if (!isAiReplyActive() || isManualReviewRequired()) {
+            finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
+            return
+        }
+        val checked = runCatching { inputPort.verifyDraft(target, expected) }
+            .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
+        if (checked.status == ChatDraftInputStatus.VERIFIED) {
+            if (index + 1 < segments.size) {
                 writeNext(target, draft, segments, index + 1, expected, requestGeneration)
             } else {
                 verifyAndFinish(target, draft, requestGeneration)
             }
+            return
         }
+
+        if (attempt < MAX_RECOVERY_VERIFY_RETRIES && isTransientVerificationFailure(checked.status)) {
+            val nextAttempt = attempt + 1
+            onLog(
+                "AI 草稿复核暂未完成：${checked.reasonCode}；" +
+                    "将在 ${RECOVERY_VERIFY_RETRY_DELAY_MS}ms 后进行第 ${nextAttempt + 1} 次复核；" +
+                    "当前段不推进"
+            )
+            scheduler.schedule(RECOVERY_VERIFY_RETRY_DELAY_MS) {
+                verifySegment(
+                    target, draft, segments, index, expected, requestGeneration, nextAttempt
+                )
+            }
+            return
+        }
+
+        onLog(
+            "AI 草稿状态：LOCAL_DRAFT_VALIDATION_REJECTED；本地回读校验未通过；" +
+                "中文原因=${checked.reasonCode}；复核次数=${attempt + 1}；安全停止"
+        )
+        finish("DRAFT_VERIFY_${checked.reasonCode}", requestGeneration)
     }
+
+    private fun isTransientVerificationFailure(status: ChatDraftInputStatus): Boolean =
+        status in setOf(
+            ChatDraftInputStatus.VERIFICATION_FAILED,
+            ChatDraftInputStatus.INPUT_NOT_FOUND,
+            ChatDraftInputStatus.INPUT_NOT_EDITABLE
+        )
 
     private fun verifyAndFinish(target: ChatDraftInputTarget, draft: String, requestGeneration: Long) {
         if (!isCurrentGeneration(requestGeneration)) return
@@ -393,6 +446,8 @@ class AiReplyDraftCoordinator(
         private const val MAX_PROCESSED_KEYS = 256
         private const val MIN_VERIFY_DWELL_DELAY_MS = 500
         private const val MAX_VERIFY_DWELL_DELAY_MS = 900
+        private const val RECOVERY_VERIFY_RETRY_DELAY_MS = 5_000L
+        private const val MAX_RECOVERY_VERIFY_RETRIES = 2
         private const val REPLY_TASK_REQUEST_TIMEOUT_MILLIS = 120_000L
 
         private fun newDraftExecutor() = Executors.newSingleThreadExecutor(ThreadFactory { runnable ->
