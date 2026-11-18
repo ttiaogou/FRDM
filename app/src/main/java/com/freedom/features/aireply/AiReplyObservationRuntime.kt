@@ -959,40 +959,6 @@ class AiReplyObservationRuntime(
         identityCaptureStartedAtMs = 0L
         identityCaptureRetryCount = 0
         identityCaptureTerminalSessionKey = null
-        // The coordinator now delivers a structural batch first. OCR is deliberately deferred
-        // until the identity transaction is terminal and the adapter has confirmed the chat
-        // detail page is restored. The OCR callback re-enters this method with an OCR-complete
-        // batch, so this branch executes only once per structural batch.
-        if ((privateDetail || greetingDetail) && !batch.ocrAttempted && batch.ocrTargets.isNotEmpty()) {
-            if (privateDetail) {
-                val preOcrIdentity = runCatching {
-                    resolveConversationIdentity(currentSessionCandidate?.contactIdentity, snapshot.chatTitleText)
-                }.getOrNull()
-                if (preOcrIdentity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
-                    !preOcrIdentity.contactId.isNullOrBlank()
-                ) {
-                    runCatching { prepareDraftHistory(preOcrIdentity, snapshot) }.onFailure {
-                        onLog("AI 草稿历史预加载失败：CONTACT_HISTORY_PRELOAD_FAILED；" +
-                            "exception=${it.javaClass.simpleName}；继续使用当前窗口消息")
-                    }
-                    onLog("AI 草稿上下文：身份已确认，历史加载完成后进入 OCR")
-                } else {
-                    onLog("AI 草稿上下文：身份未确认；跳过历史加载，进入仅当前窗口 OCR")
-                }
-            }
-            val ocrSnapshot = snapshot
-            val ocrVisit = draftVisitToken
-            chatPagePort.readRecentMessagesAsync(ocrSnapshot, limit = 10) { ocrBatch ->
-                if (ocrVisit == draftVisitToken && isAiReplyActive()) {
-                    handleMessageReadBatch(ocrBatch, ocrSnapshot)
-                } else {
-                    onLog("AI OCR 结果已丢弃：窗口任务已变化")
-                }
-            }
-            onLog("AI OCR 启动：身份采集已终态且聊天页已恢复；开始处理结构批次中的 OCR 区域")
-            return
-        }
-
         snapshotRecoveryStartedAtMs = 0L
         privateMessagesTraversalTaskExecutor.reset()
         lastMessageFingerprint = ""
@@ -1385,6 +1351,39 @@ class AiReplyObservationRuntime(
                 }
             }
         }
+        // The coordinator now delivers a structural batch first. OCR is deliberately deferred
+        // until identity is terminal and the adapter has confirmed the chat detail page is
+        // restored. The OCR callback re-enters this method with an OCR-complete batch.
+        if ((privateDetail || greetingDetail) && !batch.ocrAttempted && batch.ocrTargets.isNotEmpty()) {
+            if (privateDetail) {
+                val preOcrIdentity = runCatching {
+                    resolveConversationIdentity(currentSessionCandidate?.contactIdentity, snapshot.chatTitleText)
+                }.getOrNull()
+                if (preOcrIdentity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                    !preOcrIdentity.contactId.isNullOrBlank()
+                ) {
+                    runCatching { prepareDraftHistory(preOcrIdentity, snapshot) }.onFailure {
+                        onLog("AI 草稿历史预加载失败：CONTACT_HISTORY_PRELOAD_FAILED；" +
+                            "exception=${it.javaClass.simpleName}；继续使用当前窗口消息")
+                    }
+                    onLog("AI 草稿上下文：身份已确认，历史加载完成后进入 OCR")
+                } else {
+                    onLog("AI 草稿上下文：身份未确认；跳过历史加载，进入仅当前窗口 OCR")
+                }
+            }
+            val ocrSnapshot = snapshot
+            val ocrVisit = draftVisitToken
+            chatPagePort.readRecentMessagesAsync(ocrSnapshot, limit = 10) { ocrBatch ->
+                if (ocrVisit == draftVisitToken && isAiReplyActive()) {
+                    handleMessageReadBatch(ocrBatch, ocrSnapshot)
+                } else {
+                    onLog("AI OCR 结果已丢弃：窗口任务已变化")
+                }
+            }
+            onLog("AI OCR 启动：身份采集已终态且聊天页已恢复；开始处理结构批次中的 OCR 区域")
+            return
+        }
+
         val rowIdentity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()
             else currentSessionCandidate?.contactIdentity
         val identity = runCatching { resolveConversationIdentity(rowIdentity, snapshot.chatTitleText) }
