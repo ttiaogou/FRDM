@@ -1373,7 +1373,7 @@ class AiReplyObservationRuntime(
             }
             val ocrSnapshot = snapshot
             val ocrVisit = draftVisitToken
-            chatPagePort.readRecentMessagesAsync(ocrSnapshot, limit = 10) { ocrBatch ->
+            chatMessagePort.readRecentMessagesAsync(ocrSnapshot, limit = 10) { ocrBatch ->
                 if (ocrVisit == draftVisitToken && isAiReplyActive()) {
                     handleMessageReadBatch(ocrBatch, ocrSnapshot)
                 } else {
