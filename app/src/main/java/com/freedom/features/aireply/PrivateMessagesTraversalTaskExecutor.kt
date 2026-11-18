@@ -16,6 +16,8 @@ import com.freedom.features.conversation.domain.contact.ContactIdentityConfidenc
  */
 internal enum class SessionListTraversalPhase {
     POSITIONING_AT_BOTTOM,
+    /** Search for the stable read-only suffix below the frozen unread rows. */
+    SEEKING_UNREAD_BOUNDARY,
     SCANNING_BOTTOM_TO_TOP
 }
 
@@ -45,7 +47,9 @@ internal enum class PrivateMessagesUnreadAdmissionDecision {
     FIRST_SWIPE_REQUIRED,
     UNKNOWN_BLOCKED,
     NO_UNREAD,
-    CONTINUE_BOTTOM_POSITIONING
+    CONTINUE_BOTTOM_POSITIONING,
+    WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+    UNREAD_BOUNDARY_CONFIRMED
 }
 
 internal enum class PrivateMessagesScrollObservationDecision {
@@ -57,6 +61,8 @@ internal enum class PrivateMessagesScrollObservationDecision {
     BOTTOM_BOUNDARY_CANDIDATE,
     BOTTOM_VIEWPORT_CHANGED
 }
+
+private const val UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS = 2
 
 /** A complete, read-only decision packet for one fresh inbox snapshot. */
 internal data class PrivateMessagesListSnapshotEvaluation(
@@ -166,6 +172,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
     val ambiguousSessionIdentityKeys: MutableSet<String> = LinkedHashSet()
     val lockedUnreadSessionKeys: MutableSet<String> = LinkedHashSet()
     var lockedUnreadSetFinalized: Boolean = false
+    private var unreadBoundarySignature: String = ""
+    private var unreadBoundaryStabilityCount: Int = 0
 
     var normalInboxHadUnread: Boolean = false
     var normalInboxUnreadStateUnknown: Boolean = false
@@ -216,6 +224,32 @@ internal class PrivateMessagesTraversalTaskExecutor {
             attemptedSessionKeys,
             ambiguousSessionIdentityKeys
         )
+    }
+
+    private fun resetUnreadBoundaryObservation() {
+        unreadBoundarySignature = ""
+        unreadBoundaryStabilityCount = 0
+    }
+
+    private fun buildUnreadBoundarySignature(snapshot: ChatPageSnapshot): String {
+        val rows = snapshot.chatListCandidates
+            .filter { ChatSessionManagementPolicy.isEligible(it) }
+            .filter {
+                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
+            }
+            .sortedWith(
+                compareBy<ChatListCandidateSnapshot> { it.rowBounds.top }
+                    .thenBy { it.rowBounds.bottom }
+            )
+        val keys = rows.mapNotNull { row ->
+            ChatSessionManagementPolicy.stableSessionKey(row)
+                .takeIf(String::isNotBlank)
+                ?.let { key ->
+                    "$key@${row.rowBounds.left},${row.rowBounds.top}," +
+                        "${row.rowBounds.right},${row.rowBounds.bottom}:${row.unreadStatus.name}"
+                }
+        }
+        return if (rows.isNotEmpty() && keys.size == rows.size) keys.joinToString("|") else ""
     }
 
     fun unreadEvidence(snapshot: ChatPageSnapshot): PrivateMessagesUnreadEvidence {
@@ -269,7 +303,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         if (!candidatesEmpty) sessionListStabilityRetryCount = 0
 
         val unreadAdmissionDecision = if (initialInboxTopPositioningCompleted && !candidatesEmpty &&
-            phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM && !wasWaitingForUnread
+            (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM ||
+                phase == SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) && !wasWaitingForUnread
         ) {
             evaluateUnreadAdmission(snapshot)
         } else {
@@ -282,7 +317,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         if (explicitUnreadWhileWaiting) attemptedSessionKeys.clear()
 
         val nextCandidate = if (initialInboxTopPositioningCompleted && !candidatesEmpty &&
-            unreadAdmissionDecision == null
+            (unreadAdmissionDecision == null ||
+                unreadAdmissionDecision == PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED)
         ) {
             selectNextCandidate(snapshot.chatListCandidates, lockedUnreadSessionKeys)
         } else {
@@ -345,11 +381,52 @@ internal class PrivateMessagesTraversalTaskExecutor {
             }
         ) normalInboxUnreadStateUnknown = true
 
-        return when {
-            normalInboxUnreadStateUnknown -> PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
-            lockedUnreadSessionKeys.isEmpty() -> PrivateMessagesUnreadAdmissionDecision.NO_UNREAD
-            else -> PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
+        if (normalInboxUnreadStateUnknown) {
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
         }
+        if (lockedUnreadSessionKeys.isEmpty()) {
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.NO_UNREAD
+        }
+
+        if (viewportUnread.isNotEmpty()) {
+            phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
+        }
+
+        if (phase != SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) {
+            phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
+            resetUnreadBoundaryObservation()
+        }
+
+        val eligibleRows = snapshot.chatListCandidates.filter(ChatSessionManagementPolicy::isEligible)
+        val visibleReadSuffix = eligibleRows.isNotEmpty() &&
+            eligibleRows.all { it.unreadStatus == ChatUnreadStatus.READ }
+        if (!visibleReadSuffix) {
+            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
+        }
+
+        val signature = buildUnreadBoundarySignature(snapshot)
+        if (signature.isBlank()) {
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
+        }
+        if (signature == unreadBoundarySignature) {
+            unreadBoundaryStabilityCount++
+        } else {
+            unreadBoundarySignature = signature
+            unreadBoundaryStabilityCount = 1
+        }
+        if (unreadBoundaryStabilityCount < UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS) {
+            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
+        }
+
+        phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        lockedUnreadSetFinalized = true
+        resetUnreadBoundaryObservation()
+        return PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED
     }
 
     /**
@@ -385,7 +462,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
 
         if (!positionChanged) {
             noProgressScrollCount += 1
-            return if (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM &&
+            return if (
+                (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM ||
+                    phase == SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) &&
                 noProgressScrollCount >= maxNoProgressScrolls
             ) {
                 PrivateMessagesScrollObservationDecision.BOTTOM_BOUNDARY_CANDIDATE
@@ -437,6 +516,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         ambiguousSessionIdentityKeys.clear()
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
+        resetUnreadBoundaryObservation()
         normalInboxHadUnread = false
         normalInboxUnreadStateUnknown = false
         sessionListStabilityRetryCount = 0
@@ -463,6 +543,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         clearCurrentSession()
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
+        resetUnreadBoundaryObservation()
         attemptedSessionKeys.clear()
         initialInboxPositionCheckCompleted = true
         phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM

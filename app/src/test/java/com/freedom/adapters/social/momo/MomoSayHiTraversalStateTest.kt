@@ -65,7 +65,7 @@ class MomoSayHiTraversalStateTest {
     }
 
     @Test
-    fun restoreRebuildsOnlyEligibleDeferredRowsAndStartsAFreshBoundarySearch() {
+    fun restoreRebuildsOnlyEligibleDeferredRowsAndStartsAFreshForwardPass() {
         val repository = InMemoryRepository().apply {
             value = MomoSayHiTraversalCheckpointRecord(
                 processedRowKeys = setOf("done"),
@@ -92,31 +92,6 @@ class MomoSayHiTraversalStateTest {
         assertFalse(state.deferredReplayStarted)
         assertFalse(state.isDeferredRetryDue("pending", 4_999L))
         assertTrue(state.isDeferredRetryDue("pending", 5_000L))
-    }
-
-    @Test
-    fun boundarySearchTransitionsOnlyAfterAStableReadSuffix() {
-        val state = MomoSayHiTraversalState(
-            MomoSayHiTraversalCheckpointStore(InMemoryRepository())
-        )
-
-        assertEquals(
-            MomoSayHiTraversalState.TraversalPhase.SEEK_UNREAD_BOUNDARY,
-            state.traversalPhase
-        )
-        assertFalse(state.observeUnreadBoundary(true, false, "unread-only"))
-        assertFalse(state.observeUnreadBoundary(true, true, "unread-read"))
-        assertTrue(state.observeUnreadBoundary(true, true, "unread-read"))
-        assertEquals(
-            MomoSayHiTraversalState.TraversalPhase.PROCESS_BOTTOM_TO_TOP,
-            state.traversalPhase
-        )
-
-        state.beginFreshPass()
-        assertEquals(
-            MomoSayHiTraversalState.TraversalPhase.SEEK_UNREAD_BOUNDARY,
-            state.traversalPhase
-        )
     }
 
     @Test

@@ -969,7 +969,6 @@ internal class MomoSocialAdapter(
 
         resetReceivedGreetingsEntrySearch()
         sayHiAutonomousBrowseController.reset()
-        sayHiTraversalState.beginFreshPass()
         clearSayHiSelectedGreeting()
         resetSayHiRowTapTransaction()
         receivedGreetingsEntryTapPending = false
@@ -2140,9 +2139,7 @@ internal class MomoSocialAdapter(
         }
         // New users are isolated from one user's transient failures. Deferred users get a
         // bounded retry opportunity only after currently visible fresh candidates are handled.
-        val candidate = (unprocessedCandidates + deferredRetryCandidates)
-            .distinctBy { MomoSayHiIdentityFingerprintPolicy.rowKey(it) }
-            .maxByOrNull { it.bounds.bottom } ?: run {
+        val candidate = (unprocessedCandidates.firstOrNull() ?: deferredRetryCandidates.firstOrNull()) ?: run {
             sayHiStableCandidateKey = ""
             sayHiStableCandidateTarget = null
             sayHiStableCandidateWindow = null
@@ -3922,39 +3919,7 @@ internal class MomoSocialAdapter(
         if (allowAutonomousScroll && result.kind == MomoSayHiPageKind.RECEIVED_GREETINGS_LIST &&
             sayHiNavigationFlowController.isReceivedListConfirmed()
         ) {
-            if (sayHiTraversalState.traversalPhase == MomoSayHiTraversalState.TraversalPhase.SEEK_UNREAD_BOUNDARY) {
-                val orderedRows = result.listRows
-                    .filter { it.unread.status == EvidenceStatus.CONFIRMED }
-                    .sortedWith(compareBy<MomoSayHiListRow> { it.bounds.top }.thenBy { it.bounds.bottom })
-                val unreadIndexes = orderedRows.mapIndexedNotNull { index, row ->
-                    index.takeIf { row.unread.value == true }
-                }
-                val bottomUnreadIndex = unreadIndexes.maxOrNull()
-                val hasReadBelowUnread = bottomUnreadIndex != null &&
-                    orderedRows.drop(bottomUnreadIndex + 1).isNotEmpty() &&
-                    orderedRows.drop(bottomUnreadIndex + 1).all { it.unread.value == false }
-                val boundarySignature = orderedRows.joinToString("|") { row ->
-                    "${MomoSayHiIdentityFingerprintPolicy.rowKey(row)}:${row.unread.value}:${row.bounds.top}:${row.bounds.bottom}"
-                }
-                val boundaryConfirmed = sayHiTraversalState.observeUnreadBoundary(
-                    hasUnread = unreadIndexes.isNotEmpty(),
-                    hasReadBelowUnread = hasReadBelowUnread,
-                    signature = boundarySignature
-                )
-                if (boundaryConfirmed) {
-                    onLog("收到招呼遍历阶段切换：已确认未读区域下边界；停止继续上滑，开始从最下面未读消息向上处理")
-                } else {
-                    // Boundary search deliberately does not process rows. It only moves toward
-                    // older rows until a stable confirmed read suffix separates from unread rows.
-                    dispatchAutonomousSayHiListScroll(tree, result)
-                    greetingRowActionHandled = true
-                }
-            }
-            if (!greetingRowActionHandled &&
-                sayHiTraversalState.traversalPhase == MomoSayHiTraversalState.TraversalPhase.PROCESS_BOTTOM_TO_TOP
-            ) {
-                greetingRowActionHandled = processReceivedGreetingRows(tree, result)
-            }
+            greetingRowActionHandled = processReceivedGreetingRows(tree, result)
             if (!greetingRowActionHandled) {
                 // Empty visible rows are not by themselves proof of completion. Route them
                 // through the same stable-boundary / scroll-progress checks as populated pages.
@@ -4098,7 +4063,6 @@ internal class MomoSocialAdapter(
                 }
                 return
             }
-            sayHiTraversalState.markFinished()
             onLog("收到招呼自主浏览完成：外层 listview 连续两份完整、间隔快照均确认不可滚动，且不存在待恢复用户")
             return
         }
@@ -4145,7 +4109,6 @@ internal class MomoSocialAdapter(
         if (!sayHiAutonomousBrowseController.shouldScroll(signature, now, list.scrollable)) {
             if (sayHiAutonomousBrowseController.isFinished()) {
                 if (!sayHiTraversalState.hasDeferredRows) {
-                    sayHiTraversalState.markFinished()
                     onLog("收到招呼自主浏览完成：连续页面内容无变化，停止继续滚动")
                 } else {
                     onLog("收到招呼自主浏览未完成：列表边界候选已达到，但仍有 ${sayHiTraversalState.deferredRowCount} 个用户处于待恢复状态；不报告 COMPLETE，保留行键和重试记录")
@@ -4190,22 +4153,14 @@ internal class MomoSocialAdapter(
             )
             return
         }
-        val traversalDirection = if (
-            sayHiTraversalState.deferredReturnToTopActive ||
-            sayHiTraversalState.traversalPhase == MomoSayHiTraversalState.TraversalPhase.PROCESS_BOTTOM_TO_TOP
-        ) VerticalSwipeDirection.DOWN else VerticalSwipeDirection.UP
         val request = GestureIntentRequest(
             id = "momo-sayhi-list-scroll-${System.nanoTime()}",
             intent = GestureIntent.VerticalSwipe(
                 viewport = visibleListBounds,
-                direction = traversalDirection,
+                direction = if (sayHiTraversalState.deferredReturnToTopActive) VerticalSwipeDirection.DOWN else VerticalSwipeDirection.UP,
                 durationMs = 520L
             ),
-            description = if (traversalDirection == VerticalSwipeDirection.UP) {
-                "陌陌收到招呼列表安全上滑寻找未读边界"
-            } else {
-                "陌陌收到招呼列表安全下滑回溯未读消息"
-            },
+            description = "陌陌收到招呼列表安全上滑",
             executionContext = executionContext
         )
         if (!sayHiListSnapshotRecoveryPolicy.tryBeginGesture(SystemClock.elapsedRealtime())) {

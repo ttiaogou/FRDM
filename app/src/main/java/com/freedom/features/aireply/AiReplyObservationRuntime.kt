@@ -1901,6 +1901,18 @@ class AiReplyObservationRuntime(
                     scrollSessionList(snapshot, toTop = false)
                     return
                 }
+                PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION -> {
+                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                    onLog("AI Reply 启动准入[UNREAD_BOUNDARY_CANDIDATE]：当前视口已与未读区分离；暂不继续向上滑动，等待稳定快照确认")
+                    scheduleSessionListStabilityRetry("未读区域下方已读边界候选")
+                    return
+                }
+                PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED -> {
+                    sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
+                    onLog("AI Reply 启动准入[UNREAD_BOUNDARY_CONFIRMED]：已确认未读区下方连续已读区域；停止继续到底部，开始从最下面未读会话向上处理")
+                    // Do not return: the current stable snapshot is already the first
+                    // bottom-to-top processing snapshot. The next candidate is selected below.
+                }
             }
         }
 

@@ -13,26 +13,12 @@ internal class MomoSayHiTraversalState(
     private val maxRetryBackoffStage: Int = DEFAULT_MAX_RETRY_BACKOFF_STAGE,
     private val safeTargetFailureReasonPrefix: String = DEFAULT_SAFE_TARGET_FAILURE_REASON_PREFIX
 ) {
-    internal enum class TraversalPhase {
-        /** Search toward older rows until a stable read-only suffix follows the unread rows. */
-        SEEK_UNREAD_BOUNDARY,
-        /** Process the bottom-most visible unread row and move back toward newer rows. */
-        PROCESS_BOTTOM_TO_TOP,
-        FINISHED
-    }
-
     private val processedRowKeys = LinkedHashSet<String>()
     private val processedContactIdHashes = LinkedHashSet<String>()
     private val deferredRowKeys = LinkedHashSet<String>()
     private val retryCounts = LinkedHashMap<String, Int>()
     private val retryAfterEpochMs = LinkedHashMap<String, Long>()
     private val safeTargetValidationFailures = LinkedHashMap<String, Int>()
-
-    var traversalPhase: TraversalPhase = TraversalPhase.SEEK_UNREAD_BOUNDARY
-        private set
-    private var hasSeenUnreadInCurrentPass = false
-    private var unreadBoundarySignature = ""
-    private var unreadBoundarySamples = 0
 
     var deferredReturnToTopActive: Boolean = false
         private set
@@ -72,52 +58,10 @@ internal class MomoSayHiTraversalState(
                 }
             }
         }
-        // A platform scroll position is never restored; every run starts a fresh boundary search.
-        beginFreshPass()
-        return RestoreSummary(processedRowKeys.size, deferredRowKeys.size, processedContactIdHashes.size)
-    }
-
-    fun beginFreshPass() {
-        traversalPhase = TraversalPhase.SEEK_UNREAD_BOUNDARY
-        hasSeenUnreadInCurrentPass = false
-        unreadBoundarySignature = ""
-        unreadBoundarySamples = 0
+        // A platform scroll position is never restored; every run starts a fresh forward pass.
         deferredReturnToTopActive = false
         deferredReplayStarted = false
-    }
-
-    /**
-     * Confirms the business boundary between the unread suffix and older read rows.
-     * Two identical complete observations are required so one transient row state cannot
-     * terminate the boundary-search phase.
-     */
-    fun observeUnreadBoundary(
-        hasUnread: Boolean,
-        hasReadBelowUnread: Boolean,
-        signature: String
-    ): Boolean {
-        if (traversalPhase != TraversalPhase.SEEK_UNREAD_BOUNDARY) {
-            return traversalPhase == TraversalPhase.PROCESS_BOTTOM_TO_TOP
-        }
-        if (hasUnread) hasSeenUnreadInCurrentPass = true
-        if (!hasSeenUnreadInCurrentPass || !hasReadBelowUnread || signature.isBlank()) {
-            unreadBoundarySignature = ""
-            unreadBoundarySamples = 0
-            return false
-        }
-        if (signature == unreadBoundarySignature) {
-            unreadBoundarySamples++
-        } else {
-            unreadBoundarySignature = signature
-            unreadBoundarySamples = 1
-        }
-        if (unreadBoundarySamples < 2) return false
-        traversalPhase = TraversalPhase.PROCESS_BOTTOM_TO_TOP
-        return true
-    }
-
-    fun markFinished() {
-        traversalPhase = TraversalPhase.FINISHED
+        return RestoreSummary(processedRowKeys.size, deferredRowKeys.size, processedContactIdHashes.size)
     }
 
     fun isProcessedRow(rowKey: String): Boolean = rowKey in processedRowKeys
@@ -223,7 +167,6 @@ internal class MomoSayHiTraversalState(
         safeTargetValidationFailures.clear()
         deferredReturnToTopActive = false
         deferredReplayStarted = false
-        beginFreshPass()
         checkpointStore.clear()
     }
 

@@ -124,6 +124,19 @@ class PrivateMessagesTraversalTaskExecutorTest {
             executor.evaluateUnreadAdmission(snapshot(unread))
         )
         assertEquals(setOf(key(unread)), executor.lockedUnreadSessionKeys)
+        assertEquals(SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY, executor.phase)
+
+        val read = candidate(2, "Read", ChatUnreadStatus.READ, top = 700)
+        assertEquals(
+            PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+            executor.evaluateUnreadAdmission(snapshot(read))
+        )
+        assertEquals(
+            PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED,
+            executor.evaluateUnreadAdmission(snapshot(read))
+        )
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+        assertTrue(executor.lockedUnreadSetFinalized)
     }
 
     @Test
@@ -377,6 +390,38 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertEquals(top, executor.selectNextCandidate(candidates))
         assertEquals(null, executor.selectNextCandidate(candidates, lockedIdentityKeys = setOf(key(read))))
         assertEquals(top, executor.selectNextCandidate(candidates, lockedIdentityKeys = setOf(key(top))))
+    }
+
+    @Test
+    fun boundaryPhaseDoesNotExposeCandidateUntilReadSuffixIsStable() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+        }
+        val unread = candidate(0, "Unread", ChatUnreadStatus.UNREAD, top = 100)
+        val read = candidate(1, "Read", ChatUnreadStatus.READ, top = 400)
+
+        val first = executor.evaluateListSnapshot(snapshot(unread, read), false, 2)
+        assertEquals(
+            PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            first.unreadAdmissionDecision
+        )
+        assertEquals(null, first.nextCandidate)
+
+        val boundaryCandidate = executor.evaluateListSnapshot(snapshot(read), false, 2)
+        assertEquals(
+            PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+            boundaryCandidate.unreadAdmissionDecision
+        )
+        assertEquals(null, boundaryCandidate.nextCandidate)
+
+        val confirmed = executor.evaluateListSnapshot(snapshot(read), false, 2)
+        assertEquals(
+            PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED,
+            confirmed.unreadAdmissionDecision
+        )
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+        assertEquals(null, confirmed.nextCandidate)
     }
 
     @Test
