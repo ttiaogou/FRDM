@@ -1006,7 +1006,7 @@ internal class MomoSocialAdapter(
                             onLog("收到招呼手势回调超时：新鲜结构已确认聊天详情候选；保留事务，继续等待点击来源核验，不启动 OCR")
                             return true
                         }
-                        currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY -> {
+                        isSayHiProfileSurfacePresent() -> {
                             sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
                             sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
                             onLog("收到招呼手势回调超时：当前为资料页；转入资料页独立识别与安全返回流程")
@@ -2757,25 +2757,6 @@ internal class MomoSocialAdapter(
             return true
         }
         val ageMs = System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs
-        if (currentActivity != MomoSayHiPageContract.PROFILE_ACTIVITY) {
-            if (ageMs < SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
-            sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
-            sessionComponents.sampleStore.persistSayHiIdentityResult(
-                selected.rowKey, selected.displayName, sayHiSelectedIdentityStatus,
-                0, "PROFILE_ACTIVITY_NOT_CONFIRMED", null
-            )
-            if (isReceivedGreetingsListStructureVisible()) {
-                deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
-                clearSayHiSelectedGreeting()
-                onLog("收到招呼头像身份采集：头像点击后仍停留在收到招呼列表；本行标记为未验证并跳过")
-                return inspectSayHiPageAndAutonomousBrowse(
-                    allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
-                )
-            }
-            onLog("收到招呼头像身份采集：目标资料页 Activity 暂未确认；保留当前用户，等待新的 Activity/窗口快照，不继续点击")
-            return true
-        }
-
         val observedDialog = latestDialogWindowObservation()
         if (observedDialog != null) {
             val dialogStillPresent = rootAccess.isTargetWindowPresent(observedDialog.windowId)
@@ -2816,9 +2797,7 @@ internal class MomoSocialAdapter(
             )
         )
         if (tree == null || tree.window.packageName != targetPackage ||
-            tree.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
-            !accessibilityGateway.isWindowCurrent(tree.window)
-        ) {
+            !isSayHiProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)) {
             if (ageMs < SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
             sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
             sessionComponents.sampleStore.persistSayHiIdentityResult(
@@ -2925,8 +2904,7 @@ internal class MomoSocialAdapter(
             )
             return returnFromSayHiIdentityProfile(true)
         }
-        if (tree.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
-            !accessibilityGateway.isWindowCurrent(tree.window)
+        if (!isSayHiProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)
         ) {
             sayHiProfileScrollAttempted = false
             onLog("收到招呼身份采集：资料页窗口在滑动准备期间发生变化；丢弃旧坐标")
@@ -3022,6 +3000,29 @@ internal class MomoSocialAdapter(
             onLog("收到招呼身份采集：统一手势协调器拒绝资料页上滑；submission=$submission；不重复滑动")
         }
         return true
+    }
+
+    /** Current Momo builds render this profile surface inside MaintabActivity. */
+    private fun isSayHiProfileTree(tree: AccessibilityTreeSnapshot): Boolean {
+        val ids = tree.nodes.asSequence().map { it.viewId.substringAfterLast('/') }.toSet()
+        return setOf(
+            "root_layout",
+            "personal_profile_name",
+            "toolbar_id",
+            "tabs",
+            "pagertabcontent"
+        ).all(ids::contains)
+    }
+
+    private fun isSayHiProfileSurfacePresent(): Boolean {
+        val tree = runCatching {
+            accessibilityGateway.inspectActiveWindow(
+                TreeInspectionRequest(maxNodes = 1_200, maxDepth = 48, maxDurationMs = 800L,
+                    textCapture = NodeTextCapture.NONE)
+            )
+        }.getOrNull() ?: return false
+        return tree.window.packageName == targetPackage &&
+            isSayHiProfileTree(tree) && accessibilityGateway.isWindowCurrent(tree.window)
     }
 
     private fun returnFromSayHiIdentityProfile(pageChanged: Boolean): Boolean {
@@ -3308,19 +3309,19 @@ internal class MomoSocialAdapter(
      * Keeps the existing active-window, dialog.h, popup-blocker and WindowRef checks in one path.
      */
     private fun submitVerifiedProfileBackNavigation(): SayHiProfileBackInspection? {
-        if (activityClass() != MomoSayHiPageContract.PROFILE_ACTIVITY) {
-            onLog("资料页专用 BACK 拒绝：当前 Activity 已不是已确认的 PersonalProfileActivityK")
-            return null
-        }
         val dialogObservation = latestDialogWindowObservation()
         val inspection = rootAccess.withTargetWindowRoots { windows ->
             if (windows.isEmpty()) return@withTargetWindowRoots null
             val active = windows.firstOrNull { it.active }
                 ?: windows.firstOrNull { it.focused }
                 ?: return@withTargetWindowRoots null
-            if (active.window.packageName != targetPackage ||
-                active.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
-                active.window.windowId < 0
+            if (active.window.packageName != targetPackage || active.window.windowId < 0 ||
+                !isSayHiProfileTree(
+                    accessibilityGateway.inspectActiveWindow(
+                        TreeInspectionRequest(maxNodes = 1_200, maxDepth = 48, maxDurationMs = 800L,
+                            textCapture = NodeTextCapture.NONE)
+                    ) ?: return@withTargetWindowRoots null
+                )
             ) return@withTargetWindowRoots null
 
             val dialogRoot = dialogObservation?.let { observation ->
@@ -3357,12 +3358,12 @@ internal class MomoSocialAdapter(
                 val isDialogH = dialogObservation?.windowId == candidate.window.windowId
                 val safety = browseComponents.popupInspector.inspectBlockingOverlay(
                     candidate.root,
-                    if (isDialogH) dialogObservation?.className else MomoSayHiPageContract.PROFILE_ACTIVITY
+                    if (isDialogH) dialogObservation?.className else candidate.window.activityClass
                 )
                 onLog(
                     "资料页 BACK 安全取证[WINDOW]：windowId=${candidate.window.windowId}；" +
                         "active=${candidate.active}；focused=${candidate.focused}；" +
-                        "eventClass=${if (isDialogH) dialogObservation?.className else MomoSayHiPageContract.PROFILE_ACTIVITY}；" +
+                        "eventClass=${if (isDialogH) dialogObservation?.className else candidate.window.activityClass}；" +
                         "visited=${safety.visitedNodes}；elapsedMs=${safety.elapsedMs}；" +
                         "complete=${safety.complete}；stopReason=${safety.stopReason ?: "none"}；" +
                         "popupCandidates=${safety.popupCandidateCount}；" +
@@ -3386,7 +3387,7 @@ internal class MomoSocialAdapter(
         }
         val accepted = accessibilityGateway.performVerifiedNavigationBack(
             inspection.window,
-            MomoSayHiPageContract.PROFILE_ACTIVITY
+            inspection.window.activityClass
         )
         if (!accepted) return null
         return inspection
@@ -5042,29 +5043,21 @@ internal class MomoSocialAdapter(
             }
 
             InboxIdentityCaptureStage.WAITING_LIST_RETURN -> {
-                if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) {
-                    val restoredChat = runCatching { inspectChatPage() }.getOrNull()
-                    val restored = restoredChat != null &&
-                        restoredChat.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
-                        restoredChat.packageName == targetPackage &&
-                        normalizeIdentityDisplayName(restoredChat.chatTitleText) ==
-                            normalizeIdentityDisplayName(pending.anchor.displayName)
-                    if (restored) {
+                // The chat detail may be hosted by ChatActivity or wrapped by MaintabActivity.
+                // Inspect the stable three-anchor chat fingerprint directly; calling
+                // inspectChatPage() here would re-enter this pending transaction and keep
+                // returning UNKNOWN.
+                val restoredChat = inspectCurrentChatDetailFingerprint()?.second
+                val restored = restoredChat != null &&
+                    normalizeIdentityDisplayName(restoredChat.chatTitleText) ==
+                        normalizeIdentityDisplayName(pending.anchor.displayName)
+                if (restored) {
                         completePendingInboxIdentityBinding(
                             pending,
                             pending.platformUserId != null
                         )
-                        onLog("AI 联系人身份采集：已返回并确认原私人聊天详情页；窗口和会话标题匹配")
-                        return false
-                    }
-                    if (ageMs > SAYHI_PROFILE_PAGE_TIMEOUT_MS) {
-                        failPendingInboxIdentityCapture(
-                            pending,
-                            "RETURNED_WINDOW_NOT_ORIGINAL_CHAT_DETAIL"
-                        )
-                        return false
-                    }
-                    return true
+                    onLog("AI 联系人身份采集：已返回并确认原私人聊天详情页；三节点指纹和聊天标题匹配；继续当前窗口回复流程")
+                    return false
                 }
                 if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY &&
                     ageMs > SAYHI_PROFILE_PAGE_TIMEOUT_MS &&
@@ -5078,6 +5071,14 @@ internal class MomoSocialAdapter(
                     if (back.dialogHPresent) {
                         pending.stage = InboxIdentityCaptureStage.WAITING_PROFILE
                     }
+                }
+                if (ageMs > SAYHI_PROFILE_PAGE_TIMEOUT_MS) {
+                    failPendingInboxIdentityCapture(
+                        pending,
+                        "RETURNED_WINDOW_NOT_ORIGINAL_CHAT_DETAIL"
+                    )
+                    onLog("AI 联系人身份采集终态：返回页未通过聊天三节点指纹/标题确认；降级当前窗口消息，不阻断回复生成")
+                    return false
                 }
                 return true
             }
