@@ -4879,7 +4879,7 @@ internal class MomoSocialAdapter(
         }
         onLog(
             if (identityVerified) {
-                "AI 联系人身份采集完成：资料页 ID 已绑定回唯一匹配的原消息行，并由 ContactIdentityManager 确认为 PLATFORM_ID_VERIFIED"
+                "AI 联系人身份采集完成：资料页 ID 已完成终态回传；等待 AI Reply 绑定当前私人会话"
             } else {
                 "AI 联系人身份采集未完成：返回列表后无法将资料页 ID 唯一绑定到原消息行；不关联任何历史记录"
             }

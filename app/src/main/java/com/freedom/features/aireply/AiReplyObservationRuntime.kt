@@ -1191,8 +1191,28 @@ class AiReplyObservationRuntime(
                 }
                 if (identityOutcome != null) {
                     if (identityOutcome.verifiedIdentity != null) {
-                        currentSessionCandidate?.contactIdentity = identityOutcome.verifiedIdentity
-                        onLog("AI 联系人身份采集完成：已取得并绑定当前私人会话身份；继续加载历史上下文")
+                        val verifiedIdentity = identityOutcome.verifiedIdentity
+                        val candidate = currentSessionCandidate
+                        val sessionStillMatches = candidate != null &&
+                            currentSessionWindowKey == windowSessionKey(snapshot) &&
+                            ChatSessionManagementPolicy.matchChatHeader(
+                                currentSessionName,
+                                snapshot.chatTitleText
+                            ) != null &&
+                            verifiedIdentity.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                            !verifiedIdentity.contactId.isNullOrBlank()
+                        if (!sessionStillMatches) {
+                            onLog(
+                                "AI 联系人身份绑定失败：CURRENT_SESSION_BINDING_MISMATCH；" +
+                                    "不加载联系人历史；仅当前窗口上下文"
+                            )
+                            return
+                        }
+                        candidate!!.contactIdentity = verifiedIdentity
+                        onLog(
+                            "AI 联系人身份绑定完成：已写回当前私人会话候选；" +
+                                "confidence=${verifiedIdentity.confidence.name}；继续加载对应联系人历史"
+                        )
                     } else if (identityOutcome.awaiting) {
                         onLog(
                             "AI 联系人身份采集中：等待资料页/身份回传；" +
