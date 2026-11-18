@@ -379,14 +379,39 @@ internal class AccessibilityServiceDependencies internal constructor(
                     .resolve(identity, title)
             },
             onDraftConversationObserved = { batch, snapshot, identity, visitToken ->
-                val history = runCatching {
-                    com.freedom.features.conversation.domain.contact.ContactHistoryResolver(root.conversationRepository)
-                        .loadDraftHistory(identity, snapshot.chatTitleText)
-                }.onFailure {
-                    addLog("AI 草稿历史读取失败：CONTACT_HISTORY_READ_FAILED；exception=${it.javaClass.simpleName}")
-                }.getOrNull()
-                addLog("AI 草稿上下文：source=${history?.lookupSource ?: "VISIBLE_ONLY"}；历史记录=${history?.messages?.size ?: 0}；按已采集ID或昵称关联联系人")
-                aiReplyDraftCoordinator.generateVisibleDraft(batch, snapshot, visitToken = visitToken, history = history)
+                val verifiedIdentity = identity?.takeIf {
+                    it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                        !it.contactId.isNullOrBlank()
+                }
+                val history = if (verifiedIdentity != null) {
+                    runCatching {
+                        com.freedom.features.conversation.domain.contact.ContactHistoryResolver(root.conversationRepository)
+                            .loadDraftHistory(verifiedIdentity, snapshot.chatTitleText)
+                    }.onFailure {
+                        addLog(
+                            "AI 草稿历史读取失败：CONTACT_HISTORY_READ_FAILED；" +
+                                "contactIdVerified=true；exception=${it.javaClass.simpleName}；" +
+                                "降级为仅当前窗口上下文"
+                        )
+                    }.getOrNull()
+                } else {
+                    addLog("AI 草稿上下文：身份未达到 PLATFORM_ID_VERIFIED；不加载联系人历史；仅当前窗口上下文")
+                    null
+                }
+                addLog(
+                    if (history != null) {
+                        "AI 草稿上下文合并顺序：已验证联系人历史=${history.messages.size}条；" +
+                            "再合并当前窗口消息=${batch.messages.size}条；source=${history.lookupSource}"
+                    } else {
+                        "AI 草稿上下文合并顺序：无可用联系人历史；仅使用当前窗口消息=${batch.messages.size}条"
+                    }
+                )
+                aiReplyDraftCoordinator.generateVisibleDraft(
+                    batch,
+                    snapshot,
+                    visitToken = visitToken,
+                    history = history
+                )
             },
             onVerifiedConversationObserved = { batch, identity, snapshot ->
                 val verifiedIdentity = identity?.takeIf {
