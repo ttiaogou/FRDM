@@ -1333,9 +1333,12 @@ class AiReplyObservationRuntime(
                             return
                         }
                         candidate!!.contactIdentity = verifiedIdentity
+                        identityPendingMessageBatch = null
+                        identityPendingSnapshot = null
                         onLog(
                             "AI 联系人身份绑定完成：已写回当前私人会话候选；" +
-                                "confidence=${verifiedIdentity.confidence.name}；继续加载对应联系人历史"
+                                "confidence=${verifiedIdentity.confidence.name}；" +
+                                "恢复缓存消息=${batch.messages.size}条；继续加载对应联系人历史并提交模型"
                         )
                     } else if (identityOutcome.awaiting) {
                         identityPendingMessageBatch = batch
