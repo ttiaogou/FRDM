@@ -1335,15 +1335,25 @@ class AiReplyObservationRuntime(
                                 "身份已确认；继续加载对应联系人历史并提交模型"
                         )
                     } else if (identityOutcome.awaiting) {
+                        val elapsed = System.currentTimeMillis() - identityCaptureStartedAtMs
+                        if (elapsed < IDENTITY_CAPTURE_TIMEOUT_MS) {
+                            onLog(
+                                "AI 联系人身份采集中：等待资料页/身份回传；" +
+                                    "stage=${identityOutcome.request.name}；" +
+                                    "elapsedMs=${elapsed.coerceAtLeast(0L)}；继续等待，不加载历史"
+                            )
+                            return
+                        }
+                        identityCaptureTerminalSessionKey = identitySessionKey
                         onLog(
-                            "AI 联系人身份采集中：等待资料页/身份回传；" +
-                                "stage=${identityOutcome.request.name}；" +
-                                "暂不读取消息、不启动 OCR、不加载历史、不提交模型"
+                            "AI 联系人身份采集终态：IDENTITY_CAPTURE_TIMEOUT；" +
+                                "request=${identityOutcome.request.name}；" +
+                                "降级当前窗口消息；不因身份失败阻断回复生成"
                         )
-                        return
                     } else if (identityOutcome.failureReason != null) {
                         identityCaptureTerminalSessionKey = identitySessionKey
-                        onLog("AI 联系人身份采集失败：${identityOutcome.failureReason}；降级使用当前会话消息，不加载历史")
+                        onLog("AI 联系人身份采集终态：${identityOutcome.failureReason}；" +
+                            "降级当前窗口消息；不因身份失败阻断回复生成")
                     }
                 }
                 }

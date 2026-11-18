@@ -4971,19 +4971,6 @@ internal class MomoSocialAdapter(
 
             InboxIdentityCaptureStage.WAITING_PROFILE -> {
                 if (pending.profileScrollInFlight) return true
-                if (currentActivity != MomoSayHiPageContract.PROFILE_ACTIVITY) {
-                    if (ageMs <= SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
-                    if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) {
-                        // The UI may already have returned to the app/chat activity even when
-                        // the profile read timed out. Do not terminate the transaction here;
-                        // let WAITING_LIST_RETURN verify the restored chat before the model runs.
-                        pending.stage = InboxIdentityCaptureStage.WAITING_LIST_RETURN
-                        pending.lastTransitionAtMs = System.currentTimeMillis()
-                        onLog("AI 联系人身份采集：资料页读取超时；进入聊天页恢复确认，身份失败时仅使用当前窗口上下文")
-                        return true
-                    }
-                    return true
-                }
 
                 if (pending.backAttempts >= MAX_SAYHI_PROFILE_BACK_ATTEMPTS) return true
 
@@ -5013,12 +5000,11 @@ internal class MomoSocialAdapter(
                         )
                     )
                     if (tree == null || tree.truncated || tree.window.packageName != targetPackage ||
-                        tree.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
-                        !accessibilityGateway.isWindowCurrent(tree.window)
-                    ) {
+                        !isInboxProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)) {
                         if (ageMs <= SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
                         pending.profileReadCompleted = true
-                        onLog("AI 联系人身份采集失败：PROFILE_SNAPSHOT_READ_TIMEOUT；仍先返回聊天页，不提前调用模型")
+                        onLog("AI 联系人身份采集终态：PROFILE_SNAPSHOT_READ_TIMEOUT；" +
+                            "资料页指纹未确认；降级当前窗口消息，不继续等待 ID")
                     } else {
                         // A verified left-message-avatar tap is the profile transition. Display
                         // name and toolbar nodes are presentation data, not identity gates.
@@ -5036,6 +5022,13 @@ internal class MomoSocialAdapter(
                                     "不读取历史会话，返回聊天页后仅使用当前窗口上下文"
                             }
                         )
+                        if (pending.platformUserId == null && !pending.profileScrollAttempted) {
+                            pending.profileReadCompleted = false
+                            if (dispatchInboxProfileIdentityScroll(pending, tree)) {
+                                onLog("AI 联系人身份采集：首次扫描未取得 ID；已提交且仅提交一次资料页上滑")
+                                return true
+                            }
+                        }
                     }
                 }
 
@@ -5126,8 +5119,7 @@ internal class MomoSocialAdapter(
             )
             return false
         }
-        if (tree.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
-            !accessibilityGateway.isWindowCurrent(tree.window)
+        if (!isInboxProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)
         ) {
             onLog("AI 联系人身份采集失败：PROFILE_SCROLL_WINDOW_NOT_CURRENT；不使用旧窗口")
             return false
@@ -5174,6 +5166,18 @@ internal class MomoSocialAdapter(
             return false
         }
         return true
+    }
+
+    /** The profile is rendered inside MaintabActivity on current Momo builds. */
+    private fun isInboxProfileTree(tree: AccessibilityTreeSnapshot): Boolean {
+        val ids = tree.nodes.asSequence().map { it.viewId.substringAfterLast('/') }.toSet()
+        return setOf(
+            "root_layout",
+            "personal_profile_name",
+            "toolbar_id",
+            "tabs",
+            "pagertabcontent"
+        ).all(ids::contains)
     }
 
     override fun beginSessionManagement(): String? = runCatching {
