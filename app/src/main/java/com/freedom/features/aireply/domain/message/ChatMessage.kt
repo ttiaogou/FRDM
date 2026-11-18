@@ -121,8 +121,13 @@ data class ChatMessageOcrTarget(
     /** Neighbor signature is assigned after the complete visible batch has been collected. */
     val neighborSignature: String? = null,
     /** Identity-only direction evidence shared by structural and OCR observations. */
-    val identityDirectionHint: ChatMessageDirection? = null
+    val identityDirectionHint: ChatMessageDirection? = null,
+    /** Classification probes are UI evidence only and must never become message text. */
+    val classificationOnly: Boolean = false
 ) {
+    /** 正文映射统一使用此契约；旧分类目标继续禁止成为正文，普通目标默认可读。 */
+    val isMessageTextTarget: Boolean get() = !classificationOnly
+
     override fun toString(): String =
         "ChatMessageOcrTarget(rowIndex=$rowIndex,rowBounds=$rowBounds," +
             "bodyBounds=$bodyBounds,bubbleBounds=$bubbleBounds,avatarBounds=$avatarBounds)"

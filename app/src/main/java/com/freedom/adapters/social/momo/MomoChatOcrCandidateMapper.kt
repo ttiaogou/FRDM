@@ -18,7 +18,7 @@ internal object MomoChatOcrCandidateMapper {
         listBounds: ScreenRect
     ): List<ChatMessageCandidate> = targets.mapNotNull { target ->
         // 分类探针不是消息正文，绝不把资料字段当作对方消息提交模型。
-        if (target.classificationOnly) return@mapNotNull null
+        if (!target.isMessageTextTarget) return@mapNotNull null
         val text = textByRowIndex[target.rowIndex]
             ?.replace('\u00A0', ' ')
             ?.trim()
