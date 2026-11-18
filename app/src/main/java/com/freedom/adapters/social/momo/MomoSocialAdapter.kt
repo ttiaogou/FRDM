@@ -350,6 +350,7 @@ internal class MomoSocialAdapter(
     @Volatile private var sayHiUnverifiedDetailReturnPending: Boolean = false
     private val inboxIdentityCaptureLock = Any()
     @Volatile private var pendingInboxIdentityCapture: PendingInboxIdentityCapture? = null
+    @Volatile private var lastConfirmedChatDetailSnapshot: ChatPageSnapshot? = null
     private val failedInboxIdentityCaptureKeys = LinkedHashSet<String>()
     /** Run-scoped row-anchor cache; never persists a display-name-to-ID mapping across runs. */
     private val verifiedInboxIdentityByAnchor = LinkedHashMap<String, String>()
@@ -4405,7 +4406,12 @@ internal class MomoSocialAdapter(
     }
 
     override fun inspectChatPage(): ChatPageSnapshot {
-        if (inspectPendingInboxIdentityCapture()) return unknownChatPageSnapshot()
+        if (inspectPendingInboxIdentityCapture()) {
+            // Identity navigation is an independent transaction. Keep the last confirmed
+            // chat snapshot available to the main pipeline instead of converting the page
+            // into UNKNOWN and blocking the cached-message continuation.
+            return lastConfirmedChatDetailSnapshot ?: unknownChatPageSnapshot()
+        }
         val currentActivity = activityClass()
         if (sayHiNavigationFlowController.shouldUseDedicatedReceivedListInspector(
                 isReceivedListSurface = isReceivedGreetingsListStructureVisible()
@@ -4530,7 +4536,7 @@ internal class MomoSocialAdapter(
         } else if (canConsumePendingIdentity) {
             completePendingInboxIdentityBinding(pendingIdentityCapture!!, false)
         }
-        return ChatPageSnapshot(
+        val result = ChatPageSnapshot(
             packageName = inspection.windowPackage,
             activityClass = inspection.activityClass,
             pageKind = chatKind,
@@ -4645,6 +4651,12 @@ internal class MomoSocialAdapter(
             },
             windowGeneration = window.generation
         )
+        if (result.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            pendingInboxIdentityCapture == null
+        ) {
+            lastConfirmedChatDetailSnapshot = result
+        }
+        return result
     }
 
     // ---- ChatSessionManagementPort: bounded Momo session navigation and local samples ----
@@ -5194,6 +5206,7 @@ internal class MomoSocialAdapter(
     override fun beginSessionManagement(): String? = runCatching {
         synchronized(inboxIdentityCaptureLock) {
             pendingInboxIdentityCapture = null
+            lastConfirmedChatDetailSnapshot = null
             failedInboxIdentityCaptureKeys.clear()
             verifiedInboxIdentityByAnchor.clear()
             completedInboxIdentityOutcomes.clear()
@@ -5221,6 +5234,7 @@ internal class MomoSocialAdapter(
     override fun finishSessionManagement(): String? {
         synchronized(inboxIdentityCaptureLock) {
             pendingInboxIdentityCapture = null
+            lastConfirmedChatDetailSnapshot = null
             failedInboxIdentityCaptureKeys.clear()
             verifiedInboxIdentityByAnchor.clear()
             completedInboxIdentityOutcomes.clear()
