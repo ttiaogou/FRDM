@@ -1345,11 +1345,19 @@ class AiReplyObservationRuntime(
                     if (identityOutcome.verifiedIdentity != null) {
                         val verifiedIdentity = identityOutcome.verifiedIdentity
                         val candidate = currentSessionCandidate
-                        val restoredSurfaceMatches = currentSessionBinding
-                            ?.matchesRestoredChatSurface(snapshot) == true
+                        // The message-read callback may carry the snapshot that started the
+                        // read, which can predate the profile-page return. Reinspect the active
+                        // chat surface before binding identity so a stale snapshot cannot block
+                        // a successfully restored chat page.
+                        val restoredSnapshot = runCatching {
+                            chatPagePort.inspectChatPage()
+                        }.getOrNull()
+                        val restoredSurfaceMatches = restoredSnapshot != null &&
+                            currentSessionBinding?.matchesRestoredChatSurface(restoredSnapshot) == true
+                        val restoredHeader = restoredSnapshot?.chatTitleText
                         val auxiliaryHeaderMatches = ChatSessionManagementPolicy.matchChatHeader(
                             currentSessionName,
-                            snapshot.chatTitleText
+                            restoredHeader
                         ) != null
                         val sessionStillMatches = candidate != null &&
                             restoredSurfaceMatches &&
