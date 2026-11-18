@@ -3246,7 +3246,7 @@ internal class MomoSocialAdapter(
      * chat_user_name, message_ed_msgeditor, and message_btn_openemotes. Activity name,
      * message cards, avatars, and recycler contents are not page prerequisites.
      */
-    private fun inspectCurrentChatDetailFingerprint(): Pair<WindowRef, MomoChatPageInspection>? {
+    private fun inspectCurrentChatDetailFingerprint(expectedTitle: String? = null): Pair<WindowRef, MomoChatPageInspection>? {
         val observed = rootAccess.withActiveTargetRoot { root, window ->
             if (window.packageName != targetPackage || window.windowId < 0 ||
                 !accessibilityGateway.isWindowCurrent(window)
@@ -3259,9 +3259,28 @@ internal class MomoSocialAdapter(
                 activityClass = window.activityClass
             )
             window to inspection
-        } ?: return null
+        }
+        if (observed == null) {
+            if (expectedTitle != null) {
+                onLog("AI 联系人身份返回聊天页检查：rootWindow=缺失；chat_user_name=缺失；chatTitleText=为空；message_ed_msgeditor=缺失；message_btn_openemotes=缺失；titleMatch=false")
+            }
+            return null
+        }
 
         val (window, inspection) = observed
+        if (expectedTitle != null) {
+            val title = normalizeIdentityDisplayName(inspection.chatTitleText)
+            val expected = normalizeIdentityDisplayName(expectedTitle)
+            onLog(
+                "AI 联系人身份返回聊天页检查：" +
+                    "rootWindow=${if (accessibilityGateway.isWindowCurrent(window)) "当前" else "非当前"}；" +
+                    "chat_user_name=${if (inspection.hasChatTitleAnchor) "存在" else "缺失"}；" +
+                    "chatTitleText=${if (title.isNotBlank()) "非空" else "为空"}；" +
+                    "message_ed_msgeditor=${if (inspection.hasMessageComposerAnchor) "存在" else "缺失"}；" +
+                    "message_btn_openemotes=${if (inspection.hasMessageEmotesAnchor) "存在" else "缺失"}；" +
+                    "titleMatch=${title.isNotBlank() && expected.isNotBlank() && title == expected}"
+            )
+        }
         if (window.windowId < 0 ||
             !accessibilityGateway.isWindowCurrent(window) ||
             inspection.pageType != MomoChatPageType.CHAT_DETAIL_CANDIDATE ||
@@ -5048,7 +5067,7 @@ internal class MomoSocialAdapter(
                 // Inspect the stable three-anchor chat fingerprint directly; calling
                 // inspectChatPage() here would re-enter this pending transaction and keep
                 // returning UNKNOWN.
-                val restoredChat = inspectCurrentChatDetailFingerprint()?.second
+                val restoredChat = inspectCurrentChatDetailFingerprint(pending.anchor.displayName)?.second
                 val restoredTitle = normalizeIdentityDisplayName(restoredChat?.chatTitleText)
                 val anchorTitle = normalizeIdentityDisplayName(pending.anchor.displayName)
                 val restored = restoredChat != null &&
