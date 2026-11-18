@@ -1352,10 +1352,10 @@ class AiReplyObservationRuntimeTest {
             listOf(
                 GestureKind.SWIPE, GestureKind.SWIPE, // Startup: establish list top.
                 GestureKind.SWIPE, GestureKind.SWIPE, GestureKind.SWIPE,
-                GestureKind.SWIPE, GestureKind.SWIPE, GestureKind.TAP
+                GestureKind.TAP
             ),
             commands.map { it.kind }
-        ) // Middle-page unread is tapped before another upward swipe can be submitted.
+        ) // The stable read-only suffix stops bottom positioning before another upward swipe.
         val swipeDirections = commands.mapNotNull {
             (it.intent as? GestureIntent.VerticalSwipe)?.direction
         }
