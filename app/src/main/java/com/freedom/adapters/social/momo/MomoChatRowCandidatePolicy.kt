@@ -53,6 +53,11 @@ internal object MomoChatRowCandidatePolicy {
 
     fun isIgnoredUiTextViewId(viewId: String): Boolean = normalizedId(viewId) in ignoredUiTextIds
 
+    /** 正式文字容器的精确资源名；不把普通消息布局或卡片内的标签视为正文。 */
+    fun formalTextContainerIds(): Set<String> = explicitMessageBodyIds
+
+    fun isFormalTextContainer(viewId: String): Boolean = normalizedId(viewId) in explicitMessageBodyIds
+
     private fun normalizedId(rawId: String): String =
         rawId.substringAfterLast('/').substringAfterLast(':').lowercase()
 }

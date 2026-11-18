@@ -5554,6 +5554,8 @@ internal class MomoSocialAdapter(
                 return@acquireObservationVisibility
             }
 
+            val formalBodyRows = (structuralBatch.messages.map { it.bounds } + structuralBatch.ocrTargets.map { it.rowBounds }).distinct().size
+            onLog("AI 正文容器读取：扫描行=${structuralBatch.scannedRowCount}；正式正文行=$formalBodyRows；正文OCR=${structuralBatch.ocrTargets.size}；仅采集正式文本容器，不分类卡片")
             if (structuralBatch.ocrTargets.isEmpty()) {
                 deliver(structuralBatch)
                 return@acquireObservationVisibility

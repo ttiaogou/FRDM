@@ -419,6 +419,19 @@ internal class MomoChatMessageReader(
             return RowRead(null, false, 0, 0)
         }
 
+        // 没有正式文本容器的行直接跳过，不扫描其卡片内容、不建立 OCR 目标。
+        // 查询限定在当前行和既有正文资源名内，随后仍按原层级规则复核归属与方向。
+        val hasFormalContainer = try {
+            hasVisibleFormalTextContainer(row, rowBounds, listBounds)
+        } catch (failure: Exception) {
+            recycle(row)
+            throw failure
+        }
+        if (!hasFormalContainer) {
+            recycle(row)
+            return RowRead(null, false, 0, 0)
+        }
+
         val queue = ArrayDeque<PendingNode>()
         queue.add(PendingNode(row, 0, emptyList(), emptyList(), emptyList()))
         val textEvidence = ArrayList<MomoChatTextEvidence>()
@@ -557,27 +570,10 @@ internal class MomoChatMessageReader(
         }
         val hasMessageRowAnchor = hasRelativeMessageRoot &&
             MomoChatRowCandidatePolicy.hasMessageRowAnchor(rowViewIds)
-        val uniqueTexts = if (hasMessageRowAnchor) {
-            textEvidence.distinctBy { it.value to it.bounds }
-                .filter { evidence ->
-                    MomoChatRowCandidatePolicy.isMessageBodyText(
-                        evidence.viewId,
-                        evidence.viewIdTrail
-                    )
-                }
-        } else {
-            emptyList()
-        }
-        val body = uniqueTexts
-            .filterNot { MomoChatMessageTextEvidencePolicy.isTimeLabel(it.value) }
-            .maxWithOrNull(compareBy<MomoChatTextEvidence> { MomoChatMessageTextEvidencePolicy.textScore(it, listBounds) }
-                .thenBy { it.value.length })
+        val body = if (hasMessageRowAnchor) {
+            MomoChatTextContainerPolicy.selectBody(textEvidence, listBounds)
+        } else null
         val timeHint = timestampHint
-        // Media hints are meaningful only inside a verified message row. This prevents game or
-        // promotional cards embedded in the RecyclerView from becoming synthetic message types.
-        val typeHint = if (hasMessageRowAnchor) {
-            MomoChatMessageTextEvidencePolicy.inferMessageType(signatures, body?.value)
-        } else ChatMessageType.UNKNOWN
         val bodyText = body?.value
         val messageRoot = layoutNodeEvidence
             .filter { it.viewId == "message_root" || it.viewId.endsWith(":id/message_root") }
@@ -592,9 +588,11 @@ internal class MomoChatMessageReader(
                 }
             "root=${root.viewId};nodes=$nodes"
         }
-        val structuralBody = unexposedMessageTextViews.maxByOrNull {
-            it.bounds.width.toLong() * it.bounds.height.toLong()
-        }
+        val structuralBody = unexposedMessageTextViews
+            .filter { MomoChatTextContainerPolicy.isBodyText(it.viewId, it.viewIdTrail) }
+            .maxByOrNull {
+                it.bounds.width.toLong() * it.bounds.height.toLong()
+            }
         val structuralBubbleBounds = if (coordinateSpaceReliable && structuralBody != null) {
             MomoChatMessageTextEvidencePolicy.resolveBubbleBounds(structuralBody, listBounds)
         } else null
@@ -634,8 +632,7 @@ internal class MomoChatMessageReader(
             )
         }
         val ocrTarget = structuralBody?.takeIf {
-            hasMessageRowAnchor && coordinateSpaceReliable &&
-                typeHint in setOf(ChatMessageType.UNKNOWN, ChatMessageType.TEXT)
+            hasMessageRowAnchor && coordinateSpaceReliable
         }?.let {
             ChatMessageOcrTarget(
                 rowIndex = rowIndex,
@@ -679,23 +676,6 @@ internal class MomoChatMessageReader(
                 explicitDirectionEvidence = DirectionEvidence.AMBIGUOUS,
                 timeHint = timeHint,
                 isSystemMessage = true,
-                avatarBounds = avatarBounds,
-                structureSignature = structureSignature,
-                identityDirectionHint = identityDirection,
-                identityBubbleBounds = structuralBubbleBounds,
-                identityAvatarBounds = structuralAvatarBounds
-            )
-            typeHint != ChatMessageType.UNKNOWN -> ChatMessageCandidate(
-                rowIndex = rowIndex,
-                rowBounds = rowBounds,
-                bubbleBounds = bubbleBounds,
-                listBounds = directionListBounds,
-                text = bodyText,
-                typeHint = typeHint,
-                explicitDirectionHint = bodyDirection.direction,
-                explicitDirectionEvidence = bodyDirection.evidence,
-                timeHint = timeHint,
-                isSystemMessage = false,
                 avatarBounds = avatarBounds,
                 structureSignature = structureSignature,
                 identityDirectionHint = identityDirection,
@@ -769,8 +749,28 @@ internal class MomoChatMessageReader(
             ?.bounds
     }
 
+    /** 在当前可见行查询精确的正文容器，不把卡片的任意文本标签当作正文。 */
+    private fun hasVisibleFormalTextContainer(
+        row: AccessibilityNodeInfo,
+        rowBounds: ScreenRect,
+        listBounds: ScreenRect
+    ): Boolean = MomoChatRowCandidatePolicy.formalTextContainerIds().any { entry ->
+        val viewId = "$targetPackage:id/$entry"
+        val nodes = row.findAccessibilityNodeInfosByViewId(viewId).orEmpty()
+        try {
+            nodes.any { node ->
+                val bounds = boundsOf(node)
+                safeString { node.viewIdResourceName.orEmpty() } == viewId &&
+                    safeBoolean { node.isVisibleToUser } && !bounds.isEmpty &&
+                    intersects(bounds, rowBounds) && intersects(bounds, listBounds)
+            }
+        } finally {
+            nodes.forEach(::recycle)
+        }
+    }
+
     private fun isMomoMessageBodyView(viewId: String): Boolean =
-        MESSAGE_BODY_VIEW_ID_HINTS.any(viewId::contains)
+        MomoChatRowCandidatePolicy.isFormalTextContainer(viewId)
 
     private fun isAvatarNode(
         viewId: String,
@@ -1046,7 +1046,6 @@ internal class MomoChatMessageReader(
         const val MAX_DIRECTION_DIAGNOSTICS = 8
         const val MAX_STRUCTURE_DIAGNOSTICS = 10
         const val MAX_OCR_TARGETS = 10
-        val MESSAGE_BODY_VIEW_ID_HINTS = setOf("message_tv_layouttextview")
         val AVATAR_ID_HINTS = setOf(
             "avatar", "head_icon", "headicon", "user_icon", "usericon", "profile_avatar", "portrait"
         )
