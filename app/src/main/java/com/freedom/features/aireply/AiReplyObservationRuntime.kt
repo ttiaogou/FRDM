@@ -1186,7 +1186,10 @@ class AiReplyObservationRuntime(
                 val identityOutcome = runCatching {
                     chatSessionManagementPort.observeContactIdentityCapture(currentSessionCandidate!!)
                 }.getOrElse { error ->
-                    onLog("AI 联系人身份采集失败：IDENTITY_CAPTURE_INTERFACE_EXCEPTION；exception=${error.javaClass.simpleName}")
+                    onLog(
+                        "AI 联系人身份采集失败：IDENTITY_CAPTURE_INTERFACE_EXCEPTION；" +
+                            "exception=${error.javaClass.simpleName}；message=${error.message ?: "NONE"}"
+                    )
                     null
                 }
                 if (identityOutcome != null) {

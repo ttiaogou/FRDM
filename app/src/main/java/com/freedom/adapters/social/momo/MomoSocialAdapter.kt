@@ -4652,6 +4652,12 @@ internal class MomoSocialAdapter(
     override fun requestContactIdentityCapture(
         candidate: ChatListCandidateSnapshot
     ): ContactIdentityCaptureRequestResult {
+        onLog(
+            "AI 联系人身份采集[REQUEST]：开始；" +
+                "name=${candidate.nameText?.trim().orEmpty()}；" +
+                "selection=${candidate.selectionClass}；" +
+                "activity=${activityClass()}"
+        )
         if (candidate.contactIdentity?.let {
                 it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
                     !it.contactId.isNullOrBlank()
@@ -4659,7 +4665,10 @@ internal class MomoSocialAdapter(
         ) return ContactIdentityCaptureRequestResult.NOT_SUPPORTED
 
         val anchor = createInboxIdentityAnchor(candidate)
-            ?: return ContactIdentityCaptureRequestResult.REJECTED
+            ?: run {
+                onLog("AI 联系人身份采集失败：CANDIDATE_ANCHOR_INVALID；未进入聊天详情头像采集")
+                return ContactIdentityCaptureRequestResult.REJECTED
+            }
         val anchorKey = anchor.opaqueKey()
         synchronized(inboxIdentityCaptureLock) {
             if (anchorKey in failedInboxIdentityCaptureKeys) {
@@ -4682,11 +4691,21 @@ internal class MomoSocialAdapter(
                 allowVisibleWindowFallback = false,
                 textCapture = NodeTextCapture.EPHEMERAL
             )
-        ) ?: return ContactIdentityCaptureRequestResult.RETRY_LATER
+        ) ?: run {
+            onLog("AI 联系人身份采集失败：CHAT_DETAIL_TREE_UNAVAILABLE；等待下一次窗口快照")
+            return ContactIdentityCaptureRequestResult.RETRY_LATER
+        }
         if (tree.truncated || tree.window.packageName != targetPackage ||
             tree.window.activityClass != MomoAppDescriptor.MAIN_ACTIVITY_CLASS ||
             !accessibilityGateway.isWindowCurrent(tree.window)
-        ) return ContactIdentityCaptureRequestResult.RETRY_LATER
+        ) {
+            onLog(
+                "AI 联系人身份采集失败：CHAT_DETAIL_WINDOW_NOT_READY；" +
+                    "truncated=${tree.truncated}；package=${tree.window.packageName}；" +
+                    "activity=${tree.window.activityClass}；current=${accessibilityGateway.isWindowCurrent(tree.window)}"
+            )
+            return ContactIdentityCaptureRequestResult.RETRY_LATER
+        }
 
         val index = NodeTreeIndex(tree)
         val target = MomoSayHiAvatarTargetPolicy.resolveConversationAvatarTarget(index)
@@ -4696,8 +4715,12 @@ internal class MomoSocialAdapter(
             }
         onLog("AI 联系人身份采集：已定位聊天详情页左侧消息头像；不使用右上角头像")
         val avatarClickNode = index.nodeAt(target.path)
-            ?: return ContactIdentityCaptureRequestResult.RETRY_LATER
+            ?: run {
+                onLog("AI 联系人身份采集失败：LEFT_AVATAR_NODE_DISAPPEARED；快照内目标已失效")
+                return ContactIdentityCaptureRequestResult.RETRY_LATER
+            }
         if (!avatarClickNode.visible || target.targetBounds.isEmpty) {
+            onLog("AI 联系人身份采集失败：LEFT_AVATAR_TARGET_INVALID；不可见或边界为空")
             return ContactIdentityCaptureRequestResult.REJECTED
         }
 
@@ -4705,7 +4728,10 @@ internal class MomoSocialAdapter(
         val executionContext = gesturePolicy.captureContext(
             tree.window,
             metrics.toGestureCoordinateContext()
-        ) ?: return ContactIdentityCaptureRequestResult.RETRY_LATER
+        ) ?: run {
+            onLog("AI 联系人身份采集失败：GESTURE_CONTEXT_UNAVAILABLE；未提交头像点击")
+            return ContactIdentityCaptureRequestResult.RETRY_LATER
+        }
 
         val pending = PendingInboxIdentityCapture(
             anchor = anchor,
@@ -4766,6 +4792,7 @@ internal class MomoSocialAdapter(
                     failedInboxIdentityCaptureKeys += anchorKey
                 }
             }
+            onLog("AI 联系人身份采集失败：AVATAR_TAP_NOT_ACCEPTED；submission=$submission")
             return if (submission == GestureSubmission.DEFERRED_NOT_READY) {
                 ContactIdentityCaptureRequestResult.RETRY_LATER
             } else {
@@ -4778,6 +4805,7 @@ internal class MomoSocialAdapter(
     override fun observeContactIdentityCapture(
         candidate: ChatListCandidateSnapshot
     ): ContactIdentityCaptureOutcome {
+        onLog("AI 联系人身份采集[OBSERVE]：读取身份终态；name=${candidate.nameText?.trim().orEmpty()}")
         val anchor = createInboxIdentityAnchor(candidate)
             ?: return ContactIdentityCaptureOutcome.failed(
                 ContactIdentityCaptureRequestResult.REJECTED,
@@ -4804,6 +4832,12 @@ internal class MomoSocialAdapter(
                 ContactIdentityCaptureOutcome.failed(request, "IDENTITY_CAPTURE_NOT_SUPPORTED")
             ContactIdentityCaptureRequestResult.REJECTED ->
                 ContactIdentityCaptureOutcome.failed(request, "IDENTITY_CAPTURE_REQUEST_REJECTED")
+        }.also { outcome ->
+            onLog(
+                "AI 联系人身份采集[OBSERVE_RESULT]：" +
+                    "request=${outcome.request.name}；awaiting=${outcome.awaiting}；" +
+                    "verified=${outcome.verifiedIdentity != null}；failure=${outcome.failureReason ?: "NONE"}"
+            )
         }
     }
 
