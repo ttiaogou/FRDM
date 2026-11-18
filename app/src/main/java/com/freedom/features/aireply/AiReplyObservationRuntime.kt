@@ -1246,6 +1246,21 @@ class AiReplyObservationRuntime(
             ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null
         val draftTargetConfirmed = greetingDetail || privateDetail
         val draftAdmission = com.freedom.features.aireply.ai.VisibleDraftContext.assess(batch)
+        if (batch.ocrAttempted) {
+            val mergedOcrCount = batch.ocrTargets.count { target ->
+                batch.messages.any { message -> message.bounds == target.rowBounds }
+            }
+            val latestText = batch.messagesBottomToTop.firstOrNull()?.content
+                ?.takeIf(String::isNotBlank)
+                ?.let(::escapeOcrDebugText)
+                ?: "[无可用最新消息文本]"
+            onLog(
+                "AI OCR 消息流水线：OCR目标数=${batch.ocrTargets.size}；" +
+                    "OCR识别成功数=${batch.ocrRecognizedTargetCount}；" +
+                    "OCR合并成功数=$mergedOcrCount；最终消息数=${batch.messages.size}；" +
+                    "最新消息文本=\"$latestText\"；状态=${batch.status.name}"
+            )
+        }
         if (draftTargetConfirmed && draftAdmission.retryable) {
             // 使用新快照重新 OCR；不把重试成功等同于内容已验证。
             if (draftRetryTask != null) return
@@ -1268,6 +1283,7 @@ class AiReplyObservationRuntime(
             }
             onLog("AI 消息复读停止：${draftAdmission.reason}；已达两次重试上限，不猜测内容")
         }
+        var identityJustVerified = false
         if (privateDetail) {
             val identitySessionKey = currentSessionWindowKey
             if (identityCaptureSessionKey != identitySessionKey) {
@@ -1333,6 +1349,7 @@ class AiReplyObservationRuntime(
                             return
                         }
                         candidate!!.contactIdentity = verifiedIdentity
+                        identityJustVerified = true
                         onLog(
                             "AI 联系人身份绑定完成：已写回当前私人会话候选；" +
                                 "confidence=${verifiedIdentity.confidence.name}；" +
@@ -1362,6 +1379,11 @@ class AiReplyObservationRuntime(
                 }
                 }
             }
+        }
+        if (privateDetail && identityJustVerified) {
+            onLog("AI OCR 消息读取：身份已确认并返回原聊天页；丢弃旧批次，重新触发当前会话 OCR")
+            readVisibleMessages(snapshot)
+            return
         }
         // The coordinator now delivers a structural batch first. OCR is deliberately deferred
         // until identity is terminal and the adapter has confirmed the chat detail page is
