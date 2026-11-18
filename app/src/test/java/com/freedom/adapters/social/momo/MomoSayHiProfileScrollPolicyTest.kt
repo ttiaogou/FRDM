@@ -100,13 +100,13 @@ class MomoSayHiProfileScrollPolicyTest {
         assertEquals("PROFILE_VIEWPORT_FINGERPRINT_FALLBACK", decision.reason)
     }
 
-    @Test fun refusesScrollWhenProfilePageFingerprintIsMissing() {
+    @Test fun doesNotRequireProfileMetaNodeForIdentityRecoveryScroll() {
         val nodes = observedProfileNodes().filterNot {
             it.viewId.endsWith("/tv_multi_info")
         }
         val decision = MomoSayHiProfileScrollPolicy.resolveViewport(nodes, 720, 1554)
-        assertNull(decision.viewport)
-        assertEquals("PROFILE_PAGE_FINGERPRINT_NOT_CONFIRMED", decision.reason)
+        assertEquals(ScreenRect(0, 1065, 720, 1554), decision.viewport)
+        assertEquals("PROFILE_VIEWPORT_FINGERPRINT_CONFIRMED", decision.reason)
     }
 
     @Test fun refusesTheOuterViewPagerWhenItsContentRecyclerViewIsMissing() {
