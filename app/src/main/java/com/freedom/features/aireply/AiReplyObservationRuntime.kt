@@ -83,6 +83,8 @@ class AiReplyObservationRuntime(
         private const val MESSAGE_LIST_RETRY_DELAY_MS = 120L
         private const val MAX_MESSAGE_LIST_RETRIES = 2
         private val TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS = longArrayOf(350L, 700L, 1_200L)
+        private const val SNAPSHOT_RECOVERY_HOLD_TIMEOUT_MS = 30_000L
+        private const val SNAPSHOT_RECOVERY_POLL_DELAY_MS = 1_000L
         private const val MAX_OCR_DEBUG_TEXT_CHARS = 4_200
         private const val MAX_OCR_DEBUG_BATCHES_PER_WINDOW = 24
         private const val SESSION_OPEN_VERIFY_DELAY_MS = 2_200L
@@ -313,9 +315,41 @@ class AiReplyObservationRuntime(
     private val transientEmptySnapshotRecovery = AiReplySessionTraversalCoordinator(
         TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS
     )
+    private var snapshotRecoveryStartedAtMs = 0L
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
+    private data class CurrentSessionBinding(
+        val sourceWindowKey: String,
+        val sourceRowPath: String,
+        val sourceRowBounds: ScreenRect,
+        val sourceAvatarBounds: ScreenRect?,
+        val chatWindowKey: String,
+        val chatSurfaceKey: String
+    ) {
+        fun matches(snapshot: ChatPageSnapshot, currentChatWindowKey: String?): Boolean =
+            currentChatWindowKey == chatWindowKey &&
+                windowSessionSurfaceKey(snapshot) == chatSurfaceKey
+
+        private fun windowSessionSurfaceKey(snapshot: ChatPageSnapshot): String? {
+            val messageTarget = snapshot.messageListTarget ?: return null
+            val inputTarget = snapshot.inputFieldTarget ?: return null
+            val window = messageTarget.window
+            val inputWindow = inputTarget.window
+            if (window.packageName != inputWindow.packageName ||
+                window.windowId != inputWindow.windowId ||
+                window.generation != inputWindow.generation
+            ) return null
+            return listOf(
+                window.packageName,
+                window.windowId,
+                window.generation,
+                messageTarget.path.childIndices.joinToString("."),
+                inputTarget.path.childIndices.joinToString(".")
+            ).joinToString("|")
+        }
+    }
+    private var currentSessionBinding: CurrentSessionBinding? = null
     private var identityCaptureSessionKey: String? = null
     private var identityCaptureStartedAtMs = 0L
     private var identityCaptureRetryCount = 0
@@ -351,23 +385,32 @@ class AiReplyObservationRuntime(
         }
         val inspection = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
         if (transientEmptySnapshotRecovery.isTransient(inspection)) {
+            if (snapshotRecoveryStartedAtMs == 0L) {
+                snapshotRecoveryStartedAtMs = System.currentTimeMillis()
+                onLog("AI 页面观察[SNAPSHOT_RECOVERY_HOLD]：快照暂时丢失；保留当前任务租约和会话状态")
+            }
+            val elapsedMs = System.currentTimeMillis() - snapshotRecoveryStartedAtMs
             val delayMs = transientEmptySnapshotRecovery.nextDelayMs()
-            if (delayMs != null) {
+            if (elapsedMs < SNAPSHOT_RECOVERY_HOLD_TIMEOUT_MS) {
+                val nextDelayMs = delayMs ?: SNAPSHOT_RECOVERY_POLL_DELAY_MS
                 onLog(
                     "AI 页面观察[SNAPSHOT_RECOVERY]：页面快照为空或暂不可用；" +
                         "retry=${transientEmptySnapshotRecovery.retryCount}/${TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS.size}；" +
-                        "${delayMs}ms 后重新获取；保留最后一次已确认页面，不更新页面身份"
+                        "已等待=${elapsedMs.coerceAtLeast(0L)}ms；${nextDelayMs}ms 后重新获取；" +
+                        "保留最后一次已确认页面，不释放任务租约、不更新页面身份"
                 )
-                scheduleFullInspectionAfter(delayMs)
+                scheduleFullInspectionAfter(nextDelayMs)
             } else {
                 onLog(
-                    "AI 页面观察[SNAPSHOT_RECOVERY_EXHAUSTED]：连续 ${TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS.size} 次快照恢复仍为空；" +
-                        "保留最后一次已确认页面，等待下一次界面事件后重新检查"
+                    "AI 页面观察[SNAPSHOT_RECOVERY_TIMEOUT]：连续 ${elapsedMs.coerceAtLeast(0L)}ms 无法恢复目标窗口；" +
+                        "终止当前页面事务并保留运行日志"
                 )
+                sessionManagerState = SessionManagerState.PAUSED
             }
             return
         }
         transientEmptySnapshotRecovery.reset()
+        snapshotRecoveryStartedAtMs = 0L
         handleInspectionSnapshot(inspection!!)
     }
 
@@ -625,6 +668,23 @@ class AiReplyObservationRuntime(
                     if (headerMatchMode != null) {
                         sessionManagerState = SessionManagerState.READING_SESSION
                         currentSessionWindowKey = windowSessionKey(inspection)
+                        val selected = currentSessionCandidate
+                        val chatWindowKey = currentSessionWindowKey
+                        if (selected != null && chatWindowKey != null) {
+                            currentSessionBinding = CurrentSessionBinding(
+                                sourceWindowKey = listOf(
+                                    selected.rowTarget.window.packageName,
+                                    selected.rowTarget.window.windowId,
+                                    selected.rowTarget.window.generation
+                                ).joinToString("|"),
+                                sourceRowPath = selected.rowTarget.path.childIndices.joinToString("."),
+                                sourceRowBounds = selected.rowBounds,
+                                sourceAvatarBounds = selected.avatarBounds,
+                                chatWindowKey = chatWindowKey,
+                                chatSurfaceKey = chatSurfaceKey(inspection).orEmpty()
+                            )
+                            onLog("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定；昵称仅作辅助校验")
+                        }
                         onLog(
                             "AI 会话管理：聊天页顶部名称与目标会话匹配；匹配方式=${headerMatchMode.name}；" +
                                 "开始只读采集，不执行输入或发送"
@@ -882,12 +942,14 @@ class AiReplyObservationRuntime(
         currentSessionCandidate = null
         currentSessionReadCaptured = false
         currentSessionWindowKey = null
+        currentSessionBinding = null
         identityCaptureSessionKey = null
         identityCaptureStartedAtMs = 0L
         identityCaptureRetryCount = 0
         identityCaptureTerminalSessionKey = null
         identityPendingMessageBatch = null
         identityPendingSnapshot = null
+        snapshotRecoveryStartedAtMs = 0L
         privateMessagesTraversalTaskExecutor.reset()
         lastMessageFingerprint = ""
         temporaryContactMessageLedger.clearAll()
@@ -1233,11 +1295,7 @@ class AiReplyObservationRuntime(
                         val verifiedIdentity = identityOutcome.verifiedIdentity
                         val candidate = currentSessionCandidate
                         val sessionStillMatches = candidate != null &&
-                            currentSessionWindowKey == windowSessionKey(snapshot) &&
-                            ChatSessionManagementPolicy.matchChatHeader(
-                                currentSessionName,
-                                snapshot.chatTitleText
-                            ) != null &&
+                            currentSessionBinding?.matches(snapshot, windowSessionKey(snapshot)) == true &&
                             verifiedIdentity.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
                             !verifiedIdentity.contactId.isNullOrBlank()
                         if (!sessionStillMatches) {
@@ -3265,6 +3323,25 @@ class AiReplyObservationRuntime(
         ) return null
         val conversationIdentity = snapshot.conversationIdentityKey() ?: return null
         return "${messageWindow.packageName}|${messageWindow.windowId}|${messageWindow.generation}|conversation=$conversationIdentity"
+    }
+
+    /** Stable chat-surface binding key; deliberately excludes the display name/title. */
+    private fun chatSurfaceKey(snapshot: ChatPageSnapshot): String? {
+        val messageTarget = snapshot.messageListTarget ?: return null
+        val inputTarget = snapshot.inputFieldTarget ?: return null
+        val window = messageTarget.window
+        val inputWindow = inputTarget.window
+        if (window.packageName != inputWindow.packageName ||
+            window.windowId != inputWindow.windowId ||
+            window.generation != inputWindow.generation
+        ) return null
+        return listOf(
+            window.packageName,
+            window.windowId,
+            window.generation,
+            messageTarget.path.childIndices.joinToString("."),
+            inputTarget.path.childIndices.joinToString(".")
+        ).joinToString("|")
     }
 
     private fun cancelMessageReadRetry() {
