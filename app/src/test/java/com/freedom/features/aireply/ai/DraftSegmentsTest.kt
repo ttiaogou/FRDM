@@ -1,8 +1,8 @@
 package com.freedom.features.aireply.ai
 
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
 
 class DraftSegmentsTest {
     @Test

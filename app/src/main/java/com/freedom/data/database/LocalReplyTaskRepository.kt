@@ -75,6 +75,7 @@ internal class LocalReplyTaskRepository(
         val key = hash(requestKey)
         val existing = records[key] ?: return@withFileLock false
         if (existing.requestId != requestId) return@withFileLock false
+        if (!ReplyTaskStatusTransitions.isAllowed(existing.status, status)) return@withFileLock false
         records[key] = existing.copy(status = status, updatedAtMillis = updatedAtMillis)
         writeRecords(records)
         true
@@ -92,7 +93,7 @@ internal class LocalReplyTaskRepository(
         if (!file.isFile) return result
         file.forEachLine { line -> runCatching {
             val fields = line.split('\t')
-            if (fields.size != FIELD_COUNT) return@runCatching
+            if (fields.size != LEGACY_FIELD_COUNT && fields.size != FIELD_COUNT) return@runCatching
             result[fields[0]] = ReplyTaskRecord(
                 requestKey = unpack(fields[1]),
                 conversationKey = unpack(fields[2]),
@@ -100,7 +101,12 @@ internal class LocalReplyTaskRepository(
                 contentRevision = unpack(fields[4]),
                 status = ReplyTaskStatus.valueOf(fields[5]),
                 requestId = unpack(fields[6]),
-                updatedAtMillis = fields[7].toLong()
+                updatedAtMillis = fields[7].toLong(),
+                userId = if (fields.size == FIELD_COUNT) unpack(fields[8]) else "",
+                contentHash = if (fields.size == FIELD_COUNT) unpack(fields[9]) else "",
+                createdAtMillis = if (fields.size == FIELD_COUNT) fields[10].toLong() else fields[7].toLong(),
+                cooldownUntilMillis = if (fields.size == FIELD_COUNT) fields[11].toLong() else 0L,
+                resultCode = if (fields.size == FIELD_COUNT) unpack(fields[12]) else ""
             )
         } }
         return result
@@ -113,7 +119,8 @@ internal class LocalReplyTaskRepository(
             listOf(
                 key, pack(value.requestKey), pack(value.conversationKey), pack(value.logicalMessageId),
                 pack(value.contentRevision), value.status.name, pack(value.requestId),
-                value.updatedAtMillis.toString()
+                value.updatedAtMillis.toString(), pack(value.userId), pack(value.contentHash),
+                value.createdAtMillis.toString(), value.cooldownUntilMillis.toString(), pack(value.resultCode)
             ).joinToString("\t")
         }.joinToString("\n")
         temporary.writeText(content, StandardCharsets.UTF_8)
@@ -137,7 +144,8 @@ internal class LocalReplyTaskRepository(
         .joinToString("") { "%02x".format(it) }
 
     private companion object {
-        const val FIELD_COUNT = 8
+        const val LEGACY_FIELD_COUNT = 8
+        const val FIELD_COUNT = 13
         const val REQUEST_TIMEOUT_MILLIS = 120_000L
     }
 }

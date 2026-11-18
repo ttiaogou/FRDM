@@ -148,7 +148,8 @@ class AiReplyDraftCoordinator(
             contentRevision = latestIncoming.effectiveContentRevision,
             status = ReplyTaskStatus.REQUESTED,
             requestId = requestId,
-            updatedAtMillis = nowMillis()
+            updatedAtMillis = nowMillis(),
+            userId = contactId
         )
         val requestGeneration = synchronized(lock) {
             if (awaitingUserSend.get()) return reject("DRAFT_AWAITING_USER_SEND")

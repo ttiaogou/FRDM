@@ -49,6 +49,34 @@ class LocalReplyTaskRepositoryTest {
         }
     }
 
+    @Test
+    fun durableRecordPreservesMemoryBufferIdentityAndRejectsIllegalTransition() {
+        val file = File.createTempFile("reply-task", ".tsv")
+        file.delete()
+        try {
+            val repository = LocalReplyTaskRepository(file)
+            val record = record("request-3", "owner-3", 3_000L).copy(
+                userId = "user-3",
+                contentHash = "reply-hash",
+                createdAtMillis = 2_000L,
+                cooldownUntilMillis = 9_000L,
+                resultCode = "CLAIMED"
+            )
+            assertTrue(repository.tryClaim(record, 120_000L))
+            val restored = repository.find("request-3")
+            assertEquals("user-3", restored?.userId)
+            assertEquals("reply-hash", restored?.contentHash)
+            assertEquals(2_000L, restored?.createdAtMillis)
+            assertEquals(9_000L, restored?.cooldownUntilMillis)
+            assertEquals("CLAIMED", restored?.resultCode)
+            assertFalse(repository.updateStatus("request-3", "owner-3", ReplyTaskStatus.SENT, 4_000L))
+            assertTrue(repository.updateStatus("request-3", "owner-3", ReplyTaskStatus.MODEL_COMPLETED, 4_000L))
+        } finally {
+            file.delete()
+            File(file.parentFile, "${file.name}.lock").delete()
+        }
+    }
+
     private fun record(key: String, requestId: String, updatedAt: Long) = ReplyTaskRecord(
         requestKey = key,
         conversationKey = "conversation",
