@@ -3,6 +3,7 @@ package com.freedom.data.database
 import com.freedom.features.aireply.ai.ReplyTaskRecord
 import com.freedom.features.aireply.ai.ReplyTaskRepository
 import com.freedom.features.aireply.ai.ReplyTaskStatus
+import com.freedom.features.aireply.ai.ReplyTaskStatusTransitions
 import java.io.File
 import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets

@@ -367,9 +367,9 @@ class AiReplyDraftCoordinator(
 
     private fun isTransientVerificationFailure(status: ChatDraftInputStatus): Boolean =
         status in setOf(
-            ChatDraftInputStatus.VERIFICATION_FAILED,
-            ChatDraftInputStatus.INPUT_NOT_FOUND,
-            ChatDraftInputStatus.INPUT_NOT_EDITABLE
+            // A missing or changed input node requires a fresh workflow admission;
+            // retrying the same draft callback could target a stale conversation.
+            ChatDraftInputStatus.VERIFICATION_FAILED
         )
 
     private fun verifyAndFinish(target: ChatDraftInputTarget, draft: String, requestGeneration: Long) {
