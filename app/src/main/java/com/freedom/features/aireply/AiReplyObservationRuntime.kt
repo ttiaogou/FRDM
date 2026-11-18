@@ -506,7 +506,15 @@ class AiReplyObservationRuntime(
             inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()
         ) {
-            onLog("AI 身份事务回接：资料页返回已确认原聊天；主动重新观察聊天页并读取消息，启动 OCR")
+            val restoredSessionKey = windowSessionKey(inspection) ?: run {
+                onLog("AI 身份事务回接失败：返回聊天页未生成新的 windowSessionKey；暂不读取消息")
+                return
+            }
+            currentSessionWindowKey = restoredSessionKey
+            onLog(
+                "AI 身份事务回接：资料页返回已确认原聊天；已写回返回页新的 windowSessionKey；" +
+                    "主动重新观察聊天页并读取消息，启动 OCR"
+            )
             readVisibleMessages(inspection)
             return
         }
