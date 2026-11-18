@@ -418,7 +418,7 @@ class AiReplyObservationRuntimeTest {
             onMessagesObserved = { observedBatch = it }
         )
 
-        runtime.scheduleInitialObservation()
+        runtime.scheduleInitialObservation(passiveOnly = true)
         scheduler.runNext() // Read the list currently displayed by the user.
         scheduler.runNext() // Complete the passive list sample callback.
 
@@ -1180,7 +1180,7 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L
         )
 
-        runtime.scheduleInitialObservation()
+        runtime.scheduleInitialObservation(passiveOnly = true)
         scheduler.runNext()
         assertTrue(logs.any { it.contains("仅暂停当前页面业务采集") })
         assertEquals(0, port.messageReads)

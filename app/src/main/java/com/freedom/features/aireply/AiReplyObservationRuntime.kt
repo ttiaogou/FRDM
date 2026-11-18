@@ -982,7 +982,7 @@ class AiReplyObservationRuntime(
         return cleared
     }
 
-    fun scheduleInitialObservation() {
+    fun scheduleInitialObservation(passiveOnly: Boolean = false) {
         val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
         if (failure != null) {
             sessionRunStarted = false
@@ -999,7 +999,7 @@ class AiReplyObservationRuntime(
         sampleCaptureActive = !directory.isNullOrBlank()
         // A successful AI Reply start always owns the complete traversal pipeline. The former
         // passive-only startup path was a test mode and must not be reachable from production.
-        passiveManualObservation = false
+        passiveManualObservation = passiveOnly
         sessionRunStarted = sampleCaptureActive
         privateMessagesTaskController.beginRun(currentRunGeneration())
         if (sessionRunStarted && !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动私人消息任务")) {
