@@ -13,9 +13,8 @@ class MomoChatPageClassifierTest {
         messageListCount = 0,
         hasCanonicalMessageList = false,
         hasChatTitleAnchor = true,
-        hasPeerMessageAvatarAnchor = true,
         hasMessageComposerAnchor = true,
-        hasToolbarBackButton = true
+        hasMessageEmotesAnchor = true
     )
 
     @Test
@@ -160,19 +159,19 @@ class MomoChatPageClassifierTest {
         )
         assertEquals(
             MomoChatPageType.NON_CHAT,
-            MomoChatPageClassifier.classify(valid.copy(hasPeerMessageAvatarAnchor = false))
+            MomoChatPageClassifier.classify(valid.copy(hasMessageComposerAnchor = false))
         )
         assertEquals(
             MomoChatPageType.NON_CHAT,
-            MomoChatPageClassifier.classify(valid.copy(hasMessageComposerAnchor = false))
+            MomoChatPageClassifier.classify(valid.copy(hasMessageEmotesAnchor = false))
         )
     }
 
 
     @Test
-    fun independentToolbarAvatarMessageRouteWorksWithoutTitleOrComposer() {
+    fun avatarAndMessageListCannotReplaceTheThreeNodeFingerprint() {
         assertEquals(
-            MomoChatPageType.CHAT_DETAIL_CANDIDATE,
+            MomoChatPageType.NON_CHAT,
             MomoChatPageClassifier.classify(
                 stableDetailSignals().copy(
                     hasChatTitleAnchor = false,
@@ -186,14 +185,13 @@ class MomoChatPageClassifierTest {
     }
 
     @Test
-    fun incompleteDetailInspectionCannotMatchAnyAlternativeFingerprint() {
+    fun incompleteDetailInspectionCannotMatchTheThreeNodeFingerprint() {
         assertEquals(
             MomoChatPageType.UNKNOWN,
             MomoChatPageClassifier.classify(
                 stableDetailSignals().copy(
                     hasChatTitleAnchor = false,
                     hasMessageComposerAnchor = false,
-                    hasPeerMessageAvatarAnchor = true,
                     hasCanonicalMessageList = true,
                     hasToolbarBackButton = true,
                     inspectionIncomplete = true
@@ -260,7 +258,7 @@ class MomoChatPageClassifierTest {
             MomoChatPageType.UNKNOWN,
             MomoChatPageClassifier.classify(
                 stableDetailSignals().copy(
-                    hasPeerMessageAvatarAnchor = false,
+                    hasMessageEmotesAnchor = false,
                     inspectionIncomplete = true
                 )
             )
