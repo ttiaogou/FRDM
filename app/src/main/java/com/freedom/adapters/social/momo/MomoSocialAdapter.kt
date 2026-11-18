@@ -3269,7 +3269,7 @@ internal class MomoSocialAdapter(
 
         val (window, inspection) = observed
         if (expectedTitle != null) {
-            val title = normalizeIdentityDisplayName(inspection.chatTitleText)
+            val title = extractChatPeerName(inspection.chatTitleText)
             val expected = normalizeIdentityDisplayName(expectedTitle)
             onLog(
                 "AI 联系人身份返回聊天页检查：" +
@@ -5068,7 +5068,7 @@ internal class MomoSocialAdapter(
                 // inspectChatPage() here would re-enter this pending transaction and keep
                 // returning UNKNOWN.
                 val restoredChat = inspectCurrentChatDetailFingerprint(pending.anchor.displayName)?.second
-                val restoredTitle = normalizeIdentityDisplayName(restoredChat?.chatTitleText)
+                val restoredTitle = extractChatPeerName(restoredChat?.chatTitleText)
                 val anchorTitle = normalizeIdentityDisplayName(pending.anchor.displayName)
                 val restored = restoredChat != null &&
                     restoredTitle.isNotBlank() && anchorTitle.isNotBlank() &&
@@ -6004,6 +6004,13 @@ internal class MomoSocialAdapter(
 private fun normalizeIdentityDisplayName(value: String?): String =
     java.text.Normalizer.normalize(value.orEmpty().trim(), java.text.Normalizer.Form.NFC)
         .replace(Regex("\\s+"), " ")
+
+/** ChatActivity exposes the peer title as 与+昵称+对话; compare the extracted nickname. */
+private fun extractChatPeerName(value: String?): String {
+    val title = normalizeIdentityDisplayName(value)
+    if (!title.startsWith("与") || !title.endsWith("对话")) return ""
+    return normalizeIdentityDisplayName(title.removePrefix("与").removeSuffix("对话"))
+}
 
 private fun sha256IdentityAnchor(value: String): String =
     java.security.MessageDigest.getInstance("SHA-256")
