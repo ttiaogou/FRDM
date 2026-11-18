@@ -157,6 +157,25 @@ class AiReplyDecisionEngineTest {
         assertEquals(AiReplyAction.HUMAN_REVIEW, result.action)
     }
 
+    @Test fun ambiguousModelWaitBecomesClarificationDraft() {
+        val output = """{"action":"WAIT","reason":"AMBIGUOUS_CONTEXT","reasonDetail":"缺少前文，无法确认所指内容。","draft":null}"""
+        val result = AiReplyDecisionEngine(FakeProvider(output), grantedConsent).decide(
+            AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "ambiguous-clarification")
+        )
+        assertEquals(AiReplyAction.REPLY, result.action)
+        assertEquals("AMBIGUOUS_CONTEXT_CLARIFICATION", result.reason)
+        assertTrue(!result.draft.isNullOrBlank())
+    }
+
+    @Test fun verifiedIncomingWithEmptyContextGetsClarificationDraft() {
+        val emptyContext = context().copy(messages = emptyList())
+        val result = AiReplyDecisionEngine(FakeProvider(replyJson("unused")), grantedConsent).decide(
+            AiReplyDecisionInput(emptyContext, contactIdentityVerified = true, requestId = "empty-clarification")
+        )
+        assertEquals(AiReplyAction.REPLY, result.action)
+        assertTrue(!result.draft.isNullOrBlank())
+    }
+
     @Test fun replyDraftOverConfiguredLimitIsRejectedRatherThanTruncated() {
         val provider = FakeProvider(replyJson("12345"))
         val result = AiReplyDecisionEngine(provider, grantedConsent, maxDraftChars = 4).decide(
