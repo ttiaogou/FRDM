@@ -127,7 +127,7 @@ class AiReplyObservationRuntimeTest {
             currentRunGeneration = { 5L }
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
+        runtime.scheduleInitialObservation()
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", taskCoordinator.activeTaskId())
         runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN))
         scheduler.runNextWithDelay(300L)
@@ -208,7 +208,7 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
+        runtime.scheduleInitialObservation()
         runtime.schedule(
             eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.PHYSICAL_USER)
                 .copy(signals = setOf(AccessibilityUiSignal.CHAT_NAVIGATION))
@@ -269,7 +269,7 @@ class AiReplyObservationRuntimeTest {
                 chooseRandomInt = { minimum, _ -> minimum }
             )
 
-            runtime.scheduleInitialObservation(passiveOnly = false)
+        runtime.scheduleInitialObservation()
             runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, origin))
             scheduler.runNextWithDelay(300L)
 
@@ -313,7 +313,7 @@ class AiReplyObservationRuntimeTest {
             chooseRandomInt = { minimum, _ -> minimum }
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
+        runtime.scheduleInitialObservation()
         runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN))
         scheduler.runNextWithDelay(300L)
 
@@ -360,7 +360,7 @@ class AiReplyObservationRuntimeTest {
             chooseRandomInt = { minimum, _ -> minimum }
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
+        runtime.scheduleInitialObservation()
         runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_CLICKED, InputOrigin.UNKNOWN))
         runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.SELF_INJECTED))
         runtime.schedule(eventWithOrigin(AccessibilityEventType.WINDOW_CONTENT_CHANGED, InputOrigin.UNKNOWN))
@@ -418,7 +418,7 @@ class AiReplyObservationRuntimeTest {
             onMessagesObserved = { observedBatch = it }
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = true)
+        runtime.scheduleInitialObservation()
         scheduler.runNext() // Read the list currently displayed by the user.
         scheduler.runNext() // Complete the passive list sample callback.
 
@@ -540,7 +540,7 @@ class AiReplyObservationRuntimeTest {
             currentRunGeneration = { 5L }
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
+        runtime.scheduleInitialObservation()
         runtime.schedule(event(AccessibilityEventType.VIEW_CLICKED))
         scheduler.runNextWithDelay(300L)
         assertNull(ownership.activeTaskId())
@@ -592,7 +592,7 @@ class AiReplyObservationRuntimeTest {
             currentRunGeneration = { 5L }
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
+        runtime.scheduleInitialObservation()
         runtime.schedule(event(AccessibilityEventType.VIEW_CLICKED))
         scheduler.runNextWithDelay(300L)
 
@@ -647,7 +647,7 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
+        runtime.scheduleInitialObservation()
         runUntil(scheduler, 60) {
             submittedCommands.any {
                 (it.intent as? GestureIntent.VerticalSwipe)?.direction == VerticalSwipeDirection.UP
@@ -868,7 +868,7 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
+        runtime.scheduleInitialObservation()
         assertTrue(logs.any { it.contains("AI 启动导航[RETRY]") })
         assertEquals("Activity 尚未就绪时不得暂停，也不得提交手势", 0, gestures.size)
 
@@ -1180,7 +1180,7 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = true)
+        runtime.scheduleInitialObservation()
         scheduler.runNext()
         assertTrue(logs.any { it.contains("仅暂停当前页面业务采集") })
         assertEquals(0, port.messageReads)
@@ -3368,7 +3368,7 @@ class AiReplyObservationRuntimeTest {
             currentRunGeneration = { 5L }
         )
 
-        runtime.scheduleInitialObservation(passiveOnly = false)
+        runtime.scheduleInitialObservation()
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
         events.forEach(runtime::schedule)
         runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
