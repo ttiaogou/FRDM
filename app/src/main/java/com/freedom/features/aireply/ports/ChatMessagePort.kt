@@ -18,7 +18,10 @@ interface ChatMessagePort {
         limit: Int = 10,
         onResult: (ChatMessageBatch) -> Unit
     ) {
-        onResult(readRecentMessages(page, limit))
+        // Compatibility bridge for existing adapters/tests. Adapters that have a real
+        // structure-only phase must override this method; Momo does so and never starts OCR
+        // here. Keeping the bridge async preserves callback, timeout and stale-result semantics.
+        readRecentMessagesAsync(page, limit, onResult)
     }
 
     /**
