@@ -1346,7 +1346,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntil(scheduler, 60) { port.messageReads == 1 }
 
-        assertEquals(4, bottomSwipes) // Admission swipe, one bottom movement, and two fresh no-progress confirmations.
+        assertEquals(2, bottomSwipes) // Admission swipe, then stop after the stable read-only suffix is confirmed.
         assertEquals(1, upwardSwipes) // The first upward swipe exposes the middle page.
         assertEquals(
             listOf(

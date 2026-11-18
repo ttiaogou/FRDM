@@ -1850,6 +1850,11 @@ class AiReplyObservationRuntime(
                 "AI 会话管理：未发出滚动手势时可见会话身份序列发生变化；当前列表位置不可信；" +
                     "以最新视口重新核对未读状态；保留本轮已处理身份，重新定位底部后继续审视"
             )
+            // A snapshot taken after an external list movement must never be used to
+            // select or open a row. Re-establish the bottom anchor first, then inspect
+            // the fresh viewport under the normal admission rules.
+            scrollSessionList(snapshot, toTop = false)
+            return
         }
 
         if (listEvaluation.candidatesEmpty) {
