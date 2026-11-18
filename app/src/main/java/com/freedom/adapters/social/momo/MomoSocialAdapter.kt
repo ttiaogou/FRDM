@@ -3241,8 +3241,9 @@ internal class MomoSocialAdapter(
 
     /**
      * Confirms the shared Momo chat-detail fingerprint from one fresh active-window tree.
-     * Activity, package, WindowRef generation and current-window checks remain independent
-     * identity constraints; the three UI anchors only identify the page inside that window.
+     * Received-greetings and private-message detail pages use the same three UI anchors:
+     * chat_user_name, message_ed_msgeditor, and message_btn_openemotes. Activity name,
+     * message cards, avatars, and recycler contents are not page prerequisites.
      */
     private fun inspectCurrentChatDetailFingerprint(): Pair<WindowRef, MomoChatPageInspection>? {
         val observed = rootAccess.withActiveTargetRoot { root, window ->

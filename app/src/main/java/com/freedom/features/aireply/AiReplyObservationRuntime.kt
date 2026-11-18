@@ -666,7 +666,7 @@ class AiReplyObservationRuntime(
                         readVisibleMessages(inspection)
                     } else {
                         scheduleReceivedGreetingsRecoveryRetry(
-                            "ChatActivity 候选已出现，但点击来源/详情指纹尚未全部确认；继续获取新鲜快照，不启动 OCR"
+                            "收到招呼聊天页三节点指纹尚未确认；继续获取新鲜快照，不启动 OCR"
                         )
                     }
                     return
