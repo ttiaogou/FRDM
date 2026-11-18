@@ -1761,6 +1761,7 @@ class AiReplyObservationRuntime(
             )
         }
 
+        var allowExpectedSessionReturnViewportChange = false
         if (sessionManagerState == SessionManagerState.RETURNING_TO_SESSION_LIST) {
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
@@ -1775,6 +1776,9 @@ class AiReplyObservationRuntime(
             currentSessionReadCaptured = false
             currentSessionWindowKey = null
             sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+            // The current session may move or change unread state when it is opened/read.
+            // That is an expected return mutation, not an unsolicited viewport movement.
+            allowExpectedSessionReturnViewportChange = true
             if (observationCompleted) {
                 val completedObservations = privateMessagesTaskController.recordSuccessfulObservation()
                 onLog("AI Reply 模拟回复计数：已成功读取并保存的不同私人聊天=$completedObservations/$normalInboxTaskTargetCount；仅模拟计数，未发送消息")
@@ -1790,7 +1794,8 @@ class AiReplyObservationRuntime(
         val listEvaluation = privateMessagesTraversalTaskExecutor.evaluateListSnapshot(
             snapshot = snapshot,
             wasWaitingForUnread = wasWaitingForUnread,
-            maxNoProgressScrolls = MAX_NO_PROGRESS_SCROLLS
+            maxNoProgressScrolls = MAX_NO_PROGRESS_SCROLLS,
+            allowExpectedSessionReturnViewportChange = allowExpectedSessionReturnViewportChange
         )
         val snapshotAmbiguousKeys = listEvaluation.snapshotAmbiguousKeys
         val newlyAmbiguousKeys = listEvaluation.newlyAmbiguousKeys

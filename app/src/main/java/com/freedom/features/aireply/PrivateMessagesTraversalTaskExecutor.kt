@@ -268,7 +268,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
     fun evaluateListSnapshot(
         snapshot: ChatPageSnapshot,
         wasWaitingForUnread: Boolean,
-        maxNoProgressScrolls: Int
+        maxNoProgressScrolls: Int,
+        allowExpectedSessionReturnViewportChange: Boolean = false
     ): PrivateMessagesListSnapshotEvaluation {
         val snapshotAmbiguousKeys = ambiguousIdentityKeys(snapshot.chatListCandidates)
         val newlyAmbiguousKeys = snapshotAmbiguousKeys - ambiguousSessionIdentityKeys
@@ -291,12 +292,16 @@ internal class PrivateMessagesTraversalTaskExecutor {
             maxNoProgressScrolls = maxNoProgressScrolls
         )
 
-        val viewportPositionInvalidated = reconcileUnrequestedViewportChange(
-            hadPendingScrollBaseline = hadPendingScrollBaseline,
-            wasWaitingForUnread = wasWaitingForUnread,
-            visibleKeys = visibleKeys,
-            snapshot = snapshot
-        )
+        val viewportPositionInvalidated = if (allowExpectedSessionReturnViewportChange) {
+            false
+        } else {
+            reconcileUnrequestedViewportChange(
+                hadPendingScrollBaseline = hadPendingScrollBaseline,
+                wasWaitingForUnread = wasWaitingForUnread,
+                visibleKeys = visibleKeys,
+                snapshot = snapshot
+            )
+        }
         if (visibleKeys.isNotEmpty()) lastStableSessionListVisibleKeys = visibleKeys
 
         val candidatesEmpty = snapshot.chatListCandidates.isEmpty()

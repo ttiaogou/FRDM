@@ -378,6 +378,29 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun expectedSessionReturnViewportChangeKeepsBottomToTopScanPosition() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val previous = candidate(0, "Processed", ChatUnreadStatus.READ, top = 100)
+        val next = candidate(1, "Next unread", ChatUnreadStatus.UNREAD, top = 400)
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.initialInboxTopPositioningCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.lastStableSessionListVisibleKeys = executor.visibleSessionKeys(snapshot(previous))
+        executor.attemptedSessionKeys += key(previous)
+
+        val evaluation = executor.evaluateListSnapshot(
+            snapshot(next),
+            wasWaitingForUnread = false,
+            maxNoProgressScrolls = 2,
+            allowExpectedSessionReturnViewportChange = true
+        )
+
+        assertFalse(evaluation.viewportPositionInvalidated)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+        assertEquals(next, evaluation.nextCandidate)
+    }
+
+    @Test
     fun candidateSelectionKeepsBottomToTopOrderAndFrozenUnreadMembership() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val top = candidate(0, "Top", ChatUnreadStatus.UNREAD, top = 100)
