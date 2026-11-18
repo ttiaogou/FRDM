@@ -5001,7 +5001,30 @@ internal class MomoSocialAdapter(
             }
 
             InboxIdentityCaptureStage.WAITING_LIST_RETURN -> {
-                if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) return false
+                if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) {
+                    val restoredChat = runCatching { inspectChatPage() }.getOrNull()
+                    val restored = restoredChat != null &&
+                        restoredChat.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+                        restoredChat.packageName == targetPackage &&
+                        normalizeIdentityDisplayName(restoredChat.chatTitleText) ==
+                            normalizeIdentityDisplayName(pending.anchor.displayName)
+                    if (restored) {
+                        completePendingInboxIdentityBinding(
+                            pending,
+                            pending.platformUserId != null
+                        )
+                        onLog("AI 联系人身份采集：已返回并确认原私人聊天详情页；窗口和会话标题匹配")
+                        return false
+                    }
+                    if (ageMs > SAYHI_PROFILE_PAGE_TIMEOUT_MS) {
+                        failPendingInboxIdentityCapture(
+                            pending,
+                            "RETURNED_WINDOW_NOT_ORIGINAL_CHAT_DETAIL"
+                        )
+                        return false
+                    }
+                    return true
+                }
                 if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY &&
                     ageMs > SAYHI_PROFILE_PAGE_TIMEOUT_MS &&
                     pending.backAttempts < MAX_SAYHI_PROFILE_BACK_ATTEMPTS
