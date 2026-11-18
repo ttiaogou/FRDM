@@ -55,6 +55,7 @@ import com.freedom.features.aireply.ports.ChatDraftInputResult
 import com.freedom.features.aireply.ports.ChatDraftInputStatus
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
+import com.freedom.features.aireply.ports.ContactIdentityCaptureOutcome
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import kotlin.math.abs
 import java.io.File
@@ -352,6 +353,7 @@ internal class MomoSocialAdapter(
     private val failedInboxIdentityCaptureKeys = LinkedHashSet<String>()
     /** Run-scoped row-anchor cache; never persists a display-name-to-ID mapping across runs. */
     private val verifiedInboxIdentityByAnchor = LinkedHashMap<String, String>()
+    private val completedInboxIdentityOutcomes = LinkedHashMap<String, ContactIdentityCaptureOutcome>()
 
     init {
         sayHiTraversalState.restore()?.let { restored ->
@@ -4773,6 +4775,38 @@ internal class MomoSocialAdapter(
         return ContactIdentityCaptureRequestResult.STARTED
     }
 
+    override fun observeContactIdentityCapture(
+        candidate: ChatListCandidateSnapshot
+    ): ContactIdentityCaptureOutcome {
+        val anchor = createInboxIdentityAnchor(candidate)
+            ?: return ContactIdentityCaptureOutcome.failed(
+                ContactIdentityCaptureRequestResult.REJECTED,
+                "IDENTITY_CAPTURE_CANDIDATE_ANCHOR_INVALID"
+            )
+        val key = anchor.opaqueKey()
+        synchronized(inboxIdentityCaptureLock) {
+            completedInboxIdentityOutcomes[key]?.let { return it }
+            pendingInboxIdentityCapture?.let { pending ->
+                if (pending.anchor.opaqueKey() == key) {
+                    return ContactIdentityCaptureOutcome.waiting(
+                        ContactIdentityCaptureRequestResult.IN_PROGRESS,
+                        "IDENTITY_CAPTURE_TRANSACTION_IN_PROGRESS"
+                    )
+                }
+            }
+        }
+        return when (val request = requestContactIdentityCapture(candidate)) {
+            ContactIdentityCaptureRequestResult.STARTED,
+            ContactIdentityCaptureRequestResult.IN_PROGRESS,
+            ContactIdentityCaptureRequestResult.RETRY_LATER ->
+                ContactIdentityCaptureOutcome.waiting(request, "IDENTITY_CAPTURE_WAITING_FOR_PROFILE_RESULT")
+            ContactIdentityCaptureRequestResult.NOT_SUPPORTED ->
+                ContactIdentityCaptureOutcome.failed(request, "IDENTITY_CAPTURE_NOT_SUPPORTED")
+            ContactIdentityCaptureRequestResult.REJECTED ->
+                ContactIdentityCaptureOutcome.failed(request, "IDENTITY_CAPTURE_REQUEST_REJECTED")
+        }
+    }
+
     private fun createInboxIdentityAnchor(
         candidate: ChatListCandidateSnapshot
     ): InboxIdentityRowAnchor? {
@@ -4809,12 +4843,37 @@ internal class MomoSocialAdapter(
             if (identityVerified && !pending.platformUserId.isNullOrBlank()) {
                 failedInboxIdentityCaptureKeys.remove(anchorKey)
                 verifiedInboxIdentityByAnchor[anchorKey] = pending.platformUserId!!
+                val identity = sessionComponents.contactIdentityManager.resolveSnapshot(
+                    snapshotId = "inbox-identity-${System.nanoTime()}",
+                    observations = listOf(
+                        ContactIdentityObservation(
+                            displayName = pending.anchor.displayName,
+                            isPrivateChat = true,
+                            platformUserId = pending.platformUserId
+                        )
+                    ),
+                    observedAtMillis = System.currentTimeMillis()
+                ).singleOrNull()
+                completedInboxIdentityOutcomes[anchorKey] = if (
+                    identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                ) {
+                    ContactIdentityCaptureOutcome.completed(identity)
+                } else {
+                    ContactIdentityCaptureOutcome.failed(
+                        ContactIdentityCaptureRequestResult.REJECTED,
+                        "IDENTITY_CAPTURE_MANAGER_DID_NOT_VERIFY_PLATFORM_ID"
+                    )
+                }
                 while (verifiedInboxIdentityByAnchor.size > MAX_INBOX_VERIFIED_IDENTITY_CACHE_ENTRIES) {
                     val oldest = verifiedInboxIdentityByAnchor.entries.firstOrNull()?.key ?: break
                     verifiedInboxIdentityByAnchor.remove(oldest)
                 }
             } else {
                 failedInboxIdentityCaptureKeys += anchorKey
+                completedInboxIdentityOutcomes[anchorKey] = ContactIdentityCaptureOutcome.failed(
+                    ContactIdentityCaptureRequestResult.REJECTED,
+                    "IDENTITY_CAPTURE_PROFILE_ID_NOT_CONFIRMED"
+                )
             }
             pendingInboxIdentityCapture = null
         }
@@ -5068,6 +5127,7 @@ internal class MomoSocialAdapter(
             pendingInboxIdentityCapture = null
             failedInboxIdentityCaptureKeys.clear()
             verifiedInboxIdentityByAnchor.clear()
+            completedInboxIdentityOutcomes.clear()
         }
         sessionComponents.sampleStore.beginRun()
     }.onFailure { error ->
@@ -5094,6 +5154,7 @@ internal class MomoSocialAdapter(
             pendingInboxIdentityCapture = null
             failedInboxIdentityCaptureKeys.clear()
             verifiedInboxIdentityByAnchor.clear()
+            completedInboxIdentityOutcomes.clear()
         }
         return runCatching { sessionComponents.sampleStore.finishRun() }.getOrNull()
     }
