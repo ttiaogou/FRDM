@@ -242,6 +242,11 @@ class AiReplyDraftCoordinator(
         }
         updateTaskStatus(ReplyTaskStatus.MODEL_COMPLETED, requestGeneration)
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
+            onLog(
+                "AI 草稿状态：MODEL_DID_NOT_RETURN_DRAFT；模型未返回可用草稿；" +
+                    "中文原因=${decision.reasonDetail ?: decision.reason}；" +
+                    "action=${decision.action.name}；draftPresent=${!decision.draft.isNullOrBlank()}"
+            )
             finish("MODEL_DECISION_${decision.reason}", requestGeneration)
             return
         }
@@ -273,6 +278,19 @@ class AiReplyDraftCoordinator(
                 .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED) }
         }
         if (!result.succeeded) {
+            val inputNotReady = result.status in setOf(
+                ChatDraftInputStatus.STALE_CHAT,
+                ChatDraftInputStatus.INPUT_NOT_FOUND,
+                ChatDraftInputStatus.INPUT_NOT_EDITABLE,
+                ChatDraftInputStatus.ACTION_REJECTED
+            )
+            onLog(
+                if (inputNotReady) {
+                    "AI 草稿状态：INPUT_BOX_NOT_READY；输入框未就绪；中文原因=${result.reasonCode}"
+                } else {
+                    "AI 草稿状态：LOCAL_DRAFT_VALIDATION_REJECTED；本地草稿校验未通过；中文原因=${result.reasonCode}"
+                }
+            )
             finish("DRAFT_INPUT_${result.reasonCode}", requestGeneration)
             return
         }
@@ -287,6 +305,10 @@ class AiReplyDraftCoordinator(
             val checked = runCatching { inputPort.verifyDraft(target, expected) }
                 .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
             if (checked.status != ChatDraftInputStatus.VERIFIED) {
+                onLog(
+                    "AI 草稿状态：LOCAL_DRAFT_VALIDATION_REJECTED；本地回读校验未通过；" +
+                        "中文原因=${checked.reasonCode}"
+                )
                 finish("DRAFT_VERIFY_${checked.reasonCode}", requestGeneration)
             } else if (index + 1 < segments.size) {
                 writeNext(target, draft, segments, index + 1, expected, requestGeneration)
@@ -310,8 +332,13 @@ class AiReplyDraftCoordinator(
                 awaitingUserSend.set(true)
             }
             updateTaskStatus(ReplyTaskStatus.DRAFT_APPLIED, requestGeneration)
+            onLog("AI 草稿状态：DRAFT_ACCEPTED_AND_FILLED；草稿已接受并填入输入框；等待人工检查发送")
             finish("DRAFT_ENTERED_USER_CONTENT_REVIEW_AND_SEND_REQUIRED", requestGeneration)
         } else {
+            onLog(
+                "AI 草稿状态：LOCAL_DRAFT_VALIDATION_REJECTED；最终回读校验未通过；" +
+                    "中文原因=${result.reasonCode}"
+            )
             finish("DRAFT_VERIFY_${result.reasonCode}", requestGeneration)
         }
     }
