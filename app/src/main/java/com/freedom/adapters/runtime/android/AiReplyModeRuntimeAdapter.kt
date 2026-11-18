@@ -19,7 +19,7 @@ internal class AiReplyModeRuntimeAdapter(
         onReadinessStarting(mode, "AI Reply 已启动；等待目标应用正式就绪")
         awaitingServiceReconnect = false
         runtime().reset("开始新运行前清理")
-        runtime().scheduleInitialObservation(passiveOnly = false)
+        runtime().scheduleInitialObservation()
     }
 
     override fun onRunStopped(reason: String) {
@@ -31,7 +31,7 @@ internal class AiReplyModeRuntimeAdapter(
         if (awaitingServiceReconnect) {
             awaitingServiceReconnect = false
             onReadinessStarting(mode, "AI Reply 服务重连；重新等待目标应用正式就绪")
-            runtime().scheduleInitialObservation(passiveOnly = false)
+            runtime().scheduleInitialObservation()
         }
     }
 

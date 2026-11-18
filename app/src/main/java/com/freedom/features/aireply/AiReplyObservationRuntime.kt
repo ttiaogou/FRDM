@@ -982,15 +982,13 @@ class AiReplyObservationRuntime(
         return cleared
     }
 
-    fun scheduleInitialObservation(passiveOnly: Boolean = false) {
-        if (!passiveOnly) {
-            val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
-            if (failure != null) {
-                sessionRunStarted = false
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog("AI 回复启动被阻止：$failure；请修正配置后重新启动；未遍历列表")
-                return
-            }
+    fun scheduleInitialObservation() {
+        val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
+        if (failure != null) {
+            sessionRunStarted = false
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 回复启动被阻止：$failure；请修正配置后重新启动；未遍历列表")
+            return
         }
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
@@ -999,10 +997,10 @@ class AiReplyObservationRuntime(
             chatSessionManagementPort.beginSessionManagement()
         }.getOrNull()
         sampleCaptureActive = !directory.isNullOrBlank()
-        passiveManualObservation = passiveOnly
-        // In passive-only mode, archive creation must not implicitly start inbox scrolling or
-        // opening. Keep legacy traversal available for explicit/internal callers only.
-        sessionRunStarted = sampleCaptureActive && !passiveOnly
+        // A successful AI Reply start always owns the complete traversal pipeline. The former
+        // passive-only startup path was a test mode and must not be reachable from production.
+        passiveManualObservation = false
+        sessionRunStarted = sampleCaptureActive
         privateMessagesTaskController.beginRun(currentRunGeneration())
         if (sessionRunStarted && !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动私人消息任务")) {
             sessionRunStarted = false
@@ -1039,19 +1037,10 @@ class AiReplyObservationRuntime(
             SessionManagerState.PAUSED
         }
         when {
-            passiveOnly && sampleCaptureActive -> {
-                onLog(
-                    "AI 被动观察已启动：样本归档已开启；等待人工操作采集会话列表和聊天详情；" +
-                        "自动滚动、自动打开会话、输入和发送均禁用；样本目录=$directory"
-                )
-                // Passive mode still needs an initial page snapshot so later manual navigation
-                // and scroll events can be observed and archived without autonomous gestures.
-                scheduleFullInspection()
-            }
             sessionRunStarted -> {
                 onLog(
-                    "AI Reply 测试遍历已启动：普通聊天按底部至顶部扫描；" +
-                        "进入会话执行 OCR 并自动生成审核草稿；仅人工发送；样本目录=$directory"
+                    "AI Reply 完整模型链路已启动：普通聊天按底部至顶部扫描；" +
+                        "进入会话读取消息、调用模型并写入审核草稿；仅人工发送；样本目录=$directory"
                 )
                 if (chatPagePort.supportsVerifiedMessageWorkAreaNavigation()) {
                     startupReadinessCoordinator.beginVerification()
