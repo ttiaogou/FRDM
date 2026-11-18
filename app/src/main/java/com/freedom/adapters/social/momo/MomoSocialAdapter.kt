@@ -1394,18 +1394,14 @@ internal class MomoSocialAdapter(
                 activityClass = window.activityClass.ifBlank { currentActivity }
             ).pageType
         }
-        when (currentMainPageType) {
-            MomoChatPageType.CHAT_LIST -> Unit
-            MomoChatPageType.UNKNOWN, null -> {
-                logReceivedGreetingsEntrySkip("MESSAGE_WORK_AREA_SNAPSHOT_TEMPORARILY_UNKNOWN")
-                onLog("收到的招呼导航暂缓：消息列表页面指纹本次快照暂不可用；保留导航任务，等待新快照，不复用旧坐标")
-                return true
-            }
-            else -> {
-                logReceivedGreetingsEntrySkip("MESSAGE_WORK_AREA_STRUCTURAL_FINGERPRINT_NOT_CONFIRMED")
-                return false
-            }
-        }
+        onLog(
+            "收到招呼入口前页面类型：activity=$currentActivity；" +
+                "pageType=$currentMainPageType；" +
+                "entryPending=$receivedGreetingsEntryTapPending"
+        )
+        // The received-greetings row is itself the navigation surface. Do not make the
+        // generic page classifier a prerequisite: a fresh, unique label plus its clickable
+        // item_layout is stronger evidence for this entry than a transient CHAT_LIST result.
 
         val now = System.currentTimeMillis()
         if (now - lastReceivedGreetingsEntryTapAtMs < RECEIVED_GREETINGS_ENTRY_RETRY_COOLDOWN_MS) {
@@ -1498,7 +1494,8 @@ internal class MomoSocialAdapter(
         val tapRequest = GestureIntentRequest(
             id = "momo-sayhi-entry-${tapSubmittedAt}-${System.nanoTime()}",
             intent = GestureIntent.Tap(
-                preferredBounds = tapTarget.tapBounds,
+                // Tap the session container's safe area, not the non-clickable TextView label.
+                preferredBounds = tapTarget.clickableAncestorBounds,
                 targetBounds = tapTarget.clickableAncestorBounds,
                 durationMs = RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS,
                 feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
@@ -1523,8 +1520,8 @@ internal class MomoSocialAdapter(
         })
         if (submission == GestureSubmission.ACCEPTED) {
             onLog(
-                "收到的招呼入口：主聊天列表已唯一识别入口；已在文本标签安全内收区域提交一次点击；" +
-                    "未点击整行中心，未触碰资料卡拒绝/通过操作"
+                "收到的招呼入口：主聊天列表已唯一识别入口；已在 item_layout 安全区域提交一次点击；" +
+                    "不再只点击文字节点，未触碰资料卡拒绝/通过操作"
             )
         } else if (submission == GestureSubmission.DEFERRED_NOT_READY) {
             // No tap was dispatched. Restore the entry phase so the next idle inspection can

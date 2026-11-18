@@ -645,8 +645,9 @@ class AiReplyObservationRuntime(
                         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
                         privateMessagesTaskController.resetQuota()
                         // The greeting branch returned to the already-established inbox context.
-                        // Start a fresh quota/identity set without replaying the startup admission swipe.
-                        privateMessagesTraversalTaskExecutor.resetForReturnedInbox()
+                        // Preserve the existing traversal memory; only the open conversation and
+                        // stale viewport baseline are invalid after returning from another page.
+                        privateMessagesTraversalTaskExecutor.resumeAfterReturnedInbox()
                         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                         val eligibleUnread = inspection.chatListCandidates.count {
                             it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
@@ -1345,19 +1346,11 @@ class AiReplyObservationRuntime(
                     if (identityOutcome.verifiedIdentity != null) {
                         val verifiedIdentity = identityOutcome.verifiedIdentity
                         val candidate = currentSessionCandidate
-                        // The message-read callback may carry the snapshot that started the
-                        // read, which can predate the profile-page return. Reinspect the active
-                        // chat surface before binding identity so a stale snapshot cannot block
-                        // a successfully restored chat page.
-                        val restoredSnapshot = runCatching {
-                            chatPagePort.inspectChatPage()
-                        }.getOrNull()
-                        val restoredSurfaceMatches = restoredSnapshot != null &&
-                            currentSessionBinding?.matchesRestoredChatSurface(restoredSnapshot) == true
-                        val restoredHeader = restoredSnapshot?.chatTitleText
+                        val restoredSurfaceMatches = currentSessionBinding
+                            ?.matchesRestoredChatSurface(snapshot) == true
                         val auxiliaryHeaderMatches = ChatSessionManagementPolicy.matchChatHeader(
                             currentSessionName,
-                            restoredHeader
+                            snapshot.chatTitleText
                         ) != null
                         val sessionStillMatches = candidate != null &&
                             restoredSurfaceMatches &&

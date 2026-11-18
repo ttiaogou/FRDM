@@ -561,6 +561,19 @@ internal class PrivateMessagesTraversalTaskExecutor {
         normalInboxUnreadStateUnknown = false
     }
 
+    /**
+     * Resumes the existing inbox traversal after the greetings branch returns.
+     * The viewport may have changed, but the admission decision, attempted identities and
+     * boundary memory remain valid; only the currently open conversation is no longer valid.
+     */
+    fun resumeAfterReturnedInbox() {
+        clearCurrentSession()
+        executionState = SessionManagerState.WAITING_FOR_SESSION_LIST
+        pendingScrollBaseline = null
+        pendingScrollToTop = false
+        lastStableSessionListVisibleKeys = null
+    }
+
     fun clearCurrentSession() {
         currentSessionKey = null
         currentSessionName = null
