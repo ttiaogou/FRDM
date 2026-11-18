@@ -29,6 +29,7 @@ import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
 import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
+import com.freedom.features.aireply.ports.ContactIdentityCaptureOutcome
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatUnreadStatus
