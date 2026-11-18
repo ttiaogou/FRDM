@@ -4827,7 +4827,10 @@ internal class MomoSocialAdapter(
             ContactIdentityCaptureRequestResult.STARTED,
             ContactIdentityCaptureRequestResult.IN_PROGRESS,
             ContactIdentityCaptureRequestResult.RETRY_LATER ->
-                ContactIdentityCaptureOutcome.waiting(request, "IDENTITY_CAPTURE_WAITING_FOR_PROFILE_RESULT")
+                // Waiting is not a terminal failure. The outcome contract rejects a
+                // failureReason while awaiting=true; stage details are emitted by the
+                // explicit [OBSERVE] and [REQUEST] logs above.
+                ContactIdentityCaptureOutcome.waiting(request)
             ContactIdentityCaptureRequestResult.NOT_SUPPORTED ->
                 ContactIdentityCaptureOutcome.failed(request, "IDENTITY_CAPTURE_NOT_SUPPORTED")
             ContactIdentityCaptureRequestResult.REJECTED ->
