@@ -89,10 +89,10 @@ class RunLogBudgetPolicyTest {
     @Test
     fun exhaustedSnapshotRecoveryIsWarningWhileIntermediateRetriesRemainInfo() {
         assertEquals(RunLogLevel.INFO, RunLogBudgetPolicy.inferLevel(
-            "AI 被动观察[SNAPSHOT_RECOVERY]：页面快照为空；retry=1/3；350ms 后重新获取"
+            "AI 页面观察[SNAPSHOT_RECOVERY]：页面快照为空；retry=1/3；350ms 后重新获取"
         ))
         assertEquals(RunLogLevel.WARN, RunLogBudgetPolicy.inferLevel(
-            "AI 被动观察[SNAPSHOT_RECOVERY_EXHAUSTED]：连续 3 次快照恢复仍为空"
+            "AI 页面观察[SNAPSHOT_RECOVERY_EXHAUSTED]：连续 3 次快照恢复仍为空"
         ))
     }
 

@@ -24,6 +24,18 @@ internal data class MomoSayHiTapTarget(
 internal object MomoSayHiAvatarTargetPolicy {
     private val avatarContainerIds = setOf("userlist_item_iv_face", "chatlist_item_iv_face")
     private val avatarImageIds = setOf("img_avatar", "icon")
+
+    /** Resolves the other party's left-side message avatar in an already opened chat. */
+    fun resolveConversationAvatarTarget(index: NodeTreeIndex): MomoSayHiTapTarget? {
+        val container = index.snapshot.nodes.lastOrNull { node ->
+            node.visible && localId(node.viewId) == "message_iv_avatar_container" &&
+                !node.bounds.isEmpty && node.bounds.left < 180
+        } ?: return null
+        val image = index.descendantsOf(container.path, includeSelf = true).firstOrNull { node ->
+            node.visible && localId(node.viewId) == "message_iv_userphoto" && !node.bounds.isEmpty
+        } ?: return null
+        return MomoSayHiTapTarget(image.path, image.bounds, image.bounds)
+    }
     fun resolveAvatarTarget(
         index: NodeTreeIndex,
         rowPath: NodePath

@@ -113,7 +113,6 @@ class AiReplyObservationRuntime(
         private const val RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS = 750L
         private const val MAX_SESSION_LIST_STABILITY_RETRIES = 3
         private const val MAX_EVENT_BURST_INSPECTION_WAIT_MS = 1_200L
-        private const val MAX_ARCHIVED_MANUAL_MESSAGE_FINGERPRINTS = 500
         private const val SESSION_TAP_DURATION_MS = 90L
         private const val SESSION_SCROLL_DURATION_MS = 480L
         private const val PRIVATE_MESSAGES_TASK_ID = PrivateMessagesTaskController.TASK_ID
@@ -207,7 +206,6 @@ class AiReplyObservationRuntime(
     private var lastConfirmedChatListInspection: ChatPageSnapshot? = null
     private var lastRegionFingerprint = ""
     private var lastMessageFingerprint = ""
-    private val archivedManualMessageFingerprints = LinkedHashSet<String>()
     private val loggedOcrDebugFingerprints = LinkedHashSet<String>()
     private val temporaryContactMessageLedger = TemporaryContactMessageLedger(threshold = 10)
     /** Session keys awaiting an externally verified intercept-toggle result, in threshold order. */
@@ -276,7 +274,6 @@ class AiReplyObservationRuntime(
         set(value) { privateMessagesTraversalTaskExecutor.executionState = value }
     /** Archive lifecycle is independent from the optional automatic session traversal state. */
     private var sampleCaptureActive = false
-    private var passiveManualObservation = false
     private var sessionRunStarted = false
     /** Startup stays provisional until the first autonomous gesture is accepted by Android. */
     // Compatibility accessors keep this large coordinator readable while the executor owns the
@@ -347,14 +344,14 @@ class AiReplyObservationRuntime(
             val delayMs = transientEmptySnapshotRecovery.nextDelayMs()
             if (delayMs != null) {
                 onLog(
-                    "AI 被动观察[SNAPSHOT_RECOVERY]：页面快照为空或暂不可用；" +
+                    "AI 页面观察[SNAPSHOT_RECOVERY]：页面快照为空或暂不可用；" +
                         "retry=${transientEmptySnapshotRecovery.retryCount}/${TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS.size}；" +
                         "${delayMs}ms 后重新获取；保留最后一次已确认页面，不更新页面身份"
                 )
                 scheduleFullInspectionAfter(delayMs)
             } else {
                 onLog(
-                    "AI 被动观察[SNAPSHOT_RECOVERY_EXHAUSTED]：连续 ${TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS.size} 次快照恢复仍为空；" +
+                    "AI 页面观察[SNAPSHOT_RECOVERY_EXHAUSTED]：连续 ${TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS.size} 次快照恢复仍为空；" +
                         "保留最后一次已确认页面，等待下一次界面事件后重新检查"
                 )
             }
@@ -595,7 +592,6 @@ class AiReplyObservationRuntime(
                         }
                     }
                     sessionRunStarted -> handleSessionListPage(inspection)
-                    isManualObservationEnabled() -> capturePassiveSessionList(inspection)
                 }
             }
             ChatPageKind.CHAT_DETAIL_CANDIDATE -> {
@@ -627,13 +623,11 @@ class AiReplyObservationRuntime(
                         rejectChatHeaderMismatch(inspection, "页面事件检查")
                     }
                 }
-                if ((isManualObservationEnabled() || !sessionRunStarted ||
+                if ((!sessionRunStarted ||
                         sessionManagerState == SessionManagerState.READING_SESSION) &&
                     inspection.messageListTarget != null
                 ) {
                     readVisibleMessages(inspection)
-                } else if (sampleCaptureActive && inspection.messageListTarget == null) {
-                    onLog("AI 被动观察：已识别聊天页面，但消息列表定位暂不可用；仅暂停当前页面消息采集，观察仍保持运行")
                 }
             }
             ChatPageKind.UNKNOWN, ChatPageKind.NON_CHAT -> {
@@ -697,14 +691,6 @@ class AiReplyObservationRuntime(
                         }
                     }
                 }
-                if (isManualObservationEnabled()) {
-                    val observed = runCatching { receivedGreetingsTaskFlow.observePageReadOnly() }.getOrDefault(false)
-                    if (observed) {
-                        onLog("AI 被动观察：已识别并采集人工打开的收到招呼页面；未执行点击或滚动")
-                    } else {
-                        onLog("AI 被动观察：页面身份暂时无法确认；仅暂停当前页面业务采集，事件观察与归档生命周期保持运行")
-                    }
-                }
                 if (sessionRunStarted && currentSessionKey != null &&
                     sessionManagerState == SessionManagerState.OPENING_SESSION
                 ) {
@@ -714,30 +700,6 @@ class AiReplyObservationRuntime(
                     sessionManagerState = SessionManagerState.PAUSED
                     onLog("AI 会话管理已暂停：点击后进入非预期页面；不继续点击或盲目返回")
                 }
-            }
-        }
-    }
-
-    /**
-     * Archives the current inbox viewport after a human navigation event. This path is strictly
-     * observational: it never scrolls, resolves tap bounds, selects unread rows, or opens chats.
-     */
-    private fun capturePassiveSessionList(snapshot: ChatPageSnapshot) {
-        val fingerprint = snapshot.stableKey()
-        if (!privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.add(fingerprint)) return
-        chatSessionManagementPort.captureSessionListSample(snapshot) { screenshotPath ->
-            scheduler.schedule(0L) {
-                if (!isAiReplyActive() || !isManualObservationEnabled()) {
-                    return@schedule
-                }
-                onLog(
-                    "AI 被动观察：人工当前会话列表视口已归档；识别行=${snapshot.chatListCandidates.size}；" +
-                        "明确未读=${snapshot.chatListCandidates.count { it.unreadStatus == ChatUnreadStatus.UNREAD }}；" +
-                        "已读=${snapshot.chatListCandidates.count { it.unreadStatus == ChatUnreadStatus.READ }}；" +
-                        "未知=${snapshot.chatListCandidates.count { it.unreadStatus == ChatUnreadStatus.UNKNOWN }}；" +
-                        "累计不同视口=${privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.size}；" +
-                        "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}；不执行列表手势或点击"
-                )
             }
         }
     }
@@ -823,9 +785,6 @@ class AiReplyObservationRuntime(
         onLog("收到的招呼页面观察[WAITING]：status=${status.name}；私人消息任务已释放UI操作租约；等待页面结构确认可执行任务")
     }
 
-    private fun isManualObservationEnabled(): Boolean =
-        sampleCaptureActive && passiveManualObservation
-
     private fun runRegionRefresh() {
         regionRefreshTask = null
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
@@ -890,7 +849,6 @@ class AiReplyObservationRuntime(
         transientEmptySnapshotRecovery.reset()
         lastRegionFingerprint = ""
         lastMessageFingerprint = ""
-        archivedManualMessageFingerprints.clear()
         loggedOcrDebugFingerprints.clear()
         ocrDebugBatchLimitLogged = false
         invalidatePendingMessageRead()
@@ -905,7 +863,6 @@ class AiReplyObservationRuntime(
             }
         }
         sampleCaptureActive = false
-        passiveManualObservation = false
         sessionRunStarted = false
         startupReadinessCoordinator.resetState(sessionStarted = false)
         sessionManagerState = SessionManagerState.STOPPED
@@ -982,7 +939,7 @@ class AiReplyObservationRuntime(
         return cleared
     }
 
-    fun scheduleInitialObservation(passiveOnly: Boolean = false) {
+    fun scheduleInitialObservation() {
         val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
         if (failure != null) {
             sessionRunStarted = false
@@ -997,9 +954,6 @@ class AiReplyObservationRuntime(
             chatSessionManagementPort.beginSessionManagement()
         }.getOrNull()
         sampleCaptureActive = !directory.isNullOrBlank()
-        // A successful AI Reply start always owns the complete traversal pipeline. The former
-        // passive-only startup path was a test mode and must not be reachable from production.
-        passiveManualObservation = passiveOnly
         sessionRunStarted = sampleCaptureActive
         privateMessagesTaskController.beginRun(currentRunGeneration())
         if (sessionRunStarted && !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动私人消息任务")) {
@@ -1027,7 +981,6 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
         privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.clear()
         lastMessageFingerprint = ""
-        archivedManualMessageFingerprints.clear()
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
         privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
@@ -1116,22 +1069,7 @@ class AiReplyObservationRuntime(
             isKnownChatDetail = knownChatDetail,
             hasChatNavigationEvidence = hasChatNavigationEvidence
         )
-        // In passive mode the user may manually enter SayHi list/card Activities. Those pages are
-        // intentionally NON_CHAT to the ordinary chat classifier, so inspect their exact page
-        // identity after human navigation/content/scroll events. Debouncing bounds the read-only
-        // scans; no gesture or click is issued by this branch.
-        val passiveNonChatObservation = isManualObservationEnabled() &&
-            !knownChatDetail && event.type in setOf(
-                AccessibilityEventType.WINDOW_STATE_CHANGED,
-                AccessibilityEventType.WINDOWS_CHANGED,
-                AccessibilityEventType.WINDOW_CONTENT_CHANGED,
-                AccessibilityEventType.VIEW_CLICKED,
-                AccessibilityEventType.VIEW_SELECTED,
-                AccessibilityEventType.VIEW_SCROLLED,
-                AccessibilityEventType.VIEW_TEXT_CHANGED
-            )
-
-        if (requiresFullInspection || passiveNonChatObservation || receivedGreetingsPageProbePending) {
+        if (requiresFullInspection || receivedGreetingsPageProbePending) {
             regionRefreshTask?.cancel()
             regionRefreshTask = null
             pageObservationCoordinator.cancelRegionRefresh()
@@ -1216,7 +1154,7 @@ class AiReplyObservationRuntime(
         val privateDetail = sessionRunStarted && currentSessionCandidate != null &&
             currentSessionWindowKey == windowSessionKey(snapshot) &&
             ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null
-        val draftTargetConfirmed = !passiveManualObservation && (greetingDetail || privateDetail)
+        val draftTargetConfirmed = greetingDetail || privateDetail
         val draftAdmission = com.freedom.features.aireply.ai.VisibleDraftContext.assess(batch)
         if (draftTargetConfirmed && draftAdmission.retryable) {
             // 使用新快照重新 OCR；不把重试成功等同于内容已验证。
@@ -1239,6 +1177,43 @@ class AiReplyObservationRuntime(
                 return
             }
             onLog("AI 消息复读停止：${draftAdmission.reason}；已达两次重试上限，不猜测内容")
+        }
+        if (privateDetail) {
+            val currentIdentity = currentSessionCandidate?.contactIdentity
+            val identityVerified = currentIdentity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                !currentIdentity.contactId.isNullOrBlank()
+            if (!identityVerified) {
+                val identityOutcome = runCatching {
+                    chatSessionManagementPort.observeContactIdentityCapture(currentSessionCandidate!!)
+                }.getOrElse { error ->
+                    onLog("AI 联系人身份采集失败：IDENTITY_CAPTURE_INTERFACE_EXCEPTION；exception=${error.javaClass.simpleName}")
+                    null
+                }
+                if (identityOutcome != null) {
+                    if (identityOutcome.verifiedIdentity != null) {
+                        currentSessionCandidate?.contactIdentity = identityOutcome.verifiedIdentity
+                        onLog("AI 联系人身份采集完成：已取得并绑定当前私人会话身份；继续加载历史上下文")
+                    } else if (identityOutcome.awaiting) {
+                        onLog(
+                            "AI 联系人身份采集中：等待资料页/身份回传；" +
+                                "stage=${identityOutcome.request.name}；暂不加载历史、不提交模型"
+                        )
+                        scheduler.schedule(500L) {
+                            if (isAiReplyActive() && sessionManagerState == SessionManagerState.READING_SESSION) {
+                                val fresh = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+                                if (fresh != null && hasSameWindowSession(snapshot, fresh)) {
+                                    readVisibleMessages(fresh)
+                                } else {
+                                    onLog("AI 联系人身份采集失败：IDENTITY_CAPTURE_WINDOW_CHANGED；未使用旧窗口继续处理")
+                                }
+                            }
+                        }
+                        return
+                    } else if (identityOutcome.failureReason != null) {
+                        onLog("AI 联系人身份采集失败：${identityOutcome.failureReason}；降级使用当前会话消息，不加载历史")
+                    }
+                }
+            }
         }
         val rowIdentity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()
             else currentSessionCandidate?.contactIdentity
@@ -1354,32 +1329,6 @@ class AiReplyObservationRuntime(
             batch.ocrRecognizedTargetCount,
             batch.ocrFailureReason.orEmpty()
         ).joinToString("|")
-        if (isManualObservationEnabled() && sampleCaptureActive &&
-            fingerprint !in archivedManualMessageFingerprints
-        ) {
-            // A manually opened chat has no independently verified inbox-row identity. Archive
-            // the batch without assigning a contact name or promoting UNKNOWN direction. Retry
-            // failed persistence on the next event, but do not duplicate an identical sample.
-            val sampleIndex = runCatching {
-                chatSessionManagementPort.persistChatSample(snapshot, batch, sessionName = null)
-            }.getOrDefault(0)
-            if (sampleIndex > 0) {
-                archivedManualMessageFingerprints += fingerprint
-                while (archivedManualMessageFingerprints.size > MAX_ARCHIVED_MANUAL_MESSAGE_FINGERPRINTS) {
-                    archivedManualMessageFingerprints.remove(archivedManualMessageFingerprints.first())
-                }
-            }
-            onLog(
-                if (sampleIndex > 0) {
-                    "AI 被动观察：人工打开的聊天详情已归档；样本序号=$sampleIndex；" +
-                        "可见消息=${batch.messages.size}；AI 可用消息=${observerBatch.messages.size}；" +
-                        "方向不明=${batch.messages.count { it.direction == com.freedom.features.aireply.domain.message.ChatMessageDirection.UNKNOWN }}；" +
-                        "联系人身份未绑定；仅使用当前窗口生成审核草稿，不自动发送"
-                } else {
-                    "AI 被动观察：人工聊天详情读取完成，但样本归档失败；未绑定联系人身份；不执行输入或发送"
-                }
-            )
-        }
         if (fingerprint != lastMessageFingerprint) {
             lastMessageFingerprint = fingerprint
             val bodyLogStatus = if (batch.ocrDebugTextByRowIndex != null ||

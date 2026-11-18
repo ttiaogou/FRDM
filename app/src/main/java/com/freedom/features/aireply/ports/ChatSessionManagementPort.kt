@@ -20,6 +20,51 @@ enum class ContactIdentityCaptureRequestResult {
 }
 
 /**
+ * Explicitly observable identity-capture state for the conversation pipeline.
+ * A request result alone is not enough to decide whether message/history loading may proceed;
+ * callers must wait while [awaiting] is true and may continue only after [completed] is true.
+ */
+data class ContactIdentityCaptureOutcome(
+    val request: ContactIdentityCaptureRequestResult,
+    val completed: Boolean = false,
+    val awaiting: Boolean = request == ContactIdentityCaptureRequestResult.STARTED ||
+        request == ContactIdentityCaptureRequestResult.IN_PROGRESS ||
+        request == ContactIdentityCaptureRequestResult.RETRY_LATER,
+    val verifiedIdentity: ContactRowIdentity? = null,
+    val failureReason: String? = null
+) {
+    init {
+        require(!(completed && awaiting)) { "identity capture cannot be completed and awaiting" }
+        require(verifiedIdentity == null || completed) {
+            "verified identity requires completed identity capture"
+        }
+        require(failureReason == null || !awaiting) {
+            "failure reason is only valid for a terminal identity capture result"
+        }
+    }
+
+    companion object {
+        fun waiting(request: ContactIdentityCaptureRequestResult, reason: String? = null) =
+            ContactIdentityCaptureOutcome(request = request, awaiting = true, failureReason = reason)
+
+        fun completed(identity: ContactRowIdentity) = ContactIdentityCaptureOutcome(
+            request = ContactIdentityCaptureRequestResult.STARTED,
+            completed = true,
+            awaiting = false,
+            verifiedIdentity = identity
+        )
+
+        fun failed(request: ContactIdentityCaptureRequestResult, reason: String) =
+            ContactIdentityCaptureOutcome(
+                request = request,
+                completed = true,
+                awaiting = false,
+                failureReason = reason
+            )
+    }
+}
+
+/**
  * Read-only session navigation and local sample-storage boundary.
  * Implementations must revalidate every row locator immediately before returning tap bounds.
  */
@@ -34,6 +79,27 @@ interface ChatSessionManagementPort {
     fun requestContactIdentityCapture(
         candidate: ChatListCandidateSnapshot
     ): ContactIdentityCaptureRequestResult = ContactIdentityCaptureRequestResult.NOT_SUPPORTED
+
+    /**
+     * Returns an explicit terminal/waiting outcome for the identity transaction. This is the
+     * hand-off used by the conversation pipeline before it loads history or calls the model.
+     * Existing adapters remain compatible until they implement the richer transaction.
+     */
+    fun observeContactIdentityCapture(
+        candidate: ChatListCandidateSnapshot
+    ): ContactIdentityCaptureOutcome {
+        val request = requestContactIdentityCapture(candidate)
+        return when (request) {
+            ContactIdentityCaptureRequestResult.STARTED,
+            ContactIdentityCaptureRequestResult.IN_PROGRESS,
+            ContactIdentityCaptureRequestResult.RETRY_LATER ->
+                ContactIdentityCaptureOutcome.waiting(request)
+            ContactIdentityCaptureRequestResult.NOT_SUPPORTED ->
+                ContactIdentityCaptureOutcome.failed(request, "IDENTITY_CAPTURE_NOT_SUPPORTED")
+            ContactIdentityCaptureRequestResult.REJECTED ->
+                ContactIdentityCaptureOutcome.failed(request, "IDENTITY_CAPTURE_REJECTED")
+        }
+    }
 
     /** Delivers transient event evidence; persists redacted metadata only while a collection run is active. */
     fun recordAccessibilityEvent(event: AccessibilityEventEnvelope) { }

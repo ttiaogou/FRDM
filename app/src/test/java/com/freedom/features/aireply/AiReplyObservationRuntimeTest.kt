@@ -931,7 +931,7 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun passivePageObservationNeverExecutesNavigationGesture() {
+    fun physicalScrollNeverExecutesNavigationGesture() {
         assertLegacySignalsDoNotControlPageSelectedTask(
             listOf(
             eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.PHYSICAL_USER)
@@ -1066,53 +1066,6 @@ class AiReplyObservationRuntimeTest {
             eventWithOrigin(AccessibilityEventType.VIEW_SELECTED, InputOrigin.PHYSICAL_USER)
             )
         )
-    }
-
-    @Test
-    fun unidentifiedPagePausesOnlyItsCollectorAndLaterRecognizedPageResumesSampling() {
-        val scheduler = FakeScheduler()
-        val port = FakeChatPort().apply {
-            sessionRunEnabled = true
-            passiveSayHiObservationResult = false
-            page = ChatPageSnapshot(
-                packageName = "com.immomo.momo",
-                activityClass = "com.immomo.momo.unknown.TransientActivity",
-                pageKind = ChatPageKind.UNKNOWN,
-                scannedNodeCount = 5,
-                editableInputCount = 0,
-                messageListCount = 0,
-                sendActionCount = 0,
-                messageRelatedViewIdCount = 0,
-                hasChatTab = false,
-                messageListTarget = null,
-                inputFieldTarget = null
-            )
-        }
-        val logs = ArrayList<String>()
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler,
-            chatPagePort = port,
-            chatMessagePort = port,
-            chatSessionManagementPort = port,
-            gesturePolicy = NoOpGestureApi,
-            targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
-            onLog = logs::add,
-            fullInspectionDebounceMs = 300L,
-            regionRefreshDebounceMs = 500L
-        )
-
-        runtime.scheduleInitialObservation(passiveOnly = true)
-        scheduler.runNext()
-        assertTrue(logs.any { it.contains("仅暂停当前页面业务采集") })
-        assertEquals(0, port.messageReads)
-
-        port.page = chatDetailSnapshot(windowGeneration = 9L)
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        scheduler.runNext() // The recognized chat detail is inspected without restarting the run.
-        assertEquals(1, port.messageReads)
-        assertEquals(1, port.persistedChatSamples)
-        assertTrue(logs.none { it.contains("AI 样本归档：运行时重置") })
     }
 
     @Test
@@ -3527,8 +3480,8 @@ class AiReplyObservationRuntimeTest {
         var manualGreetingsArrivalObservations: Int = 0
         var manualGreetingsArrivalStatuses: List<ReceivedGreetingsPageArrivalStatus>? = null
         private var manualGreetingsArrivalIndex: Int = 0
-        var passiveSayHiObservations: Int = 0
-        var passiveSayHiObservationResult: Boolean = true
+        var receivedGreetingsPageObservations: Int = 0
+        var receivedGreetingsPageObservationResult: Boolean = true
         var receivedGreetingsPriorityReturns: Int = 0
         var receivedGreetingsTraversalStatusValue: ReceivedGreetingsTraversalStatus =
             ReceivedGreetingsTraversalStatus.UNKNOWN
@@ -3605,8 +3558,8 @@ class AiReplyObservationRuntimeTest {
             return beginCurrentListResult
         }
         override fun observeReceivedGreetingsPage(): Boolean {
-            passiveSayHiObservations++
-            return passiveSayHiObservationResult
+            receivedGreetingsPageObservations++
+            return receivedGreetingsPageObservationResult
         }
         override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus =
             receivedGreetingsTraversalStatusValue

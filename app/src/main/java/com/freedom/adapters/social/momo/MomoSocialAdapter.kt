@@ -195,6 +195,8 @@ internal class MomoSocialAdapter(
         @Volatile var lastTransitionAtMs: Long = lastTransitionAtMs
         @Volatile var platformUserId: String? = null
         @Volatile var profileReadCompleted: Boolean = false
+        @Volatile var profileScrollAttempted: Boolean = false
+        @Volatile var profileScrollInFlight: Boolean = false
         @Volatile var backAttempts: Int = 0
     }
 
@@ -906,7 +908,6 @@ internal class MomoSocialAdapter(
      */
     override fun supportsReceivedGreetingsIdleWorkflow(): Boolean = true
 
-    /** Passive path for pages the user opens manually; it never scrolls or taps. */
     override fun observeReceivedGreetingsPage(): Boolean =
         inspectSayHiPageAndAutonomousBrowse(allowAutonomousScroll = false, minimumIntervalMs = 300L)
 
@@ -3573,7 +3574,6 @@ internal class MomoSocialAdapter(
 
     /**
      * Inspects confirmed SayHi pages. Test traversal may scroll only the confirmed list;
-     * passive observation always leaves the user's viewport alone.
      */
     private fun inspectSayHiPageAndAutonomousBrowse(
         allowAutonomousScroll: Boolean = true,
@@ -4683,43 +4683,22 @@ internal class MomoSocialAdapter(
         ) ?: return ContactIdentityCaptureRequestResult.RETRY_LATER
         if (tree.truncated || tree.window.packageName != targetPackage ||
             tree.window.activityClass != MomoAppDescriptor.MAIN_ACTIVITY_CLASS ||
-            tree.window != candidate.rowTarget.window ||
             !accessibilityGateway.isWindowCurrent(tree.window)
         ) return ContactIdentityCaptureRequestResult.RETRY_LATER
 
         val index = NodeTreeIndex(tree)
-        val row = index.nodeAt(candidate.rowTarget.path)
-            ?: return ContactIdentityCaptureRequestResult.RETRY_LATER
-        if (localNodeId(row.viewId) != "item_layout" || !row.visible ||
-            row.bounds != candidate.rowBounds ||
-            index.ancestorsOf(row.path).none { localNodeId(it.viewId) == "recyclerview" }
-        ) return ContactIdentityCaptureRequestResult.RETRY_LATER
-
-        val nameNodes = index.descendantsOf(row.path).filter {
-            localNodeId(it.viewId) == "chatlist_item_tv_name" && it.visible
-        }
-        val currentName = nameNodes.singleOrNull()?.text?.trim()
-        if (nameNodes.size != 1 ||
-            nameNodes.singleOrNull()?.path?.childIndices != candidate.nameNodePath?.childIndices ||
-            normalizeIdentityDisplayName(currentName) != normalizeIdentityDisplayName(anchor.displayName)
-        ) return ContactIdentityCaptureRequestResult.RETRY_LATER
-
-        // Reuse the Received Greetings avatar resolver. In the ordinary inbox tree the exact
-        // clickable node is chatlist_item_iv_face; img_avatar itself is not the tap target.
-        val target = MomoSayHiAvatarTargetPolicy.resolveAvatarTarget(index, row.path)
-            ?: return ContactIdentityCaptureRequestResult.REJECTED
+        val target = MomoSayHiAvatarTargetPolicy.resolveConversationAvatarTarget(index)
+            ?: run {
+                onLog("AI 联系人身份采集失败：CHAT_DETAIL_LEFT_AVATAR_NOT_FOUND；不回退私人列表头像")
+                return ContactIdentityCaptureRequestResult.RETRY_LATER
+            }
+        onLog("AI 联系人身份采集：已定位聊天详情页左侧消息头像；不使用右上角头像")
         val avatarClickNode = index.nodeAt(target.path)
             ?: return ContactIdentityCaptureRequestResult.RETRY_LATER
-        if (localNodeId(avatarClickNode.viewId) != "chatlist_item_iv_face" ||
-            target.path.childIndices != candidate.avatarPath?.childIndices ||
-            !avatarClickNode.visible || !avatarClickNode.enabled || !avatarClickNode.clickable ||
-            target.preferredBounds != candidate.avatarBounds ||
-            target.targetBounds != avatarClickNode.bounds
-        ) return ContactIdentityCaptureRequestResult.REJECTED
-
-        if (sayHiTapReadiness(tree, target) != MomoSayHiTapReadiness.READY) {
-            return ContactIdentityCaptureRequestResult.RETRY_LATER
+        if (!avatarClickNode.visible || target.targetBounds.isEmpty) {
+            return ContactIdentityCaptureRequestResult.REJECTED
         }
+
         val metrics = accessibilityGateway.displayMetrics()
         val executionContext = gesturePolicy.captureContext(
             tree.window,
@@ -4746,7 +4725,7 @@ internal class MomoSocialAdapter(
                 durationMs = RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS,
                 feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
             ),
-            description = "陌陌普通消息列表：点击当前联系人头像采集平台身份（只读）",
+            description = "陌陌聊天详情：点击对方消息左侧头像采集平台身份（只读）",
             executionContext = executionContext
         )
         val submission = runCatching {
@@ -4870,6 +4849,7 @@ internal class MomoSocialAdapter(
             }
 
             InboxIdentityCaptureStage.WAITING_PROFILE -> {
+                if (pending.profileScrollInFlight) return true
                 if (currentActivity != MomoSayHiPageContract.PROFILE_ACTIVITY) {
                     if (ageMs <= SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
                     if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) {
@@ -4924,6 +4904,19 @@ internal class MomoSocialAdapter(
                                 source = "PROFILE_NAME_MISMATCH"
                             )
                         }
+                        if (readout.status != MomoSayHiPlatformIdentityStatus.CONFIRMED &&
+                            !pending.profileScrollAttempted
+                        ) {
+                            pending.profileScrollAttempted = true
+                            if (dispatchInboxProfileIdentityScroll(pending, tree)) {
+                                onLog(
+                                    "AI 联系人身份采集[PROFILE_SCROLL]：首次未读取到唯一用户 ID；" +
+                                        "已提交唯一一次向上滑动，等待新资料页节点树"
+                                )
+                                return true
+                            }
+                            onLog("AI 联系人身份采集失败：PROFILE_SCROLL_SUBMISSION_FAILED；不使用旧坐标")
+                        }
                         pending.platformUserId = readout.value.takeIf {
                             readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED
                         }
@@ -4932,7 +4925,8 @@ internal class MomoSocialAdapter(
                             if (pending.platformUserId != null) {
                                 "AI 联系人身份采集：资料页昵称与原消息行一致，现有陌陌资料页解析器确认唯一平台 ID；原始 ID 不写入运行日志"
                             } else {
-                                "AI 联系人身份采集：资料页身份未通过唯一 ID 或昵称交叉验证；不关联历史会话"
+                                "AI 联系人身份采集失败：PROFILE_ID_NOT_FOUND_AFTER_ONE_SCROLL；" +
+                                    "资料页身份未通过唯一 ID 或昵称交叉验证；不关联历史会话"
                             }
                         )
                     }
@@ -5000,6 +4994,73 @@ internal class MomoSocialAdapter(
             failedInboxIdentityCaptureKeys += pending.anchor.opaqueKey()
         }
         onLog("AI 联系人身份采集失败：$reason；保留未验证身份，不以昵称关联历史")
+    }
+
+    private fun dispatchInboxProfileIdentityScroll(
+        pending: PendingInboxIdentityCapture,
+        tree: AccessibilityTreeSnapshot
+    ): Boolean {
+        val metrics = accessibilityGateway.displayMetrics()
+        val decision = MomoSayHiProfileScrollPolicy.resolveViewport(
+            nodes = tree.nodes,
+            displayWidth = metrics.widthPixels,
+            displayHeight = metrics.heightPixels
+        )
+        val viewport = decision.viewport ?: run {
+            onLog(
+                "AI 联系人身份采集失败：PROFILE_SCROLL_VIEWPORT_UNAVAILABLE；" +
+                    "candidates=${decision.candidateCount}；reason=${decision.reason}"
+            )
+            return false
+        }
+        if (tree.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
+            !accessibilityGateway.isWindowCurrent(tree.window)
+        ) {
+            onLog("AI 联系人身份采集失败：PROFILE_SCROLL_WINDOW_NOT_CURRENT；不使用旧窗口")
+            return false
+        }
+        val executionContext = gesturePolicy.captureContext(
+            tree.window,
+            metrics.toGestureCoordinateContext()
+        ) ?: run {
+            onLog("AI 联系人身份采集失败：PROFILE_SCROLL_CONTEXT_UNAVAILABLE；不使用旧视口")
+            return false
+        }
+        val request = GestureIntentRequest(
+            id = "momo-inbox-profile-id-scroll-${System.nanoTime()}",
+            intent = GestureIntent.VerticalSwipe(
+                viewport = viewport,
+                direction = VerticalSwipeDirection.UP,
+                durationMs = SAYHI_PROFILE_IDENTITY_SCROLL_DURATION_MS
+            ),
+            description = "陌陌私人会话资料页身份字段只读上滑",
+            executionContext = executionContext
+        )
+        pending.profileScrollInFlight = true
+        val submission = runCatching {
+            gesturePolicy.execute(request, GestureExecutionListener { result ->
+                pending.profileScrollInFlight = false
+                pending.lastTransitionAtMs = System.currentTimeMillis()
+                onLog(
+                    if (result.status == GestureExecutionStatus.COMPLETED) {
+                        "AI 联系人身份采集[PROFILE_SCROLL_COMPLETED]：上滑完成；等待资料页二次节点扫描"
+                    } else {
+                        "AI 联系人身份采集失败：PROFILE_SCROLL_${result.status.name}；" +
+                            "资料页二次扫描未开始"
+                    }
+                )
+            })
+        }.getOrElse {
+            pending.profileScrollInFlight = false
+            onLog("AI 联系人身份采集失败：PROFILE_SCROLL_EXECUTION_EXCEPTION；exception=${it.javaClass.simpleName}")
+            return false
+        }
+        if (submission != GestureSubmission.ACCEPTED) {
+            pending.profileScrollInFlight = false
+            onLog("AI 联系人身份采集失败：PROFILE_SCROLL_SUBMISSION_${submission.name}")
+            return false
+        }
+        return true
     }
 
     override fun beginSessionManagement(): String? = runCatching {
