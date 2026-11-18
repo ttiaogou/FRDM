@@ -420,7 +420,6 @@ class AiReplyObservationRuntimeTest {
 
         runtime.scheduleInitialObservation(passiveOnly = true)
         scheduler.runNext() // Read the list currently displayed by the user.
-        scheduler.runNext() // Complete the passive list sample callback.
 
         assertEquals(1, port.sessionListSamples)
         assertEquals(0, gestureCount)
