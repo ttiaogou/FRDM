@@ -1298,9 +1298,15 @@ class AiReplyObservationRuntime(
                 }.getOrElse { error ->
                     onLog(
                         "AI 联系人身份采集失败：IDENTITY_CAPTURE_INTERFACE_EXCEPTION；" +
-                            "exception=${error.javaClass.simpleName}；message=${error.message ?: "NONE"}"
+                            "exception=${error.javaClass.simpleName}；message=${error.message ?: "NONE"}；" +
+                            "身份未终态，继续等待，不启动模型"
                     )
-                    null
+                    // An adapter exception is not proof of terminal identity failure.
+                    // Keep the conversation on the bounded identity transaction and let
+                    // the existing timeout path decide when current-window fallback is allowed.
+                    ContactIdentityCaptureOutcome.waiting(
+                        ContactIdentityCaptureRequestResult.RETRY_LATER
+                    )
                 }
                 if (identityOutcome != null) {
                     if (identityOutcome.verifiedIdentity != null) {
