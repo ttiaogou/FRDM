@@ -1,5 +1,6 @@
 package com.freedom.adapters.ai
 
+import com.freedom.features.aireply.ai.AiModelCallStage
 import com.freedom.features.aireply.ai.AiModelConfiguration
 import com.freedom.features.aireply.ai.AiModelMessage
 import com.freedom.features.aireply.ai.AiModelRequest
@@ -22,12 +23,16 @@ class DeepSeekAiModelTransport(
     }
 ) : AiModelTransport {
 
-    override fun execute(request: AiModelRequest): Result<AiModelResult> = runCatching {
+    override fun execute(request: AiModelRequest): Result<AiModelResult> = AiModelHttpCallTrace().capture { trace ->
         val config = configuration.normalized()
         require(config.provider == AiModelServiceProvider.DEEPSEEK) { "AI_MODEL_PROVIDER_MISMATCH" }
         require(config.isReadyForCloudProvider) { "AI_MODEL_NOT_CONFIGURED" }
-        val connection = connectionFactory.open(URL(chatCompletionsEndpoint(config.apiBaseUrl)))
+        trace.stage = AiModelCallStage.ENDPOINT
+        val endpoint = chatCompletionsEndpoint(config.apiBaseUrl)
+        trace.stage = AiModelCallStage.CONNECTION_OPEN
+        val connection = connectionFactory.open(URL(endpoint))
         try {
+            trace.stage = AiModelCallStage.CONNECTION_SETUP
             connection.requestMethod = "POST"
             connection.connectTimeout = config.requestTimeoutMillis.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             connection.readTimeout = config.requestTimeoutMillis.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
@@ -36,19 +41,27 @@ class DeepSeekAiModelTransport(
             connection.setRequestProperty("Authorization", "Bearer ${config.apiKey}")
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             connection.setRequestProperty("Accept", "application/json")
+            trace.stage = AiModelCallStage.REQUEST_ENCODING
             val bodyBytes = buildRequestPayload(config.modelName, request)
                 .toByteArray(StandardCharsets.UTF_8)
             connection.setFixedLengthStreamingMode(bodyBytes.size)
+            trace.stage = AiModelCallStage.REQUEST_WRITE
             connection.outputStream.use { output -> output.write(bodyBytes) }
 
+            trace.stage = AiModelCallStage.RESPONSE_STATUS
             val status = connection.responseCode
+            trace.httpStatus = status
             if (status !in 200..299) {
-                runCatching { connection.errorStream?.use { readBounded(it, MAX_RESPONSE_BYTES) } }
+                runCatching { connection.errorStream?.use {
+                    trace.captureProviderError(String(readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8))
+                } }
                 throw httpFailure(status)
             }
+            trace.stage = AiModelCallStage.RESPONSE_READ
             val responseText = connection.inputStream.use {
                 String(readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8)
             }
+            trace.stage = AiModelCallStage.RESPONSE_PARSE
             parseResponse(responseText, config.modelName)
         } catch (timeout: SocketTimeoutException) {
             throw AiModelHttpException("HTTP_TIMEOUT", retryable = true, cause = timeout)

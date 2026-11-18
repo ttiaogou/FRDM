@@ -1,5 +1,6 @@
 package com.freedom.adapters.ai
 
+import com.freedom.features.aireply.ai.AiModelCallStage
 import com.freedom.features.aireply.ai.AiModelConfiguration
 import com.freedom.features.aireply.ai.AiModelMessage
 import com.freedom.features.aireply.ai.AiModelRequest
@@ -16,10 +17,59 @@ import java.nio.charset.StandardCharsets
 
 /** Safe, non-secret transport failure suitable for diagnostics. Response bodies are never exposed. */
 class AiModelHttpException(
-    val safeCode: String,
-    val retryable: Boolean = false,
-    cause: Throwable? = null
-) : IOException(safeCode, cause)
+    override val safeCode: String,
+    override val retryable: Boolean = false,
+    cause: Throwable? = null,
+    override val httpStatus: Int? = null,
+    override val stage: AiModelCallStage = AiModelCallStage.MODEL_CALL,
+    override val providerErrorCode: String? = null,
+    override val providerErrorType: String? = null,
+    override val providerErrorParam: String? = null
+) : IOException(safeCode, cause), com.freedom.features.aireply.ai.AiModelCallFailureDetails
+
+/** One trace per invocation: concurrent calls cannot overwrite each other's status or stage. */
+internal class AiModelHttpCallTrace {
+    var stage = AiModelCallStage.CONFIGURATION
+    var httpStatus: Int? = null
+    private var providerErrorCode: String? = null
+    private var providerErrorType: String? = null
+    private var providerErrorParam: String? = null
+
+    // 只提取白名单内的错误码/类型/参数，绝不保留自由文本 message 或响应正文。
+    fun captureProviderError(body: String) {
+        val root = MiniJson.parse(body) as? Map<*, *> ?: return
+        val error = root["error"] as? Map<*, *> ?: return
+        providerErrorCode = (error["code"] as? String)?.let {
+            com.freedom.features.aireply.ai.AiModelCallDiagnostics.safeProviderError(it)
+        }
+        providerErrorType = (error["type"] as? String)?.let {
+            com.freedom.features.aireply.ai.AiModelCallDiagnostics.safeProviderError(it)
+        }
+        providerErrorParam = (error["param"] as? String)?.let {
+            com.freedom.features.aireply.ai.AiModelCallDiagnostics.safeProviderParam(it)
+        }
+    }
+
+    fun <T> capture(block: (AiModelHttpCallTrace) -> T): Result<T> = runCatching { block(this) }
+        .recoverCatching { failure ->
+            val known = failure as? AiModelHttpException
+            val safeCode = known?.safeCode ?: when (failure.message) {
+                "AI_MODEL_NOT_CONFIGURED", "AI_MODEL_PROVIDER_MISMATCH", "HTTPS_REQUIRED" -> failure.message!!
+                else -> "HTTP_PREPARATION_FAILED"
+            }
+            throw AiModelHttpException(
+                safeCode = safeCode,
+                retryable = known?.retryable ?: false,
+                // Retain the original wrapper/type and cause for technical diagnostics only.
+                cause = failure,
+                httpStatus = httpStatus,
+                stage = stage,
+                providerErrorCode = providerErrorCode,
+                providerErrorType = providerErrorType,
+                providerErrorParam = providerErrorParam
+            )
+        }
+}
 
 /** Opens a connection; injected in tests so the transport can be verified without network access. */
 fun interface AiHttpConnectionFactory {
@@ -38,13 +88,17 @@ class OpenAiCompatibleAiModelTransport(
     }
 ) : AiModelTransport {
 
-    override fun execute(request: AiModelRequest): Result<AiModelResult> = runCatching {
+    override fun execute(request: AiModelRequest): Result<AiModelResult> = AiModelHttpCallTrace().capture { trace ->
         val config = configuration.normalized()
         require(config.isReadyForCloudProvider) { "AI_MODEL_NOT_CONFIGURED" }
+        trace.stage = AiModelCallStage.ENDPOINT
         val endpoint = chatCompletionsEndpoint(config.apiBaseUrl)
+        trace.stage = AiModelCallStage.REQUEST_ENCODING
         val payload = buildRequestPayload(config.modelName, request)
+        trace.stage = AiModelCallStage.CONNECTION_OPEN
         val connection = connectionFactory.open(URL(endpoint))
         try {
+            trace.stage = AiModelCallStage.CONNECTION_SETUP
             connection.requestMethod = "POST"
             connection.connectTimeout = config.requestTimeoutMillis.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             connection.readTimeout = config.requestTimeoutMillis.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
@@ -55,17 +109,24 @@ class OpenAiCompatibleAiModelTransport(
             connection.setRequestProperty("Accept", "application/json")
             val bodyBytes = payload.toByteArray(StandardCharsets.UTF_8)
             connection.setFixedLengthStreamingMode(bodyBytes.size)
+            trace.stage = AiModelCallStage.REQUEST_WRITE
             connection.outputStream.use { output -> output.write(bodyBytes) }
 
+            trace.stage = AiModelCallStage.RESPONSE_STATUS
             val status = connection.responseCode
+            trace.httpStatus = status
             if (status !in 200..299) {
                 // Read only a bounded amount to release the stream; do not surface provider text.
-                runCatching { connection.errorStream?.use { readBounded(it, MAX_RESPONSE_BYTES) } }
+                runCatching { connection.errorStream?.use {
+                    trace.captureProviderError(String(readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8))
+                } }
                 throw httpFailure(status)
             }
+            trace.stage = AiModelCallStage.RESPONSE_READ
             val responseText = connection.inputStream.use {
                 String(readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8)
             }
+            trace.stage = AiModelCallStage.RESPONSE_PARSE
             parseResponse(responseText, config.modelName)
         } catch (timeout: SocketTimeoutException) {
             throw AiModelHttpException("HTTP_TIMEOUT", retryable = true, cause = timeout)

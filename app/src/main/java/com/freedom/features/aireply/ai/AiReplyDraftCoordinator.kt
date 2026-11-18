@@ -203,6 +203,7 @@ class AiReplyDraftCoordinator(
             finish("AI_REPLY_STATE_CHANGED_BEFORE_REQUEST", requestGeneration)
             return
         }
+        val callStartedAt = nowMillis()
         val provider = createProvider(configuration)
         val decision = AiReplyDecisionEngine(
             modelProvider = provider,
@@ -220,8 +221,16 @@ class AiReplyDraftCoordinator(
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
             fun safeLog(value: String?): String = AiModelDataRedactor.redact(value.orEmpty())
                 .replace(Regex("[\\r\\n\\t\\p{Cntrl}]"), " ").take(1_000)
+            decision.callDiagnostics?.let { diagnostics ->
+                onLog("AI 模型调用失败：requestId=${safeLog(requestId)}；" +
+                    "provider=${safeLog(configuration.provider.name)}；model=${safeLog(configuration.modelName)}；" +
+                    "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；${diagnostics.logFields()}")
+            }
+            val fallbackDetail = if (decision.callDiagnostics != null) {
+                "本地捕获到模型调用异常；未取得可用回复；请查看同一 requestId 的调用失败日志"
+            } else "模型未提供详细解释；请核查模型响应协议"
             onLog("AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
-                "reason=${safeLog(decision.reason)}；reasonDetail=${safeLog(decision.reasonDetail ?: "模型未提供详细解释；请核查模型响应协议")}；" +
+                "reason=${safeLog(decision.reason)}；reasonDetail=${safeLog(decision.reasonDetail ?: fallbackDetail)}；" +
                 "provider=${safeLog(decision.provider)}；model=${safeLog(decision.model)}；" +
                 "finishReason=${safeLog(decision.finishReason)}；contextMessages=${context.messages.size}；" +
                 "inputTokens=${decision.usage?.inputTokens}；outputTokens=${decision.usage?.outputTokens}；" +

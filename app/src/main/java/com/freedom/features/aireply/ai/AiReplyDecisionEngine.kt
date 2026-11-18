@@ -34,8 +34,12 @@ class AiReplyDecisionEngine(
                 schema = AiReplyDecisionJsonParser.schema(maxDraftChars)
             )
         )
-        val result = runCatching { modelProvider.generate(request) }.getOrNull()
-            ?: return AiReplyDecision(AiReplyAction.HUMAN_REVIEW, "MODEL_CALL_FAILED")
+        val result = runCatching { modelProvider.generate(request) }.getOrElse { failure ->
+            return AiReplyDecision(
+                AiReplyAction.HUMAN_REVIEW, "MODEL_CALL_FAILED",
+                callDiagnostics = AiModelCallDiagnostics.from(failure)
+            )
+        }
         val raw = result.text?.trim().orEmpty()
         if (raw.isBlank()) return AiReplyDecision(AiReplyAction.HUMAN_REVIEW, "EMPTY_MODEL_OUTPUT")
         val parsed = AiReplyDecisionJsonParser.parse(raw, maxDraftChars)
@@ -80,5 +84,6 @@ data class AiReplyDecision(
     val model: String? = null,
     val reasonDetail: String? = null,
     val finishReason: String? = null,
-    val usage: TokenUsage? = null
+    val usage: TokenUsage? = null,
+    val callDiagnostics: AiModelCallDiagnostics? = null
 )
