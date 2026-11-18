@@ -34,5 +34,5 @@ internal object DraftSegments {
 
     private fun preferredCount(remaining: Int): Int = if (remaining % 3 == 1) TARGET_MIN else TARGET_MAX
     private fun isPreferredBoundary(unit: String): Boolean =
-        unit.lastOrNull() in "，。！？；：、,.!?;: "
+        unit.lastOrNull()?.let { it in "，。！？；：、,.!?;: " } == true
 }
