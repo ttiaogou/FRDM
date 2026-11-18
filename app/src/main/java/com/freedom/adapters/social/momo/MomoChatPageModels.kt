@@ -15,6 +15,7 @@ internal object MomoChatPageContract {
     const val CHAT_MESSAGE_AVATAR_CONTAINER_VIEW_ID = "com.immomo.momo:id/message_iv_avatar_container"
     const val CHAT_MESSAGE_AVATAR_VIEW_ID = "com.immomo.momo:id/message_iv_userphoto"
     const val CHAT_COMPOSER_VIEW_ID = "com.immomo.momo:id/message_ed_msgeditor"
+    const val CHAT_EMOTES_VIEW_ID = "com.immomo.momo:id/message_btn_openemotes"
     const val CHAT_INPUT_LAYOUT_VIEW_ID = "com.immomo.momo:id/input_layout"
     const val CHAT_EDITOR_LAYOUT_VIEW_ID = "com.immomo.momo:id/editor_layout"
     const val CHAT_APPBAR_VIEW_ID = "com.immomo.momo:id/appbar_id"
@@ -47,6 +48,7 @@ data class MomoChatPageSignals(
     val hasChatTitleAnchor: Boolean = false,
     val hasPeerMessageAvatarAnchor: Boolean = false,
     val hasMessageComposerAnchor: Boolean = false,
+    val hasMessageEmotesAnchor: Boolean = false,
     val hasToolbarBackButton: Boolean = false,
     val hasMessageTopTab: Boolean = false,
     val messageTopTabSelected: Boolean = false,
@@ -58,16 +60,9 @@ data class MomoChatPageSignals(
     val hasStableChatDetailFingerprint: Boolean
         get() = !inspectionIncomplete && MomoAlternativeFingerprintPolicy.matchesAny(
             listOf(
-                MomoFingerprintPath("TITLE_AVATAR_COMPOSER", listOf(
-                    hasChatTitleAnchor, hasPeerMessageAvatarAnchor, hasMessageComposerAnchor
+                MomoFingerprintPath("TITLE_COMPOSER_EMOTES", listOf(
+                    hasChatTitleAnchor, hasMessageComposerAnchor, hasMessageEmotesAnchor
                 )),
-                MomoFingerprintPath("TITLE_COMPOSER_MESSAGE_REGION", listOf(
-                    hasChatTitleAnchor, hasMessageComposerAnchor, hasCanonicalMessageList
-                )),
-                // Independent fallback: does not depend on the title text anchor or composer.
-                MomoFingerprintPath("TOOLBAR_AVATAR_MESSAGE_REGION", listOf(
-                    hasToolbarBackButton, hasPeerMessageAvatarAnchor, hasCanonicalMessageList
-                ))
             )
         )
 }
@@ -174,6 +169,7 @@ data class MomoChatPageInspection(
     val hasChatTitleAnchor: Boolean = false,
     val hasPeerMessageAvatarAnchor: Boolean = false,
     val hasMessageComposerAnchor: Boolean = false,
+    val hasMessageEmotesAnchor: Boolean = false,
     val hasToolbarBackButton: Boolean = false,
     /** Ephemeral chat header title used only to verify the session opened by the manager. */
     val chatTitleText: String? = null,
@@ -199,15 +195,8 @@ data class MomoChatPageInspection(
     val hasStableChatDetailFingerprint: Boolean
         get() = !inspectionIncomplete && MomoAlternativeFingerprintPolicy.matchesAny(
             listOf(
-                MomoFingerprintPath("TITLE_AVATAR_COMPOSER", listOf(
-                    hasChatTitleAnchor, hasPeerMessageAvatarAnchor, hasMessageComposerAnchor
-                )),
-                MomoFingerprintPath("TITLE_COMPOSER_MESSAGE_REGION", listOf(
-                    hasChatTitleAnchor, hasMessageComposerAnchor, hasCanonicalMessageList
-                )),
-                // Independent fallback: does not depend on the title text anchor or composer.
-                MomoFingerprintPath("TOOLBAR_AVATAR_MESSAGE_REGION", listOf(
-                    hasToolbarBackButton, hasPeerMessageAvatarAnchor, hasCanonicalMessageList
+                MomoFingerprintPath("TITLE_COMPOSER_EMOTES", listOf(
+                    hasChatTitleAnchor, hasMessageComposerAnchor, hasMessageEmotesAnchor
                 ))
             )
         )
@@ -259,8 +248,8 @@ data class MomoChatPageInspection(
     } + "；Activity=${activityClass.ifBlank { "未知" }}；" +
         "输入控件=$editableInputCount；已验证消息列表=$messageListCount；发送控件=$sendActionCount；" +
         "消息相关 ViewId=$messageRelatedViewIdCount；" +
-        "页面主/备用指纹（标题/头像/输入框；标题/输入框/消息区）=" +
-        "$hasChatTitleAnchor/$hasPeerMessageAvatarAnchor/$hasMessageComposerAnchor/$hasToolbarBackButton；" +
+        "聊天页指纹（聊天对象/输入框/表情按钮）=" +
+        "$hasChatTitleAnchor/$hasMessageComposerAnchor/$hasMessageEmotesAnchor；" +
         "标题栏返回按钮=$hasToolbarBackButton；标准消息列表=$hasCanonicalMessageList；" +
         "消息列表严格结构（顶部消息Tab/选中、底部聊天Tab/选中、列表容器、唯一可滚动非空RecyclerView）=" +
         "$hasMessageTopTab/$messageTopTabSelected/$hasChatTab/$messageTabSelected/" +

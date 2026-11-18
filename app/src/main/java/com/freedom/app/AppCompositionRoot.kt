@@ -360,6 +360,10 @@ internal class AccessibilityServiceDependencies internal constructor(
     }
     val aiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate
     val aiReplyObservationRuntime by lazy(LazyThreadSafetyMode.NONE) {
+        // The history preloaded before OCR is consumed by the later draft callback. Keeping this
+        // cache at the single runtime composition boundary avoids reading the same repository
+        // rows again after OCR completes.
+        var preparedDraftHistory: com.freedom.features.aireply.ai.VerifiedDraftHistory? = null
         AiReplyObservationRuntime(
             scheduler = taskScheduler,
             chatPagePort = momoSocialAdapter,
@@ -379,6 +383,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                     .resolve(identity, title)
             },
             prepareDraftHistory = { identity, snapshot ->
+                preparedDraftHistory = null
                 val verifiedIdentity = identity?.takeIf {
                     it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
                         !it.contactId.isNullOrBlank()
@@ -387,6 +392,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                     val history = com.freedom.features.conversation.domain.contact.ContactHistoryResolver(
                         root.conversationRepository
                     ).loadDraftHistory(verifiedIdentity, snapshot.chatTitleText)
+                    preparedDraftHistory = history
                     addLog(
                         if (history != null) {
                             "AI 草稿历史预加载：已验证联系人历史=${history.messages.size}条；OCR 尚未启动"
@@ -402,7 +408,10 @@ internal class AccessibilityServiceDependencies internal constructor(
                         !it.contactId.isNullOrBlank()
                 }
                 val history = if (verifiedIdentity != null) {
-                    runCatching {
+                    preparedDraftHistory?.also {
+                        preparedDraftHistory = null
+                        addLog("AI 草稿历史读取：复用 OCR 前已完成的历史预加载；不重复查询")
+                    } ?: runCatching {
                         com.freedom.features.conversation.domain.contact.ContactHistoryResolver(root.conversationRepository)
                             .loadDraftHistory(verifiedIdentity, snapshot.chatTitleText)
                     }.onFailure {
@@ -413,6 +422,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                         )
                     }.getOrNull()
                 } else {
+                    preparedDraftHistory = null
                     addLog("AI 草稿上下文：身份未达到 PLATFORM_ID_VERIFIED；不加载联系人历史；仅当前窗口上下文")
                     null
                 }

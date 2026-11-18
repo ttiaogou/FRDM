@@ -342,8 +342,6 @@ class AiReplyObservationRuntime(
         fun matchesRestoredChatSurface(snapshot: ChatPageSnapshot): Boolean =
             snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
                 snapshot.packageName.isNotBlank() &&
-                snapshot.activityClass.endsWith("ChatActivity") &&
-                snapshot.messageListTarget != null &&
                 snapshot.inputFieldTarget != null
 
         private fun windowSessionSurfaceKey(snapshot: ChatPageSnapshot): String? {
@@ -1125,7 +1123,7 @@ class AiReplyObservationRuntime(
         }
         val knownInspection = lastPageInspection
         val knownChatDetail = knownInspection?.let {
-            inboxPageRecognizer.isChatDetail(it) && it.messageListTarget != null
+            inboxPageRecognizer.isChatDetail(it)
         } == true
         // Preserve the 2.1 rule: any click/selection from a known chat list can
         // navigate to a detail page even when the clicked row has no chat-related ViewId/text.
@@ -2545,8 +2543,7 @@ class AiReplyObservationRuntime(
         }
         val current = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
         if (current?.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
-            current.packageName == targetPackage() &&
-            current.messageListTarget != null
+            current.packageName == targetPackage()
         ) {
             val headerMatchMode = currentSessionHeaderMatchMode(current)
             if (headerMatchMode == null) {

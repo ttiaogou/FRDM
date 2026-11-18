@@ -4696,13 +4696,11 @@ internal class MomoSocialAdapter(
 
         // The session candidate is created from the main list, but identity capture is
         // intentionally executed after navigation on the confirmed chat detail page.
-        if (activityClass() != MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS ||
-            sayHiGestureInFlight || receivedGreetingsEntryTapPending ||
+        if (sayHiGestureInFlight || receivedGreetingsEntryTapPending ||
             receivedGreetingsEntrySearchGestureInFlight || sayHiCardListTapPending
         ) {
             onLog(
-                "AI 联系人身份采集等待：CHAT_DETAIL_PRECONDITION_NOT_READY；" +
-                    "activity=${activityClass()}；expected=${MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS}；" +
+                "AI 联系人身份采集等待：CHAT_DETAIL_GESTURE_NOT_READY；" +
                     "gestureInFlight=$sayHiGestureInFlight"
             )
             return ContactIdentityCaptureRequestResult.RETRY_LATER
@@ -4721,7 +4719,6 @@ internal class MomoSocialAdapter(
             return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
         if (tree.truncated || tree.window.packageName != targetPackage ||
-            tree.window.activityClass != MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS ||
             !accessibilityGateway.isWindowCurrent(tree.window)
         ) {
             onLog(

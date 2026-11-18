@@ -71,6 +71,7 @@ internal class MomoChatPageInspector(
         var hasChatTitleAnchor = false
         var hasPeerMessageAvatarAnchor = false
         var hasMessageComposerAnchor = false
+        var hasMessageEmotesAnchor = false
         var hasToolbarBackButton = false
         var messageListPath: List<Int>? = null
         var messageListClassName: String? = null
@@ -117,7 +118,8 @@ internal class MomoChatPageInspector(
                     val isChatFingerprintCandidate = viewId in setOf(
                         MomoChatPageContract.CHAT_TITLE_VIEW_ID,
                         MomoChatPageContract.CHAT_MESSAGE_AVATAR_VIEW_ID,
-                        MomoChatPageContract.CHAT_COMPOSER_VIEW_ID
+                        MomoChatPageContract.CHAT_COMPOSER_VIEW_ID,
+                        MomoChatPageContract.CHAT_EMOTES_VIEW_ID
                     ) || isToolbarBackCandidate
                     val nodeVisible = isChatFingerprintCandidate && safeBoolean { node.isVisibleToUser }
                     val nodeBounds = Rect()
@@ -128,11 +130,7 @@ internal class MomoChatPageInspector(
                     if (
                         viewId == MomoChatPageContract.CHAT_TITLE_VIEW_ID &&
                         className == "android.widget.TextView" &&
-                        nodeVisible && nodeBoundsValid &&
-                        hasAncestorId("name_layout") &&
-                        hasAncestorId("toolbar_id") &&
-                        hasAncestorId("appbar_id") &&
-                        text.startsWith("与") && text.endsWith("对话")
+                        nodeVisible && nodeBoundsValid
                     ) {
                         hasChatTitleAnchor = true
                     }
@@ -148,10 +146,16 @@ internal class MomoChatPageInspector(
                     if (
                         viewId == MomoChatPageContract.CHAT_COMPOSER_VIEW_ID &&
                         normalizedClass == "edittext" && safeBoolean { node.isEditable } &&
-                        nodeVisible && nodeBoundsValid &&
-                        hasAncestorId("editor_layout") && hasAncestorId("input_layout")
+                        nodeVisible && nodeBoundsValid
                     ) {
                         hasMessageComposerAnchor = true
+                    }
+                    if (
+                        viewId == MomoChatPageContract.CHAT_EMOTES_VIEW_ID &&
+                        normalizedClass == "imageview" &&
+                        nodeVisible && nodeBoundsValid
+                    ) {
+                        hasMessageEmotesAnchor = true
                     }
                     if (isToolbarBackCandidate &&
                         safeBoolean { node.isClickable } && nodeVisible && nodeBoundsValid
@@ -392,16 +396,10 @@ internal class MomoChatPageInspector(
                         )
                     }
 
-                    // Stop as soon as any independent chat-detail route is complete. The third
-                    // route uses toolbar-back + peer-avatar + canonical message region and does
-                    // not depend on either the title-text anchor or composer anchor.
-                    val titleAndComposer = hasChatTitleAnchor && hasMessageComposerAnchor
-                    val titleAvatarComposerRoute = titleAndComposer && hasPeerMessageAvatarAnchor
-                    val titleComposerMessageRegionRoute = titleAndComposer &&
-                        messageListPath != null && messageListCount > 0
-                    val toolbarAvatarMessageRoute = hasToolbarBackButton && hasPeerMessageAvatarAnchor &&
-                        messageListPath != null && messageListCount > 0
-                    if (titleAvatarComposerRoute || titleComposerMessageRegionRoute || toolbarAvatarMessageRoute) break
+                    // These three stable resource IDs are the complete chat-detail contract.
+                    // Message cards, avatars, recycler contents, and Activity names are not
+                    // prerequisites and therefore cannot block this classification.
+                    if (hasChatTitleAnchor && hasMessageComposerAnchor && hasMessageEmotesAnchor) break
 
                     if (path.size >= maxInspectionDepth && childCount > 0) {
                         depthBudgetExceeded = true
@@ -483,6 +481,7 @@ internal class MomoChatPageInspector(
             hasChatTitleAnchor = hasChatTitleAnchor,
             hasPeerMessageAvatarAnchor = hasPeerMessageAvatarAnchor,
             hasMessageComposerAnchor = hasMessageComposerAnchor,
+            hasMessageEmotesAnchor = hasMessageEmotesAnchor,
             hasToolbarBackButton = hasToolbarBackButton,
             hasMessageTopTab = hasMessageTopTab,
             messageTopTabSelected = messageTopTabSelected,
@@ -509,6 +508,7 @@ internal class MomoChatPageInspector(
             hasChatTitleAnchor = hasChatTitleAnchor,
             hasPeerMessageAvatarAnchor = hasPeerMessageAvatarAnchor,
             hasMessageComposerAnchor = hasMessageComposerAnchor,
+            hasMessageEmotesAnchor = hasMessageEmotesAnchor,
             hasToolbarBackButton = hasToolbarBackButton,
             chatTitleText = chatTitleText,
             chatHeaderDiagnostic = chatHeaderDiagnostic,
