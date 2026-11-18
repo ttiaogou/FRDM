@@ -1651,7 +1651,7 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun aiSessionManagerRepositionsAtBottomWhenListViewportChangesOutsideItsOwnSwipe() {
+    fun aiSessionManagerContinuesScanWhenReturnedListViewportChangesAfterSession() {
         val scheduler = FakeScheduler()
         val firstCandidate = sessionCandidate(nameText = "First Contact", completeBoundaryEvidence = true)
         val externallyVisibleRead = sessionCandidate(nameText = "Other Contact", completeBoundaryEvidence = true, unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ)
@@ -1706,12 +1706,10 @@ class AiReplyObservationRuntimeTest {
 
         runtime.scheduleInitialObservation()
         runUntil(scheduler, 60) { port.messageReads == 1 }
-        runUntilLog(scheduler, logs, "未发出滚动手势时可见会话身份序列发生变化；当前列表位置不可信")
 
         assertEquals(1, commands.count { it.kind == GestureKind.TAP })
-        assertEquals(GestureKind.SWIPE, commands.last().kind)
-        assertTrue(commands.last().description.contains("启动定位底部"))
-        assertTrue(logs.any { it.contains("保留本轮已处理身份，重新定位底部后继续审视") })
+        assertEquals(GestureKind.TAP, commands.last().kind)
+        assertTrue(logs.none { it.contains("未发出滚动手势时可见会话身份序列发生变化；当前列表位置不可信") })
     }
 
     @Test
