@@ -1167,6 +1167,10 @@ class AiReplyObservationRuntime(
 
         if (knownChatDetail && AccessibilityEventPolicy.requiresKnownChatRegionRefresh(event.type)) {
             cancelMessageReadRetry()
+            // A failed known-region refresh already queues a fresh full inspection. Keep that
+            // stronger recovery request; a subsequent scroll event must not replace it with a
+            // weaker region refresh that could reuse the invalidated locators.
+            if (pageInspectionTask != null) return
             regionRefreshTask?.cancel()
             pageObservationCoordinator.cancelFullInspection()
             pageObservationCoordinator.signalRegionRefresh()
