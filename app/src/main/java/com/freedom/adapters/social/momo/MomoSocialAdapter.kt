@@ -3265,7 +3265,8 @@ internal class MomoSocialAdapter(
         if (window.windowId < 0 ||
             !accessibilityGateway.isWindowCurrent(window) ||
             inspection.pageType != MomoChatPageType.CHAT_DETAIL_CANDIDATE ||
-            !inspection.hasStableChatDetailFingerprint
+            !inspection.hasStableChatDetailFingerprint ||
+            inspection.chatTitleText.isNullOrBlank()
         ) {
             return null
         }
@@ -5048,14 +5049,16 @@ internal class MomoSocialAdapter(
                 // inspectChatPage() here would re-enter this pending transaction and keep
                 // returning UNKNOWN.
                 val restoredChat = inspectCurrentChatDetailFingerprint()?.second
+                val restoredTitle = normalizeIdentityDisplayName(restoredChat?.chatTitleText)
+                val anchorTitle = normalizeIdentityDisplayName(pending.anchor.displayName)
                 val restored = restoredChat != null &&
-                    normalizeIdentityDisplayName(restoredChat.chatTitleText) ==
-                        normalizeIdentityDisplayName(pending.anchor.displayName)
+                    restoredTitle.isNotBlank() && anchorTitle.isNotBlank() &&
+                    restoredTitle == anchorTitle
                 if (restored) {
-                        completePendingInboxIdentityBinding(
-                            pending,
-                            pending.platformUserId != null
-                        )
+                    completePendingInboxIdentityBinding(
+                        pending,
+                        pending.platformUserId != null
+                    )
                     onLog("AI 联系人身份采集：已返回并确认原私人聊天详情页；三节点指纹和聊天标题匹配；继续当前窗口回复流程")
                     return false
                 }
