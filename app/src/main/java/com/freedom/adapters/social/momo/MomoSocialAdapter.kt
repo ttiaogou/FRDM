@@ -4408,10 +4408,12 @@ internal class MomoSocialAdapter(
 
     override fun inspectChatPage(): ChatPageSnapshot {
         if (inspectPendingInboxIdentityCapture()) {
-            // Identity navigation is an independent transaction. Keep the last confirmed
-            // chat snapshot available to the main pipeline instead of converting the page
-            // into UNKNOWN and blocking the cached-message continuation.
-            return lastConfirmedChatDetailSnapshot ?: unknownChatPageSnapshot()
+            // Never expose the pre-navigation chat snapshot while the profile transaction is
+            // still pending. Otherwise the model can start while the UI is still on the profile
+            // page (or while BACK has not yet restored the chat detail page). The pending flow
+            // must finish, confirm the chat page, and only then allow the main pipeline to read
+            // the current-window fallback or load history.
+            return unknownChatPageSnapshot()
         }
         val currentActivity = activityClass()
         if (sayHiNavigationFlowController.shouldUseDedicatedReceivedListInspector(
@@ -4973,8 +4975,13 @@ internal class MomoSocialAdapter(
                 if (currentActivity != MomoSayHiPageContract.PROFILE_ACTIVITY) {
                     if (ageMs <= SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
                     if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) {
-                        failPendingInboxIdentityCapture(pending, "头像点击后未进入已确认的个人资料页")
-                        return false
+                        // The UI may already have returned to the app/chat activity even when
+                        // the profile read timed out. Do not terminate the transaction here;
+                        // let WAITING_LIST_RETURN verify the restored chat before the model runs.
+                        pending.stage = InboxIdentityCaptureStage.WAITING_LIST_RETURN
+                        pending.lastTransitionAtMs = System.currentTimeMillis()
+                        onLog("AI 联系人身份采集：资料页读取超时；进入聊天页恢复确认，身份失败时仅使用当前窗口上下文")
+                        return true
                     }
                     return true
                 }
@@ -5012,41 +5019,22 @@ internal class MomoSocialAdapter(
                     ) {
                         if (ageMs <= SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
                         pending.profileReadCompleted = true
+                        onLog("AI 联系人身份采集失败：PROFILE_SNAPSHOT_READ_TIMEOUT；仍先返回聊天页，不提前调用模型")
                     } else {
-                        val profileNameMatches = inboxProfileNameMatches(tree, pending.anchor.displayName)
-                        val readout = if (profileNameMatches) {
-                            MomoSayHiPlatformIdentityParser.parse(tree.nodes)
-                        } else {
-                            MomoSayHiPlatformIdentityReadout(
-                                value = null,
-                                status = MomoSayHiPlatformIdentityStatus.MISSING,
-                                candidateCount = 0,
-                                source = "PROFILE_NAME_MISMATCH"
-                            )
-                        }
-                        if (readout.status != MomoSayHiPlatformIdentityStatus.CONFIRMED &&
-                            !pending.profileScrollAttempted
-                        ) {
-                            pending.profileScrollAttempted = true
-                            if (dispatchInboxProfileIdentityScroll(pending, tree)) {
-                                onLog(
-                                    "AI 联系人身份采集[PROFILE_SCROLL]：首次未读取到唯一用户 ID；" +
-                                        "已提交唯一一次向上滑动，等待新资料页节点树"
-                                )
-                                return true
-                            }
-                            onLog("AI 联系人身份采集失败：PROFILE_SCROLL_SUBMISSION_FAILED；不使用旧坐标")
-                        }
+                        // A verified left-message-avatar tap is the profile transition. Display
+                        // name and toolbar nodes are presentation data, not identity gates.
+                        // Read the explicit profile ID directly; scroll only when it is missing.
+                        val readout = MomoSayHiPlatformIdentityParser.parse(tree.nodes)
                         pending.platformUserId = readout.value.takeIf {
                             readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED
                         }
                         pending.profileReadCompleted = true
                         onLog(
                             if (pending.platformUserId != null) {
-                                "AI 联系人身份采集：资料页昵称与原消息行一致，现有陌陌资料页解析器确认唯一平台 ID；原始 ID 不写入运行日志"
+                                "AI 联系人身份采集：资料页已读取唯一平台 ID；原始 ID 不写入运行日志"
                             } else {
-                                "AI 联系人身份采集失败：PROFILE_ID_NOT_FOUND_AFTER_ONE_SCROLL；" +
-                                    "资料页身份未通过唯一 ID 或昵称交叉验证；不关联历史会话"
+                                "AI 联系人身份采集失败：PROFILE_ID_NOT_FOUND；" +
+                                    "不读取历史会话，返回聊天页后仅使用当前窗口上下文"
                             }
                         )
                     }
@@ -5102,30 +5090,6 @@ internal class MomoSocialAdapter(
                 return true
             }
         }
-    }
-
-    private fun inboxProfileNameMatches(
-        tree: AccessibilityTreeSnapshot,
-        expectedName: String
-    ): Boolean {
-        if (tree.nodes.none { localNodeId(it.viewId) == "personal_profile_photo_fl" && it.visible } ||
-            tree.nodes.none { localNodeId(it.viewId) == "user_profile_view_pager" && it.visible } ||
-            tree.nodes.none { localNodeId(it.viewId) == "pagertabcontent" && it.visible }
-        ) return false
-        fun uniqueName(id: String): String? {
-            val matches = tree.nodes.filter {
-                localNodeId(it.viewId) == id && it.visible &&
-                    it.className.substringAfterLast('.') == "TextView"
-            }
-            return matches.singleOrNull()?.text?.trim()?.takeIf(String::isNotBlank)
-        }
-        val profileName = uniqueName("personal_profile_name") ?: return false
-        val toolbarName = uniqueName("toolbar_title") ?: return false
-        val expected = normalizeIdentityDisplayName(expectedName)
-        return expected.isNotBlank() &&
-            normalizeIdentityDisplayName(profileName) == expected &&
-            normalizeIdentityDisplayName(toolbarName) == expected &&
-            normalizeIdentityDisplayName(profileName) == normalizeIdentityDisplayName(toolbarName)
     }
 
     private fun failPendingInboxIdentityCapture(
@@ -5730,6 +5694,29 @@ internal class MomoSocialAdapter(
 
     override fun readRecentMessages(page: ChatPageSnapshot, limit: Int): ChatMessageBatch =
         messageComponents.reader.readRecentMessages(page, limit)
+
+    override fun readRecentMessagesStructureAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        onResult: (ChatMessageBatch) -> Unit
+    ) {
+        // Structural stage only. In particular, do not acquire the screenshot/OCR processor
+        // here: identity navigation and chat-page restoration must complete first.
+        onResult(runCatching {
+            messageComponents.reader.readRecentMessages(page, limit)
+        }.getOrElse {
+            ChatMessageBatch(
+                status = MessageReadStatus.MESSAGE_LIST_UNAVAILABLE,
+                windowSessionKey = null,
+                messages = emptyList(),
+                scannedRowCount = 0,
+                candidateRowCount = 0,
+                truncated = false,
+                capturedAtMillis = System.currentTimeMillis(),
+                messageListUnavailableReason = "消息结构读取异常"
+            )
+        })
+    }
 
     override fun readRecentMessagesAsync(
         page: ChatPageSnapshot,

@@ -103,7 +103,7 @@ internal class ChatMessageReadCoordinator(
         val callThread = Thread.currentThread()
         val callReturned = AtomicBoolean(false)
         try {
-            messagePort.readRecentMessagesAsync(snapshot, limit = messageLimit) { batch ->
+            messagePort.readRecentMessagesStructureAsync(snapshot, limit = messageLimit) { batch ->
                 val shouldDeliver = synchronized(callbackGate) {
                     if (callbackReceived) {
                         false

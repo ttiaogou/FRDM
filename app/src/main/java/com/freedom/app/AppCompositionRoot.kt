@@ -378,6 +378,24 @@ internal class AccessibilityServiceDependencies internal constructor(
                 com.freedom.features.conversation.domain.contact.ContactHistoryResolver(root.conversationRepository)
                     .resolve(identity, title)
             },
+            prepareDraftHistory = { identity, snapshot ->
+                val verifiedIdentity = identity?.takeIf {
+                    it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                        !it.contactId.isNullOrBlank()
+                }
+                if (verifiedIdentity != null) {
+                    val history = com.freedom.features.conversation.domain.contact.ContactHistoryResolver(
+                        root.conversationRepository
+                    ).loadDraftHistory(verifiedIdentity, snapshot.chatTitleText)
+                    addLog(
+                        if (history != null) {
+                            "AI 草稿历史预加载：已验证联系人历史=${history.messages.size}条；OCR 尚未启动"
+                        } else {
+                            "AI 草稿历史预加载：未找到可用历史；OCR 尚未启动"
+                        }
+                    )
+                }
+            },
             onDraftConversationObserved = { batch, snapshot, identity, visitToken ->
                 val verifiedIdentity = identity?.takeIf {
                     it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&

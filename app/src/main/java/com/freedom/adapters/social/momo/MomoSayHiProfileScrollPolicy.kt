@@ -4,9 +4,9 @@ import com.freedom.core.accessibility.api.AccessibilityNodeSnapshot
 import com.freedom.core.accessibility.api.ScreenRect
 
 /**
- * Selects the profile content RecyclerView from two independent fingerprints:
- * (1) the visible profile header identifies the current page, and
- * (2) pagertabcontent -> scrollable RecyclerView identifies the content viewport.
+ * Selects the profile content RecyclerView from the observed profile hierarchy. Identity
+ * extraction is independent from display-name and toolbar nodes; this viewport is only used
+ * for the single recovery scroll after an ID read misses.
  *
  * The viewport is intersected with the captured display before it is used for a gesture. Momo's
  * accessibility bounds can extend below DisplayMetrics.heightPixels (for example 1600 vs 1554),
@@ -29,14 +29,9 @@ internal object MomoSayHiProfileScrollPolicy {
             return Decision(null, 0, "INVALID_DISPLAY_BOUNDS")
         }
 
-        // Fingerprint group A: two stable profile-header resource IDs, each unique and visible.
-        if (!hasUniqueVisibleTextAnchor(nodes, PROFILE_NAME_VIEW_ID) ||
-            !hasUniqueVisibleTextAnchor(nodes, PROFILE_META_VIEW_ID)
-        ) {
-            return Decision(null, 0, "PROFILE_PAGE_FINGERPRINT_NOT_CONFIRMED")
-        }
-
-        // Fingerprint group B: the observed ViewPager must uniquely own the content RecyclerView.
+        // The observed ViewPager must uniquely own the content RecyclerView. Do not require
+        // nickname/meta/toolbar nodes: they are not the identity result and may be temporarily
+        // absent after navigation or after the profile has been scrolled.
         val pagers = nodes.filter { node ->
             node.visible && node.scrollable &&
                 localId(node.viewId) == PROFILE_PAGER_VIEW_ID &&
@@ -112,17 +107,6 @@ internal object MomoSayHiProfileScrollPolicy {
         )
     }
 
-    private fun hasUniqueVisibleTextAnchor(
-        nodes: List<AccessibilityNodeSnapshot>,
-        expectedLocalId: String
-    ): Boolean {
-        val matches = nodes.filter { node ->
-            node.visible && localId(node.viewId) == expectedLocalId &&
-                node.className.substringAfterLast('.') == "TextView"
-        }
-        return matches.size == 1
-    }
-
     private fun localId(viewId: String): String = viewId.substringAfterLast('/')
 
     private fun isDescendant(ancestor: List<Int>, descendant: List<Int>): Boolean =
@@ -157,8 +141,6 @@ internal object MomoSayHiProfileScrollPolicy {
             bounds.width.toLong() * bounds.height >=
             (displayWidth.toLong() * displayHeight * MIN_AREA_RATIO).toLong()
 
-    private const val PROFILE_NAME_VIEW_ID = "personal_profile_name"
-    private const val PROFILE_META_VIEW_ID = "tv_multi_info"
     private const val PROFILE_PAGER_VIEW_ID = "pagertabcontent"
     private const val PROFILE_CONTENT_HEADING = "个人信息"
     private const val MIN_WIDTH_RATIO = 0.60f

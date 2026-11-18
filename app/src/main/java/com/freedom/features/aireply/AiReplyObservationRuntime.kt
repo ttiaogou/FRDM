@@ -71,6 +71,8 @@ class AiReplyObservationRuntime(
     private val isConversationDraftPending: () -> Boolean = { false },
     /** Current-window draft callback; true reserves the page for generation/review. */
     private val resolveConversationIdentity: (ContactRowIdentity?, String?) -> ContactRowIdentity? = { identity, _ -> identity },
+    /** Loads verified draft history after identity restoration and before OCR starts. */
+    private val prepareDraftHistory: (ContactRowIdentity?, ChatPageSnapshot) -> Unit = { _, _ -> },
     private val onDraftConversationObserved: (ChatMessageBatch, ChatPageSnapshot, ContactRowIdentity?, String) -> Boolean = { _, _, _, _ -> false },
     private val draftStartupFailure: () -> String? = { null },
     /** A verified draft stays on screen so the user can review it and press Send manually. */
@@ -94,7 +96,6 @@ class AiReplyObservationRuntime(
         private const val SESSION_RETURN_VERIFY_DELAY_MS = 900L
         private const val DRAFT_PENDING_POLL_DELAY_MS = 500L
         private const val MAX_DRAFT_PENDING_WAIT_MS = 185_000L
-        private const val IDENTITY_CAPTURE_RETRY_DELAY_MS = 500L
         private const val IDENTITY_CAPTURE_TIMEOUT_MS = 15_000L
         private const val MAX_IDENTITY_CAPTURE_RETRIES = 30
         private const val MAX_NO_PROGRESS_SCROLLS = 2
@@ -368,9 +369,6 @@ class AiReplyObservationRuntime(
     private var identityCaptureStartedAtMs = 0L
     private var identityCaptureRetryCount = 0
     private var identityCaptureTerminalSessionKey: String? = null
-    /** Keeps the already OCR-ed batch while profile identity navigation is pending. */
-    private var identityPendingMessageBatch: ChatMessageBatch? = null
-    private var identityPendingSnapshot: ChatPageSnapshot? = null
 
 
     /**
@@ -961,8 +959,40 @@ class AiReplyObservationRuntime(
         identityCaptureStartedAtMs = 0L
         identityCaptureRetryCount = 0
         identityCaptureTerminalSessionKey = null
-        identityPendingMessageBatch = null
-        identityPendingSnapshot = null
+        // The coordinator now delivers a structural batch first. OCR is deliberately deferred
+        // until the identity transaction is terminal and the adapter has confirmed the chat
+        // detail page is restored. The OCR callback re-enters this method with an OCR-complete
+        // batch, so this branch executes only once per structural batch.
+        if ((privateDetail || greetingDetail) && !batch.ocrAttempted && batch.ocrTargets.isNotEmpty()) {
+            if (privateDetail) {
+                val preOcrIdentity = runCatching {
+                    resolveConversationIdentity(currentSessionCandidate?.contactIdentity, snapshot.chatTitleText)
+                }.getOrNull()
+                if (preOcrIdentity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                    !preOcrIdentity.contactId.isNullOrBlank()
+                ) {
+                    runCatching { prepareDraftHistory(preOcrIdentity, snapshot) }.onFailure {
+                        onLog("AI 草稿历史预加载失败：CONTACT_HISTORY_PRELOAD_FAILED；" +
+                            "exception=${it.javaClass.simpleName}；继续使用当前窗口消息")
+                    }
+                    onLog("AI 草稿上下文：身份已确认，历史加载完成后进入 OCR")
+                } else {
+                    onLog("AI 草稿上下文：身份未确认；跳过历史加载，进入仅当前窗口 OCR")
+                }
+            }
+            val ocrSnapshot = snapshot
+            val ocrVisit = draftVisitToken
+            chatPagePort.readRecentMessagesAsync(ocrSnapshot, limit = 10) { ocrBatch ->
+                if (ocrVisit == draftVisitToken && isAiReplyActive()) {
+                    handleMessageReadBatch(ocrBatch, ocrSnapshot)
+                } else {
+                    onLog("AI OCR 结果已丢弃：窗口任务已变化")
+                }
+            }
+            onLog("AI OCR 启动：身份采集已终态且聊天页已恢复；开始处理结构批次中的 OCR 区域")
+            return
+        }
+
         snapshotRecoveryStartedAtMs = 0L
         privateMessagesTraversalTaskExecutor.reset()
         lastMessageFingerprint = ""
@@ -1335,59 +1365,17 @@ class AiReplyObservationRuntime(
                             return
                         }
                         candidate!!.contactIdentity = verifiedIdentity
-                        identityPendingMessageBatch = null
-                        identityPendingSnapshot = null
                         onLog(
                             "AI 联系人身份绑定完成：已写回当前私人会话候选；" +
                                 "confidence=${verifiedIdentity.confidence.name}；" +
-                                "恢复缓存消息=${batch.messages.size}条；继续加载对应联系人历史并提交模型"
+                                "身份已确认；继续加载对应联系人历史并提交模型"
                         )
                     } else if (identityOutcome.awaiting) {
-                        if (batch.messages.isNotEmpty() &&
-                            batch.status != MessageReadStatus.WINDOW_STALE
-                        ) {
-                            if (identityPendingMessageBatch == null) {
-                                identityPendingMessageBatch = batch
-                                identityPendingSnapshot = snapshot
-                                onLog(
-                                    "AI 联系人身份采集：已缓存首个有效消息批次；" +
-                                        "消息=${batch.messages.size}条"
-                                )
-                            }
-                        } else if (identityPendingMessageBatch != null) {
-                            onLog(
-                                "AI 联系人身份采集：忽略无效消息批次；" +
-                                    "status=${batch.status.name}；消息=${batch.messages.size}条；" +
-                                    "保留已有有效缓存=${identityPendingMessageBatch?.messages?.size}条"
-                            )
-                        }
                         onLog(
                             "AI 联系人身份采集中：等待资料页/身份回传；" +
-                                "stage=${identityOutcome.request.name}；缓存消息=${identityPendingMessageBatch?.messages?.size ?: 0}条；" +
-                                "暂不重复 OCR、不加载历史、不提交模型"
+                                "stage=${identityOutcome.request.name}；" +
+                                "暂不读取消息、不启动 OCR、不加载历史、不提交模型"
                         )
-                        val cachedBatch = identityPendingMessageBatch
-                        val cachedSnapshot = identityPendingSnapshot
-                        val run = sessionActionGeneration
-                        scheduler.schedule(IDENTITY_CAPTURE_RETRY_DELAY_MS) {
-                            if (isAiReplyActive() && sessionManagerState == SessionManagerState.READING_SESSION &&
-                                run == sessionActionGeneration
-                            ) {
-                                // inspectChatPage() advances the adapter's pending profile transaction.
-                                // Do not call readVisibleMessages(): the original OCR batch is reused.
-                                runCatching { chatPagePort.inspectChatPage() }
-                                if (cachedBatch != null && cachedSnapshot != null &&
-                                    identityPendingMessageBatch === cachedBatch &&
-                                    identityPendingSnapshot === cachedSnapshot
-                                ) {
-                                    handleMessageReadBatch(cachedBatch, cachedSnapshot)
-                                } else if (cachedBatch == null || cachedSnapshot == null) {
-                                    onLog("AI 联系人身份采集：当前没有有效消息缓存；继续等待新鲜消息批次，不提交模型")
-                                } else {
-                                    onLog("AI 联系人身份采集失败：IDENTITY_CAPTURE_CACHE_INVALIDATED；未使用旧批次继续处理")
-                                }
-                            }
-                        }
                         return
                     } else if (identityOutcome.failureReason != null) {
                         identityCaptureTerminalSessionKey = identitySessionKey
@@ -1397,8 +1385,6 @@ class AiReplyObservationRuntime(
                 }
             }
         }
-        identityPendingMessageBatch = null
-        identityPendingSnapshot = null
         val rowIdentity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()
             else currentSessionCandidate?.contactIdentity
         val identity = runCatching { resolveConversationIdentity(rowIdentity, snapshot.chatTitleText) }
