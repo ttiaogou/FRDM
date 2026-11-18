@@ -331,6 +331,18 @@ class AiReplyObservationRuntime(
             currentChatWindowKey == chatWindowKey &&
                 windowSessionSurfaceKey(snapshot) == chatSurfaceKey
 
+        /**
+         * Profile navigation may recreate the chat window and rebuild both child paths.
+         * Once a platform ID is verified, use the restored chat surface plus the caller's
+         * auxiliary header check; do not require the old window generation or node paths.
+         */
+        fun matchesRestoredChatSurface(snapshot: ChatPageSnapshot): Boolean =
+            snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+                snapshot.packageName.isNotBlank() &&
+                snapshot.activityClass.endsWith("ChatActivity") &&
+                snapshot.messageListTarget != null &&
+                snapshot.inputFieldTarget != null
+
         private fun windowSessionSurfaceKey(snapshot: ChatPageSnapshot): String? {
             val messageTarget = snapshot.messageListTarget ?: return null
             val inputTarget = snapshot.inputFieldTarget ?: return null
@@ -1294,14 +1306,23 @@ class AiReplyObservationRuntime(
                     if (identityOutcome.verifiedIdentity != null) {
                         val verifiedIdentity = identityOutcome.verifiedIdentity
                         val candidate = currentSessionCandidate
+                        val restoredSurfaceMatches = currentSessionBinding
+                            ?.matchesRestoredChatSurface(snapshot) == true
+                        val auxiliaryHeaderMatches = ChatSessionManagementPolicy.matchChatHeader(
+                            currentSessionName,
+                            snapshot.chatTitleText
+                        ) != null
                         val sessionStillMatches = candidate != null &&
-                            currentSessionBinding?.matches(snapshot, windowSessionKey(snapshot)) == true &&
+                            restoredSurfaceMatches &&
+                            auxiliaryHeaderMatches &&
                             verifiedIdentity.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
                             !verifiedIdentity.contactId.isNullOrBlank()
                         if (!sessionStillMatches) {
                             onLog(
-                                "AI 联系人身份绑定失败：CURRENT_SESSION_BINDING_MISMATCH；" +
-                                    "不加载联系人历史；仅当前窗口上下文"
+                                "AI 联系人身份绑定暂缓：CURRENT_SESSION_BINDING_NOT_READY；" +
+                                    "platformContactId已保留；" +
+                                    "restoredChatSurface=$restoredSurfaceMatches；" +
+                                    "辅助标题匹配=$auxiliaryHeaderMatches；等待原聊天页恢复后重试"
                             )
                             return
                         }
