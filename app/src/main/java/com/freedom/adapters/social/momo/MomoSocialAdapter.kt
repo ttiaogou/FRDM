@@ -4837,9 +4837,11 @@ internal class MomoSocialAdapter(
             completedInboxIdentityOutcomes[key]?.let { return it }
             pendingInboxIdentityCapture?.let { pending ->
                 if (pending.anchor.opaqueKey() == key) {
+                    // IN_PROGRESS is a non-terminal state. Keep the reason in the
+                    // explicit OBSERVE log, never in failureReason.
+                    onLog("AI 联系人身份采集[OBSERVE_WAITING]：事务仍在进行；不返回失败原因")
                     return ContactIdentityCaptureOutcome.waiting(
-                        ContactIdentityCaptureRequestResult.IN_PROGRESS,
-                        "IDENTITY_CAPTURE_TRANSACTION_IN_PROGRESS"
+                        ContactIdentityCaptureRequestResult.IN_PROGRESS
                     )
                 }
             }
