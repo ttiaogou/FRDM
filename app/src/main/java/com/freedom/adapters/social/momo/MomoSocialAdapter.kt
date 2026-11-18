@@ -352,6 +352,7 @@ internal class MomoSocialAdapter(
     @Volatile private var pendingInboxIdentityCapture: PendingInboxIdentityCapture? = null
     @Volatile private var lastConfirmedChatDetailSnapshot: ChatPageSnapshot? = null
     private val failedInboxIdentityCaptureKeys = LinkedHashSet<String>()
+    private val loggedInboxIdentityFailureKeys = LinkedHashSet<String>()
     /** Run-scoped row-anchor cache; never persists a display-name-to-ID mapping across runs. */
     private val verifiedInboxIdentityByAnchor = LinkedHashMap<String, String>()
     private val completedInboxIdentityOutcomes = LinkedHashMap<String, ContactIdentityCaptureOutcome>()
@@ -5131,11 +5132,18 @@ internal class MomoSocialAdapter(
         pending: PendingInboxIdentityCapture,
         reason: String
     ) {
+        // Row geometry/path may change while the same profile transaction is unwinding;
+        // deduplicate by the redacted display identity and reason, not the volatile anchor.
+        val logKey = "${normalizeIdentityDisplayName(pending.anchor.displayName)}|$reason"
+        val shouldLog: Boolean
         synchronized(inboxIdentityCaptureLock) {
             if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
             failedInboxIdentityCaptureKeys += pending.anchor.opaqueKey()
+            shouldLog = loggedInboxIdentityFailureKeys.add(logKey)
         }
-        onLog("AI 联系人身份采集失败：$reason；保留未验证身份，不以昵称关联历史")
+        if (shouldLog) {
+            onLog("AI 联系人身份采集失败：$reason；保留未验证身份，不以昵称关联历史")
+        }
     }
 
     private fun dispatchInboxProfileIdentityScroll(
@@ -5210,6 +5218,7 @@ internal class MomoSocialAdapter(
             pendingInboxIdentityCapture = null
             lastConfirmedChatDetailSnapshot = null
             failedInboxIdentityCaptureKeys.clear()
+            loggedInboxIdentityFailureKeys.clear()
             verifiedInboxIdentityByAnchor.clear()
             completedInboxIdentityOutcomes.clear()
         }
@@ -5238,6 +5247,7 @@ internal class MomoSocialAdapter(
             pendingInboxIdentityCapture = null
             lastConfirmedChatDetailSnapshot = null
             failedInboxIdentityCaptureKeys.clear()
+            loggedInboxIdentityFailureKeys.clear()
             verifiedInboxIdentityByAnchor.clear()
             completedInboxIdentityOutcomes.clear()
         }

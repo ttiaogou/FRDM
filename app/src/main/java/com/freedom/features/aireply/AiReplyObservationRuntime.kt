@@ -18,6 +18,7 @@ import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.accessibility.gesture.GestureExecutionResult
 import com.freedom.core.accessibility.gesture.GestureExecutionStatus
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
+import com.freedom.features.aireply.domain.message.MessageReadStatus
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import com.freedom.features.aireply.domain.contact.TemporaryContactMessageLedger
@@ -1342,15 +1343,31 @@ class AiReplyObservationRuntime(
                                 "恢复缓存消息=${batch.messages.size}条；继续加载对应联系人历史并提交模型"
                         )
                     } else if (identityOutcome.awaiting) {
-                        identityPendingMessageBatch = batch
-                        identityPendingSnapshot = snapshot
+                        if (batch.messages.isNotEmpty() &&
+                            batch.status != MessageReadStatus.WINDOW_STALE
+                        ) {
+                            if (identityPendingMessageBatch == null) {
+                                identityPendingMessageBatch = batch
+                                identityPendingSnapshot = snapshot
+                                onLog(
+                                    "AI 联系人身份采集：已缓存首个有效消息批次；" +
+                                        "消息=${batch.messages.size}条"
+                                )
+                            }
+                        } else if (identityPendingMessageBatch != null) {
+                            onLog(
+                                "AI 联系人身份采集：忽略无效消息批次；" +
+                                    "status=${batch.status.name}；消息=${batch.messages.size}条；" +
+                                    "保留已有有效缓存=${identityPendingMessageBatch?.messages?.size}条"
+                            )
+                        }
                         onLog(
                             "AI 联系人身份采集中：等待资料页/身份回传；" +
-                                "stage=${identityOutcome.request.name}；缓存当前消息=${batch.messages.size}条；" +
+                                "stage=${identityOutcome.request.name}；缓存消息=${identityPendingMessageBatch?.messages?.size ?: 0}条；" +
                                 "暂不重复 OCR、不加载历史、不提交模型"
                         )
-                        val cachedBatch = batch
-                        val cachedSnapshot = snapshot
+                        val cachedBatch = identityPendingMessageBatch
+                        val cachedSnapshot = identityPendingSnapshot
                         val run = sessionActionGeneration
                         scheduler.schedule(IDENTITY_CAPTURE_RETRY_DELAY_MS) {
                             if (isAiReplyActive() && sessionManagerState == SessionManagerState.READING_SESSION &&
@@ -1359,10 +1376,13 @@ class AiReplyObservationRuntime(
                                 // inspectChatPage() advances the adapter's pending profile transaction.
                                 // Do not call readVisibleMessages(): the original OCR batch is reused.
                                 runCatching { chatPagePort.inspectChatPage() }
-                                if (identityPendingMessageBatch === cachedBatch &&
+                                if (cachedBatch != null && cachedSnapshot != null &&
+                                    identityPendingMessageBatch === cachedBatch &&
                                     identityPendingSnapshot === cachedSnapshot
                                 ) {
                                     handleMessageReadBatch(cachedBatch, cachedSnapshot)
+                                } else if (cachedBatch == null || cachedSnapshot == null) {
+                                    onLog("AI 联系人身份采集：当前没有有效消息缓存；继续等待新鲜消息批次，不提交模型")
                                 } else {
                                     onLog("AI 联系人身份采集失败：IDENTITY_CAPTURE_CACHE_INVALIDATED；未使用旧批次继续处理")
                                 }
