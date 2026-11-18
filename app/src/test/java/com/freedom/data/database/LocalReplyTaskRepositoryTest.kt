@@ -15,8 +15,10 @@ class LocalReplyTaskRepositoryTest {
         val file = File.createTempFile("reply-task", ".tsv")
         file.delete()
         try {
-            val first = LocalReplyTaskRepository(file)
-            val second = LocalReplyTaskRepository(file)
+            // Keep the fixture inside the claim timeout; this test is about ownership,
+            // not wall-clock expiry.
+            val first = LocalReplyTaskRepository(file) { 10_000L }
+            val second = LocalReplyTaskRepository(file) { 10_000L }
             val record = record("request-1", "owner-1", 1_000L)
 
             assertTrue(first.tryClaim(record, 120_000L))
@@ -54,7 +56,7 @@ class LocalReplyTaskRepositoryTest {
         val file = File.createTempFile("reply-task", ".tsv")
         file.delete()
         try {
-            val repository = LocalReplyTaskRepository(file)
+            val repository = LocalReplyTaskRepository(file) { 10_000L }
             val record = record("request-3", "owner-3", 3_000L).copy(
                 userId = "user-3",
                 contentHash = "reply-hash",
