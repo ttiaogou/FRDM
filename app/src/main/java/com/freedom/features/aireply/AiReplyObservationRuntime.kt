@@ -90,6 +90,9 @@ class AiReplyObservationRuntime(
         private const val SESSION_RETURN_VERIFY_DELAY_MS = 900L
         private const val DRAFT_PENDING_POLL_DELAY_MS = 500L
         private const val MAX_DRAFT_PENDING_WAIT_MS = 185_000L
+        private const val IDENTITY_CAPTURE_RETRY_DELAY_MS = 500L
+        private const val IDENTITY_CAPTURE_TIMEOUT_MS = 15_000L
+        private const val MAX_IDENTITY_CAPTURE_RETRIES = 30
         private const val MAX_NO_PROGRESS_SCROLLS = 2
         private const val SESSION_BOUNDARY_SETTLE_DELAY_MS = 650L
         private const val MAX_BOUNDARY_STABILITY_CONFIRMATIONS = 2
@@ -313,6 +316,13 @@ class AiReplyObservationRuntime(
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
+    private var identityCaptureSessionKey: String? = null
+    private var identityCaptureStartedAtMs = 0L
+    private var identityCaptureRetryCount = 0
+    private var identityCaptureTerminalSessionKey: String? = null
+    /** Keeps the already OCR-ed batch while profile identity navigation is pending. */
+    private var identityPendingMessageBatch: ChatMessageBatch? = null
+    private var identityPendingSnapshot: ChatPageSnapshot? = null
 
 
     /**
@@ -872,6 +882,12 @@ class AiReplyObservationRuntime(
         currentSessionCandidate = null
         currentSessionReadCaptured = false
         currentSessionWindowKey = null
+        identityCaptureSessionKey = null
+        identityCaptureStartedAtMs = 0L
+        identityCaptureRetryCount = 0
+        identityCaptureTerminalSessionKey = null
+        identityPendingMessageBatch = null
+        identityPendingSnapshot = null
         privateMessagesTraversalTaskExecutor.reset()
         lastMessageFingerprint = ""
         temporaryContactMessageLedger.clearAll()
@@ -1179,10 +1195,30 @@ class AiReplyObservationRuntime(
             onLog("AI 消息复读停止：${draftAdmission.reason}；已达两次重试上限，不猜测内容")
         }
         if (privateDetail) {
+            val identitySessionKey = currentSessionWindowKey
+            if (identityCaptureSessionKey != identitySessionKey) {
+                identityCaptureSessionKey = identitySessionKey
+                identityCaptureStartedAtMs = System.currentTimeMillis()
+                identityCaptureRetryCount = 0
+                identityCaptureTerminalSessionKey = null
+                onLog("AI 联系人身份采集事务：已为当前聊天窗口建立新事务；等待身份终态")
+            }
             val currentIdentity = currentSessionCandidate?.contactIdentity
             val identityVerified = currentIdentity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
                 !currentIdentity.contactId.isNullOrBlank()
-            if (!identityVerified) {
+            if (!identityVerified && identityCaptureTerminalSessionKey != identitySessionKey) {
+                identityCaptureRetryCount++
+                val identityElapsedMs = System.currentTimeMillis() - identityCaptureStartedAtMs
+                if (identityElapsedMs >= IDENTITY_CAPTURE_TIMEOUT_MS ||
+                    identityCaptureRetryCount > MAX_IDENTITY_CAPTURE_RETRIES
+                ) {
+                    identityCaptureTerminalSessionKey = identitySessionKey
+                    onLog(
+                        "AI 联系人身份采集终态：IDENTITY_CAPTURE_TIMEOUT；" +
+                            "已停止继续 RETRY_LATER；重试=${identityCaptureRetryCount - 1}；" +
+                            "耗时=${identityElapsedMs.coerceAtLeast(0L)}ms；仅当前窗口上下文"
+                    )
+                } else {
                 val identityOutcome = runCatching {
                     chatSessionManagementPort.observeContactIdentityCapture(currentSessionCandidate!!)
                 }.getOrElse { error ->
@@ -1217,27 +1253,43 @@ class AiReplyObservationRuntime(
                                 "confidence=${verifiedIdentity.confidence.name}；继续加载对应联系人历史"
                         )
                     } else if (identityOutcome.awaiting) {
+                        identityPendingMessageBatch = batch
+                        identityPendingSnapshot = snapshot
                         onLog(
                             "AI 联系人身份采集中：等待资料页/身份回传；" +
-                                "stage=${identityOutcome.request.name}；暂不加载历史、不提交模型"
+                                "stage=${identityOutcome.request.name}；缓存当前消息=${batch.messages.size}条；" +
+                                "暂不重复 OCR、不加载历史、不提交模型"
                         )
-                        scheduler.schedule(500L) {
-                            if (isAiReplyActive() && sessionManagerState == SessionManagerState.READING_SESSION) {
-                                val fresh = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
-                                if (fresh != null && hasSameWindowSession(snapshot, fresh)) {
-                                    readVisibleMessages(fresh)
+                        val cachedBatch = batch
+                        val cachedSnapshot = snapshot
+                        val run = sessionActionGeneration
+                        scheduler.schedule(IDENTITY_CAPTURE_RETRY_DELAY_MS) {
+                            if (isAiReplyActive() && sessionManagerState == SessionManagerState.READING_SESSION &&
+                                run == sessionActionGeneration
+                            ) {
+                                // inspectChatPage() advances the adapter's pending profile transaction.
+                                // Do not call readVisibleMessages(): the original OCR batch is reused.
+                                runCatching { chatPagePort.inspectChatPage() }
+                                if (identityPendingMessageBatch === cachedBatch &&
+                                    identityPendingSnapshot === cachedSnapshot
+                                ) {
+                                    handleMessageReadBatch(cachedBatch, cachedSnapshot)
                                 } else {
-                                    onLog("AI 联系人身份采集失败：IDENTITY_CAPTURE_WINDOW_CHANGED；未使用旧窗口继续处理")
+                                    onLog("AI 联系人身份采集失败：IDENTITY_CAPTURE_CACHE_INVALIDATED；未使用旧批次继续处理")
                                 }
                             }
                         }
                         return
                     } else if (identityOutcome.failureReason != null) {
+                        identityCaptureTerminalSessionKey = identitySessionKey
                         onLog("AI 联系人身份采集失败：${identityOutcome.failureReason}；降级使用当前会话消息，不加载历史")
                     }
                 }
+                }
             }
         }
+        identityPendingMessageBatch = null
+        identityPendingSnapshot = null
         val rowIdentity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()
             else currentSessionCandidate?.contactIdentity
         val identity = runCatching { resolveConversationIdentity(rowIdentity, snapshot.chatTitleText) }
