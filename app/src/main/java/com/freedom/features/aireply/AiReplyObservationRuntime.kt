@@ -502,6 +502,15 @@ class AiReplyObservationRuntime(
         val nextKey = inspection.stableKey()
         lastPageInspection = inspection
 
+        if (!receivedGreetingsTaskActive &&
+            inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()
+        ) {
+            onLog("AI 身份事务回接：资料页返回已确认原聊天；主动重新观察聊天页并读取消息，启动 OCR")
+            readVisibleMessages(inspection)
+            return
+        }
+
         // Probe after any relevant target-app page-change event. Event provenance never gates
         // the probe or grants task ownership. Event bursts are coalesced by EventAssistedDebouncer;
         // the listener owns one stability retry and one low-frequency fallback timer. Only

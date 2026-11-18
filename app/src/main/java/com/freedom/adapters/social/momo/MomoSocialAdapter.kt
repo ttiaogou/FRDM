@@ -351,6 +351,7 @@ internal class MomoSocialAdapter(
     @Volatile private var sayHiUnverifiedDetailReturnPending: Boolean = false
     private val inboxIdentityCaptureLock = Any()
     @Volatile private var pendingInboxIdentityCapture: PendingInboxIdentityCapture? = null
+    @Volatile private var identityReturnReinspectionPending: Boolean = false
     @Volatile private var lastConfirmedChatDetailSnapshot: ChatPageSnapshot? = null
     private val failedInboxIdentityCaptureKeys = LinkedHashSet<String>()
     private val loggedInboxIdentityFailureKeys = LinkedHashSet<String>()
@@ -4685,6 +4686,13 @@ internal class MomoSocialAdapter(
         return result
     }
 
+    override fun consumeIdentityReturnReinspectionRequest(): Boolean =
+        synchronized(inboxIdentityCaptureLock) {
+            if (!identityReturnReinspectionPending) return@synchronized false
+            identityReturnReinspectionPending = false
+            true
+        }
+
     // ---- ChatSessionManagementPort: bounded Momo session navigation and local samples ----
 
     override fun requestContactIdentityCapture(
@@ -5078,6 +5086,9 @@ internal class MomoSocialAdapter(
                         pending,
                         pending.platformUserId != null
                     )
+                    synchronized(inboxIdentityCaptureLock) {
+                        identityReturnReinspectionPending = true
+                    }
                     onLog("AI 联系人身份采集：已返回并确认原私人聊天详情页；三节点指纹和聊天标题匹配；继续当前窗口回复流程")
                     return false
                 }
@@ -5206,6 +5217,7 @@ internal class MomoSocialAdapter(
     override fun beginSessionManagement(): String? = runCatching {
         synchronized(inboxIdentityCaptureLock) {
             pendingInboxIdentityCapture = null
+            identityReturnReinspectionPending = false
             lastConfirmedChatDetailSnapshot = null
             failedInboxIdentityCaptureKeys.clear()
             loggedInboxIdentityFailureKeys.clear()
@@ -5235,6 +5247,7 @@ internal class MomoSocialAdapter(
     override fun finishSessionManagement(): String? {
         synchronized(inboxIdentityCaptureLock) {
             pendingInboxIdentityCapture = null
+            identityReturnReinspectionPending = false
             lastConfirmedChatDetailSnapshot = null
             failedInboxIdentityCaptureKeys.clear()
             loggedInboxIdentityFailureKeys.clear()

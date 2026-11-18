@@ -71,6 +71,9 @@ data class ContactIdentityCaptureOutcome(
 interface ChatSessionManagementPort {
     fun beginSessionManagement(): String?
 
+    /** Consumes the one-shot signal raised when profile identity returned to the original chat. */
+    fun consumeIdentityReturnReinspectionRequest(): Boolean = false
+
     /**
      * Acquires a platform identity for a private-chat row that has no verified ID yet.
      * Implementations must use their validated profile-navigation and identity-parser path;
