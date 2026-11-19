@@ -96,6 +96,7 @@ class AiReplyObservationRuntime(
         private val TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L)
         /** Long waits are polling intervals, not a recovery timeout. */
         private const val SNAPSHOT_RECOVERY_LOW_FREQUENCY_DELAY_MS = 30_000L
+        private const val EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS = 10_000L
         private const val RECEIVED_GREETINGS_USER_QUIET_MIN_MS = 2_000
         private const val RECEIVED_GREETINGS_USER_QUIET_MAX_MS = 5_000
         private const val RECEIVED_GREETINGS_USER_ACTIVE_RECHECK_DELAY_MS = 10_000L
@@ -433,7 +434,14 @@ class AiReplyObservationRuntime(
 
     private fun runFullInspection() {
         pageInspectionTask = null
-        if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
+        if (!isAiReplyActive()) return
+        if (!chatPagePort.supportsTargetPackage(targetPackage())) {
+            if (recoveryContext.pending) {
+                onLog("统一页面恢复[EXTERNAL_PAGE_WAIT]：当前前台不是目标应用；${EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS}ms后继续观察")
+                scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
+            }
+            return
+        }
         if (sessionRunStarted && userInteractionActive) {
             onLog("统一恢复事务[USER_ACTIVE]：用户仍在操作；暂停页面复核和业务动作，10s后重新检查")
             scheduleFullInspectionAfter(RECEIVED_GREETINGS_USER_ACTIVE_RECHECK_DELAY_MS)
@@ -593,6 +601,8 @@ class AiReplyObservationRuntime(
         if (recoveryContext.pending) {
             val targetRoute = matchedRouteId
             if (targetRoute == null) {
+                onLog("统一页面恢复[ROUTE_WAIT]：当前目标应用页面尚未匹配业务指纹；继续等待")
+                scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
                 lastPageInspection = inspection
                 return
             }
@@ -614,12 +624,20 @@ class AiReplyObservationRuntime(
                 lastPageInspection = inspection
                 return
             }
+            recoveryContext.markUiOwnershipTransferred()
             val sourceTaskId = recoveryContext.sourceTaskId
+            val fingerprintVerified = recoveryContext.fingerprintVerified
+            val uiOwnershipTransferred = recoveryContext.uiOwnershipTransferred
             recoveryContext.clear()
             pageRecoveryVerificationGate.reset()
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
-            onLog("统一页面恢复[RECOVERY_VERIFIED]：目标路由=$targetRoute；已从任务=${sourceTaskId}恢复任务=$targetTaskId")
+            onLog(
+                "统一页面恢复[RECOVERY_VERIFIED]：目标路由=$targetRoute；" +
+                    "双快照=$fingerprintVerified；" +
+                    "UI操作权=$uiOwnershipTransferred；" +
+                    "已从任务=${sourceTaskId}恢复任务=$targetTaskId"
+            )
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                 lastPageInspection = inspection

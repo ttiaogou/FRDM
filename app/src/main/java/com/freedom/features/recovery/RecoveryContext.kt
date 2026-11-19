@@ -18,6 +18,10 @@ class RecoveryContext {
     var verificationSamples: Int = 0
         private set
     private var lastVerificationKey: String? = null
+    var fingerprintVerified: Boolean = false
+        private set
+    var uiOwnershipTransferred: Boolean = false
+        private set
 
     val pending: Boolean
         get() = sourceTaskId != null
@@ -31,6 +35,8 @@ class RecoveryContext {
         checkpointSaved = false
         verificationSamples = 0
         lastVerificationKey = null
+        fingerprintVerified = false
+        uiOwnershipTransferred = false
     }
 
     fun markCheckpointSaved() {
@@ -48,7 +54,13 @@ class RecoveryContext {
             1
         }
         lastVerificationKey = fingerprintKey
-        return verificationSamples >= REQUIRED_STABLE_SAMPLES
+        fingerprintVerified = verificationSamples >= REQUIRED_STABLE_SAMPLES
+        return fingerprintVerified
+    }
+
+    fun markUiOwnershipTransferred() {
+        check(fingerprintVerified) { "UI ownership cannot transfer before fingerprint verification" }
+        uiOwnershipTransferred = true
     }
 
     fun clear() {
@@ -58,6 +70,8 @@ class RecoveryContext {
         checkpointSaved = false
         verificationSamples = 0
         lastVerificationKey = null
+        fingerprintVerified = false
+        uiOwnershipTransferred = false
     }
 
     companion object {
