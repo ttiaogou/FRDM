@@ -249,6 +249,7 @@ internal class AndroidAccountBrowseWorkflow(
                 )
                 if (!accountBrowseSession.touchActive) {
                     accountBrowseSession.touchActive = true
+                    accountBrowseRuntime.onUserInteractionStarted()
                     cancelManualTouchResume()
                     if (accountBrowsePhase != AccountBrowsePhase.PAUSED) {
                         pauseAccountBrowse("检测到手动触摸；自动浏览暂时让出操作权", allowManualResume = true)
@@ -292,6 +293,7 @@ internal class AndroidAccountBrowseWorkflow(
                 )
                 if (accountBrowseSession.touchActive) {
                     accountBrowseSession.touchActive = false
+                    accountBrowseRuntime.onUserInteractionEnded()
                     if (accountBrowseSession.manualResumeAllowed) {
                         addLog("用户已停止操作屏幕；开始第一轮静默 5 秒倒计时；后续验证不通过时依次等待 15 秒和 60 秒；新操作会重置到第一轮")
                         scheduleManualTouchResume()

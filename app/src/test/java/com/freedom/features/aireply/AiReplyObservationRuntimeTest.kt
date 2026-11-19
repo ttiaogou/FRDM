@@ -1187,7 +1187,7 @@ class AiReplyObservationRuntimeTest {
         )
 
         runtime.scheduleInitialObservation()
-        runUntilLog(scheduler, logs, "AI 页面观察[SNAPSHOT_RECOVERY]")
+        runUntilLog(scheduler, logs, "当前列表暂未提取到会话行")
         assertEquals(500L, scheduler.nextDelay())
 
         port.page = emptyListPage.copy(chatListCandidates = listOf(candidate))

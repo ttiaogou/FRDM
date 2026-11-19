@@ -80,6 +80,14 @@ class AccountBrowseRuntime(
 
     fun recoveryStableSamples(): Int = recoveryTransaction.stableVerificationSamples
 
+    fun onUserInteractionStarted() {
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionStarted)
+    }
+
+    fun onUserInteractionEnded() {
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionEnded)
+    }
+
     /**
      * Replaces the dynamic-feed-local stableSamples decision with the shared two-sample gate.
      * The caller still owns fingerprint extraction and all feed actions.
@@ -127,6 +135,9 @@ class AccountBrowseRuntime(
             return
         }
         if (isTouchActive() || phase == AccountBrowsePhase.PAUSED) return
+        if (recoveryTransaction.state != RecoveryTransactionState.ACTIVE &&
+            phase != AccountBrowsePhase.WAIT_FOR_FEED_STABLE
+        ) return
 
         when (phase) {
             AccountBrowsePhase.IDLE,
