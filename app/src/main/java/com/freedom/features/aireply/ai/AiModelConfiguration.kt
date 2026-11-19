@@ -66,13 +66,13 @@ enum class AiModelServiceProvider(
  * The API key is deliberately excluded from toString() to prevent accidental log disclosure.
  */
 data class AiModelConfiguration(
-    val apiBaseUrl: String = AiModelServiceProvider.OPENAI.defaultBaseUrl,
-    val modelName: String = AiModelServiceProvider.OPENAI.defaultModelName,
+    val apiBaseUrl: String = AiModelServiceProvider.DEEPSEEK.defaultBaseUrl,
+    val modelName: String = AiModelServiceProvider.DEEPSEEK.defaultModelName,
     val apiKey: String = "",
     val temperature: Double = DEFAULT_TEMPERATURE,
     val maxOutputTokens: Int = DEFAULT_MAX_OUTPUT_TOKENS,
     val requestTimeoutMillis: Long = DEFAULT_REQUEST_TIMEOUT_MILLIS,
-    val provider: AiModelServiceProvider = AiModelServiceProvider.OPENAI
+    val provider: AiModelServiceProvider = AiModelServiceProvider.DEEPSEEK
 ) {
     init {
         require(temperature.isFinite() && temperature in 0.0..2.0) {

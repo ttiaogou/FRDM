@@ -7,11 +7,11 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class AiModelConfigurationTest {
-    @Test fun defaultConfigurationUsesRequestContractDefaultsAndOpenAiPresets() {
+    @Test fun defaultConfigurationUsesRequestContractDefaultsAndDeepSeekPresets() {
         val configuration = AiModelConfiguration()
-        assertEquals(AiModelServiceProvider.OPENAI, configuration.provider)
-        assertEquals("https://api.openai.com/v1", configuration.apiBaseUrl)
-        assertEquals("gpt-6.1-sol", configuration.modelName)
+        assertEquals(AiModelServiceProvider.DEEPSEEK, configuration.provider)
+        assertEquals("https://api.deepseek.com", configuration.apiBaseUrl)
+        assertEquals("deepseek-flash", configuration.modelName)
         assertEquals(0.3, configuration.temperature, 0.0)
         assertEquals(512, configuration.maxOutputTokens)
         assertEquals(30_000L, configuration.requestTimeoutMillis)

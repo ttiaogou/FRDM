@@ -10,7 +10,6 @@ import android.view.Gravity
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
-import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -40,8 +39,9 @@ internal class AiModelConfigurationScreen(
     private var currentModelOptions: List<AiModelOption> = emptyList()
     private var apiKeyStatus: TextView? = null
     private var statusMessage: TextView? = null
-    private var apiKeyInput: EditText? = null
-    private var clearApiKeyButton: Button? = null
+    private var apiKeyValue: TextView? = null
+    private var customEndpointInput: EditText? = null
+    private var customModelInput: EditText? = null
 
     fun create(): View {
         val root = LinearLayout(activity).apply {
@@ -104,14 +104,14 @@ internal class AiModelConfigurationScreen(
             orientation = LinearLayout.VERTICAL
             visibility = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) View.VISIBLE else View.GONE
         }
-        val customEndpointInput = addField(
+        customEndpointInput = addField(
             customFields,
             label = "自定义 API 地址（HTTPS）",
             value = configuration.apiBaseUrl,
             hint = "例如 https://api.example.com/v1",
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         )
-        val customModelInput = addField(
+        customModelInput = addField(
             customFields,
             label = "自定义模型名称",
             value = configuration.modelName,
@@ -163,29 +163,23 @@ internal class AiModelConfigurationScreen(
                         .takeIf { savedConfiguration.provider == nextProvider }
                         .orEmpty()
                 )
-                apiKeyInput?.text?.clear()
-                apiKeyInput?.hint = if (configuration.apiKey.isBlank()) {
-                    "粘贴服务商提供的 API Key"
-                } else {
-                    "留空保持已保存的 Key 不变"
-                }
+                apiKeyValue?.text = if (configuration.apiKey.isBlank()) "未设置" else "已保存 · 点击编辑"
                 apiKeyStatus?.text = apiKeyStatusText()
-                clearApiKeyButton?.isEnabled = configuration.apiKey.isNotBlank()
                 if (nextProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
                     if (previousProvider != AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
                         val hasSavedCustomConfiguration =
                             savedConfiguration.provider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT
-                        customEndpointInput.setText(
+                        customEndpointInput?.setText(
                             if (hasSavedCustomConfiguration) savedConfiguration.apiBaseUrl else ""
                         )
-                        customModelInput.setText(
+                        customModelInput?.setText(
                             if (hasSavedCustomConfiguration) savedConfiguration.modelName else ""
                         )
                     }
                     customFields.visibility = View.VISIBLE
                 } else {
                     customFields.visibility = View.GONE
-                    customEndpointInput.setText(nextProvider.defaultBaseUrl)
+                    customEndpointInput?.setText(nextProvider.defaultBaseUrl)
                     selectedModelName = nextProvider.defaultModelName
                     refreshModelOptions(nextProvider, nextProvider.defaultModelName)
                 }
@@ -198,14 +192,6 @@ internal class AiModelConfigurationScreen(
             }
         }
 
-        content.addView(TextView(activity).apply {
-            text = "服务商和常用模型已预设，API 地址会自动配置。通常只需选择服务商、选择模型并填写 API Key。自定义兼容接口仅供已有自定义服务地址的用户使用。"
-            textSize = 12f
-            setTextColor(FreedomUi.MUTED)
-            setLineSpacing(dp(2).toFloat(), 1f)
-            setPadding(dp(2), dp(10), dp(2), dp(8))
-        })
-
         content.addView(sectionTitle("API Key"), topMargin(12))
         val apiKeyStatusView = TextView(activity).apply {
             text = apiKeyStatusText()
@@ -215,40 +201,27 @@ internal class AiModelConfigurationScreen(
         }
         apiKeyStatus = apiKeyStatusView
         content.addView(apiKeyStatusView)
-        apiKeyInput = addField(
-            content,
-            label = "API Key（需要手动填写）",
-            value = "",
-            hint = if (configuration.apiKey.isBlank()) "粘贴服务商提供的 API Key" else "留空保持已保存的 Key 不变",
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        )
-        apiKeyInput?.apply {
-            setSingleLine(true)
-            isSaveEnabled = false
-            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
-        }
-        val keyActions = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
+        val apiKeyField = TextView(activity).apply {
+            text = if (configuration.apiKey.isBlank()) "未设置" else "已保存 · 点击编辑"
+            textSize = 14f
+            setTextColor(FreedomUi.TEXT)
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), 0, dp(14), 0)
+            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "API Key，点击编辑"
         }
-        val clearKeyButton = Button(activity).apply {
-            text = "删除已保存的 API Key"
-            isEnabled = configuration.apiKey.isNotBlank()
-            setOnClickListener { confirmClearApiKey() }
-        }
-        FreedomUi.styleSecondaryButton(clearKeyButton, dp)
-        clearApiKeyButton = clearKeyButton
-        keyActions.addView(clearKeyButton, LinearLayout.LayoutParams(-1, dp(44)))
-        content.addView(keyActions, topMargin(4))
-
+        apiKeyValue = apiKeyField
+        apiKeyField.setOnClickListener { showApiKeyEditor() }
+        content.addView(apiKeyField, LinearLayout.LayoutParams(-1, dp(52)))
         content.addView(TextView(activity).apply {
-            text = "聊天风格偏好通过通用自然语言指令传递，不依赖特定模型厂商。不同模型对指令的遵循效果可能有所差异。API Key 使用 Android Keystore + AES-GCM 加密保存在应用私有存储中；仅在开启云端模型处理授权后才会发送脱敏后的聊天上下文。生成内容只会填入聊天输入框，不会自动发送。"
-            textSize = 12f
+            text = "点击编辑 API Key"
+            textSize = 11f
             setTextColor(FreedomUi.MUTED)
-            setLineSpacing(dp(2).toFloat(), 1f)
-            setPadding(dp(2), dp(14), dp(2), dp(8))
+            setPadding(dp(2), dp(6), dp(2), dp(0))
         })
-        content.addView(cloudConsentPreferenceRow(), topMargin(12))
+
         val statusMessageView = TextView(activity).apply {
             textSize = 12f
             setTextColor(FreedomUi.SECONDARY)
@@ -256,72 +229,6 @@ internal class AiModelConfigurationScreen(
         }
         statusMessage = statusMessageView
         content.addView(statusMessageView)
-        val saveButton = Button(activity).apply {
-            text = "保存模型配置"
-            setOnClickListener {
-                val endpoint = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
-                    customEndpointInput.text.toString().trim()
-                } else {
-                    selectedProvider.defaultBaseUrl
-                }
-                val model = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
-                    customModelInput.text.toString().trim()
-                } else {
-                    selectedModelName
-                }
-                val next = runCatching {
-                    configuration.copy(
-                        provider = selectedProvider,
-                        apiBaseUrl = endpoint,
-                        modelName = model,
-                        apiKey = apiKeyInput?.text?.toString()?.trim()
-                            ?.takeIf { it.isNotEmpty() } ?: configuration.apiKey
-                    ).normalized()
-                }.getOrElse { failure ->
-                    showStatus(failure.message ?: "模型配置无效。", error = true)
-                    return@setOnClickListener
-                }
-                if (selectedProvider != AiModelServiceProvider.CUSTOM_OPENAI_COMPAT &&
-                    currentModelOptions.none { it.id == next.modelName }
-                ) {
-                    showStatus("请选择列表中的模型。", error = true)
-                    return@setOnClickListener
-                }
-                next.validationError()?.let { message ->
-                    showStatus(message, error = true)
-                    if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
-                        customEndpointInput.error = message
-                    }
-                    return@setOnClickListener
-                }
-                if (next.apiKey.isBlank()) {
-                    showStatus("请填写 API Key 后再保存。", error = true)
-                    apiKeyInput?.error = "API Key 不能为空"
-                    return@setOnClickListener
-                }
-                if (next.modelName.isBlank() || next.apiBaseUrl.isBlank()) {
-                    showStatus("模型配置不完整，请检查服务商和模型选择。", error = true)
-                    return@setOnClickListener
-                }
-                onSave(next).fold(
-                    onSuccess = {
-                        configuration = next
-                        savedConfiguration = next
-                        apiKeyInput?.text?.clear()
-                        apiKeyInput?.hint = "留空保持已保存的 Key 不变"
-                        apiKeyStatus?.text = apiKeyStatusText()
-                        clearKeyButton.isEnabled = configuration.apiKey.isNotBlank()
-                        showStatus("模型配置已加密保存。", error = false)
-                    },
-                    onFailure = { failure ->
-                        showStatus(failure.message ?: "保存失败，请检查安全存储状态。", error = true)
-                    }
-                )
-            }
-        }
-        FreedomUi.stylePrimaryButton(saveButton, dp)
-        content.addView(saveButton, topMargin(8))
-
         scroll.addView(content)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         return root
@@ -492,6 +399,95 @@ internal class AiModelConfigurationScreen(
         return wrapper
     }
 
+    private fun showApiKeyEditor() {
+        val input = EditText(activity).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            isSingleLine = true
+            textSize = 16f
+            setTextColor(FreedomUi.TEXT)
+            hint = "输入 API Key"
+            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            isSaveEnabled = false
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+        }
+        val content = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(8), dp(22), dp(4))
+            addView(input, LinearLayout.LayoutParams(-1, dp(52)))
+            addView(TextView(activity).apply {
+                text = "留空并保存清空已保存的 Key"
+                textSize = 11f
+                setTextColor(FreedomUi.MUTED)
+                setPadding(dp(2), dp(8), 0, 0)
+            })
+        }
+        val dialog = AlertDialog.Builder(activity)
+            .setTitle("API Key")
+            .setView(content)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val endpoint = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
+                    customEndpointInput?.text?.toString()?.trim().orEmpty()
+                } else {
+                    selectedProvider.defaultBaseUrl
+                }
+                val model = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
+                    customModelInput?.text?.toString()?.trim().orEmpty()
+                } else {
+                    selectedModelName
+                }
+                val next = runCatching {
+                    configuration.copy(
+                        provider = selectedProvider,
+                        apiBaseUrl = endpoint,
+                        modelName = model,
+                        apiKey = input.text.toString().trim()
+                    ).normalized()
+                }.getOrElse { failure ->
+                    input.error = failure.message ?: "API Key 无效"
+                    return@setOnClickListener
+                }
+                if (selectedProvider != AiModelServiceProvider.CUSTOM_OPENAI_COMPAT &&
+                    currentModelOptions.none { it.id == next.modelName }
+                ) {
+                    input.error = "请选择列表中的模型"
+                    return@setOnClickListener
+                }
+                next.validationError()?.let { message ->
+                    input.error = message
+                    return@setOnClickListener
+                }
+                if (next.modelName.isBlank() || next.apiBaseUrl.isBlank()) {
+                    input.error = "模型配置不完整，请检查服务商和模型选择"
+                    return@setOnClickListener
+                }
+                onSave(next).fold(
+                    onSuccess = {
+                        configuration = next
+                        savedConfiguration = next
+                        runCatching { onCloudConsentChanged(next.apiKey.isNotBlank()) }
+                            .onFailure { failure ->
+                                showStatus(failure.message ?: "保存云端授权状态失败。", error = true)
+                            }
+                        apiKeyValue?.text = if (next.apiKey.isBlank()) "未设置" else "已保存 · 点击编辑"
+                        apiKeyStatus?.text = apiKeyStatusText()
+                        showStatus("模型配置已保存。", error = false)
+                        dialog.dismiss()
+                    },
+                    onFailure = { failure ->
+                        input.error = failure.message ?: "保存失败，请检查安全存储状态"
+                    }
+                )
+            }
+        }
+        dialog.show()
+        FreedomUi.styleAlertDialog(dialog, activity, dp)
+    }
+
     private fun confirmClearApiKey() {
         if (configuration.apiKey.isBlank()) return
         val dialog = AlertDialog.Builder(activity)
@@ -504,9 +500,7 @@ internal class AiModelConfigurationScreen(
                         configuration = configuration.copy(apiKey = "")
                         savedConfiguration = savedConfiguration.copy(apiKey = "")
                         apiKeyStatus?.text = apiKeyStatusText()
-                        clearApiKeyButton?.isEnabled = false
-                        apiKeyInput?.hint = "粘贴 API Key"
-                        apiKeyInput?.text?.clear()
+                        apiKeyValue?.text = "未设置"
                         showStatus("已删除本机保存的 API Key。", error = false)
                     },
                     onFailure = { failure ->
