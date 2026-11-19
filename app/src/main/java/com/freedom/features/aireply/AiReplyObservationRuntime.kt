@@ -675,8 +675,8 @@ class AiReplyObservationRuntime(
             !recoveryContext.pending && selfInitiatedTransition == null &&
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
-        if (shouldCreateRouteRecovery || unmatchedReturnToOwnedRoute) {
-            requestUnifiedPauseAndCheckpoint(activeTaskId, "PAGE_ROUTE_CHANGED")
+        if ((shouldCreateRouteRecovery || unmatchedReturnToOwnedRoute) && activeTaskId != null) {
+            requestUnifiedPauseAndCheckpoint(activeTaskId!!, "PAGE_ROUTE_CHANGED")
             unmatchedNavigationObservationPending = false
         } else if (unmatchedNavigationObservationPending &&
             matchedRouteId == activeRouteId
