@@ -152,13 +152,6 @@ class AiReplyObservationRuntime(
         ownership = taskOwnership,
         chooseRandomInt = chooseRandomInt
     )
-    init {
-        privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
-            privateMessagesTraversalTaskExecutor.restore(checkpoint)
-            privateMessagesCheckpointRecoveryPending = true
-            onLog("消息列表进程恢复：已读取持久化检查点；等待页面结构重新确认后继续")
-        }
-    }
     private val receivedGreetingsTaskFlow = ReceivedGreetingsTaskFlowController(
         ownership = taskOwnership,
         pagePort = chatPagePort
@@ -289,6 +282,13 @@ class AiReplyObservationRuntime(
 
 
     private val privateMessagesTraversalTaskExecutor = PrivateMessagesTraversalTaskExecutor()
+    init {
+        privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
+            privateMessagesTraversalTaskExecutor.restore(checkpoint)
+            privateMessagesCheckpointRecoveryPending = true
+            onLog("消息列表进程恢复：已读取持久化检查点；等待页面结构重新确认后继续")
+        }
+    }
     private var sessionManagerState: SessionManagerState
         get() = privateMessagesTraversalTaskExecutor.executionState
         set(value) { privateMessagesTraversalTaskExecutor.executionState = value }
