@@ -644,6 +644,9 @@ class AiReplyObservationRuntime(
         val selfInitiatedTransition = pendingNavigationSourceResult?.takeIf {
             selfNavigationMatchesInspection(it, inspection)
         }
+        val selfNavigationReturnedToMessageList = selfInitiatedTransition != null &&
+            inspection.pageKind == ChatPageKind.CHAT_LIST &&
+            matchedRouteId == messageListRecoveryRoute.routeId
         if (selfInitiatedTransition != null) {
             pendingNavigationSourceResult = null
             if (recoveryContext.pending) {
@@ -655,6 +658,7 @@ class AiReplyObservationRuntime(
                     "统一页面恢复[SELF_NAVIGATION_CONSUMED]：" +
                         "actionId=${selfInitiatedTransition.actionId}；" +
                         "targetActivity=${inspection.activityClass}；" +
+                        "targetRoute=${matchedRouteId ?: "UNKNOWN"}；" +
                         "已取消误触发的路由恢复并继续当前业务链路"
                 )
             } else {
@@ -662,7 +666,16 @@ class AiReplyObservationRuntime(
                     "统一页面恢复[SELF_NAVIGATION_CONSUMED]：" +
                         "actionId=${selfInitiatedTransition.actionId}；" +
                         "targetActivity=${inspection.activityClass}；" +
+                        "targetRoute=${matchedRouteId ?: "UNKNOWN"}；" +
                         "跳过PAGE_ROUTE_CHANGED"
+                )
+            }
+            if (selfNavigationReturnedToMessageList) {
+                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                onLog(
+                    "统一页面恢复[SESSION_LIST_RETURN_CONSUMED]：" +
+                        "actionId=${selfInitiatedTransition.actionId}；" +
+                        "已消费聊天详情页返回消息列表事务；等待消息列表继续执行"
                 )
             }
         }
