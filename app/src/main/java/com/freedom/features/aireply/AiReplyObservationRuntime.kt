@@ -637,7 +637,7 @@ class AiReplyObservationRuntime(
             pageRecoveryVerificationGate.reset()
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
-            onLog("统一页面恢复[RECOVERY_VERIFIED]：目标路由=$targetRoute；已从任务=$sourceTaskId恢复任务=$targetTaskId")
+            onLog("统一页面恢复[RECOVERY_VERIFIED]：目标路由=$targetRoute；已从任务=${sourceTaskId}恢复任务=$targetTaskId")
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                 lastPageInspection = inspection
