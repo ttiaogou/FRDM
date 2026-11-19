@@ -587,28 +587,12 @@ class AiReplyObservationRuntime(
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
         ) {
-            recoveryRouteForTask(activeTaskId)?.saveCheckpoint()
-            recoveryContext.request(activeTaskId, "PAGE_ROUTE_CHANGED")
-            recoveryContext.markCheckpointSaved()
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("PAGE_ROUTE_CHANGED"))
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
-            sessionTransitionTask?.cancel()
-            sessionTransitionTask = null
-            pageInspectionTask?.cancel()
-            pageInspectionTask = null
-            if (activeTaskId == RECEIVED_GREETINGS_TASK_ID) {
-                receivedGreetingsTaskFlow.pauseForBusinessSwitch()
-            }
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog(
-                "统一页面恢复[PAUSED]：当前任务=$activeTaskId；当前页面未匹配原路由；" +
-                    "已保存检查点，等待目标页面指纹；不执行滚动、点击或导航"
-            )
+            requestUnifiedPauseAndCheckpoint(activeTaskId, "PAGE_ROUTE_CHANGED")
         }
 
         if (recoveryContext.pending) {
             val targetRoute = matchedRouteId
-            if (targetRoute == null || targetRoute == recoveryRouteIdForTask(recoveryContext.sourceTaskId)) {
+            if (targetRoute == null) {
                 lastPageInspection = inspection
                 return
             }
@@ -842,8 +826,7 @@ class AiReplyObservationRuntime(
                 SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
             ) && previous?.pageKind == ChatPageKind.CHAT_LIST
         ) {
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_UNKNOWN"))
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+            requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "MESSAGE_LIST_UNKNOWN")
             messageListRecoveryVerificationPending = true
             scheduleSessionListStabilityRetry("页面结构暂时不可用")
             return
@@ -955,8 +938,7 @@ class AiReplyObservationRuntime(
             }
             ChatPageKind.UNKNOWN, ChatPageKind.NON_CHAT -> {
                 if (sessionRunStarted && receivedGreetingsTaskActive) {
-                    recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage())
-                    recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+                    requestUnifiedPauseAndCheckpoint(RECEIVED_GREETINGS_TASK_ID, "RECEIVED_GREETINGS_UNKNOWN")
                     // A page classification failure is a recovery request, never a business step.
                     // The received-greetings coordinator retains the traversal checkpoint and
                     // only resumes after the adapter confirms the list/detail fingerprint again.
@@ -1267,6 +1249,30 @@ class AiReplyObservationRuntime(
         PRIVATE_MESSAGES_TASK_ID -> messageListRecoveryRoute
         RECEIVED_GREETINGS_TASK_ID -> receivedGreetingsRecoveryRoute
         else -> null
+    }
+
+    /** Single pause/checkpoint entry used by page-route changes and UNKNOWN observations. */
+    private fun requestUnifiedPauseAndCheckpoint(taskId: String, reason: String): Boolean {
+        if (recoveryContext.pending) return false
+        val route = recoveryRouteForTask(taskId) ?: return false
+        route.saveCheckpoint()
+        recoveryContext.request(taskId, reason)
+        recoveryContext.markCheckpointSaved()
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        sessionTransitionTask?.cancel()
+        sessionTransitionTask = null
+        pageInspectionTask?.cancel()
+        pageInspectionTask = null
+        if (taskId == RECEIVED_GREETINGS_TASK_ID) {
+            receivedGreetingsTaskFlow.pauseForBusinessSwitch()
+        }
+        sessionManagerState = SessionManagerState.PAUSED
+        onLog(
+            "统一恢复[PAUSED_CHECKPOINT_SAVED]：task=$taskId；reason=$reason；" +
+                "已保存检查点并暂停全部滚动、点击和导航"
+        )
+        return true
     }
 
     private fun pageIdentityChanged(previous: ChatPageSnapshot, current: ChatPageSnapshot): Boolean =
