@@ -20,6 +20,11 @@ import com.freedom.features.aireply.ai.AiModelConfiguration
 import com.freedom.features.aireply.ai.AiModelOption
 import com.freedom.features.aireply.ai.AiModelServiceProvider
 import com.freedom.ui.theme.FreedomUi
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.io.BufferedReader
+import java.io.InputStreamReader
 
 /** User-facing editor with provider/model choices; only the API key is required as free text. */
 internal class AiModelConfigurationScreen(
@@ -40,6 +45,8 @@ internal class AiModelConfigurationScreen(
     private var apiKeyStatus: TextView? = null
     private var statusMessage: TextView? = null
     private var apiKeyValue: TextView? = null
+    private var apiAddressValue: TextView? = null
+    private var modelNameValue: TextView? = null
     private var customEndpointInput: EditText? = null
     private var customModelInput: EditText? = null
 
@@ -99,10 +106,41 @@ internal class AiModelConfigurationScreen(
             selectedIndex = 0
         )
         val modelSpinnerLabel = content.getChildAt(content.childCount - 2)
+        modelSpinner.visibility = View.GONE
+        modelSpinnerLabel.visibility = View.GONE
+
+        fun clickableValue(label: String, value: String, description: String, action: () -> Unit): TextView {
+            content.addView(TextView(activity).apply {
+                text = label
+                textSize = 12f
+                setTextColor(FreedomUi.SECONDARY)
+                setPadding(dp(2), dp(10), dp(2), dp(5))
+            })
+            return TextView(activity).apply {
+                text = value.ifBlank { "未设置" }
+                textSize = 14f
+                setTextColor(FreedomUi.TEXT)
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14), 0, dp(14), 0)
+                background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
+                isClickable = true
+                isFocusable = true
+                contentDescription = description
+                setOnClickListener { action() }
+                content.addView(this, LinearLayout.LayoutParams(-1, dp(52)))
+            }
+        }
+
+        apiAddressValue = clickableValue("API 地址", configuration.apiBaseUrl, "API 地址，点击编辑") {
+            showApiAddressEditor()
+        }
+        modelNameValue = clickableValue("模型名称", configuration.modelName, "模型名称，点击编辑") {
+            showModelEditor()
+        }
 
         val customFields = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            visibility = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) View.VISIBLE else View.GONE
+            visibility = View.GONE
         }
         customEndpointInput = addField(
             customFields,
@@ -176,10 +214,15 @@ internal class AiModelConfigurationScreen(
                             if (hasSavedCustomConfiguration) savedConfiguration.modelName else ""
                         )
                     }
-                    customFields.visibility = View.VISIBLE
-                } else {
                     customFields.visibility = View.GONE
+                } else {
                     customEndpointInput?.setText(nextProvider.defaultBaseUrl)
+                    configuration = configuration.copy(
+                        apiBaseUrl = nextProvider.defaultBaseUrl,
+                        modelName = nextProvider.defaultModelName
+                    )
+                    apiAddressValue?.text = nextProvider.defaultBaseUrl
+                    modelNameValue?.text = nextProvider.defaultModelName
                     selectedModelName = nextProvider.defaultModelName
                     refreshModelOptions(nextProvider, nextProvider.defaultModelName)
                 }
@@ -231,6 +274,9 @@ internal class AiModelConfigurationScreen(
         content.addView(statusMessageView)
         scroll.addView(content)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        if (configuration.apiKey.isNotBlank()) {
+            loadRemoteModels(configuration.apiBaseUrl, configuration.apiKey)
+        }
         return root
     }
 
@@ -399,6 +445,175 @@ internal class AiModelConfigurationScreen(
         return wrapper
     }
 
+    private fun showApiAddressEditor() {
+        showTextEditor(
+            title = "API 地址",
+            current = configuration.apiBaseUrl,
+            hint = "例如 https://api.example.com/v1",
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        ) { value ->
+            val next = configuration.copy(apiBaseUrl = value).normalized()
+            next.validationError()?.let { throw IllegalArgumentException(it) }
+            configuration = next
+            apiAddressValue?.text = next.apiBaseUrl.ifBlank { "未设置" }
+            customEndpointInput?.setText(next.apiBaseUrl)
+            if (next.apiKey.isNotBlank()) loadRemoteModels(next.apiBaseUrl, next.apiKey)
+            onSave(next).getOrThrow()
+        }
+    }
+
+    private fun showModelEditor() {
+        val input = EditText(activity).apply {
+            setText(selectedModelName)
+            setSelection(text.length)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            isSingleLine = true
+            textSize = 16f
+            setTextColor(FreedomUi.TEXT)
+            hint = "输入模型 ID"
+            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        val content = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(8), dp(22), dp(4))
+            if (currentModelOptions.isNotEmpty()) {
+                addView(TextView(activity).apply {
+                    text = "已加载模型"
+                    textSize = 11f
+                    setTextColor(FreedomUi.MUTED)
+                    setPadding(dp(2), 0, 0, dp(6))
+                })
+                val picker = Spinner(activity).apply {
+                    adapter = ArrayAdapter(
+                        activity,
+                        android.R.layout.simple_spinner_item,
+                        currentModelOptions.map { it.displayName }
+                    ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+                    setSelection(currentModelOptions.indexOfFirst { it.id == selectedModelName }.coerceAtLeast(0))
+                    onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                        override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                        override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                            input.setText(currentModelOptions.getOrNull(position)?.id.orEmpty())
+                            input.setSelection(input.text.length)
+                        }
+                    }
+                }
+                addView(picker, LinearLayout.LayoutParams(-1, dp(48)))
+            }
+            addView(input, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(10) })
+            addView(TextView(activity).apply {
+                text = "可选择已加载模型，也可手动填写模型 ID"
+                textSize = 11f
+                setTextColor(FreedomUi.MUTED)
+                setPadding(dp(2), dp(8), 0, 0)
+            })
+        }
+        val dialog = AlertDialog.Builder(activity)
+            .setTitle("模型名称")
+            .setView(content)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val value = input.text.toString().trim()
+                if (value.isBlank()) {
+                    input.error = "模型名称不能为空"
+                    return@setOnClickListener
+                }
+                val next = configuration.copy(modelName = value).normalized()
+                configuration = next
+                selectedModelName = value
+                modelNameValue?.text = value
+                customModelInput?.setText(value)
+                onSave(next).getOrThrow()
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+        FreedomUi.styleAlertDialog(dialog, activity, dp)
+    }
+
+    private fun showTextEditor(
+        title: String,
+        current: String,
+        hint: String,
+        inputType: Int,
+        onSaveValue: (String) -> Unit
+    ) {
+        val input = EditText(activity).apply {
+            setText(current)
+            setSelection(text.length)
+            this.inputType = inputType
+            isSingleLine = true
+            textSize = 16f
+            setTextColor(FreedomUi.TEXT)
+            this.hint = hint
+            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        val content = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(8), dp(22), dp(4))
+            addView(input, LinearLayout.LayoutParams(-1, dp(52)))
+        }
+        val dialog = AlertDialog.Builder(activity)
+            .setTitle(title)
+            .setView(content)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                runCatching { onSaveValue(input.text.toString().trim()) }
+                    .onSuccess { dialog.dismiss() }
+                    .onFailure { input.error = it.message ?: "输入内容无效" }
+            }
+        }
+        dialog.show()
+        FreedomUi.styleAlertDialog(dialog, activity, dp)
+    }
+
+    private fun loadRemoteModels(baseUrl: String, apiKey: String) {
+        if (baseUrl.isBlank() || apiKey.isBlank()) return
+        showStatus("正在加载模型列表…", error = false)
+        Thread {
+            val result = runCatching {
+                val endpoint = baseUrl.trimEnd('/') + "/models"
+                val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 10_000
+                    readTimeout = 15_000
+                    setRequestProperty("Authorization", "Bearer $apiKey")
+                    setRequestProperty("Accept", "application/json")
+                }
+                val status = connection.responseCode
+                val stream = if (status in 200..299) connection.inputStream else {
+                    connection.errorStream ?: connection.inputStream
+                }
+                val body = BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { it.readText() }
+                connection.disconnect()
+                if (status !in 200..299) error("模型列表加载失败（HTTP $status）")
+                val data = JSONObject(body).optJSONArray("data") ?: error("模型列表响应格式无效")
+                (0 until data.length()).mapNotNull { index ->
+                    data.optJSONObject(index)?.optString("id")?.trim()?.takeIf { it.isNotBlank() }
+                }.distinct().map { AiModelOption(it, it) }
+            }
+            activity.runOnUiThread {
+                result.onSuccess { options ->
+                    currentModelOptions = options
+                    if (options.any { it.id == selectedModelName }) {
+                        modelNameValue?.text = selectedModelName
+                    }
+                    showStatus("已加载 ${options.size} 个模型。", error = false)
+                }.onFailure { failure ->
+                    showStatus(failure.message ?: "模型列表加载失败，可手动填写模型 ID。", error = true)
+                }
+            }
+        }.start()
+    }
+
     private fun showApiKeyEditor() {
         val input = EditText(activity).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
@@ -433,12 +648,12 @@ internal class AiModelConfigurationScreen(
                 val endpoint = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
                     customEndpointInput?.text?.toString()?.trim().orEmpty()
                 } else {
-                    selectedProvider.defaultBaseUrl
+                    configuration.apiBaseUrl.ifBlank { selectedProvider.defaultBaseUrl }
                 }
                 val model = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
                     customModelInput?.text?.toString()?.trim().orEmpty()
                 } else {
-                    selectedModelName
+                    selectedModelName.ifBlank { configuration.modelName }
                 }
                 val next = runCatching {
                     configuration.copy(
@@ -475,6 +690,7 @@ internal class AiModelConfigurationScreen(
                             }
                         apiKeyValue?.text = if (next.apiKey.isBlank()) "未设置" else "已保存 · 点击编辑"
                         apiKeyStatus?.text = apiKeyStatusText()
+                        if (next.apiKey.isNotBlank()) loadRemoteModels(next.apiBaseUrl, next.apiKey)
                         showStatus("模型配置已保存。", error = false)
                         dialog.dismiss()
                     },
