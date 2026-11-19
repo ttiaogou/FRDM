@@ -583,6 +583,9 @@ interface ChatPagePort {
     /** Fresh page-specific fingerprint; null keeps received-greetings recovery paused. */
     fun receivedGreetingsRecoveryFingerprint(): String? = null
 
+    /** Reloads the durable received-greetings checkpoint after an AccessibilityService reconnect. */
+    fun reloadReceivedGreetingsCheckpointAfterServiceReconnect(): Boolean = false
+
     /** Observes user navigation toward the greetings list without clicking or scrolling. */
     fun observeManuallyOpenedReceivedGreetingsPage(): ReceivedGreetingsPageArrivalStatus =
         ReceivedGreetingsPageArrivalStatus.NOT_TARGET

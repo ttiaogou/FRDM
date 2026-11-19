@@ -3228,6 +3228,16 @@ internal class MomoSocialAdapter(
     override fun receivedGreetingsRecoveryFingerprint(): String? =
         receivedGreetingsListWindowIdentity()
 
+    override fun reloadReceivedGreetingsCheckpointAfterServiceReconnect(): Boolean {
+        val restored = sayHiTraversalState.restore() ?: return false
+        val pageVerified = isReceivedGreetingsListStructureVisible()
+        onLog(
+            "收到招呼服务重连：已重新读取断点；成功记录=${restored.processedRows}；" +
+                "待恢复用户=${restored.deferredRows}；当前列表指纹=${if (pageVerified) "已确认" else "待重新确认"}"
+        )
+        return pageVerified
+    }
+
     private fun resetSayHiDetailBackReturnTracking() {
         sayHiDetailBackRecoveryWindowStartedAtUptimeMs = 0L
         sayHiDetailBackRecoveryAttempted = false

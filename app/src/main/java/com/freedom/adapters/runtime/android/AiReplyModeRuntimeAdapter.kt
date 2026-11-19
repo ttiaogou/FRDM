@@ -28,6 +28,16 @@ internal class AiReplyModeRuntimeAdapter(
     }
 
     override fun onAccessibilityServiceConnected() {
+        val checkpointPageVerified = runCatching {
+            runtime().reloadReceivedGreetingsCheckpointAfterServiceReconnect()
+        }.getOrDefault(false)
+        onLog(
+            if (checkpointPageVerified) {
+                "收到招呼服务重连：断点已读取且当前页面指纹已确认；继续等待运行时协调"
+            } else {
+                "收到招呼服务重连：断点已尝试读取；当前页面未确认，保持只读等待并由后续页面事件复核"
+            }
+        )
         if (awaitingServiceReconnect) {
             awaitingServiceReconnect = false
             onReadinessStarting(mode, "AI Reply 服务重连；重新等待目标应用正式就绪")

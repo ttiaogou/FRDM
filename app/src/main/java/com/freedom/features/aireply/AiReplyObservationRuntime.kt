@@ -1222,6 +1222,11 @@ class AiReplyObservationRuntime(
         }
     }
 
+    /** Re-reads the durable received-greetings checkpoint before page observations resume. */
+    fun reloadReceivedGreetingsCheckpointAfterServiceReconnect(): Boolean = runCatching {
+        chatPagePort.reloadReceivedGreetingsCheckpointAfterServiceReconnect()
+    }.getOrDefault(false)
+
     /** Schedules bounded page or known-region inspection from a normalized, redacted event. */
     fun schedule(event: AccessibilityEventEnvelope) {
         if (!chatPagePort.supportsTargetPackage(targetPackage())) return
