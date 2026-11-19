@@ -108,7 +108,7 @@ class ReceivedGreetingsTaskFlowControllerTest {
     }
 
     @Test
-    fun unclassifiedSuccessfulListProgressResetsRetryAndOtherTransitionStatesRetry() {
+    fun unclassifiedListProgressNeverExecutesBusinessStepAndKeepsRecoveryRetryState() {
         val port = FakePagePort()
         val flow = createFlow(port)
         assertTrue(flow.claimOwnership("test"))
@@ -116,10 +116,10 @@ class ReceivedGreetingsTaskFlowControllerTest {
         flow.nextRecoveryRetryPlan()
         port.status = ReceivedGreetingsTraversalStatus.SCANNING
         assertEquals(
-            ReceivedGreetingsTaskFlowController.DecisionKind.LIST_CONTINUES,
+            ReceivedGreetingsTaskFlowController.DecisionKind.RETRY_REQUIRED,
             flow.evaluateUnclassifiedPageSnapshot().kind
         )
-        assertEquals(1, flow.nextRecoveryRetryPlan().retryCount)
+        assertEquals(2, flow.nextRecoveryRetryPlan().retryCount)
 
         port.status = ReceivedGreetingsTraversalStatus.PROFILE_CARD
         assertEquals(
