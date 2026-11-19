@@ -8,6 +8,25 @@ import verify_boundaries as guard  # noqa: E402
 
 
 class ArchitectureVerifierUnitTest(unittest.TestCase):
+    def test_unified_recovery_state_machine_rejects_business_page_dependencies(self):
+        code = {
+            "app/src/main/java/com/freedom/features/recovery/UnifiedRecoveryTransactionStateMachine.kt":
+                "import com.freedom.adapters.social.momo.MomoSocialAdapter\n"
+                "class UnifiedRecoveryTransactionStateMachine { val page = ChatPageSnapshot() }"
+        }
+        violations = guard.recovery_transaction_boundary_violations(code)
+        self.assertTrue(any("imports adapter" in item for item in violations))
+        self.assertTrue(any("business-specific" in item for item in violations))
+
+    def test_adapter_cannot_instantiate_or_force_resume_recovery_machine(self):
+        code = {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt":
+                "private val recovery = UnifiedRecoveryTransactionStateMachine()\n"
+        }
+        violations = guard.recovery_transaction_boundary_violations(code)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("bypasses", violations[0])
+
     def test_kotlin_scanner_ignores_comments_and_string_literals(self):
         source = '''
             // service.dispatchGesture(description)

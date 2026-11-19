@@ -478,6 +478,45 @@ def inspect_project(root: Path) -> list[str]:
         for rel in account_browse_state_ownership_leaks(code_by_path, state_code):
             issues.append(f"AccountBrowse state ownership leak into adapter/platform layer: {rel}")
 
+    # 10) Shared recovery transaction is an architecture boundary, not a business-local utility.
+    issues.extend(recovery_transaction_boundary_violations(code_by_path))
+
+    return issues
+
+
+def recovery_transaction_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
+    """Hard guardrails for the shared recovery transaction boundary."""
+    issues: list[str] = []
+    state_machine_paths = {
+        rel for rel in code_by_path
+        if rel.endswith("/UnifiedRecoveryTransactionStateMachine.kt")
+        or ("/recovery/" in rel and rel.endswith(".kt"))
+    }
+    adapter_paths = {
+        rel for rel in code_by_path
+        if "/adapters/" in rel and "/src/main/" in rel and rel.endswith(".kt")
+    }
+    business_tokens = re.compile(
+        r"\b(?:Momo|MomoSocialAdapter|ChatPageSnapshot|ChatListCandidateSnapshot|"
+        r"userlist_item_|hilist_tv_|message_list|receivedGreetings|privateMessages)\b"
+    )
+    for rel in sorted(state_machine_paths):
+        code = code_by_path[rel]
+        imports = re.findall(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)", code, re.MULTILINE)
+        leaked = [name for name in imports if name.startswith((
+            "com.freedom.adapters.", "com.freedom.data.", "android.", "androidx."
+        ))]
+        if leaked:
+            issues.append(f"Unified recovery state machine imports adapter/platform/data implementation: {rel}: {sorted(set(leaked))}")
+        if business_tokens.search(code):
+            issues.append(f"Unified recovery state machine contains business-specific page/traversal token: {rel}")
+    bypass = re.compile(
+        r"\b(?:UnifiedRecoveryTransactionStateMachine|RecoveryTransactionStateMachine)\s*\(|"
+        r"\.\b(?:forceResume|resumeWithoutVerification|transitionRecoveryState)\s*\("
+    )
+    for rel in sorted(adapter_paths):
+        if bypass.search(code_by_path[rel]):
+            issues.append(f"Adapter bypasses the unified recovery transaction state machine: {rel}")
     return issues
 
 
@@ -519,6 +558,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - Validation tokens: Runtime-only; issuance owned by GesturePolicyValidator")
     print(" - GestureCommand/GestureSpec construction: compiler-owned")
     print(" - Android dispatch: confined to AndroidGestureDispatcher")
+    print(" - Recovery transaction: adapters cannot bypass it; state machine cannot depend on business page fields")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")
     print(" - Host/plugin AIDL contract: identical; host does not package ONNX Runtime or OpenCV")
     print(" - AGENTS source integrity and Feature/Adapter/Data/UI ownership boundaries: valid")
