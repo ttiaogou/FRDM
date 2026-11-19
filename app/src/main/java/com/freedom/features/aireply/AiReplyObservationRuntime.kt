@@ -1263,7 +1263,6 @@ class AiReplyObservationRuntime(
             currentSessionWindowKey == windowSessionKey(snapshot) &&
             ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null
         val draftTargetConfirmed = greetingDetail || privateDetail
-        val draftAdmission = com.freedom.features.aireply.ai.VisibleDraftContext.assess(batch)
         if (batch.ocrAttempted) {
             val mergedOcrCount = batch.ocrTargets.count { target ->
                 batch.messages.any { message -> message.bounds == target.rowBounds }
@@ -1278,28 +1277,6 @@ class AiReplyObservationRuntime(
                     "OCR合并成功数=$mergedOcrCount；最终消息数=${batch.messages.size}；" +
                     "最新消息文本=\"$latestText\"；状态=${batch.status.name}"
             )
-        }
-        if (draftTargetConfirmed && draftAdmission.retryable) {
-            // 使用新快照重新 OCR；不把重试成功等同于内容已验证。
-            if (draftRetryTask != null) return
-            if (draftReadRetries < 2) {
-                draftReadRetries++
-                val visit = draftVisitToken
-                val run = sessionActionGeneration
-                onLog("AI 消息复读：${draftAdmission.reason}；attempt=$draftReadRetries/2；保持当前页面")
-                draftRetryTask = scheduler.schedule(700L * draftReadRetries) {
-                    draftRetryTask = null
-                    if (visit != draftVisitToken || run != sessionActionGeneration || !isAiReplyActive()) return@schedule
-                    val fresh = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
-                    if (fresh == null || !hasSameWindowSession(snapshot, fresh)) {
-                        onLog("AI 消息复读停止：窗口或会话已变化")
-                        return@schedule
-                    }
-                    readVisibleMessages(fresh)
-                }
-                return
-            }
-            onLog("AI 消息复读停止：${draftAdmission.reason}；已达两次重试上限，不猜测内容")
         }
         var identityJustVerified = false
         if (privateDetail) {
@@ -1348,6 +1325,20 @@ class AiReplyObservationRuntime(
                         val candidate = currentSessionCandidate
                         val restoredSurfaceMatches = currentSessionBinding
                             ?.matchesRestoredChatSurface(snapshot) == true
+                        val restoredPageKind = snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE
+                        val restoredPackagePresent = snapshot.packageName.isNotBlank()
+                        val restoredInputPresent = snapshot.inputFieldTarget != null
+                        val restoredMessageListPresent = snapshot.messageListTarget != null
+                        onLog(
+                            "AI 会话恢复校验：" +
+                                "pageKind=${snapshot.pageKind};" +
+                                "packageNamePresent=$restoredPackagePresent;" +
+                                "inputFieldPresent=$restoredInputPresent;" +
+                                "messageListPresent=$restoredMessageListPresent;" +
+                                "windowId=${snapshot.messageListTarget?.window?.windowId ?: snapshot.inputFieldTarget?.window?.windowId ?: "NONE"};" +
+                                "windowGeneration=${snapshot.messageListTarget?.window?.generation ?: snapshot.inputFieldTarget?.window?.generation ?: "NONE"};" +
+                                "restoredPageKind=$restoredPageKind"
+                        )
                         val auxiliaryHeaderMatches = ChatSessionManagementPolicy.matchChatHeader(
                             currentSessionName,
                             snapshot.chatTitleText
@@ -1434,6 +1425,29 @@ class AiReplyObservationRuntime(
             }
             onLog("AI OCR 启动：身份采集已终态且聊天页已恢复；开始处理结构批次中的 OCR 区域")
             return
+        }
+        val draftAdmission = com.freedom.features.aireply.ai.VisibleDraftContext.assess(batch)
+        if (draftTargetConfirmed && draftAdmission.retryable) {
+            // 使用新快照重新 OCR；不把重试成功等同于内容已验证。
+            if (draftRetryTask != null) return
+            if (draftReadRetries < 2) {
+                draftReadRetries++
+                val visit = draftVisitToken
+                val run = sessionActionGeneration
+                onLog("AI 消息复读：${draftAdmission.reason}；attempt=$draftReadRetries/2；保持当前页面")
+                draftRetryTask = scheduler.schedule(700L * draftReadRetries) {
+                    draftRetryTask = null
+                    if (visit != draftVisitToken || run != sessionActionGeneration || !isAiReplyActive()) return@schedule
+                    val fresh = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+                    if (fresh == null || !hasSameWindowSession(snapshot, fresh)) {
+                        onLog("AI 消息复读停止：窗口或会话已变化")
+                        return@schedule
+                    }
+                    readVisibleMessages(fresh)
+                }
+                return
+            }
+            onLog("AI 消息复读停止：${draftAdmission.reason}；已达两次重试上限，不猜测内容")
         }
 
         val rowIdentity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()

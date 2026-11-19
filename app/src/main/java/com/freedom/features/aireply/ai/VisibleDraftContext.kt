@@ -14,7 +14,14 @@ internal object VisibleDraftContext {
         if (batch.windowSessionKey.isNullOrBlank() || !batch.coordinateSpaceReliable) return retry("WINDOW_OR_GEOMETRY_UNCONFIRMED")
         if (batch.status !in setOf(MessageReadStatus.SUCCESS, MessageReadStatus.OCR_PARTIAL,
                 MessageReadStatus.DIRECTION_UNKNOWN, MessageReadStatus.MESSAGE_TEXT_NOT_EXPOSED)) return retry("MESSAGE_READ_INCOMPLETE")
-        val latest = batch.messagesBottomToTop.firstOrNull() ?: return retry("LATEST_MESSAGE_UNAVAILABLE")
+        val latest = batch.messagesBottomToTop.firstOrNull()
+            ?: return retry(
+                if (batch.ocrTargets.isNotEmpty() && !batch.ocrAttempted) {
+                    "MESSAGE_TEXT_PENDING_OCR"
+                } else {
+                    "LATEST_MESSAGE_UNAVAILABLE"
+                }
+            )
         // A truncated viewport cannot prove that the latest visible row is the
         // actual conversation tail, so it remains ineligible for automatic
         // drafting. An unrelated dynamic/system card or a partially read row

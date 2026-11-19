@@ -204,7 +204,9 @@ internal class MomoChatMessageReader(
         return ChatMessageBatch(
             status = readResult.status,
             windowSessionKey = readResult.windowSessionKey,
-            messages = readResult.messages,
+            // Accessibility text is used only as structural evidence and OCR targeting input.
+            // The target app's message body is produced by OCR, not by node text extraction.
+            messages = emptyList(),
             scannedRowCount = readResult.scannedRows,
             candidateRowCount = readResult.candidateRows,
             truncated = readResult.truncated,
