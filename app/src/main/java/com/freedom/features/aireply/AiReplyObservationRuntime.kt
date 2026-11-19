@@ -3279,7 +3279,7 @@ class AiReplyObservationRuntime(
                     "current=${currentKey.take(12)}；不进入历史上下文或 OCR"
             )
         }
-        return sameTargetSession && currentSessionHeaderMatchMode(snapshot) != null
+        return sameTargetSession
     }
 
     private fun normalizeSessionTitle(value: String?): String =
