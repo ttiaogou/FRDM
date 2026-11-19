@@ -3074,6 +3074,7 @@ internal class MomoSocialAdapter(
     private fun requestChatActivityBack(
         reason: String,
         expectedWindow: WindowRef? = null,
+        beforeSubmit: (WindowRef) -> Unit = {},
         onSubmitted: (WindowRef) -> Unit = {}
     ): Boolean {
         val dialogObservation = latestDialogWindowObservation()
@@ -3207,6 +3208,7 @@ internal class MomoSocialAdapter(
             onLog("聊天详情结构安全 BACK 拒绝：弹层检查后页面指纹、窗口或页面代次发生变化；reason=$reason")
             return false
         }
+        beforeSubmit(inspection.window)
         val accepted = accessibilityGateway.performVerifiedNavigationBack(
             inspection.window,
             inspection.window.activityClass
@@ -5706,7 +5708,14 @@ internal class MomoSocialAdapter(
     }
 
     override fun navigateBackToSessionList(): Boolean =
-        requestChatActivityBack("普通聊天消息采集完成")
+        requestChatActivityBack(
+            reason = "普通聊天消息采集完成",
+            beforeSubmit = {
+                // Register the adapter-owned return before dispatching BACK so the
+                // unified accessibility entry can distinguish it from user navigation.
+                registerSelfNavigation(MomoAppDescriptor.MAIN_ACTIVITY_CLASS)
+            }
+        )
 
     private fun resolveLocalPath(
         root: AccessibilityNodeInfo,
