@@ -1,11 +1,11 @@
 name: Freedom CI
 
 on:
-  # Build every branch push, including branches pushed from GitHub Desktop.
-  # Pull requests targeting the integration branches are also validated.
+  # Run direct-push CI only for integration branches. Feature and Dependabot
+  # branches are validated by pull_request, avoiding duplicate builds for the
+  # same commit on both push and pull_request events.
   push:
-    branches:
-      - "**"
+    branches: ["main", "master"]
   pull_request:
     branches: ["main", "master"]
   schedule:
