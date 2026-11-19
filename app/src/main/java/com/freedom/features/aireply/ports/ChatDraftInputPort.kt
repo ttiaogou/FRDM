@@ -22,7 +22,12 @@ enum class ChatDraftInputStatus {
     INPUT_NOT_EMPTY,
     ACTION_REJECTED,
     TEXT_MISMATCH,
-    VERIFICATION_FAILED
+    VERIFICATION_FAILED,
+    SEND_CONTROL_NOT_FOUND,
+    SEND_CONTROL_AMBIGUOUS,
+    SEND_PRECONDITION_FAILED,
+    SEND_GESTURE_REJECTED,
+    SEND_SUBMITTED
 }
 
 data class ChatDraftInputResult(
@@ -44,4 +49,9 @@ data class ChatDraftInputResult(
 interface ChatDraftInputPort {
     fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult
     fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult
+}
+
+/** Sends only a freshly validated, unchanged draft through the shared screen-gesture channel. */
+interface ChatDraftSendPort {
+    fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult
 }

@@ -3,6 +3,7 @@ package com.freedom.features.aireply.ai
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
 import com.freedom.features.aireply.ports.ChatDraftInputPort
+import com.freedom.features.aireply.ports.ChatDraftSendPort
 import com.freedom.features.aireply.ports.ChatDraftInputResult
 import com.freedom.features.aireply.ports.ChatDraftInputStatus
 import com.freedom.features.aireply.ports.ChatDraftInputTarget
@@ -22,8 +23,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Calls the configured remote model and fills only a verified, empty Momo chat input field.
- * Sending is intentionally outside this coordinator and remains a manual user action.
+ * Calls the configured remote model, fills a verified composer, and admits automatic sending
+ * only after the adapter revalidates the live conversation and send control.
  */
 class AiReplyDraftCoordinator(
     private val configurationRepository: AiModelConfigurationRepository,
@@ -40,7 +41,8 @@ class AiReplyDraftCoordinator(
     private val chooseRandomInt: (Int, Int) -> Int = { min, max ->
         java.util.concurrent.ThreadLocalRandom.current().nextInt(min, max + 1)
     },
-    private val replyTaskRepository: ReplyTaskRepository? = null
+    private val replyTaskRepository: ReplyTaskRepository? = null,
+    private val sendPort: ChatDraftSendPort? = null
 ) {
     private val pending = AtomicBoolean(false)
     private val awaitingUserSend = AtomicBoolean(false)
@@ -414,11 +416,27 @@ class AiReplyDraftCoordinator(
         if (result.status == ChatDraftInputStatus.VERIFIED) {
             synchronized(lock) {
                 if (!isCurrentGeneration(requestGeneration)) return
-                awaitingUserSend.set(true)
+                awaitingUserSend.set(sendPort == null)
             }
             updateTaskStatus(ReplyTaskStatus.DRAFT_APPLIED, requestGeneration)
-            onLog("AI 草稿状态：DRAFT_ACCEPTED_AND_FILLED；草稿已接受并填入输入框；等待人工检查发送")
-            finish("DRAFT_ENTERED_USER_CONTENT_REVIEW_AND_SEND_REQUIRED", requestGeneration)
+            if (sendPort == null) {
+                onLog("AI 草稿状态：DRAFT_ACCEPTED_AND_FILLED；草稿已接受并填入输入框；等待人工检查发送")
+                finish("DRAFT_ENTERED_USER_CONTENT_REVIEW_AND_SEND_REQUIRED", requestGeneration)
+                return
+            }
+            updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
+            updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
+            val sent = runCatching { sendPort.sendDraft(target, draft) }
+                .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED) }
+            if (sent.status == ChatDraftInputStatus.SEND_SUBMITTED) {
+                updateTaskStatus(ReplyTaskStatus.SENT_UNCONFIRMED, requestGeneration)
+                onLog("AI 回复状态：SEND_SUBMITTED；已通过发送前校验并提交发送手势；等待消息结果核验")
+                finish("DRAFT_SENT_WAITING_CONFIRMATION", requestGeneration)
+            } else {
+                updateTaskStatus(ReplyTaskStatus.FAILED_FINAL, requestGeneration)
+                onLog("AI 回复状态：SEND_REJECTED；发送前校验或手势提交失败；reason=${sent.reasonCode}")
+                finish("DRAFT_SEND_${sent.reasonCode}", requestGeneration)
+            }
         } else {
             onLog(
                 "AI 草稿状态：LOCAL_DRAFT_VALIDATION_REJECTED；最终回读校验未通过；" +

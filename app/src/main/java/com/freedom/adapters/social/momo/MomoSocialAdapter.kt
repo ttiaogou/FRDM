@@ -54,6 +54,7 @@ import com.freedom.features.aireply.ports.ChatDraftInputPort
 import com.freedom.features.aireply.ports.ChatDraftInputTarget
 import com.freedom.features.aireply.ports.ChatDraftInputResult
 import com.freedom.features.aireply.ports.ChatDraftInputStatus
+import com.freedom.features.aireply.ports.ChatDraftSendPort
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
 import com.freedom.features.aireply.ports.ContactIdentityCaptureOutcome
@@ -98,7 +99,8 @@ internal class MomoSocialAdapter(
     private val sampleArchivePort: SessionSampleArchivePort,
     /** Registers the imminent profile-to-chat return in the unified navigation provenance layer. */
     private val registerSelfNavigation: (String) -> Unit = {}
-) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort {
+) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort,
+    ChatDraftSendPort {
 
     override fun isReceivedGreetingsListActivity(activityClass: String): Boolean =
         activityClass == MomoSayHiPageContract.LIST_ACTIVITY
@@ -4438,6 +4440,98 @@ internal class MomoSocialAdapter(
     override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult =
         draftInputController.verifyDraft(target, text)
 
+    override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+        if (target.packageName != targetPackage || activityClass() != target.activityClass) {
+            return ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_CONTEXT_CHANGED")
+        }
+        return try {
+            rootAccess.withActiveWindowRoot { root ->
+                val inputs = root.findAccessibilityNodeInfosByViewId(MomoChatPageContract.CHAT_COMPOSER_VIEW_ID).orEmpty()
+                val writableInputs = inputs.filter { node ->
+                    node.viewIdResourceName == MomoChatPageContract.CHAT_COMPOSER_VIEW_ID &&
+                        node.isEditable && node.isEnabled && node.isVisibleToUser && !node.isPassword
+                }
+                if (writableInputs.size != 1) {
+                    inputs.forEach { node -> runCatching { node.recycle() } }
+                    return@withActiveWindowRoot ChatDraftInputResult(
+                        ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "INPUT_IDENTITY_CHANGED"
+                    )
+                }
+                val input = writableInputs.single()
+                val inputText = draftInputText(input)
+                if (inputText != expectedText) {
+                    inputs.forEach { node -> runCatching { node.recycle() } }
+                    return@withActiveWindowRoot ChatDraftInputResult(
+                        ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "DRAFT_CHANGED_BEFORE_SEND"
+                    )
+                }
+                val sendNodes = SEND_CONTROL_VIEW_ID_SUFFIXES.flatMap { suffix ->
+                    root.findAccessibilityNodeInfosByViewId("$targetPackage:id/$suffix").orEmpty()
+                }.distinctBy { node ->
+                    "${node.viewIdResourceName}|${node.hashCode()}"
+                }.filter { node ->
+                    val label = (node.text?.toString().orEmpty() + " " + node.contentDescription?.toString().orEmpty()).lowercase()
+                    node.isVisibleToUser && node.isEnabled && node.isClickable &&
+                        (label.contains("发送") || label.contains("send"))
+                }
+                inputs.forEach { node -> runCatching { node.recycle() } }
+                if (sendNodes.isEmpty()) {
+                    sendNodes.forEach { node -> runCatching { node.recycle() } }
+                    return@withActiveWindowRoot ChatDraftInputResult(
+                        ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_FOUND"
+                    )
+                }
+                if (sendNodes.size != 1) {
+                    sendNodes.forEach { node -> runCatching { node.recycle() } }
+                    return@withActiveWindowRoot ChatDraftInputResult(
+                        ChatDraftInputStatus.SEND_CONTROL_AMBIGUOUS, "SEND_CONTROL_AMBIGUOUS"
+                    )
+                }
+                val send = sendNodes.single()
+                val rect = Rect()
+                send.getBoundsInScreen(rect)
+                val bounds = rect.toScreenRect()
+                send.recycle()
+                if (bounds.isEmpty) {
+                    return@withActiveWindowRoot ChatDraftInputResult(
+                        ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_BOUNDS_INVALID"
+                    )
+                }
+                val executionContext = gesturePolicy.captureContext(target.nodeTarget.window)
+                    ?: return@withActiveWindowRoot ChatDraftInputResult(
+                        ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_WINDOW_NOT_CURRENT"
+                    )
+                if (executionContext.targetWindow != target.nodeTarget.window) {
+                    return@withActiveWindowRoot ChatDraftInputResult(
+                        ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_WINDOW_GENERATION_CHANGED"
+                    )
+                }
+                val request = GestureIntentRequest(
+                    id = "momo-send-${System.nanoTime()}",
+                    intent = GestureIntent.Tap(
+                        preferredBounds = bounds,
+                        targetBounds = bounds,
+                        durationMs = SEND_TAP_DURATION_MS,
+                        feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.STANDARD
+                    ),
+                    description = "Tap verified Momo send control after draft revalidation",
+                    executionContext = executionContext
+                )
+                val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
+                    onLog("AI 发送手势回调：status=${result.status}; reason=${result.reason}")
+                })
+                if (submission == GestureSubmission.ACCEPTED) {
+                    ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+                } else {
+                    ChatDraftInputResult(ChatDraftInputStatus.SEND_GESTURE_REJECTED, submission.name)
+                }
+            } ?: ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "ACTIVE_WINDOW_UNAVAILABLE")
+        } catch (failure: Exception) {
+            onLog("AI 发送前校验异常：${failure.javaClass.simpleName}")
+            ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PRECONDITION_EXCEPTION")
+        }
+    }
+
     private fun draftInputText(input: AccessibilityNodeInfo): String =
         if (input.isShowingHintText) "" else input.text?.toString().orEmpty()
 
@@ -4473,6 +4567,7 @@ internal class MomoSocialAdapter(
             ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "INPUT_NODE_ACCESS_FAILED")
         }
     }
+
 
     override fun inspectChatPage(): ChatPageSnapshot {
         if (inspectPendingInboxIdentityCapture()) {
@@ -6007,6 +6102,10 @@ internal class MomoSocialAdapter(
         private const val SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX =
             "ROW_SAFE_TAP_TARGET_SECOND_VALIDATION_FAILED"
         private const val RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS = 90L
+        private const val SEND_TAP_DURATION_MS = 90L
+        private val SEND_CONTROL_VIEW_ID_SUFFIXES = setOf(
+            "send", "btn_send", "message_btn_send", "submit_message"
+        )
         private const val RECEIVED_GREETINGS_ENTRY_SEARCH_SCROLL_DURATION_MS = 520L
         private const val RECEIVED_GREETINGS_PRE_TAP_MAX_SNAPSHOT_AGE_MS = 750L
         private const val RECEIVED_GREETINGS_ENTRY_DIAGNOSTIC_INTERVAL_MS = 5_000L

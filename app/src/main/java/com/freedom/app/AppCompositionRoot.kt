@@ -345,6 +345,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             cloudConsent = root.aiModelCloudConsent,
             personalizationRepository = root.aiReplyPersonalizationRepository,
             inputPort = momoSocialAdapter,
+            sendPort = momoSocialAdapter,
             scheduler = taskScheduler,
             isAiReplyActive = {
                 monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
