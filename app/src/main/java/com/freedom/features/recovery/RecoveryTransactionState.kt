@@ -35,3 +35,93 @@ sealed interface RecoveryTransactionEvent {
         PAGE_OBSERVATION
     }
 }
+
+/**
+ * Shared, business-neutral recovery transaction.
+ *
+ * The page adapters only provide observations. The feature coordinator owns this reducer and
+ * decides when the task is paused or may resume. It deliberately has no retry limit: a retry
+ * schedule is an event, not a terminal condition.
+ */
+class UnifiedRecoveryTransactionStateMachine(
+    initialState: RecoveryTransactionState = RecoveryTransactionState.ACTIVE
+) {
+    var state: RecoveryTransactionState = initialState
+        private set
+    var stableVerificationSamples: Int = 0
+        private set
+
+    fun dispatch(event: RecoveryTransactionEvent): RecoveryTransactionState {
+        when (event) {
+            is RecoveryTransactionEvent.UnknownPage -> {
+                stableVerificationSamples = 0
+                state = RecoveryTransactionState.PAUSED
+            }
+            is RecoveryTransactionEvent.CheckpointLoaded -> {
+                stableVerificationSamples = 0
+                state = RecoveryTransactionState.VERIFYING
+            }
+            is RecoveryTransactionEvent.VerificationStarted -> {
+                stableVerificationSamples = 0
+                state = RecoveryTransactionState.VERIFYING
+            }
+            is RecoveryTransactionEvent.VerificationSample -> {
+                if (state != RecoveryTransactionState.VERIFYING &&
+                    state != RecoveryTransactionState.PAUSED
+                ) return state
+                stableVerificationSamples = if (event.stable) {
+                    stableVerificationSamples + 1
+                } else {
+                    0
+                }
+                state = if (stableVerificationSamples >= REQUIRED_STABLE_SAMPLES) {
+                    RecoveryTransactionState.VERIFIED
+                } else {
+                    RecoveryTransactionState.VERIFYING
+                }
+            }
+            RecoveryTransactionEvent.UserInteractionStarted -> {
+                if (state != RecoveryTransactionState.CANCELLED) {
+                    state = RecoveryTransactionState.PAUSED
+                    stableVerificationSamples = 0
+                }
+            }
+            RecoveryTransactionEvent.UserInteractionEnded -> {
+                if (state == RecoveryTransactionState.PAUSED) {
+                    state = RecoveryTransactionState.VERIFYING
+                    stableVerificationSamples = 0
+                }
+            }
+            is RecoveryTransactionEvent.RetryScheduled -> {
+                if (state != RecoveryTransactionState.CANCELLED) {
+                    state = RecoveryTransactionState.PAUSED
+                }
+            }
+            RecoveryTransactionEvent.ResumeRequested -> {
+                if (state == RecoveryTransactionState.VERIFIED) {
+                    state = RecoveryTransactionState.RESUMING
+                }
+            }
+            RecoveryTransactionEvent.ResumeCompleted -> {
+                if (state == RecoveryTransactionState.RESUMING) {
+                    state = RecoveryTransactionState.ACTIVE
+                    stableVerificationSamples = 0
+                }
+            }
+            is RecoveryTransactionEvent.Cancelled -> {
+                state = RecoveryTransactionState.CANCELLED
+                stableVerificationSamples = 0
+            }
+        }
+        return state
+    }
+
+    fun reset() {
+        state = RecoveryTransactionState.ACTIVE
+        stableVerificationSamples = 0
+    }
+
+    companion object {
+        const val REQUIRED_STABLE_SAMPLES = 2
+    }
+}

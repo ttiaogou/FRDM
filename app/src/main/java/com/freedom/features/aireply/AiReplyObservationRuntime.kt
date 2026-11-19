@@ -36,6 +36,8 @@ import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
+import com.freedom.features.recovery.RecoveryTransactionEvent
+import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.LinkedHashSet
@@ -281,11 +283,16 @@ class AiReplyObservationRuntime(
 
 
 
+    /** One coordinator-owned transaction shared by message-list and received-greetings recovery. */
+    private val recoveryTransaction = UnifiedRecoveryTransactionStateMachine()
     private val privateMessagesTraversalTaskExecutor = PrivateMessagesTraversalTaskExecutor()
     init {
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             privateMessagesCheckpointRecoveryPending = true
+            recoveryTransaction.dispatch(
+                RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.PROCESS_RESTART)
+            )
             onLog("消息列表进程恢复：已读取持久化检查点；等待页面结构重新确认后继续")
         }
     }
@@ -423,6 +430,8 @@ class AiReplyObservationRuntime(
         if (transientEmptySnapshotRecovery.isTransient(inspection)) {
             if (snapshotRecoveryStartedAtMs == 0L) {
                 snapshotRecoveryStartedAtMs = System.currentTimeMillis()
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("EMPTY_SNAPSHOT"))
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
                 onLog("AI 页面观察[SNAPSHOT_RECOVERY_HOLD]：快照暂时丢失；保留当前任务租约和会话状态")
             }
             val elapsedMs = System.currentTimeMillis() - snapshotRecoveryStartedAtMs
@@ -448,10 +457,16 @@ class AiReplyObservationRuntime(
         val recovered = inspection!!
         if (snapshotRecoveryStartedAtMs != 0L) {
             if (!pageRecoveryVerificationGate.observe(recoveryStructuralKey(recovered))) {
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
                 onLog("AI 页面恢复[RECOVERY_VERIFYING]：第${pageRecoveryVerificationGate.stableSamples}/2次独立新鲜快照尚未稳定；350ms后复核")
                 scheduleFullInspectionAfter(350L)
                 return
             }
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            // The page gate has already admitted two equal fresh observations.
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
             onLog("AI 页面恢复[RECOVERY_VERIFIED]：连续两次新鲜结构快照一致；恢复消息列表任务")
             pageRecoveryVerificationGate.reset()
             snapshotRecoveryStartedAtMs = 0L
@@ -468,10 +483,16 @@ class AiReplyObservationRuntime(
                 return
             }
             if (!receivedGreetingsRecoveryVerificationGate.observe(fingerprint)) {
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
                 onLog("收到的招呼恢复[RECOVERY_VERIFYING]：第${receivedGreetingsRecoveryVerificationGate.stableSamples}/2次独立指纹快照尚未稳定；350ms后复核")
                 scheduleFullInspectionAfter(350L)
                 return
             }
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            // The branch-specific fingerprint gate has already admitted two equal observations.
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
             receivedGreetingsRecoveryVerificationPending = false
             receivedGreetingsRecoveryVerifiedForNextSnapshot = true
             receivedGreetingsRecoveryVerificationGate.reset()
@@ -493,6 +514,7 @@ class AiReplyObservationRuntime(
     fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
         if (!sessionRunStarted || !receivedGreetingsTaskActive) return
         receivedGreetingsUserActive = true
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionStarted)
         receivedGreetingsQuietGeneration++
         receivedGreetingsQuietTask?.cancel()
         receivedGreetingsQuietTask = null
@@ -507,6 +529,7 @@ class AiReplyObservationRuntime(
                 if (expectedGeneration != receivedGreetingsQuietGeneration) return@schedule
                 receivedGreetingsQuietTask = null
                 receivedGreetingsUserActive = false
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionEnded)
                 onLog("收到的招呼恢复[USER_QUIET]：用户已静默${quietMs}ms；开始双快照页面指纹复核")
                 scheduleFullInspectionAfter(0L)
             }
@@ -709,6 +732,8 @@ class AiReplyObservationRuntime(
                 SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
             ) && (previous?.pageKind == ChatPageKind.CHAT_LIST || privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount > 0)
         ) {
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_UNKNOWN"))
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
             scheduleSessionListStabilityRetry("页面结构暂时不可用")
             return
         }
@@ -819,6 +844,8 @@ class AiReplyObservationRuntime(
             }
             ChatPageKind.UNKNOWN, ChatPageKind.NON_CHAT -> {
                 if (sessionRunStarted && receivedGreetingsTaskActive) {
+                    recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage())
+                    recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
                     // A page classification failure is a recovery request, never a business step.
                     // The received-greetings coordinator retains the traversal checkpoint and
                     // only resumes after the adapter confirms the list/detail fingerprint again.
@@ -1049,6 +1076,7 @@ class AiReplyObservationRuntime(
         sessionTransitionTask = null
         lastPageInspection = null
         lastConfirmedChatListInspection = null
+        recoveryTransaction.reset()
         transientEmptySnapshotRecovery.reset()
         receivedGreetingsRecoveryVerificationPending = false
         receivedGreetingsRecoveryVerifiedForNextSnapshot = false
@@ -1172,6 +1200,9 @@ class AiReplyObservationRuntime(
         sampleCaptureActive = !directory.isNullOrBlank()
         sessionRunStarted = sampleCaptureActive
         if (sessionRunStarted && chatPagePort.hasRestorableReceivedGreetingsCheckpoint()) {
+            recoveryTransaction.dispatch(
+                RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)
+            )
             onLog(
                 "收到招呼进程恢复：已保留持久化检查点；等待收到招呼列表页面指纹确认后再恢复任务，" +
                     "不因断点存在而执行盲目导航"
@@ -1211,6 +1242,9 @@ class AiReplyObservationRuntime(
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             privateMessagesCheckpointRecoveryPending = true
+            recoveryTransaction.dispatch(
+                RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)
+            )
             onLog("消息列表任务恢复：已重新装载检查点；等待连续两次消息列表结构快照确认")
         }
         sessionManagerState = if (sessionRunStarted) {
