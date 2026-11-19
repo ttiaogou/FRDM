@@ -117,6 +117,7 @@ class AiReplyObservationRuntime(
         private const val MAX_STARTUP_MESSAGE_TAB_RETRIES = 75
         private const val MAX_STARTUP_MESSAGE_TAB_TAPS = 1
         private val MESSAGE_LIST_RECOVERY_RETRY_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L, 30_000L)
+        private val RECEIVED_GREETINGS_RECOVERY_RETRY_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L, 30_000L)
         /** Re-check transient mf_view overlap without pausing the session-list traversal. */
         private const val SESSION_SAFE_VIEWPORT_RETRY_DELAY_MS = 650L
         private const val SESSION_SAFE_VIEWPORT_RETRY_BACKOFF_MS = 5_000L
@@ -338,12 +339,14 @@ class AiReplyObservationRuntime(
     )
     private var snapshotRecoveryStartedAtMs = 0L
     private var receivedGreetingsUserActive = false
+    private var userInteractionActive = false
     private var receivedGreetingsQuietTask: ScheduledTask? = null
     private var receivedGreetingsQuietGeneration = 0L
     private val pageRecoveryVerificationGate = PageRecoveryVerificationGate()
     private var receivedGreetingsRecoveryVerificationPending = false
     private val receivedGreetingsRecoveryVerificationGate = PageRecoveryVerificationGate()
     private var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+    private var receivedGreetingsRecoveryRetryAttempt = 0
     private var privateMessagesCheckpointRecoveryPending = false
     private val privateMessagesCheckpointVerificationGate = PageRecoveryVerificationGate()
     private var messageRecoveryRetryAttempt = 0
@@ -415,8 +418,8 @@ class AiReplyObservationRuntime(
     private fun runFullInspection() {
         pageInspectionTask = null
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
-        if (sessionRunStarted && receivedGreetingsTaskActive && receivedGreetingsUserActive) {
-            onLog("收到的招呼恢复[USER_ACTIVE]：用户仍在操作；暂停页面指纹复核，10s后重新检查")
+        if (sessionRunStarted && userInteractionActive) {
+            onLog("统一恢复事务[USER_ACTIVE]：用户仍在操作；暂停页面复核和业务动作，10s后重新检查")
             scheduleFullInspectionAfter(RECEIVED_GREETINGS_USER_ACTIVE_RECHECK_DELAY_MS)
             return
         }
@@ -496,6 +499,7 @@ class AiReplyObservationRuntime(
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
             receivedGreetingsRecoveryVerificationPending = false
             receivedGreetingsRecoveryVerifiedForNextSnapshot = true
+            receivedGreetingsRecoveryRetryAttempt = 0
             receivedGreetingsRecoveryVerificationGate.reset()
             onLog("收到的招呼恢复[RECOVERY_VERIFIED]：连续两次新鲜列表指纹一致；恢复收到招呼任务协调器")
         }
@@ -513,8 +517,13 @@ class AiReplyObservationRuntime(
 
     /** System touch boundaries pause received-greetings recovery without becoming page evidence. */
     fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
-        if (!sessionRunStarted || !receivedGreetingsTaskActive) return
+        if (!sessionRunStarted) return
+        val recoveryContextActive = receivedGreetingsTaskActive ||
+            messageListRecoveryVerificationPending ||
+            privateMessagesCheckpointRecoveryPending
+        if (!recoveryContextActive) return
         receivedGreetingsUserActive = true
+        userInteractionActive = true
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionStarted)
         receivedGreetingsQuietGeneration++
         receivedGreetingsQuietTask?.cancel()
@@ -530,6 +539,7 @@ class AiReplyObservationRuntime(
                 if (expectedGeneration != receivedGreetingsQuietGeneration) return@schedule
                 receivedGreetingsQuietTask = null
                 receivedGreetingsUserActive = false
+                userInteractionActive = false
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionEnded)
                 onLog("收到的招呼恢复[USER_QUIET]：用户已静默${quietMs}ms；开始双快照页面指纹复核")
                 scheduleFullInspectionAfter(0L)
@@ -1120,12 +1130,14 @@ class AiReplyObservationRuntime(
         receivedGreetingsQuietTask = null
         receivedGreetingsQuietGeneration++
         receivedGreetingsUserActive = false
+        userInteractionActive = false
         privateMessagesTraversalTaskExecutor.reset()
         lastMessageFingerprint = ""
         temporaryContactMessageLedger.clearAll()
         pendingInterceptionContactKeys.clear()
         privateMessagesTaskController.resetQuota()
         receivedGreetingsTaskFlow.reset()
+        receivedGreetingsRecoveryRetryAttempt = 0
         receivedGreetingsPageProbePending = false
     }
 
@@ -1220,6 +1232,7 @@ class AiReplyObservationRuntime(
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         privateMessagesTaskController.resetQuota()
         receivedGreetingsTaskFlow.reset()
+        receivedGreetingsRecoveryRetryAttempt = 0
         privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
         privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted = false
         privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = false
@@ -2295,6 +2308,8 @@ class AiReplyObservationRuntime(
                 fresh.packageName == targetPackage() &&
                 fresh.windowIdentityKey() == expectedWindowIdentity
             ) {
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_BOUNDARY_UNKNOWN"))
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
                 privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
                 privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
@@ -2541,6 +2556,7 @@ class AiReplyObservationRuntime(
         messageReadCoordinator.invalidatePending()
 
         receivedGreetingsTaskFlow.markStarted()
+        receivedGreetingsRecoveryRetryAttempt = 0
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
 
         startupReadinessCoordinator.markReceivedGreetingsWorkAreaConfirmed()
@@ -3128,6 +3144,8 @@ class AiReplyObservationRuntime(
             snapshot.windowGeneration > 0L &&
             fresh.windowGeneration == snapshot.windowGeneration
         if (sameWindowTransientUnknown) {
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_PRE_SCROLL_UNKNOWN"))
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
             // The swipe has not been submitted. Keep the traversal phase and direction intent;
             // the next stability inspection will rebuild the viewport from a new node tree.
             privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
@@ -3432,6 +3450,8 @@ class AiReplyObservationRuntime(
                 refreshed.windowIdentityKey() == expectedWindowIdentity &&
                 lastConfirmedChatListInspection?.hasSameWindowIdentity(refreshed) == true
             if (transientUnknownOnSameWindow) {
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_VIEWPORT_UNKNOWN"))
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
                 onLog("AI 会话管理[SAFE_VIEWPORT_RETRY]：同一窗口页面树仍暂时UNKNOWN；保留滚动意图，等待新快照")
                 scheduleSessionSafeViewportRetry(toTop, expectedWindowIdentity, "同一窗口页面树暂时UNKNOWN")
                 return@retry
@@ -3541,9 +3561,12 @@ class AiReplyObservationRuntime(
      */
     private fun scheduleReceivedGreetingsRecoveryRetry(reason: String) {
         if (!sessionRunStarted || !receivedGreetingsTaskActive) return
-        val retryPlan = receivedGreetingsTaskFlow.nextRecoveryRetryPlan()
-        val retryCount = retryPlan.retryCount
-        val delayMs = retryPlan.delayMs
+        receivedGreetingsRecoveryRetryAttempt += 1
+        val retryCount = receivedGreetingsRecoveryRetryAttempt
+        val delayMs = RECEIVED_GREETINGS_RECOVERY_RETRY_DELAYS_MS[
+            (retryCount - 1).coerceAtMost(RECEIVED_GREETINGS_RECOVERY_RETRY_DELAYS_MS.lastIndex)
+        ]
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.RetryScheduled(delayMs))
         onLog(
             "收到的招呼自动恢复[RETRY]：$reason；第${retryCount}次新鲜快照复核；" +
                 "delay=${delayMs}ms；任务和当前用户进度保持不变；" +

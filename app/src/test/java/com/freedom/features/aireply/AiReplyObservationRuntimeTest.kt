@@ -1187,9 +1187,9 @@ class AiReplyObservationRuntimeTest {
         )
 
         runtime.scheduleInitialObservation()
-        scheduler.runNext() // Empty first snapshot schedules a short stability retry.
-        assertTrue(logs.any { it.contains("第 1/3 次短间隔复核") })
-        assertEquals(350L, scheduler.nextDelay())
+        scheduler.runNext() // Empty first snapshot enters the indefinite recovery backoff.
+        assertTrue(logs.any { it.contains("AI 页面观察[SNAPSHOT_RECOVERY]") })
+        assertEquals(500L, scheduler.nextDelay())
 
         port.page = emptyListPage.copy(chatListCandidates = listOf(candidate))
         runUntilLog(scheduler, logs, "AI Reply 启动准入[UNREAD_LOCKING]")
