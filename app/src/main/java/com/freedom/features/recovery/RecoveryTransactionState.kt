@@ -50,6 +50,7 @@ class UnifiedRecoveryTransactionStateMachine(
         private set
     var stableVerificationSamples: Int = 0
         private set
+    private var lastObservedFingerprint: String = ""
 
     fun dispatch(event: RecoveryTransactionEvent): RecoveryTransactionState {
         when (event) {
@@ -116,9 +117,29 @@ class UnifiedRecoveryTransactionStateMachine(
         return state
     }
 
+    /** Feeds one adapter fingerprint into the shared stable-sample gate. */
+    fun observeFingerprint(fingerprint: String): RecoveryTransactionState {
+        if (fingerprint.isBlank()) {
+            lastObservedFingerprint = ""
+            return dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
+        }
+        if (fingerprint != lastObservedFingerprint) {
+            lastObservedFingerprint = fingerprint
+            if (state != RecoveryTransactionState.VERIFYING &&
+                state != RecoveryTransactionState.PAUSED
+            ) {
+                dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+            } else if (stableVerificationSamples > 0) {
+                dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
+            }
+        }
+        return dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+    }
+
     fun reset() {
         state = RecoveryTransactionState.ACTIVE
         stableVerificationSamples = 0
+        lastObservedFingerprint = ""
     }
 
     companion object {

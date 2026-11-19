@@ -44,7 +44,6 @@ class AccountBrowseRuntime(
 
     private val stepScheduler = AccountBrowseScheduler(scheduler, canScheduleStep) { performStep() }
     private val recoveryTransaction = UnifiedRecoveryTransactionStateMachine()
-    private var lastDynamicVerificationFingerprint: String = ""
 
     fun scheduleStep(delayMs: Long) = stepScheduler.schedule(delayMs)
 
@@ -130,23 +129,7 @@ class AccountBrowseRuntime(
      * The caller still owns fingerprint extraction and all feed actions.
      */
     fun observeDynamicFeedFingerprint(fingerprint: String): Boolean {
-        if (fingerprint.isBlank()) {
-            lastDynamicVerificationFingerprint = ""
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
-            return false
-        }
-        val changed = fingerprint != lastDynamicVerificationFingerprint
-        if (changed) {
-            lastDynamicVerificationFingerprint = fingerprint
-            if (recoveryTransaction.state != RecoveryTransactionState.VERIFYING &&
-                recoveryTransaction.state != RecoveryTransactionState.PAUSED
-            ) {
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
-            } else if (recoveryTransaction.stableVerificationSamples > 0) {
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
-            }
-        }
-        val state = recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        val state = recoveryTransaction.observeFingerprint(fingerprint)
         if (state != RecoveryTransactionState.VERIFIED) return false
         recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
         recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
@@ -233,7 +216,6 @@ class AccountBrowseRuntime(
         checkpointRepository?.clear()
         phase = AccountBrowsePhase.IDLE
         restoredCheckpointPhase = null
-        lastDynamicVerificationFingerprint = ""
         recoveryTransaction.reset()
         session.reset()
         afterReset()
