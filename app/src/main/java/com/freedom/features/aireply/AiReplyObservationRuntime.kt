@@ -1241,6 +1241,21 @@ class AiReplyObservationRuntime(
         chatPagePort.reloadReceivedGreetingsCheckpointAfterServiceReconnect()
     }.getOrDefault(false)
 
+    /** Reloads the message-list checkpoint and accepts it only with a fresh list-page check. */
+    fun reloadPrivateMessagesCheckpointAfterServiceReconnect(): Boolean {
+        val checkpoint = privateMessagesCheckpointRepository?.load() ?: return false
+        privateMessagesTraversalTaskExecutor.restore(checkpoint)
+        val page = runCatching { chatPagePort.inspectChatPage() }.getOrNull() ?: return false
+        val verified = page.pageKind == ChatPageKind.CHAT_LIST &&
+            page.packageName == targetPackage() &&
+            page.messageTabPositionKey() != null &&
+            page.messageTabAnchorPositionKey() != null
+        onLog(
+            "消息列表服务重连：已重新读取检查点；当前页面结构=${if (verified) "已确认" else "待重新确认"}"
+        )
+        return verified
+    }
+
     /** Schedules bounded page or known-region inspection from a normalized, redacted event. */
     fun schedule(event: AccessibilityEventEnvelope) {
         if (!chatPagePort.supportsTargetPackage(targetPackage())) return
