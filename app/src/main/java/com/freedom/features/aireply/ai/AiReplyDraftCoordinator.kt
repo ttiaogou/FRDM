@@ -205,19 +205,42 @@ class AiReplyDraftCoordinator(
             return
         }
         val callStartedAt = nowMillis()
-        val provider = createProvider(configuration)
-        val decision = AiReplyDecisionEngine(
-            modelProvider = provider,
-            cloudConsent = cloudConsent
-        ).decide(
-            AiReplyDecisionInput(
-                context = context,
-                contactIdentityVerified = !context.currentWindowDraft,
-                manualReviewRequired = isManualReviewRequired(),
-                cooldownActive = false,
-                requestId = requestId,
-                personalization = personalizationRepository.load()
+        onLog(
+            "AI 模型调用开始：requestId=$requestId；" +
+                "provider=${configuration.provider.name}；" +
+                "model=${configuration.modelName}；" +
+                "contextMessages=${context.messages.size}"
+        )
+        val decision = try {
+            val provider = createProvider(configuration)
+            AiReplyDecisionEngine(
+                modelProvider = provider,
+                cloudConsent = cloudConsent
+            ).decide(
+                AiReplyDecisionInput(
+                    context = context,
+                    contactIdentityVerified = !context.currentWindowDraft,
+                    manualReviewRequired = isManualReviewRequired(),
+                    cooldownActive = false,
+                    requestId = requestId,
+                    personalization = personalizationRepository.load()
+                )
             )
+        } catch (error: Throwable) {
+            onLog(
+                "AI 模型调用异常：requestId=$requestId；" +
+                    "stage=DECIDE；" +
+                    "exception=${error.javaClass.simpleName}；" +
+                    "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}"
+            )
+            throw error
+        }
+        onLog(
+            "AI 模型调用完成：requestId=$requestId；" +
+                "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；" +
+                "action=${decision.action.name}；" +
+                "reason=${decision.reason}；" +
+                "draftPresent=${!decision.draft.isNullOrBlank()}"
         )
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
             fun safeLog(value: String?): String = AiModelDataRedactor.redact(value.orEmpty())
