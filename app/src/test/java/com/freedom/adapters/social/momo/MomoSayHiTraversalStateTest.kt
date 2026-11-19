@@ -114,4 +114,21 @@ class MomoSayHiTraversalStateTest {
         assertEquals(0, state.processedContactCount)
         assertNull(repository.value)
     }
+
+    @Test
+    fun everyCheckpointMutationIsPersistedImmediately() {
+        val repository = InMemoryRepository()
+        val state = MomoSayHiTraversalState(MomoSayHiTraversalCheckpointStore(repository))
+
+        state.markProcessedRow("row-a")
+        assertTrue(repository.value?.processedRowKeys?.contains("row-a") == true)
+
+        state.markProcessedContactHash("contact-a")
+        assertTrue(repository.value?.processedContactIdHashes?.contains("contact-a") == true)
+
+        state.setDeferredReturnToTopActive(true)
+        state.setDeferredReplayStarted(true)
+        assertTrue(repository.value?.deferredReturnToTopActive == true)
+        assertTrue(repository.value?.deferredReplayStarted == true)
+    }
 }

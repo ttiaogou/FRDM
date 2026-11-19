@@ -83,10 +83,15 @@ internal class MomoSayHiTraversalState(
 
     fun hasRetryableDeferredRows(): Boolean = deferredRowKeys.any(::shouldRetryDeferredRow)
 
-    fun markProcessedRow(rowKey: String) = rememberBounded(processedRowKeys, rowKey)
+    fun markProcessedRow(rowKey: String) {
+        rememberBounded(processedRowKeys, rowKey)
+        persist()
+    }
 
-    fun markProcessedContactHash(contactIdHash: String) =
+    fun markProcessedContactHash(contactIdHash: String) {
         rememberBounded(processedContactIdHashes, contactIdHash)
+        persist()
+    }
 
     /** Records the existing bounded retry schedule and checkpoints it before returning. */
     fun deferRow(rowKey: String, reason: String, nowEpochMs: Long): DeferralResult {
@@ -127,10 +132,12 @@ internal class MomoSayHiTraversalState(
 
     fun setDeferredReturnToTopActive(value: Boolean) {
         deferredReturnToTopActive = value
+        persist()
     }
 
     fun setDeferredReplayStarted(value: Boolean) {
         deferredReplayStarted = value
+        persist()
     }
 
     fun persist(nowEpochMs: Long = System.currentTimeMillis()) {
