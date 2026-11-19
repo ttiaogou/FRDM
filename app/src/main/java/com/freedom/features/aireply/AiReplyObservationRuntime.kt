@@ -116,7 +116,7 @@ class AiReplyObservationRuntime(
         private const val STARTUP_MESSAGE_TAB_RETRY_DELAY_MS = 400L
         private const val MAX_STARTUP_MESSAGE_TAB_RETRIES = 75
         private const val MAX_STARTUP_MESSAGE_TAB_TAPS = 1
-        private const val SESSION_LIST_STABILITY_RETRY_DELAY_MS = 350L
+        private val MESSAGE_LIST_RECOVERY_RETRY_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L, 30_000L)
         /** Re-check transient mf_view overlap without pausing the session-list traversal. */
         private const val SESSION_SAFE_VIEWPORT_RETRY_DELAY_MS = 650L
         private const val SESSION_SAFE_VIEWPORT_RETRY_BACKOFF_MS = 5_000L
@@ -126,7 +126,6 @@ class AiReplyObservationRuntime(
         private const val PRIORITY_RETURN_INSPECTION_DELAY_MS = 500L
         private const val RECEIVED_GREETINGS_RECHECK_DELAY_MS = 1_300L
         private const val RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS = 750L
-        private const val MAX_SESSION_LIST_STABILITY_RETRIES = 3
         private const val MAX_EVENT_BURST_INSPECTION_WAIT_MS = 1_200L
         private const val SESSION_TAP_DURATION_MS = 90L
         private const val SESSION_SCROLL_DURATION_MS = 480L
@@ -347,6 +346,8 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
     private var privateMessagesCheckpointRecoveryPending = false
     private val privateMessagesCheckpointVerificationGate = PageRecoveryVerificationGate()
+    private var messageRecoveryRetryAttempt = 0
+    private var messageListRecoveryVerificationPending = false
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -730,10 +731,11 @@ class AiReplyObservationRuntime(
                 SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP,
                 SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM,
                 SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
-            ) && (previous?.pageKind == ChatPageKind.CHAT_LIST || privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount > 0)
+            ) && previous?.pageKind == ChatPageKind.CHAT_LIST
         ) {
             recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_UNKNOWN"))
             recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+            messageListRecoveryVerificationPending = true
             scheduleSessionListStabilityRetry("页面结构暂时不可用")
             return
         }
@@ -1077,6 +1079,8 @@ class AiReplyObservationRuntime(
         lastPageInspection = null
         lastConfirmedChatListInspection = null
         recoveryTransaction.reset()
+        messageListRecoveryVerificationPending = false
+        messageRecoveryRetryAttempt = 0
         transientEmptySnapshotRecovery.reset()
         receivedGreetingsRecoveryVerificationPending = false
         receivedGreetingsRecoveryVerifiedForNextSnapshot = false
@@ -1238,6 +1242,8 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
         privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
         privateMessagesCheckpointRecoveryPending = false
+        messageListRecoveryVerificationPending = false
+        messageRecoveryRetryAttempt = 0
         privateMessagesCheckpointVerificationGate.reset()
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
@@ -1871,6 +1877,23 @@ class AiReplyObservationRuntime(
     }
 
     private fun handleSessionListPage(snapshot: ChatPageSnapshot) {
+        if (messageListRecoveryVerificationPending && sessionRunStarted && !receivedGreetingsTaskActive) {
+            if (!pageRecoveryVerificationGate.observe(recoveryStructuralKey(snapshot))) {
+                sessionManagerState = SessionManagerState.PAUSED
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
+                onLog("消息列表恢复[RECOVERY_VERIFYING]：等待第二次独立稳定页面快照；保持暂停")
+                scheduleSessionListStabilityRetry("消息列表页面指纹尚未连续稳定")
+                return
+            }
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+            messageListRecoveryVerificationPending = false
+            messageRecoveryRetryAttempt = 0
+            pageRecoveryVerificationGate.reset()
+            onLog("消息列表恢复[RECOVERY_VERIFIED]：连续两次独立页面快照一致；恢复原有遍历算法")
+        }
         if (privateMessagesCheckpointRecoveryPending && sessionRunStarted && !receivedGreetingsTaskActive) {
             if (!privateMessagesCheckpointVerificationGate.observe(recoveryStructuralKey(snapshot))) {
                 sessionManagerState = SessionManagerState.PAUSED
@@ -1879,6 +1902,11 @@ class AiReplyObservationRuntime(
                 return
             }
             privateMessagesCheckpointRecoveryPending = false
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+            messageRecoveryRetryAttempt = 0
             privateMessagesCheckpointVerificationGate.reset()
             sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP
             onLog("消息列表进程恢复[RECOVERY_VERIFIED]：连续两次结构快照一致；继续持久化检查点对应任务")
@@ -2606,22 +2634,18 @@ class AiReplyObservationRuntime(
             sessionManagerState == SessionManagerState.STOPPED
         ) return
         sessionTransitionTask?.cancel()
-        if (privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount >= MAX_SESSION_LIST_STABILITY_RETRIES) {
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog(
-                "AI 会话管理已暂停：会话列表连续 $MAX_SESSION_LIST_STABILITY_RETRIES 次未稳定（$reason）；" +
-                    "不执行点击或滚动，等待新的页面事件或用户重新启动"
-            )
-            return
-        }
-        privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount += 1
-        val attempt = privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount
+        messageRecoveryRetryAttempt += 1
+        val attempt = messageRecoveryRetryAttempt
+        val delayMs = MESSAGE_LIST_RECOVERY_RETRY_DELAYS_MS[
+            (attempt - 1).coerceAtMost(MESSAGE_LIST_RECOVERY_RETRY_DELAYS_MS.lastIndex)
+        ]
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.RetryScheduled(delayMs))
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         onLog(
-            "AI 会话管理：$reason；进行第 $attempt/$MAX_SESSION_LIST_STABILITY_RETRIES 次短间隔复核，" +
-                "不执行空坐标操作"
+            "AI 会话管理：$reason；第 $attempt 次恢复复核，${delayMs}ms 后再次检查；" +
+                "达到最长间隔后继续低频检查，不因次数终止，不执行空坐标操作"
         )
-        sessionTransitionTask = scheduler.schedule(SESSION_LIST_STABILITY_RETRY_DELAY_MS) {
+        sessionTransitionTask = scheduler.schedule(delayMs) {
             sessionTransitionTask = null
             if (!isAiReplyActive() || !sessionRunStarted) {
                 onLog(
