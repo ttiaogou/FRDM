@@ -558,6 +558,35 @@ class AiReplyObservationRuntime(
             return
         }
 
+        // Returning from a chat detail page is a recovery boundary even when the fresh
+        // snapshot is immediately classified as CHAT_LIST. Do not let the known-page branch
+        // below reacquire the task and scroll on the first post-BACK snapshot; that would bypass
+        // the shared UNKNOWN/recovery path and the two-snapshot verification gate.
+        val returnedFromChatDetail = sessionRunStarted &&
+            !receivedGreetingsTaskActive &&
+            !awaitingNormalInboxAfterGreetingsReturn &&
+            previous != null &&
+            inboxPageRecognizer.isChatDetail(previous) &&
+            inspection.pageKind == ChatPageKind.CHAT_LIST &&
+            inspection.packageName == targetPackage()
+        if (returnedFromChatDetail) {
+            recoveryTransaction.dispatch(
+                RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_RETURN_FROM_CHAT_DETAIL")
+            )
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+            messageListRecoveryVerificationPending = true
+            pageRecoveryVerificationGate.reset()
+            sessionManagerState = SessionManagerState.PAUSED
+            releaseTaskOwnership("聊天详情返回消息列表；等待双快照页面恢复验证")
+            lastPageInspection = inspection
+            onLog(
+                "PageRecoveryRequested：聊天详情已返回消息列表；" +
+                    "即使当前快照已识别为 CHAT_LIST，也必须连续两次稳定页面快照后恢复原遍历状态"
+            )
+            scheduleFullInspectionAfter(0L)
+            return
+        }
+
         if (sessionRunStarted) {
             when {
                 receivedGreetingsTaskActive && !ownsTask(RECEIVED_GREETINGS_TASK_ID) -> {
