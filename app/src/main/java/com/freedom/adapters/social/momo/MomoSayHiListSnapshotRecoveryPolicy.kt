@@ -3,7 +3,7 @@ package com.freedom.adapters.social.momo
 import kotlin.random.Random
 
 /**
- * Serializes received-greetings list snapshots and gestures, then provides bounded recovery.
+ * Serializes received-greetings list snapshots and gestures for the shared recovery transaction.
  *
  * RecyclerView emits content/scroll events while a swipe is running and briefly after Android
  * reports the gesture terminal callback. Those events must not start another accessibility-tree
@@ -11,7 +11,7 @@ import kotlin.random.Random
  * both snapshot reads and autonomous list swipes; callers provide monotonic elapsed time.
  */
 internal class MomoSayHiListSnapshotRecoveryPolicy(
-    private val retryDelayRangesMs: List<LongRange> = listOf(300L..450L, 600L..850L, 1_000L..1_400L),
+    private val retryDelayRangesMs: List<LongRange> = listOf(500L..500L, 1_000L..1_000L, 2_000L..2_000L, 5_000L..5_000L, 10_000L..10_000L, 30_000L..30_000L),
     private val postGestureSettleRangeMs: LongRange = 250L..420L,
     private val sampleDelayMs: (LongRange) -> Long = { range ->
         if (range.first == range.last) range.first else Random.nextLong(range.first, range.last + 1L)
@@ -111,16 +111,12 @@ internal class MomoSayHiListSnapshotRecoveryPolicy(
             retryAttempts = 0
             exhaustedWindowKey = null
         }
-        if (exhaustedWindowKey == windowKey || retryAttempts >= retryDelayRangesMs.size) {
-            exhaustedWindowKey = windowKey
-            return IncompleteSnapshotDecision.Exhausted(retryAttempts)
-        }
         retryAttempts += 1
-        val range = retryDelayRangesMs[retryAttempts - 1]
+        val range = retryDelayRangesMs[(retryAttempts - 1).coerceAtMost(retryDelayRangesMs.lastIndex)]
         val delay = sampleDelayMs(range).coerceIn(range.first, range.last)
         return IncompleteSnapshotDecision.Retry(
             attempt = retryAttempts,
-            maximumAttempts = retryDelayRangesMs.size,
+            maximumAttempts = Int.MAX_VALUE,
             delayMs = delay
         )
     }
@@ -132,7 +128,7 @@ internal class MomoSayHiListSnapshotRecoveryPolicy(
         exhaustedWindowKey = null
     }
 
-    /** True once the bounded recovery budget for this exact window has been exhausted. */
+    /** Kept for compatibility; unified recovery no longer exhausts by retry count. */
     @Synchronized
     fun isPausedForWindow(windowKey: String): Boolean = exhaustedWindowKey == windowKey
 

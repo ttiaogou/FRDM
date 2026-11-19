@@ -729,6 +729,13 @@ class AiReplyObservationRuntime(
             }
             ChatPageKind.UNKNOWN, ChatPageKind.NON_CHAT -> {
                 if (sessionRunStarted && receivedGreetingsTaskActive) {
+                    // A page classification failure is a recovery request, never a business step.
+                    // The received-greetings coordinator retains the traversal checkpoint and
+                    // only resumes after the adapter confirms the list/detail fingerprint again.
+                    onLog(
+                        "PageRecoveryRequested：收到招呼页面 UNKNOWN；" +
+                            "暂停滚动/点击/导航，保留任务检查点，等待新鲜页面指纹复核"
+                    )
                     val decision = receivedGreetingsTaskFlow.evaluateUnclassifiedPageSnapshot()
                     when (decision.kind) {
                         ReceivedGreetingsTaskFlowController.DecisionKind.RETRY_REQUIRED -> {
@@ -3319,8 +3326,8 @@ class AiReplyObservationRuntime(
 
     /**
      * A transient received-greetings observation failure schedules another fresh full snapshot.
-     * The delay grows to a bounded ceiling and then remains at that ceiling while the task is
-     * active; this prevents a retry budget from silently converting a recoverable page into PAUSED.
+     * The delay grows to a low-frequency ceiling and remains there while the task is active; the
+     * recovery transaction has no retry-count termination.
      */
     private fun scheduleReceivedGreetingsRecoveryRetry(reason: String) {
         if (!sessionRunStarted || !receivedGreetingsTaskActive) return
@@ -3329,7 +3336,8 @@ class AiReplyObservationRuntime(
         val delayMs = retryPlan.delayMs
         onLog(
             "收到的招呼自动恢复[RETRY]：$reason；第${retryCount}次新鲜快照复核；" +
-                "delay=${delayMs}ms；任务和当前用户进度保持不变"
+                "delay=${delayMs}ms；任务和当前用户进度保持不变；" +
+                "不因重试次数终止恢复"
         )
         scheduleFullInspectionAfter(delayMs)
     }

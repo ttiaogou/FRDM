@@ -131,11 +131,9 @@ internal class ReceivedGreetingsTaskFlowController(
         }
     }
 
-    /**
-     * Unknown/non-chat page snapshots still allow the adapter's bounded step to make progress.
-     * Retry cadence and retry-counter reset behavior intentionally match the legacy branch.
-     */
-    fun evaluateUnclassifiedPageSnapshot(): Decision = evaluateAdapterStep(classifiedPage = false)
+    /** Unknown/non-chat snapshots never authorize a business step; the coordinator must recover. */
+    fun evaluateUnclassifiedPageSnapshot(): Decision =
+        Decision(DecisionKind.RETRY_REQUIRED, executor.traversalStatus(), DecisionOrigin.PAGE_PROGRESS)
 
     private fun evaluateAdapterStep(classifiedPage: Boolean): Decision {
         val observation = executor.performIdleStepAndInspect()
