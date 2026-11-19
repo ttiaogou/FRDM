@@ -181,6 +181,9 @@ class AccountBrowseRuntime(
         )
     }
 
+    /** Allows the shared page router to persist the current browse checkpoint before takeover. */
+    fun saveRecoveryCheckpoint() = persistCheckpoint()
+
     /**
      * Execute the existing phase-to-action mapping.
      *

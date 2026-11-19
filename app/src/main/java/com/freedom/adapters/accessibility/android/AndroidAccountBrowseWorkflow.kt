@@ -19,6 +19,8 @@ import com.freedom.core.accessibility.overlay.OverlayPort
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.PageObservationCoordinator
+import com.freedom.core.runtime.PageFingerprint
+import com.freedom.features.accountbrowse.DynamicFeedRecoveryRouteAdapter
 import com.freedom.core.runtime.PageObservationSubscription
 import com.freedom.features.accountbrowse.AccountBrowseInteractionContext
 import com.freedom.features.accountbrowse.AccountBrowseInteractionEventClassifier
@@ -69,6 +71,9 @@ internal class AndroidAccountBrowseWorkflow(
     private val observationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
         pageObservationCoordinator ?: PageObservationCoordinator(taskScheduler)
     }
+    private val dynamicFeedRecoveryRoute = DynamicFeedRecoveryRouteAdapter(targetPackage) {
+        accountBrowseRuntime.saveRecoveryCheckpoint()
+    }
     private val pageObservationChannel: PageObservationSubscription by lazy(LazyThreadSafetyMode.NONE) {
         observationCoordinator.registerChannel(
             channelId = ACCOUNT_BROWSE_PAGE_OBSERVATION_CHANNEL,
@@ -76,6 +81,10 @@ internal class AndroidAccountBrowseWorkflow(
             maxWaitMs = PAGE_OBSERVATION_MAX_WAIT_MS,
             onObservationRequested = ::onCoalescedPageObservationRequested
         )
+    }
+
+    init {
+        observationCoordinator.registerFingerprintRoute(dynamicFeedRecoveryRoute.asRoute())
     }
 
     internal var phase: AccountBrowsePhase
@@ -99,6 +108,16 @@ internal class AndroidAccountBrowseWorkflow(
             startRestoredCheckpointVerification()
         }
     }
+
+    private fun matchDynamicFeedRoute(page: BrowsePageEvidence): Boolean =
+        observationCoordinator.matchFingerprint(
+            PageFingerprint(
+                packageName = page.packageName,
+                activityClass = page.activityClass,
+                semanticPage = page.pageKind.name,
+                adapterFingerprint = page.fingerprint
+            )
+        ) == DynamicFeedRecoveryRouteAdapter.ROUTE_ID
 
     private fun startRestoredCheckpointVerification() {
         if (isManualReviewRequired() || !isMonitoringRunning() || !isBrowseModeActive()) return
@@ -380,6 +399,9 @@ internal class AndroidAccountBrowseWorkflow(
         }
         val page = socialBrowsePort.inspectPage()
         accountBrowseRuntime.observeRecoveryPage(page)
+        if (page.pageKind == BrowsePageKind.DYNAMIC_FEED && matchDynamicFeedRoute(page)) {
+            addLog("动态浏览页面路由已匹配统一页面指纹：进入动态列表恢复/稳定性复核链路")
+        }
         if (page.packageName.isBlank()) {
             if (!accountBrowseSession.rootUnavailableLogged) {
                 addLog("恢复检查暂时无法读取当前前台页面；等待后续页面事件再次触发检查")
@@ -1171,6 +1193,15 @@ internal class AndroidAccountBrowseWorkflow(
         if (handleMomoPopup()) return
         if (isRetainedObstructionEvidence(page.reason)) {
             addLog("动态页已由先前成功指纹确认；当前识别锚点被遮挡，保留任务并等待遮挡消失，不执行滑动")
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+
+        if (page.pageKind == BrowsePageKind.DYNAMIC_FEED && !matchDynamicFeedRoute(page)) {
+            accountBrowseRuntime.observeRecoveryPage(
+                page.copy(reason = "DYNAMIC_FEED_ROUTE_NOT_MATCHED")
+            )
+            addLog("动态列表页面指纹未匹配统一路由；保持暂停并等待新页面快照")
             scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
             return
         }
