@@ -3003,6 +3003,23 @@ class AiReplyObservationRuntime(
             }
             return
         }
+        if (result.status == GestureExecutionStatus.CANCELLED) {
+            // Opening a conversation legitimately changes the active window before the
+            // platform gesture callback is delivered. Reacquire the page and let the
+            // ChatActivity fingerprint take ownership of the transition instead of
+            // treating the expected navigation as a failed tap.
+            val current = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+            if (current?.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+                current.packageName == targetPackage()
+            ) {
+                onLog(
+                    "AI 会话点击[CHAT_DETAIL_REACQUIRED]：平台回调为CANCELLED，但当前快照已确认ChatActivity聊天页；" +
+                        "交由聊天页复核接管，不暂停任务"
+                )
+                verifyOpenedSession()
+                return
+            }
+        }
         if (result.status != GestureExecutionStatus.COMPLETED) {
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
