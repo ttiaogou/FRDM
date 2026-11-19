@@ -325,6 +325,7 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsUserActive = false
     private var receivedGreetingsQuietTask: ScheduledTask? = null
     private var receivedGreetingsQuietGeneration = 0L
+    private val pageRecoveryVerificationGate = PageRecoveryVerificationGate()
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -430,9 +431,28 @@ class AiReplyObservationRuntime(
             return
         }
         transientEmptySnapshotRecovery.reset()
-        snapshotRecoveryStartedAtMs = 0L
-        handleInspectionSnapshot(inspection!!)
+        val recovered = inspection!!
+        if (snapshotRecoveryStartedAtMs != 0L) {
+            if (!pageRecoveryVerificationGate.observe(recoveryStructuralKey(recovered))) {
+                onLog("AI 页面恢复[RECOVERY_VERIFYING]：第${pageRecoveryVerificationGate.stableSamples}/2次独立新鲜快照尚未稳定；350ms后复核")
+                scheduleFullInspectionAfter(350L)
+                return
+            }
+            onLog("AI 页面恢复[RECOVERY_VERIFIED]：连续两次新鲜结构快照一致；恢复消息列表任务")
+            pageRecoveryVerificationGate.reset()
+            snapshotRecoveryStartedAtMs = 0L
+        }
+        handleInspectionSnapshot(recovered)
     }
+
+    private fun recoveryStructuralKey(snapshot: ChatPageSnapshot): String = listOf(
+        snapshot.packageName, snapshot.pageKind.name, snapshot.scannedNodeCount,
+        snapshot.messageListCount, snapshot.editableInputCount, snapshot.sendActionCount,
+        snapshot.messageRelatedViewIdCount, snapshot.hasChatTab,
+        snapshot.messageListTarget?.expectedViewId.orEmpty(),
+        snapshot.messageListTarget?.expectedClassName.orEmpty(),
+        snapshot.chatListViewport?.toString().orEmpty(), snapshot.chatListCandidates.size
+    ).joinToString("|")
 
     /** System touch boundaries pause received-greetings recovery without becoming page evidence. */
     fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {

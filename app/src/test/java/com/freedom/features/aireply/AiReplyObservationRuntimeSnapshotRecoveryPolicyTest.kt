@@ -56,4 +56,14 @@ class AiReplyObservationRuntimeSnapshotRecoveryPolicyTest {
         assertEquals(0, policy.retryCount)
         assertEquals(500L, policy.nextDelayMs(30_000L))
     }
+
+    @Test fun recoveryGateRequiresTwoEqualFreshStructuralSamples() {
+        val gate = PageRecoveryVerificationGate()
+        assertFalse(gate.observe("chat-list|rows=3"))
+        assertEquals(1, gate.stableSamples)
+        assertFalse(gate.observe("chat-list|rows=4"))
+        assertTrue(gate.observe("chat-list|rows=4"))
+        gate.reset()
+        assertEquals(0, gate.stableSamples)
+    }
 }
