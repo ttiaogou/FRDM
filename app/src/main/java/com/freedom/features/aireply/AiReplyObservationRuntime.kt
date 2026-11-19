@@ -2675,7 +2675,8 @@ class AiReplyObservationRuntime(
     }
 
     private fun scheduleSessionListStabilityRetry(reason: String) {
-        if (sessionManagerState == SessionManagerState.PAUSED ||
+        if ((sessionManagerState == SessionManagerState.PAUSED &&
+                !messageListRecoveryVerificationPending) ||
             sessionManagerState == SessionManagerState.STOPPED
         ) return
         sessionTransitionTask?.cancel()
