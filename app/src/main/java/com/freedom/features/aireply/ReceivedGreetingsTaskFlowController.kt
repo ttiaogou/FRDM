@@ -99,6 +99,8 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun markTraversalReturnedToInbox() = lifecycle.markTraversalReturnedToInbox()
 
+    fun pauseForBusinessSwitch() = lifecycle.pauseForBusinessSwitch()
+
     fun markCompletedAwaitingUserExit() = lifecycle.markCompletedAwaitingUserExit()
 
     fun acknowledgeCompletedTaskExit() = lifecycle.acknowledgeCompletedTaskExit()

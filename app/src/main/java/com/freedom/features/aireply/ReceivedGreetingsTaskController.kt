@@ -58,6 +58,14 @@ internal class ReceivedGreetingsTaskController(
         recoveryRetryCount = 0
     }
 
+    /** Pauses this branch for an externally verified business-page handoff without clearing context. */
+    fun pauseForBusinessSwitch() {
+        isActive = false
+        completedAwaitingUserExit = false
+        awaitingNormalInboxAfterReturn = false
+        recoveryRetryCount = 0
+    }
+
     /** Clears only the A-plan page-exit latch after the message-list page is independently confirmed. */
     fun acknowledgeCompletedTaskExit() {
         completedAwaitingUserExit = false
