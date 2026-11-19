@@ -132,6 +132,8 @@ class AiReplyObservationRuntime(
         private const val SESSION_SCROLL_DURATION_MS = 480L
         private const val PRIVATE_MESSAGES_TASK_ID = PrivateMessagesTaskController.TASK_ID
         private const val RECEIVED_GREETINGS_TASK_ID = ReceivedGreetingsTaskController.TASK_ID
+        private const val RECEIVED_GREETINGS_LIST_ACTIVITY =
+            "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
         private val PAGE_CHANGE_RECHECK_EVENT_TYPES = setOf(
             AccessibilityEventType.WINDOW_STATE_CHANGED,
             AccessibilityEventType.WINDOWS_CHANGED,
@@ -351,6 +353,7 @@ class AiReplyObservationRuntime(
     private val privateMessagesCheckpointVerificationGate = PageRecoveryVerificationGate()
     private var messageRecoveryRetryAttempt = 0
     private var messageListRecoveryVerificationPending = false
+    private var receivedGreetingsExitObservationSequence = 0L
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -551,6 +554,23 @@ class AiReplyObservationRuntime(
     private fun handleInspectionSnapshot(incomingInspection: ChatPageSnapshot) {
         val previous = lastPageInspection
         val inspection = stabilizeIncomingPageSnapshot(incomingInspection)
+
+        // Phase 1 only records the cross-business boundary. It deliberately does not pause,
+        // transfer ownership, or alter traversal state; later phases consume this boundary.
+        if (previous?.activityClass == RECEIVED_GREETINGS_LIST_ACTIVITY &&
+            inspection.activityClass != RECEIVED_GREETINGS_LIST_ACTIVITY
+        ) {
+            receivedGreetingsExitObservationSequence += 1L
+            onLog(
+                "页面离开识别[RECEIVED_GREETINGS_EXIT]：" +
+                    "sourceActivity=$RECEIVED_GREETINGS_LIST_ACTIVITY；" +
+                    "targetActivity=${inspection.activityClass.ifBlank { "UNKNOWN" }}；" +
+                    "targetPage=${inspection.pageKind.name}；" +
+                    "window=${inspection.windowIdentityKey().orEmpty()}；" +
+                    "sequence=$receivedGreetingsExitObservationSequence；" +
+                    "当前阶段仅记录边界，不暂停任务、不转移UI操作权"
+            )
+        }
 
         // 模型请求、分段填入及人工审核期间，不让遍历任务抢走页面。
         if (isConversationDraftPending() || isDraftAwaitingUserSend()) {
