@@ -306,7 +306,6 @@ class AiReplyObservationRuntime(
         sharedPageObservationCoordinator?.registerFingerprintRoute(receivedGreetingsRecoveryRoute.asRoute())
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
-            privateMessagesCheckpointRecoveryPending = true
             recoveryContext.request(PRIVATE_MESSAGES_TASK_ID, "PROCESS_RESTART_CHECKPOINT")
             recoveryContext.markCheckpointLoaded()
             recoveryTransaction.dispatch(
@@ -366,8 +365,6 @@ class AiReplyObservationRuntime(
     private val receivedGreetingsRecoveryVerificationGate = PageRecoveryVerificationGate()
     private var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
     private var receivedGreetingsRecoveryRetryAttempt = 0
-    private var privateMessagesCheckpointRecoveryPending = false
-    private val privateMessagesCheckpointVerificationGate = PageRecoveryVerificationGate()
     private var messageRecoveryRetryAttempt = 0
     private var messageListRecoveryVerificationPending = false
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
@@ -546,7 +543,7 @@ class AiReplyObservationRuntime(
         if (!sessionRunStarted) return
         val recoveryContextActive = receivedGreetingsTaskActive ||
             messageListRecoveryVerificationPending ||
-            privateMessagesCheckpointRecoveryPending
+            recoveryContext.pending
         if (!recoveryContextActive) return
         receivedGreetingsUserActive = true
         userInteractionActive = true
@@ -641,8 +638,6 @@ class AiReplyObservationRuntime(
                     "已从任务=${sourceTaskId}恢复任务=$targetTaskId"
             )
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
-                privateMessagesCheckpointRecoveryPending = false
-                privateMessagesCheckpointVerificationGate.reset()
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                 lastPageInspection = inspection
                 handleSessionListPage(inspection)
@@ -1414,13 +1409,10 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
         privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
-        privateMessagesCheckpointRecoveryPending = false
         messageListRecoveryVerificationPending = false
         messageRecoveryRetryAttempt = 0
-        privateMessagesCheckpointVerificationGate.reset()
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
-            privateMessagesCheckpointRecoveryPending = true
             if (!recoveryContext.pending) {
                 recoveryContext.request(PRIVATE_MESSAGES_TASK_ID, "SERVICE_RECONNECT_CHECKPOINT")
                 recoveryContext.markCheckpointLoaded()
@@ -1493,15 +1485,11 @@ class AiReplyObservationRuntime(
                 RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)
             )
         }
-        val page = runCatching { chatPagePort.inspectChatPage() }.getOrNull() ?: return false
-        val verified = page.pageKind == ChatPageKind.CHAT_LIST &&
-            page.packageName == targetPackage() &&
-            page.messageTabPositionKey() != null &&
-            page.messageTabAnchorPositionKey() != null
         onLog(
-            "消息列表服务重连：已重新读取检查点；当前页面结构=${if (verified) "已确认" else "待重新确认"}"
+            "消息列表服务重连：已重新读取检查点；交由统一页面路由进行双快照复核"
         )
-        return verified
+        scheduleFullInspectionAfter(0L)
+        return true
     }
 
     /** Schedules bounded page or known-region inspection from a normalized, redacted event. */
@@ -2091,23 +2079,6 @@ class AiReplyObservationRuntime(
             messageRecoveryRetryAttempt = 0
             pageRecoveryVerificationGate.reset()
             onLog("消息列表恢复[RECOVERY_VERIFIED]：连续两次独立页面快照一致；恢复原有遍历算法")
-        }
-        if (privateMessagesCheckpointRecoveryPending && sessionRunStarted && !receivedGreetingsTaskActive) {
-            if (!privateMessagesCheckpointVerificationGate.observe(recoveryStructuralKey(snapshot))) {
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog("消息列表进程恢复[RECOVERY_VERIFYING]：第${privateMessagesCheckpointVerificationGate.stableSamples}/2次结构快照尚未稳定；350ms后复核")
-                scheduleFullInspectionAfter(350L)
-                return
-            }
-            privateMessagesCheckpointRecoveryPending = false
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
-            messageRecoveryRetryAttempt = 0
-            privateMessagesCheckpointVerificationGate.reset()
-            sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP
-            onLog("消息列表进程恢复[RECOVERY_VERIFIED]：连续两次结构快照一致；继续持久化检查点对应任务")
         }
         if (privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys != null) {
             // The delayed boundary verifier owns this interval. Ignore ordinary page events so
