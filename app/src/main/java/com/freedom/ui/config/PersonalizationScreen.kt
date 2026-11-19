@@ -40,6 +40,7 @@ internal class PersonalizationScreen(
     private var parameters = taskParameters()
     private var personalization = loadAiReplyPersonalization()
     private var replyLimitValue: TextView? = null
+    private var imagePreReplyValue: TextView? = null
     private var customInstructionsInput: EditText? = null
     private var personalizationStatus: TextView? = null
 
@@ -172,7 +173,7 @@ internal class PersonalizationScreen(
         content.addView(sectionHeader("回复行为设置"), LinearLayout.LayoutParams(-1, -2).apply {
             topMargin = dp(18)
         })
-        content.addView(replyLimitPreferenceRow(), LinearLayout.LayoutParams(-1, -2))
+        content.addView(messageInterceptionPreferenceRow(), LinearLayout.LayoutParams(-1, -2))
         content.addView(imagePreReplyPreferenceRow(), LinearLayout.LayoutParams(-1, -2))
 
         content.addView(sectionHeader("本地记录说明"), LinearLayout.LayoutParams(-1, -2).apply {
@@ -291,7 +292,7 @@ internal class PersonalizationScreen(
             }
     }
 
-    private fun replyLimitPreferenceRow(): View {
+    private fun messageInterceptionPreferenceRow(): View {
         val wrapper = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         val row = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -306,16 +307,10 @@ internal class PersonalizationScreen(
         row.addView(LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             addView(TextView(activity).apply {
-                text = "回复数量限制"
+                text = "消息拦截"
                 textSize = 14f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(FreedomUi.TEXT)
-            })
-            addView(TextView(activity).apply {
-                text = "达到上限后触发 · 0为不限"
-                textSize = 11f
-                setTextColor(FreedomUi.MUTED)
-                setPadding(0, dp(4), 0, 0)
             })
         }, LinearLayout.LayoutParams(0, -2, 1f))
         replyLimitValue = TextView(activity).apply {
@@ -325,15 +320,9 @@ internal class PersonalizationScreen(
             gravity = Gravity.CENTER
             setTextColor(FreedomUi.TEXT)
             background = FreedomUi.roundedSurface(dp(9), Color.WHITE, FreedomUi.DIVIDER)
-            contentDescription = "回复数量限制 ${parameters.replyLimit} 条，点击编辑"
+            contentDescription = "消息拦截 ${parameters.replyLimit}，点击编辑"
         }
         row.addView(replyLimitValue, LinearLayout.LayoutParams(dp(64), dp(40)))
-        row.addView(TextView(activity).apply {
-            text = "条"
-            textSize = 12f
-            setTextColor(FreedomUi.MUTED)
-            setPadding(dp(6), 0, 0, 0)
-        })
         wrapper.addView(row)
         wrapper.addView(View(activity).apply {
             setBackgroundColor(FreedomUi.DIVIDER)
@@ -357,14 +346,14 @@ internal class PersonalizationScreen(
             setPadding(dp(22), dp(8), dp(22), dp(4))
             addView(input, LinearLayout.LayoutParams(-1, dp(52)))
             addView(TextView(activity).apply {
-                text = "输入 0 表示不限"
+                text = "回复消息满足后执行/0不开启"
                 textSize = 11f
                 setTextColor(FreedomUi.MUTED)
                 setPadding(dp(2), dp(8), 0, 0)
             })
         }
         val dialog = AlertDialog.Builder(activity)
-            .setTitle("回复数量限制")
+            .setTitle("消息拦截")
             .setView(content)
             .setNegativeButton("取消", null)
             .setPositiveButton("保存", null)
@@ -380,7 +369,7 @@ internal class PersonalizationScreen(
                 onTaskParametersChanged(parameters)
                 replyLimitValue?.apply {
                     text = parsed.toString()
-                    contentDescription = "回复数量限制 $parsed 条，点击编辑"
+                    contentDescription = "消息拦截 $parsed，点击编辑"
                 }
                 dialog.dismiss()
             }
@@ -396,6 +385,10 @@ internal class PersonalizationScreen(
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = dp(68)
             setPadding(dp(2), dp(8), dp(4), dp(8))
+            background = clickableBackground(8)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showImagePreReplyEditor() }
         }
         row.addView(LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -405,32 +398,70 @@ internal class PersonalizationScreen(
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(FreedomUi.TEXT)
             })
-            addView(TextView(activity).apply {
-                text = "保存偏好；图片识别与自动回复流程接入后生效"
-                textSize = 11f
-                setTextColor(FreedomUi.MUTED)
-                setPadding(0, dp(4), 0, 0)
-                maxLines = 2
-            })
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        row.addView(Switch(activity).apply {
-            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
-            thumbTintList = ColorStateList(states, intArrayOf(FreedomUi.TEXT, Color.WHITE))
-            trackTintList = ColorStateList(states, intArrayOf(FreedomUi.LIME, 0xFFD9DED5.toInt()))
-            minWidth = dp(52)
-            showText = false
-            isChecked = parameters.imagePreReplyEnabled
-            contentDescription = "图片预回复偏好；执行链路尚未接入"
-            setOnCheckedChangeListener { _, checked ->
-                parameters = parameters.copy(imagePreReplyEnabled = checked)
-                onTaskParametersChanged(parameters)
-            }
-        })
+        imagePreReplyValue = TextView(activity).apply {
+            text = parameters.imagePreReplyLimit.toString()
+            textSize = 20f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(FreedomUi.TEXT)
+            background = FreedomUi.roundedSurface(dp(9), Color.WHITE, FreedomUi.DIVIDER)
+            contentDescription = "图片预回复 ${parameters.imagePreReplyLimit}，点击编辑"
+        }
+        row.addView(imagePreReplyValue, LinearLayout.LayoutParams(dp(64), dp(40)))
         wrapper.addView(row)
         wrapper.addView(View(activity).apply {
             setBackgroundColor(FreedomUi.DIVIDER)
         }, LinearLayout.LayoutParams(-1, dp(1)))
         return wrapper
+    }
+
+    private fun showImagePreReplyEditor() {
+        val input = EditText(activity).apply {
+            setText(parameters.imagePreReplyLimit.toString())
+            setSelection(text.length)
+            inputType = InputType.TYPE_CLASS_NUMBER
+            isSingleLine = true
+            textSize = 18f
+            setTextColor(FreedomUi.TEXT)
+            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        val content = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(8), dp(22), dp(4))
+            addView(input, LinearLayout.LayoutParams(-1, dp(52)))
+            addView(TextView(activity).apply {
+                text = "回复消息满足后执行/0不开启"
+                textSize = 11f
+                setTextColor(FreedomUi.MUTED)
+                setPadding(dp(2), dp(8), 0, 0)
+            })
+        }
+        val dialog = AlertDialog.Builder(activity)
+            .setTitle("图片预回复")
+            .setView(content)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val parsed = input.text.toString().trim().toIntOrNull()
+                if (parsed == null || parsed < 0) {
+                    input.error = "请输入大于或等于 0 的数字"
+                    return@setOnClickListener
+                }
+                parameters = parameters.copy(imagePreReplyLimit = parsed)
+                onTaskParametersChanged(parameters)
+                imagePreReplyValue?.apply {
+                    text = parsed.toString()
+                    contentDescription = "图片预回复 $parsed，点击编辑"
+                }
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+        FreedomUi.styleAlertDialog(dialog, activity, dp)
     }
 
     private fun historyRetentionPolicyRow(): View {

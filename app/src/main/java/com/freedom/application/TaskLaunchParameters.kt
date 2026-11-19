@@ -11,7 +11,7 @@ data class TaskLaunchParameters(
     val maxAge: Int = 0,
     /** True means the user selected “仅在线”; currently persisted as a preference only. */
     val onlineOnly: Boolean = false,
-    val replyLimit: Int = 10,
+    val replyLimit: Int = 0,
     /** Stored preference; image understanding/reply execution is not wired into the runtime yet. */
-    val imagePreReplyEnabled: Boolean = false
+    val imagePreReplyLimit: Int = 0
 )

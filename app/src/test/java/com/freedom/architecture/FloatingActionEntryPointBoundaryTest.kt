@@ -181,13 +181,14 @@ class FloatingActionEntryPointBoundaryTest {
         val store = source("app/src/main/java/com/freedom/data/TaskLaunchParametersStore.kt")
 
         assertFalse(homeOnly.contains("回复数量限制"))
-        assertTrue(personalization.contains("replyLimitPreferenceRow()"))
+        assertTrue(personalization.contains("messageInterceptionPreferenceRow()"))
         assertTrue(personalization.contains("图片预回复"))
-        assertTrue(model.contains("imagePreReplyEnabled"))
+        assertTrue(model.contains("imagePreReplyLimit"))
         assertTrue(store.contains("KEY_IMAGE_PRE_REPLY_ENABLED"))
-        assertTrue(store.contains("getBoolean(KEY_IMAGE_PRE_REPLY_ENABLED, false)"))
-        assertTrue(store.contains("putBoolean(KEY_IMAGE_PRE_REPLY_ENABLED, parameters.imagePreReplyEnabled)"))
-        assertTrue(personalization.contains("图片识别与自动回复流程接入后生效"))
+        assertTrue(store.contains("KEY_IMAGE_PRE_REPLY_LIMIT"))
+        assertTrue(store.contains("getInt(KEY_IMAGE_PRE_REPLY_LIMIT, 0)"))
+        assertTrue(store.contains("putInt(KEY_IMAGE_PRE_REPLY_LIMIT"))
+        assertTrue(personalization.contains("回复消息满足后执行/0不开启"))
     }
 
     @Test
