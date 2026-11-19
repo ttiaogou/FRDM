@@ -155,6 +155,7 @@ class AiReplyObservationRuntime(
     init {
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
+            privateMessagesCheckpointRecoveryPending = true
             onLog("消息列表进程恢复：已读取持久化检查点；等待页面结构重新确认后继续")
         }
     }
@@ -337,6 +338,8 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsRecoveryVerificationPending = false
     private val receivedGreetingsRecoveryVerificationGate = PageRecoveryVerificationGate()
     private var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+    private var privateMessagesCheckpointRecoveryPending = false
+    private val privateMessagesCheckpointVerificationGate = PageRecoveryVerificationGate()
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -1203,6 +1206,13 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
         privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
+        privateMessagesCheckpointRecoveryPending = false
+        privateMessagesCheckpointVerificationGate.reset()
+        privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
+            privateMessagesTraversalTaskExecutor.restore(checkpoint)
+            privateMessagesCheckpointRecoveryPending = true
+            onLog("消息列表任务恢复：已重新装载检查点；等待连续两次消息列表结构快照确认")
+        }
         sessionManagerState = if (sessionRunStarted) {
             SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP
         } else {
@@ -1827,6 +1837,18 @@ class AiReplyObservationRuntime(
     }
 
     private fun handleSessionListPage(snapshot: ChatPageSnapshot) {
+        if (privateMessagesCheckpointRecoveryPending && sessionRunStarted && !receivedGreetingsTaskActive) {
+            if (!privateMessagesCheckpointVerificationGate.observe(recoveryStructuralKey(snapshot))) {
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("消息列表进程恢复[RECOVERY_VERIFYING]：第${privateMessagesCheckpointVerificationGate.stableSamples}/2次结构快照尚未稳定；350ms后复核")
+                scheduleFullInspectionAfter(350L)
+                return
+            }
+            privateMessagesCheckpointRecoveryPending = false
+            privateMessagesCheckpointVerificationGate.reset()
+            sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP
+            onLog("消息列表进程恢复[RECOVERY_VERIFIED]：连续两次结构快照一致；继续持久化检查点对应任务")
+        }
         if (privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys != null) {
             // The delayed boundary verifier owns this interval. Ignore ordinary page events so
             // an early accessibility callback cannot turn a provisional no-motion result into
