@@ -985,6 +985,28 @@ internal class MomoSocialAdapter(
         return true
     }
 
+    /**
+     * Bridges the shared route confirmation into the adapter's window-scoped list state. The
+     * existing read-only manual-list observer remains the authority for locating the current
+     * list container and setting sayHiConfirmedListTarget; no navigation or gesture is issued.
+     */
+    override fun synchronizeReceivedGreetingsRecoveryConfirmation(): Boolean {
+        var status = observeManuallyOpenedReceivedGreetingsPage()
+        if (status != ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED) {
+            status = observeManuallyOpenedReceivedGreetingsPage()
+        }
+        val confirmed = status == ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED &&
+            isReceivedGreetingsListStructureVisible() &&
+            sayHiNavigationFlowController.isReceivedListConfirmed() &&
+            sayHiConfirmedListTarget?.let { accessibilityGateway.isWindowCurrent(it.window) } == true
+        onLog(
+            "收到的招呼统一恢复确认同步：结果=${if (confirmed) "已同步" else "未同步"}；" +
+                "adapterList=${sayHiNavigationFlowController.isReceivedListConfirmed()}；" +
+                "windowTarget=${sayHiConfirmedListTarget != null}"
+        )
+        return confirmed
+    }
+
     override fun beginReceivedGreetingsNavigationTask() {
         resetReceivedGreetingsEntrySearch()
     }

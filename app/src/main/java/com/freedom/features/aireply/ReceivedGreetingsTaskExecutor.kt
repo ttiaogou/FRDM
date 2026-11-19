@@ -118,6 +118,10 @@ internal class ReceivedGreetingsTaskExecutor(
             .getOrDefault(false)
     }
 
+    fun synchronizeRecoveryConfirmation(): Boolean =
+        runCatching { pagePort.synchronizeReceivedGreetingsRecoveryConfirmation() }
+            .getOrDefault(false)
+
     /** Returns from a verified greetings boundary only when this task still owns UI operations. */
     fun returnForPriorityCheck(): Boolean {
         if (!ownsTask()) return false

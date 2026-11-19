@@ -601,6 +601,12 @@ interface ChatPagePort {
     /** Starts read-only traversal from an already confirmed, manually opened greetings list. */
     fun beginReceivedGreetingsTaskFromCurrentList(): Boolean = false
 
+    /**
+     * Synchronizes adapter-owned list confirmation after the shared page-recovery route has
+     * already verified the destination with two stable snapshots.
+     */
+    fun synchronizeReceivedGreetingsRecoveryConfirmation(): Boolean = false
+
     /** Current read-only traversal status for the received-greetings branch. */
     fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus =
         ReceivedGreetingsTraversalStatus.UNKNOWN

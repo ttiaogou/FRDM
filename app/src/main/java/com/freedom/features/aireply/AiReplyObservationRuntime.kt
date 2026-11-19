@@ -648,6 +648,13 @@ class AiReplyObservationRuntime(
                 receivedGreetingsRecoveryVerificationPending = false
                 receivedGreetingsRecoveryVerifiedForNextSnapshot = false
                 receivedGreetingsRecoveryVerificationGate.reset()
+                if (!receivedGreetingsTaskFlow.synchronizeRecoveryConfirmation()) {
+                    sessionManagerState = SessionManagerState.PAUSED
+                    onLog("统一页面恢复[ADAPTER_CONFIRMATION_WAIT]：收到招呼路由已通过双快照，但适配器列表确认状态尚未同步；保持暂停并等待新鲜只读复核")
+                    scheduleFullInspectionAfter(350L)
+                    lastPageInspection = inspection
+                    return
+                }
                 sessionManagerState = SessionManagerState.PAUSED
                 lastPageInspection = inspection
                 startReceivedGreetingsTaskFromConfirmedPage()

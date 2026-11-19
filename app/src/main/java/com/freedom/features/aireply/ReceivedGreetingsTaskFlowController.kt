@@ -86,6 +86,8 @@ internal class ReceivedGreetingsTaskFlowController(
     /** Begins only from a page already confirmed by the dedicated page recognizer. */
     fun beginFromConfirmedList(): Boolean = executor.beginFromConfirmedList()
 
+    fun synchronizeRecoveryConfirmation(): Boolean = executor.synchronizeRecoveryConfirmation()
+
     fun markStarted() = lifecycle.markStarted()
 
     fun performInitialIdleStep(): Boolean = executor.performIdleStep()
