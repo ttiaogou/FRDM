@@ -5,6 +5,7 @@ import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.accessibility.events.AccessibilityEventType
 import com.freedom.core.accessibility.event.AccessibilityEventPolicy
 import com.freedom.core.accessibility.events.AccessibilityUiSignal
+import com.freedom.core.accessibility.events.SelfNavigationTransition
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.TaskCoordinator
@@ -341,6 +342,25 @@ class AiReplyObservationRuntime(
     private var currentSessionWindowKey: String?
         get() = privateMessagesTraversalTaskExecutor.currentSessionWindowKey
         set(value) { privateMessagesTraversalTaskExecutor.currentSessionWindowKey = value }
+    /** Captures the self-initiated list-to-detail navigation awaiting page verification. */
+    private data class ExpectedPrivateSessionDetailNavigation(
+        val sessionKey: String,
+        val sessionName: String?,
+        val sourceWindowKey: String,
+        val startedAtUptimeMs: Long
+    )
+    private var expectedPrivateSessionDetailNavigation: ExpectedPrivateSessionDetailNavigation? = null
+    private var selfNavigationTransition: SelfNavigationTransition? = null
+
+    /** Receives business-neutral navigation provenance from the unified accessibility layer. */
+    fun onSelfNavigationAttached(transition: SelfNavigationTransition) {
+        selfNavigationTransition = transition
+        onLog(
+            "统一页面导航[SELF_NAVIGATION_ATTACHED]：" +
+                "actionId=${transition.actionId}；targetActivity=${transition.targetActivityClass}；" +
+                "targetPageGeneration=${transition.targetPageGeneration}"
+        )
+    }
     /** Prevents duplicate mismatch handling; the per-attempt guard belongs to the traversal executor. */
     private val headerMismatchGuard: Any
         get() = privateMessagesTraversalTaskExecutor.headerMismatchGuard
@@ -593,9 +613,17 @@ class AiReplyObservationRuntime(
 
         val activeTaskId = taskOwnership.activeTaskId()
         val activeRouteId = recoveryRouteIdForTask(activeTaskId)
+        val selfInitiatedTransition = selfNavigationTransition?.takeIf {
+            it.targetActivityClass == inspection.activityClass &&
+                it.targetPageGeneration == inspection.windowGeneration
+        }
+        if (selfInitiatedTransition != null) {
+            selfNavigationTransition = null
+        }
         if (sessionRunStarted && activeTaskId != null && !recoveryContext.pending &&
             previous != null && matchedRouteId != activeRouteId &&
-            pageIdentityChanged(previous, inspection)
+            pageIdentityChanged(previous, inspection) &&
+            selfInitiatedTransition == null
         ) {
             requestUnifiedPauseAndCheckpoint(activeTaskId, "PAGE_ROUTE_CHANGED")
         }
@@ -1233,6 +1261,8 @@ class AiReplyObservationRuntime(
         currentSessionReadCaptured = false
         currentSessionWindowKey = null
         currentSessionBinding = null
+        expectedPrivateSessionDetailNavigation = null
+        selfNavigationTransition = null
         identityCaptureSessionKey = null
         identityCaptureStartedAtMs = 0L
         identityCaptureRetryCount = 0
@@ -2944,6 +2974,22 @@ class AiReplyObservationRuntime(
                             candidate = attempt.candidate,
                             sessionKey = attempt.selectedKey,
                             windowKey = null
+                        )
+                        expectedPrivateSessionDetailNavigation = ExpectedPrivateSessionDetailNavigation(
+                            sessionKey = attempt.selectedKey,
+                            sessionName = attempt.candidate.nameText,
+                            sourceWindowKey = listOf(
+                                attempt.candidate.rowTarget.window.packageName,
+                                attempt.candidate.rowTarget.window.windowId,
+                                attempt.candidate.rowTarget.window.generation
+                            ).joinToString("|"),
+                            startedAtUptimeMs = android.os.SystemClock.uptimeMillis()
+                        )
+                        onLog(
+                            "AI 会话导航事务：已登记预期详情导航；" +
+                                "sessionKey=${attempt.selectedKey.take(12)}；" +
+                                "sourceWindow=${attempt.candidate.rowTarget.window.windowId}@" +
+                                "${attempt.candidate.rowTarget.window.generation}"
                         )
                         sessionManagerState = SessionManagerState.OPENING_SESSION
                         privateMessagesTraversalTaskExecutor.attemptedSessionKeys += attempt.selectedKey

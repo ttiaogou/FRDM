@@ -25,6 +25,16 @@ enum class InputOrigin {
     UNKNOWN
 }
 
+/** Generic, business-neutral evidence that a page transition came from a registered action. */
+data class SelfNavigationTransition(
+    val actionId: String,
+    val sourcePageGeneration: Long,
+    val targetActivityClass: String,
+    val targetPageGeneration: Long,
+    val targetWindowId: Int,
+    val transitionAtUptimeMs: Long
+)
+
 enum class InputOriginEvidence {
     FREEDOM_DISPATCH_GESTURE_LEDGER_MATCH,
     GLOBAL_TOUCH_EVENT_WITHOUT_ACTOR_PROVENANCE,
@@ -174,6 +184,7 @@ class InputOriginClassifier(
 
     private val lock = Any()
     private val actions = LinkedHashMap<String, ActionRecord>()
+    private var lastAttachedSelfNavigation: SelfNavigationTransition? = null
     private var manualReviewRequired: Boolean = false
     private var manualReviewReason: String = ""
 
@@ -374,6 +385,14 @@ class InputOriginClassifier(
                         transitionAtUptimeMs = transitionAtUptimeMs,
                         expiresAtUptimeMs = transitionAtUptimeMs + NAVIGATION_ENTRY_TRANSITION_GRACE_MS
                     )
+                    lastAttachedSelfNavigation = SelfNavigationTransition(
+                        actionId = record.id,
+                        sourcePageGeneration = sourcePageGeneration,
+                        targetActivityClass = targetActivityClass,
+                        targetPageGeneration = targetPageGeneration,
+                        targetWindowId = targetWindowId,
+                        transitionAtUptimeMs = transitionAtUptimeMs
+                    )
                     "导航事务[ATTACHED]：sourceActionId=${record.id}；sourceActivity=${record.activityClass}；" +
                         "sourcePageGeneration=$sourcePageGeneration；targetActivity=$targetActivityClass；" +
                         "targetPageGeneration=$targetPageGeneration；targetWindowId=$targetWindowId；" +
@@ -388,6 +407,11 @@ class InputOriginClassifier(
             }
         }
         emitDiagnostic(diagnostic)
+    }
+
+    /** Returns and clears the latest generic self-navigation evidence for route handling. */
+    fun takeAttachedSelfNavigation(): SelfNavigationTransition? = synchronized(lock) {
+        lastAttachedSelfNavigation.also { lastAttachedSelfNavigation = null }
     }
 
     fun rejectDispatchGesture(actionId: String, reason: String) {
@@ -608,7 +632,10 @@ class InputOriginClassifier(
             event.packageName == targetPackage &&
             event.type in TARGET_CONTROL_FEEDBACK_TYPES
 
-    fun clear() = synchronized(lock) { actions.clear() }
+    fun clear() = synchronized(lock) {
+        actions.clear()
+        lastAttachedSelfNavigation = null
+    }
 
     private fun emitDiagnostic(message: String) {
         runCatching { onDiagnostic(message) }

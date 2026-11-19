@@ -512,6 +512,9 @@ class FreedomAccessibilityService : AccessibilityService() {
                     targetWindowId = runCatching { event.windowId }.getOrDefault(-1),
                     transitionAtUptimeMs = event.eventTime
                 )
+                inputOriginClassifier.takeAttachedSelfNavigation()?.let { transition ->
+                    aiReplyObservationRuntime.onSelfNavigationAttached(transition)
+                }
                 pendingNavigationSourcePageGeneration = null
                 pendingNavigationSourceAtUptimeMs = 0L
             }
