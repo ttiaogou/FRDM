@@ -53,7 +53,9 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
     private fun JSONObject.readList(key: String): List<String> = readSet(key).toList()
     private fun JSONObject.readSet(key: String): LinkedHashSet<String> {
         val result = LinkedHashSet<String>(); val array = optJSONArray(key) ?: return result
-        for (i in 0 until array.length().coerceAtMost(MAX_KEYS)) optString(i).takeIf(String::isNotBlank)?.let(result::add)
+        for (i in 0 until array.length().coerceAtMost(MAX_KEYS)) {
+            array.optString(i).takeIf(String::isNotBlank)?.let(result::add)
+        }
         return result
     }
 
