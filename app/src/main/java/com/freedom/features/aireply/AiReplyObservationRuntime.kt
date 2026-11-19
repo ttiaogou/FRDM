@@ -350,11 +350,18 @@ class AiReplyObservationRuntime(
         val startedAtUptimeMs: Long
     )
     private var expectedPrivateSessionDetailNavigation: ExpectedPrivateSessionDetailNavigation? = null
-    private var selfNavigationTransition: SelfNavigationTransition? = null
+    /**
+     * Business-neutral navigation provenance consumed by route recovery.
+     *
+     * This is deliberately separate from expectedPrivateSessionDetailNavigation: the
+     * route layer may trust only the generic unified input result, never a message
+     * session's expected target registration.
+     */
+    private var pendingNavigationSourceResult: SelfNavigationTransition? = null
 
     /** Receives business-neutral navigation provenance from the unified accessibility layer. */
     fun onSelfNavigationAttached(transition: SelfNavigationTransition) {
-        selfNavigationTransition = transition
+        pendingNavigationSourceResult = transition
         onLog(
             "统一页面导航[SELF_NAVIGATION_ATTACHED]：" +
                 "actionId=${transition.actionId}；targetActivity=${transition.targetActivityClass}；" +
@@ -613,12 +620,15 @@ class AiReplyObservationRuntime(
 
         val activeTaskId = taskOwnership.activeTaskId()
         val activeRouteId = recoveryRouteIdForTask(activeTaskId)
-        val selfInitiatedTransition = selfNavigationTransition?.takeIf {
+        // Route recovery is allowed to suppress PAGE_ROUTE_CHANGED only when the
+        // unified accessibility layer supplied a matching generic source result.
+        // It must not consult expectedPrivateSessionDetailNavigation here.
+        val selfInitiatedTransition = pendingNavigationSourceResult?.takeIf {
             it.targetActivityClass == inspection.activityClass &&
                 it.targetPageGeneration == inspection.windowGeneration
         }
         if (selfInitiatedTransition != null) {
-            selfNavigationTransition = null
+            pendingNavigationSourceResult = null
         }
         if (sessionRunStarted && activeTaskId != null && !recoveryContext.pending &&
             previous != null && matchedRouteId != activeRouteId &&
@@ -1262,7 +1272,7 @@ class AiReplyObservationRuntime(
         currentSessionWindowKey = null
         currentSessionBinding = null
         expectedPrivateSessionDetailNavigation = null
-        selfNavigationTransition = null
+        pendingNavigationSourceResult = null
         identityCaptureSessionKey = null
         identityCaptureStartedAtMs = 0L
         identityCaptureRetryCount = 0
@@ -2983,7 +2993,10 @@ class AiReplyObservationRuntime(
                                 attempt.candidate.rowTarget.window.windowId,
                                 attempt.candidate.rowTarget.window.generation
                             ).joinToString("|"),
-                            startedAtUptimeMs = android.os.SystemClock.uptimeMillis()
+                            // Keep this business module independent from Android APIs while
+                            // preserving the monotonic uptime meaning used by the navigation
+                            // correlation record.
+                            startedAtUptimeMs = System.nanoTime() / 1_000_000L
                         )
                         onLog(
                             "AI 会话导航事务：已登记预期详情导航；" +
