@@ -1,6 +1,7 @@
 package com.freedom.features.aireply
 
 import com.freedom.core.accessibility.api.GestureSubmission
+import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.NodePath
 import com.freedom.core.accessibility.api.NodeTarget
 import com.freedom.core.accessibility.api.ScreenRect
@@ -86,6 +87,10 @@ class PrivateMessagesTaskExecutorTest {
         assertEquals(submitted.requestId, dispatched?.id)
         assertEquals(submitted.requestId, callbackId)
         assertTrue(dispatched?.description?.contains("打开已复核的会话行") == true)
+        assertEquals(
+            GestureFeedbackIntent.NAVIGATION_ENTRY,
+            dispatched?.feedbackIntent
+        )
     }
 
     @Test

@@ -477,13 +477,6 @@ class FreedomAccessibilityService : AccessibilityService() {
             if (globalNodeLayoutVisualizationUseCase.snapshots().isNotEmpty()) {
                 globalNodeLayoutVisualizationUseCase.clear()
             }
-            val currentPageGeneration = accessibilityGateway.currentWindowGeneration()
-            if (gestureRuntimeDelegate.isInitialized()) {
-                gestureRuntime.onPageTransition(
-                    newPageGeneration = currentPageGeneration,
-                    reason = "accessibility_window_or_activity_transition"
-                )
-            }
             if (activeMode == RunMode.AI_REPLY) {
                 val foregroundPackage = accessibilityGateway.observeForegroundWindowForReadiness()
                 addLog(
@@ -504,23 +497,34 @@ class FreedomAccessibilityService : AccessibilityService() {
                     pendingNavigationSourceAtUptimeMs = event.eventTime
                 }
             }
-            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-                if (isTargetWindowEvent) {
-                    val pairedSource = pendingNavigationSourcePageGeneration?.takeIf {
-                        event.eventTime >= pendingNavigationSourceAtUptimeMs &&
-                            event.eventTime - pendingNavigationSourceAtUptimeMs <= NAVIGATION_TRANSITION_EVENT_PAIR_MS
-                    }
-                    inputOriginClassifier.noteActivityTransition(
-                        packageName = monitorRepository.targetPackage(),
-                        targetActivityClass = event.className?.toString().orEmpty(),
-                        sourcePageGeneration = pairedSource ?: sourcePageGeneration,
-                        targetPageGeneration = accessibilityGateway.currentWindowGeneration(),
-                        targetWindowId = runCatching { event.windowId }.getOrDefault(-1),
-                        transitionAtUptimeMs = event.eventTime
-                    )
+            val pairedSource = if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && isTargetWindowEvent) {
+                pendingNavigationSourcePageGeneration?.takeIf {
+                    event.eventTime >= pendingNavigationSourceAtUptimeMs &&
+                        event.eventTime - pendingNavigationSourceAtUptimeMs <= NAVIGATION_TRANSITION_EVENT_PAIR_MS
                 }
+            } else null
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && isTargetWindowEvent) {
+                inputOriginClassifier.noteActivityTransition(
+                    packageName = monitorRepository.targetPackage(),
+                    targetActivityClass = event.className?.toString().orEmpty(),
+                    sourcePageGeneration = pairedSource ?: sourcePageGeneration,
+                    targetPageGeneration = accessibilityGateway.currentWindowGeneration(),
+                    targetWindowId = runCatching { event.windowId }.getOrDefault(-1),
+                    transitionAtUptimeMs = event.eventTime
+                )
                 pendingNavigationSourcePageGeneration = null
                 pendingNavigationSourceAtUptimeMs = 0L
+            }
+            // Attribute the transition while the dispatch ledger still retains the
+            // navigation-entry tap. Only then invalidate the active gesture execution;
+            // otherwise the coordinator can settle the tap as CANCELLED before the
+            // unified accessibility entry point attaches its navigation transaction.
+            val currentPageGeneration = accessibilityGateway.currentWindowGeneration()
+            if (gestureRuntimeDelegate.isInitialized()) {
+                gestureRuntime.onPageTransition(
+                    newPageGeneration = currentPageGeneration,
+                    reason = "accessibility_window_or_activity_transition"
+                )
             }
         }
         if (!monitorRepository.isRunRequested()) return

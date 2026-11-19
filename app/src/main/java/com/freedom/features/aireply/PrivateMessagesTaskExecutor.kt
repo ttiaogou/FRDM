@@ -1,9 +1,9 @@
 package com.freedom.features.aireply
 
+import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.accessibility.gesture.GestureExecutionResult
-import com.freedom.core.accessibility.gesture.GestureFeedbackIntent
 import com.freedom.core.accessibility.gesture.GestureIntent
 import com.freedom.core.accessibility.gesture.GestureIntentRequest
 import com.freedom.core.accessibility.gesture.GestureExecutionContext

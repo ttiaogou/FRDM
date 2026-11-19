@@ -72,7 +72,13 @@ class InputOriginClassifier(
     private val movementFeedbackGraceAfterCompletionMs: Long = DEFAULT_MOVEMENT_FEEDBACK_GRACE_AFTER_COMPLETION_MS,
     private val onDiagnostic: (String) -> Unit = {}
 ) {
-    private enum class DispatchState { ACTIVE, FEEDBACK_PENDING, RETAINED, CANCELLED }
+    private enum class DispatchState {
+        ACTIVE,
+        FEEDBACK_PENDING,
+        NAVIGATION_PENDING,
+        RETAINED,
+        CANCELLED
+    }
 
     private data class NavigationTransitionTicket(
         val sourcePageGeneration: Long,
@@ -280,7 +286,10 @@ class InputOriginClassifier(
         val state = if (completed) DispatchState.FEEDBACK_PENDING else DispatchState.CANCELLED
         val settledRecord = synchronized(lock) {
             val record = actions[actionId] ?: return@synchronized null
-            record.state = state
+            val settledState = if (completed && record.feedbackIntent == GestureFeedbackIntent.NAVIGATION_ENTRY) {
+                DispatchState.NAVIGATION_PENDING
+            } else state
+            record.state = settledState
             record.settledAtUptimeMs = settledAtUptimeMs
             record.expiresAtUptimeMs = maxOf(
                 record.expiresAtUptimeMs,
@@ -312,7 +321,11 @@ class InputOriginClassifier(
             emitDiagnostic(
                 "输入来源账本[SETTLED]：actionId=$actionId；" +
                     "platformResult=${if (completed) "COMPLETED" else "CANCELLED"}；" +
-                    "ledgerState=${if (completed) "FEEDBACK_PENDING" else "CANCELLED"}；" +
+                    "ledgerState=${if (completed && state == DispatchState.FEEDBACK_PENDING) {
+                        "FEEDBACK_PENDING"
+                    } else if (completed) {
+                        "NAVIGATION_PENDING"
+                    } else "CANCELLED"}；" +
                     "settledAtUptimeMs=$settledAtUptimeMs；" +
                     "feedbackExpiresAtUptimeMs=${settledRecord.first}；" +
                     "retainedUntilUptimeMs=${settledRecord.second}"
@@ -339,7 +352,11 @@ class InputOriginClassifier(
             pruneLocked(transitionAtUptimeMs)
             val eligible = actions.values.filter { record ->
                 record.feedbackIntent == GestureFeedbackIntent.NAVIGATION_ENTRY &&
-                    record.state in setOf(DispatchState.ACTIVE, DispatchState.FEEDBACK_PENDING) &&
+                    record.state in setOf(
+                        DispatchState.ACTIVE,
+                        DispatchState.FEEDBACK_PENDING,
+                        DispatchState.NAVIGATION_PENDING
+                    ) &&
                     record.packageName == packageName &&
                     record.pageGeneration == sourcePageGeneration &&
                     record.isTapLike && !record.possibleExternalTouchOverlap &&
@@ -421,7 +438,11 @@ class InputOriginClassifier(
             if (isScroll) {
                 val navigationTickets = actions.values.mapNotNull { record ->
                     val ticket = record.navigationTransitionTicket ?: return@mapNotNull null
-                    if (record.state !in setOf(DispatchState.ACTIVE, DispatchState.FEEDBACK_PENDING) ||
+                    if (record.state !in setOf(
+                            DispatchState.ACTIVE,
+                            DispatchState.FEEDBACK_PENDING,
+                            DispatchState.NAVIGATION_PENDING
+                        ) ||
                         ticket.consumed || ticket.possibleExternalTouch ||
                         ticket.targetPageGeneration != currentPageGeneration ||
                         ticket.targetActivityClass != currentActivityClass ||
@@ -434,6 +455,7 @@ class InputOriginClassifier(
                 if (navigationTickets.size == 1) {
                     val (record, ticket) = navigationTickets.single()
                     ticket.consumed = true
+                    record.state = DispatchState.RETAINED
                     return@synchronized InputOriginDecision(
                         origin = InputOrigin.SELF_INJECTED,
                         evidence = InputOriginEvidence.AUTONOMOUS_NAVIGATION_TRANSITION_MATCH,
@@ -473,7 +495,12 @@ class InputOriginClassifier(
                 // feedback can arrive before Android invokes GestureResultCallback, so ACTIVE
                 // is matchable; CANCELLED and RETAINED are never matchable. A preceding global touch
                 // boundary prevents a SELF_INJECTED match; the boundary remains UNKNOWN on its own.
-                if (record.state !in setOf(DispatchState.ACTIVE, DispatchState.FEEDBACK_PENDING)) return@filter false
+                if (record.state !in setOf(
+                        DispatchState.ACTIVE,
+                        DispatchState.FEEDBACK_PENDING,
+                        DispatchState.NAVIGATION_PENDING
+                    )
+                ) return@filter false
                 if (isClick && event.type in record.consumedClickFeedbackTypes) return@filter false
                 if (!isWithinFeedbackWindow(record, eventTime)) return@filter false
                 if (record.possibleExternalTouchOverlap) return@filter false
@@ -719,7 +746,7 @@ class InputOriginClassifier(
             }
             val hasLiveNavigationTicket = ticket != null && !ticket.consumed &&
                 !ticket.possibleExternalTouch && nowUptimeMs <= ticket.expiresAtUptimeMs
-            if (record.state == DispatchState.FEEDBACK_PENDING &&
+            if (record.state in setOf(DispatchState.FEEDBACK_PENDING, DispatchState.NAVIGATION_PENDING) &&
                 nowUptimeMs > record.feedbackExpiresAtUptimeMs && !hasLiveNavigationTicket
             ) {
                 record.state = DispatchState.RETAINED

@@ -13,7 +13,7 @@ class AiReplyDecisionEngine(
         if (input.manualReviewRequired && !input.context.currentWindowDraft) return AiReplyDecision(AiReplyAction.HUMAN_REVIEW, "MANUAL_REVIEW_REQUIRED")
         if (!input.contactIdentityVerified && !input.context.currentWindowDraft) return AiReplyDecision(AiReplyAction.HUMAN_REVIEW, "CONTACT_IDENTITY_UNVERIFIED")
         if (!input.context.hasVerifiedIncoming && !input.context.currentWindowDraft) return AiReplyDecision(AiReplyAction.WAIT, "NO_VERIFIED_INCOMING_MESSAGE")
-        if (input.context.messages.isEmpty()) return clarificationDecision("EMPTY_CONTEXT")
+        if (input.context.messages.isEmpty()) return AiReplyDecision(AiReplyAction.WAIT, "EMPTY_CONTEXT")
         if (input.cooldownActive) return AiReplyDecision(AiReplyAction.WAIT, "CONTACT_COOLDOWN")
         if (modelProvider.requiresCloudConsent && !cloudConsent.isGranted()) {
             return AiReplyDecision(AiReplyAction.HUMAN_REVIEW, "CLOUD_PROCESSING_CONSENT_REQUIRED")
@@ -49,22 +49,8 @@ class AiReplyDecisionEngine(
                 provider = result.provider,
                 model = result.model
             )
-        val normalized = if (parsed.action == AiReplyAction.WAIT && input.context.hasVerifiedIncoming) {
-            // A verified incoming message must always receive a draft. When the model cannot
-            // disambiguate the context, turn WAIT into a low-commitment clarification instead
-            // of leaving the user with an empty draft.
-            clarificationDecision("${parsed.reason}_CLARIFICATION", parsed.reasonDetail)
-        } else parsed
-        return normalized.copy(provider = result.provider, model = result.model, finishReason = result.finishReason, usage = result.usage)
+        return parsed.copy(provider = result.provider, model = result.model, finishReason = result.finishReason, usage = result.usage)
     }
-
-    private fun clarificationDecision(reason: String, detail: String? = null): AiReplyDecision =
-        AiReplyDecision(
-            action = AiReplyAction.REPLY,
-            reason = reason.take(120),
-            reasonDetail = detail ?: "上下文不足，生成低承诺的澄清式回复，不猜测具体事实。",
-            draft = "你说的是哪一件事呀？可以再具体说一点吗？"
-        )
 
     companion object {
         const val DEFAULT_TEMPERATURE = 0.4
@@ -72,7 +58,9 @@ class AiReplyDecisionEngine(
         const val DEFAULT_SYSTEM_INSTRUCTION = "You are a careful conversation assistant. Use only the supplied conversation history. " +
             "Return one JSON object matching the supplied strict JSON Schema: action, reason, reasonDetail, draft. " +
             "Use a short uppercase reason code. In reasonDetail, explain in Chinese the concrete basis for this decision, the ambiguity or missing context, and why a draft was not produced when applicable. Do not invent facts or repeat private identifiers. Set draft to a string only for REPLY; otherwise set draft to null. " +
-            "Never claim to have performed actions. If there is a verified incoming message but the context is insufficient or ambiguous, choose REPLY and draft one short, low-commitment clarification question. Do not choose WAIT or return a null/empty draft in that case. " +
+            "Never claim to have performed actions. If context is insufficient, choose WAIT. " +
+            "For REPLY, draft must contain one independent message per line. Keep each line short and do not merge independent replies. " +
+            "If line breaks are unavailable, use the literal separator <MSG> between messages. Do not use numbered lists or explanations. " +
             "If sensitive, risky, ambiguous, or requiring a consequential decision, choose HUMAN_REVIEW. " +
             "Do not volunteer your AI identity when it is irrelevant to the conversation; if directly asked whether you are an AI, answer truthfully and never claim to be human. " +
             "Common phone numbers, email addresses, and mainland Chinese identity numbers are redacted before submission."
