@@ -86,7 +86,9 @@ class AiReplyObservationRuntime(
     private val isDraftAwaitingUserSend: () -> Boolean = { false },
     /** Invalidates late model callbacks when this runtime is reset. */
     private val onDraftRuntimeReset: () -> Unit = {},
-    private val privateMessagesCheckpointRepository: PrivateMessagesTraversalCheckpointRepository? = null
+    private val privateMessagesCheckpointRepository: PrivateMessagesTraversalCheckpointRepository? = null,
+    /** Registers non-tap business navigation in the unified accessibility provenance layer. */
+    private val registerSelfNavigation: (String) -> Unit = {}
 ) {
     companion object {
         private const val MAX_VISIBLE_MESSAGES = 20
@@ -1729,6 +1731,7 @@ class AiReplyObservationRuntime(
                             "耗时=${identityElapsedMs.coerceAtLeast(0L)}ms；仅当前窗口上下文"
                     )
                 } else {
+                registerSelfNavigation(snapshot.activityClass)
                 val identityOutcome = runCatching {
                     chatSessionManagementPort.observeContactIdentityCapture(currentSessionCandidate!!)
                 }.getOrElse { error ->

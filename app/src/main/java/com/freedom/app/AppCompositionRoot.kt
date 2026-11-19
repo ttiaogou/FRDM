@@ -487,6 +487,12 @@ internal class AccessibilityServiceDependencies internal constructor(
                     aiReplyDraftCoordinator.resetForRuntimeReset()
                 }
             },
+            registerSelfNavigation = { targetActivityClass ->
+                inputOriginClassifier.registerExpectedSelfNavigation(
+                    packageName = monitorRepository.targetPackage(),
+                    targetActivityClass = targetActivityClass
+                )
+            },
             privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository
         )
     }

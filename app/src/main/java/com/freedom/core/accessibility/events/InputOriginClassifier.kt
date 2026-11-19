@@ -184,7 +184,15 @@ class InputOriginClassifier(
 
     private val lock = Any()
     private val actions = LinkedHashMap<String, ActionRecord>()
+    private var pendingExpectedNavigation: ExpectedNavigationRegistration? = null
     private var lastAttachedSelfNavigation: SelfNavigationTransition? = null
+
+    private data class ExpectedNavigationRegistration(
+        val actionId: String,
+        val packageName: String,
+        val targetActivityClass: String,
+        val registeredAtUptimeMs: Long
+    )
     private var manualReviewRequired: Boolean = false
     private var manualReviewReason: String = ""
 
@@ -374,8 +382,29 @@ class InputOriginClassifier(
                     transitionAtUptimeMs >= record.submittedAtUptimeMs - EVENT_EARLY_TOLERANCE_MS &&
                     transitionAtUptimeMs <= record.submittedAtUptimeMs + NAVIGATION_ENTRY_TRANSITION_CAUSALITY_MS
             }
-            when (eligible.size) {
-                1 -> {
+            when {
+                eligible.isEmpty() && pendingExpectedNavigation?.let { expected ->
+                    expected.packageName == packageName &&
+                        expected.targetActivityClass == targetActivityClass &&
+                        transitionAtUptimeMs >= expected.registeredAtUptimeMs &&
+                        transitionAtUptimeMs <= expected.registeredAtUptimeMs + NAVIGATION_ENTRY_TRANSITION_CAUSALITY_MS
+                } == true -> {
+                    val expected = pendingExpectedNavigation!!
+                    pendingExpectedNavigation = null
+                    lastAttachedSelfNavigation = SelfNavigationTransition(
+                        actionId = expected.actionId,
+                        sourcePageGeneration = sourcePageGeneration,
+                        targetActivityClass = targetActivityClass,
+                        targetPageGeneration = targetPageGeneration,
+                        targetWindowId = targetWindowId,
+                        transitionAtUptimeMs = transitionAtUptimeMs
+                    )
+                    "导航事务[ATTACHED]：selfActionId=${expected.actionId}；" +
+                        "sourcePageGeneration=$sourcePageGeneration；targetActivity=$targetActivityClass；" +
+                        "targetPageGeneration=$targetPageGeneration；targetWindowId=$targetWindowId；" +
+                        "transitionAtUptimeMs=$transitionAtUptimeMs；source=EXPECTED_SELF_NAVIGATION"
+                }
+                eligible.size == 1 -> {
                     val record = eligible.single()
                     record.navigationTransitionTicket = NavigationTransitionTicket(
                         sourcePageGeneration = sourcePageGeneration,
@@ -398,7 +427,7 @@ class InputOriginClassifier(
                         "targetPageGeneration=$targetPageGeneration；targetWindowId=$targetWindowId；" +
                         "transitionAtUptimeMs=$transitionAtUptimeMs；ticketExpiresAt=${record.navigationTransitionTicket?.expiresAtUptimeMs}"
                 }
-                0 -> "导航事务[UNMATCHED]：未找到唯一来源点击；package=$packageName；" +
+                eligible.isEmpty() -> "导航事务[UNMATCHED]：未找到唯一来源点击；package=$packageName；" +
                     "targetActivity=$targetActivityClass；sourcePageGeneration=$sourcePageGeneration；" +
                     "targetPageGeneration=$targetPageGeneration；targetWindowId=$targetWindowId；" +
                     "transitionAtUptimeMs=$transitionAtUptimeMs"
@@ -412,6 +441,24 @@ class InputOriginClassifier(
     /** Returns and clears the latest generic self-navigation evidence for route handling. */
     fun takeAttachedSelfNavigation(): SelfNavigationTransition? = synchronized(lock) {
         lastAttachedSelfNavigation.also { lastAttachedSelfNavigation = null }
+    }
+
+    /** Registers a business-neutral self-navigation action whose transition is not a tap. */
+    fun registerExpectedSelfNavigation(
+        packageName: String,
+        targetActivityClass: String,
+        registeredAtUptimeMs: Long = System.nanoTime() / 1_000_000L
+    ): String? = synchronized(lock) {
+        if (packageName.isBlank() || targetActivityClass.isBlank()) return@synchronized null
+        val actionId = "freedom-self-navigation-${registeredAtUptimeMs}-${actions.size}"
+        pendingExpectedNavigation = ExpectedNavigationRegistration(
+            actionId = actionId,
+            packageName = packageName,
+            targetActivityClass = targetActivityClass,
+            registeredAtUptimeMs = registeredAtUptimeMs
+        )
+        emitDiagnostic("导航事务[EXPECTED_REGISTERED]：actionId=$actionId；targetActivity=$targetActivityClass")
+        actionId
     }
 
     fun rejectDispatchGesture(actionId: String, reason: String) {
@@ -634,6 +681,7 @@ class InputOriginClassifier(
 
     fun clear() = synchronized(lock) {
         actions.clear()
+        pendingExpectedNavigation = null
         lastAttachedSelfNavigation = null
     }
 
