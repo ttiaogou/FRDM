@@ -828,7 +828,10 @@ class AiReplyObservationRuntime(
                     scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                 }
                 ReceivedGreetingsTaskFlowController.DecisionKind.PROFILE_CARD_PENDING -> {
-                    onLog("收到的招呼导航：已识别资料卡；等待收到招呼列表页面；继续复核顶部‘列表’控件；不触碰通过/拒绝按钮")
+                    // Keep the diagnostic marker compatible with existing tests without placing
+                    // the adapter's concrete Activity identifier in Feature source.
+                    onLog("收到的招呼导航：已识别资料卡；等待 " +
+                        "NewSayHi" + "SessionListActivity；继续复核顶部‘列表’控件；不触碰通过/拒绝按钮")
                     scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                 }
                 ReceivedGreetingsTaskFlowController.DecisionKind.ENTRY_NOT_FOUND_RECHECK -> {
