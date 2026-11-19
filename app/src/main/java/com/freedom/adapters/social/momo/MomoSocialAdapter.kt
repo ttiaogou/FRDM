@@ -3074,7 +3074,6 @@ internal class MomoSocialAdapter(
     private fun requestChatActivityBack(
         reason: String,
         expectedWindow: WindowRef? = null,
-        beforeSubmit: (WindowRef) -> Unit = {},
         onSubmitted: (WindowRef) -> Unit = {}
     ): Boolean {
         val dialogObservation = latestDialogWindowObservation()
@@ -3208,7 +3207,6 @@ internal class MomoSocialAdapter(
             onLog("聊天详情结构安全 BACK 拒绝：弹层检查后页面指纹、窗口或页面代次发生变化；reason=$reason")
             return false
         }
-        beforeSubmit(inspection.window)
         val accepted = accessibilityGateway.performVerifiedNavigationBack(
             inspection.window,
             inspection.window.activityClass
@@ -5119,6 +5117,24 @@ internal class MomoSocialAdapter(
             }
 
             InboxIdentityCaptureStage.WAITING_LIST_RETURN -> {
+                // The user may leave the chat detail manually before the profile
+                // transaction has confirmed its expected return. Do not let this
+                // stale identity transaction hide the message-list fingerprint:
+                // the unified recovery router must be able to observe the new page
+                // and decide whether the original task can resume.
+                if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS &&
+                    !isReceivedGreetingsListStructureVisible()
+                ) {
+                    failPendingInboxIdentityCapture(
+                        pending,
+                        "MANUAL_RETURN_TO_MESSAGE_LIST"
+                    )
+                    onLog(
+                        "AI 联系人身份采集[MANUAL_RETURN_DETECTED]：" +
+                            "已离开聊天详情页；释放过期身份事务，允许统一页面恢复读取消息列表指纹"
+                    )
+                    return false
+                }
                 // The chat detail may be hosted by ChatActivity or wrapped by MaintabActivity.
                 // Inspect the stable three-anchor chat fingerprint directly; calling
                 // inspectChatPage() here would re-enter this pending transaction and keep
@@ -5707,16 +5723,8 @@ internal class MomoSocialAdapter(
         }
     }
 
-    /** Registers the program-owned ChatActivity -> session-list return before dispatching BACK. */
     override fun navigateBackToSessionList(): Boolean =
-        requestChatActivityBack(
-            reason = "普通聊天消息采集完成",
-            beforeSubmit = {
-                // Register the adapter-owned return before dispatching BACK so the
-                // unified accessibility entry can distinguish it from user navigation.
-                registerSelfNavigation(MomoAppDescriptor.MAIN_ACTIVITY_CLASS)
-            }
-        )
+        requestChatActivityBack("普通聊天消息采集完成")
 
     private fun resolveLocalPath(
         root: AccessibilityNodeInfo,
