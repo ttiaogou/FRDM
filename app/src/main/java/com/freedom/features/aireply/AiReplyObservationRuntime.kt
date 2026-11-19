@@ -558,6 +558,33 @@ class AiReplyObservationRuntime(
             return
         }
 
+        // Received-greetings detail -> list is also a recovery boundary. Keep its task lease
+        // while verifying: runFullInspection deliberately refuses to inspect that branch after
+        // ownership is released, so releasing it here would deadlock the recovery transaction.
+        val returnedFromReceivedGreetingsDetail = sessionRunStarted &&
+            receivedGreetingsTaskActive &&
+            previous != null &&
+            inboxPageRecognizer.isChatDetail(previous) &&
+            inspection.pageKind == ChatPageKind.CHAT_LIST &&
+            inspection.packageName == targetPackage()
+        if (returnedFromReceivedGreetingsDetail) {
+            recoveryTransaction.dispatch(
+                RecoveryTransactionEvent.UnknownPage("RECEIVED_GREETINGS_RETURN_FROM_CHAT_DETAIL")
+            )
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+            receivedGreetingsRecoveryVerificationPending = true
+            receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+            receivedGreetingsRecoveryVerificationGate.reset()
+            sessionManagerState = SessionManagerState.PAUSED
+            lastPageInspection = inspection
+            onLog(
+                "PageRecoveryRequested：收到招呼聊天详情已返回收到招呼列表；" +
+                    "保留任务租约并等待连续两次稳定列表指纹，不执行滚动、点击或导航"
+            )
+            scheduleFullInspectionAfter(0L)
+            return
+        }
+
         // Returning from a chat detail page is a recovery boundary even when the fresh
         // snapshot is immediately classified as CHAT_LIST. Do not let the known-page branch
         // below reacquire the task and scroll on the first post-BACK snapshot; that would bypass
