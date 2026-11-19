@@ -3238,6 +3238,9 @@ internal class MomoSocialAdapter(
         return pageVerified
     }
 
+    override fun hasRestorableReceivedGreetingsCheckpoint(): Boolean =
+        sayHiTraversalState.hasRestorableCheckpoint
+
     private fun resetSayHiDetailBackReturnTracking() {
         sayHiDetailBackRecoveryWindowStartedAtUptimeMs = 0L
         sayHiDetailBackRecoveryAttempted = false

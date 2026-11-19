@@ -1160,6 +1160,12 @@ class AiReplyObservationRuntime(
         }.getOrNull()
         sampleCaptureActive = !directory.isNullOrBlank()
         sessionRunStarted = sampleCaptureActive
+        if (sessionRunStarted && chatPagePort.hasRestorableReceivedGreetingsCheckpoint()) {
+            onLog(
+                "收到招呼进程恢复：已保留持久化检查点；等待收到招呼列表页面指纹确认后再恢复任务，" +
+                    "不因断点存在而执行盲目导航"
+            )
+        }
         privateMessagesTaskController.beginRun(currentRunGeneration())
         if (sessionRunStarted && !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动私人消息任务")) {
             sessionRunStarted = false

@@ -29,6 +29,8 @@ internal class MomoSayHiTraversalState(
     val processedContactCount: Int get() = processedContactIdHashes.size
     val deferredRowCount: Int get() = deferredRowKeys.size
     val hasDeferredRows: Boolean get() = deferredRowKeys.isNotEmpty()
+    var hasRestorableCheckpoint: Boolean = false
+        private set
 
     data class RestoreSummary(
         val processedRows: Int,
@@ -45,7 +47,11 @@ internal class MomoSayHiTraversalState(
 
     /** Restores only hashed/content-derived identities and retry metadata, never list position. */
     fun restore(): RestoreSummary? {
-        val checkpoint = checkpointStore.load() ?: return null
+        val checkpoint = checkpointStore.load() ?: run {
+            hasRestorableCheckpoint = false
+            return null
+        }
+        hasRestorableCheckpoint = true
         processedRowKeys.addAll(checkpoint.processedRowKeys)
         processedContactIdHashes.addAll(checkpoint.processedContactIdHashes)
         checkpoint.deferredRows.forEach { (key, value) ->
@@ -174,6 +180,7 @@ internal class MomoSayHiTraversalState(
         safeTargetValidationFailures.clear()
         deferredReturnToTopActive = false
         deferredReplayStarted = false
+        hasRestorableCheckpoint = false
         checkpointStore.clear()
     }
 

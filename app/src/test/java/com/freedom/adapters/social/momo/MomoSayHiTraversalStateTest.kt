@@ -92,6 +92,7 @@ class MomoSayHiTraversalStateTest {
         assertFalse(state.deferredReplayStarted)
         assertFalse(state.isDeferredRetryDue("pending", 4_999L))
         assertTrue(state.isDeferredRetryDue("pending", 5_000L))
+        assertTrue(state.hasRestorableCheckpoint)
     }
 
     @Test
@@ -113,6 +114,7 @@ class MomoSayHiTraversalStateTest {
         assertEquals(0, state.processedRowCount)
         assertEquals(0, state.processedContactCount)
         assertNull(repository.value)
+        assertFalse(state.hasRestorableCheckpoint)
     }
 
     @Test

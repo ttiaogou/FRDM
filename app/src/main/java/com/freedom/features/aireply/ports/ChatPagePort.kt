@@ -586,6 +586,9 @@ interface ChatPagePort {
     /** Reloads the durable received-greetings checkpoint after an AccessibilityService reconnect. */
     fun reloadReceivedGreetingsCheckpointAfterServiceReconnect(): Boolean = false
 
+    /** True when a process-recreated adapter has a non-expired received-greetings checkpoint. */
+    fun hasRestorableReceivedGreetingsCheckpoint(): Boolean = false
+
     /** Observes user navigation toward the greetings list without clicking or scrolling. */
     fun observeManuallyOpenedReceivedGreetingsPage(): ReceivedGreetingsPageArrivalStatus =
         ReceivedGreetingsPageArrivalStatus.NOT_TARGET
