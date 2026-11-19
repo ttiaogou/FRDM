@@ -11,8 +11,7 @@ data class AiReplyPersonalization(
     val customInstructions: String = ""
 ) {
     /**
-     * Convert preferences into plain-language instructions instead of provider-specific numeric
-     * parameters. Any model adapter can pass these instructions through its own system-message API.
+     * 将偏好转换为自然语言提示，而不是供应商专属的数值参数；各模型适配器都可以将这些提示放入系统消息。
      */
     fun systemPromptInstructions(): String {
         require(validationError() == null) { validationError() ?: "AI 个性化偏好无效" }

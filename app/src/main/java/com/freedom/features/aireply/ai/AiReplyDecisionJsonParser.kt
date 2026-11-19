@@ -1,6 +1,6 @@
 package com.freedom.features.aireply.ai
 
-/** Strict JSON Schema and parser shared by the decision engine and provider request contract. */
+/** 决策引擎与供应商请求契约共用的严格 JSON Schema 和解析器。 */
 internal object AiReplyDecisionJsonParser {
     fun schema(maxDraftChars: Int): String = """
         {

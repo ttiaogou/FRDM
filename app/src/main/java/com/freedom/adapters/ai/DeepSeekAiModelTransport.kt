@@ -91,8 +91,8 @@ class DeepSeekAiModelTransport(
             is AiModelResponseFormat.JsonSchema -> buildString {
                 append(request.systemInstruction)
                 append("\n\n")
-                append("Return exactly one valid json object. The response must be JSON only, ")
-                append("with no Markdown fences or surrounding prose. Match this JSON Schema:\n")
+                append("请严格只返回一个有效的 JSON 对象，不要使用 Markdown 代码块，也不要添加任何说明文字。")
+                append("请严格匹配以下 JSON Schema：\n")
                 append(format.schema)
             }
         }
@@ -119,8 +119,7 @@ class DeepSeekAiModelTransport(
         when (request.responseFormat) {
             AiModelResponseFormat.PlainText -> Unit
             is AiModelResponseFormat.JsonSchema -> {
-                // DeepSeek Chat Completions supports JSON Output, not OpenAI's json_schema format.
-                // The complete schema is supplied in the system instruction and validated locally.
+                // DeepSeek 对话接口使用 JSON 输出；完整 Schema 已放入中文系统提示词，并由本地再次校验。
                 payload["response_format"] = mapOf("type" to "json_object")
             }
         }

@@ -252,7 +252,7 @@ class OpenAiCompatibleAiModelTransport(
     }
 }
 
-/** Small strict JSON codec used by this adapter so JVM tests do not depend on Android JSON stubs. */
+/** 适配器使用的小型严格 JSON 编解码器，避免 JVM 测试依赖 Android JSON 桩。 */
 internal object MiniJson {
     fun stringify(value: Any?): String = buildString { appendValue(value) }
 
