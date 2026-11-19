@@ -414,19 +414,22 @@ class AiReplyDraftCoordinator(
         val result = runCatching { inputPort.verifyDraft(target, draft) }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
         if (result.status == ChatDraftInputStatus.VERIFIED) {
+            // Capture the nullable dependency once so the compiler and the send decision use
+            // the same configuration even though the actual send is executed inside a lambda.
+            val configuredSendPort = sendPort
             synchronized(lock) {
                 if (!isCurrentGeneration(requestGeneration)) return
-                awaitingUserSend.set(sendPort == null)
+                awaitingUserSend.set(configuredSendPort == null)
             }
             updateTaskStatus(ReplyTaskStatus.DRAFT_APPLIED, requestGeneration)
-            if (sendPort == null) {
+            if (configuredSendPort == null) {
                 onLog("AI 草稿状态：DRAFT_ACCEPTED_AND_FILLED；草稿已接受并填入输入框；等待人工检查发送")
                 finish("DRAFT_ENTERED_USER_CONTENT_REVIEW_AND_SEND_REQUIRED", requestGeneration)
                 return
             }
             updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
             updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
-            val sent = runCatching { sendPort.sendDraft(target, draft) }
+            val sent = runCatching { configuredSendPort.sendDraft(target, draft) }
                 .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED) }
             if (sent.status == ChatDraftInputStatus.SEND_SUBMITTED) {
                 updateTaskStatus(ReplyTaskStatus.SENT_UNCONFIRMED, requestGeneration)
