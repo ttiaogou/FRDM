@@ -326,6 +326,9 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsQuietTask: ScheduledTask? = null
     private var receivedGreetingsQuietGeneration = 0L
     private val pageRecoveryVerificationGate = PageRecoveryVerificationGate()
+    private var receivedGreetingsRecoveryVerificationPending = false
+    private val receivedGreetingsRecoveryVerificationGate = PageRecoveryVerificationGate()
+    private var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -441,6 +444,27 @@ class AiReplyObservationRuntime(
             onLog("AI 页面恢复[RECOVERY_VERIFIED]：连续两次新鲜结构快照一致；恢复消息列表任务")
             pageRecoveryVerificationGate.reset()
             snapshotRecoveryStartedAtMs = 0L
+        }
+        if (sessionRunStarted && receivedGreetingsTaskActive &&
+            receivedGreetingsRecoveryVerificationPending
+        ) {
+            val fingerprint = runCatching {
+                chatPagePort.receivedGreetingsRecoveryFingerprint()
+            }.getOrNull()
+            if (fingerprint.isNullOrBlank()) {
+                onLog("收到的招呼恢复[RECOVERY_VERIFYING]：当前快照未通过收到招呼列表指纹；继续暂停任务")
+                scheduleReceivedGreetingsRecoveryRetry("收到招呼列表指纹尚未确认；不执行滚动、点击或导航")
+                return
+            }
+            if (!receivedGreetingsRecoveryVerificationGate.observe(fingerprint)) {
+                onLog("收到的招呼恢复[RECOVERY_VERIFYING]：第${receivedGreetingsRecoveryVerificationGate.stableSamples}/2次独立指纹快照尚未稳定；350ms后复核")
+                scheduleFullInspectionAfter(350L)
+                return
+            }
+            receivedGreetingsRecoveryVerificationPending = false
+            receivedGreetingsRecoveryVerifiedForNextSnapshot = true
+            receivedGreetingsRecoveryVerificationGate.reset()
+            onLog("收到的招呼恢复[RECOVERY_VERIFIED]：连续两次新鲜列表指纹一致；恢复收到招呼任务协调器")
         }
         handleInspectionSnapshot(recovered)
     }
@@ -791,7 +815,16 @@ class AiReplyObservationRuntime(
                         "PageRecoveryRequested：收到招呼页面 UNKNOWN；" +
                             "暂停滚动/点击/导航，保留任务检查点，等待新鲜页面指纹复核"
                     )
-                    val decision = receivedGreetingsTaskFlow.evaluateUnclassifiedPageSnapshot()
+                    if (!receivedGreetingsRecoveryVerifiedForNextSnapshot) {
+                        receivedGreetingsRecoveryVerificationPending = true
+                        receivedGreetingsRecoveryVerificationGate.reset()
+                    }
+                    val decision = if (receivedGreetingsRecoveryVerifiedForNextSnapshot) {
+                        receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+                        receivedGreetingsTaskFlow.evaluatePageSnapshot(ChatPageKind.CHAT_LIST)
+                    } else {
+                        receivedGreetingsTaskFlow.evaluateUnclassifiedPageSnapshot()
+                    }
                     when (decision.kind) {
                         ReceivedGreetingsTaskFlowController.DecisionKind.RETRY_REQUIRED -> {
                             scheduleReceivedGreetingsRecoveryRetry(
@@ -1006,6 +1039,9 @@ class AiReplyObservationRuntime(
         lastPageInspection = null
         lastConfirmedChatListInspection = null
         transientEmptySnapshotRecovery.reset()
+        receivedGreetingsRecoveryVerificationPending = false
+        receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+        receivedGreetingsRecoveryVerificationGate.reset()
         lastRegionFingerprint = ""
         lastMessageFingerprint = ""
         loggedOcrDebugFingerprints.clear()

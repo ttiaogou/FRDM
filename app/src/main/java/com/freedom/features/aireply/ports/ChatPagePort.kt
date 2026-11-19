@@ -580,6 +580,9 @@ interface ChatPagePort {
      */
     fun observeReceivedGreetingsPage(): Boolean = false
 
+    /** Fresh page-specific fingerprint; null keeps received-greetings recovery paused. */
+    fun receivedGreetingsRecoveryFingerprint(): String? = null
+
     /** Observes user navigation toward the greetings list without clicking or scrolling. */
     fun observeManuallyOpenedReceivedGreetingsPage(): ReceivedGreetingsPageArrivalStatus =
         ReceivedGreetingsPageArrivalStatus.NOT_TARGET

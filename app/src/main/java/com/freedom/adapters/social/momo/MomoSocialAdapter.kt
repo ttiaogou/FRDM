@@ -3225,6 +3225,9 @@ internal class MomoSocialAdapter(
                 accessibilityGateway.isWindowCurrent(window)
         } == true
 
+    override fun receivedGreetingsRecoveryFingerprint(): String? =
+        receivedGreetingsListWindowIdentity()
+
     private fun resetSayHiDetailBackReturnTracking() {
         sayHiDetailBackRecoveryWindowStartedAtUptimeMs = 0L
         sayHiDetailBackRecoveryAttempted = false
