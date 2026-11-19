@@ -1187,8 +1187,7 @@ class AiReplyObservationRuntimeTest {
         )
 
         runtime.scheduleInitialObservation()
-        scheduler.runNext() // Empty first snapshot enters the indefinite recovery backoff.
-        assertTrue(logs.any { it.contains("AI 页面观察[SNAPSHOT_RECOVERY]") })
+        runUntilLog(scheduler, logs, "AI 页面观察[SNAPSHOT_RECOVERY]")
         assertEquals(500L, scheduler.nextDelay())
 
         port.page = emptyListPage.copy(chatListCandidates = listOf(candidate))

@@ -1,6 +1,11 @@
 package com.freedom.features.accountbrowse
 
 import com.freedom.core.runtime.TaskScheduler
+import com.freedom.features.accountbrowse.ports.BrowsePageEvidence
+import com.freedom.features.accountbrowse.ports.BrowsePageKind
+import com.freedom.features.recovery.RecoveryTransactionEvent
+import com.freedom.features.recovery.RecoveryTransactionState
+import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 
 /**
  * Coordinates the automatic-browse phase dispatch independently from Android Service APIs.
@@ -13,6 +18,7 @@ class AccountBrowseRuntime(
     private val canScheduleStep: () -> Boolean,
     private val isSessionEnabled: () -> Boolean,
     private val isTouchActive: () -> Boolean,
+    private val targetPackage: () -> String = { "com.immomo.momo" },
     private val onResetSession: () -> Unit,
     private val actions: Actions
 ) {
@@ -34,6 +40,8 @@ class AccountBrowseRuntime(
     )
 
     private val stepScheduler = AccountBrowseScheduler(scheduler, canScheduleStep) { performStep() }
+    private val recoveryTransaction = UnifiedRecoveryTransactionStateMachine()
+    private var lastDynamicVerificationFingerprint: String = ""
 
     fun scheduleStep(delayMs: Long) = stepScheduler.schedule(delayMs)
 
@@ -48,6 +56,59 @@ class AccountBrowseRuntime(
 
     var phase: AccountBrowsePhase = AccountBrowsePhase.IDLE
         private set
+
+    /** Normalizes page-observation uncertainty before any AccountBrowse action is authorized. */
+    fun observeRecoveryPage(page: BrowsePageEvidence): RecoveryTransactionState {
+        val unknown = page.pageKind == BrowsePageKind.UNKNOWN ||
+            page.packageName.isBlank() ||
+            !isTargetPackage(page.packageName) ||
+            page.fingerprint.isBlank() ||
+            page.confidence < 80
+        if (unknown) {
+            return recoveryTransaction.dispatch(
+                RecoveryTransactionEvent.UnknownPage(
+                    page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
+                )
+            ).also {
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+            }
+        }
+        return recoveryTransaction.state
+    }
+
+    fun recoveryState(): RecoveryTransactionState = recoveryTransaction.state
+
+    fun recoveryStableSamples(): Int = recoveryTransaction.stableVerificationSamples
+
+    /**
+     * Replaces the dynamic-feed-local stableSamples decision with the shared two-sample gate.
+     * The caller still owns fingerprint extraction and all feed actions.
+     */
+    fun observeDynamicFeedFingerprint(fingerprint: String): Boolean {
+        if (fingerprint.isBlank()) {
+            lastDynamicVerificationFingerprint = ""
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
+            return false
+        }
+        val changed = fingerprint != lastDynamicVerificationFingerprint
+        if (changed) {
+            lastDynamicVerificationFingerprint = fingerprint
+            if (recoveryTransaction.state != RecoveryTransactionState.VERIFYING &&
+                recoveryTransaction.state != RecoveryTransactionState.PAUSED
+            ) {
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+            } else if (recoveryTransaction.stableVerificationSamples > 0) {
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
+            }
+        }
+        val state = recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        if (state != RecoveryTransactionState.VERIFIED) return false
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        return true
+    }
+
+    private fun isTargetPackage(packageName: String): Boolean = packageName == targetPackage()
 
     /** The AccountBrowse workflow owns all phase transitions. */
     fun transitionTo(nextPhase: AccountBrowsePhase) {
@@ -98,6 +159,8 @@ class AccountBrowseRuntime(
     ) {
         beforeReset()
         phase = AccountBrowsePhase.IDLE
+        lastDynamicVerificationFingerprint = ""
+        recoveryTransaction.reset()
         session.reset()
         afterReset()
     }

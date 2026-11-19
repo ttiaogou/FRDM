@@ -121,6 +121,7 @@ internal class AndroidAccountBrowseWorkflow(
             },
             isSessionEnabled = { isMonitoringRunning() && isBrowseModeActive() },
             isTouchActive = { accountBrowseSession.touchActive },
+            targetPackage = targetPackage,
             onResetSession = ::resetAccountBrowseSession,
             actions = AccountBrowseRuntime.Actions(
                 waitForDynamicTab = ::waitForMomoDynamicTab,
@@ -364,6 +365,7 @@ internal class AndroidAccountBrowseWorkflow(
             return
         }
         val page = socialBrowsePort.inspectPage()
+        accountBrowseRuntime.observeRecoveryPage(page)
         if (page.packageName.isBlank()) {
             if (!accountBrowseSession.rootUnavailableLogged) {
                 addLog("恢复检查暂时无法读取当前前台页面；等待后续页面事件再次触发检查")
@@ -1164,17 +1166,21 @@ internal class AndroidAccountBrowseWorkflow(
         if (fingerprint == null) {
             accountBrowseSession.lastStableFingerprint = ""
             accountBrowseSession.stableSamples = 0
+            accountBrowseRuntime.observeDynamicFeedFingerprint("")
             addLog("动态列表尚不具备操作条件：${inspection.reason}")
-        } else if (fingerprint == accountBrowseSession.lastStableFingerprint) {
-            accountBrowseSession.stableSamples++
-            addLog("动态列表采样：可见项目=${inspection.visibleCardCount}，稳定计数=${accountBrowseSession.stableSamples}/$REQUIRED_STABLE_FEED_SAMPLES；${inspection.reason}")
         } else {
+            val recovered = accountBrowseRuntime.observeDynamicFeedFingerprint(fingerprint)
             accountBrowseSession.lastStableFingerprint = fingerprint
-            accountBrowseSession.stableSamples = 1
-            addLog("动态列表布局基准已建立：可见项目=${inspection.visibleCardCount}，稳定计数=1/$REQUIRED_STABLE_FEED_SAMPLES；${inspection.reason}")
+            accountBrowseSession.stableSamples = accountBrowseRuntime.recoveryStableSamples()
+            addLog("动态列表采样：可见项目=${inspection.visibleCardCount}，稳定计数=${accountBrowseSession.stableSamples}/$REQUIRED_STABLE_FEED_SAMPLES；事务状态=${accountBrowseRuntime.recoveryState().name}；${inspection.reason}")
+            if (recovered) {
+                accountBrowseSession.stableSamples = REQUIRED_STABLE_FEED_SAMPLES
+            }
         }
 
-        if (accountBrowseSession.stableSamples >= REQUIRED_STABLE_FEED_SAMPLES) {
+        if (accountBrowseRuntime.recoveryState() == com.freedom.features.recovery.RecoveryTransactionState.ACTIVE &&
+            accountBrowseSession.stableSamples >= REQUIRED_STABLE_FEED_SAMPLES
+        ) {
             accountBrowseSession.swipeCount = 0
             if (accountBrowseSession.manualRecoveryInProgress) {
                 manualHandoffCoordinator.quietPeriod.reset()
@@ -2700,7 +2706,7 @@ internal class AndroidAccountBrowseWorkflow(
         private const val INITIAL_DYNAMIC_TAB_WAIT_TIMEOUT_MS = 60_000L
         private const val MANUAL_RECOVERY_NAVIGATION_TIMEOUT_MS = 15_000L
         private const val INITIAL_FEED_STABILITY_TIMEOUT_MS = 10_000L
-        private const val REQUIRED_STABLE_FEED_SAMPLES = 3
+        private const val REQUIRED_STABLE_FEED_SAMPLES = 2
         private const val FIRST_SWIPE_COUNTDOWN_SECONDS = 3
         private const val FIRST_SWIPE_COUNTDOWN_STEP_MS = 1_000L
         private const val REQUIRED_STABLE_PAGE_SAMPLES = 2
