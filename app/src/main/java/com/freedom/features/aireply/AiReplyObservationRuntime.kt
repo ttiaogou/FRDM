@@ -35,6 +35,7 @@ import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.LinkedHashSet
@@ -78,7 +79,8 @@ class AiReplyObservationRuntime(
     /** A verified draft stays on screen so the user can review it and press Send manually. */
     private val isDraftAwaitingUserSend: () -> Boolean = { false },
     /** Invalidates late model callbacks when this runtime is reset. */
-    private val onDraftRuntimeReset: () -> Unit = {}
+    private val onDraftRuntimeReset: () -> Unit = {},
+    private val privateMessagesCheckpointRepository: PrivateMessagesTraversalCheckpointRepository? = null
 ) {
     companion object {
         private const val MAX_VISIBLE_MESSAGES = 20
@@ -150,6 +152,12 @@ class AiReplyObservationRuntime(
         ownership = taskOwnership,
         chooseRandomInt = chooseRandomInt
     )
+    init {
+        privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
+            privateMessagesTraversalTaskExecutor.restore(checkpoint)
+            onLog("消息列表进程恢复：已读取持久化检查点；等待页面结构重新确认后继续")
+        }
+    }
     private val receivedGreetingsTaskFlow = ReceivedGreetingsTaskFlowController(
         ownership = taskOwnership,
         pagePort = chatPagePort
@@ -1924,6 +1932,7 @@ class AiReplyObservationRuntime(
             maxNoProgressScrolls = MAX_NO_PROGRESS_SCROLLS,
             allowExpectedSessionReturnViewportChange = allowExpectedSessionReturnViewportChange
         )
+        privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
         val snapshotAmbiguousKeys = listEvaluation.snapshotAmbiguousKeys
         val newlyAmbiguousKeys = listEvaluation.newlyAmbiguousKeys
         if (newlyAmbiguousKeys.isNotEmpty()) {

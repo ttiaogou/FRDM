@@ -6,6 +6,7 @@ import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
+import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
 
 /**
  * Owns the private-message list traversal state and pure list decisions.
@@ -81,6 +82,36 @@ internal data class PrivateMessagesListSnapshotEvaluation(
 )
 
 internal class PrivateMessagesTraversalTaskExecutor {
+    fun checkpoint(): PrivateMessagesTraversalCheckpoint = PrivateMessagesTraversalCheckpoint(
+        attemptedSessionKeys = attemptedSessionKeys,
+        lockedUnreadSessionKeys = lockedUnreadSessionKeys,
+        ambiguousSessionIdentityKeys = ambiguousSessionIdentityKeys,
+        lastStableVisibleKeys = lastStableSessionListVisibleKeys.orEmpty(),
+        phase = phase.name,
+        atTop = atTop,
+        initialInboxPositionCheckCompleted = initialInboxPositionCheckCompleted,
+        initialInboxTopPositioningCompleted = initialInboxTopPositioningCompleted,
+        initialUnreadGateSwipeCompleted = initialUnreadGateSwipeCompleted,
+        lockedUnreadSetFinalized = lockedUnreadSetFinalized,
+        normalInboxHadUnread = normalInboxHadUnread,
+        normalInboxUnreadStateUnknown = normalInboxUnreadStateUnknown
+    )
+
+    fun restore(checkpoint: PrivateMessagesTraversalCheckpoint) {
+        attemptedSessionKeys += checkpoint.attemptedSessionKeys
+        lockedUnreadSessionKeys += checkpoint.lockedUnreadSessionKeys
+        ambiguousSessionIdentityKeys += checkpoint.ambiguousSessionIdentityKeys
+        lastStableSessionListVisibleKeys = checkpoint.lastStableVisibleKeys
+        phase = runCatching { SessionListTraversalPhase.valueOf(checkpoint.phase) }
+            .getOrDefault(SessionListTraversalPhase.POSITIONING_AT_BOTTOM)
+        atTop = checkpoint.atTop
+        initialInboxPositionCheckCompleted = checkpoint.initialInboxPositionCheckCompleted
+        initialInboxTopPositioningCompleted = checkpoint.initialInboxTopPositioningCompleted
+        initialUnreadGateSwipeCompleted = checkpoint.initialUnreadGateSwipeCompleted
+        lockedUnreadSetFinalized = checkpoint.lockedUnreadSetFinalized
+        normalInboxHadUnread = checkpoint.normalInboxHadUnread
+        normalInboxUnreadStateUnknown = checkpoint.normalInboxUnreadStateUnknown
+    }
     private data class IdentityReturn(
         val original: ChatListCandidateSnapshot,
         val oldKey: String,

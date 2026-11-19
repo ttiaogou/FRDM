@@ -68,6 +68,8 @@ import com.freedom.data.database.LocalConversationRepository
 import com.freedom.data.database.LocalReplyTaskRepository
 import com.freedom.features.aireply.ai.ReplyTaskRepository
 import com.freedom.data.social.momo.MomoSayHiTraversalCheckpointDataStore
+import com.freedom.data.PrivateMessagesTraversalCheckpointDataStore
+import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
 import com.freedom.data.samples.MomoChatSampleArchiveDataStore
 import com.freedom.features.aireply.AiReplyObservationRuntime
 import com.freedom.features.aireply.ai.AiModelServiceProvider
@@ -130,6 +132,9 @@ class AppCompositionRoot(context: Context) {
     }
     val sayHiTraversalCheckpointRepository: MomoSayHiTraversalCheckpointRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MomoSayHiTraversalCheckpointDataStore(appContext)
+    }
+    val privateMessagesCheckpointRepository: PrivateMessagesTraversalCheckpointRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        PrivateMessagesTraversalCheckpointDataStore(appContext)
     }
     val sampleArchivePort: SessionSampleArchivePort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MomoChatSampleArchiveDataStore()
@@ -476,7 +481,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {
                     aiReplyDraftCoordinator.resetForRuntimeReset()
                 }
-            }
+            },
+            privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository
         )
     }
     val accountBrowseWorkflow by lazy(LazyThreadSafetyMode.NONE) {
