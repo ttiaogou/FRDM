@@ -18,7 +18,7 @@ class AccountBrowseRuntime(
     private val canScheduleStep: () -> Boolean,
     private val isSessionEnabled: () -> Boolean,
     private val isTouchActive: () -> Boolean,
-    private val targetPackage: () -> String = { "com.immomo.momo" },
+    private val targetPackage: () -> String,
     private val onResetSession: () -> Unit,
     private val actions: Actions
 ) {
@@ -79,14 +79,6 @@ class AccountBrowseRuntime(
     fun recoveryState(): RecoveryTransactionState = recoveryTransaction.state
 
     fun recoveryStableSamples(): Int = recoveryTransaction.stableVerificationSamples
-
-    fun onUserInteractionStarted() {
-        recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionStarted)
-    }
-
-    fun onUserInteractionEnded() {
-        recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionEnded)
-    }
 
     /**
      * Replaces the dynamic-feed-local stableSamples decision with the shared two-sample gate.

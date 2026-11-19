@@ -89,6 +89,7 @@ class AccountBrowseManualRecoveryTest {
         canScheduleStep = { true },
         isSessionEnabled = { true },
         isTouchActive = { false },
+        targetPackage = { "com.immomo.momo" },
         onResetSession = {},
         actions = AccountBrowseRuntime.Actions(
             waitForDynamicTab = {},
