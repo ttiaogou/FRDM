@@ -12,6 +12,20 @@ class PageObservationCoordinator(
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L }
 ) {
     private val channels = LinkedHashMap<String, PageObservationSubscription>()
+    private val fingerprintRouter = PageFingerprintRouter()
+
+    /** Registers or replaces a destination route used by all business observers. */
+    @Synchronized
+    fun registerFingerprintRoute(route: PageFingerprintRoute) = fingerprintRouter.register(route)
+
+    @Synchronized
+    fun unregisterFingerprintRoute(routeId: String) = fingerprintRouter.unregister(routeId)
+
+    /** Matches a fresh adapter fingerprint without granting ownership or performing UI actions. */
+    fun matchFingerprint(fingerprint: PageFingerprint): String? = fingerprintRouter.match(fingerprint)
+
+    @Synchronized
+    fun registeredFingerprintRouteIds(): Set<String> = fingerprintRouter.registeredRouteIds()
 
     /** Creates the shared coordinator used by the AccessibilityService dependency graph. */
     /**

@@ -9,6 +9,8 @@ import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.PageObservationCoordinator
+import com.freedom.core.runtime.PageFingerprint
+import com.freedom.core.runtime.PageFingerprintRoute
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
 import com.freedom.core.accessibility.gesture.GestureIntent
@@ -287,6 +289,16 @@ class AiReplyObservationRuntime(
     private val recoveryTransaction = UnifiedRecoveryTransactionStateMachine()
     private val privateMessagesTraversalTaskExecutor = PrivateMessagesTraversalTaskExecutor()
     init {
+        sharedPageObservationCoordinator?.registerFingerprintRoute(
+            PageFingerprintRoute("AI_REPLY_PRIVATE_MESSAGES") { fingerprint ->
+                fingerprint.semanticPage == ChatPageKind.CHAT_LIST.name
+            }
+        )
+        sharedPageObservationCoordinator?.registerFingerprintRoute(
+            PageFingerprintRoute("AI_REPLY_RECEIVED_GREETINGS") { fingerprint ->
+                !fingerprint.adapterFingerprint.isNullOrBlank()
+            }
+        )
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             privateMessagesCheckpointRecoveryPending = true
@@ -554,6 +566,16 @@ class AiReplyObservationRuntime(
     private fun handleInspectionSnapshot(incomingInspection: ChatPageSnapshot) {
         val previous = lastPageInspection
         val inspection = stabilizeIncomingPageSnapshot(incomingInspection)
+        sharedPageObservationCoordinator?.matchFingerprint(
+            PageFingerprint(
+                packageName = inspection.packageName,
+                activityClass = inspection.activityClass,
+                semanticPage = inspection.pageKind.name,
+                adapterFingerprint = runCatching {
+                    chatPagePort.receivedGreetingsRecoveryFingerprint()
+                }.getOrNull()
+            )
+        )
 
         // Publish the cross-business boundary before the pause is observed by the target
         // coordinator. The event is only a request/record at this phase; ownership transfer
