@@ -26,6 +26,7 @@ import com.freedom.features.accountbrowse.AccountBrowseInteractionEvidence
 import com.freedom.features.accountbrowse.AccountBrowseInteractionEvidenceClassifier
 import com.freedom.features.accountbrowse.AccountBrowsePhase
 import com.freedom.features.accountbrowse.AccountBrowseRuntime
+import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
 import com.freedom.features.accountbrowse.AccountBrowseSessionStatePort
 import com.freedom.features.accountbrowse.FeedRefreshVerificationPolicy
 import com.freedom.features.accountbrowse.FeedReturnStability
@@ -56,7 +57,8 @@ internal class AndroidAccountBrowseWorkflow(
     private val isManualReviewRequired: () -> Boolean = { false },
     private val onManualReviewRequired: (String) -> Unit = {},
     private val onRequestScreenOff: () -> Boolean = { false },
-    private val pageObservationCoordinator: PageObservationCoordinator? = null
+    private val pageObservationCoordinator: PageObservationCoordinator? = null,
+    private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null
 ) {
     private val displayMetrics get() = accessibilityGateway.displayMetrics()
     private val navigationExecutor = AccountBrowseNavigationExecutor(gesturePolicy) { displayMetrics }
@@ -91,7 +93,18 @@ internal class AndroidAccountBrowseWorkflow(
         get() = accountBrowseRuntime.session
 
     internal fun startIfIdle() {
-        if (accountBrowsePhase == AccountBrowsePhase.IDLE) startAccountBrowseIfNeeded()
+        if (accountBrowsePhase == AccountBrowsePhase.IDLE) {
+            startAccountBrowseIfNeeded()
+        } else if (accountBrowseRuntime.hasPendingCheckpointVerification()) {
+            startRestoredCheckpointVerification()
+        }
+    }
+
+    private fun startRestoredCheckpointVerification() {
+        if (isManualReviewRequired() || !isMonitoringRunning() || !isBrowseModeActive()) return
+        if (!accountBrowseRuntime.beginCheckpointVerification()) return
+        addLog("动态浏览已读取持久化检查点；进入只读页面复核，连续两次稳定指纹确认前不会恢复滑动、点击或导航")
+        scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
     }
 
     internal fun isGestureBusyForCalibration(): Boolean =
@@ -122,6 +135,7 @@ internal class AndroidAccountBrowseWorkflow(
             isSessionEnabled = { isMonitoringRunning() && isBrowseModeActive() },
             isTouchActive = { accountBrowseSession.touchActive },
             targetPackage = targetPackage,
+            checkpointRepository = accountBrowseCheckpointRepository,
             onResetSession = ::resetAccountBrowseSession,
             actions = AccountBrowseRuntime.Actions(
                 waitForDynamicTab = ::waitForMomoDynamicTab,

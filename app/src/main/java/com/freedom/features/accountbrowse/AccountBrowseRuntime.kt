@@ -3,6 +3,8 @@ package com.freedom.features.accountbrowse
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.accountbrowse.ports.BrowsePageEvidence
 import com.freedom.features.accountbrowse.ports.BrowsePageKind
+import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpoint
+import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
 import com.freedom.features.recovery.RecoveryTransactionEvent
 import com.freedom.features.recovery.RecoveryTransactionState
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
@@ -19,6 +21,7 @@ class AccountBrowseRuntime(
     private val isSessionEnabled: () -> Boolean,
     private val isTouchActive: () -> Boolean,
     private val targetPackage: () -> String,
+    private val checkpointRepository: AccountBrowseCheckpointRepository? = null,
     private val onResetSession: () -> Unit,
     private val actions: Actions
 ) {
@@ -53,9 +56,51 @@ class AccountBrowseRuntime(
      */
     private val sessionStateOwner = AccountBrowseSessionStateOwner()
     val session: AccountBrowseSessionStatePort = sessionStateOwner.port
+    private var restoredCheckpointPhase: AccountBrowsePhase? = null
 
     var phase: AccountBrowsePhase = AccountBrowsePhase.IDLE
         private set
+
+    init {
+        checkpointRepository?.load()?.let { checkpoint ->
+            restoredCheckpointPhase = runCatching { AccountBrowsePhase.valueOf(checkpoint.phase) }
+                .getOrDefault(AccountBrowsePhase.PAUSED)
+            // A restored checkpoint is never executable immediately. The workflow must first
+            // re-observe the page and satisfy the shared two-sample verification gate.
+            phase = AccountBrowsePhase.PAUSED
+            recoveryTransaction.dispatch(
+                RecoveryTransactionEvent.CheckpointLoaded(
+                    if (checkpoint.savedAtEpochMs > 0L) {
+                        RecoveryTransactionEvent.Source.PROCESS_RESTART
+                    } else {
+                        RecoveryTransactionEvent.Source.SERVICE_RECONNECT
+                    }
+                )
+            )
+            sessionStateOwner.update { current ->
+                current.copy(
+                    sourceFingerprint = checkpoint.sourceFingerprint,
+                    detailFingerprint = checkpoint.detailFingerprint,
+                    lastStableFingerprint = checkpoint.lastStableFingerprint,
+                    sourceSnapshot = checkpoint.sourceSnapshot,
+                    currentActivityClass = checkpoint.currentActivityClass,
+                    imageBrowserActive = checkpoint.imageBrowserActive,
+                    swipeCount = checkpoint.swipeCount,
+                    feedRefreshRecoveryActive = checkpoint.feedRefreshRecoveryActive,
+                    feedRefreshLastSnapshot = checkpoint.feedRefreshLastSnapshot
+                )
+            }
+        }
+    }
+
+    fun hasPendingCheckpointVerification(): Boolean = restoredCheckpointPhase != null
+
+    /** Moves a restored session into a read-only feed verification phase. */
+    fun beginCheckpointVerification(): Boolean {
+        if (restoredCheckpointPhase == null) return false
+        transitionTo(AccountBrowsePhase.WAIT_FOR_FEED_STABLE)
+        return true
+    }
 
     /** Normalizes page-observation uncertainty before any AccountBrowse action is authorized. */
     fun observeRecoveryPage(page: BrowsePageEvidence): RecoveryTransactionState {
@@ -105,6 +150,7 @@ class AccountBrowseRuntime(
         if (state != RecoveryTransactionState.VERIFIED) return false
         recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
         recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        restoredCheckpointPhase = null
         return true
     }
 
@@ -113,6 +159,26 @@ class AccountBrowseRuntime(
     /** The AccountBrowse workflow owns all phase transitions. */
     fun transitionTo(nextPhase: AccountBrowsePhase) {
         phase = nextPhase
+        persistCheckpoint()
+    }
+
+    private fun persistCheckpoint() {
+        val snapshot = sessionStateOwner.snapshot()
+        checkpointRepository?.save(
+            AccountBrowseCheckpoint(
+                phase = phase.name,
+                sourceFingerprint = snapshot.sourceFingerprint,
+                detailFingerprint = snapshot.detailFingerprint,
+                lastStableFingerprint = snapshot.lastStableFingerprint,
+                sourceSnapshot = snapshot.sourceSnapshot,
+                currentActivityClass = snapshot.currentActivityClass,
+                imageBrowserActive = snapshot.imageBrowserActive,
+                swipeCount = snapshot.swipeCount,
+                feedRefreshRecoveryActive = snapshot.feedRefreshRecoveryActive,
+                feedRefreshLastSnapshot = snapshot.feedRefreshLastSnapshot,
+                savedAtEpochMs = System.currentTimeMillis()
+            )
+        )
     }
 
     /**
@@ -161,7 +227,9 @@ class AccountBrowseRuntime(
         afterReset: () -> Unit
     ) {
         beforeReset()
+        checkpointRepository?.clear()
         phase = AccountBrowsePhase.IDLE
+        restoredCheckpointPhase = null
         lastDynamicVerificationFingerprint = ""
         recoveryTransaction.reset()
         session.reset()
@@ -195,6 +263,7 @@ class AccountBrowseRuntime(
             session.pauseReason = reason
             onPauseReasonChanged(reason)
         }
+        persistCheckpoint()
     }
 
     /** Record manual takeover while already paused, without replacing the first snapshot. */
