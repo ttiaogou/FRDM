@@ -316,7 +316,10 @@ class AiReplyObservationRuntime(
     }
     private var sessionManagerState: SessionManagerState
         get() = privateMessagesTraversalTaskExecutor.executionState
-        set(value) { privateMessagesTraversalTaskExecutor.executionState = value }
+        set(value) {
+            privateMessagesTraversalTaskExecutor.executionState = value
+            recoveryContext.recordPauseState(value == SessionManagerState.PAUSED)
+        }
     /** Archive lifecycle is independent from the optional automatic session traversal state. */
     private var sampleCaptureActive = false
     private var sessionRunStarted = false

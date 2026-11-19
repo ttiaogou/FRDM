@@ -7,6 +7,14 @@ package com.freedom.features.recovery
  * remain responsible for the actual checkpoint data and page fingerprint calculation.
  */
 class RecoveryContext {
+    enum class PauseDomain {
+        NONE,
+        BUSINESS_SAFETY,
+        RECOVERY_TRANSACTION
+    }
+
+    var pauseDomain: PauseDomain = PauseDomain.NONE
+        private set
     var sourceTaskId: String? = null
         private set
     var targetRouteId: String? = null
@@ -40,6 +48,16 @@ class RecoveryContext {
         lastVerificationKey = null
         fingerprintVerified = false
         uiOwnershipTransferred = false
+        pauseDomain = PauseDomain.RECOVERY_TRANSACTION
+    }
+
+    /** Records the coordinator's effective pause domain without changing recovery lifecycle. */
+    fun recordPauseState(isPaused: Boolean) {
+        pauseDomain = when {
+            isPaused && pending -> PauseDomain.RECOVERY_TRANSACTION
+            isPaused -> PauseDomain.BUSINESS_SAFETY
+            else -> PauseDomain.NONE
+        }
     }
 
     fun markCheckpointSaved() {
@@ -81,6 +99,7 @@ class RecoveryContext {
         lastVerificationKey = null
         fingerprintVerified = false
         uiOwnershipTransferred = false
+        pauseDomain = PauseDomain.NONE
     }
 
     companion object {
