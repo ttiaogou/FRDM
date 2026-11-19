@@ -5707,6 +5707,7 @@ internal class MomoSocialAdapter(
         }
     }
 
+    /** Registers the program-owned ChatActivity -> session-list return before dispatching BACK. */
     override fun navigateBackToSessionList(): Boolean =
         requestChatActivityBack(
             reason = "普通聊天消息采集完成",
