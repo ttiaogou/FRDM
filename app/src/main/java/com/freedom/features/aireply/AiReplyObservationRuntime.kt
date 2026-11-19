@@ -624,11 +624,29 @@ class AiReplyObservationRuntime(
         // unified accessibility layer supplied a matching generic source result.
         // It must not consult expectedPrivateSessionDetailNavigation here.
         val selfInitiatedTransition = pendingNavigationSourceResult?.takeIf {
-            it.targetActivityClass == inspection.activityClass &&
-                it.targetPageGeneration == inspection.windowGeneration
+            selfNavigationMatchesInspection(it, inspection)
         }
         if (selfInitiatedTransition != null) {
             pendingNavigationSourceResult = null
+            if (recoveryContext.pending) {
+                recoveryContext.clear()
+                pageRecoveryVerificationGate.reset()
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+                onLog(
+                    "统一页面恢复[SELF_NAVIGATION_CONSUMED]：" +
+                        "actionId=${selfInitiatedTransition.actionId}；" +
+                        "targetActivity=${inspection.activityClass}；" +
+                        "已取消误触发的路由恢复并继续当前业务链路"
+                )
+            } else {
+                onLog(
+                    "统一页面恢复[SELF_NAVIGATION_CONSUMED]：" +
+                        "actionId=${selfInitiatedTransition.actionId}；" +
+                        "targetActivity=${inspection.activityClass}；" +
+                        "跳过PAGE_ROUTE_CHANGED"
+                )
+            }
         }
         if (sessionRunStarted && activeTaskId != null && !recoveryContext.pending &&
             previous != null && matchedRouteId != activeRouteId &&
@@ -3945,6 +3963,21 @@ class AiReplyObservationRuntime(
         ) return null
         val conversationIdentity = snapshot.conversationIdentityKey() ?: return null
         return "${messageWindow.packageName}|${messageWindow.windowId}|${messageWindow.generation}|conversation=$conversationIdentity"
+    }
+
+    /** Matches a generic navigation result to the current page without using business state. */
+    private fun selfNavigationMatchesInspection(
+        transition: SelfNavigationTransition,
+        inspection: ChatPageSnapshot
+    ): Boolean {
+        if (transition.targetActivityClass != inspection.activityClass) return false
+        if (transition.targetPageGeneration == inspection.windowGeneration) return true
+        val observedWindowIds = listOfNotNull(
+            inspection.messageListTarget?.window?.windowId,
+            inspection.inputFieldTarget?.window?.windowId,
+            inspection.sessionListNavigationTarget?.nodeTarget?.window?.windowId
+        ).toSet()
+        return transition.targetWindowId >= 0 && transition.targetWindowId in observedWindowIds
     }
 
     /** Stable chat-surface binding key; deliberately excludes the display name/title. */
