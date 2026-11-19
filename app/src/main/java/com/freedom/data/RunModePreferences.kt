@@ -28,7 +28,7 @@ object RunModePreferences {
     }
 
     fun isAiReplyModeSelected(context: Context): Boolean =
-        preferences(context).getBoolean(KEY_AI_REPLY_MODE, false)
+        preferences(context).getBoolean(KEY_AI_REPLY_MODE, true)
 
     fun setAiReplyModeSelected(context: Context, enabled: Boolean) {
         preferences(context).edit().putBoolean(KEY_AI_REPLY_MODE, enabled).apply()

@@ -12,9 +12,9 @@ class AiReplyPersonalizationTest {
     fun dailyChatDefaultsUseTheNewProviderNeutralPreferences() {
         val preferences = AiReplyPersonalization()
 
-        assertEquals(PersonalityStyle.FRIENDLY, preferences.personalityStyle)
+        assertEquals(PersonalityStyle.FLIRTATIOUS_PROBING, preferences.personalityStyle)
         assertEquals(LanguageStyle.CASUAL, preferences.languageStyle)
-        assertEquals(ReplyLength.MODERATE, preferences.replyLength)
+        assertEquals(ReplyLength.MINIMAL, preferences.replyLength)
         assertEquals(EmotionExpression.NATURAL_MODERATE, preferences.emotionExpression)
         assertEquals(HumorLevel.OCCASIONAL, preferences.humorLevel)
         assertEquals(InteractionLevel.MODERATE, preferences.interactionLevel)
@@ -36,7 +36,7 @@ class AiReplyPersonalizationTest {
             enumValues<ReplyLength>().map { it.displayName }
         )
         assertEquals(
-            listOf("克制冷静", "自然适度", "情绪丰富", "热情积极", "高度共情"),
+            listOf("克制冷静", "自然舒适", "情绪丰富", "热情积极", "高度共情"),
             enumValues<EmotionExpression>().map { it.displayName }
         )
         assertEquals(

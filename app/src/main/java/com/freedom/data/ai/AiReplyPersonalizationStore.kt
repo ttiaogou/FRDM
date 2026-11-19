@@ -19,7 +19,7 @@ internal class AiReplyPersonalizationStore(context: Context) : AiReplyPersonaliz
     )
 
     override fun load(): AiReplyPersonalization = AiReplyPersonalization(
-        personalityStyle = readEnum(KEY_PERSONALITY_STYLE, PersonalityStyle.FRIENDLY),
+        personalityStyle = readEnum(KEY_PERSONALITY_STYLE, PersonalityStyle.FLIRTATIOUS_PROBING),
         languageStyle = readEnum(KEY_LANGUAGE_STYLE, LanguageStyle.CASUAL),
         replyLength = readReplyLength(),
         emotionExpression = readEnum(KEY_EMOTION_EXPRESSION, EmotionExpression.NATURAL_MODERATE),
@@ -50,7 +50,7 @@ internal class AiReplyPersonalizationStore(context: Context) : AiReplyPersonaliz
     private fun readReplyLength(): ReplyLength = when (preferences.getString(KEY_REPLY_LENGTH, null)) {
         // Preserve the closest equivalent for users upgrading from the previous settings screen.
         "CONCISE" -> ReplyLength.SHORT
-        else -> readEnum(KEY_REPLY_LENGTH, ReplyLength.MODERATE)
+        else -> readEnum(KEY_REPLY_LENGTH, ReplyLength.MINIMAL)
     }
 
     private inline fun <reified T : Enum<T>> readEnum(key: String, fallback: T): T =

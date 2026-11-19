@@ -2,9 +2,9 @@ package com.freedom.features.aireply.ai
 
 /** Provider-neutral, user-facing preferences for the style of generated chat drafts. */
 data class AiReplyPersonalization(
-    val personalityStyle: PersonalityStyle = PersonalityStyle.FRIENDLY,
+    val personalityStyle: PersonalityStyle = PersonalityStyle.FLIRTATIOUS_PROBING,
     val languageStyle: LanguageStyle = LanguageStyle.CASUAL,
-    val replyLength: ReplyLength = ReplyLength.MODERATE,
+    val replyLength: ReplyLength = ReplyLength.MINIMAL,
     val emotionExpression: EmotionExpression = EmotionExpression.NATURAL_MODERATE,
     val humorLevel: HumorLevel = HumorLevel.OCCASIONAL,
     val interactionLevel: InteractionLevel = InteractionLevel.MODERATE,
@@ -93,7 +93,7 @@ enum class ReplyLength(val displayName: String, val systemInstruction: String) {
 
 enum class EmotionExpression(val displayName: String, val systemInstruction: String) {
     RESTRAINED_CALM("克制冷静", "保持冷静、克制和稳定，不夸大情绪。"),
-    NATURAL_MODERATE("自然适度", "根据语境自然表达关心或积极态度，不过度渲染情绪。"),
+    NATURAL_MODERATE("自然舒适", "根据语境自然表达关心或积极态度，不过度渲染情绪。"),
     EXPRESSIVE("情绪丰富", "在合适的语境中更充分地表达语气和情绪变化，避免戏剧化。"),
     ENTHUSIASTIC("热情积极", "表达积极、热情和鼓励，避免不合时宜的过度热烈。"),
     HIGHLY_EMPATHETIC("高度共情", "认真理解对方表达的感受和处境，以有同理心的方式回应；不虚构自身经历或真实人类情绪。")

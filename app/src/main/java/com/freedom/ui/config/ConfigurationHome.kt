@@ -245,7 +245,7 @@ internal class ConfigurationHome(
         }
         val aiSwitch = styledSwitch().apply {
             isChecked = callbacks.aiEnabled() && !callbacks.browseEnabled()
-            contentDescription = "AI回复"
+            contentDescription = "AI Agent"
         }
         browseSwitch.setOnCheckedChangeListener { _, checked ->
             if (checked && aiSwitch.isChecked) aiSwitch.isChecked = false
@@ -257,7 +257,7 @@ internal class ConfigurationHome(
         }
         section.addView(modeSwitchRow("自动浏览", browseSwitch), LinearLayout.LayoutParams(-1, dp(58)))
         section.addView(divider(), LinearLayout.LayoutParams(-1, dp(1)))
-        section.addView(modeSwitchRow("AI回复", aiSwitch), LinearLayout.LayoutParams(-1, dp(58)))
+        section.addView(modeSwitchRow("AI Agent", aiSwitch), LinearLayout.LayoutParams(-1, dp(58)))
         section.addView(divider(), LinearLayout.LayoutParams(-1, dp(1)))
         return section
     }

@@ -84,7 +84,6 @@ internal class PersonalizationScreen(
             setPadding(dp(2), dp(8), dp(2), dp(8))
         }
 
-        content.addView(sectionHeader("聊天风格"))
         content.addView(dropdownPreferenceRow(
             label = "性格风格",
             choices = enumValues<PersonalityStyle>(),
@@ -127,14 +126,6 @@ internal class PersonalizationScreen(
             displayName = { it.displayName },
             onSelected = { selected -> updatePersonalization { it.copy(interactionLevel = selected) } }
         ))
-        content.addView(TextView(activity).apply {
-            text = "以上偏好会转换为通用自然语言指令，不依赖特定模型厂商的温度或 Token 参数。不同模型对指令的遵循效果可能有所差异。"
-            textSize = 11f
-            setTextColor(FreedomUi.MUTED)
-            setLineSpacing(dp(2).toFloat(), 1f)
-            setPadding(dp(2), dp(10), dp(2), dp(16))
-        })
-
         content.addView(sectionHeader("高级自定义"))
         content.addView(TextView(activity).apply {
             text = "还有什么特别的聊天习惯需要告诉 AI？"
