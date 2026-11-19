@@ -28,4 +28,13 @@ class DraftSegmentsTest {
         assertEquals(listOf("第一条", "第二条"), ReplyMessageSegments.split("第一条<MSG>第二条"))
         assertEquals(listOf("第一条。第二条"), ReplyMessageSegments.split("第一条。第二条"))
     }
+
+    @Test
+    fun exposesSafeParseMetadataWithoutMessage正文() {
+        val parsed = ReplyMessageSegments.parse("第一条<MSG>第二条")
+        assertEquals(1, parsed.delimiterCount)
+        assertEquals(2, parsed.messages.size)
+        assertEquals(listOf(3, 3), parsed.messages.map { it.codePointCount(0, it.length) })
+        assertTrue(!parsed.fallbackToSingleMessage)
+    }
 }

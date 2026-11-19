@@ -285,8 +285,16 @@ class AiReplyDraftCoordinator(
             }
             // The model owns message boundaries; the existing input cadence still owns
             // 2-3-grapheme writes inside each queued message. Sending remains manual.
-            val messageQueue = ReplyMessageSegments.split(decision.draft)
-            val segments = messageQueue.flatMap(DraftSegments::split)
+            val parsedMessages = ReplyMessageSegments.parse(decision.draft)
+            onLog(
+                "AI 回复解析诊断：requestId=$requestId；" +
+                    "delimiterCount=${parsedMessages.delimiterCount}；" +
+                    "lineBreakCount=${parsedMessages.lineBreakCount}；" +
+                    "messageCount=${parsedMessages.messages.size}；" +
+                    "messageLengths=${parsedMessages.messages.joinToString(",", prefix="[", postfix="]") { it.codePointCount(0, it.length).toString() }}；" +
+                    "fallbackToSingleMessage=${parsedMessages.fallbackToSingleMessage}"
+            )
+            val segments = parsedMessages.messages.flatMap(DraftSegments::split)
             writeNext(target, decision.draft, segments, 0, "", requestGeneration)
         }
     }
