@@ -307,6 +307,8 @@ class AiReplyObservationRuntime(
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             privateMessagesCheckpointRecoveryPending = true
+            recoveryContext.request(PRIVATE_MESSAGES_TASK_ID, "PROCESS_RESTART_CHECKPOINT")
+            recoveryContext.markCheckpointLoaded()
             recoveryTransaction.dispatch(
                 RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.PROCESS_RESTART)
             )
@@ -639,10 +641,15 @@ class AiReplyObservationRuntime(
                     "已从任务=${sourceTaskId}恢复任务=$targetTaskId"
             )
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
+                privateMessagesCheckpointRecoveryPending = false
+                privateMessagesCheckpointVerificationGate.reset()
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                 lastPageInspection = inspection
                 handleSessionListPage(inspection)
             } else {
+                receivedGreetingsRecoveryVerificationPending = false
+                receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+                receivedGreetingsRecoveryVerificationGate.reset()
                 sessionManagerState = SessionManagerState.PAUSED
                 lastPageInspection = inspection
                 startReceivedGreetingsTaskFromConfirmedPage()
@@ -1188,7 +1195,7 @@ class AiReplyObservationRuntime(
         lastPageInspection = null
         lastConfirmedChatListInspection = null
         recoveryTransaction.reset()
-        recoveryContext.clear()
+        if (!recoveryContext.pending) recoveryContext.clear()
         messageListRecoveryVerificationPending = false
         messageRecoveryRetryAttempt = 0
         transientEmptySnapshotRecovery.reset()
@@ -1365,6 +1372,10 @@ class AiReplyObservationRuntime(
         sampleCaptureActive = !directory.isNullOrBlank()
         sessionRunStarted = sampleCaptureActive
         if (sessionRunStarted && chatPagePort.hasRestorableReceivedGreetingsCheckpoint()) {
+            if (!recoveryContext.pending) {
+                recoveryContext.request(RECEIVED_GREETINGS_TASK_ID, "SERVICE_RECONNECT_CHECKPOINT")
+                recoveryContext.markCheckpointLoaded()
+            }
             recoveryTransaction.dispatch(
                 RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)
             )
@@ -1410,12 +1421,16 @@ class AiReplyObservationRuntime(
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             privateMessagesCheckpointRecoveryPending = true
+            if (!recoveryContext.pending) {
+                recoveryContext.request(PRIVATE_MESSAGES_TASK_ID, "SERVICE_RECONNECT_CHECKPOINT")
+                recoveryContext.markCheckpointLoaded()
+            }
             recoveryTransaction.dispatch(
                 RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)
             )
             onLog("消息列表任务恢复：已重新装载检查点；等待连续两次消息列表结构快照确认")
         }
-        sessionManagerState = if (sessionRunStarted) {
+        sessionManagerState = if (sessionRunStarted && !recoveryContext.pending) {
             SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP
         } else {
             SessionManagerState.PAUSED
@@ -1426,7 +1441,13 @@ class AiReplyObservationRuntime(
                     "AI Reply 完整模型链路已启动：普通聊天按底部至顶部扫描；" +
                         "进入会话读取消息、调用模型并写入审核草稿；仅人工发送；样本目录=$directory"
                 )
-                if (chatPagePort.supportsVerifiedMessageWorkAreaNavigation()) {
+                if (recoveryContext.pending) {
+                    onLog(
+                        "统一恢复[CHECKPOINT_LOADED]：task=${recoveryContext.sourceTaskId}；" +
+                            "已读取检查点，等待目标页面路由和双快照验证；不启动工作区导航"
+                    )
+                    scheduleFullInspectionAfter(0L)
+                } else if (chatPagePort.supportsVerifiedMessageWorkAreaNavigation()) {
                     startupReadinessCoordinator.beginVerification()
                 } else {
                     // Compatibility path for adapters that do not expose a stable navigation
@@ -1450,13 +1471,28 @@ class AiReplyObservationRuntime(
 
     /** Re-reads the durable received-greetings checkpoint before page observations resume. */
     fun reloadReceivedGreetingsCheckpointAfterServiceReconnect(): Boolean = runCatching {
-        chatPagePort.reloadReceivedGreetingsCheckpointAfterServiceReconnect()
+        chatPagePort.reloadReceivedGreetingsCheckpointAfterServiceReconnect().also { loaded ->
+            if (loaded && !recoveryContext.pending) {
+                recoveryContext.request(RECEIVED_GREETINGS_TASK_ID, "SERVICE_RECONNECT_CHECKPOINT")
+                recoveryContext.markCheckpointLoaded()
+                recoveryTransaction.dispatch(
+                    RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)
+                )
+            }
+        }
     }.getOrDefault(false)
 
     /** Reloads the message-list checkpoint and accepts it only with a fresh list-page check. */
     fun reloadPrivateMessagesCheckpointAfterServiceReconnect(): Boolean {
         val checkpoint = privateMessagesCheckpointRepository?.load() ?: return false
         privateMessagesTraversalTaskExecutor.restore(checkpoint)
+        if (!recoveryContext.pending) {
+            recoveryContext.request(PRIVATE_MESSAGES_TASK_ID, "SERVICE_RECONNECT_CHECKPOINT")
+            recoveryContext.markCheckpointLoaded()
+            recoveryTransaction.dispatch(
+                RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)
+            )
+        }
         val page = runCatching { chatPagePort.inspectChatPage() }.getOrNull() ?: return false
         val verified = page.pageKind == ChatPageKind.CHAT_LIST &&
             page.packageName == targetPackage() &&

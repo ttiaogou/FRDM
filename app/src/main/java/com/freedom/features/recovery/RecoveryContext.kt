@@ -15,6 +15,8 @@ class RecoveryContext {
         private set
     var checkpointSaved: Boolean = false
         private set
+    var checkpointLoaded: Boolean = false
+        private set
     var verificationSamples: Int = 0
         private set
     private var lastVerificationKey: String? = null
@@ -33,6 +35,7 @@ class RecoveryContext {
         targetRouteId = null
         reason = recoveryReason
         checkpointSaved = false
+        checkpointLoaded = false
         verificationSamples = 0
         lastVerificationKey = null
         fingerprintVerified = false
@@ -42,6 +45,11 @@ class RecoveryContext {
     fun markCheckpointSaved() {
         check(pending) { "cannot save checkpoint without a recovery request" }
         checkpointSaved = true
+    }
+
+    fun markCheckpointLoaded() {
+        check(pending) { "cannot load checkpoint without a recovery request" }
+        checkpointLoaded = true
     }
 
     fun observeTarget(routeId: String, fingerprintKey: String): Boolean {
@@ -68,6 +76,7 @@ class RecoveryContext {
         targetRouteId = null
         reason = null
         checkpointSaved = false
+        checkpointLoaded = false
         verificationSamples = 0
         lastVerificationKey = null
         fingerprintVerified = false
