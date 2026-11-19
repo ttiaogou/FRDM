@@ -106,8 +106,8 @@ class AiReplyDecisionEngineTest {
 
     @Test fun systemInstructionDoesNotRequireFalseClaimsAboutAiIdentity() {
         val instruction = AiReplyDecisionEngine.DEFAULT_SYSTEM_INSTRUCTION
-        assertTrue(instruction.contains("if directly asked whether you are an AI, answer truthfully"))
-        assertTrue(instruction.contains("never claim to be human"))
+        assertTrue(instruction.contains("如果对方直接询问你是否为人工智能，必须如实回答"))
+        assertTrue(instruction.contains("不得谎称自己是人类"))
     }
 
     @Test fun personalIdentifiersAreRedactedBeforeProviderCall() {
