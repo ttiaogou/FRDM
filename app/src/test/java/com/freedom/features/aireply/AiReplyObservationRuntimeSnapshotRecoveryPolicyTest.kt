@@ -42,13 +42,18 @@ class AiReplyObservationRuntimeSnapshotRecoveryPolicyTest {
         assertFalse(policy.isTransient(snapshot(messageLists = 1)))
     }
 
-    @Test fun recoveryRetriesAreBoundedAndResetForTheNextEpisode() {
-        val policy = AiReplySessionTraversalCoordinator(longArrayOf(350L, 700L, 1_200L))
-        assertEquals(350L, policy.nextDelayMs())
-        assertEquals(700L, policy.nextDelayMs())
-        assertEquals(1_200L, policy.nextDelayMs())
-        assertEquals(null, policy.nextDelayMs())
+    @Test fun recoveryUsesFastBackoffThenContinuesLowFrequencyWithoutHardStop() {
+        val policy = AiReplySessionTraversalCoordinator(longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L))
+        assertEquals(500L, policy.nextDelayMs(30_000L))
+        assertEquals(1_000L, policy.nextDelayMs(30_000L))
+        assertEquals(2_000L, policy.nextDelayMs(30_000L))
+        assertEquals(5_000L, policy.nextDelayMs(30_000L))
+        assertEquals(10_000L, policy.nextDelayMs(30_000L))
+        assertEquals(30_000L, policy.nextDelayMs(30_000L))
+        assertEquals(30_000L, policy.nextDelayMs(30_000L))
+        assertTrue(policy.retryCount > 6)
+        policy.reset()
         assertEquals(0, policy.retryCount)
-        assertEquals(350L, policy.nextDelayMs())
+        assertEquals(500L, policy.nextDelayMs(30_000L))
     }
 }

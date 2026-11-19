@@ -86,9 +86,9 @@ class AiReplyObservationRuntime(
         private const val MAX_STRUCTURE_LOG_LINE_CHARS = 3_500
         private const val MESSAGE_LIST_RETRY_DELAY_MS = 120L
         private const val MAX_MESSAGE_LIST_RETRIES = 2
-        private val TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS = longArrayOf(350L, 700L, 1_200L)
-        private const val SNAPSHOT_RECOVERY_HOLD_TIMEOUT_MS = 30_000L
-        private const val SNAPSHOT_RECOVERY_POLL_DELAY_MS = 1_000L
+        private val TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L)
+        /** Long waits are polling intervals, not a recovery timeout. */
+        private const val SNAPSHOT_RECOVERY_LOW_FREQUENCY_DELAY_MS = 30_000L
         private const val MAX_OCR_DEBUG_TEXT_CHARS = 4_200
         private const val MAX_OCR_DEBUG_BATCHES_PER_WINDOW = 24
         private const val SESSION_OPEN_VERIFY_DELAY_MS = 2_200L
@@ -400,23 +400,22 @@ class AiReplyObservationRuntime(
                 onLog("AI 页面观察[SNAPSHOT_RECOVERY_HOLD]：快照暂时丢失；保留当前任务租约和会话状态")
             }
             val elapsedMs = System.currentTimeMillis() - snapshotRecoveryStartedAtMs
-            val delayMs = transientEmptySnapshotRecovery.nextDelayMs()
-            if (elapsedMs < SNAPSHOT_RECOVERY_HOLD_TIMEOUT_MS) {
-                val nextDelayMs = delayMs ?: SNAPSHOT_RECOVERY_POLL_DELAY_MS
-                onLog(
-                    "AI 页面观察[SNAPSHOT_RECOVERY]：页面快照为空或暂不可用；" +
-                        "retry=${transientEmptySnapshotRecovery.retryCount}/${TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS.size}；" +
-                        "已等待=${elapsedMs.coerceAtLeast(0L)}ms；${nextDelayMs}ms 后重新获取；" +
-                        "保留最后一次已确认页面，不释放任务租约、不更新页面身份"
-                )
-                scheduleFullInspectionAfter(nextDelayMs)
+            val nextDelayMs = transientEmptySnapshotRecovery.nextDelayMs(
+                SNAPSHOT_RECOVERY_LOW_FREQUENCY_DELAY_MS
+            )
+            val phase = if (transientEmptySnapshotRecovery.retryCount <= TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS.size) {
+                "FAST_BACKOFF"
             } else {
-                onLog(
-                    "AI 页面观察[SNAPSHOT_RECOVERY_TIMEOUT]：连续 ${elapsedMs.coerceAtLeast(0L)}ms 无法恢复目标窗口；" +
-                        "终止当前页面事务并保留运行日志"
-                )
-                sessionManagerState = SessionManagerState.PAUSED
+                "LOW_FREQUENCY_WAIT"
             }
+            onLog(
+                "AI 页面观察[SNAPSHOT_RECOVERY]：页面快照为空或暂不可用；" +
+                    "retry=${transientEmptySnapshotRecovery.retryCount};phase=$phase;" +
+                    "已等待=${elapsedMs.coerceAtLeast(0L)}ms；${nextDelayMs}ms 后重新获取；" +
+                    "保留最后一次已确认页面，不释放任务租约、不更新页面身份；" +
+                    "恢复不会因等待时长自动终止"
+            )
+            scheduleFullInspectionAfter(nextDelayMs)
             return
         }
         transientEmptySnapshotRecovery.reset()
