@@ -43,6 +43,8 @@ internal class AiReplyModeRuntimeAdapter(
 
     override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = runtime().schedule(event)
 
+    override fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) = runtime().onGlobalTouchEvent(event)
+
     override fun onAccessibilityServiceInterrupted(reason: String) {
         onReadinessInvalidated("无障碍服务中断；目标应用就绪状态失效：$reason")
         awaitingServiceReconnect = true

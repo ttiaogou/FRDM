@@ -89,6 +89,9 @@ class AiReplyObservationRuntime(
         private val TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L)
         /** Long waits are polling intervals, not a recovery timeout. */
         private const val SNAPSHOT_RECOVERY_LOW_FREQUENCY_DELAY_MS = 30_000L
+        private const val RECEIVED_GREETINGS_USER_QUIET_MIN_MS = 2_000
+        private const val RECEIVED_GREETINGS_USER_QUIET_MAX_MS = 5_000
+        private const val RECEIVED_GREETINGS_USER_ACTIVE_RECHECK_DELAY_MS = 10_000L
         private const val MAX_OCR_DEBUG_TEXT_CHARS = 4_200
         private const val MAX_OCR_DEBUG_BATCHES_PER_WINDOW = 24
         private const val SESSION_OPEN_VERIFY_DELAY_MS = 2_200L
@@ -319,6 +322,9 @@ class AiReplyObservationRuntime(
         TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS
     )
     private var snapshotRecoveryStartedAtMs = 0L
+    private var receivedGreetingsUserActive = false
+    private var receivedGreetingsQuietTask: ScheduledTask? = null
+    private var receivedGreetingsQuietGeneration = 0L
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -386,6 +392,11 @@ class AiReplyObservationRuntime(
     private fun runFullInspection() {
         pageInspectionTask = null
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
+        if (sessionRunStarted && receivedGreetingsTaskActive && receivedGreetingsUserActive) {
+            onLog("收到的招呼恢复[USER_ACTIVE]：用户仍在操作；暂停页面指纹复核，10s后重新检查")
+            scheduleFullInspectionAfter(RECEIVED_GREETINGS_USER_ACTIVE_RECHECK_DELAY_MS)
+            return
+        }
         if (sessionRunStarted && receivedGreetingsTaskActive &&
             !ownsTask(RECEIVED_GREETINGS_TASK_ID)
         ) {
@@ -421,6 +432,30 @@ class AiReplyObservationRuntime(
         transientEmptySnapshotRecovery.reset()
         snapshotRecoveryStartedAtMs = 0L
         handleInspectionSnapshot(inspection!!)
+    }
+
+    /** System touch boundaries pause received-greetings recovery without becoming page evidence. */
+    fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
+        if (!sessionRunStarted || !receivedGreetingsTaskActive) return
+        receivedGreetingsUserActive = true
+        receivedGreetingsQuietGeneration++
+        receivedGreetingsQuietTask?.cancel()
+        receivedGreetingsQuietTask = null
+        onLog("收到的招呼恢复[USER_ACTIVE]：检测到用户触摸；暂停恢复复核和业务动作；event=${event.type}")
+        if (event.type == AccessibilityEventType.TOUCH_INTERACTION_END) {
+            val expectedGeneration = receivedGreetingsQuietGeneration
+            val quietMs = chooseRandomInt(
+                RECEIVED_GREETINGS_USER_QUIET_MIN_MS,
+                RECEIVED_GREETINGS_USER_QUIET_MAX_MS
+            ).toLong()
+            receivedGreetingsQuietTask = scheduler.schedule(quietMs) {
+                if (expectedGeneration != receivedGreetingsQuietGeneration) return@schedule
+                receivedGreetingsQuietTask = null
+                receivedGreetingsUserActive = false
+                onLog("收到的招呼恢复[USER_QUIET]：用户已静默${quietMs}ms；开始双快照页面指纹复核")
+                scheduleFullInspectionAfter(0L)
+            }
+        }
     }
 
     /** Applies a newly acquired page snapshot after ordinary debounce or verified user stability. */
@@ -982,6 +1017,10 @@ class AiReplyObservationRuntime(
         identityCaptureRetryCount = 0
         identityCaptureTerminalSessionKey = null
         snapshotRecoveryStartedAtMs = 0L
+        receivedGreetingsQuietTask?.cancel()
+        receivedGreetingsQuietTask = null
+        receivedGreetingsQuietGeneration++
+        receivedGreetingsUserActive = false
         privateMessagesTraversalTaskExecutor.reset()
         lastMessageFingerprint = ""
         temporaryContactMessageLedger.clearAll()
