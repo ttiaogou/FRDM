@@ -968,6 +968,10 @@ class AiReplyObservationRuntime(
                 if (currentSessionKey != null && sessionManagerState == SessionManagerState.OPENING_SESSION) {
                     sessionTransitionTask?.cancel()
                     sessionTransitionTask = null
+                    if (!isExpectedPrivateSessionDetail(inspection)) {
+                        rejectChatHeaderMismatch(inspection, "预期会话身份复核")
+                        return
+                    }
                     val headerMatchMode = currentSessionHeaderMatchMode(inspection)
                     if (headerMatchMode != null) {
                         sessionManagerState = SessionManagerState.READING_SESSION
@@ -3093,6 +3097,10 @@ class AiReplyObservationRuntime(
         if (current?.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             current.packageName == targetPackage()
         ) {
+            if (!isExpectedPrivateSessionDetail(current)) {
+                rejectChatHeaderMismatch(current, "延迟页面预期会话身份复核")
+                return
+            }
             val headerMatchMode = currentSessionHeaderMatchMode(current)
             if (headerMatchMode == null) {
                 rejectChatHeaderMismatch(current, "延迟页面复核")
@@ -3248,6 +3256,27 @@ class AiReplyObservationRuntime(
 
     private fun currentSessionHeaderMatchMode(snapshot: ChatPageSnapshot) =
         ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText)
+
+    /**
+     * Message-business identity gate. A generic self-navigation result only proves that
+     * Freedom caused a transition; it does not prove that the resulting detail page belongs
+     * to the selected conversation. Keep that decision entirely in the message layer.
+     */
+    private fun isExpectedPrivateSessionDetail(snapshot: ChatPageSnapshot): Boolean {
+        val expected = expectedPrivateSessionDetailNavigation ?: return false
+        val selected = currentSessionCandidate ?: return false
+        val selectedKey = ChatSessionManagementPolicy.stableSessionKey(selected)
+        val currentKey = currentSessionKey ?: return false
+        val sameTargetSession = expected.sessionKey == selectedKey && expected.sessionKey == currentKey
+        if (!sameTargetSession) {
+            onLog(
+                "AI 会话身份校验失败：详情页不属于当前预期会话；" +
+                    "expected=${expected.sessionKey.take(12)}；selected=${selectedKey.take(12)}；" +
+                    "current=${currentKey.take(12)}；不进入历史上下文或 OCR"
+            )
+        }
+        return sameTargetSession && currentSessionHeaderMatchMode(snapshot) != null
+    }
 
     private fun normalizeSessionTitle(value: String?): String =
         ChatSessionManagementPolicy.normalizeSessionTitle(value)
