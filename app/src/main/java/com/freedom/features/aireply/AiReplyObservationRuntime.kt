@@ -358,6 +358,8 @@ class AiReplyObservationRuntime(
      * session's expected target registration.
      */
     private var pendingNavigationSourceResult: SelfNavigationTransition? = null
+    /** Set by an unattributed window transition; consumed only after a fresh route match. */
+    private var unmatchedNavigationObservationPending = false
 
     /** Receives business-neutral navigation provenance from the unified accessibility layer. */
     fun onSelfNavigationAttached(transition: SelfNavigationTransition) {
@@ -367,6 +369,22 @@ class AiReplyObservationRuntime(
                 "actionId=${transition.actionId}；targetActivity=${transition.targetActivityClass}；" +
                 "targetPageGeneration=${transition.targetPageGeneration}"
         )
+    }
+
+    /**
+     * Requests a read-only route observation for a transition with no unique Freedom source.
+     * The event itself never grants ownership or pauses a task; the destination fingerprint is
+     * still the authority that creates the recovery transaction.
+     */
+    fun onUnmatchedNavigationObserved(targetActivityClass: String) {
+        if (!isAiReplyActive() || !sessionRunStarted) return
+        unmatchedNavigationObservationPending = true
+        onLog(
+            "统一页面恢复[UNMATCHED_OBSERVATION]：未登记导航；" +
+                "targetActivity=${targetActivityClass.ifBlank { "UNKNOWN" }}；" +
+                "等待目标页面指纹，不直接判定UNKNOWN或恢复"
+        )
+        scheduleFullInspectionAfter(0L)
     }
     /** Prevents duplicate mismatch handling; the per-attempt guard belongs to the traversal executor. */
     private val headerMismatchGuard: Any
@@ -648,12 +666,24 @@ class AiReplyObservationRuntime(
                 )
             }
         }
-        if (sessionRunStarted && activeTaskId != null && !recoveryContext.pending &&
+        val unmatchedReturnToOwnedRoute = unmatchedNavigationObservationPending &&
+            selfInitiatedTransition == null &&
+            previous != null &&
+            inboxPageRecognizer.isChatDetail(previous) &&
+            matchedRouteId == activeRouteId
+        val shouldCreateRouteRecovery = sessionRunStarted && activeTaskId != null &&
+            !recoveryContext.pending && selfInitiatedTransition == null &&
             previous != null && matchedRouteId != activeRouteId &&
-            pageIdentityChanged(previous, inspection) &&
-            selfInitiatedTransition == null
-        ) {
+            pageIdentityChanged(previous, inspection)
+        if (shouldCreateRouteRecovery || unmatchedReturnToOwnedRoute) {
             requestUnifiedPauseAndCheckpoint(activeTaskId, "PAGE_ROUTE_CHANGED")
+            unmatchedNavigationObservationPending = false
+        } else if (unmatchedNavigationObservationPending &&
+            matchedRouteId == activeRouteId
+        ) {
+            // The unattributed transition returned to the already-owned route. It was observed,
+            // but it did not establish a new recovery destination.
+            unmatchedNavigationObservationPending = false
         }
 
         if (recoveryContext.pending) {
@@ -1295,6 +1325,7 @@ class AiReplyObservationRuntime(
         currentSessionBinding = null
         expectedPrivateSessionDetailNavigation = null
         pendingNavigationSourceResult = null
+        unmatchedNavigationObservationPending = false
         identityCaptureSessionKey = null
         identityCaptureStartedAtMs = 0L
         identityCaptureRetryCount = 0

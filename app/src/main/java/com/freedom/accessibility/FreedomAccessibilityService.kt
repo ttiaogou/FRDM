@@ -512,8 +512,13 @@ class FreedomAccessibilityService : AccessibilityService() {
                     targetWindowId = runCatching { event.windowId }.getOrDefault(-1),
                     transitionAtUptimeMs = event.eventTime
                 )
-                inputOriginClassifier.takeAttachedSelfNavigation()?.let { transition ->
-                    aiReplyObservationRuntime.onSelfNavigationAttached(transition)
+                val attachedSelfNavigation = inputOriginClassifier.takeAttachedSelfNavigation()
+                if (attachedSelfNavigation != null) {
+                    aiReplyObservationRuntime.onSelfNavigationAttached(attachedSelfNavigation)
+                } else {
+                    aiReplyObservationRuntime.onUnmatchedNavigationObserved(
+                        event.className?.toString().orEmpty()
+                    )
                 }
                 pendingNavigationSourcePageGeneration = null
                 pendingNavigationSourceAtUptimeMs = 0L
