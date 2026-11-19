@@ -95,7 +95,9 @@ internal class MomoSocialAdapter(
     private val diagnostics: RunDiagnosticsPort,
     private val sayHiTraversalCheckpointRepository: MomoSayHiTraversalCheckpointRepository,
     private val ocrReviewRepository: OcrReviewRepository,
-    private val sampleArchivePort: SessionSampleArchivePort
+    private val sampleArchivePort: SessionSampleArchivePort,
+    /** Registers the imminent profile-to-chat return in the unified navigation provenance layer. */
+    private val registerSelfNavigation: (String) -> Unit = {}
 ) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort {
 
     override fun isReceivedGreetingsListActivity(activityClass: String): Boolean =
@@ -5049,6 +5051,7 @@ internal class MomoSocialAdapter(
                 if (dialogObservation != null &&
                     rootAccess.isTargetWindowPresent(dialogObservation.windowId) != false
                 ) {
+                    registerSelfNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
                     val back = submitVerifiedProfileBackNavigation() ?: return true
                     pending.backAttempts++
                     pending.lastTransitionAtMs = System.currentTimeMillis()
@@ -5103,6 +5106,7 @@ internal class MomoSocialAdapter(
                     }
                 }
 
+                registerSelfNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
                 val back = submitVerifiedProfileBackNavigation() ?: return true
                 pending.backAttempts++
                 pending.lastTransitionAtMs = System.currentTimeMillis()
@@ -5140,6 +5144,7 @@ internal class MomoSocialAdapter(
                 ) {
                     // A submitted BACK is not proof that the profile was left. Allow one more
                     // independently revalidated, popup-safe attempt after the bounded wait.
+                    registerSelfNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
                     val back = submitVerifiedProfileBackNavigation() ?: return true
                     pending.backAttempts++
                     pending.lastTransitionAtMs = System.currentTimeMillis()

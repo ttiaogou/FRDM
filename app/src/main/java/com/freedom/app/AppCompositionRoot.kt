@@ -329,7 +329,13 @@ internal class AccessibilityServiceDependencies internal constructor(
             diagnostics = diagnostics,
             sayHiTraversalCheckpointRepository = root.sayHiTraversalCheckpointRepository,
             ocrReviewRepository = root.ocrReviewRepository,
-            sampleArchivePort = root.sampleArchivePort
+            sampleArchivePort = root.sampleArchivePort,
+            registerSelfNavigation = { targetActivityClass ->
+                inputOriginClassifier.registerExpectedSelfNavigation(
+                    packageName = monitorRepository.targetPackage(),
+                    targetActivityClass = targetActivityClass
+                )
+            }
         )
     }
     val momoSocialAdapter: MomoSocialAdapter by momoSocialAdapterDelegate
@@ -486,12 +492,6 @@ internal class AccessibilityServiceDependencies internal constructor(
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {
                     aiReplyDraftCoordinator.resetForRuntimeReset()
                 }
-            },
-            registerSelfNavigation = { targetActivityClass ->
-                inputOriginClassifier.registerExpectedSelfNavigation(
-                    packageName = monitorRepository.targetPackage(),
-                    targetActivityClass = targetActivityClass
-                )
             },
             privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository
         )
