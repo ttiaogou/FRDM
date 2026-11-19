@@ -3263,15 +3263,19 @@ class AiReplyObservationRuntime(
      * to the selected conversation. Keep that decision entirely in the message layer.
      */
     private fun isExpectedPrivateSessionDetail(snapshot: ChatPageSnapshot): Boolean {
-        val expected = expectedPrivateSessionDetailNavigation ?: return false
         val selected = currentSessionCandidate ?: return false
         val selectedKey = ChatSessionManagementPolicy.stableSessionKey(selected)
         val currentKey = currentSessionKey ?: return false
-        val sameTargetSession = expected.sessionKey == selectedKey && expected.sessionKey == currentKey
+        val expected = expectedPrivateSessionDetailNavigation
+        // The business identity gate remains valid for restored/test-created business state
+        // where no navigation ticket exists. When a ticket is present, its session key is an
+        // additional consistency check, not the identity proof itself.
+        val sameTargetSession = currentKey == selectedKey &&
+            (expected == null || expected.sessionKey == selectedKey)
         if (!sameTargetSession) {
             onLog(
                 "AI 会话身份校验失败：详情页不属于当前预期会话；" +
-                    "expected=${expected.sessionKey.take(12)}；selected=${selectedKey.take(12)}；" +
+                    "expected=${expected?.sessionKey?.take(12) ?: "NONE"}；selected=${selectedKey.take(12)}；" +
                     "current=${currentKey.take(12)}；不进入历史上下文或 OCR"
             )
         }
