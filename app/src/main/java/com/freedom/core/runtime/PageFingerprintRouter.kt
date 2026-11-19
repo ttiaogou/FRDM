@@ -14,6 +14,15 @@ data class PageFingerprintRoute(
     val matches: (PageFingerprint) -> Boolean
 )
 
+/** Feature-owned page route contract; core only invokes its provider-neutral callbacks. */
+interface PageRecoveryRouteAdapter {
+    val routeId: String
+    fun matches(fingerprint: PageFingerprint): Boolean
+    fun saveCheckpoint()
+
+    fun asRoute(): PageFingerprintRoute = PageFingerprintRoute(routeId, ::matches)
+}
+
 /**
  * Ordered page-fingerprint registry owned by the shared observation coordinator.
  * Registration is replaceable by route ID so service/runtime recreation cannot duplicate routes.

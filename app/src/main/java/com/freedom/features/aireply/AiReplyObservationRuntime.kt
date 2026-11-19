@@ -10,7 +10,7 @@ import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.PageFingerprint
-import com.freedom.core.runtime.PageFingerprintRoute
+import com.freedom.core.runtime.PageRecoveryRouteAdapter
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
 import com.freedom.core.accessibility.gesture.GestureIntent
@@ -288,16 +288,19 @@ class AiReplyObservationRuntime(
     /** One coordinator-owned transaction shared by message-list and received-greetings recovery. */
     private val recoveryTransaction = UnifiedRecoveryTransactionStateMachine()
     private val privateMessagesTraversalTaskExecutor = PrivateMessagesTraversalTaskExecutor()
+    private val messageListRecoveryRoute: PageRecoveryRouteAdapter by lazy(LazyThreadSafetyMode.NONE) {
+        MessageListRecoveryRouteAdapter {
+            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+        }
+    }
+    private val receivedGreetingsRecoveryRoute: PageRecoveryRouteAdapter by lazy(LazyThreadSafetyMode.NONE) {
+        ReceivedGreetingsRecoveryRouteAdapter {
+            chatPagePort.persistReceivedGreetingsCheckpoint()
+        }
+    }
     init {
-        sharedPageObservationCoordinator?.registerFingerprintRoute(
-            PageFingerprintRoute("AI_REPLY_PRIVATE_MESSAGES") { fingerprint ->
-                fingerprint.semanticPage == ChatPageKind.CHAT_LIST.name
-            }
-        )
-        sharedPageObservationCoordinator?.registerFingerprintRoute(
-            PageFingerprintRoute("AI_REPLY_RECEIVED_GREETINGS") { fingerprint ->
-                !fingerprint.adapterFingerprint.isNullOrBlank()
-            }
+        sharedPageObservationCoordinator?.registerFingerprintRoute(messageListRecoveryRoute.asRoute())
+        sharedPageObservationCoordinator?.registerFingerprintRoute(receivedGreetingsRecoveryRoute.asRoute())
         )
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
@@ -586,7 +589,7 @@ class AiReplyObservationRuntime(
         ) {
             receivedGreetingsExitObservationSequence += 1L
             if (sessionRunStarted && receivedGreetingsTaskActive) {
-                chatPagePort.persistReceivedGreetingsCheckpoint()
+                receivedGreetingsRecoveryRoute.saveCheckpoint()
                 recoveryTransaction.dispatch(
                     RecoveryTransactionEvent.UnknownPage("RECEIVED_GREETINGS_PAGE_EXIT")
                 )
@@ -645,7 +648,7 @@ class AiReplyObservationRuntime(
             previous.packageName == targetPackage() &&
             !receivedGreetingsFingerprint.isNullOrBlank()
         if (leavingMessageListForGreetings) {
-            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            messageListRecoveryRoute.saveCheckpoint()
             recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_PAGE_EXIT"))
             recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
             taskCoordinator?.receiveBusinessTaskSwitch(
