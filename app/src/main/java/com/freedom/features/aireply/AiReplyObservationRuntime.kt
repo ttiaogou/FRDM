@@ -354,6 +354,7 @@ class AiReplyObservationRuntime(
     private var messageRecoveryRetryAttempt = 0
     private var messageListRecoveryVerificationPending = false
     private var receivedGreetingsExitObservationSequence = 0L
+    private var receivedGreetingsPausedForPageExit = false
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -561,6 +562,22 @@ class AiReplyObservationRuntime(
             inspection.activityClass != RECEIVED_GREETINGS_LIST_ACTIVITY
         ) {
             receivedGreetingsExitObservationSequence += 1L
+            if (sessionRunStarted && receivedGreetingsTaskActive) {
+                chatPagePort.persistReceivedGreetingsCheckpoint()
+                recoveryTransaction.dispatch(
+                    RecoveryTransactionEvent.UnknownPage("RECEIVED_GREETINGS_PAGE_EXIT")
+                )
+                sessionTransitionTask?.cancel()
+                sessionTransitionTask = null
+                pageInspectionTask?.cancel()
+                pageInspectionTask = null
+                receivedGreetingsPausedForPageExit = true
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog(
+                    "收到的招呼任务[PAUSED_PAGE_EXIT]：已保存当前检查点；" +
+                        "停止滚动、点击和导航；保留任务上下文，等待后续跨业务恢复阶段接管"
+                )
+            }
             onLog(
                 "页面离开识别[RECEIVED_GREETINGS_EXIT]：" +
                     "sourceActivity=$RECEIVED_GREETINGS_LIST_ACTIVITY；" +
@@ -570,6 +587,15 @@ class AiReplyObservationRuntime(
                     "sequence=$receivedGreetingsExitObservationSequence；" +
                     "当前阶段仅记录边界，不暂停任务、不转移UI操作权"
             )
+            if (receivedGreetingsPausedForPageExit) {
+                lastPageInspection = inspection
+                return
+            }
+        }
+
+        if (receivedGreetingsPausedForPageExit) {
+            lastPageInspection = inspection
+            return
         }
 
         // 模型请求、分段填入及人工审核期间，不让遍历任务抢走页面。
@@ -1284,6 +1310,7 @@ class AiReplyObservationRuntime(
             return
         }
         cancelAiReadinessRetry(resetCount = true)
+        receivedGreetingsPausedForPageExit = false
         cancelSessionSafeViewportRetry(resetCount = true)
         startupReadinessCoordinator.cancelRecovery()
         val directory = runCatching {

@@ -3238,6 +3238,10 @@ internal class MomoSocialAdapter(
         return pageVerified
     }
 
+    override fun persistReceivedGreetingsCheckpoint() {
+        persistSayHiTraversalCheckpoint()
+    }
+
     override fun hasRestorableReceivedGreetingsCheckpoint(): Boolean =
         sayHiTraversalState.hasRestorableCheckpoint
 
