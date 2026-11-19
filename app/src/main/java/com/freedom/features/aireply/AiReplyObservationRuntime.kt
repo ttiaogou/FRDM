@@ -40,6 +40,7 @@ import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
 import com.freedom.features.recovery.RecoveryTransactionEvent
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
+import com.freedom.features.recovery.RecoveryContext
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.LinkedHashSet
@@ -287,6 +288,7 @@ class AiReplyObservationRuntime(
 
     /** One coordinator-owned transaction shared by message-list and received-greetings recovery. */
     private val recoveryTransaction = UnifiedRecoveryTransactionStateMachine()
+    private val recoveryContext = RecoveryContext()
     private val privateMessagesTraversalTaskExecutor = PrivateMessagesTraversalTaskExecutor()
     private val messageListRecoveryRoute: PageRecoveryRouteAdapter by lazy(LazyThreadSafetyMode.NONE) {
         MessageListRecoveryRouteAdapter {
@@ -365,8 +367,6 @@ class AiReplyObservationRuntime(
     private val privateMessagesCheckpointVerificationGate = PageRecoveryVerificationGate()
     private var messageRecoveryRetryAttempt = 0
     private var messageListRecoveryVerificationPending = false
-    private var pendingRecoverySourceTaskId: String? = null
-    private var pendingRecoveryTargetRouteId: String? = null
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -583,13 +583,13 @@ class AiReplyObservationRuntime(
 
         val activeTaskId = taskOwnership.activeTaskId()
         val activeRouteId = recoveryRouteIdForTask(activeTaskId)
-        if (sessionRunStarted && activeTaskId != null && pendingRecoverySourceTaskId == null &&
+        if (sessionRunStarted && activeTaskId != null && !recoveryContext.pending &&
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
         ) {
             recoveryRouteForTask(activeTaskId)?.saveCheckpoint()
-            pendingRecoverySourceTaskId = activeTaskId
-            pendingRecoveryTargetRouteId = null
+            recoveryContext.request(activeTaskId, "PAGE_ROUTE_CHANGED")
+            recoveryContext.markCheckpointSaved()
             recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("PAGE_ROUTE_CHANGED"))
             recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
             sessionTransitionTask?.cancel()
@@ -606,17 +606,16 @@ class AiReplyObservationRuntime(
             )
         }
 
-        if (pendingRecoverySourceTaskId != null) {
+        if (recoveryContext.pending) {
             val targetRoute = matchedRouteId
-            if (targetRoute == null || targetRoute == recoveryRouteIdForTask(pendingRecoverySourceTaskId)) {
+            if (targetRoute == null || targetRoute == recoveryRouteIdForTask(recoveryContext.sourceTaskId)) {
                 lastPageInspection = inspection
                 return
             }
-            pendingRecoveryTargetRouteId = targetRoute
             val verificationKey = listOf(targetRoute, recoveryStructuralKey(inspection)).joinToString("|")
-            if (!pageRecoveryVerificationGate.observe(verificationKey)) {
+            if (!recoveryContext.observeTarget(targetRoute, verificationKey)) {
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
-                onLog("统一页面恢复[RECOVERY_VERIFYING]：目标路由=$targetRoute；第${pageRecoveryVerificationGate.stableSamples}/2次快照尚未稳定")
+                onLog("统一页面恢复[RECOVERY_VERIFYING]：目标路由=$targetRoute；第${recoveryContext.verificationSamples}/2次快照尚未稳定")
                 scheduleFullInspectionAfter(350L)
                 lastPageInspection = inspection
                 return
@@ -631,9 +630,8 @@ class AiReplyObservationRuntime(
                 lastPageInspection = inspection
                 return
             }
-            val sourceTaskId = pendingRecoverySourceTaskId
-            pendingRecoverySourceTaskId = null
-            pendingRecoveryTargetRouteId = null
+            val sourceTaskId = recoveryContext.sourceTaskId
+            recoveryContext.clear()
             pageRecoveryVerificationGate.reset()
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
@@ -1190,6 +1188,7 @@ class AiReplyObservationRuntime(
         lastPageInspection = null
         lastConfirmedChatListInspection = null
         recoveryTransaction.reset()
+        recoveryContext.clear()
         messageListRecoveryVerificationPending = false
         messageRecoveryRetryAttempt = 0
         transientEmptySnapshotRecovery.reset()
@@ -1335,6 +1334,7 @@ class AiReplyObservationRuntime(
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
         startupReadinessCoordinator.cancelRecovery()
+        recoveryContext.clear()
         val directory = runCatching {
             chatSessionManagementPort.beginSessionManagement()
         }.getOrNull()
