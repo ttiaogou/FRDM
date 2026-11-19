@@ -301,7 +301,6 @@ class AiReplyObservationRuntime(
     init {
         sharedPageObservationCoordinator?.registerFingerprintRoute(messageListRecoveryRoute.asRoute())
         sharedPageObservationCoordinator?.registerFingerprintRoute(receivedGreetingsRecoveryRoute.asRoute())
-        )
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             privateMessagesCheckpointRecoveryPending = true
@@ -366,9 +365,8 @@ class AiReplyObservationRuntime(
     private val privateMessagesCheckpointVerificationGate = PageRecoveryVerificationGate()
     private var messageRecoveryRetryAttempt = 0
     private var messageListRecoveryVerificationPending = false
-    private var receivedGreetingsExitObservationSequence = 0L
-    private var receivedGreetingsPausedForPageExit = false
-    private var messageListPausedForPageExit = false
+    private var pendingRecoverySourceTaskId: String? = null
+    private var pendingRecoveryTargetRouteId: String? = null
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -569,257 +567,92 @@ class AiReplyObservationRuntime(
     private fun handleInspectionSnapshot(incomingInspection: ChatPageSnapshot) {
         val previous = lastPageInspection
         val inspection = stabilizeIncomingPageSnapshot(incomingInspection)
-        sharedPageObservationCoordinator?.matchFingerprint(
-            PageFingerprint(
-                packageName = inspection.packageName,
-                activityClass = inspection.activityClass,
-                semanticPage = inspection.pageKind.name,
-                adapterFingerprint = runCatching {
-                    chatPagePort.receivedGreetingsRecoveryFingerprint()
-                }.getOrNull()
-            )
+        val pageFingerprint = PageFingerprint(
+            packageName = inspection.packageName,
+            activityClass = inspection.activityClass,
+            semanticPage = inspection.pageKind.name,
+            adapterFingerprint = runCatching {
+                chatPagePort.receivedGreetingsRecoveryFingerprint()
+            }.getOrNull()
         )
-
-        // Publish the cross-business boundary before the pause is observed by the target
-        // coordinator. The event is only a request/record at this phase; ownership transfer
-        // still requires target-page fingerprint and checkpoint verification.
-        if (previous != null &&
-            chatPagePort.isReceivedGreetingsListActivity(previous.activityClass) &&
-            !chatPagePort.isReceivedGreetingsListActivity(inspection.activityClass)
-        ) {
-            receivedGreetingsExitObservationSequence += 1L
-            if (sessionRunStarted && receivedGreetingsTaskActive) {
-                receivedGreetingsRecoveryRoute.saveCheckpoint()
-                recoveryTransaction.dispatch(
-                    RecoveryTransactionEvent.UnknownPage("RECEIVED_GREETINGS_PAGE_EXIT")
-                )
-                val switchEvent = taskCoordinator?.receiveBusinessTaskSwitch(
-                    fromTaskId = RECEIVED_GREETINGS_TASK_ID,
-                    toTaskId = PRIVATE_MESSAGES_TASK_ID,
-                    reason = "RECEIVED_GREETINGS_PAGE_EXIT"
-                )
-                sessionTransitionTask?.cancel()
-                sessionTransitionTask = null
-                pageInspectionTask?.cancel()
-                pageInspectionTask = null
-                receivedGreetingsPausedForPageExit = true
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog(
-                    "收到的招呼任务[PAUSED_PAGE_EXIT]：已保存当前检查点；" +
-                        "停止滚动、点击和导航；保留任务上下文，等待后续跨业务恢复阶段接管"
-                )
-                onLog(
-                    "任务协调[CROSS_BUSINESS_SWITCH_REQUESTED]：" +
-                        "from=$RECEIVED_GREETINGS_TASK_ID；to=$PRIVATE_MESSAGES_TASK_ID；" +
-                        "reason=RECEIVED_GREETINGS_PAGE_EXIT；" +
-                        "sequence=${switchEvent?.sequence ?: "UNAVAILABLE"}；" +
-                        "仅发布事件，尚未转移UI操作权"
-                )
-            }
-            onLog(
-                "页面离开识别[RECEIVED_GREETINGS_EXIT]：" +
-                    "sourcePage=RECEIVED_GREETINGS_LIST；" +
-                    "targetActivity=${inspection.activityClass.ifBlank { "UNKNOWN" }}；" +
-                    "targetPage=${inspection.pageKind.name}；" +
-                    "window=${inspection.windowIdentityKey().orEmpty()}；" +
-                    "sequence=$receivedGreetingsExitObservationSequence；" +
-                    "已暂停任务并发布跨业务切换事件，尚未转移UI操作权"
-            )
-            if (receivedGreetingsPausedForPageExit) {
-                lastPageInspection = inspection
-                return
-            }
-        }
-
-        // Reverse cross-business handoff: a user may leave the message list and manually open
-        // received greetings. The first matching snapshot only requests recovery; the greetings
-        // branch receives UI ownership after two independent adapter fingerprints agree.
-        val receivedGreetingsFingerprint = if (
-            inspection.packageName == targetPackage() &&
-            !receivedGreetingsTaskActive &&
-            inspection.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE
-        ) {
-            runCatching { chatPagePort.receivedGreetingsRecoveryFingerprint() }.getOrNull()
+        val matchedRouteId = if (pageFingerprint.packageName == targetPackage()) {
+            sharedPageObservationCoordinator?.matchFingerprint(pageFingerprint)
+                ?: listOf(messageListRecoveryRoute, receivedGreetingsRecoveryRoute)
+                    .firstOrNull { it.matches(pageFingerprint) }?.routeId
         } else null
-        val leavingMessageListForGreetings = sessionRunStarted &&
-            !receivedGreetingsTaskActive &&
-            !messageListPausedForPageExit &&
-            previous?.pageKind == ChatPageKind.CHAT_LIST &&
-            previous.packageName == targetPackage() &&
-            !receivedGreetingsFingerprint.isNullOrBlank()
-        if (leavingMessageListForGreetings) {
-            messageListRecoveryRoute.saveCheckpoint()
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_PAGE_EXIT"))
+
+        val activeTaskId = taskOwnership.activeTaskId()
+        val activeRouteId = recoveryRouteIdForTask(activeTaskId)
+        if (sessionRunStarted && activeTaskId != null && pendingRecoverySourceTaskId == null &&
+            previous != null && matchedRouteId != activeRouteId &&
+            pageIdentityChanged(previous, inspection)
+        ) {
+            recoveryRouteForTask(activeTaskId)?.saveCheckpoint()
+            pendingRecoverySourceTaskId = activeTaskId
+            pendingRecoveryTargetRouteId = null
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("PAGE_ROUTE_CHANGED"))
             recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
-            taskCoordinator?.receiveBusinessTaskSwitch(
-                fromTaskId = PRIVATE_MESSAGES_TASK_ID,
-                toTaskId = RECEIVED_GREETINGS_TASK_ID,
-                reason = "MESSAGE_LIST_PAGE_EXIT"
-            )
-            messageListPausedForPageExit = true
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
             pageInspectionTask?.cancel()
             pageInspectionTask = null
+            if (activeTaskId == RECEIVED_GREETINGS_TASK_ID) {
+                receivedGreetingsTaskFlow.pauseForBusinessSwitch()
+            }
             sessionManagerState = SessionManagerState.PAUSED
             onLog(
-                "消息列表任务[PAUSED_PAGE_EXIT]：已保存检查点；检测到收到招呼目标页面；" +
-                    "等待双快照指纹验证，不执行滚动、点击或导航"
+                "统一页面恢复[PAUSED]：当前任务=$activeTaskId；当前页面未匹配原路由；" +
+                    "已保存检查点，等待目标页面指纹；不执行滚动、点击或导航"
             )
         }
 
-        if (messageListPausedForPageExit) {
-            val fingerprint = receivedGreetingsFingerprint
-            if (fingerprint.isNullOrBlank()) {
-                onLog("收到的招呼跨业务恢复[RECOVERY_VERIFYING]：当前快照未通过列表指纹；保持暂停")
-                scheduleFullInspectionAfter(350L)
+        if (pendingRecoverySourceTaskId != null) {
+            val targetRoute = matchedRouteId
+            if (targetRoute == null || targetRoute == recoveryRouteIdForTask(pendingRecoverySourceTaskId)) {
                 lastPageInspection = inspection
                 return
             }
-            if (!receivedGreetingsRecoveryVerificationGate.observe(fingerprint)) {
+            pendingRecoveryTargetRouteId = targetRoute
+            val verificationKey = listOf(targetRoute, recoveryStructuralKey(inspection)).joinToString("|")
+            if (!pageRecoveryVerificationGate.observe(verificationKey)) {
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
-                onLog(
-                    "收到的招呼跨业务恢复[RECOVERY_VERIFYING]：第" +
-                        "${receivedGreetingsRecoveryVerificationGate.stableSamples}/2次独立指纹快照尚未稳定；保持暂停"
-                )
+                onLog("统一页面恢复[RECOVERY_VERIFYING]：目标路由=$targetRoute；第${pageRecoveryVerificationGate.stableSamples}/2次快照尚未稳定")
                 scheduleFullInspectionAfter(350L)
                 lastPageInspection = inspection
                 return
             }
             recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
             recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
-            if (!claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, "收到招呼连续两次指纹确认后接管跨业务恢复")) {
+            val targetTaskId = taskIdForRecoveryRoute(targetRoute)
+            if (targetTaskId == null || !claimTaskOwnership(targetTaskId, "统一页面路由双快照验证完成")) {
                 sessionManagerState = SessionManagerState.PAUSED
-                onLog("收到的招呼跨业务恢复[OWNERSHIP_REJECTED]：已完成页面验证，但未取得UI操作权")
+                onLog("统一页面恢复[OWNERSHIP_REJECTED]：目标路由=$targetRoute；未取得UI操作权")
                 scheduleFullInspectionAfter(350L)
                 lastPageInspection = inspection
                 return
             }
-            messageListPausedForPageExit = false
-            receivedGreetingsRecoveryVerificationGate.reset()
+            val sourceTaskId = pendingRecoverySourceTaskId
+            pendingRecoverySourceTaskId = null
+            pendingRecoveryTargetRouteId = null
+            pageRecoveryVerificationGate.reset()
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("收到的招呼跨业务恢复[RECOVERY_VERIFIED]：连续两次独立指纹一致；开始恢复收到招呼检查点")
-            startReceivedGreetingsTaskFromConfirmedPage()
-            return
-        }
-
-        if (receivedGreetingsPausedForPageExit) {
-            val pendingSwitch = taskCoordinator?.lastBusinessTaskSwitchEvent()
-            val switchingToPrivateMessages = pendingSwitch?.fromTaskId == RECEIVED_GREETINGS_TASK_ID &&
-                pendingSwitch.toTaskId == PRIVATE_MESSAGES_TASK_ID
-            if (switchingToPrivateMessages && inspection.pageKind == ChatPageKind.CHAT_LIST &&
-                inspection.packageName == targetPackage()
-            ) {
-                if (!messageListRecoveryVerificationPending) {
-                    recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
-                    messageListRecoveryVerificationPending = true
-                    pageRecoveryVerificationGate.reset()
-                    sessionManagerState = SessionManagerState.PAUSED
-                    onLog(
-                        "PageRecoveryRequested：收到招呼已离开；消息列表目标页面已发现；" +
-                            "等待连续两次稳定消息列表指纹，不执行滚动、点击或导航"
-                    )
-                }
-                if (!pageRecoveryVerificationGate.observe(recoveryStructuralKey(inspection))) {
-                    recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
-                    onLog(
-                        "消息列表跨业务恢复[RECOVERY_VERIFYING]：第" +
-                            "${pageRecoveryVerificationGate.stableSamples}/2次独立指纹快照尚未稳定；保持暂停"
-                    )
-                    scheduleFullInspectionAfter(350L)
-                    lastPageInspection = inspection
-                    return
-                }
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
-                if (!claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "消息列表连续两次指纹确认后接管跨业务恢复")) {
-                    sessionManagerState = SessionManagerState.PAUSED
-                    onLog("消息列表跨业务恢复[OWNERSHIP_REJECTED]：已完成页面验证，但未取得UI操作权")
-                    scheduleFullInspectionAfter(350L)
-                    lastPageInspection = inspection
-                    return
-                }
-                receivedGreetingsTaskFlow.pauseForBusinessSwitch()
-                receivedGreetingsPausedForPageExit = false
-                messageListRecoveryVerificationPending = false
-                messageRecoveryRetryAttempt = 0
-                pageRecoveryVerificationGate.reset()
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+            onLog("统一页面恢复[RECOVERY_VERIFIED]：目标路由=$targetRoute；已从任务=$sourceTaskId恢复任务=$targetTaskId")
+            if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                onLog(
-                    "消息列表跨业务恢复[RECOVERY_VERIFIED]：连续两次独立指纹一致；" +
-                        "已由消息列表任务接管并恢复原遍历检查点"
-                )
                 lastPageInspection = inspection
                 handleSessionListPage(inspection)
-                return
+            } else {
+                sessionManagerState = SessionManagerState.PAUSED
+                lastPageInspection = inspection
+                startReceivedGreetingsTaskFromConfirmedPage()
             }
-            lastPageInspection = inspection
             return
         }
 
         // 模型请求、分段填入及人工审核期间，不让遍历任务抢走页面。
         if (isConversationDraftPending() || isDraftAwaitingUserSend()) {
             lastPageInspection = inspection
-            return
-        }
-
-        // Received-greetings detail -> list is also a recovery boundary. Keep its task lease
-        // while verifying: runFullInspection deliberately refuses to inspect that branch after
-        // ownership is released, so releasing it here would deadlock the recovery transaction.
-        val returnedFromReceivedGreetingsDetail = sessionRunStarted &&
-            receivedGreetingsTaskActive &&
-            previous != null &&
-            inboxPageRecognizer.isChatDetail(previous) &&
-            inspection.pageKind == ChatPageKind.CHAT_LIST &&
-            inspection.packageName == targetPackage()
-        if (returnedFromReceivedGreetingsDetail) {
-            recoveryTransaction.dispatch(
-                RecoveryTransactionEvent.UnknownPage("RECEIVED_GREETINGS_RETURN_FROM_CHAT_DETAIL")
-            )
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
-            receivedGreetingsRecoveryVerificationPending = true
-            receivedGreetingsRecoveryVerifiedForNextSnapshot = false
-            receivedGreetingsRecoveryVerificationGate.reset()
-            sessionManagerState = SessionManagerState.PAUSED
-            lastPageInspection = inspection
-            onLog(
-                "PageRecoveryRequested：收到招呼聊天详情已返回收到招呼列表；" +
-                    "保留任务租约并等待连续两次稳定列表指纹，不执行滚动、点击或导航"
-            )
-            scheduleFullInspectionAfter(0L)
-            return
-        }
-
-        // Returning from a chat detail page is a recovery boundary even when the fresh
-        // snapshot is immediately classified as CHAT_LIST. Do not let the known-page branch
-        // below reacquire the task and scroll on the first post-BACK snapshot; that would bypass
-        // the shared UNKNOWN/recovery path and the two-snapshot verification gate.
-        val returnedFromChatDetail = sessionRunStarted &&
-            !receivedGreetingsTaskActive &&
-            !awaitingNormalInboxAfterGreetingsReturn &&
-            previous != null &&
-            inboxPageRecognizer.isChatDetail(previous) &&
-            inspection.pageKind == ChatPageKind.CHAT_LIST &&
-            inspection.packageName == targetPackage()
-        if (returnedFromChatDetail) {
-            recoveryTransaction.dispatch(
-                RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_RETURN_FROM_CHAT_DETAIL")
-            )
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
-            messageListRecoveryVerificationPending = true
-            pageRecoveryVerificationGate.reset()
-            sessionManagerState = SessionManagerState.PAUSED
-            releaseTaskOwnership("聊天详情返回消息列表；等待双快照页面恢复验证")
-            lastPageInspection = inspection
-            onLog(
-                "PageRecoveryRequested：聊天详情已返回消息列表；" +
-                    "即使当前快照已识别为 CHAT_LIST，也必须连续两次稳定页面快照后恢复原遍历状态"
-            )
-            scheduleFullInspectionAfter(0L)
             return
         }
 
@@ -1358,7 +1191,6 @@ class AiReplyObservationRuntime(
         lastConfirmedChatListInspection = null
         recoveryTransaction.reset()
         messageListRecoveryVerificationPending = false
-        messageListPausedForPageExit = false
         messageRecoveryRetryAttempt = 0
         transientEmptySnapshotRecovery.reset()
         receivedGreetingsRecoveryVerificationPending = false
@@ -1420,6 +1252,30 @@ class AiReplyObservationRuntime(
         else -> false
     }
 
+    private fun recoveryRouteIdForTask(taskId: String?): String? = when (taskId) {
+        PRIVATE_MESSAGES_TASK_ID -> messageListRecoveryRoute.routeId
+        RECEIVED_GREETINGS_TASK_ID -> receivedGreetingsRecoveryRoute.routeId
+        else -> null
+    }
+
+    private fun taskIdForRecoveryRoute(routeId: String): String? = when (routeId) {
+        messageListRecoveryRoute.routeId -> PRIVATE_MESSAGES_TASK_ID
+        receivedGreetingsRecoveryRoute.routeId -> RECEIVED_GREETINGS_TASK_ID
+        else -> null
+    }
+
+    private fun recoveryRouteForTask(taskId: String?): PageRecoveryRouteAdapter? = when (taskId) {
+        PRIVATE_MESSAGES_TASK_ID -> messageListRecoveryRoute
+        RECEIVED_GREETINGS_TASK_ID -> receivedGreetingsRecoveryRoute
+        else -> null
+    }
+
+    private fun pageIdentityChanged(previous: ChatPageSnapshot, current: ChatPageSnapshot): Boolean =
+        previous.packageName != current.packageName ||
+            previous.activityClass != current.activityClass ||
+            previous.windowIdentityKey() != current.windowIdentityKey() ||
+            previous.pageKind != current.pageKind
+
     private fun ownsTask(taskId: String): Boolean = when (taskId) {
         PrivateMessagesTaskController.TASK_ID -> privateMessagesTaskController.ownsTask()
         ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskFlow.ownsTask()
@@ -1477,8 +1333,6 @@ class AiReplyObservationRuntime(
             return
         }
         cancelAiReadinessRetry(resetCount = true)
-        receivedGreetingsPausedForPageExit = false
-        messageListPausedForPageExit = false
         cancelSessionSafeViewportRetry(resetCount = true)
         startupReadinessCoordinator.cancelRecovery()
         val directory = runCatching {
@@ -1527,7 +1381,6 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
         privateMessagesCheckpointRecoveryPending = false
         messageListRecoveryVerificationPending = false
-        messageListPausedForPageExit = false
         messageRecoveryRetryAttempt = 0
         privateMessagesCheckpointVerificationGate.reset()
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->

@@ -11,7 +11,8 @@ internal class MessageListRecoveryRouteAdapter(
     override val routeId: String = "AI_REPLY_PRIVATE_MESSAGES"
 
     override fun matches(fingerprint: PageFingerprint): Boolean =
-        fingerprint.semanticPage == ChatPageKind.CHAT_LIST.name
+        fingerprint.semanticPage == ChatPageKind.CHAT_LIST.name &&
+            fingerprint.adapterFingerprint.isNullOrBlank()
 
     override fun saveCheckpoint() = persist()
 }
