@@ -132,8 +132,6 @@ class AiReplyObservationRuntime(
         private const val SESSION_SCROLL_DURATION_MS = 480L
         private const val PRIVATE_MESSAGES_TASK_ID = PrivateMessagesTaskController.TASK_ID
         private const val RECEIVED_GREETINGS_TASK_ID = ReceivedGreetingsTaskController.TASK_ID
-        private const val RECEIVED_GREETINGS_LIST_ACTIVITY =
-            "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
         private val PAGE_CHANGE_RECHECK_EVENT_TYPES = setOf(
             AccessibilityEventType.WINDOW_STATE_CHANGED,
             AccessibilityEventType.WINDOWS_CHANGED,
@@ -556,16 +554,23 @@ class AiReplyObservationRuntime(
         val previous = lastPageInspection
         val inspection = stabilizeIncomingPageSnapshot(incomingInspection)
 
-        // Phase 1 only records the cross-business boundary. It deliberately does not pause,
-        // transfer ownership, or alter traversal state; later phases consume this boundary.
-        if (previous?.activityClass == RECEIVED_GREETINGS_LIST_ACTIVITY &&
-            inspection.activityClass != RECEIVED_GREETINGS_LIST_ACTIVITY
+        // Publish the cross-business boundary before the pause is observed by the target
+        // coordinator. The event is only a request/record at this phase; ownership transfer
+        // still requires target-page fingerprint and checkpoint verification.
+        if (previous != null &&
+            chatPagePort.isReceivedGreetingsListActivity(previous.activityClass) &&
+            !chatPagePort.isReceivedGreetingsListActivity(inspection.activityClass)
         ) {
             receivedGreetingsExitObservationSequence += 1L
             if (sessionRunStarted && receivedGreetingsTaskActive) {
                 chatPagePort.persistReceivedGreetingsCheckpoint()
                 recoveryTransaction.dispatch(
                     RecoveryTransactionEvent.UnknownPage("RECEIVED_GREETINGS_PAGE_EXIT")
+                )
+                val switchEvent = taskCoordinator?.receiveBusinessTaskSwitch(
+                    fromTaskId = RECEIVED_GREETINGS_TASK_ID,
+                    toTaskId = PRIVATE_MESSAGES_TASK_ID,
+                    reason = "RECEIVED_GREETINGS_PAGE_EXIT"
                 )
                 sessionTransitionTask?.cancel()
                 sessionTransitionTask = null
@@ -577,15 +582,22 @@ class AiReplyObservationRuntime(
                     "收到的招呼任务[PAUSED_PAGE_EXIT]：已保存当前检查点；" +
                         "停止滚动、点击和导航；保留任务上下文，等待后续跨业务恢复阶段接管"
                 )
+                onLog(
+                    "任务协调[CROSS_BUSINESS_SWITCH_REQUESTED]：" +
+                        "from=$RECEIVED_GREETINGS_TASK_ID；to=$PRIVATE_MESSAGES_TASK_ID；" +
+                        "reason=RECEIVED_GREETINGS_PAGE_EXIT；" +
+                        "sequence=${switchEvent?.sequence ?: "UNAVAILABLE"}；" +
+                        "仅发布事件，尚未转移UI操作权"
+                )
             }
             onLog(
                 "页面离开识别[RECEIVED_GREETINGS_EXIT]：" +
-                    "sourceActivity=$RECEIVED_GREETINGS_LIST_ACTIVITY；" +
+                    "sourcePage=RECEIVED_GREETINGS_LIST；" +
                     "targetActivity=${inspection.activityClass.ifBlank { "UNKNOWN" }}；" +
                     "targetPage=${inspection.pageKind.name}；" +
                     "window=${inspection.windowIdentityKey().orEmpty()}；" +
                     "sequence=$receivedGreetingsExitObservationSequence；" +
-                    "当前阶段仅记录边界，不暂停任务、不转移UI操作权"
+                    "已暂停任务并发布跨业务切换事件，尚未转移UI操作权"
             )
             if (receivedGreetingsPausedForPageExit) {
                 lastPageInspection = inspection
@@ -816,7 +828,7 @@ class AiReplyObservationRuntime(
                     scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                 }
                 ReceivedGreetingsTaskFlowController.DecisionKind.PROFILE_CARD_PENDING -> {
-                    onLog("收到的招呼导航：已识别资料卡；等待 NewSayHiSessionListActivity；继续复核顶部‘列表’控件；不触碰通过/拒绝按钮")
+                    onLog("收到的招呼导航：已识别资料卡；等待收到招呼列表页面；继续复核顶部‘列表’控件；不触碰通过/拒绝按钮")
                     scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                 }
                 ReceivedGreetingsTaskFlowController.DecisionKind.ENTRY_NOT_FOUND_RECHECK -> {

@@ -537,6 +537,8 @@ enum class ReceivedGreetingsPageArrivalStatus {
 }
 
 interface ChatPagePort {
+    /** Semantic page-boundary check; concrete Activity identifiers stay in the adapter. */
+    fun isReceivedGreetingsListActivity(activityClass: String): Boolean = false
     /** Returns whether the active social adapter owns the supplied selected package. */
     fun supportsTargetPackage(packageName: String): Boolean
 

@@ -98,6 +98,9 @@ internal class MomoSocialAdapter(
     private val sampleArchivePort: SessionSampleArchivePort
 ) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort {
 
+    override fun isReceivedGreetingsListActivity(activityClass: String): Boolean =
+        activityClass == MomoSayHiPageContract.LIST_ACTIVITY
+
     private data class Config(
         val page: MomoPageInspector.Config,
         val navigation: MomoNavigationController.Config,

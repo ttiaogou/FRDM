@@ -17,6 +17,33 @@ class TaskCoordinator(
     private var activeLease: TaskLease? = null
     private var latestRunGeneration = -1L
     private var nextRevision = 0L
+    private var nextSwitchSequence = 0L
+    private var lastBusinessTaskSwitchEvent: BusinessTaskSwitchEvent? = null
+
+    /**
+     * Receives a cross-business switch request without transferring UI ownership yet.
+     * The target task must still verify its page and checkpoint before a later phase calls
+     * [transfer]. Keeping this separate prevents a page-exit observation from becoming an
+     * unsafe blind handoff.
+     */
+    @Synchronized
+    fun receiveBusinessTaskSwitch(
+        fromTaskId: String,
+        toTaskId: String,
+        reason: String
+    ): BusinessTaskSwitchEvent {
+        check(nextSwitchSequence < Long.MAX_VALUE) { "business switch sequence exhausted" }
+        return BusinessTaskSwitchEvent(
+            fromTaskId = fromTaskId,
+            toTaskId = toTaskId,
+            reason = reason,
+            sequence = ++nextSwitchSequence
+        ).also { lastBusinessTaskSwitchEvent = it }
+    }
+
+    /** Latest request is observable by coordinators that perform target-page verification. */
+    @Synchronized
+    fun lastBusinessTaskSwitchEvent(): BusinessTaskSwitchEvent? = lastBusinessTaskSwitchEvent
 
     /** Start a task if the single task/UI slot is free; repeated claims by the owner are idempotent. */
     @Synchronized
