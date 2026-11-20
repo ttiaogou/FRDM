@@ -175,23 +175,20 @@ internal class MomoSocialAdapter(
         val rowIndex: Int,
         val rowPath: List<Int>,
         val displayName: String,
-        val rowBounds: ScreenRect,
-        val avatarBounds: ScreenRect
+        val rowBounds: ScreenRect
     ) {
         fun matches(candidate: ChatListCandidateSnapshot): Boolean =
             candidate.selectionClass == "PRIVATE_CHAT" &&
                 candidate.rowIndex == rowIndex &&
                 candidate.rowTarget.path.childIndices == rowPath &&
                 normalizeIdentityDisplayName(candidate.nameText) == normalizeIdentityDisplayName(displayName) &&
-                candidate.rowBounds == rowBounds &&
-                candidate.avatarBounds == avatarBounds
+                candidate.rowBounds == rowBounds
 
         fun opaqueKey(): String = listOf(
             rowIndex,
             rowPath.joinToString("."),
             normalizeIdentityDisplayName(displayName),
-            rowBounds.left, rowBounds.top, rowBounds.right, rowBounds.bottom,
-            avatarBounds.left, avatarBounds.top, avatarBounds.right, avatarBounds.bottom
+            rowBounds.left, rowBounds.top, rowBounds.right, rowBounds.bottom
         ).joinToString("|").let(::sha256IdentityAnchor)
     }
 
@@ -5103,22 +5100,16 @@ internal class MomoSocialAdapter(
     ): InboxIdentityRowAnchor? {
         if (candidate.selectionClass != "PRIVATE_CHAT" ||
             !candidate.hasReadableName || !candidate.rowVisibleToUser ||
-            !candidate.rowBoundsValid || candidate.avatarBounds == null ||
-            candidate.avatarPath == null || candidate.nameNodePath == null ||
+            !candidate.rowBoundsValid || candidate.nameNodePath == null ||
             candidate.rowTarget.window.packageName != targetPackage ||
             candidate.rowTarget.window.activityClass != MomoAppDescriptor.MAIN_ACTIVITY_CLASS
         ) return null
-        val avatar = candidate.avatarBounds
-        if (candidate.rowBounds.isEmpty || avatar.isEmpty ||
-            avatar.left < candidate.rowBounds.left || avatar.top < candidate.rowBounds.top ||
-            avatar.right > candidate.rowBounds.right || avatar.bottom > candidate.rowBounds.bottom
-        ) return null
+        if (candidate.rowBounds.isEmpty) return null
         return InboxIdentityRowAnchor(
             rowIndex = candidate.rowIndex,
             rowPath = candidate.rowTarget.path.childIndices.toList(),
             displayName = candidate.nameText.orEmpty().trim(),
-            rowBounds = candidate.rowBounds,
-            avatarBounds = avatar
+            rowBounds = candidate.rowBounds
         )
     }
 
