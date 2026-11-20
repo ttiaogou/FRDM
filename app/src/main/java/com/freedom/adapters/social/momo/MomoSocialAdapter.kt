@@ -201,6 +201,8 @@ internal class MomoSocialAdapter(
         @Volatile var lastTransitionAtMs: Long = lastTransitionAtMs
         @Volatile var platformUserId: String? = null
         @Volatile var profileReadCompleted: Boolean = false
+        /** Set only after a fresh current-window snapshot passes the existing profile-page check. */
+        @Volatile var profileEntryVerified: Boolean = false
         @Volatile var profileScrollAttempted: Boolean = false
         @Volatile var profileScrollInFlight: Boolean = false
         @Volatile var backAttempts: Int = 0
@@ -5018,7 +5020,7 @@ internal class MomoSocialAdapter(
                     }
                 }
                 if (result.status == GestureExecutionStatus.COMPLETED) {
-                    onLog("AI 联系人身份采集：已完成当前消息行独立头像点击；等待资料页身份字段，不点击整行")
+                    onLog("AI 联系人身份采集：头像手势回调完成；仅进入资料页复核状态，尚未确认资料页，不读取 ID、不点击整行")
                 } else {
                     onLog("AI 联系人身份采集：头像手势未完成，状态=${result.status}；本轮不改点消息行或使用坐标兜底")
                 }
@@ -5232,11 +5234,19 @@ internal class MomoSocialAdapter(
                     )
                     if (tree == null || tree.truncated || tree.window.packageName != targetPackage ||
                         !isInboxProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)) {
+                        pending.profileEntryVerified = false
                         if (ageMs <= SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
                         pending.profileReadCompleted = true
                         onLog("AI 联系人身份采集终态：PROFILE_SNAPSHOT_READ_TIMEOUT；" +
                             "资料页指纹未确认；降级当前窗口消息，不继续等待 ID")
                     } else {
+                        pending.profileEntryVerified = true
+                        transitionAvatarClickState(
+                            pending,
+                            MomoAvatarClickTransactionState.AVATAR_ENTRY_VERIFYING,
+                            "当前窗口新快照通过既有资料页确认条件"
+                        )
+                        onLog("AI 联系人身份采集：已通过当前窗口新快照确认资料页；开始按原逻辑读取资料页 ID")
                         // A verified left-message-avatar tap is the profile transition. Display
                         // name and toolbar nodes are presentation data, not identity gates.
                         // Read the explicit profile ID directly; scroll only when it is missing.
