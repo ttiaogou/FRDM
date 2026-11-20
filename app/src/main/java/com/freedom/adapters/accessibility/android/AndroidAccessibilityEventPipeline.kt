@@ -37,10 +37,10 @@ internal class AndroidAccessibilityEventPipeline(
     private val inputOriginClassifier: InputOriginClassifier = InputOriginClassifier(),
     private val onDuplicateSuppressed: (AccessibilityEventEnvelope) -> Unit = {},
     private val observeWindowStateEvent: (className: String, windowId: Int) -> Unit = { _, _ -> }
-) {
+) : AccessibilityEventPipelinePort {
 
     /** Entry point for Android callbacks. The platform event is normalized synchronously. */
-    fun process(event: AccessibilityEvent, runMode: RunMode) {
+    override fun process(event: AccessibilityEvent, runMode: RunMode) {
         val androidEventType = event.eventType
         if (androidEventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START ||
             androidEventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END
