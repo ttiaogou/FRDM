@@ -20,6 +20,18 @@ internal enum class MomoAvatarClickTransactionState {
     AVATAR_COMPLETED
 }
 
+/** Normalized reasons used by the avatar transaction; these are not page fingerprints. */
+internal enum class MomoAvatarClickFailureReason {
+    AVATAR_GESTURE_REJECTED,
+    AVATAR_GESTURE_DEFERRED,
+    AVATAR_GESTURE_COMPLETED_BUT_PROFILE_NOT_OPENED,
+    PROFILE_PAGE_NOT_CONFIRMED,
+    AVATAR_NOT_FOUND,
+    CHAT_DETAIL_NOT_STABLE,
+    OVERLAY_BLOCKED,
+    WINDOW_CONTEXT_CHANGED
+}
+
 internal fun MomoAvatarClickTransactionState.canTransitionTo(
     next: MomoAvatarClickTransactionState
 ): Boolean = when (this) {

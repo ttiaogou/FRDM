@@ -403,6 +403,24 @@ internal class MomoSocialAdapter(
         }
     }
 
+    private fun releaseAvatarCaptureAfterProfileMiss(
+        pending: PendingInboxIdentityCapture,
+        reason: MomoAvatarClickFailureReason
+    ) {
+        transitionAvatarClickState(
+            pending,
+            MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
+            reason.name
+        )
+        synchronized(inboxIdentityCaptureLock) {
+            if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
+        }
+        onLog(
+            "AI 头像点击事务：资料页进入失败；释放旧头像事务，下一次观察重新读取聊天详情并重新定位头像；" +
+                "reason=${reason.name}；不暂停任务、不标记身份失败、不使用旧坐标、不点击整行"
+        )
+    }
+
     init {
         sayHiTraversalState.restore()?.let { restored ->
             onLog(
@@ -4936,7 +4954,7 @@ internal class MomoSocialAdapter(
                 textCapture = NodeTextCapture.EPHEMERAL
             )
         ) ?: run {
-            onLog("AI 联系人身份采集失败：CHAT_DETAIL_TREE_UNAVAILABLE；等待下一次窗口快照")
+            onLog("AI 联系人身份采集失败：${MomoAvatarClickFailureReason.CHAT_DETAIL_NOT_STABLE.name}；等待下一次窗口快照")
             releaseAvatarCaptureForRetry(pending, "聊天详情节点树暂时不可用")
             return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
@@ -4957,14 +4975,14 @@ internal class MomoSocialAdapter(
         val index = NodeTreeIndex(tree)
         val target = MomoSayHiAvatarTargetPolicy.resolveConversationAvatarTarget(index)
             ?: run {
-                onLog("AI 联系人身份采集失败：CHAT_DETAIL_LEFT_AVATAR_NOT_FOUND；不回退私人列表头像")
+                onLog("AI 联系人身份采集失败：${MomoAvatarClickFailureReason.AVATAR_NOT_FOUND.name}；不回退私人列表头像")
                 releaseAvatarCaptureForRetry(pending, "当前快照暂时未找到目标头像")
                 return ContactIdentityCaptureRequestResult.RETRY_LATER
             }
         onLog("AI 联系人身份采集：已定位聊天详情页左侧消息头像；不使用右上角头像")
         val avatarClickNode = index.nodeAt(target.path)
             ?: run {
-                onLog("AI 联系人身份采集失败：LEFT_AVATAR_NODE_DISAPPEARED；快照内目标已失效")
+                onLog("AI 联系人身份采集失败：${MomoAvatarClickFailureReason.AVATAR_NOT_FOUND.name}；当前快照目标已失效")
                 releaseAvatarCaptureForRetry(pending, "头像节点在同一快照中失效")
                 return ContactIdentityCaptureRequestResult.RETRY_LATER
             }
@@ -4973,7 +4991,7 @@ internal class MomoSocialAdapter(
         if (!avatarClickNode.visible || target.targetBounds.isEmpty) {
             onLog("AI 联系人身份采集失败：LEFT_AVATAR_TARGET_INVALID；不可见或边界为空")
             releaseAvatarCaptureForRetry(pending, "头像目标不可见或边界无效")
-            return ContactIdentityCaptureRequestResult.REJECTED
+            return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
 
         val metrics = accessibilityGateway.displayMetrics()
@@ -4981,7 +4999,7 @@ internal class MomoSocialAdapter(
             tree.window,
             metrics.toGestureCoordinateContext()
         ) ?: run {
-            onLog("AI 联系人身份采集失败：GESTURE_CONTEXT_UNAVAILABLE；未提交头像点击")
+            onLog("AI 联系人身份采集失败：${MomoAvatarClickFailureReason.WINDOW_CONTEXT_CHANGED.name}；未提交头像点击")
             releaseAvatarCaptureForRetry(pending, "手势坐标上下文暂时不可用")
             return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
@@ -5028,10 +5046,10 @@ internal class MomoSocialAdapter(
         }.getOrElse {
             synchronized(inboxIdentityCaptureLock) {
                 if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
-                failedInboxIdentityCaptureKeys += anchorKey
             }
-            onLog("AI 联系人身份采集：头像手势执行器异常；拒绝坐标兜底")
-            return ContactIdentityCaptureRequestResult.REJECTED
+            onLog("AI 联系人身份采集：头像手势执行器异常；" +
+                "reason=${MomoAvatarClickFailureReason.AVATAR_GESTURE_REJECTED.name}；重新定位，不执行坐标或整行兜底")
+            return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
 
         if (submission != GestureSubmission.ACCEPTED) {
@@ -5043,12 +5061,13 @@ internal class MomoSocialAdapter(
             synchronized(inboxIdentityCaptureLock) {
                 if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
             }
-            onLog("AI 联系人身份采集失败：AVATAR_TAP_NOT_ACCEPTED；submission=$submission")
-            return if (submission == GestureSubmission.DEFERRED_NOT_READY) {
-                ContactIdentityCaptureRequestResult.RETRY_LATER
+            val reason = if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+                MomoAvatarClickFailureReason.AVATAR_GESTURE_DEFERRED
             } else {
-                ContactIdentityCaptureRequestResult.REJECTED
+                MomoAvatarClickFailureReason.AVATAR_GESTURE_REJECTED
             }
+            onLog("AI 联系人身份采集失败：${reason.name}；submission=$submission；下一次观察重新定位头像")
+            return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
         return ContactIdentityCaptureRequestResult.STARTED
     }
@@ -5190,12 +5209,10 @@ internal class MomoSocialAdapter(
                     return true
                 }
                 if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) {
-                    transitionAvatarClickState(
+                    releaseAvatarCaptureAfterProfileMiss(
                         pending,
-                        MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
-                        "头像点击后未观察到资料页；等待重新定位"
+                        MomoAvatarClickFailureReason.AVATAR_GESTURE_COMPLETED_BUT_PROFILE_NOT_OPENED
                     )
-                    failPendingInboxIdentityCapture(pending, "头像点击后未观察到完成回调或资料页导航")
                     return false
                 }
                 return true
@@ -5236,9 +5253,15 @@ internal class MomoSocialAdapter(
                         !isInboxProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)) {
                         pending.profileEntryVerified = false
                         if (ageMs <= SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
+                        if (currentActivity != MomoSayHiPageContract.PROFILE_ACTIVITY) {
+                            releaseAvatarCaptureAfterProfileMiss(
+                                pending,
+                                MomoAvatarClickFailureReason.PROFILE_PAGE_NOT_CONFIRMED
+                            )
+                            return false
+                        }
                         pending.profileReadCompleted = true
-                        onLog("AI 联系人身份采集终态：PROFILE_SNAPSHOT_READ_TIMEOUT；" +
-                            "资料页指纹未确认；降级当前窗口消息，不继续等待 ID")
+                        onLog("AI 联系人身份采集：资料页当前快照未确认；按原有返回逻辑退出资料页，返回聊天详情后重新定位头像")
                     } else {
                         pending.profileEntryVerified = true
                         transitionAvatarClickState(
@@ -5313,6 +5336,13 @@ internal class MomoSocialAdapter(
                     restoredTitle.isNotBlank() && anchorTitle.isNotBlank() &&
                     restoredTitle == anchorTitle
                 if (restored) {
+                    if (!pending.profileEntryVerified) {
+                        releaseAvatarCaptureAfterProfileMiss(
+                            pending,
+                            MomoAvatarClickFailureReason.PROFILE_PAGE_NOT_CONFIRMED
+                        )
+                        return false
+                    }
                     completePendingInboxIdentityBinding(
                         pending,
                         pending.platformUserId != null
