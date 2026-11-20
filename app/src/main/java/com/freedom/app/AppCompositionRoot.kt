@@ -67,7 +67,9 @@ import com.freedom.data.ai.EncryptedAiModelConfigurationRepository
 import com.freedom.data.ai.AiReplyPersonalizationStore
 import com.freedom.data.database.LocalConversationRepository
 import com.freedom.data.database.LocalReplyTaskRepository
+import com.freedom.data.database.LocalReplySegmentTaskRepository
 import com.freedom.features.aireply.ai.ReplyTaskRepository
+import com.freedom.features.aireply.ai.ReplySegmentTaskRepository
 import com.freedom.data.social.momo.MomoSayHiTraversalCheckpointDataStore
 import com.freedom.data.PrivateMessagesTraversalCheckpointDataStore
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
@@ -129,6 +131,9 @@ class AppCompositionRoot(context: Context) {
     val replyTaskRepository: ReplyTaskRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         LocalReplyTaskRepository(File(appContext.filesDir, "reply_task_store.tsv"))
     }
+    val replySegmentTaskRepository: ReplySegmentTaskRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        LocalReplySegmentTaskRepository(File(appContext.filesDir, "reply_segment_task_store.tsv"))
+    }
     val conversationContextManager: ConversationContextManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         ConversationContextManager(conversationRepository)
     }
@@ -182,6 +187,7 @@ class AppCompositionRoot(context: Context) {
         mainHandler: Handler,
         addLog: (String) -> Unit,
         dp: (Int) -> Int,
+        persistManualReviewHold: (String) -> Unit,
         requestScreenOff: () -> Boolean,
         refreshViews: () -> Unit
     ): AccessibilityServiceDependencies = AccessibilityServiceDependencies(
@@ -190,6 +196,7 @@ class AppCompositionRoot(context: Context) {
         mainHandler = mainHandler,
         addLog = addLog,
         dp = dp,
+        persistManualReviewHold = persistManualReviewHold,
         requestScreenOff = requestScreenOff,
         refreshViews = refreshViews
     )
@@ -216,6 +223,7 @@ internal class AccessibilityServiceDependencies internal constructor(
     private val mainHandler: Handler,
     private val addLog: (String) -> Unit,
     private val dp: (Int) -> Int,
+    private val persistManualReviewHold: (String) -> Unit,
     private val requestScreenOff: () -> Boolean,
     private val refreshViews: () -> Unit
 ) {
@@ -350,6 +358,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             isAiReplyActive = {
                 monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
             },
+            isManualReviewRequired = {
+                monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
+            },
             onLog = addLog,
             createProvider = { configuration ->
                 val transport = when (configuration.provider) {
@@ -369,7 +380,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                     cloudConsent = root.aiModelCloudConsent
                 )
             },
-            replyTaskRepository = root.replyTaskRepository
+            replyTaskRepository = root.replyTaskRepository,
+            replySegmentTaskRepository = root.replySegmentTaskRepository
         )
     }
     val aiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate
@@ -491,6 +503,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isPending },
+            isDraftAwaitingUserSend = { aiReplyDraftCoordinator.isAwaitingUserSend },
             onDraftRuntimeReset = {
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {
                     aiReplyDraftCoordinator.resetForRuntimeReset()
@@ -514,6 +527,10 @@ internal class AccessibilityServiceDependencies internal constructor(
                 "当前识别应用=${snapshot.appLabel}；当前识别页面=${snapshot.pageLabel}"
             },
             onLog = addLog,
+            isManualReviewRequired = {
+                monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
+            },
+            onManualReviewRequired = persistManualReviewHold,
             onRequestScreenOff = requestScreenOff,
             pageObservationCoordinator = pageObservationCoordinator,
             accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository
@@ -522,6 +539,7 @@ internal class AccessibilityServiceDependencies internal constructor(
     val accountBrowseRuntimeAdapter by lazy(LazyThreadSafetyMode.NONE) {
         AccountBrowseModeRuntimeAdapter(
             workflow = { accountBrowseWorkflow },
+            acknowledgeManualReview = inputOriginClassifier::acknowledgeManualReview,
             onReadinessStarting = { mode, reason ->
                 targetAppReadinessController.markStarting(mode, reason, SystemClock.uptimeMillis())
             },

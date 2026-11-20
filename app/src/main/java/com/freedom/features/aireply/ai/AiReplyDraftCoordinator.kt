@@ -31,8 +31,8 @@ enum class SendConfirmationResult {
 }
 
 /**
- * Calls the configured remote model, fills a verified composer, and submits through the
- * validated automatic send port.
+ * Calls the configured remote model and fills a verified composer. Sending is deliberately
+ * outside this phase; the next phase may consume the persisted PENDING_SEND state.
  */
 class AiReplyDraftCoordinator(
     private val configurationRepository: AiModelConfigurationRepository,
@@ -41,6 +41,7 @@ class AiReplyDraftCoordinator(
     private val inputPort: ChatDraftInputPort,
     private val scheduler: TaskScheduler,
     private val isAiReplyActive: () -> Boolean,
+    private val isManualReviewRequired: () -> Boolean,
     private val onLog: (String) -> Unit,
     private val createProvider: (AiModelConfiguration) -> AiModelProvider,
     private val backgroundExecutor: Executor = newDraftExecutor(),
@@ -49,9 +50,11 @@ class AiReplyDraftCoordinator(
         java.util.concurrent.ThreadLocalRandom.current().nextInt(min, max + 1)
     },
     private val replyTaskRepository: ReplyTaskRepository? = null,
-    private val sendPort: ChatDraftSendPort? = null
+    private val sendPort: ChatDraftSendPort? = null,
+    private val replySegmentTaskRepository: ReplySegmentTaskRepository? = null
 ) {
     private val pending = AtomicBoolean(false)
+    private val awaitingUserSend = AtomicBoolean(false)
     private val generation = AtomicLong(0L)
     private val lock = Any()
     private val processedMessageKeys = LinkedHashSet<String>()
@@ -79,11 +82,14 @@ class AiReplyDraftCoordinator(
     )
 
     val isPending: Boolean get() = pending.get()
+    val isAwaitingUserSend: Boolean get() = awaitingUserSend.get()
+
     /** Invalidates late callbacks when the AI Reply runtime is stopped or rebuilt. */
     fun resetForRuntimeReset() {
         synchronized(lock) {
             generation.incrementAndGet()
             pending.set(false)
+            awaitingUserSend.set(false)
             processedMessageKeys.clear()
             failedRequests.clear()
             activeMessageKey = null
@@ -181,6 +187,7 @@ class AiReplyDraftCoordinator(
             userId = contactId
         )
         val requestGeneration = synchronized(lock) {
+            if (awaitingUserSend.get()) return reject("DRAFT_AWAITING_USER_SEND")
             if (pending.get()) return reject("DRAFT_REQUEST_ALREADY_PENDING")
             if (dedupeKey in processedMessageKeys) return reject("DUPLICATE_INCOMING_MESSAGE")
             val failure = failedRequests[dedupeKey]
@@ -251,6 +258,7 @@ class AiReplyDraftCoordinator(
                 AiReplyDecisionInput(
                     context = context,
                     contactIdentityVerified = !context.currentWindowDraft,
+                    manualReviewRequired = isManualReviewRequired(),
                     cooldownActive = false,
                     requestId = requestId,
                     personalization = personalizationRepository.load()
@@ -309,7 +317,7 @@ class AiReplyDraftCoordinator(
             return
         }
         scheduler.schedule(0L) {
-            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
+            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) {
                 finish("AI_REPLY_STATE_CHANGED_BEFORE_INPUT", requestGeneration)
                 return@schedule
             }
@@ -325,15 +333,37 @@ class AiReplyDraftCoordinator(
                     "messageLengths=${parsedMessages.messages.joinToString(",", prefix="[", postfix="]") { it.codePointCount(0, it.length).toString() }}；" +
                     "fallbackToSingleMessage=${parsedMessages.fallbackToSingleMessage}"
             )
+            persistMessageSegmentTasks(
+                requestId = requestId,
+                conversationKey = target.conversationIdentityKey,
+                messages = parsedMessages.messages
+            )
             val segments = parsedMessages.messages.flatMap(DraftSegments::split)
             writeNext(target, decision.draft, segments, 0, "", requestGeneration)
         }
     }
 
+    private fun persistMessageSegmentTasks(
+        requestId: String,
+        conversationKey: String,
+        messages: List<String>
+    ) {
+        val repository = replySegmentTaskRepository ?: return
+        val records = ReplySegmentTaskFactory.create(requestId, conversationKey, messages, nowMillis())
+        records.forEach { record ->
+            runCatching {
+                if (repository.find(record.taskId) == null) repository.save(record)
+            }.onFailure { error ->
+                onLog("AI 消息段任务持久化失败：requestId=$requestId；segmentIndex=${record.segmentIndex}；error=${error.javaClass.simpleName}")
+            }
+        }
+        onLog("AI 消息段任务已建立：requestId=$requestId；conversationKey=$conversationKey；segmentCount=${records.size}；输入片段仍由 DraftSegments 独立处理")
+    }
+
     internal fun writeNext(target: ChatDraftInputTarget, draft: String, segments: List<String>,
                           index: Int, confirmed: String, requestGeneration: Long) {
         if (!isCurrentGeneration(requestGeneration)) return
-        if (!isAiReplyActive()) {
+        if (!isAiReplyActive() || isManualReviewRequired()) {
             finish("AI_REPLY_STATE_CHANGED_BEFORE_INPUT", requestGeneration)
             return
         }
@@ -344,7 +374,7 @@ class AiReplyDraftCoordinator(
                 "requestGeneration=$requestGeneration"
         )
         val result = synchronized(lock) {
-            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) return
+            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) return
             runCatching { inputPort.writeDraft(target, confirmed, expected) }
                 .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED) }
         }
@@ -369,7 +399,7 @@ class AiReplyDraftCoordinator(
             .coerceIn(MIN_VERIFY_DWELL_DELAY_MS, MAX_VERIFY_DWELL_DELAY_MS)
         scheduler.schedule(dwell.toLong()) {
             if (!isCurrentGeneration(requestGeneration)) return@schedule
-            if (!isAiReplyActive()) {
+            if (!isAiReplyActive() || isManualReviewRequired()) {
                 finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
                 return@schedule
             }
@@ -395,7 +425,7 @@ class AiReplyDraftCoordinator(
         attempt: Int
     ) {
         if (!isCurrentGeneration(requestGeneration)) return
-        if (!isAiReplyActive()) {
+        if (!isAiReplyActive() || isManualReviewRequired()) {
             finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
             return
         }
@@ -447,7 +477,7 @@ class AiReplyDraftCoordinator(
         requestGeneration: Long
     ) {
         if (!isCurrentGeneration(requestGeneration)) return
-        if (!isAiReplyActive()) {
+        if (!isAiReplyActive() || isManualReviewRequired()) {
             finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
             return
         }
@@ -456,16 +486,21 @@ class AiReplyDraftCoordinator(
         if (result.status == ChatDraftInputStatus.VERIFIED) {
             // Stage two consumes PENDING_SEND and invokes the retained send port only after
             // the adapter has revalidated the live chat and send control.
-            if (!isCurrentGeneration(requestGeneration)) return
+            synchronized(lock) {
+                if (!isCurrentGeneration(requestGeneration)) return
+                awaitingUserSend.set(true)
+            }
             updateTaskStatus(ReplyTaskStatus.DRAFT_APPLIED, requestGeneration)
             updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
             val configuredSendPort = sendPort
             if (configuredSendPort == null) {
-                onLog("AI 草稿状态：PENDING_SEND；发送端口不可用；自动发送已停止")
-                finish("DRAFT_SEND_PORT_UNAVAILABLE", requestGeneration)
+                awaitingUserSend.set(true)
+                onLog("AI 草稿状态：PENDING_SEND；发送端口不可用；保留当前草稿等待人工处理")
+                finish("DRAFT_ENTERED_USER_CONTENT_REVIEW_AND_SEND_REQUIRED", requestGeneration)
                 return
             }
             updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
+            awaitingUserSend.set(true)
             if (!isCurrentGeneration(requestGeneration) || !hasActiveTaskOwner()) {
                 updateTaskStatus(ReplyTaskStatus.FAILED_FINAL, requestGeneration)
                 onLog("AI 回复状态：发送前任务校验失败；status=FAILED_FINAL；reason=REQUEST_GENERATION_INVALID")
@@ -576,6 +611,7 @@ class AiReplyDraftCoordinator(
                     activeMessageKey = null
                     activeRequestId = null
                     activeExistingOutgoingKeys = emptySet()
+                    awaitingUserSend.set(false)
                 }
                 return SendConfirmationResult.CONFIRMED
             }
@@ -596,13 +632,8 @@ class AiReplyDraftCoordinator(
     }
 
     private fun finish(reasonCode: String, requestGeneration: Long) {
-        if (reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED", "MODEL_DECISION_MODEL_CALL_FAILED", "DRAFT_SEND_PORT_UNAVAILABLE")) {
-            val status = when (reasonCode) {
-                "MODEL_DECISION_MODEL_CALL_FAILED" -> ReplyTaskStatus.UNKNOWN
-                "DRAFT_SEND_PORT_UNAVAILABLE" -> ReplyTaskStatus.FAILED_FINAL
-                else -> ReplyTaskStatus.FAILED_RETRYABLE
-            }
-            updateTaskStatus(status, requestGeneration)
+        if (reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED", "MODEL_DECISION_MODEL_CALL_FAILED")) {
+            updateTaskStatus(if (reasonCode == "MODEL_DECISION_MODEL_CALL_FAILED") ReplyTaskStatus.UNKNOWN else ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
         }
         synchronized(lock) {
             if (!isCurrentGeneration(requestGeneration)) return
