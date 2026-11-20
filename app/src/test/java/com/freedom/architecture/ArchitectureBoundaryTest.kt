@@ -402,6 +402,10 @@ class ArchitectureBoundaryTest {
             "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt",
             "app/src/main/java/com/freedom/adapters/accessibility/android/GestureTrailOverlay.kt"
         ) + setOf(
+            "core/src/main/kotlin/com/freedom/core/accessibility/gesture/GestureCoordinateRegion.kt",
+            "core/src/main/kotlin/com/freedom/core/accessibility/events/InputOriginClassifier.kt",
+            "core/src/main/kotlin/com/freedom/core/accessibility/api/AccessibilityGateway.kt",
+            "gesture/gesture-runtime/src/main/kotlin/com/freedom/core/accessibility/gesture/GestureCommand.kt",
             "gesture/gesture-core/src/main/kotlin/com/freedom/core/accessibility/gesture/GestureCoordinateRegion.kt",
             "gesture/gesture-core/src/main/kotlin/com/freedom/core/accessibility/gesture/GestureCommand.kt",
             "gesture/gesture-core/src/main/kotlin/com/freedom/core/accessibility/gesture/GestureGeometryPolicy.kt",
