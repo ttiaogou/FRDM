@@ -1930,7 +1930,26 @@ class AiReplyObservationRuntime(
                     }
                     recordSuccessfulSend(sendConfirmationId)
                     privateMessagesTaskController.recordSuccessfulObservation()
+                    privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
+                    privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
+                    privateMessagesTraversalTaskExecutor.checkpointNextCursorKey = currentSessionKey
+                    privateMessagesTraversalTaskExecutor.checkpointTraversalDirection = "BOTTOM_TO_TOP"
+                    val checkpointWritten = currentSessionCandidate?.let {
+                        privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(it)
+                        privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+                        true
+                    } ?: run {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 会话返回被阻止：缺少当前会话稳定键，未写入返回检查点")
+                        false
+                    }
+                    if (!checkpointWritten) return
                     onLog("AI 发送成功记录：已记录一次发送成功和一次本轮成功处理")
+                }
+                if (!currentSessionSendConfirmed || !currentSessionReadCaptured) {
+                    sessionManagerState = SessionManagerState.PAUSED
+                    onLog("AI 会话返回被阻止：发送确认或当前段确认状态不完整")
+                    return
                 }
                 scheduleReturnToSessionList(snapshot)
                 return

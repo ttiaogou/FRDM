@@ -17,7 +17,11 @@ data class PrivateMessagesTraversalCheckpoint(
     val savedAtEpochMs: Long = System.currentTimeMillis(),
     /** Best-effort re-anchor identity; never contains node paths or coordinates. */
     val resumeSessionKey: String? = null,
-    val resumeSessionName: String? = null
+    val resumeSessionName: String? = null,
+    val runGeneration: Long = 0L,
+    val lastSuccessfulTaskId: String? = null,
+    val nextCursorKey: String? = null,
+    val traversalDirection: String = "BOTTOM_TO_TOP"
 )
 
 interface PrivateMessagesTraversalCheckpointRepository {

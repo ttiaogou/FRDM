@@ -477,13 +477,16 @@ class AiReplyDraftCoordinator(
                 return
             }
             updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
-            awaitingUserSend.set(true)
             if (!isCurrentGeneration(requestGeneration) || !hasActiveTaskOwner()) {
                 updateTaskStatus(ReplyTaskStatus.FAILED_FINAL, requestGeneration)
                 onLog("AI 回复状态：发送前任务校验失败；status=FAILED_FINAL；reason=REQUEST_GENERATION_INVALID")
                 finish("DRAFT_SEND_REQUEST_GENERATION_INVALID", requestGeneration)
                 return
             }
+            // Only expose the user-send waiting state after the request owner has
+            // been revalidated. Direct writeNext calls must fail closed without
+            // leaving a stale awaiting-user state behind.
+            awaitingUserSend.set(true)
             val sent = runCatching { configuredSendPort.sendDraft(target, draft) }
                 .getOrElse {
                     ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_EXCEPTION")

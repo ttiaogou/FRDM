@@ -82,6 +82,10 @@ internal data class PrivateMessagesListSnapshotEvaluation(
 )
 
 internal class PrivateMessagesTraversalTaskExecutor {
+    var checkpointRunGeneration: Long = 0L
+    var checkpointLastSuccessfulTaskId: String? = null
+    var checkpointNextCursorKey: String? = null
+    var checkpointTraversalDirection: String = "BOTTOM_TO_TOP"
     fun checkpoint(): PrivateMessagesTraversalCheckpoint = PrivateMessagesTraversalCheckpoint(
         attemptedSessionKeys = attemptedSessionKeys.toSet(),
         lockedUnreadSessionKeys = lockedUnreadSessionKeys.toSet(),
@@ -96,7 +100,11 @@ internal class PrivateMessagesTraversalTaskExecutor {
         normalInboxHadUnread = normalInboxHadUnread,
         normalInboxUnreadStateUnknown = normalInboxUnreadStateUnknown,
         resumeSessionKey = resumeSessionKey,
-        resumeSessionName = resumeSessionName
+        resumeSessionName = resumeSessionName,
+        runGeneration = checkpointRunGeneration,
+        lastSuccessfulTaskId = checkpointLastSuccessfulTaskId,
+        nextCursorKey = checkpointNextCursorKey,
+        traversalDirection = checkpointTraversalDirection
     )
 
     fun restore(checkpoint: PrivateMessagesTraversalCheckpoint) {
@@ -136,6 +144,10 @@ internal class PrivateMessagesTraversalTaskExecutor {
         normalInboxUnreadStateUnknown = checkpoint.normalInboxUnreadStateUnknown
         resumeSessionKey = checkpoint.resumeSessionKey
         resumeSessionName = checkpoint.resumeSessionName
+        checkpointRunGeneration = checkpoint.runGeneration
+        checkpointLastSuccessfulTaskId = checkpoint.lastSuccessfulTaskId
+        checkpointNextCursorKey = checkpoint.nextCursorKey
+        checkpointTraversalDirection = checkpoint.traversalDirection
     }
 
     internal enum class RestoreReanchorStatus { REANCHORED, NOT_FOUND, AMBIGUOUS }
