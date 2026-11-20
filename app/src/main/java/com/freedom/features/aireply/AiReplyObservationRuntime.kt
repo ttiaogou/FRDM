@@ -518,7 +518,10 @@ class AiReplyObservationRuntime(
         ) return
         receivedGreetingsPageProbePending = true
         onLog("收到的招呼页面观察[LOW_FREQUENCY_CHECK]：执行一次只读页面结构检查")
-        pageObservationCoordinator.signalFullInspection()
+        // The watchdog callback is already a fresh-observation request. Schedule it through
+        // the runtime-owned inspection slot so a stale/coalesced full-inspection channel cannot
+        // swallow the probe while an earlier page inspection is still being retired.
+        scheduleFullInspectionAfter(fullInspectionDebounceMs)
     }
 
     /** Requests a fresh unified snapshot for a bounded arrival retry; no adapter probe is run here. */
@@ -528,12 +531,10 @@ class AiReplyObservationRuntime(
             !receivedGreetingsTaskFlow.supportsWorkflow()
         ) return
         receivedGreetingsPageProbePending = true
-        // This callback is already the watcher-approved stability retry. Do not send it
-        // through the normal full-inspection debounce again: doing so leaves the retry
-        // pending behind another quiet period and can prevent the second confirmation
-        // snapshot from running. The scheduled task still performs a fresh read-only
-        // observation and never changes task ownership by itself.
-        scheduleFullInspectionAfter(0L)
+        // A stability retry must always result in one new snapshot. Bypass the coalescing
+        // channel here; otherwise a pending channel request can consume the retry without
+        // invoking runFullInspection, leaving the arrival watcher stuck at two samples.
+        scheduleFullInspectionAfter(fullInspectionDebounceMs)
     }
 
     private fun runFullInspection() {
