@@ -10,6 +10,10 @@ internal enum class MomoIdentityVerificationResult {
     IDENTITY_USER_STOPPED
 }
 
+internal fun MomoIdentityVerificationResult.isTerminalFailure(): Boolean =
+    this == MomoIdentityVerificationResult.IDENTITY_CONFLICT ||
+        this == MomoIdentityVerificationResult.IDENTITY_USER_STOPPED
+
 internal fun classifyMomoIdentityVerification(
     confidence: ContactIdentityConfidence?,
     contactId: String?,

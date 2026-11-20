@@ -4744,9 +4744,7 @@ internal class MomoSocialAdapter(
                     createInboxIdentityAnchor(candidate)?.opaqueKey()?.let { key ->
                         synchronized(inboxIdentityCaptureLock) {
                             verifiedInboxIdentityByAnchor.remove(key)
-                            if (verificationResult == MomoIdentityVerificationResult.IDENTITY_CONFLICT ||
-                                verificationResult == MomoIdentityVerificationResult.IDENTITY_USER_STOPPED
-                            ) {
+                            if (verificationResult.isTerminalFailure()) {
                                 failedInboxIdentityCaptureKeys += key
                             } else {
                                 failedInboxIdentityCaptureKeys.remove(key)
@@ -5179,9 +5177,7 @@ internal class MomoSocialAdapter(
                     verificationResult == MomoIdentityVerificationResult.IDENTITY_VERIFIED
                 ) {
                     ContactIdentityCaptureOutcome.completed(requireNotNull(identity))
-                } else if (verificationResult == MomoIdentityVerificationResult.IDENTITY_CONFLICT ||
-                    verificationResult == MomoIdentityVerificationResult.IDENTITY_USER_STOPPED
-                ) {
+                } else if (verificationResult.isTerminalFailure()) {
                     failedInboxIdentityCaptureKeys += anchorKey
                     ContactIdentityCaptureOutcome.failed(
                         ContactIdentityCaptureRequestResult.REJECTED,

@@ -37,5 +37,8 @@ class MomoIdentityVerificationResultTest {
             MomoIdentityVerificationResult.IDENTITY_USER_STOPPED,
             classifyMomoIdentityVerification(null, null, userStopped = true)
         )
+        assertEquals(false, MomoIdentityVerificationResult.IDENTITY_RETRYABLE.isTerminalFailure())
+        assertEquals(true, MomoIdentityVerificationResult.IDENTITY_CONFLICT.isTerminalFailure())
+        assertEquals(true, MomoIdentityVerificationResult.IDENTITY_USER_STOPPED.isTerminalFailure())
     }
 }
