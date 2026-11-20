@@ -60,6 +60,7 @@ internal class AndroidAccessibilityGateway(
     private val activeRunMode: () -> RunMode?,
     private val inspectPageReadiness: (AccessibilityNodeInfo, String, RunMode) -> TargetAppPageReadiness,
     private val targetAppReadinessController: TargetAppReadinessController,
+    private val isUiOperationOwned: () -> Boolean,
     private val onReadinessDiagnostic: (String) -> Unit = {}
 ) : AccessibilityGateway, GestureExecutionPort, AndroidActiveWindowRootAccess, AndroidScreenshotCapture {
 
@@ -395,6 +396,9 @@ internal class AndroidAccessibilityGateway(
     }
 
     override fun performNodeAction(request: NodeActionRequest): ActionResult {
+        if (!isUiOperationOwned()) {
+            return ActionResult(accepted = false, performed = false, reason = "ui_operation_lease_missing")
+        }
         val readinessFailure = inspectAutonomousDispatchReadiness()
         if (readinessFailure != null) {
             return ActionResult(accepted = false, performed = false, reason = "app_not_ready:$readinessFailure")
@@ -472,6 +476,7 @@ internal class AndroidAccessibilityGateway(
         expectedWindow: WindowRef,
         expectedActivityClass: String
     ): Boolean {
+        if (!isUiOperationOwned()) return false
         val expectedPackage = targetPackage().trim()
         if (expectedActivityClass.isBlank() || expectedPackage.isBlank() ||
             expectedWindow.packageName != expectedPackage ||
@@ -515,6 +520,7 @@ internal class AndroidAccessibilityGateway(
         // Lock-screen requests are a safety response to manual-review holds. Every other global
         // action changes the target UI and must pass the same current-page readiness gate.
         if (action != GlobalAccessibilityAction.LOCK_SCREEN) {
+            if (!isUiOperationOwned()) return false
             val readinessFailure = inspectAutonomousDispatchReadiness()
             if (readinessFailure != null) return false
         }
@@ -536,13 +542,16 @@ internal class AndroidAccessibilityGateway(
     }
 
     override fun dispatchGesture(spec: GestureSpec, listener: GestureResultListener): GestureSubmission =
-        gestureDispatcher.dispatchGesture(spec, listener)
+        if (isUiOperationOwned()) gestureDispatcher.dispatchGesture(spec, listener)
+        else GestureSubmission.REJECTED
 
     override fun dispatchGesture(
         spec: GestureSpec,
         listener: GestureResultListener,
         onPlatformDispatch: () -> Unit
-    ): GestureSubmission = gestureDispatcher.dispatchGesture(spec, listener, onPlatformDispatch)
+    ): GestureSubmission =
+        if (isUiOperationOwned()) gestureDispatcher.dispatchGesture(spec, listener, onPlatformDispatch)
+        else GestureSubmission.REJECTED
 
     private fun inspectAutonomousDispatchReadiness(): String? {
         val expectedPackage = targetPackage()
