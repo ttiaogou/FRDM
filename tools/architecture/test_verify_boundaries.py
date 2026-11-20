@@ -30,6 +30,41 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         violations = guard.final_architecture_boundary_violations(code)
         self.assertTrue(any("RETRYABLE result" in item for item in violations))
 
+    def test_unified_accessibility_entry_requires_single_forwarding_callback(self):
+        valid = {
+            "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt":
+                "override fun onAccessibilityEvent(event: AccessibilityEvent?) {\n"
+                "    accessibilityEventForwarder.accept(event)\n}\n"
+        }
+        self.assertEqual(guard.unified_accessibility_entry_violations(valid), [])
+
+        bypass = dict(valid)
+        bypass["app/src/main/java/com/freedom/accessibility/OtherService.kt"] = \
+            "override fun onAccessibilityEvent(event: AccessibilityEvent?) { pipeline.process(event) }\n"
+        violations = guard.unified_accessibility_entry_violations(bypass)
+        self.assertTrue(any("declared exactly once" in item for item in violations))
+
+    def test_checkpoint_restore_requires_read_only_verification_gate(self):
+        valid = {
+            "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt":
+                "checkpointRepository?.load()?.let { stateMachine.transitionTo(AccountBrowsePhase.PAUSED); "
+                "dynamicPageRecovery.restoreFromCheckpoint(1) }\n"
+                "fun beginCheckpointVerification() {}\n"
+                "fun observeDynamicFeedFingerprint(value: String) = true\n",
+            "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt":
+                "CheckpointLoaded VerificationStarted ResumeRequested ResumeCompleted\n",
+            "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt":
+                "hasPendingCheckpointVerification beginCheckpointVerification observeDynamicFeedFingerprint\n",
+        }
+        self.assertEqual(guard.checkpoint_recovery_boundary_violations(valid), [])
+
+        invalid = dict(valid)
+        invalid["business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"] = \
+            "checkpointRepository?.load()?.let { stateMachine.transitionTo(AccountBrowsePhase.FIRST_SWIPE_COUNTDOWN) }\n"
+        violations = guard.checkpoint_recovery_boundary_violations(invalid)
+        self.assertTrue(any("must enter PAUSED" in item for item in violations))
+        self.assertTrue(any("must activate DynamicPageRecovery" in item for item in violations))
+
     def test_unified_recovery_state_machine_rejects_business_page_dependencies(self):
         code = {
             "app/src/main/java/com/freedom/features/recovery/UnifiedRecoveryTransactionStateMachine.kt":
