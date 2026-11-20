@@ -4746,8 +4746,10 @@ internal class MomoSocialAdapter(
                             verifiedInboxIdentityByAnchor.remove(key)
                             if (verificationResult.isTerminalFailure()) {
                                 failedInboxIdentityCaptureKeys += key
+                                onIdentityVerificationLog(verificationResult, "EXPLICIT_IDENTITY_CONFLICT", true, "SKIP_CURRENT_TARGET", key)
                             } else {
                                 failedInboxIdentityCaptureKeys.remove(key)
+                                onIdentityVerificationLog(verificationResult, "PROFILE_ID_NOT_CONFIRMED", false, "RETRY_ON_NEXT_OBSERVATION", key)
                             }
                         }
                     }
@@ -4925,9 +4927,10 @@ internal class MomoSocialAdapter(
         val anchorKey = anchor.opaqueKey()
         synchronized(inboxIdentityCaptureLock) {
             if (anchorKey in failedInboxIdentityCaptureKeys) {
-                onLog("AI 联系人身份采集[REJECTED]：命中明确终态身份失败缓存；不重新点击当前目标")
+                onLog("IDENTITY_CAPTURE_BLOCKED result=IDENTITY_CAPTURE_BLOCKED；reason=EXPLICIT_IDENTITY_CONFLICT；failedCacheHit=true；action=SKIP_CURRENT_TARGET；anchorHash=${anchorKey.take(12)}")
                 return ContactIdentityCaptureRequestResult.REJECTED
             }
+            onLog("IDENTITY_RETRY_ALLOWED result=IDENTITY_RETRY_ALLOWED；previousFailure=NONE_OR_RETRYABLE；failedCacheHit=false；action=REACQUIRE_AVATAR；anchorHash=${anchorKey.take(12)}")
             val pending = pendingInboxIdentityCapture
             if (pending != null) return ContactIdentityCaptureRequestResult.IN_PROGRESS
         }
@@ -4951,7 +4954,7 @@ internal class MomoSocialAdapter(
         )
         synchronized(inboxIdentityCaptureLock) {
             if (anchorKey in failedInboxIdentityCaptureKeys) {
-                onLog("AI 联系人身份采集[REJECTED]：二次入口检查命中明确终态身份失败缓存；不使用旧头像定位")
+                onLog("IDENTITY_CAPTURE_BLOCKED result=IDENTITY_CAPTURE_BLOCKED；reason=EXPLICIT_IDENTITY_CONFLICT；failedCacheHit=true；action=SKIP_CURRENT_TARGET；anchorHash=${anchorKey.take(12)}")
                 return ContactIdentityCaptureRequestResult.REJECTED
             }
             if (pendingInboxIdentityCapture != null) {
@@ -5158,6 +5161,10 @@ internal class MomoSocialAdapter(
         verifiedInboxIdentityByAnchor.remove(anchorKey)
     }
 
+    private fun onIdentityVerificationLog(result: MomoIdentityVerificationResult, reason: String, cacheWrite: Boolean, nextAction: String, anchorKey: String) {
+        onLog("IDENTITY_VERIFICATION result=${result.name}；reason=$reason；cacheWrite=$cacheWrite；nextAction=$nextAction；anchorHash=${anchorKey.take(12)}")
+    }
+
     private fun localNodeId(viewId: String): String = viewId.substringAfterLast('/')
 
     private fun completePendingInboxIdentityBinding(
@@ -5191,12 +5198,14 @@ internal class MomoSocialAdapter(
                     ContactIdentityCaptureOutcome.completed(requireNotNull(identity))
                 } else if (verificationResult.isTerminalFailure()) {
                     failedInboxIdentityCaptureKeys += anchorKey
+                    onIdentityVerificationLog(verificationResult, "EXPLICIT_IDENTITY_CONFLICT", true, "SKIP_CURRENT_TARGET", anchorKey)
                     ContactIdentityCaptureOutcome.failed(
                         ContactIdentityCaptureRequestResult.REJECTED,
                         verificationResult.name
                     )
                 } else {
                     clearRetryableInboxIdentityState(anchorKey)
+                    onIdentityVerificationLog(verificationResult, "PROFILE_ID_NOT_CONFIRMED", false, "RETRY_ON_NEXT_OBSERVATION", anchorKey)
                     ContactIdentityCaptureOutcome.waiting(ContactIdentityCaptureRequestResult.RETRY_LATER)
                 }
                 while (verifiedInboxIdentityByAnchor.size > MAX_INBOX_VERIFIED_IDENTITY_CACHE_ENTRIES) {
