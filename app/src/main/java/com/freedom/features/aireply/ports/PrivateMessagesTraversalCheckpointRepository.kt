@@ -14,7 +14,10 @@ data class PrivateMessagesTraversalCheckpoint(
     val lockedUnreadSetFinalized: Boolean,
     val normalInboxHadUnread: Boolean,
     val normalInboxUnreadStateUnknown: Boolean,
-    val savedAtEpochMs: Long = System.currentTimeMillis()
+    val savedAtEpochMs: Long = System.currentTimeMillis(),
+    /** Best-effort re-anchor identity; never contains node paths or coordinates. */
+    val resumeSessionKey: String? = null,
+    val resumeSessionName: String? = null
 )
 
 interface PrivateMessagesTraversalCheckpointRepository {

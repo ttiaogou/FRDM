@@ -94,7 +94,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
         initialUnreadGateSwipeCompleted = initialUnreadGateSwipeCompleted,
         lockedUnreadSetFinalized = lockedUnreadSetFinalized,
         normalInboxHadUnread = normalInboxHadUnread,
-        normalInboxUnreadStateUnknown = normalInboxUnreadStateUnknown
+        normalInboxUnreadStateUnknown = normalInboxUnreadStateUnknown,
+        resumeSessionKey = resumeSessionKey,
+        resumeSessionName = resumeSessionName
     )
 
     fun restore(checkpoint: PrivateMessagesTraversalCheckpoint) {
@@ -132,11 +134,63 @@ internal class PrivateMessagesTraversalTaskExecutor {
         lockedUnreadSetFinalized = checkpoint.lockedUnreadSetFinalized
         normalInboxHadUnread = checkpoint.normalInboxHadUnread
         normalInboxUnreadStateUnknown = checkpoint.normalInboxUnreadStateUnknown
+        resumeSessionKey = checkpoint.resumeSessionKey
+        resumeSessionName = checkpoint.resumeSessionName
+    }
+
+    internal enum class RestoreReanchorStatus { REANCHORED, NOT_FOUND, AMBIGUOUS }
+    internal data class RestoreReanchorResult(
+        val status: RestoreReanchorStatus,
+        val matchedCandidate: ChatListCandidateSnapshot? = null
+    )
+
+    /**
+     * Re-anchors a restored traversal to the newest list snapshot. Coordinates and row indexes
+     * from the checkpoint are never reused. The last session identity is only a search hint;
+     * clicking still goes through the normal fresh-row validation path.
+     */
+    fun reanchorRestoredCheckpoint(snapshot: ChatPageSnapshot): RestoreReanchorResult {
+        val visible = visibleSessionKeys(snapshot)
+        if (visible.isNotEmpty()) lastStableSessionListVisibleKeys = visible
+
+        val candidates = snapshot.chatListCandidates.filter { candidate ->
+            candidate.selectionClass == "PRIVATE_CHAT" && ChatSessionManagementPolicy.isEligible(candidate)
+        }
+        val keyMatches = resumeSessionKey?.let { key ->
+            candidates.filter { ChatSessionManagementPolicy.stableSessionKey(it) == key }
+        }.orEmpty()
+        val titleKey = ChatSessionManagementPolicy.stableSessionKeyForTitle(resumeSessionName)
+        val titleMatches = if (titleKey.isBlank()) emptyList() else candidates.filter {
+            ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) == titleKey
+        }
+        val matches = when {
+            keyMatches.size == 1 -> keyMatches
+            titleMatches.size == 1 -> titleMatches
+            keyMatches.size > 1 || titleMatches.size > 1 -> return RestoreReanchorResult(RestoreReanchorStatus.AMBIGUOUS)
+            else -> return RestoreReanchorResult(RestoreReanchorStatus.NOT_FOUND)
+        }
+        val matched = matches.single()
+        val newKey = ChatSessionManagementPolicy.stableSessionKey(matched)
+        val oldKey = resumeSessionKey
+        if (oldKey != null && oldKey != newKey) {
+            if (attemptedSessionKeys.remove(oldKey)) attemptedSessionKeys += newKey
+            if (lockedUnreadSessionKeys.remove(oldKey)) lockedUnreadSessionKeys += newKey
+            if (ambiguousSessionIdentityKeys.remove(oldKey)) ambiguousSessionIdentityKeys += newKey
+        }
+        resumeSessionKey = newKey.takeIf(String::isNotBlank)
+        resumeSessionName = matched.nameText
+        return RestoreReanchorResult(RestoreReanchorStatus.REANCHORED, matched)
+    }
+
+    /** Keeps the most recent business identity as a recovery search hint. */
+    fun rememberRecoveryAnchor(candidate: ChatListCandidateSnapshot) {
+        resumeSessionKey = ChatSessionManagementPolicy.stableSessionKey(candidate).takeIf(String::isNotBlank)
+        resumeSessionName = candidate.nameText.takeIf(String::isNotBlank)
     }
 
     /**
-     * Confirms that a freshly observed message list still contains the restored viewport
-     * identity. A mismatch pauses recovery instead of silently starting a new traversal.
+     * Legacy compatibility predicate retained for callers/tests; recovery no longer treats a
+     * viewport mismatch as a fatal condition.
      */
     fun isRestoredViewportCompatible(snapshot: ChatPageSnapshot): Boolean {
         val expected = lastStableSessionListVisibleKeys.orEmpty()
@@ -242,6 +296,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
 
     var normalInboxHadUnread: Boolean = false
     var normalInboxUnreadStateUnknown: Boolean = false
+    var resumeSessionKey: String? = null
+    var resumeSessionName: String? = null
     var sessionListStabilityRetryCount: Int = 0
     var sessionActionCount: Int = 0
 
@@ -595,6 +651,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         pendingScrollBaseline = null
         pendingScrollToTop = false
         lastStableSessionListVisibleKeys = null
+        resumeSessionKey = null
+        resumeSessionName = null
         cancelledScrollRecoveryCount = 0
         capturedSessionListFingerprints.clear()
         pendingBoundaryConfirmationKeys = null
@@ -622,6 +680,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         pendingScrollBaseline = null
         pendingScrollToTop = false
         lastStableSessionListVisibleKeys = null
+        resumeSessionKey = null
+        resumeSessionName = null
         normalInboxHadUnread = false
         normalInboxUnreadStateUnknown = false
     }
@@ -652,6 +712,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         sessionKey: String,
         windowKey: String?
     ) {
+        rememberRecoveryAnchor(candidate)
         currentSessionKey = sessionKey
         currentSessionName = candidate.nameText
         currentSessionCandidate = candidate

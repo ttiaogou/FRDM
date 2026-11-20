@@ -518,6 +518,43 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertEquals(setOf("audit"), executor.capturedSessionListFingerprints)
     }
 
+    @Test
+    fun restoredViewportMismatchReanchorsBySessionNameWithoutReusingCoordinates() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val saved = candidate(0, "Alice", ChatUnreadStatus.UNREAD, top = 100)
+        executor.lastStableSessionListVisibleKeys = executor.visibleSessionKeys(snapshot(saved))
+        executor.rememberRecoveryAnchor(saved)
+
+        val moved = candidate(4, "Alice", ChatUnreadStatus.UNREAD, top = 900)
+        val current = snapshot(candidate(1, "Other", ChatUnreadStatus.READ), moved)
+        assertFalse(executor.isRestoredViewportCompatible(current))
+
+        val result = executor.reanchorRestoredCheckpoint(current)
+
+        assertEquals(
+            PrivateMessagesTraversalTaskExecutor.RestoreReanchorStatus.REANCHORED,
+            result.status
+        )
+        assertEquals(moved, result.matchedCandidate)
+        assertEquals(executor.visibleSessionKeys(current), executor.lastStableSessionListVisibleKeys)
+        assertEquals("Alice", executor.resumeSessionName)
+    }
+
+    @Test
+    fun restoredViewportMismatchWithoutAnchorContinuesWithCurrentViewport() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        executor.lastStableSessionListVisibleKeys = listOf("old@0,100,720,240")
+
+        val current = snapshot(candidate(2, "New row", ChatUnreadStatus.UNREAD, top = 500))
+        val result = executor.reanchorRestoredCheckpoint(current)
+
+        assertEquals(
+            PrivateMessagesTraversalTaskExecutor.RestoreReanchorStatus.NOT_FOUND,
+            result.status
+        )
+        assertEquals(executor.visibleSessionKeys(current), executor.lastStableSessionListVisibleKeys)
+    }
+
     private fun key(candidate: ChatListCandidateSnapshot): String =
         com.freedom.features.aireply.ports.ChatSessionManagementPolicy.stableSessionKey(candidate)
 

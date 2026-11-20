@@ -819,21 +819,20 @@ class AiReplyObservationRuntime(
                     "已从任务=${sourceTaskId}恢复任务=$targetTaskId"
             )
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
-                if (messageListCheckpointRestored &&
-                    !privateMessagesTraversalTaskExecutor.isRestoredViewportCompatible(inspection)
-                ) {
-                    sessionManagerState = SessionManagerState.PAUSED
-                    onLog(
-                        "消息列表检查点恢复[VIEWPORT_MISMATCH]：当前稳定列表身份与检查点不一致；" +
-                            "保持暂停，不重置为新的遍历"
-                    )
-                    scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
-                    lastPageInspection = inspection
-                    return
-                }
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                 if (messageListCheckpointRestored) {
-                    onLog("消息列表检查点恢复[CONTINUE]：页面已验证；保留原检查点和遍历游标继续处理")
+                    val compatible = privateMessagesTraversalTaskExecutor.isRestoredViewportCompatible(inspection)
+                    if (!compatible) {
+                        val reanchor = privateMessagesTraversalTaskExecutor.reanchorRestoredCheckpoint(inspection)
+                        onLog(
+                            "消息列表检查点恢复[REANCHOR]：当前视口与保存视口不同；" +
+                                "status=${reanchor.status.name}；" +
+                                "已重新读取当前位置，不复用旧坐标；" +
+                                "目标会话=${if (reanchor.matchedCandidate != null) "已定位" else "未定位，继续按原方向扫描"}"
+                        )
+                    } else {
+                        onLog("消息列表检查点恢复[CONTINUE]：页面已验证；保留原检查点和遍历游标继续处理")
+                    }
                     messageListCheckpointRestored = false
                 }
                 lastPageInspection = inspection
@@ -3106,6 +3105,11 @@ class AiReplyObservationRuntime(
 
     private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) {
         if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID)) return
+
+        // Persist only the business identity used for recovery re-anchoring. The next recovery
+        // pass will reacquire the row and coordinates from a fresh page snapshot.
+        privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(candidate)
+        privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
 
         if (candidate.contactIdentity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) {
             onLog("AI 会话身份：未确认平台 ID；使用本次访问临时上下文，不前置跳转资料采集；仍复核同名歧义、目标行及聊天标题")

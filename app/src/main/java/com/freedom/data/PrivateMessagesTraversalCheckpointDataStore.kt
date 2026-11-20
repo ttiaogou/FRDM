@@ -26,7 +26,9 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
                 json.optBoolean("initialInboxTopPositioningCompleted"),
                 json.optBoolean("initialUnreadGateSwipeCompleted"),
                 json.optBoolean("lockedUnreadSetFinalized"), json.optBoolean("normalInboxHadUnread"),
-                json.optBoolean("normalInboxUnreadStateUnknown"), saved
+                json.optBoolean("normalInboxUnreadStateUnknown"), saved,
+                json.optString("resumeSessionKey").takeIf(String::isNotBlank),
+                json.optString("resumeSessionName").takeIf(String::isNotBlank)
             )
         }.getOrElse { clear(); null }
     }
@@ -45,6 +47,8 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
             .put("lockedUnreadSetFinalized", checkpoint.lockedUnreadSetFinalized)
             .put("normalInboxHadUnread", checkpoint.normalInboxHadUnread)
             .put("normalInboxUnreadStateUnknown", checkpoint.normalInboxUnreadStateUnknown)
+            .put("resumeSessionKey", checkpoint.resumeSessionKey.orEmpty())
+            .put("resumeSessionName", checkpoint.resumeSessionName.orEmpty())
         preferences.edit().putString(KEY, json.toString()).apply()
     }
 
