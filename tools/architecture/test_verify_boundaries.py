@@ -8,6 +8,28 @@ import verify_boundaries as guard  # noqa: E402
 
 
 class ArchitectureVerifierUnitTest(unittest.TestCase):
+    def test_final_boundaries_reject_platform_and_terminal_unknown_bypasses(self):
+        code = {
+            "business/src/main/kotlin/com/freedom/features/bad/BadFeature.kt":
+                "val node: AccessibilityNodeInfo? = null\n",
+            "app/src/main/java/com/freedom/adapters/bad/BadAdapter.kt":
+                "val machine = AccountBrowseStateMachine()\n",
+            "business/src/main/kotlin/com/freedom/features/aireply/ai/ReplyTaskRepository.kt":
+                "ReplyTaskStatus.UNKNOWN to setOf(ReplyTaskStatus.FAILED_FINAL)\n",
+        }
+        violations = guard.final_architecture_boundary_violations(code)
+        self.assertTrue(any("Feature directly accesses" in item for item in violations))
+        self.assertTrue(any("Adapter instantiates" in item for item in violations))
+        self.assertTrue(any("UNKNOWN may transition" in item for item in violations))
+
+    def test_final_boundaries_reject_retryable_permanent_cache_write(self):
+        code = {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt":
+                "failedInboxIdentityCaptureKeys += FAILED_RETRYABLE\n",
+        }
+        violations = guard.final_architecture_boundary_violations(code)
+        self.assertTrue(any("RETRYABLE result" in item for item in violations))
+
     def test_unified_recovery_state_machine_rejects_business_page_dependencies(self):
         code = {
             "app/src/main/java/com/freedom/features/recovery/UnifiedRecoveryTransactionStateMachine.kt":
