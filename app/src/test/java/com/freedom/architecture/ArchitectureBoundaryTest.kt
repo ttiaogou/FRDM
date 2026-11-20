@@ -401,6 +401,23 @@ class ArchitectureBoundaryTest {
             "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGestureVisualizer.kt",
             "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt",
             "app/src/main/java/com/freedom/adapters/accessibility/android/GestureTrailOverlay.kt"
+        ) + setOf(
+            "gesture/gesture-core/src/main/kotlin/com/freedom/core/accessibility/gesture/GestureCoordinateRegion.kt",
+            "gesture/gesture-core/src/main/kotlin/com/freedom/core/accessibility/gesture/GestureCommand.kt",
+            "gesture/gesture-core/src/main/kotlin/com/freedom/core/accessibility/gesture/GestureGeometryPolicy.kt",
+            "gesture/gesture-core/src/main/kotlin/com/freedom/core/accessibility/gesture/GestureDynamicsPolicy.kt",
+            "gesture/gesture-runtime/src/main/kotlin/com/freedom/application/gesture/GestureExecutionCoordinator.kt",
+            "gesture/gesture-runtime/src/main/kotlin/com/freedom/application/gesture/GesturePolicyPipeline.kt",
+            "gesture/gesture-runtime/src/main/kotlin/com/freedom/application/gesture/GestureCommandCompiler.kt",
+            "gesture/gesture-runtime/src/main/kotlin/com/freedom/application/gesture/GesturePolicyValidator.kt",
+            "gesture/gesture-runtime/src/main/kotlin/com/freedom/application/gesture/GestureValidationTypes.kt",
+            "gesture/gesture-runtime/src/main/kotlin/com/freedom/core/accessibility/api/AccessibilityGateway.kt",
+            "gesture/gesture-runtime/src/main/kotlin/com/freedom/core/accessibility/api/GestureExecutionPort.kt",
+            "gesture/gesture-runtime/src/main/kotlin/com/freedom/core/accessibility/events/InputOriginClassifier.kt",
+            "gesture/gesture-android/src/main/kotlin/com/freedom/adapters/accessibility/android/AndroidGesturePathFactory.kt",
+            "gesture/gesture-android/src/main/kotlin/com/freedom/adapters/accessibility/android/AndroidGestureVisualizer.kt",
+            "gesture/gesture-android/src/main/kotlin/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt",
+            "gesture/gesture-android/src/main/kotlin/com/freedom/adapters/accessibility/android/GestureTrailOverlay.kt"
         )
         val rawGestureApi = listOf(
             Regex("\\bGestureCommand\\b"),
