@@ -10,6 +10,7 @@ import android.content.IntentFilter
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
+import com.freedom.adapters.accessibility.android.AndroidAccessibilityEventForwarder
 import com.freedom.adapters.accessibility.android.AndroidAccessibilitySubscriptionPolicy
 import com.freedom.adapters.accessibility.diagnostics.LatestAccessibilityNodeDump
 import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
