@@ -4925,6 +4925,7 @@ internal class MomoSocialAdapter(
         val anchorKey = anchor.opaqueKey()
         synchronized(inboxIdentityCaptureLock) {
             if (anchorKey in failedInboxIdentityCaptureKeys) {
+                onLog("AI 联系人身份采集[REJECTED]：命中明确终态身份失败缓存；不重新点击当前目标")
                 return ContactIdentityCaptureRequestResult.REJECTED
             }
             val pending = pendingInboxIdentityCapture
@@ -4949,7 +4950,11 @@ internal class MomoSocialAdapter(
             lastTransitionAtMs = System.currentTimeMillis()
         )
         synchronized(inboxIdentityCaptureLock) {
-            if (pendingInboxIdentityCapture != null || anchorKey in failedInboxIdentityCaptureKeys) {
+            if (anchorKey in failedInboxIdentityCaptureKeys) {
+                onLog("AI 联系人身份采集[REJECTED]：二次入口检查命中明确终态身份失败缓存；不使用旧头像定位")
+                return ContactIdentityCaptureRequestResult.REJECTED
+            }
+            if (pendingInboxIdentityCapture != null) {
                 return ContactIdentityCaptureRequestResult.IN_PROGRESS
             }
             pendingInboxIdentityCapture = pending
