@@ -312,6 +312,7 @@ class AiReplyObservationRuntime(
         sharedPageObservationCoordinator?.registerFingerprintRoute(receivedGreetingsRecoveryRoute.asRoute())
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
+            messageListCheckpointRestored = true
             recoveryContext.request(
                 PRIVATE_MESSAGES_TASK_ID,
                 "PROCESS_RESTART_CHECKPOINT",
@@ -446,6 +447,8 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsRecoveryRetryAttempt = 0
     private var messageRecoveryRetryAttempt = 0
     private var messageListRecoveryVerificationPending = false
+    /** True while the next verified message-list snapshot must continue a restored checkpoint. */
+    private var messageListCheckpointRestored = false
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -763,7 +766,23 @@ class AiReplyObservationRuntime(
                     "已从任务=${sourceTaskId}恢复任务=$targetTaskId"
             )
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
+                if (messageListCheckpointRestored &&
+                    !privateMessagesTraversalTaskExecutor.isRestoredViewportCompatible(inspection)
+                ) {
+                    sessionManagerState = SessionManagerState.PAUSED
+                    onLog(
+                        "消息列表检查点恢复[VIEWPORT_MISMATCH]：当前稳定列表身份与检查点不一致；" +
+                            "保持暂停，不重置为新的遍历"
+                    )
+                    scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
+                    lastPageInspection = inspection
+                    return
+                }
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                if (messageListCheckpointRestored) {
+                    onLog("消息列表检查点恢复[CONTINUE]：页面已验证；保留原检查点和遍历游标继续处理")
+                    messageListCheckpointRestored = false
+                }
                 lastPageInspection = inspection
                 handleSessionListPage(inspection)
             } else {
@@ -1328,6 +1347,7 @@ class AiReplyObservationRuntime(
         recoveryTransaction.reset()
         if (!recoveryContext.pending) recoveryContext.clear()
         messageListRecoveryVerificationPending = false
+        messageListCheckpointRestored = false
         messageRecoveryRetryAttempt = 0
         transientEmptySnapshotRecovery.reset()
         receivedGreetingsRecoveryVerificationPending = false
@@ -1580,6 +1600,7 @@ class AiReplyObservationRuntime(
         messageRecoveryRetryAttempt = 0
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
+            messageListCheckpointRestored = true
             if (!recoveryContext.pending) {
                 activateRecoveryIdentity(
                     PRIVATE_MESSAGES_TASK_ID,
@@ -1653,6 +1674,7 @@ class AiReplyObservationRuntime(
     fun reloadPrivateMessagesCheckpointAfterServiceReconnect(): Boolean {
         val checkpoint = privateMessagesCheckpointRepository?.load() ?: return false
         privateMessagesTraversalTaskExecutor.restore(checkpoint)
+        messageListCheckpointRestored = true
         if (!recoveryContext.pending) {
             activateRecoveryIdentity(
                 PRIVATE_MESSAGES_TASK_ID,

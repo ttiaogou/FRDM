@@ -28,12 +28,12 @@ internal class AiReplyModeRuntimeAdapter(
     }
 
     override fun onAccessibilityServiceConnected() {
-        val messageCheckpointPageVerified = runCatching {
+        val messageCheckpointLoaded = runCatching {
             runtime().reloadPrivateMessagesCheckpointAfterServiceReconnect()
         }.getOrDefault(false)
         onLog(
-            if (messageCheckpointPageVerified) {
-                "消息列表服务重连：检查点已读取且当前列表结构已确认"
+            if (messageCheckpointLoaded) {
+                "消息列表服务重连：检查点已读取；当前列表结构仍需统一页面双快照确认"
             } else {
                 "消息列表服务重连：检查点已尝试读取；当前列表结构未确认，等待后续页面事件复核"
             }

@@ -83,10 +83,10 @@ internal data class PrivateMessagesListSnapshotEvaluation(
 
 internal class PrivateMessagesTraversalTaskExecutor {
     fun checkpoint(): PrivateMessagesTraversalCheckpoint = PrivateMessagesTraversalCheckpoint(
-        attemptedSessionKeys = attemptedSessionKeys,
-        lockedUnreadSessionKeys = lockedUnreadSessionKeys,
-        ambiguousSessionIdentityKeys = ambiguousSessionIdentityKeys,
-        lastStableVisibleKeys = lastStableSessionListVisibleKeys.orEmpty(),
+        attemptedSessionKeys = attemptedSessionKeys.toSet(),
+        lockedUnreadSessionKeys = lockedUnreadSessionKeys.toSet(),
+        ambiguousSessionIdentityKeys = ambiguousSessionIdentityKeys.toSet(),
+        lastStableVisibleKeys = lastStableSessionListVisibleKeys.orEmpty().toList(),
         phase = phase.name,
         atTop = atTop,
         initialInboxPositionCheckCompleted = initialInboxPositionCheckCompleted,
@@ -98,10 +98,31 @@ internal class PrivateMessagesTraversalTaskExecutor {
     )
 
     fun restore(checkpoint: PrivateMessagesTraversalCheckpoint) {
+        // A checkpoint replaces the in-memory traversal cursor. It must not inherit a
+        // previous run's pending session, scroll baseline, or boundary evidence.
+        clearIdentityReturn()
+        clearCurrentSession()
+        headerMismatchRecordedForCurrentAttempt = false
+        sessionListStabilityRetryCount = 0
+        sessionActionCount = 0
+        noProgressScrollCount = 0
+        pendingScrollBaseline = null
+        pendingScrollToTop = false
+        cancelledScrollRecoveryCount = 0
+        unreadBoundarySignature = ""
+        unreadBoundaryStabilityCount = 0
+        capturedSessionListFingerprints.clear()
+        pendingBoundaryConfirmationKeys = null
+        pendingBoundaryConfirmationToTop = false
+        boundaryStabilityConfirmationCount = 0
+        lastUnreadAuditFingerprint = ""
+        attemptedSessionKeys.clear()
+        lockedUnreadSessionKeys.clear()
+        ambiguousSessionIdentityKeys.clear()
         attemptedSessionKeys += checkpoint.attemptedSessionKeys
         lockedUnreadSessionKeys += checkpoint.lockedUnreadSessionKeys
         ambiguousSessionIdentityKeys += checkpoint.ambiguousSessionIdentityKeys
-        lastStableSessionListVisibleKeys = checkpoint.lastStableVisibleKeys
+        lastStableSessionListVisibleKeys = checkpoint.lastStableVisibleKeys.toList()
         phase = runCatching { SessionListTraversalPhase.valueOf(checkpoint.phase) }
             .getOrDefault(SessionListTraversalPhase.POSITIONING_AT_BOTTOM)
         atTop = checkpoint.atTop
@@ -111,6 +132,19 @@ internal class PrivateMessagesTraversalTaskExecutor {
         lockedUnreadSetFinalized = checkpoint.lockedUnreadSetFinalized
         normalInboxHadUnread = checkpoint.normalInboxHadUnread
         normalInboxUnreadStateUnknown = checkpoint.normalInboxUnreadStateUnknown
+    }
+
+    /**
+     * Confirms that a freshly observed message list still contains the restored viewport
+     * identity. A mismatch pauses recovery instead of silently starting a new traversal.
+     */
+    fun isRestoredViewportCompatible(snapshot: ChatPageSnapshot): Boolean {
+        val expected = lastStableSessionListVisibleKeys.orEmpty()
+        if (expected.isEmpty()) return true
+        val actual = visibleSessionKeys(snapshot)
+        if (actual.isEmpty()) return false
+        val expectedIdentityKeys = expected.mapTo(LinkedHashSet()) { it.substringBefore('@') }
+        return actual.any { it.substringBefore('@') in expectedIdentityKeys }
     }
     private data class IdentityReturn(
         val original: ChatListCandidateSnapshot,
