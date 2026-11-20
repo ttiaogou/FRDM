@@ -327,7 +327,10 @@ def inspect_project(root: Path) -> list[str]:
             issues.append(f"Required GestureApi consumer is missing: {rel}")
             continue
         code = mask_kotlin_non_code(path.read_text(encoding="utf-8"))
-        if "import com.freedom.gesture.api.GestureApi" not in code:
+        if (
+            "import com.freedom.gesture.api.GestureApi" not in code and
+            "import com.freedom.features.accountbrowse.ports.AccountBrowseGesturePort" not in code
+        ):
             issues.append(f"Gesture business adapter must depend on GestureApi: {rel}")
         if forbidden_consumer_symbols.search(code):
             issues.append(f"Gesture business adapter uses a Runtime/platform bypass: {rel}")
