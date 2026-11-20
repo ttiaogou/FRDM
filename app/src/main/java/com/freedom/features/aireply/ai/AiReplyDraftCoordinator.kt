@@ -463,10 +463,7 @@ class AiReplyDraftCoordinator(
         if (result.status == ChatDraftInputStatus.VERIFIED) {
             // Stage two consumes PENDING_SEND and invokes the retained send port only after
             // the adapter has revalidated the live chat and send control.
-            synchronized(lock) {
-                if (!isCurrentGeneration(requestGeneration)) return
-                awaitingUserSend.set(true)
-            }
+            if (!isCurrentGeneration(requestGeneration)) return
             updateTaskStatus(ReplyTaskStatus.DRAFT_APPLIED, requestGeneration)
             updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
             val configuredSendPort = sendPort
