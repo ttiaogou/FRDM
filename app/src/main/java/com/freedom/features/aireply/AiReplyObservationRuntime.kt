@@ -528,7 +528,10 @@ class AiReplyObservationRuntime(
             !receivedGreetingsTaskFlow.supportsWorkflow()
         ) return
         receivedGreetingsPageProbePending = true
-        pageObservationCoordinator.signalFullInspection()
+        // The watcher callback already runs from the scheduler's retry task. Execute the
+        // unified read now so the bounded retry remains one fresh observation, without adding
+        // another full-inspection debounce interval.
+        runFullInspection()
     }
 
     private fun runFullInspection() {
