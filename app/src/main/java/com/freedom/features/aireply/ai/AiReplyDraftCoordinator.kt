@@ -64,6 +64,7 @@ class AiReplyDraftCoordinator(
     private var pendingSendConfirmation: PendingSendConfirmation? = null
     private var sendConfirmationChecks = 0
     private var lastConfirmedSendId: String? = null
+    private var activeMessageSegments: List<String> = emptyList()
 
     private data class PendingSendConfirmation(
         val sendAttemptId: String,
@@ -336,8 +337,8 @@ class AiReplyDraftCoordinator(
                 conversationKey = target.conversationIdentityKey,
                 messages = parsedMessages.messages
             )
-            val segments = parsedMessages.messages.flatMap(DraftSegments::split)
-            writeNext(target, decision.draft, segments, 0, "", requestGeneration)
+            activeMessageSegments = parsedMessages.messages.map(String::trim).filter(String::isNotEmpty)
+            writeMessageSegment(target, 0, requestGeneration)
         }
     }
 
@@ -356,6 +357,61 @@ class AiReplyDraftCoordinator(
             }
         }
         onLog("AI 消息段任务已建立：requestId=$requestId；conversationKey=$conversationKey；segmentCount=${records.size}；输入片段仍由 DraftSegments 独立处理")
+    }
+
+    private fun writeMessageSegment(target: ChatDraftInputTarget, segmentIndex: Int, requestGeneration: Long) {
+        val message = activeMessageSegments.getOrNull(segmentIndex).orEmpty()
+        if (message.isBlank()) { finish("DRAFT_SEGMENT_EMPTY", requestGeneration); return }
+        writeMessageChunk(target, segmentIndex, DraftSegments.split(message), 0, "", requestGeneration)
+    }
+
+    private fun writeMessageChunk(target: ChatDraftInputTarget, segmentIndex: Int, chunks: List<String>, chunkIndex: Int, confirmed: String, requestGeneration: Long) {
+        if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) { finish("AI_REPLY_STATE_CHANGED_BEFORE_INPUT", requestGeneration); return }
+        val expected = confirmed + chunks[chunkIndex]
+        val result = runCatching { inputPort.writeDraft(target, confirmed, expected) }
+            .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED) }
+        if (!result.succeeded) { finish("DRAFT_INPUT_${result.reasonCode}", requestGeneration); return }
+        scheduler.schedule(chooseRandomInt(MIN_VERIFY_DWELL_DELAY_MS, MAX_VERIFY_DWELL_DELAY_MS).toLong()) {
+            val checked = runCatching { inputPort.verifyDraft(target, expected) }
+                .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
+            if (checked.status != ChatDraftInputStatus.VERIFIED) { finish("DRAFT_VERIFY_${checked.reasonCode}", requestGeneration); return@schedule }
+            if (chunkIndex + 1 < chunks.size) writeMessageChunk(target, segmentIndex, chunks, chunkIndex + 1, expected, requestGeneration)
+            else {
+                val message = activeMessageSegments[segmentIndex]
+                val finalCheck = runCatching { inputPort.verifyDraft(target, message) }
+                    .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
+                if (finalCheck.status != ChatDraftInputStatus.VERIFIED) { finish("DRAFT_VERIFY_${finalCheck.reasonCode}", requestGeneration); return@schedule }
+                updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.DRAFT_APPLIED)
+                updateTaskStatus(ReplyTaskStatus.DRAFT_APPLIED, requestGeneration)
+                sendMessageSegment(target, message, segmentIndex, requestGeneration)
+            }
+        }
+    }
+
+    private fun sendMessageSegment(target: ChatDraftInputTarget, message: String, segmentIndex: Int, requestGeneration: Long) {
+        if (!hasActiveTaskOwner()) return
+        updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.PENDING_SEND)
+        if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
+        updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.SENDING)
+        if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
+        val sent = runCatching { sendPort?.sendDraft(target, message) ?: ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_UNAVAILABLE") }
+            .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_EXCEPTION") }
+        if (sent.status != ChatDraftInputStatus.SEND_SUBMITTED) { updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.FAILED_RETRYABLE); updateTaskStatus(ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration); finish("DRAFT_SEND_${sent.reasonCode}", requestGeneration); return }
+        val submittedAt = nowMillis()
+        synchronized(lock) {
+            pendingSendConfirmation = PendingSendConfirmation(UUID.randomUUID().toString(), activeRequestId.orEmpty(), target.conversationIdentityKey, segmentIndex, activeMessageSegments.size, fingerprint(message), submittedAt, submittedAt + SEND_CONFIRMATION_TIMEOUT_MILLIS, requestGeneration, target, message, activeExistingOutgoingKeys)
+            sendConfirmationChecks = 0
+        }
+        updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.SENT_UNCONFIRMED)
+        if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENT_UNCONFIRMED, requestGeneration)
+        pending.set(false)
+    }
+
+    private fun updateSegmentStatus(requestGeneration: Long, segmentIndex: Int, status: ReplySegmentTaskStatus, sentAt: Long? = null, confirmationId: String? = null) {
+        val requestId = synchronized(lock) { activeRequestId } ?: return
+        val repo = replySegmentTaskRepository ?: return
+        val record = repo.find("$requestId:segment:$segmentIndex") ?: return
+        if (record.status != status) repo.update(record.copy(status = status, sentAt = sentAt ?: record.sentAt, confirmationId = confirmationId ?: record.confirmationId))
     }
 
     internal fun writeNext(target: ChatDraftInputTarget, draft: String, segments: List<String>,
@@ -573,6 +629,7 @@ class AiReplyDraftCoordinator(
         if (generation.get() != pending.requestGeneration) {
             onLog("AI 发送结果核验：UNKNOWN；运行代次已失效；禁止重发")
             updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)
+            updateSegmentStatus(pending.requestGeneration, pending.segmentIndex, ReplySegmentTaskStatus.UNKNOWN)
             return SendConfirmationResult.UNKNOWN
         }
         val observationMatches = batch.windowSessionKey == pending.target.windowSessionKey &&
@@ -585,6 +642,7 @@ class AiReplyDraftCoordinator(
             if (checks >= SEND_CONFIRMATION_MAX_CHECKS) {
                 onLog("AI 发送结果核验：UNKNOWN；窗口、会话标题或时间条件连续不匹配；禁止重发")
                 updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)
+                updateSegmentStatus(pending.requestGeneration, pending.segmentIndex, ReplySegmentTaskStatus.UNKNOWN)
                 return SendConfirmationResult.UNKNOWN
             }
             onLog("AI 发送结果核验：WAITING；当前批次不属于发送后的稳定聊天观察；检查次数=$checks")
@@ -597,19 +655,26 @@ class AiReplyDraftCoordinator(
                 messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys
         }
         if (matched != null) {
-            val confirmationId = fingerprint(
-                "${pending.conversationKey}|${pending.requestId}|${pending.segmentIndex}|${matched.stableLogicalMessageId}"
-            )
-            if (updateTaskStatus(ReplyTaskStatus.SENT, pending.requestGeneration)) {
+            val confirmationId = fingerprint("${pending.requestId}|${pending.segmentIndex}|${pending.segmentContentHash}|${matched.stableLogicalMessageId}|${matched.effectiveContentRevision}")
+            if (updateSegmentStatusAndContinue(pending, confirmationId)) {
                 onLog("AI 发送结果核验：SENT；sendConfirmationId=${confirmationId.take(12)}；" +
                     "sendAttemptId=${pending.sendAttemptId.take(12)}")
+                val nextIndex = pending.segmentIndex + 1
                 synchronized(lock) {
-                    lastConfirmedSendId = confirmationId
                     pendingSendConfirmation = null
+                    awaitingUserSend.set(false)
+                }
+                if (nextIndex < activeMessageSegments.size) {
+                    onLog("AI 消息段顺序推进：segmentIndex=${pending.segmentIndex} 已确认；启动 segmentIndex=$nextIndex")
+                    scheduler.schedule(0L) { writeMessageSegment(pending.target, nextIndex, pending.requestGeneration) }
+                    return SendConfirmationResult.WAITING
+                }
+                lastConfirmedSendId = confirmationId
+                updateTaskStatus(ReplyTaskStatus.SENT, pending.requestGeneration)
+                synchronized(lock) {
                     activeMessageKey = null
                     activeRequestId = null
                     activeExistingOutgoingKeys = emptySet()
-                    awaitingUserSend.set(false)
                 }
                 return SendConfirmationResult.CONFIRMED
             }
@@ -618,11 +683,17 @@ class AiReplyDraftCoordinator(
         val checks = synchronized(lock) { ++sendConfirmationChecks }
         if (checks >= SEND_CONFIRMATION_MAX_CHECKS || nowMillis() >= pending.confirmationDeadline) {
             updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)
+            updateSegmentStatus(pending.requestGeneration, pending.segmentIndex, ReplySegmentTaskStatus.UNKNOWN)
             onLog("AI 发送结果核验：UNKNOWN；检查次数=$checks；未发现新的己方消息；禁止立即重发")
             return SendConfirmationResult.UNKNOWN
         }
         onLog("AI 发送结果核验：WAITING；检查次数=$checks；等待下一次当前聊天消息观察")
         return SendConfirmationResult.WAITING
+    }
+
+    private fun updateSegmentStatusAndContinue(pending: PendingSendConfirmation, confirmationId: String): Boolean {
+        updateSegmentStatus(pending.requestGeneration, pending.segmentIndex, ReplySegmentTaskStatus.SENT, nowMillis(), confirmationId)
+        return true
     }
 
     fun consumeConfirmedSendId(): String? = synchronized(lock) {
