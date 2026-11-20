@@ -11,14 +11,14 @@ import com.freedom.features.aireply.ports.ChatPageSnapshot
  * snapshot is usable or the owning run is explicitly stopped.
  */
 internal class AiReplySessionTraversalCoordinator(retryDelaysMs: LongArray) {
+    private val pageObservationSemantics = AiReplyPageObservationSemantics()
     private val retryDelays = retryDelaysMs.filter { it > 0L }.toList()
     var retryCount: Int = 0
         private set
 
-    fun isTransient(snapshot: ChatPageSnapshot?): Boolean = snapshot == null ||
-        (snapshot.pageKind == ChatPageKind.UNKNOWN && snapshot.scannedNodeCount == 0 &&
-            snapshot.messageListCount == 0 && snapshot.editableInputCount == 0 &&
-            snapshot.sendActionCount == 0 && snapshot.messageRelatedViewIdCount == 0)
+    fun isTransient(snapshot: ChatPageSnapshot?): Boolean =
+        pageObservationSemantics.classify(snapshot, previous = null, targetPackage = "").status ==
+            AiReplyPageObservationStatus.TEMPORARILY_UNAVAILABLE
 
     /** Returns the next fast delay, then keeps returning the low-frequency delay indefinitely. */
     fun nextDelayMs(lowFrequencyDelayMs: Long = DEFAULT_LOW_FREQUENCY_DELAY_MS): Long {

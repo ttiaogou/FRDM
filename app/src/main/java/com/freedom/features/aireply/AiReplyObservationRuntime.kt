@@ -403,6 +403,7 @@ class AiReplyObservationRuntime(
     private val transientEmptySnapshotRecovery = AiReplySessionTraversalCoordinator(
         TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS
     )
+    private val pageObservationSemantics = AiReplyPageObservationSemantics()
     private var snapshotRecoveryStartedAtMs = 0L
     private var receivedGreetingsUserActive = false
     private var userInteractionActive = false
@@ -502,7 +503,12 @@ class AiReplyObservationRuntime(
             return
         }
         val inspection = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
-        if (transientEmptySnapshotRecovery.isTransient(inspection)) {
+        val observationDecision = pageObservationSemantics.classify(
+            snapshot = inspection,
+            previous = lastPageInspection,
+            targetPackage = targetPackage()
+        )
+        if (observationDecision.status == AiReplyPageObservationStatus.TEMPORARILY_UNAVAILABLE) {
             if (snapshotRecoveryStartedAtMs == 0L) {
                 snapshotRecoveryStartedAtMs = System.currentTimeMillis()
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("EMPTY_SNAPSHOT"))
