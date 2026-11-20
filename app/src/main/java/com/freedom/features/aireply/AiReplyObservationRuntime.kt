@@ -771,9 +771,17 @@ class AiReplyObservationRuntime(
             sessionManagerState == SessionManagerState.OPENING_SESSION &&
             previous?.pageKind == ChatPageKind.CHAT_LIST &&
             inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE
+        // The received-greetings adapter legitimately traverses from its confirmed list into a
+        // profile card (and then back to the verified list). That intermediate NON_CHAT page is
+        // part of the same task workflow; it must not be converted into a generic route-recovery
+        // request merely because it has no list fingerprint yet.
+        val receivedGreetingsWorkflowTransition = activeTaskId == RECEIVED_GREETINGS_TASK_ID &&
+            receivedGreetingsTaskActive &&
+            previous?.pageKind == ChatPageKind.CHAT_LIST &&
+            inspection.pageKind == ChatPageKind.NON_CHAT
         val shouldCreateRouteRecovery = sessionRunStarted && activeTaskId != null &&
             !recoveryContext.pending && selfInitiatedTransition == null &&
-            !openingPrivateSessionDetail &&
+            !openingPrivateSessionDetail && !receivedGreetingsWorkflowTransition &&
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
         if ((shouldCreateRouteRecovery || unmatchedReturnToOwnedRoute) && activeTaskId != null) {
