@@ -10,7 +10,7 @@ class InspectorSearchBoundaryTest {
         get() = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }
             .first { File(it, "settings.gradle.kts").isFile }
 
-    private fun source(path: String) = File(root, path).readText()
+    private fun source(path: String) = TestSourceResolver.resolve(root, path).readText()
 
     @Test fun pureSearchEngineCoversQueryAttributesRegexAndRegion() {
         val engine = source("app/src/main/java/com/freedom/core/accessibility/inspector/InspectorSearch.kt")
