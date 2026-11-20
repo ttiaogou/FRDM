@@ -773,6 +773,7 @@ class ArchitectureBoundaryTest {
         val pipelinePort = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AccessibilityEventPipelinePort.kt")
         assertTrue("The Android event entry must depend on the named pipeline port", forwarder.readText().contains("AccessibilityEventPipelinePort"))
         assertTrue("The Android pipeline must implement the named pipeline port", pipelineText.contains(": AccessibilityEventPipelinePort"))
+        assertTrue("The Android pipeline must signal the shared page observation coordinator", pipelineText.contains("pageObservationCoordinator?.signal(routedTargetEvent.type)"))
         assertTrue("The Android event entry must own pipeline forwarding", forwarder.readText().contains("pipeline.process(event, runMode)"))
         assertTrue("The pipeline port must expose normalized event processing", pipelinePort.readText().contains("fun process(event: AccessibilityEvent, runMode: RunMode)"))
         assertFalse("Service must not normalize Android events directly", serviceText.contains("AndroidAccessibilityEventNormalizer"))
