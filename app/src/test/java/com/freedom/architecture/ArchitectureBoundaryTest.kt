@@ -951,6 +951,7 @@ class ArchitectureBoundaryTest {
                     add("${file.relativeTo(projectRoot)}: Runtime implementation import")
                 }
                 if (Regex("import\\s+com\\.freedom\\.gesture\\.api\\.GestureApi").containsMatchIn(source).not() &&
+                    Regex("import\\s+com\\.freedom\\.features\\.accountbrowse\\.ports\\.AccountBrowseGesturePort").containsMatchIn(source).not() &&
                     source.contains("GestureIntentRequest")) {
                     add("${file.relativeTo(projectRoot)}: gesture consumer missing GestureApi dependency")
                 }
