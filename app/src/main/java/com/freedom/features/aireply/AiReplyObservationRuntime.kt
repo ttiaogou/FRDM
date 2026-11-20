@@ -241,7 +241,7 @@ class AiReplyObservationRuntime(
             isReadRequestAllowed = {
                 isAiReplyActive() && chatPagePort.supportsTargetPackage(targetPackage())
             },
-            inspectActivePage = { chatPagePort.inspectChatPage() },
+            inspectActivePage = { readPageSnapshot() },
             isResultCurrent = ::isMessageReadResultCurrent,
             shouldDrainPendingSnapshot = { !isReadOnlyGreetingMessageRead() },
             onValidatedResult = { requestedSnapshot, batch, activeSnapshot ->
@@ -404,6 +404,14 @@ class AiReplyObservationRuntime(
         TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS
     )
     private val pageObservationSemantics = AiReplyPageObservationSemantics()
+    private val pageReadCoordinator = AiReplyPageReadCoordinator(
+        inspectPage = { chatPagePort.inspectChatPage() },
+        onLog = onLog
+    )
+
+    private fun readPageSnapshot(
+        purpose: AiReplyPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
+    ): ChatPageSnapshot? = pageReadCoordinator.read(purpose).snapshot
     private var snapshotRecoveryStartedAtMs = 0L
     private var receivedGreetingsUserActive = false
     private var userInteractionActive = false
@@ -502,7 +510,7 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼任务观察被阻止：当前任务已不持有 UI 操作权；等待安全恢复")
             return
         }
-        val inspection = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+        val inspection = runCatching { readPageSnapshot() }.getOrNull()
         val observationDecision = pageObservationSemantics.classify(
             snapshot = inspection,
             previous = lastPageInspection,
@@ -1918,7 +1926,7 @@ class AiReplyObservationRuntime(
                 draftRetryTask = scheduler.schedule(700L * draftReadRetries) {
                     draftRetryTask = null
                     if (visit != draftVisitToken || run != sessionActionGeneration || !isAiReplyActive()) return@schedule
-                    val fresh = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+                    val fresh = runCatching { readPageSnapshot() }.getOrNull()
                     if (fresh == null || !hasSameWindowSession(snapshot, fresh)) {
                         onLog("AI 消息复读停止：窗口或会话已变化")
                         return@schedule
@@ -2699,7 +2707,7 @@ class AiReplyObservationRuntime(
             if (!isAiReplyActive() || !sessionRunStarted ||
                 sessionManagerState != SessionManagerState.WAITING_FOR_UNREAD
             ) return@schedule
-            val fresh = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+            val fresh = runCatching { readPageSnapshot() }.getOrNull()
             if (fresh == null || fresh.pageKind != ChatPageKind.CHAT_LIST || fresh.packageName != targetPackage()) {
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI Reply 低频待机复查暂停：未能确认普通消息列表页面；不把未知页面当作无未读，也不执行点击或滑动")
@@ -3148,7 +3156,7 @@ class AiReplyObservationRuntime(
             onLog("AI 会话打开复核被阻止：私人消息任务租约已失效；不处理旧页面状态")
             return
         }
-        val current = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+        val current = runCatching { readPageSnapshot() }.getOrNull()
         if (current?.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             current.packageName == targetPackage()
         ) {
@@ -3273,7 +3281,7 @@ class AiReplyObservationRuntime(
                 return@rejectedReturn
             }
 
-            val current = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+            val current = runCatching { readPageSnapshot() }.getOrNull()
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 current.packageName != targetPackage() || windowSessionKey(current) != rejectedWindowKey
             ) {
@@ -3391,7 +3399,7 @@ class AiReplyObservationRuntime(
                 onLog("AI 会话返回[STALE_TASK_IGNORED]：私人消息任务租约已失效；不提交返回动作")
                 return@schedule
             }
-            val current = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+            val current = runCatching { readPageSnapshot() }.getOrNull()
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 current.packageName != snapshot.packageName || !hasSameWindowSession(snapshot, current)
             ) {
@@ -3429,7 +3437,7 @@ class AiReplyObservationRuntime(
         if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID)) return
         // Reacquire the active page immediately before scrolling. A previous list snapshot can
         // become stale after RecyclerView relayout, window changes, or user interaction.
-        val inspectionResult = runCatching { chatPagePort.inspectChatPage() }
+        val inspectionResult = runCatching { readPageSnapshot() }
         val rawFresh = inspectionResult.getOrNull()
         val fresh = rawFresh?.let(::stabilizeIncomingPageSnapshot) ?: run {
             sessionManagerState = SessionManagerState.PAUSED
@@ -3801,7 +3809,7 @@ class AiReplyObservationRuntime(
 
     /** Acquires the newest page tree and validates it against the last confirmed inbox identity. */
     private fun inspectFreshPageSnapshot(): ChatPageSnapshot? {
-        val raw = runCatching { chatPagePort.inspectChatPage() }.getOrNull() ?: return null
+        val raw = runCatching { readPageSnapshot() }.getOrNull() ?: return null
         return stabilizeIncomingPageSnapshot(raw)
     }
 
@@ -3940,7 +3948,7 @@ class AiReplyObservationRuntime(
             // The snapshot and node paths are deliberately refreshed after the delay. If the
             // user navigated away, the current page contract will reject the read without using
             // the previous chat's locator.
-            val refreshed = runCatching { chatPagePort.inspectChatPage() }.getOrNull()
+            val refreshed = runCatching { readPageSnapshot() }.getOrNull()
             if (refreshed == null || refreshed.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 refreshed.packageName != targetPackage() ||
                 refreshed.messageListTarget == null || refreshed.inputFieldTarget == null
