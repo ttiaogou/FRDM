@@ -31,7 +31,7 @@ class AiReplyDecisionEngineTest {
         val provider = FakeProvider(replyJson("你好"))
         val engine = AiReplyDecisionEngine(provider, grantedConsent)
         val result = engine.decide(AiReplyDecisionInput(context(), contactIdentityVerified = false, requestId = "r1"))
-        assertEquals(AiReplyAction.HUMAN_REVIEW, result.action)
+        assertEquals(AiReplyAction.WAIT, result.action)
         assertEquals(0, provider.callCount)
     }
 
@@ -39,7 +39,7 @@ class AiReplyDecisionEngineTest {
         val provider = FakeProvider(replyJson("你好"))
         val engine = AiReplyDecisionEngine(provider)
         val result = engine.decide(AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r2"))
-        assertEquals(AiReplyAction.HUMAN_REVIEW, result.action)
+        assertEquals(AiReplyAction.WAIT, result.action)
         assertEquals("CLOUD_PROCESSING_CONSENT_REQUIRED", result.reason)
         assertEquals(0, provider.callCount)
     }
@@ -134,7 +134,7 @@ class AiReplyDecisionEngineTest {
         val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
             AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r5")
         )
-        assertEquals(AiReplyAction.HUMAN_REVIEW, result.action)
+        assertEquals(AiReplyAction.WAIT, result.action)
         assertEquals("MODEL_OUTPUT_SCHEMA_INVALID", result.reason)
     }
 
@@ -145,7 +145,7 @@ class AiReplyDecisionEngineTest {
             val result = AiReplyDecisionEngine(FakeProvider(output), grantedConsent).decide(
                 AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r6-$index")
             )
-            assertEquals(AiReplyAction.HUMAN_REVIEW, result.action)
+            assertEquals(AiReplyAction.WAIT, result.action)
             assertEquals("MODEL_OUTPUT_SCHEMA_INVALID", result.reason)
         }
     }
@@ -155,7 +155,7 @@ class AiReplyDecisionEngineTest {
         val result = AiReplyDecisionEngine(FakeProvider(output), grantedConsent).decide(
             AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r7")
         )
-        assertEquals(AiReplyAction.HUMAN_REVIEW, result.action)
+        assertEquals(AiReplyAction.WAIT, result.action)
     }
 
     @Test fun replyDraftOverConfiguredLimitIsRejectedRatherThanTruncated() {
@@ -163,16 +163,16 @@ class AiReplyDecisionEngineTest {
         val result = AiReplyDecisionEngine(provider, grantedConsent, maxDraftChars = 4).decide(
             AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r8")
         )
-        assertEquals(AiReplyAction.HUMAN_REVIEW, result.action)
+        assertEquals(AiReplyAction.WAIT, result.action)
         assertNull(result.draft)
     }
 
-    @Test fun manualReviewOverridesModel() {
+    @Test fun removedReviewGateDoesNotOverrideModel() {
         val provider = FakeProvider(replyJson("hi"))
         val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
-            AiReplyDecisionInput(context(), true, manualReviewRequired = true, requestId = "r9")
+            AiReplyDecisionInput(context(), true, requestId = "r9")
         )
-        assertEquals(AiReplyAction.HUMAN_REVIEW, result.action)
+        assertEquals(AiReplyAction.WAIT, result.action)
         assertNotNull(result.reason)
         assertEquals(0, provider.callCount)
     }
@@ -180,12 +180,12 @@ class AiReplyDecisionEngineTest {
     @Test fun ambiguousDecisionPreservesDetailedModelExplanationAndMetadata() {
         val provider = object : AiModelProvider {
             override fun generate(request: AiModelRequest) = AiModelResult(
-                """{"action":"HUMAN_REVIEW","reason":"SEXUAL_INNUENDO_AMBIGUOUS","reasonDetail":"表达存在歧义，缺少前文，无法确认是普通玩笑还是性暗示，因此交由人工判断。","draft":null}""",
+                """{"action":"WAIT","reason":"SEXUAL_INNUENDO_AMBIGUOUS","reasonDetail":"表达存在歧义，停止自动发送。","draft":null}""",
                 "fake", "test", TokenUsage(40, 30), "stop")
         }
         val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
             AiReplyDecisionInput(context(), true, requestId = "detailed"))
-        assertEquals(AiReplyAction.HUMAN_REVIEW, result.action)
+        assertEquals(AiReplyAction.WAIT, result.action)
         assertTrue(result.reasonDetail!!.contains("缺少前文"))
         assertEquals("stop", result.finishReason)
         assertEquals(30, result.usage?.outputTokens)

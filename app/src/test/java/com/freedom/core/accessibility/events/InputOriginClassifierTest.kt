@@ -12,22 +12,6 @@ import org.junit.Test
 
 class InputOriginClassifierTest {
     @Test
-    fun manualReviewLatchSurvivesLedgerClearUntilExplicitAcknowledgement() {
-        val classifier = InputOriginClassifier()
-        classifier.registerDispatchGesture(
-            "review-test", TARGET_PACKAGE, ACTIVITY, 7L, 12, swipe(), 10_000L
-        )
-        classifier.requireManualReview("unattributed touch")
-        classifier.clear()
-        assertTrue(classifier.isManualReviewRequired())
-        assertEquals("unattributed touch", classifier.manualReviewReason())
-
-        classifier.acknowledgeManualReview("explicit new run")
-        assertFalse(classifier.isManualReviewRequired())
-        assertEquals("", classifier.manualReviewReason())
-    }
-
-    @Test
     fun clickInsideRegisteredTapTargetIsSelfInjected() {
         val classifier = InputOriginClassifier()
         classifier.registerDispatchGesture(

@@ -56,8 +56,6 @@ internal class AndroidAccountBrowseWorkflow(
     private val targetPackage: () -> String,
     private val monitorPageContext: () -> String,
     private val onLog: (String) -> Unit,
-    private val isManualReviewRequired: () -> Boolean = { false },
-    private val onManualReviewRequired: (String) -> Unit = {},
     private val onRequestScreenOff: () -> Boolean = { false },
     private val pageObservationCoordinator: PageObservationCoordinator? = null,
     private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null
@@ -120,7 +118,7 @@ internal class AndroidAccountBrowseWorkflow(
         ) == DynamicFeedRecoveryRouteAdapter.ROUTE_ID
 
     private fun startRestoredCheckpointVerification() {
-        if (isManualReviewRequired() || !isMonitoringRunning() || !isBrowseModeActive()) return
+        if (!isMonitoringRunning() || !isBrowseModeActive()) return
         if (!accountBrowseRuntime.beginCheckpointVerification()) return
         addLog("动态浏览已读取持久化检查点；进入只读页面复核，连续两次稳定指纹确认前不会恢复滑动、点击或导航")
         scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
@@ -147,7 +145,6 @@ internal class AndroidAccountBrowseWorkflow(
             canScheduleStep = {
                 isMonitoringRunning() && isBrowseModeActive() &&
                     !accountBrowseSession.touchActive &&
-                    !isManualReviewRequired() &&
                     accountBrowsePhase != AccountBrowsePhase.PAUSED &&
                     accountBrowsePhase != AccountBrowsePhase.IDLE
             },
@@ -186,7 +183,6 @@ internal class AndroidAccountBrowseWorkflow(
                 accountBrowseRuntime.resumeAfterManualTouch(
                     isMonitoringRunning = isMonitoringRunning,
                     isBrowseModeEnabled = isBrowseModeActive,
-                    isManualReviewRequired = isManualReviewRequired,
                     quietPeriodMs = quietPeriodMs,
                     quietPeriodStage = quietPeriodStage,
                     initialDynamicTabWaitTimeoutMs = MANUAL_RECOVERY_NAVIGATION_TIMEOUT_MS,
@@ -378,7 +374,7 @@ internal class AndroidAccountBrowseWorkflow(
      */
     private fun onCoalescedPageObservationRequested() {
         if (!isMonitoringRunning() || !isBrowseModeActive() || accountBrowseSession.touchActive ||
-            isManualReviewRequired() || accountBrowsePhase !in PAGE_OBSERVATION_PHASES
+            accountBrowsePhase !in PAGE_OBSERVATION_PHASES
         ) return
         accountBrowseRuntime.scheduleStep(PAGE_STATE_POLL_MS)
     }
@@ -387,10 +383,6 @@ internal class AndroidAccountBrowseWorkflow(
         className.substringAfterLast('.') == "RecyclerView"
 
     internal fun startAccountBrowseIfNeeded() {
-        if (isManualReviewRequired()) {
-            addLog("动态浏览：检测到持久化人工复核锁；保持自主控制暂停；需要显式停止并重新启动运行")
-            return
-        }
         if (!isMonitoringRunning() || !isBrowseModeActive()) return
         if (accountBrowsePhase != AccountBrowsePhase.IDLE) return
         if (!socialBrowsePort.supportsTargetPackage(targetPackage())) {
@@ -506,10 +498,9 @@ internal class AndroidAccountBrowseWorkflow(
         accountBrowseSession.manualRecoveryInProgress = false
         accountBrowseSession.pausedContext = null
         val latchReason = "动态浏览人工接管后，第三轮静默 60 秒结束仍未满足动态列表操作条件；$reason"
-        runCatching { onManualReviewRequired(latchReason) }
         val screenOffAccepted = runCatching { onRequestScreenOff() }.getOrDefault(false)
         addLog(
-            "动态浏览[MANUAL_REVIEW_LATCHED]：$latchReason；已写入持久化人工复核锁；" +
+            "动态浏览[MANUAL_HANDOFF_PAUSED]：$latchReason；不写入持久化人工复核锁；" +
                 "已请求息屏=${screenOffAccepted}；必须显式停止并重新启动运行"
         )
     }

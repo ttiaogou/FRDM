@@ -71,7 +71,6 @@ class DraftInputFlowTest {
         // that establishes requestId/message ownership. The send gate must reject
         // this unsafe path instead of producing an uncorrelated click.
         assertEquals(0, send.calls)
-        assertFalse(coordinator.isAwaitingUserSend)
     }
 
     @Test fun writesAndVerifiesEachPrefixThenRequiresUser() {
@@ -82,7 +81,6 @@ class DraftInputFlowTest {
         assertEquals(listOf("" to "abc", "abc" to "abcdef"), input.writes)
         assertEquals(listOf("abc", "abcdef", "abcdef"), input.reads)
         assertEquals(listOf(500L, 500L), scheduler.delays)
-        assertTrue(coordinator.isAwaitingUserSend)
     }
 
     @Test fun editsAndFailuresStopWithoutOverwriting() {
@@ -93,7 +91,6 @@ class DraftInputFlowTest {
             scheduler.next()
             assertEquals(1, input.writes.size)
             assertTrue(scheduler.tasks.isEmpty())
-            assertFalse(coordinator.isAwaitingUserSend)
             if (status == null) assertEquals("user edit", input.text)
         }
     }
@@ -104,6 +101,5 @@ class DraftInputFlowTest {
         coordinator.resetForRuntimeReset(); scheduler.next()
         assertEquals(1, input.writes.size)
         assertTrue(input.reads.isEmpty())
-        assertFalse(coordinator.isAwaitingUserSend)
     }
 }

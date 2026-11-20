@@ -862,7 +862,7 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun unknownStartupPageEventsDoNotLatchManualReview() {
+    fun unknownStartupPageEventsDoNotCreateLegacyHold() {
         assertLegacySignalsDoNotControlPageSelectedTask(
             listOf(
             eventWithOrigin(AccessibilityEventType.VIEW_TEXT_CHANGED, InputOrigin.UNKNOWN),

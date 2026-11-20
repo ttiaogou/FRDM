@@ -11,9 +11,6 @@ interface RunStateRepository {
     fun setActiveMode(mode: RunMode?)
     fun setRunRequested(requested: Boolean)
 
-    /** Fail-safe provenance hold; implementations may persist it across service/process recovery. */
-    fun isInputManualReviewRequired(): Boolean = false
-    fun setInputManualReviewRequired(required: Boolean) = Unit
 }
 
 /** Reads the two existing UI selections without allowing a running session to change mode. */

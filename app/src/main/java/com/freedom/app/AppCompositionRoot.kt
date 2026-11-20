@@ -182,7 +182,6 @@ class AppCompositionRoot(context: Context) {
         mainHandler: Handler,
         addLog: (String) -> Unit,
         dp: (Int) -> Int,
-        persistManualReviewHold: (String) -> Unit,
         requestScreenOff: () -> Boolean,
         refreshViews: () -> Unit
     ): AccessibilityServiceDependencies = AccessibilityServiceDependencies(
@@ -191,7 +190,6 @@ class AppCompositionRoot(context: Context) {
         mainHandler = mainHandler,
         addLog = addLog,
         dp = dp,
-        persistManualReviewHold = persistManualReviewHold,
         requestScreenOff = requestScreenOff,
         refreshViews = refreshViews
     )
@@ -218,7 +216,6 @@ internal class AccessibilityServiceDependencies internal constructor(
     private val mainHandler: Handler,
     private val addLog: (String) -> Unit,
     private val dp: (Int) -> Int,
-    private val persistManualReviewHold: (String) -> Unit,
     private val requestScreenOff: () -> Boolean,
     private val refreshViews: () -> Unit
 ) {
@@ -352,9 +349,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             scheduler = taskScheduler,
             isAiReplyActive = {
                 monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
-            },
-            isManualReviewRequired = {
-                monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
             },
             onLog = addLog,
             createProvider = { configuration ->
@@ -497,7 +491,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isPending },
-            isDraftAwaitingUserSend = { aiReplyDraftCoordinator.isAwaitingUserSend },
             onDraftRuntimeReset = {
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {
                     aiReplyDraftCoordinator.resetForRuntimeReset()
@@ -521,10 +514,6 @@ internal class AccessibilityServiceDependencies internal constructor(
                 "当前识别应用=${snapshot.appLabel}；当前识别页面=${snapshot.pageLabel}"
             },
             onLog = addLog,
-            isManualReviewRequired = {
-                monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
-            },
-            onManualReviewRequired = persistManualReviewHold,
             onRequestScreenOff = requestScreenOff,
             pageObservationCoordinator = pageObservationCoordinator,
             accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository
@@ -533,7 +522,6 @@ internal class AccessibilityServiceDependencies internal constructor(
     val accountBrowseRuntimeAdapter by lazy(LazyThreadSafetyMode.NONE) {
         AccountBrowseModeRuntimeAdapter(
             workflow = { accountBrowseWorkflow },
-            acknowledgeManualReview = inputOriginClassifier::acknowledgeManualReview,
             onReadinessStarting = { mode, reason ->
                 targetAppReadinessController.markStarting(mode, reason, SystemClock.uptimeMillis())
             },

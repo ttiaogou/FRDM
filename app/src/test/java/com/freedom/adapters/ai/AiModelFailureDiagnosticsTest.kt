@@ -32,7 +32,7 @@ class AiModelFailureDiagnosticsTest {
         val context = ConversationContext("contact", "conversation", request().conversation, 1, 0, 0, true)
         val decision = AiReplyDecisionEngine(provider, consent).decide(AiReplyDecisionInput(context, true, requestId = "request-1"))
         assertEquals("MODEL_CALL_FAILED", decision.reason)
-        assertEquals(AiReplyAction.HUMAN_REVIEW, decision.action)
+        assertEquals(AiReplyAction.WAIT, decision.action)
         assertNull(decision.draft)
         return decision.callDiagnostics!!
     }
@@ -156,7 +156,7 @@ class AiModelFailureDiagnosticsTest {
                 override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult = error("must not verify")
             }, scheduler = object : TaskScheduler {
                 override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask = error("must not schedule input")
-            }, isAiReplyActive = { true }, isManualReviewRequired = { false }, onLog = { logs.add(it) },
+            }, isAiReplyActive = { true }, onLog = { logs.add(it) },
             createProvider = { TransportBackedAiModelProvider("test", "configured-model", transport(false) {
                 now += 234L
                 FakeConnection(401, "$secret $privateText")
@@ -176,7 +176,6 @@ class AiModelFailureDiagnosticsTest {
         assertFalse(logs.joinToString().contains(secret))
         assertFalse(logs.joinToString().contains(privateText))
         assertFalse(coordinator.isPending)
-        assertFalse(coordinator.isAwaitingUserSend)
     }
 
     private class FakeConnection(private val status: Int, private val body: String,

@@ -42,7 +42,6 @@ class FreedomAccessibilityService : AccessibilityService() {
             mainHandler = mainHandler,
             addLog = ::addLog,
             dp = ::dp,
-            persistManualReviewHold = ::persistManualReviewHold,
             requestScreenOff = ::requestScreenOff,
             refreshViews = ::refreshViews
         )
@@ -542,11 +541,6 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()
-
-    private fun persistManualReviewHold(reason: String) {
-        monitorRepository.setInputManualReviewRequired(true)
-        inputOriginClassifier.requireManualReview(reason)
-    }
 
     private fun requestScreenOff(): Boolean =
         accessibilityGateway.performGlobalAction(GlobalAccessibilityAction.LOCK_SCREEN)

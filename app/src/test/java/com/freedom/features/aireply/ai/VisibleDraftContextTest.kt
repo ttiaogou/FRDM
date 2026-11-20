@@ -26,7 +26,7 @@ class VisibleDraftContextTest {
                 return AiModelResult("""{"action":"REPLY","reason":"OK","draft":"你好呀"}""", "fake", "fake")
             }
         }, AiModelCloudConsent { true })
-        val decision = engine.decide(AiReplyDecisionInput(context, false, true, false, "request"))
+        val decision = engine.decide(AiReplyDecisionInput(context, false, false, "request"))
         assertEquals(1, calls)
         assertEquals(AiReplyAction.REPLY, decision.action)
     }

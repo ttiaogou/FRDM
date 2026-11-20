@@ -9,7 +9,7 @@ internal object AiReplyDecisionJsonParser {
           "properties": {
             "action": {
               "type": "string",
-              "enum": ["REPLY", "DO_NOT_REPLY", "WAIT", "HUMAN_REVIEW"]
+              "enum": ["REPLY", "DO_NOT_REPLY", "WAIT"]
             },
             "reason": {
               "type": "string",
@@ -51,7 +51,7 @@ internal object AiReplyDecisionJsonParser {
                 require(draft == draft.trim())
                 AiReplyDecision(action, reason, draft, reasonDetail = reasonDetail)
             }
-            AiReplyAction.DO_NOT_REPLY, AiReplyAction.WAIT, AiReplyAction.HUMAN_REVIEW -> {
+            AiReplyAction.DO_NOT_REPLY, AiReplyAction.WAIT -> {
                 require(draft == null)
                 AiReplyDecision(action, reason, reasonDetail = reasonDetail)
             }

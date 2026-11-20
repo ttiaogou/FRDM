@@ -312,7 +312,6 @@ class AccountBrowseRuntime(
     fun resumeAfterManualTouch(
         isMonitoringRunning: () -> Boolean,
         isBrowseModeEnabled: () -> Boolean,
-        isManualReviewRequired: () -> Boolean,
         quietPeriodMs: Long,
         quietPeriodStage: Int,
         initialDynamicTabWaitTimeoutMs: Long,
@@ -326,7 +325,6 @@ class AccountBrowseRuntime(
             session.touchActive -> onLog("手动恢复检查未执行：仍检测到屏幕触摸，继续等待用户操作结束")
             !isMonitoringRunning() -> onLog("手动恢复检查未执行：监听已停止")
             !isBrowseModeEnabled() -> onLog("手动恢复检查未执行：自动浏览模式已关闭")
-            isManualReviewRequired() -> onLog("手动恢复检查未执行：已存在持久化人工复核锁")
             else -> {
                 session.manualRecoveryInProgress = true
                 session.manualRecoveryAttemptActive = true

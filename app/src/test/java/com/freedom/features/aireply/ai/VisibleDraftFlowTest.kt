@@ -55,7 +55,7 @@ class VisibleDraftFlowTest {
                     return ScheduledTask { tasks.remove(task) }
                 }
             },
-            isAiReplyActive = { active }, isManualReviewRequired = { false }, onLog = { logs.add(it) },
+            isAiReplyActive = { active }, onLog = { logs.add(it) },
             createProvider = { object : AiModelProvider {
                 override fun generate(request: AiModelRequest): AiModelResult {
                     calls++
@@ -73,18 +73,17 @@ class VisibleDraftFlowTest {
         f.drain()
         assertEquals(1, f.calls)
         assertEquals("你好呀", f.text)
-        assertTrue(f.coordinator.isAwaitingUserSend)
         assertFalse(f.coordinator.isPending)
         assertFalse(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
     }
 
     @Test fun nonReplyDecisionLogsExplanationWithoutWritingOrLeakingPhoneNumber() {
         val f = Fixture()
-        f.modelOutput = """{"action":"HUMAN_REVIEW","reason":"SEXUAL_INNUENDO_AMBIGUOUS","reasonDetail":"缺少前文无法确认含义；涉及电话13800138000，需人工判断。","draft":null}"""
+        f.modelOutput = """{"action":"WAIT","reason":"SEXUAL_INNUENDO_AMBIGUOUS","reasonDetail":"缺少前文无法确认含义；停止自动发送。","draft":null}"""
         assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
         f.drain()
         val log = f.logs.single { it.startsWith("AI 模型决策详情：") }
-        assertTrue(log.contains("action=HUMAN_REVIEW"))
+        assertTrue(log.contains("action=WAIT"))
         assertTrue(log.contains("reason=SEXUAL_INNUENDO_AMBIGUOUS"))
         assertTrue(log.contains("缺少前文无法确认含义"))
         assertTrue(log.contains("provider=fake"))
@@ -92,7 +91,6 @@ class VisibleDraftFlowTest {
         assertTrue(log.contains("outputTokens=20"))
         assertFalse(log.contains("13800138000"))
         assertEquals("", f.text)
-        assertFalse(f.coordinator.isAwaitingUserSend)
     }
 
     @Test fun transientModelFailureRetriesOnceAfterCooldown() {
@@ -111,7 +109,6 @@ class VisibleDraftFlowTest {
         val f = Fixture(); f.text = "人工输入"
         f.coordinator.generateVisibleDraft(f.batch, f.snapshot); f.drain()
         assertEquals("人工输入", f.text)
-        assertFalse(f.coordinator.isAwaitingUserSend)
     }
 
     @Test fun stoppedOrResetRequestsCannotFillInput() {

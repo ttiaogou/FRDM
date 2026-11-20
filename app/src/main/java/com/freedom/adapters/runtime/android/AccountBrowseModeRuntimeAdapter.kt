@@ -12,7 +12,6 @@ import com.freedom.core.runtime.TaskExecutionController
 /** Routes normalized lifecycle and accessibility events into the AccountBrowse Android adapter. */
 internal class AccountBrowseModeRuntimeAdapter(
     private val workflow: () -> AndroidAccountBrowseWorkflow,
-    private val acknowledgeManualReview: (String) -> Unit = {},
     private val onReadinessStarting: (RunMode, String) -> Unit = { _, _ -> },
     private val onReadinessInvalidated: (String) -> Unit = {},
     private val taskCoordinator: TaskCoordinator,
@@ -34,8 +33,6 @@ internal class AccountBrowseModeRuntimeAdapter(
         }
         try {
             onReadinessStarting(mode, "AccountBrowse 已启动；等待目标应用正式就绪")
-            // A new run is an explicit user acknowledgement of a previously latched review hold.
-            acknowledgeManualReview("显式新建动态浏览运行已通过UI命令确认")
             workflow().startAccountBrowseIfNeeded()
         } catch (error: Throwable) {
             releaseTaskOwnership("自动浏览启动失败")

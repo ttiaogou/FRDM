@@ -789,7 +789,7 @@ class MainActivity : Activity() {
             if (entries.isEmpty()) return@reviewActionText
             AlertDialog.Builder(this@MainActivity)
                 .setTitle("删除全部 OCR 核验数据")
-                .setMessage("这会删除所有 OCR 核验样本、原始截图、裁剪图、标注图和人工审核标记，且无法恢复。")
+                .setMessage("这会删除所有 OCR 核验样本、原始截图、裁剪图和标注图，且无法恢复。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("全部删除") { _, _ ->
                     if (store.deleteAll()) {

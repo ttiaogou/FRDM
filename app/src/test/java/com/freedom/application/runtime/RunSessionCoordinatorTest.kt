@@ -16,13 +16,7 @@ class RunSessionCoordinatorTest {
         var requested = false
         var mode: RunMode? = null
         val writes = mutableListOf<String>()
-        var manualReviewRequired = false
         override fun isRunRequested() = requested
-        override fun isInputManualReviewRequired() = manualReviewRequired
-        override fun setInputManualReviewRequired(required: Boolean) {
-            manualReviewRequired = required
-            writes += "manual-review:$required"
-        }
         override fun activeMode() = mode
         override fun setActiveMode(mode: RunMode?) {
             this.mode = mode
@@ -160,11 +154,10 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
-    fun implicitRunRequestSynchronizationDoesNotClearInputReviewHold() {
+    fun implicitRunRequestSynchronizationKeepsActiveRuntime() {
         val state = FakeState().apply {
             requested = true
             mode = RunMode.AI_REPLY
-            manualReviewRequired = true
         }
         val ai = FakeRuntime(RunMode.AI_REPLY)
         val coordinator = RunSessionCoordinator(
@@ -175,7 +168,6 @@ class RunSessionCoordinatorTest {
 
         coordinator.synchronizeRunRequest()
 
-        assertTrue(state.manualReviewRequired)
         assertTrue(state.writes.isEmpty())
         assertEquals(listOf("start"), ai.calls)
     }

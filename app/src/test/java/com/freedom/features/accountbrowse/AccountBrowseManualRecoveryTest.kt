@@ -29,7 +29,6 @@ class AccountBrowseManualRecoveryTest {
         runtime.resumeAfterManualTouch(
             isMonitoringRunning = { true },
             isBrowseModeEnabled = { true },
-            isManualReviewRequired = { false },
             quietPeriodMs = 5_000L,
             quietPeriodStage = 1,
             initialDynamicTabWaitTimeoutMs = 15_000L,
@@ -49,7 +48,7 @@ class AccountBrowseManualRecoveryTest {
     }
 
     @Test
-    fun persistedManualReviewHoldBlocksTheNextAutonomousNavigationAttempt() {
+    fun manualRecoveryDoesNotUsePersistentReviewHold() {
         val runtime = runtime()
         val scheduledSteps = mutableListOf<Long>()
         val logs = mutableListOf<String>()
@@ -65,7 +64,6 @@ class AccountBrowseManualRecoveryTest {
         runtime.resumeAfterManualTouch(
             isMonitoringRunning = { true },
             isBrowseModeEnabled = { true },
-            isManualReviewRequired = { true },
             quietPeriodMs = 60_000L,
             quietPeriodStage = 3,
             initialDynamicTabWaitTimeoutMs = 15_000L,

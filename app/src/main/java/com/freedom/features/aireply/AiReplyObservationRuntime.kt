@@ -88,8 +88,6 @@ class AiReplyObservationRuntime(
     /** Returns the stable ID produced by the confirmation matcher exactly once. */
     private val onConfirmedSendId: () -> String? = { null },
     private val draftStartupFailure: () -> String? = { null },
-    /** A verified draft stays on screen so the user can review it and press Send manually. */
-    private val isDraftAwaitingUserSend: () -> Boolean = { false },
     /** Invalidates late model callbacks when this runtime is reset. */
     private val onDraftRuntimeReset: () -> Unit = {},
     private val privateMessagesCheckpointRepository: PrivateMessagesTraversalCheckpointRepository? = null
@@ -877,8 +875,8 @@ class AiReplyObservationRuntime(
             return
         }
 
-        // 模型请求、分段填入及人工审核期间，不让遍历任务抢走页面。
-        if (isConversationDraftPending() || isDraftAwaitingUserSend()) {
+        // 模型请求和分段填入期间，不让遍历任务抢走页面。
+        if (isConversationDraftPending()) {
             lastPageInspection = inspection
             return
         }
@@ -1142,7 +1140,7 @@ class AiReplyObservationRuntime(
                     val detailStatus = runCatching { receivedGreetingsTaskFlow.traversalStatus() }
                         .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
                     if (detailStatus == ReceivedGreetingsTraversalStatus.DETAIL_READY) {
-                        // 读取结果进入独立的人工审核草稿入口，同时保留本地样本归档。
+                        // 读取结果进入独立的草稿处理入口，同时保留本地样本归档。
                         readVisibleMessages(inspection)
                     } else {
                         scheduleReceivedGreetingsRecoveryRetry(
@@ -1707,7 +1705,7 @@ class AiReplyObservationRuntime(
             sessionRunStarted -> {
                 onLog(
                     "AI Reply 完整模型链路已启动：普通聊天按底部至顶部扫描；" +
-                        "进入会话读取消息、调用模型并写入审核草稿；仅人工发送；样本目录=$directory"
+                        "进入会话读取消息、调用模型并自动发送；样本目录=$directory"
                 )
                 if (recoveryContext.pending) {
                     onLog(
@@ -2169,7 +2167,7 @@ class AiReplyObservationRuntime(
         } else {
             onLog("AI 草稿未准入：${if (!draftTargetConfirmed) "CHAT_ENTRY_NOT_BOUND" else draftAdmission.reason}")
             false
-        } || isConversationDraftPending() || isDraftAwaitingUserSend()
+        } || isConversationDraftPending()
         // Received-greeting details also support human-reviewed drafts. Do not expose their
         // Verified-history observers remain separate from this current-window draft path.
         if (sessionRunStarted && receivedGreetingsTaskActive &&
@@ -2193,7 +2191,7 @@ class AiReplyObservationRuntime(
                     "草稿由独立入口处理；不自动发送"
             )
             if (draftHoldsPage) {
-                onLog("收到招呼：保持聊天页面等待草稿审核及人工发送；不自动返回")
+                onLog("收到招呼：保持聊天页面完成自动发送确认；不提前返回")
                 return
             }
             val returned = runCatching {
@@ -3609,14 +3607,6 @@ class AiReplyObservationRuntime(
         if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
             sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话返回被阻止：私人消息任务未持有 UI 操作权")
-            return
-        }
-        val awaitingUserSend = runCatching { isDraftAwaitingUserSend() }.getOrDefault(true)
-        if (awaitingUserSend) {
-            sessionTransitionTask?.cancel()
-            sessionTransitionTask = null
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("AI 回复草稿已填入并校验：保留当前聊天页面，等待用户检查内容并手动点击发送；未提交发送动作")
             return
         }
         val draftPending = runCatching { isConversationDraftPending() }.getOrDefault(true)

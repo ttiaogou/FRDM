@@ -193,36 +193,6 @@ class InputOriginClassifier(
         val targetActivityClass: String,
         val registeredAtUptimeMs: Long
     )
-    private var manualReviewRequired: Boolean = false
-    private var manualReviewReason: String = ""
-
-    /** Latches a fail-safe hold. Clearing action correlations never acknowledges this hold. */
-    fun requireManualReview(reason: String) {
-        val changed = synchronized(lock) {
-            if (manualReviewRequired) false else {
-                manualReviewRequired = true
-                manualReviewReason = reason
-                true
-            }
-        }
-        if (changed) emitDiagnostic("输入仲裁[MANUAL_REVIEW_REQUIRED]：reason=$reason；必须显式重新启动运行后才可清除")
-    }
-
-    fun isManualReviewRequired(): Boolean = synchronized(lock) { manualReviewRequired }
-
-    /** Only an explicit new AI run may acknowledge a previous UNKNOWN/EXTERNAL_INJECTED hold. */
-    fun acknowledgeManualReview(reason: String) {
-        val changed = synchronized(lock) {
-            val hadReview = manualReviewRequired
-            manualReviewRequired = false
-            manualReviewReason = ""
-            hadReview
-        }
-        if (changed) emitDiagnostic("输入仲裁[MANUAL_REVIEW_ACKNOWLEDGED]：reason=$reason；通过显式新运行确认解除暂停")
-    }
-
-    fun manualReviewReason(): String = synchronized(lock) { manualReviewReason }
-
     init {
         require(retentionAfterCompletionMs >= 0L) { "retentionAfterCompletionMs cannot be negative" }
         require(feedbackEventGraceMs >= 0L) { "feedbackEventGraceMs cannot be negative" }
