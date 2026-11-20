@@ -91,7 +91,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 touchInteractionMonitor.record(type, eventTimeMs, callbackUptimeMs, packageName, windowId)
             },
             onWindowTransition = ::handleAccessibilityWindowTransition,
-            process = { event, mode -> accessibilityEventPipeline.process(event, mode) }
+            pipeline = accessibilityEventPipeline
         )
     }
 
