@@ -6025,11 +6025,13 @@ internal class MomoSocialAdapter(
     }
 
     override fun refreshKnownChatRegions(previous: ChatPageSnapshot): ChatRegionSnapshot {
-        val previousWindow = previous.messageListTarget?.window
-            ?: previous.inputFieldTarget?.window
-        val bothTargetsShareWindow = previous.messageListTarget == null ||
-            previous.inputFieldTarget == null ||
-            previous.messageListTarget.window == previous.inputFieldTarget.window
+        val messageListTarget = messageListTarget
+        val inputFieldTarget = inputFieldTarget
+        val previousWindow = messageListTarget?.window
+            ?: inputFieldTarget?.window
+        val bothTargetsShareWindow = messageListTarget == null ||
+            inputFieldTarget == null ||
+            messageListTarget.window == inputFieldTarget.window
         if (previousWindow == null || !bothTargetsShareWindow) {
             return ChatRegionSnapshot(false, 0, 0, 0, 0, false)
         }
@@ -6049,13 +6051,13 @@ internal class MomoSocialAdapter(
             sendActionCount = previous.sendActionCount,
             messageRelatedViewIdCount = previous.messageRelatedViewIdCount,
             hasChatTab = previous.hasChatTab,
-            messageListPath = previous.messageListTarget?.path?.childIndices,
-            inputFieldPath = previous.inputFieldTarget?.path?.childIndices,
-            messageListClassName = previous.messageListTarget?.expectedClassName,
-            messageListViewId = previous.messageListTarget?.expectedViewId,
+            messageListPath = messageListTarget?.path?.childIndices,
+            inputFieldPath = inputFieldTarget?.path?.childIndices,
+            messageListClassName = messageListTarget?.expectedClassName,
+            messageListViewId = messageListTarget?.expectedViewId,
             hasCanonicalMessageList =
-                previous.messageListTarget?.expectedClassName == MomoChatPageContract.MESSAGE_LIST_CLASS_NAME &&
-                    previous.messageListTarget?.expectedViewId == MomoChatPageContract.MESSAGE_LIST_VIEW_ID
+                messageListTarget?.expectedClassName == MomoChatPageContract.MESSAGE_LIST_CLASS_NAME &&
+                    messageListTarget?.expectedViewId == MomoChatPageContract.MESSAGE_LIST_VIEW_ID
         )
 
         return rootAccess.withActiveTargetRoot { root, currentWindow ->
