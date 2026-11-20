@@ -15,8 +15,10 @@ class ArchitectureBoundaryTest {
                 ?: start
         }
 
+    private fun projectFile(path: String): File = TestSourceResolver.resolve(projectRoot, path)
+
     private fun kotlinFiles(relativeDirectory: String): List<File> {
-        val directory = File(projectRoot, relativeDirectory)
+        val directory = projectFile(relativeDirectory)
         if (!directory.exists()) return emptyList()
         return directory.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
     }
@@ -86,11 +88,11 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun productionMomoIdentityLiteralsAreCentralizedInTheSocialAdapterDescriptor() {
-        val descriptor = File(projectRoot, "app/src/main/java/com/freedom/adapters/social/momo/MomoAppDescriptor.kt")
+        val descriptor = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoAppDescriptor.kt")
         assertTrue("Momo descriptor is required", descriptor.isFile)
         val boundaryFiles = kotlinFiles("app/src/main/java/com/freedom/features") + listOf(
-            File(projectRoot, "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt"),
-            File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
+            projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt"),
+            projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
         )
         val violations = boundaryFiles.filter { it.isFile }
             .filter { Regex("com\\.immomo\\.momo").containsMatchIn(it.readText()) ||
@@ -102,7 +104,7 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun momoPageConfigurationIsOwnedByTheMomoSocialAdapter() {
-        val service = File(projectRoot, "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
+        val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
         val serviceSource = service.readText()
         val forbiddenServiceSymbols = listOf(
             "MomoSocialAdapter.Config",
@@ -120,7 +122,7 @@ class ArchitectureBoundaryTest {
             leakedSymbols.isEmpty()
         )
 
-        val adapter = File(projectRoot, "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt")
+        val adapter = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt")
         val adapterSource = adapter.readText()
         assertTrue("Momo adapter must own its default page configuration", adapterSource.contains("createDefaultConfig()"))
         assertTrue(
@@ -132,7 +134,7 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun gestureCalibrationControllerDependsOnHostContractNotConcreteAccessibilityService() {
-        val controller = File(projectRoot, "app/src/main/java/com/freedom/accessibility/gesture/GestureCalibrationController.kt")
+        val controller = projectFile("app/src/main/java/com/freedom/accessibility/gesture/GestureCalibrationController.kt")
         val controllerSource = controller.readText()
         assertFalse(
             "GestureCalibrationController must not depend on FreedomAccessibilityService",
@@ -141,10 +143,10 @@ class ArchitectureBoundaryTest {
         )
         assertTrue("Controller must consume the host contract", controllerSource.contains("host: GestureCalibrationHost"))
 
-        val hostContract = File(projectRoot, "app/src/main/java/com/freedom/accessibility/gesture/GestureCalibrationHost.kt")
+        val hostContract = projectFile("app/src/main/java/com/freedom/accessibility/gesture/GestureCalibrationHost.kt")
         assertTrue("Narrow gesture calibration host contract is required", hostContract.isFile)
 
-        val hostAdapter = File(projectRoot, "app/src/main/java/com/freedom/adapters/android/gestures/AndroidGestureCalibrationHost.kt")
+        val hostAdapter = projectFile("app/src/main/java/com/freedom/adapters/android/gestures/AndroidGestureCalibrationHost.kt")
         val hostAdapterSource = hostAdapter.readText()
         assertTrue("Android adapter must implement the host contract", hostAdapterSource.contains(": GestureCalibrationHost"))
         assertTrue("Android adapter must own active-window access", hostAdapterSource.contains("service.rootInActiveWindow"))
@@ -152,9 +154,9 @@ class ArchitectureBoundaryTest {
         assertFalse("Calibration adapter must not bypass the shared Gesture Policy Pipeline", hostAdapterSource.contains("service.dispatchGesture"))
         assertTrue("Android adapter must own broadcast dispatch", hostAdapterSource.contains("service.sendBroadcast"))
 
-        val service = File(projectRoot, "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
+        val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
         val serviceSource = service.readText()
-        val compositionRoot = File(projectRoot, "app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        val compositionRoot = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
         assertTrue("Accessibility composition root must create the Android calibration host", compositionRoot.contains("AndroidGestureCalibrationHost("))
         assertTrue("Composition root must inject the unified Gesture Policy Pipeline", compositionRoot.contains("gesturePolicy = gesturePolicy"))
         assertTrue("Service must register the calibration receiver through its registry", serviceSource.contains("serviceReceiverRegistry.register(gestureCalibrationController.receiver"))
@@ -164,32 +166,32 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun gestureExecutorAndVisualizerShareOneValidatedCommandBoundary() {
-        val coordinator = File(projectRoot, "app/src/main/java/com/freedom/application/gesture/GestureExecutionCoordinator.kt")
+        val coordinator = projectFile("app/src/main/java/com/freedom/application/gesture/GestureExecutionCoordinator.kt")
         val coordinatorSource = coordinator.readText()
         assertTrue("Gesture coordinator must show the command before dispatch", coordinatorSource.indexOf("visualizer.show(command)") < coordinatorSource.indexOf("dispatcher.dispatchGesture(command.gesture"))
         assertTrue("Gesture coordinator must reject when visualization is unavailable", coordinatorSource.contains("gesture_visualization_unavailable"))
-        val validatorSource = File(projectRoot, "app/src/main/java/com/freedom/application/gesture/GesturePolicyValidator.kt").readText()
+        val validatorSource = projectFile("app/src/main/java/com/freedom/application/gesture/GesturePolicyValidator.kt").readText()
         assertTrue("Shared gesture validator must validate display coordinates", validatorSource.contains("coordinate_outside_display"))
 
-        val pathFactory = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGesturePathFactory.kt")
+        val pathFactory = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGesturePathFactory.kt")
         assertTrue("Android path factory is required", pathFactory.isFile)
-        val dispatcher = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt").readText()
-        val overlay = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/GestureTrailOverlay.kt").readText()
+        val dispatcher = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt").readText()
+        val overlay = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/GestureTrailOverlay.kt").readText()
         assertTrue("Dispatch must use the shared Android path factory", dispatcher.contains("AndroidGesturePathFactory.create(stroke.commands)"))
         assertTrue("Visualization must use the shared Android path factory", overlay.contains("AndroidGesturePathFactory.create(commands)"))
         assertTrue("Gesture visualization must use accessibility overlay windows", overlay.contains("TYPE_ACCESSIBILITY_OVERLAY"))
         assertFalse("Gesture visualization must not require SYSTEM_ALERT_WINDOW directly", overlay.contains("canDrawOverlays"))
 
-        val workflow = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt").readText()
+        val workflow = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt").readText()
         assertTrue("AccountBrowse coordinate gestures must use the shared Gesture Policy Pipeline", workflow.contains("gesturePolicy.execute(gestureRequest)"))
         assertFalse("AccountBrowse workflow must not dispatch raw Android gestures", workflow.contains("accessibilityGateway.dispatchGesture("))
-        assertFalse("Calibration must not dispatch raw Android gestures", File(projectRoot, "app/src/main/java/com/freedom/accessibility/gesture/GestureCalibrationController.kt").readText().contains("GestureDescription.Builder"))
+        assertFalse("Calibration must not dispatch raw Android gestures", projectFile("app/src/main/java/com/freedom/accessibility/gesture/GestureCalibrationController.kt").readText().contains("GestureDescription.Builder"))
     }
 
 
     @Test
     fun momoSocialAdapterRoutesEveryScreenGestureThroughTheUnifiedExecutor() {
-        val adapter = File(projectRoot, "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt")
+        val adapter = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt")
         val source = adapter.readText()
         assertTrue("Momo adapter must receive the shared Gesture Policy Pipeline", source.contains("private val gesturePolicy: GestureApi"))
         assertTrue("Received-greetings entry tap must use the unified executor", source.contains("gesturePolicy.execute(tapRequest"))
@@ -197,13 +199,13 @@ class ArchitectureBoundaryTest {
         assertFalse("Momo adapter must not bypass serialization and visualization", source.contains("accessibilityGateway.dispatchGesture("))
         assertFalse("Momo adapter must not retain a raw platform gesture callback", source.contains("GestureResultListener"))
 
-        val compositionRoot = File(projectRoot, "app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        val compositionRoot = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
         assertTrue("Composition root must create Momo adapter and inject the single shared Gesture API", compositionRoot.contains("MomoSocialAdapter(") && compositionRoot.contains("gesturePolicy = gesturePolicy"))
     }
 
     @Test
     fun momoProfileBackRebuildsRowTargetAndRebindsCurrentWindowGenerationOnlyAfterRevalidation() {
-        val adapter = File(projectRoot, "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt")
+        val adapter = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt")
         val source = adapter.readText()
         val profileBackBranch = source.substringAfter(
             "if (sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_BACK_PENDING) {"
@@ -234,7 +236,7 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun allAutomatedScreenTapsAndScrollsUseCoordinateGesturesOnly() {
-        val sourceRoot = File(projectRoot, "app/src/main/java/com/freedom")
+        val sourceRoot = projectFile("app/src/main/java/com/freedom")
         val productionFiles = sourceRoot.walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
             .toList()
@@ -261,17 +263,17 @@ class ArchitectureBoundaryTest {
         }
         assertTrue("Screen taps and scrolls must not use node actions:\n${violations.joinToString("\n")}", violations.isEmpty())
 
-        val actionContract = File(projectRoot, "app/src/main/java/com/freedom/core/accessibility/api/AccessibilityGateway.kt").readText()
+        val actionContract = projectFile("app/src/main/java/com/freedom/core/accessibility/api/AccessibilityGateway.kt").readText()
         val nodeActionBody = actionContract.substringAfter("enum class NodeAction {").substringBefore("}")
         assertTrue("Only non-touch semantic node actions may remain", nodeActionBody.contains("FOCUS") &&
             nodeActionBody.contains("SET_TEXT") && nodeActionBody.contains("DISMISS"))
         assertFalse("NodeAction must not expose tap or scroll actions", forbiddenNodeAction.containsMatchIn(nodeActionBody))
 
-        val workflow = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt").readText()
+        val workflow = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt").readText()
         assertTrue("AccountBrowse coordinate operations must use Gesture Policy Pipeline", workflow.contains("gesturePolicy.execute("))
         assertFalse("AccountBrowse must not call node click or scroll actions", Regex("NodeAction\\.(?:CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD)").containsMatchIn(workflow))
         assertTrue("The only remaining node action in AccountBrowse is semantic popup dismiss", workflow.contains("NodeAction.DISMISS"))
-        val navigationExecutor = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AccountBrowseNavigationExecutor.kt").readText()
+        val navigationExecutor = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AccountBrowseNavigationExecutor.kt").readText()
         assertTrue(
             "AccountBrowse taps must intersect preferred, clickable and current display bounds before submission",
             workflow.contains("navigationExecutor.createCoordinateTap(") &&
@@ -281,11 +283,11 @@ class ArchitectureBoundaryTest {
                 navigationExecutor.contains("preferredBounds = preferred") &&
                 navigationExecutor.contains("targetBounds = clickable")
         )
-        assertTrue("Tap continuation must build its stroke only inside the verified safe intersection", File(projectRoot, "app/src/main/java/com/freedom/application/gesture/GestureCommandCompiler.kt").readText().contains("GestureGeometryPolicy.createTapCommands(point, targetRegion, random)"))
+        assertTrue("Tap continuation must build its stroke only inside the verified safe intersection", projectFile("app/src/main/java/com/freedom/application/gesture/GestureCommandCompiler.kt").readText().contains("GestureGeometryPolicy.createTapCommands(point, targetRegion, random)"))
         assertTrue("Popup coordinate tap must use the close icon/label bounds", workflow.contains("preferredBounds = closeBounds"))
         assertTrue("Popup coordinate tap must validate against its clickable ancestor bounds", workflow.contains("clickableBounds = closeTargetBounds"))
 
-        val gateway = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt").readText()
+        val gateway = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt").readText()
         assertTrue("Accessibility Gateway must delegate gesture dispatch to the Android Gesture Adapter", gateway.contains("gestureDispatcher.dispatchGesture(spec, listener)"))
         assertFalse("Accessibility Gateway must not call dispatchGesture directly", gateway.contains("service.dispatchGesture("))
         assertTrue("Node performAction must be centralized in one gateway adapter", Regex("\\.performAction\\(").findAll(gateway).count() == 1)
@@ -293,7 +295,7 @@ class ArchitectureBoundaryTest {
         assertTrue("Only AndroidGestureDispatcher may call AccessibilityService.dispatchGesture", rawAndroidDispatchFiles.size == 1 && rawAndroidDispatchFiles.single().name == "AndroidGestureDispatcher.kt")
         assertFalse("Workflow must not bypass Gesture Policy Pipeline through gateway dispatch", workflow.contains("accessibilityGateway.dispatchGesture("))
 
-        val overlay = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/GestureTrailOverlay.kt").readText()
+        val overlay = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/GestureTrailOverlay.kt").readText()
         assertTrue("Gesture visualizer must render the submitted command", overlay.contains("showCommand(command, renderedStrokes)"))
         assertFalse("Legacy estimated node-bound click visualization must be removed", overlay.contains("showClick(") || overlay.contains("showLegacyNodeBounds"))
         assertFalse("Legacy standalone swipe visualization must be removed", overlay.contains("fun showSwipe(") || overlay.contains("fun finishSwipe("))
@@ -328,9 +330,9 @@ class ArchitectureBoundaryTest {
         val businessFiles = buildList {
             addAll(kotlinFiles("app/src/main/java/com/freedom/features"))
             addAll(kotlinFiles("app/src/main/java/com/freedom/adapters/social"))
-            add(File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"))
-            add(File(projectRoot, "app/src/main/java/com/freedom/accessibility/gesture/GestureCalibrationController.kt"))
-            add(File(projectRoot, "app/src/main/java/com/freedom/adapters/android/gestures/AndroidGestureCalibrationHost.kt"))
+            add(projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"))
+            add(projectFile("app/src/main/java/com/freedom/accessibility/gesture/GestureCalibrationController.kt"))
+            add(projectFile("app/src/main/java/com/freedom/adapters/android/gestures/AndroidGestureCalibrationHost.kt"))
         }.filter { it.isFile }
         val forbidden = listOf(
             Regex("\\bGestureCommand\\b"),
@@ -354,9 +356,9 @@ class ArchitectureBoundaryTest {
             violations.isEmpty()
         )
 
-        val pipelineFile = File(projectRoot, "app/src/main/java/com/freedom/application/gesture/GesturePolicyPipeline.kt")
+        val pipelineFile = projectFile("app/src/main/java/com/freedom/application/gesture/GesturePolicyPipeline.kt")
         val pipeline = pipelineFile.readText()
-        val compilerFile = File(projectRoot, "app/src/main/java/com/freedom/application/gesture/GestureCommandCompiler.kt")
+        val compilerFile = projectFile("app/src/main/java/com/freedom/application/gesture/GestureCommandCompiler.kt")
         val compiler = compilerFile.readText()
         assertTrue("Pipeline must validate raw requests before policy resolution", pipeline.contains("validator.validateRequest(request)"))
         assertTrue("Pipeline must select policy before command compilation", pipeline.contains("commandCompiler.compile(validatedRequest, policyDecision)"))
@@ -375,8 +377,8 @@ class ArchitectureBoundaryTest {
             requestValidationIndex >= 0 && requestValidationIndex < contextValidationIndex &&
                 contextValidationIndex < policySelectionIndex && policySelectionIndex < compilationIndex &&
                 compilationIndex < approvalIndex && approvalIndex < executionIndex)
-        val runtimeBuild = File(projectRoot, "gesture/gesture-runtime/build.gradle.kts").readText()
-        val appBuild = File(projectRoot, "app/build.gradle.kts").readText()
+        val runtimeBuild = projectFile("gesture/gesture-runtime/build.gradle.kts").readText()
+        val appBuild = projectFile("app/build.gradle.kts").readText()
         assertTrue(":gesture-runtime must compile the dedicated GestureCommandCompiler", runtimeBuild.contains("GestureCommandCompiler.kt"))
         assertTrue(":app must exclude the compiler source to prevent duplicate compilation", appBuild.contains("GestureCommandCompiler.kt"))
 
@@ -440,7 +442,7 @@ class ArchitectureBoundaryTest {
         }
         assertTrue("Only AndroidGestureDispatcher may call AccessibilityService.dispatchGesture: ${rawDispatch.map { it.relativeTo(projectRoot) }}", rawDispatch.isEmpty())
 
-        val contract = File(projectRoot, "app/src/main/java/com/freedom/core/accessibility/api/AccessibilityGateway.kt").readText()
+        val contract = projectFile("app/src/main/java/com/freedom/core/accessibility/api/AccessibilityGateway.kt").readText()
         val accessibilityGateway = contract.substringAfter("interface AccessibilityGateway :")
             .substringBefore("\n}")
         assertFalse("Feature-facing AccessibilityGateway must not expose GestureExecutionPort", accessibilityGateway.contains("GestureExecutionPort"))
@@ -449,7 +451,7 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun gestureCoordinatorOwnsOneBoundedFifoExecutionQueue() {
-        val coordinator = File(projectRoot, "app/src/main/java/com/freedom/application/gesture/GestureExecutionCoordinator.kt").readText()
+        val coordinator = projectFile("app/src/main/java/com/freedom/application/gesture/GestureExecutionCoordinator.kt").readText()
         assertTrue("Gesture coordinator must own a FIFO pending queue", coordinator.contains("ArrayDeque<ActiveExecution>"))
         assertTrue("Gesture coordinator must bound pending queue admission", coordinator.contains("pendingExecutions.size >= maxPendingCommands"))
         assertTrue("Gesture coordinator must promote only the queue head", coordinator.contains("pendingExecutions.removeFirst()"))
@@ -464,11 +466,11 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun gestureExecutionRequiresRuntimeOnlyValidatedAndApprovedTypes() {
-        val validationTypes = File(projectRoot, "app/src/main/java/com/freedom/application/gesture/GestureValidationTypes.kt").readText()
-        val commandSource = File(projectRoot, "app/src/main/java/com/freedom/core/accessibility/gesture/GestureCommand.kt").readText()
-        val validatorSource = File(projectRoot, "app/src/main/java/com/freedom/application/gesture/GesturePolicyValidator.kt").readText()
-        val coordinatorSource = File(projectRoot, "app/src/main/java/com/freedom/application/gesture/GestureExecutionCoordinator.kt").readText()
-        val runtimeBuild = File(projectRoot, "gesture/gesture-runtime/build.gradle.kts").readText()
+        val validationTypes = projectFile("app/src/main/java/com/freedom/application/gesture/GestureValidationTypes.kt").readText()
+        val commandSource = projectFile("app/src/main/java/com/freedom/core/accessibility/gesture/GestureCommand.kt").readText()
+        val validatorSource = projectFile("app/src/main/java/com/freedom/application/gesture/GesturePolicyValidator.kt").readText()
+        val coordinatorSource = projectFile("app/src/main/java/com/freedom/application/gesture/GestureExecutionCoordinator.kt").readText()
+        val runtimeBuild = projectFile("gesture/gesture-runtime/build.gradle.kts").readText()
 
         assertTrue(validationTypes.contains("internal class ValidatedGestureRequest private constructor"))
         assertTrue(validationTypes.contains("internal class ApprovedGestureCommand private constructor"))
@@ -508,7 +510,7 @@ class ArchitectureBoundaryTest {
             "gesture/gesture-android/build.gradle.kts" to setOf(":core", ":gesture-runtime")
         )
         expectedDependencies.forEach { (path, expected) ->
-            val source = File(projectRoot, path).readText()
+            val source = projectFile(path).readText()
             val actual = Regex("project\\(\\s*\":([^\"]+)\"\\s*\\)")
                 .findAll(source)
                 .map { ":${it.groupValues[1]}" }
@@ -516,20 +518,20 @@ class ArchitectureBoundaryTest {
             assertTrue("$path dependencies must be $expected, found $actual", actual == expected)
         }
 
-        val runtimeBuild = File(projectRoot, "gesture/gesture-runtime/build.gradle.kts").readText()
+        val runtimeBuild = projectFile("gesture/gesture-runtime/build.gradle.kts").readText()
         assertTrue("Runtime must keep gesture-core as implementation", runtimeBuild.contains("implementation(project(\":gesture-core\"))"))
         assertFalse("Runtime must not export gesture-core algorithms", runtimeBuild.contains("api(project(\":gesture-core\"))"))
-        val settings = File(projectRoot, "settings.gradle.kts").readText()
+        val settings = projectFile("settings.gradle.kts").readText()
         listOf(":app", ":business", ":core", ":gesture-api", ":gesture-core", ":gesture-runtime", ":gesture-android")
             .forEach { module -> assertTrue("Gradle module must be included: $module", settings.contains("\"$module\"")) }
     }
 
     @Test
     fun gestureApiIsTheOnlyPublicGestureEntryPoint() {
-        val sourceRoot = File(projectRoot, "app/src/main/java/com/freedom")
+        val sourceRoot = projectFile("app/src/main/java/com/freedom")
         val productionFiles = sourceRoot.walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
-            .toList() + File(projectRoot, "gesture/gesture-api/src/main/kotlin/com/freedom/gesture/api/GestureApi.kt")
+            .toList() + projectFile("gesture/gesture-api/src/main/kotlin/com/freedom/gesture/api/GestureApi.kt")
         val declarations = productionFiles.filter { Regex("\\binterface\\s+GestureApi\\b").containsMatchIn(it.readText()) }
         assertTrue("GestureApi must have one declaration in :gesture-api", declarations.size == 1 &&
             declarations.single().relativeTo(projectRoot).invariantSeparatorsPath ==
@@ -547,7 +549,7 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun androidPlatformGestureDispatchIsConfinedToOneAdapter() {
-        val sourceRoot = File(projectRoot, "app/src/main/java/com/freedom")
+        val sourceRoot = projectFile("app/src/main/java/com/freedom")
         val productionFiles = sourceRoot.walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
             .toList()
@@ -558,7 +560,7 @@ class ArchitectureBoundaryTest {
             "AccessibilityService.dispatchGesture must only be called in AndroidGestureDispatcher: ${platformCalls.map { it.relativeTo(projectRoot) }}",
             platformCalls.size == 1 && platformCalls.single().name == "AndroidGestureDispatcher.kt"
         )
-        val compiler = File(projectRoot, "app/src/main/java/com/freedom/application/gesture/GestureCommandCompiler.kt")
+        val compiler = projectFile("app/src/main/java/com/freedom/application/gesture/GestureCommandCompiler.kt")
         val unauthorizedCommands = productionFiles.filter {
             it != compiler && it.name != "GestureCommand.kt" && Regex("\\bGestureCommand\\s*\\(").containsMatchIn(it.readText())
         }
@@ -567,7 +569,7 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun ciRunsTheArchitectureGateBeforeAndroidBuild() {
-        val workflow = File(projectRoot, ".github/workflows/android-build.yml").readText()
+        val workflow = projectFile(".github/workflows/android-build.yml").readText()
         val jobsSection = workflow.substringAfter("jobs:", missingDelimiterValue = "")
         assertTrue("CI workflow must declare jobs", jobsSection.isNotBlank())
 
@@ -608,7 +610,7 @@ class ArchitectureBoundaryTest {
             "app/src/test/java/com/freedom/core/accessibility/AccessibilityEventRouterTest.kt",
             "app/src/test/java/com/freedom/core/runtime/RunCoordinatorTest.kt"
         )
-        val present = removedPaths.filter { File(projectRoot, it).exists() }
+        val present = removedPaths.filter { projectFile(it).exists() }
         assertTrue("Legacy duplicate implementations must be removed: $present", present.isEmpty())
     }
 
@@ -626,10 +628,10 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun monitorStoreImplementationIsConfinedToDataAdapters() {
-        val sourceRoot = File(projectRoot, "app/src/main/java/com/freedom")
+        val sourceRoot = projectFile("app/src/main/java/com/freedom")
         val violations = sourceRoot.walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
-            .filter { !it.toPath().startsWith(File(projectRoot, "app/src/main/java/com/freedom/data").toPath()) }
+            .filter { !it.toPath().startsWith(projectFile("app/src/main/java/com/freedom/data").toPath()) }
             .filter { Regex("\\bMonitorStore\\s*\\.\\s*[A-Za-z_]").containsMatchIn(it.readText()) }
             .map { it.relativeTo(projectRoot).path }
             .toList()
@@ -638,8 +640,8 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun sharedPreferencesAccessIsConfinedToDataAdapters() {
-        val sourceRoot = File(projectRoot, "app/src/main/java/com/freedom")
-        val dataRoot = File(projectRoot, "app/src/main/java/com/freedom/data")
+        val sourceRoot = projectFile("app/src/main/java/com/freedom")
+        val dataRoot = projectFile("app/src/main/java/com/freedom/data")
         val violations = sourceRoot.walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
             .filter { !it.toPath().startsWith(dataRoot.toPath()) }
@@ -678,18 +680,18 @@ class ArchitectureBoundaryTest {
         assertTrue("AccountBrowse Feature must not expose Android handles/services: ${leaks.joinToString()}", leaks.isEmpty())
         assertFalse(
             "Android AccountBrowse workflow must stay outside Feature",
-            File(projectRoot, "app/src/main/java/com/freedom/features/accountbrowse/android/AndroidAccountBrowseWorkflow.kt").exists()
+            projectFile("app/src/main/java/com/freedom/features/accountbrowse/android/AndroidAccountBrowseWorkflow.kt").exists()
         )
-        val legacyBridge = File(projectRoot, "app/src/main/java/com/freedom/adapters/social/momo/AccountBrowseAndroidPort.kt")
+        val legacyBridge = projectFile("app/src/main/java/com/freedom/adapters/social/momo/AccountBrowseAndroidPort.kt")
         assertFalse("Legacy AccountBrowseAndroidPort compatibility bridge must be removed", legacyBridge.exists())
 
-        val workflow = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt").readText()
+        val workflow = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt").readText()
         assertTrue("AccountBrowse workflow must consume SocialBrowsePort", workflow.contains("private val socialBrowsePort: SocialBrowsePort"))
         assertTrue("AccountBrowse workflow must consume AccessibilityGateway", workflow.contains("private val accessibilityGateway: AccessibilityGateway"))
         assertFalse("AccountBrowse workflow must not access Android AccessibilityNodeInfo", workflow.contains("AccessibilityNodeInfo"))
         assertFalse("AccountBrowse workflow must not depend on Android AccessibilityService", workflow.contains("AccessibilityService"))
         assertFalse("AccountBrowse workflow must not acquire the active root directly", workflow.contains("rootInActiveWindow"))
-        val momoAdapter = File(projectRoot, "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt").readText()
+        val momoAdapter = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt").readText()
         assertFalse("Momo adapter must not implement the removed legacy AccountBrowse port", momoAdapter.contains("AccountBrowseAndroidPort"))
         val pageInspection = momoAdapter.substringAfter("override fun inspectPage(): BrowsePageEvidence =")
             .substringBefore("override fun inspectDynamicTab():")
@@ -713,8 +715,8 @@ class ArchitectureBoundaryTest {
         assertTrue("Feed snapshots must distinguish whole-window and list-only evidence", momoAdapter.contains("captureVisibleFeedSnapshot(listOnly: Boolean)"))
         assertTrue("Card selection must return the source fingerprint from the same inspected window", momoAdapter.contains("sourceFingerprint = sourceFingerprint"))
         assertTrue("Card selection must return the source list snapshot from the same inspected list", momoAdapter.contains("sourceSnapshot = sourceSnapshot"))
-        val gateway = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt").readText()
-        val dispatcher = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt").readText()
+        val gateway = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt").readText()
+        val dispatcher = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt").readText()
         assertTrue("AccessibilityGateway must map structured dismiss actions", gateway.contains("NodeAction.DISMISS -> AccessibilityNodeInfo.ACTION_DISMISS"))
         assertTrue("Android Gesture Dispatcher must dispatch additional structured strokes", dispatcher.contains("addAll(spec.additionalStrokes)"))
         assertTrue("The Android root bridge must expose foreground read-only inspection", gateway.contains("override fun <T> withActiveWindowRoot"))
@@ -733,11 +735,11 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun serviceOwnsRuntimeCompositionAndDelegatesEventsToTheAndroidPipeline() {
-        val service = File(projectRoot, "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
-        val activity = File(projectRoot, "app/src/main/java/com/freedom/MainActivity.kt")
-        val pipeline = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt")
+        val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
+        val activity = projectFile("app/src/main/java/com/freedom/MainActivity.kt")
+        val pipeline = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt")
         val serviceText = service.readText()
-        val compositionRootText = File(projectRoot, "app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        val compositionRootText = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
         val activityText = activity.readText()
         val pipelineText = pipeline.readText()
         assertTrue("Application composition root must own the runtime coordinator", compositionRootText.contains("RunSessionCoordinator("))
@@ -764,7 +766,7 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun serviceDelegatesConnectionRecoveryAndReceiverRegistrationLifecycle() {
-        val service = File(projectRoot, "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
+        val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
         val recovery = File(
             projectRoot,
             "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityServiceRecoveryCoordinator.kt"
@@ -799,10 +801,10 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun floatingLogIsOptionalAndOverlayPermissionIsOnlyRequestedFromItsManualSwitch() {
-        val mainActivity = File(projectRoot, "app/src/main/java/com/freedom/MainActivity.kt").readText()
-        val configPanel = File(projectRoot, "app/src/main/java/com/freedom/ui/config/ConfigPanel.kt").readText()
-        val monitorStore = File(projectRoot, "app/src/main/java/com/freedom/data/MonitorStore.kt").readText()
-        val service = File(projectRoot, "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
+        val mainActivity = projectFile("app/src/main/java/com/freedom/MainActivity.kt").readText()
+        val configPanel = projectFile("app/src/main/java/com/freedom/ui/config/ConfigPanel.kt").readText()
+        val monitorStore = projectFile("app/src/main/java/com/freedom/data/MonitorStore.kt").readText()
+        val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
 
         val toggleStart = mainActivity.indexOf("private fun toggleMonitoring()")
         val toggleEnd = mainActivity.indexOf("private fun showTargetEditor()", toggleStart)
@@ -820,13 +822,13 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun androidEventPipelineKeepsRawPlatformEventsOutOfCoreAndFeatureLayers() {
-        val pipeline = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt").readText()
+        val pipeline = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt").readText()
         val forbidden = listOf(
             "app/src/main/java/com/freedom/core/accessibility/events/AccessibilityEventEnvelope.kt",
             "app/src/main/java/com/freedom/core/runtime/ModeRuntimePort.kt",
             "app/src/main/java/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt",
             "app/src/main/java/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
-        ).map { File(projectRoot, it) }
+        ).map { projectFile(it) }
             .filter { it.readText().contains("android.view.accessibility.AccessibilityEvent") }
         assertTrue("Platform AccessibilityEvent must stop at the Android adapter boundary: ${forbidden.map { it.name }}", forbidden.isEmpty())
         assertTrue("Android pipeline must normalize into the immutable envelope", pipeline.contains("AccessibilityEventEnvelope"))
@@ -835,7 +837,7 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun modeRuntimeContractUsesOnlyNormalizedPlatformNeutralEvents() {
-        val port = File(projectRoot, "app/src/main/java/com/freedom/core/runtime/ModeRuntimePort.kt").readText()
+        val port = projectFile("app/src/main/java/com/freedom/core/runtime/ModeRuntimePort.kt").readText()
         assertTrue(port.contains("AccessibilityEventEnvelope"))
         assertFalse(port.contains("android.view.accessibility.AccessibilityEvent"))
         assertFalse(port.contains("android.view.accessibility.AccessibilityNodeInfo"))
@@ -849,13 +851,13 @@ class ArchitectureBoundaryTest {
             "app/src/main/java/com/freedom/core/runtime/android/HandlerTaskScheduler.kt",
             "app/src/main/java/com/freedom/features/accountbrowse/android/AndroidAccountBrowseWorkflow.kt"
         )
-        val present = oldPaths.filter { File(projectRoot, it).exists() }
+        val present = oldPaths.filter { projectFile(it).exists() }
         assertTrue("Android implementations remain inside Core/Feature: $present", present.isEmpty())
     }
 
     @Test
     fun projectDeclaresBusinessGestureAndCoreGradleModules() {
-        val settings = File(projectRoot, "settings.gradle.kts").readText()
+        val settings = projectFile("settings.gradle.kts").readText()
         val modules = listOf(":app", ":business", ":core", ":gesture-api", ":gesture-core", ":gesture-runtime", ":gesture-android")
         modules.forEach { module ->
             assertTrue("Gradle settings must include $module", settings.contains("\"$module\""))
@@ -863,8 +865,8 @@ class ArchitectureBoundaryTest {
         modules.drop(1).forEach { module ->
             assertTrue("Gradle module build file is missing for $module", moduleBuildFile(module).isFile)
         }
-        val coreBuild = File(projectRoot, "core/build.gradle.kts").readText()
-        val gestureCoreBuild = File(projectRoot, "gesture/gesture-core/build.gradle.kts").readText()
+        val coreBuild = projectFile("core/build.gradle.kts").readText()
+        val gestureCoreBuild = projectFile("gesture/gesture-core/build.gradle.kts").readText()
         assertTrue("GestureDynamicsPolicy must not compile in :core", coreBuild.contains("GestureDynamicsPolicy.kt"))
         assertTrue("GestureDynamicsPolicy tests must not compile in :core", coreBuild.contains("GestureDynamicsPolicyTest.kt"))
         assertTrue("GestureDynamicsPolicy and its tests must compile in :gesture-core",
@@ -893,7 +895,7 @@ class ArchitectureBoundaryTest {
         assertTrue(":gesture-api must compile the canonical GestureApi", apiBuild.contains("com/freedom/gesture/api/GestureApi.kt"))
         assertFalse(":gesture-api must not compile the retired port declaration", apiBuild.contains("GesturePolicyPort.kt"))
 
-        val legacyPort = File(projectRoot, "app/src/main/java/com/freedom/core/accessibility/gesture/GesturePolicyPort.kt")
+        val legacyPort = projectFile("app/src/main/java/com/freedom/core/accessibility/gesture/GesturePolicyPort.kt")
         val legacySource = legacyPort.readText()
         assertFalse("The legacy file must not redeclare GesturePolicyPort", Regex("interface\\s+GesturePolicyPort\\b").containsMatchIn(legacySource))
         assertFalse("The legacy file must not redeclare an interruptible public port", Regex("interface\\s+InterruptibleGesturePolicyPort\\b").containsMatchIn(legacySource))
@@ -910,8 +912,8 @@ class ArchitectureBoundaryTest {
         val consumers = buildList {
             addAll(kotlinFiles("app/src/main/java/com/freedom/features"))
             addAll(kotlinFiles("app/src/main/java/com/freedom/adapters/social"))
-            add(File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"))
-            add(File(projectRoot, "app/src/main/java/com/freedom/adapters/android/gestures/AndroidGestureCalibrationHost.kt"))
+            add(projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"))
+            add(projectFile("app/src/main/java/com/freedom/adapters/android/gestures/AndroidGestureCalibrationHost.kt"))
         }.filter { it.isFile }
         val violations = consumers.flatMap { file ->
             val source = file.readText()
@@ -930,7 +932,7 @@ class ArchitectureBoundaryTest {
         }
         assertTrue("Business/Adapter gesture consumers must use only GestureApi:\n${violations.joinToString("\n")}", violations.isEmpty())
 
-        val compositionRoot = File(projectRoot, "app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        val compositionRoot = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
         assertTrue("Application composition root must create the shared Runtime handle", compositionRoot.contains("GestureRuntimeFactory.create("))
         assertTrue("Composition root must expose the shared runtime through the public GestureApi view", compositionRoot.contains("val gesturePolicy: PublicGestureApi get() = gestureRuntime"))
         val aiReplySource = consumers.first { it.name == "AiReplyObservationRuntime.kt" }.readText()
@@ -971,30 +973,30 @@ class ArchitectureBoundaryTest {
     }
 
     private fun moduleBuildFile(module: String): File = when (module) {
-        ":app" -> File(projectRoot, "app/build.gradle.kts")
-        ":business" -> File(projectRoot, "business/build.gradle.kts")
-        ":core" -> File(projectRoot, "core/build.gradle.kts")
-        ":gesture-api" -> File(projectRoot, "gesture/gesture-api/build.gradle.kts")
-        ":gesture-core" -> File(projectRoot, "gesture/gesture-core/build.gradle.kts")
-        ":gesture-runtime" -> File(projectRoot, "gesture/gesture-runtime/build.gradle.kts")
-        ":gesture-android" -> File(projectRoot, "gesture/gesture-android/build.gradle.kts")
+        ":app" -> projectFile("app/build.gradle.kts")
+        ":business" -> projectFile("business/build.gradle.kts")
+        ":core" -> projectFile("core/build.gradle.kts")
+        ":gesture-api" -> projectFile("gesture/gesture-api/build.gradle.kts")
+        ":gesture-core" -> projectFile("gesture/gesture-core/build.gradle.kts")
+        ":gesture-runtime" -> projectFile("gesture/gesture-runtime/build.gradle.kts")
+        ":gesture-android" -> projectFile("gesture/gesture-android/build.gradle.kts")
         else -> error("Unknown module: $module")
     }
 
     @Test
     fun serviceDelegatesWindowPreviewAndLogResponsibilitiesToAndroidAdapters() {
-        val service = File(projectRoot, "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
+        val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
         val source = service.readText()
-        val compositionRootSource = File(projectRoot, "app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
-        val formatter = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AccessibilityEventFormatter.kt")
+        val compositionRootSource = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        val formatter = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AccessibilityEventFormatter.kt")
         val formatterSource = formatter.readText()
-        val workflow = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
+        val workflow = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
         val workflowSource = workflow.readText()
-        val runtimeAdapter = File(projectRoot, "app/src/main/java/com/freedom/adapters/runtime/android/AccountBrowseModeRuntimeAdapter.kt")
+        val runtimeAdapter = projectFile("app/src/main/java/com/freedom/adapters/runtime/android/AccountBrowseModeRuntimeAdapter.kt")
         val runtimeAdapterSource = runtimeAdapter.readText()
-        val previewScheduler = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidMonitorPreviewScheduler.kt")
+        val previewScheduler = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidMonitorPreviewScheduler.kt")
         val previewSchedulerSource = previewScheduler.readText()
-        val logPresenter = File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidMonitorLogPresenter.kt")
+        val logPresenter = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidMonitorLogPresenter.kt")
         val logPresenterSource = logPresenter.readText()
 
         assertFalse("Service must not own current target Activity state", source.contains("currentTargetActivityClass"))
@@ -1016,7 +1018,7 @@ class ArchitectureBoundaryTest {
         assertTrue("Log presenter must preserve the existing millisecond timestamp format", logPresenterSource.contains("HH:mm:ss.SSS"))
 
         assertTrue("Central formatter must own immutable source details", formatterSource.contains("fun sourceDetails(source: AccessibilitySourceSnapshot?)"))
-        assertFalse("Pipeline must not contain a second source-details formatter", File(projectRoot, "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt").readText().contains("private fun accessibilitySourceDetails"))
+        assertFalse("Pipeline must not contain a second source-details formatter", projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt").readText().contains("private fun accessibilitySourceDetails"))
         assertFalse("AccountBrowse workflow must not contain a second source-details formatter", workflowSource.contains("accessibilitySourceDetails("))
         assertTrue("Workflow must use the shared source-details formatter", workflowSource.contains("AccessibilityEventFormatter.sourceDetails(event.source)"))
         assertTrue("Runtime adapter must use the shared source-details formatter", runtimeAdapterSource.contains("AccessibilityEventFormatter.sourceDetails(event.source)"))
@@ -1141,7 +1143,7 @@ class ArchitectureBoundaryTest {
         assertTrue("The command compiler must apply system-edge bounds before compiling clicks", compiler.contains("GestureGeometryPolicy.safeDisplayBounds("))
         assertTrue("Validator must require a bounded multi-segment motion profile", validator.contains("movement_gesture_requires_three_to_eight_motion_segments"))
         assertTrue("Validator must reject invalid or excessive segment speeds", validator.contains("movement_gesture_speed_profile_invalid") && validator.contains("movement_gesture_speed_exceeds_limit"))
-        val dynamics = File(projectRoot, "app/src/main/java/com/freedom/core/accessibility/gesture/GestureDynamicsPolicy.kt").readText()
+        val dynamics = projectFile("app/src/main/java/com/freedom/core/accessibility/gesture/GestureDynamicsPolicy.kt").readText()
         assertTrue("Dynamics policy must support explicit kinematic acceleration/deceleration", dynamics.contains("GestureMotionMode.KINEMATIC_LIMITED") && dynamics.contains("accelerationPxPerSecondSquared") && dynamics.contains("decelerationPxPerSecondSquared"))
         assertTrue("Validator must constrain every control point to the approved region", validator.contains("coordinate_outside_validated_safe_region"))
         assertTrue("Android dispatcher must link the same pointer with continueStroke", dispatcher.contains("previous.continueStroke(paths[index], 0L, stroke.durationMs, stroke.willContinue)"))
