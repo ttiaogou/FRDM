@@ -358,9 +358,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             isAiReplyActive = {
                 monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
             },
-            isManualReviewRequired = {
-                monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
-            },
             onLog = addLog,
             createProvider = { configuration ->
                 val transport = when (configuration.provider) {
@@ -503,7 +500,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isPending },
-            isDraftAwaitingUserSend = { aiReplyDraftCoordinator.isAwaitingUserSend },
             onDraftRuntimeReset = {
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {
                     aiReplyDraftCoordinator.resetForRuntimeReset()
@@ -527,10 +523,6 @@ internal class AccessibilityServiceDependencies internal constructor(
                 "当前识别应用=${snapshot.appLabel}；当前识别页面=${snapshot.pageLabel}"
             },
             onLog = addLog,
-            isManualReviewRequired = {
-                monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
-            },
-            onManualReviewRequired = persistManualReviewHold,
             onRequestScreenOff = requestScreenOff,
             pageObservationCoordinator = pageObservationCoordinator,
             accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository
@@ -539,7 +531,6 @@ internal class AccessibilityServiceDependencies internal constructor(
     val accountBrowseRuntimeAdapter by lazy(LazyThreadSafetyMode.NONE) {
         AccountBrowseModeRuntimeAdapter(
             workflow = { accountBrowseWorkflow },
-            acknowledgeManualReview = inputOriginClassifier::acknowledgeManualReview,
             onReadinessStarting = { mode, reason ->
                 targetAppReadinessController.markStarting(mode, reason, SystemClock.uptimeMillis())
             },

@@ -41,7 +41,6 @@ class AiReplyDraftCoordinator(
     private val inputPort: ChatDraftInputPort,
     private val scheduler: TaskScheduler,
     private val isAiReplyActive: () -> Boolean,
-    private val isManualReviewRequired: () -> Boolean,
     private val onLog: (String) -> Unit,
     private val createProvider: (AiModelConfiguration) -> AiModelProvider,
     private val backgroundExecutor: Executor = newDraftExecutor(),
@@ -316,7 +315,7 @@ class AiReplyDraftCoordinator(
             return
         }
         scheduler.schedule(0L) {
-            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) {
+            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
                 finish("AI_REPLY_STATE_CHANGED_BEFORE_INPUT", requestGeneration)
                 return@schedule
             }
@@ -362,7 +361,7 @@ class AiReplyDraftCoordinator(
     internal fun writeNext(target: ChatDraftInputTarget, draft: String, segments: List<String>,
                           index: Int, confirmed: String, requestGeneration: Long) {
         if (!isCurrentGeneration(requestGeneration)) return
-        if (!isAiReplyActive() || isManualReviewRequired()) {
+        if (!isAiReplyActive()) {
             finish("AI_REPLY_STATE_CHANGED_BEFORE_INPUT", requestGeneration)
             return
         }
@@ -373,7 +372,7 @@ class AiReplyDraftCoordinator(
                 "requestGeneration=$requestGeneration"
         )
         val result = synchronized(lock) {
-            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) return
+            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) return
             runCatching { inputPort.writeDraft(target, confirmed, expected) }
                 .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED) }
         }
@@ -398,7 +397,7 @@ class AiReplyDraftCoordinator(
             .coerceIn(MIN_VERIFY_DWELL_DELAY_MS, MAX_VERIFY_DWELL_DELAY_MS)
         scheduler.schedule(dwell.toLong()) {
             if (!isCurrentGeneration(requestGeneration)) return@schedule
-            if (!isAiReplyActive() || isManualReviewRequired()) {
+            if (!isAiReplyActive()) {
                 finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
                 return@schedule
             }
@@ -424,7 +423,7 @@ class AiReplyDraftCoordinator(
         attempt: Int
     ) {
         if (!isCurrentGeneration(requestGeneration)) return
-        if (!isAiReplyActive() || isManualReviewRequired()) {
+        if (!isAiReplyActive()) {
             finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
             return
         }
@@ -476,7 +475,7 @@ class AiReplyDraftCoordinator(
         requestGeneration: Long
     ) {
         if (!isCurrentGeneration(requestGeneration)) return
-        if (!isAiReplyActive() || isManualReviewRequired()) {
+        if (!isAiReplyActive()) {
             finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
             return
         }

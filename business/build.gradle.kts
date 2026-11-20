@@ -21,4 +21,5 @@ dependencies {
     api(project(":core"))
     api(project(":gesture-api"))
     testImplementation("junit:junit:4.13.2")
+    testImplementation(kotlin("test"))
 }

@@ -1,6 +1,5 @@
 package com.freedom.features.aireply.ai
 
-import com.freedom.data.database.LocalReplySegmentTaskRepository
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -27,7 +26,18 @@ class ReplySegmentTaskTest {
     fun repositoryPersistsAndGuardsIndependentState() {
         val file = File.createTempFile("reply-segments", ".tsv").apply { delete() }
         try {
-            val repository = LocalReplySegmentTaskRepository(file)
+            val repository = object : ReplySegmentTaskRepository {
+                private val records = linkedMapOf<String, ReplySegmentTaskRecord>()
+                override fun find(taskId: String): ReplySegmentTaskRecord? = records[taskId]
+                override fun findByRequest(requestId: String): List<ReplySegmentTaskRecord> =
+                    records.values.filter { it.requestId == requestId }
+                override fun save(record: ReplySegmentTaskRecord) { records[record.taskId] = record }
+                override fun update(record: ReplySegmentTaskRecord): Boolean {
+                    if (!records.containsKey(record.taskId)) return false
+                    records[record.taskId] = record
+                    return true
+                }
+            }
             val records = ReplySegmentTaskFactory.create("request-2", "conversation-2", listOf("甲", "乙"), 200L)
             records.forEach(repository::save)
 
