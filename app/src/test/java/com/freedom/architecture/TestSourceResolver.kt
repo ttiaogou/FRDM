@@ -7,28 +7,38 @@ import java.io.File
  * Tests keep their package-relative references while production sources remain modularized.
  */
 object TestSourceResolver {
+    private val moduleSourceRoots = listOf(
+        "core/src/main/kotlin/",
+        "business/src/main/kotlin/",
+        "gesture/gesture-api/src/main/kotlin/",
+        "gesture/gesture-core/src/main/kotlin/",
+        "gesture/gesture-runtime/src/main/kotlin/",
+        "gesture/gesture-android/src/main/kotlin/"
+    )
+    private const val legacyPrefix = "app/src/main/java/"
+
+    private fun candidates(projectRoot: File, requestedPath: String): List<File> {
+        if (!requestedPath.startsWith(legacyPrefix)) return emptyList()
+        val relative = requestedPath.removePrefix(legacyPrefix)
+        return moduleSourceRoots.map { File(projectRoot, it + relative) }
+    }
+
     fun resolve(projectRoot: File, requestedPath: String): File {
+        val moduleFile = candidates(projectRoot, requestedPath).firstOrNull { it.isFile }
+        if (moduleFile != null) return moduleFile
         val direct = File(projectRoot, requestedPath)
-        if (direct.exists()) return direct
+        return if (direct.exists()) direct else candidates(projectRoot, requestedPath)
+            .firstOrNull { it.exists() } ?: direct
+    }
 
-        val legacyPrefix = "app/src/main/java/"
-        if (requestedPath.startsWith(legacyPrefix)) {
-            val relative = requestedPath.removePrefix(legacyPrefix)
-            val sourceRoots = listOf(
-                "core/src/main/kotlin/",
-                "business/src/main/kotlin/",
-                "gesture/gesture-api/src/main/kotlin/",
-                "gesture/gesture-core/src/main/kotlin/",
-                "gesture/gesture-runtime/src/main/kotlin/",
-                "gesture/gesture-android/src/main/kotlin/"
-            )
-            sourceRoots
-                .asSequence()
-                .map { File(projectRoot, it + relative) }
-                .firstOrNull { it.exists() }
-                ?.let { return it }
+    fun resolveAll(projectRoot: File, requestedPath: String): List<File> {
+        val direct = File(projectRoot, requestedPath)
+        val moduleMatches = candidates(projectRoot, requestedPath).filter { it.exists() }
+        val results = if (requestedPath.startsWith(legacyPrefix)) {
+            moduleMatches + if (direct.exists()) listOf(direct) else emptyList()
+        } else {
+            listOf(direct).filter { it.exists() }
         }
-
-        return direct
+        return results.distinctBy { it.absolutePath }.ifEmpty { listOf(direct) }
     }
 }
