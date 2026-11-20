@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.freedom.core.accessibility.events.AccessibilityEventType
 
 class PageObservationCoordinatorTest {
     @Test
@@ -147,6 +148,22 @@ class PageObservationCoordinatorTest {
         assertEquals(setOf("second"), coordinator.registeredChannelIds())
         scheduler.runNextWithDelay(200L)
         assertEquals(10, observations)
+    }
+
+    @Test
+    fun signalOnlyRequestsChannelsInterestedInTheEventType() {
+        val scheduler = FakeScheduler()
+        val coordinator = PageObservationCoordinator(scheduler)
+        var interested = 0
+        var unrelated = 0
+        coordinator.registerChannel("interested", 200L, 800L, { interested++ }, setOf(AccessibilityEventType.VIEW_SCROLLED))
+        coordinator.registerChannel("unrelated", 200L, 800L, { unrelated++ }, setOf(AccessibilityEventType.VIEW_CLICKED))
+
+        coordinator.signal(AccessibilityEventType.VIEW_SCROLLED)
+        scheduler.runNextWithDelay(200L)
+
+        assertEquals(1, interested)
+        assertEquals(0, unrelated)
     }
 
     private class FakeScheduler : TaskScheduler {
