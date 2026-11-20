@@ -215,7 +215,10 @@ class RunSessionCoordinator(
     fun resetRuntime(mode: RunMode, reason: String) {
         advanceRunGeneration()
         log.append("运行时租约隔离：事件=RESET；mode=$mode；reason=$reason；runGeneration=$runGeneration")
-        runtimes[mode]?.resetRuntime(reason)
+        // This entry point is the generation barrier used by the service composition layer.
+        // The caller that owns the concrete runtime performs its reset/cleanup separately;
+        // invoking resetRuntime on the same runtime here would re-enter onRunStopped and can
+        // duplicate archive finalization or other lifecycle cleanup.
     }
 
     @Synchronized
