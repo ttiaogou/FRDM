@@ -328,8 +328,7 @@ class ArchitectureBoundaryTest {
     @Test
     fun businessModulesCanOnlySubmitGestureIntentThroughThePolicyPipeline() {
         val businessFiles = buildList {
-            addAll(kotlinFiles("app/src/main/java/com/freedom/features"))
-            addAll(kotlinFiles("app/src/main/java/com/freedom/adapters/social"))
+            addAll(kotlinFiles("business/src/main/kotlin/com/freedom/features"))
             add(projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"))
             add(projectFile("app/src/main/java/com/freedom/accessibility/gesture/GestureCalibrationController.kt"))
             add(projectFile("app/src/main/java/com/freedom/adapters/android/gestures/AndroidGestureCalibrationHost.kt"))
