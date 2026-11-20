@@ -9,6 +9,7 @@ import com.freedom.core.accessibility.events.AccessibilityEventType
 import com.freedom.core.accessibility.events.DefaultAccessibilityEventRoutePolicy
 import com.freedom.core.accessibility.events.InputOriginClassifier
 import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.PageObservationCoordinator
 
 /**
  * Owns the synchronous Android-event normalization and dispatch pipeline.
@@ -36,7 +37,8 @@ internal class AndroidAccessibilityEventPipeline(
     private val currentWindowGeneration: () -> Long = { 0L },
     private val inputOriginClassifier: InputOriginClassifier = InputOriginClassifier(),
     private val onDuplicateSuppressed: (AccessibilityEventEnvelope) -> Unit = {},
-    private val observeWindowStateEvent: (className: String, windowId: Int) -> Unit = { _, _ -> }
+    private val observeWindowStateEvent: (className: String, windowId: Int) -> Unit = { _, _ -> },
+    private val pageObservationCoordinator: PageObservationCoordinator? = null
 ) : AccessibilityEventPipelinePort {
 
     /** Entry point for Android callbacks. The platform event is normalized synchronously. */
@@ -131,6 +133,8 @@ internal class AndroidAccessibilityEventPipeline(
         val eventNow = now ?: nowMillis()
 
         val routedTargetEvent = eventForRouting
+
+        pageObservationCoordinator?.signal(routedTargetEvent.type)
 
         if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && className.isNotBlank()) {
             runCatching { observeWindowStateEvent(className, eventForRouting.windowId) }
