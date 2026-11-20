@@ -187,7 +187,6 @@ class AppCompositionRoot(context: Context) {
         mainHandler: Handler,
         addLog: (String) -> Unit,
         dp: (Int) -> Int,
-        persistManualReviewHold: (String) -> Unit,
         requestScreenOff: () -> Boolean,
         refreshViews: () -> Unit
     ): AccessibilityServiceDependencies = AccessibilityServiceDependencies(
@@ -196,7 +195,6 @@ class AppCompositionRoot(context: Context) {
         mainHandler = mainHandler,
         addLog = addLog,
         dp = dp,
-        persistManualReviewHold = persistManualReviewHold,
         requestScreenOff = requestScreenOff,
         refreshViews = refreshViews
     )
@@ -223,7 +221,6 @@ internal class AccessibilityServiceDependencies internal constructor(
     private val mainHandler: Handler,
     private val addLog: (String) -> Unit,
     private val dp: (Int) -> Int,
-    private val persistManualReviewHold: (String) -> Unit,
     private val requestScreenOff: () -> Boolean,
     private val refreshViews: () -> Unit
 ) {
