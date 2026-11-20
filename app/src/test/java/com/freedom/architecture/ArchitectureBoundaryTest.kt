@@ -757,16 +757,20 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
-    fun serviceOwnsRuntimeCompositionAndDelegatesEventsToTheAndroidPipeline() {
+    fun serviceIsOnlyTheAndroidEventCallbackForwarder() {
         val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
         val activity = projectFile("app/src/main/java/com/freedom/MainActivity.kt")
         val pipeline = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt")
+        val forwarder = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventForwarder.kt")
         val serviceText = service.readText()
         val compositionRootText = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
         val activityText = activity.readText()
         val pipelineText = pipeline.readText()
         assertTrue("Application composition root must own the runtime coordinator", compositionRootText.contains("RunSessionCoordinator("))
-        assertTrue("Service must delegate raw Android events to the event pipeline", serviceText.contains("accessibilityEventPipeline.process(event, runMode)"))
+        assertTrue("Service must forward raw Android events to the Android entry adapter", serviceText.contains("accessibilityEventForwarder.accept(event)"))
+        assertFalse("Service must not call the event pipeline directly", serviceText.contains("accessibilityEventPipeline.process(event, runMode)"))
+        assertTrue("The Android event entry must own callback filtering", forwarder.readText().contains("AndroidAccessibilitySubscriptionPolicy.acceptsCallbackEvent"))
+        assertTrue("The Android event entry must own pipeline forwarding", forwarder.readText().contains("process(event, runMode)"))
         assertFalse("Service must not normalize Android events directly", serviceText.contains("AndroidAccessibilityEventNormalizer"))
         assertFalse("Service must not apply event routing or log de-duplication directly", serviceText.contains("DefaultAccessibilityEventRoutePolicy") || serviceText.contains("shouldSuppressDuplicate"))
         assertTrue("Android pipeline must normalize before routing", pipelineText.indexOf("AndroidAccessibilityEventNormalizer.normalize(") < pipelineText.indexOf("routePolicy.route("))
