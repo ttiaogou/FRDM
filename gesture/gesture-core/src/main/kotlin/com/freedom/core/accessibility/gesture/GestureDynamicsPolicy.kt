@@ -203,8 +203,9 @@ object GestureDynamicsPolicy {
             ?: return reject("motion_resolution_failed:mode=${effectiveMotion.mode};velocityCurve=${effectiveMotion.velocityCurve}")
         val shouldPause = pause.enabled && pause.probability > 0f && random.nextFloat() < pause.probability
         val resolvedPause = if (shouldPause) {
-            val sampledDuration = if (pause.durationDistribution != null) {
-                GestureTimeDistributionPolicy.sampleMillis(pause.durationDistribution, random)
+            val durationDistribution = pause.durationDistribution
+            val sampledDuration = if (durationDistribution != null) {
+                GestureTimeDistributionPolicy.sampleMillis(durationDistribution, random)
                     ?: return reject("pause_duration_distribution_unavailable")
             } else pause.durationMs
             if (sampledDuration !in 1L..5_000L) return reject("pause_duration_out_of_range:durationMs=$sampledDuration")
@@ -693,13 +694,15 @@ object GestureDynamicsPolicy {
     private fun clampPoint(point: GesturePoint, left: Float, top: Float, right: Float, bottom: Float) =
         GesturePoint(point.x.coerceIn(left, right), point.y.coerceIn(top, bottom))
 
-    private fun GestureDirectionProfile.isValid(): Boolean =
-        (baseAngleDegrees == null || baseAngleDegrees.isFinite()) &&
+    private fun GestureDirectionProfile.isValid(): Boolean {
+        val angle = baseAngleDegrees
+        return (angle == null || angle.isFinite()) &&
             directionOffsetDegrees.isFinite() && abs(directionOffsetDegrees) <= 90f &&
             pathRotationDegrees.isFinite() && abs(pathRotationDegrees) <= 90f &&
             horizontalBias.isFinite() && abs(horizontalBias) <= 0.25f &&
             verticalBias.isFinite() && abs(verticalBias) <= 0.25f &&
             curveAmplitudePx.isFinite() && curveAmplitudePx in 0f..180f
+    }
 
     /** Axis profiles constrain the main travel vector while still allowing a modest direction offset. */
     private fun GestureDirectionProfile.isAngleCompatible(angleDegrees: Float): Boolean {
