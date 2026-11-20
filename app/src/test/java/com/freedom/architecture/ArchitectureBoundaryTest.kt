@@ -17,11 +17,14 @@ class ArchitectureBoundaryTest {
 
     private fun projectFile(path: String): File = TestSourceResolver.resolve(projectRoot, path)
 
-    private fun kotlinFiles(relativeDirectory: String): List<File> {
-        val directory = projectFile(relativeDirectory)
-        if (!directory.exists()) return emptyList()
-        return directory.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
-    }
+    private fun kotlinFiles(relativeDirectory: String): List<File> =
+        TestSourceResolver.resolveAll(projectRoot, relativeDirectory)
+            .flatMap { directory ->
+                if (!directory.exists()) emptyList()
+                else if (directory.isFile) listOf(directory)
+                else directory.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
+            }
+            .distinctBy { it.absolutePath }
 
     // Match verify_boundaries.py: comments and literals are not executable Kotlin code.
     // Keep every newline (and its position) so reported source locations remain stable.
@@ -236,10 +239,7 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun allAutomatedScreenTapsAndScrollsUseCoordinateGesturesOnly() {
-        val sourceRoot = projectFile("app/src/main/java/com/freedom")
-        val productionFiles = sourceRoot.walkTopDown()
-            .filter { it.isFile && it.extension == "kt" }
-            .toList()
+        val productionFiles = kotlinFiles("app/src/main/java/com/freedom")
         val forbiddenTouchAction = Regex(
             "(?:AccessibilityNodeInfo\\.)?ACTION_(?:CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD)"
         )
@@ -767,14 +767,8 @@ class ArchitectureBoundaryTest {
     @Test
     fun serviceDelegatesConnectionRecoveryAndReceiverRegistrationLifecycle() {
         val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
-        val recovery = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityServiceRecoveryCoordinator.kt"
-        )
-        val receiverRegistry = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidServiceReceiverRegistry.kt"
-        )
+        val recovery = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityServiceRecoveryCoordinator.kt")
+        val receiverRegistry = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidServiceReceiverRegistry.kt")
         assertTrue("A dedicated service recovery coordinator is required", recovery.isFile)
         assertTrue("A dedicated Service receiver registry is required", receiverRegistry.isFile)
         assertTrue("Service must invoke recovery from the system connection callback", service.contains("serviceRecoveryCoordinator.onServiceConnected()"))
@@ -1037,38 +1031,23 @@ class ArchitectureBoundaryTest {
         }.map { it.relativeTo(projectRoot).path }
         assertTrue("AI Reply message feature must remain platform/app neutral: ${violations.joinToString()}", violations.isEmpty())
 
-        val messageModel = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/features/aireply/domain/message/ChatMessage.kt"
-        ).readText()
+        val messageModel = projectFile("app/src/main/java/com/freedom/features/aireply/domain/message/ChatMessage.kt").readText()
         assertTrue("Message content must be redacted from diagnostic toString", messageModel.contains("content=[REDACTED]"))
         assertTrue("Visible-message batches must be explicitly bounded/in-memory", messageModel.contains("currently visible messages"))
 
-        val messagePort = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/features/aireply/ports/ChatMessagePort.kt"
-        ).readText()
+        val messagePort = projectFile("app/src/main/java/com/freedom/features/aireply/ports/ChatMessagePort.kt").readText()
         assertTrue("Feature message reading must use a narrow port", messagePort.contains("interface ChatMessagePort"))
         assertFalse("Message port must not expose Android nodes", messagePort.contains("AccessibilityNodeInfo"))
 
-        val momoAdapter = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt"
-        ).readText()
+        val momoAdapter = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt").readText()
         assertTrue("Momo social adapter must implement the message port", momoAdapter.contains("ChatMessagePort"))
         assertTrue("Momo reader must be called through the adapter's extracted message component", momoAdapter.contains("messageComponents.reader.readRecentMessages"))
-        assertTrue("Runtime must receive the message port through application composition", File(
-            projectRoot,
-            "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
-        ).readText().contains("chatMessagePort = momoSocialAdapter"))
+        assertTrue("Runtime must receive the message port through application composition", projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText().contains("chatMessagePort = momoSocialAdapter"))
     }
 
     @Test
     fun aiReplyObservationReadsMessagesOnlyForKnownChatDetailsAndNeverLogsBodies() {
-        val runtime = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
-        ).readText()
+        val runtime = projectFile("app/src/main/java/com/freedom/features/aireply/AiReplyObservationRuntime.kt").readText()
         assertTrue("Message reading must be limited to chat detail candidates", runtime.contains("ChatPageKind.CHAT_DETAIL_CANDIDATE ->"))
         assertTrue("Message reading must have a fixed upper bound", runtime.contains("MAX_VISIBLE_MESSAGES = 20"))
         assertTrue("Runtime logs must use redacted batch summaries", runtime.contains("batch.summary()"))
@@ -1080,10 +1059,7 @@ class ArchitectureBoundaryTest {
 
     @Test
     fun businessFeedSwipeIntentDoesNotExposeTrajectoryTuning() {
-        val intentSource = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/core/accessibility/gesture/GestureIntent.kt"
-        ).readText()
+        val intentSource = projectFile("app/src/main/java/com/freedom/core/accessibility/gesture/GestureIntent.kt").readText()
         val feedSwipe = intentSource.substringAfter("data class FeedSwipe(").substringBefore(") : GestureIntent")
         listOf(
             "curveOffsetRatio",
@@ -1098,41 +1074,20 @@ class ArchitectureBoundaryTest {
             assertFalse("Business FeedSwipe must not expose $parameter", feedSwipe.contains(parameter))
         }
 
-        val manager = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/application/gesture/GesturePolicyManager.kt"
-        ).readText()
-        val pipeline = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/application/gesture/GesturePolicyPipeline.kt"
-        ).readText()
+        val manager = projectFile("app/src/main/java/com/freedom/application/gesture/GesturePolicyManager.kt").readText()
+        val pipeline = projectFile("app/src/main/java/com/freedom/application/gesture/GesturePolicyPipeline.kt").readText()
         assertTrue("Runtime must own per-request algorithm selection", manager.contains("random.nextBoolean()"))
         assertTrue("Pipeline must resolve a strategy before geometry compilation", pipeline.contains("policyManager.select(validatedIntentRequest)"))
-        val compiler = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/application/gesture/GestureCommandCompiler.kt"
-        ).readText()
+        val compiler = projectFile("app/src/main/java/com/freedom/application/gesture/GestureCommandCompiler.kt").readText()
         assertTrue("Feed density must come from the captured coordinate context", compiler.contains("executionContext.coordinateContext.density"))
     }
 
     @Test
     fun stageTwoGeometryPolicyIsCompiledAndValidatedBeforeAndroidDispatch() {
-        val geometry = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/core/accessibility/gesture/GestureGeometryPolicy.kt"
-        ).readText()
-        val compiler = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/application/gesture/GestureCommandCompiler.kt"
-        ).readText()
-        val validator = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/application/gesture/GesturePolicyValidator.kt"
-        ).readText()
-        val dispatcher = File(
-            projectRoot,
-            "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt"
-        ).readText()
+        val geometry = projectFile("app/src/main/java/com/freedom/core/accessibility/gesture/GestureGeometryPolicy.kt").readText()
+        val compiler = projectFile("app/src/main/java/com/freedom/application/gesture/GestureCommandCompiler.kt").readText()
+        val validator = projectFile("app/src/main/java/com/freedom/application/gesture/GesturePolicyValidator.kt").readText()
+        val dispatcher = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt").readText()
 
         assertTrue("Click and movement geometry must reserve the system-edge safety band", geometry.contains("safeDisplayBounds("))
         assertTrue("Click sampling must use an inward safe region", geometry.contains("DEFAULT_TAP_INSET_RATIO = 0.15f"))
