@@ -528,7 +528,12 @@ class AiReplyObservationRuntime(
             !receivedGreetingsTaskFlow.supportsWorkflow()
         ) return
         receivedGreetingsPageProbePending = true
-        pageObservationCoordinator.signalFullInspection()
+        // This callback is already the watcher-approved stability retry. Do not send it
+        // through the normal full-inspection debounce again: doing so leaves the retry
+        // pending behind another quiet period and can prevent the second confirmation
+        // snapshot from running. The scheduled task still performs a fresh read-only
+        // observation and never changes task ownership by itself.
+        scheduleFullInspectionAfter(0L)
     }
 
     private fun runFullInspection() {
