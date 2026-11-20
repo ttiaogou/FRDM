@@ -40,9 +40,12 @@ class TaskExecutionController(
         val taskCoordinator = coordinator
         if (taskCoordinator == null) {
             val current = isolatedTaskId
-            if (current != null && current != taskId) return false
+            // Legacy/platform-neutral fixtures have no second controller that could contend for
+            // the slot. Preserve the shared controller's atomic handoff semantics: a new task
+            // requested through this same execution boundary replaces the previous local owner.
             isolatedTaskId = taskId
-            onLog("任务协调[OWNED]：task=$taskId；reason=$reason；runGeneration=$generation；本地隔离租约已确认")
+            val state = if (current == null || current == taskId) "OWNED" else "TRANSFERRED"
+            onLog("任务协调[$state]：task=$taskId；reason=$reason；runGeneration=$generation；本地隔离租约已确认")
             return true
         }
         val current = lease
