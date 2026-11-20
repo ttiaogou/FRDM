@@ -7,7 +7,7 @@ import com.freedom.core.runtime.PageRecoveryRouteAdapter
  * Provider-neutral route for the automatic-browse dynamic feed.
  * It only identifies the destination and delegates checkpoint persistence to the runtime.
  */
-internal class DynamicFeedRecoveryRouteAdapter(
+class DynamicFeedRecoveryRouteAdapter(
     private val targetPackage: () -> String,
     private val save: () -> Unit
 ) : PageRecoveryRouteAdapter {
