@@ -90,6 +90,9 @@ def kotlin_sources(root: Path) -> list[Path]:
         root / "core",
     ]
     files: set[Path] = set()
+    migration_roots_present = any((root / relative).exists() for relative in (
+        "core/src/main/kotlin", "business/src/main/kotlin", "gesture/gesture-runtime/src/main/kotlin"
+    ))
     legacy_prefixes = (
         "app/src/main/java/com/freedom/core/",
         "app/src/main/java/com/freedom/features/",
@@ -106,7 +109,7 @@ def kotlin_sources(root: Path) -> list[Path]:
             continue
         for path in search_root.rglob("*.kt"):
             rel = path.relative_to(root).as_posix()
-            if rel.startswith(legacy_prefixes):
+            if migration_roots_present and rel.startswith(legacy_prefixes):
                 continue
             if any(part in {"build", ".gradle", ".git", "test", "androidTest"} for part in path.parts):
                 continue
@@ -116,8 +119,16 @@ def kotlin_sources(root: Path) -> list[Path]:
 
 def account_browse_state_ownership_leaks(code_by_path: dict[str, str], state_code: str) -> list[str]:
     """Enforce Runtime ownership of immutable AccountBrowse snapshots and update commands."""
-    state_rel = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt"
-    runtime_rel = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
+    state_candidates = (
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt",
+        "app/src/main/java/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt",
+    )
+    runtime_candidates = (
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt",
+        "app/src/main/java/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt",
+    )
+    state_rel = next((path for path in state_candidates if path in code_by_path), state_candidates[0])
+    runtime_rel = next((path for path in runtime_candidates if path in code_by_path), runtime_candidates[0])
     runtime_code = code_by_path.get(runtime_rel, "")
     offenders: set[str] = set()
 
@@ -154,8 +165,12 @@ def core_test_application_dependencies(root: Path) -> list[str]:
     :core compiles app/src/test/java/com/freedom/core/** as its own test source set.
     Such tests may depend on core contracts, but must not import :app application classes.
     """
-    test_root = root / "core/src/test/kotlin/com/freedom/core"
-    if not test_root.exists():
+    test_roots = (
+        root / "core/src/test/kotlin/com/freedom/core",
+        root / "app/src/test/java/com/freedom/core",
+    )
+    test_root = next((candidate for candidate in test_roots if candidate.exists()), None)
+    if test_root is None:
         return []
     offenders: list[str] = []
     app_import = re.compile(r"^\s*import\s+com\.freedom\.application(?:\.|$)", re.MULTILINE)
