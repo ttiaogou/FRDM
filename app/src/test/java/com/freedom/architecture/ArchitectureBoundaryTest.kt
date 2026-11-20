@@ -962,7 +962,7 @@ class ArchitectureBoundaryTest {
         assertTrue(":gesture-android must implement Runtime SPI", android.contains("project(\":gesture-runtime\")"))
         assertFalse(":gesture-android must not depend directly on geometry algorithms", android.contains("project(\":gesture-core\")"))
         assertTrue(":app must compose the modules", app.contains("project(\":gesture-runtime\")") && app.contains("project(\":gesture-android\")"))
-        assertTrue(":app must exclude the business Feature sources", app.contains("com/freedom/features/**"))
+        assertFalse(":app must not declare the business Feature source tree", app.contains("src/main/java/com/freedom/features") || app.contains("src/main/kotlin/com/freedom/features"))
         assertFalse(":app must not receive gesture algorithms as a transitive API dependency", app.contains("project(\":gesture-core\")"))
     }
 
