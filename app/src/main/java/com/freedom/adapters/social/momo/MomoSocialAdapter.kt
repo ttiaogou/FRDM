@@ -4734,15 +4734,29 @@ internal class MomoSocialAdapter(
             )
             chatListExtraction.candidates.zip(identities).forEachIndexed { index, (candidate, identity) ->
                 candidate.contactIdentity = identity
+                val verificationResult = classifyMomoIdentityVerification(
+                    confidence = identity.confidence,
+                    contactId = identity.contactId
+                )
                 if (index != pendingIdentityMatchIndex && cachedPlatformIds[index] != null &&
-                    identity.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                    verificationResult != MomoIdentityVerificationResult.IDENTITY_VERIFIED
                 ) {
                     createInboxIdentityAnchor(candidate)?.opaqueKey()?.let { key ->
                         synchronized(inboxIdentityCaptureLock) {
                             verifiedInboxIdentityByAnchor.remove(key)
-                            failedInboxIdentityCaptureKeys += key
+                            if (verificationResult == MomoIdentityVerificationResult.IDENTITY_CONFLICT ||
+                                verificationResult == MomoIdentityVerificationResult.IDENTITY_USER_STOPPED
+                            ) {
+                                failedInboxIdentityCaptureKeys += key
+                            } else {
+                                failedInboxIdentityCaptureKeys.remove(key)
+                            }
                         }
                     }
+                    onLog(
+                        "AI 联系人身份验证分类：result=${verificationResult.name}；" +
+                            "confidence=${identity.confidence.name}；不把本次暂时无法确认写入永久失败缓存"
+                    )
                 }
             }
             if (canConsumePendingIdentity) {
@@ -5157,15 +5171,25 @@ internal class MomoSocialAdapter(
                     ),
                     observedAtMillis = System.currentTimeMillis()
                 ).singleOrNull()
+                val verificationResult = classifyMomoIdentityVerification(
+                    confidence = identity?.confidence,
+                    contactId = identity?.contactId
+                )
                 completedInboxIdentityOutcomes[anchorKey] = if (
-                    identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                    verificationResult == MomoIdentityVerificationResult.IDENTITY_VERIFIED
                 ) {
-                    ContactIdentityCaptureOutcome.completed(identity)
-                } else {
+                    ContactIdentityCaptureOutcome.completed(requireNotNull(identity))
+                } else if (verificationResult == MomoIdentityVerificationResult.IDENTITY_CONFLICT ||
+                    verificationResult == MomoIdentityVerificationResult.IDENTITY_USER_STOPPED
+                ) {
+                    failedInboxIdentityCaptureKeys += anchorKey
                     ContactIdentityCaptureOutcome.failed(
                         ContactIdentityCaptureRequestResult.REJECTED,
-                        "IDENTITY_CAPTURE_MANAGER_DID_NOT_VERIFY_PLATFORM_ID"
+                        verificationResult.name
                     )
+                } else {
+                    completedInboxIdentityOutcomes.remove(anchorKey)
+                    ContactIdentityCaptureOutcome.waiting(ContactIdentityCaptureRequestResult.RETRY_LATER)
                 }
                 while (verifiedInboxIdentityByAnchor.size > MAX_INBOX_VERIFIED_IDENTITY_CACHE_ENTRIES) {
                     val oldest = verifiedInboxIdentityByAnchor.entries.firstOrNull()?.key ?: break
