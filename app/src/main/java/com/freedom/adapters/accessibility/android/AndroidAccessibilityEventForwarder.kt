@@ -17,7 +17,7 @@ internal class AndroidAccessibilityEventForwarder(
     private val onLog: (String) -> Unit,
     private val onGlobalTouch: (AccessibilityEventType, Long, Long, String?, Int) -> Unit,
     private val onWindowTransition: (AccessibilityEvent, RunMode?) -> Unit,
-    private val process: (AccessibilityEvent, RunMode) -> Unit
+    private val pipeline: AccessibilityEventPipelinePort
 ) {
     fun accept(event: AccessibilityEvent?) {
         if (event == null) return
@@ -63,6 +63,6 @@ internal class AndroidAccessibilityEventForwarder(
         }
         if (!isRunRequested()) return
         val runMode = mode ?: return
-        process(event, runMode)
+        pipeline.process(event, runMode)
     }
 }
