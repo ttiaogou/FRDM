@@ -23,8 +23,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Calls the configured remote model, fills a verified composer, and admits automatic sending
- * only after the adapter revalidates the live conversation and send control.
+ * Calls the configured remote model and fills a verified composer. Sending is deliberately
+ * outside this phase; the next phase may consume the persisted PENDING_SEND state.
  */
 class AiReplyDraftCoordinator(
     private val configurationRepository: AiModelConfigurationRepository,
@@ -286,7 +286,8 @@ class AiReplyDraftCoordinator(
                 return@schedule
             }
             // The model owns message boundaries; the existing input cadence still owns
-            // 2-3-grapheme writes inside each queued message. Sending remains manual.
+            // 2-3-grapheme writes inside each queued message. Stage one stops after the
+            // complete draft is verified; it must not submit a send gesture.
             val parsedMessages = ReplyMessageSegments.parse(decision.draft)
             onLog(
                 "AI 回复解析诊断：requestId=$requestId；" +
@@ -309,6 +310,11 @@ class AiReplyDraftCoordinator(
             return
         }
         val expected = confirmed + segments[index]
+        onLog(
+            "AI 草稿输入段：segmentIndex=$index；segmentCount=${segments.size}；" +
+                "当前段字符数=${segments[index].codePointCount(0, segments[index].length)}；" +
+                "requestGeneration=$requestGeneration"
+        )
         val result = synchronized(lock) {
             if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || isManualReviewRequired()) return
             runCatching { inputPort.writeDraft(target, confirmed, expected) }
@@ -414,32 +420,17 @@ class AiReplyDraftCoordinator(
         val result = runCatching { inputPort.verifyDraft(target, draft) }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
         if (result.status == ChatDraftInputStatus.VERIFIED) {
-            // Capture the nullable dependency once so the compiler and the send decision use
-            // the same configuration even though the actual send is executed inside a lambda.
-            val configuredSendPort = sendPort
+            // Stage one ends here. The next phase may consume PENDING_SEND and invoke the
+            // retained send port after its own send-result protocol is implemented.
             synchronized(lock) {
                 if (!isCurrentGeneration(requestGeneration)) return
-                awaitingUserSend.set(configuredSendPort == null)
+                awaitingUserSend.set(true)
             }
             updateTaskStatus(ReplyTaskStatus.DRAFT_APPLIED, requestGeneration)
-            if (configuredSendPort == null) {
-                onLog("AI 草稿状态：DRAFT_ACCEPTED_AND_FILLED；草稿已接受并填入输入框；等待人工检查发送")
-                finish("DRAFT_ENTERED_USER_CONTENT_REVIEW_AND_SEND_REQUIRED", requestGeneration)
-                return
-            }
             updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
-            updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
-            val sent = runCatching { configuredSendPort.sendDraft(target, draft) }
-                .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED) }
-            if (sent.status == ChatDraftInputStatus.SEND_SUBMITTED) {
-                updateTaskStatus(ReplyTaskStatus.SENT_UNCONFIRMED, requestGeneration)
-                onLog("AI 回复状态：SEND_SUBMITTED；已通过发送前校验并提交发送手势；等待消息结果核验")
-                finish("DRAFT_SENT_WAITING_CONFIRMATION", requestGeneration)
-            } else {
-                updateTaskStatus(ReplyTaskStatus.FAILED_FINAL, requestGeneration)
-                onLog("AI 回复状态：SEND_REJECTED；发送前校验或手势提交失败；reason=${sent.reasonCode}")
-                finish("DRAFT_SEND_${sent.reasonCode}", requestGeneration)
-            }
+            onLog("AI 草稿状态：DRAFT_ACCEPTED_AND_FILLED；草稿已接受并填入输入框；" +
+                "状态=PENDING_SEND；本阶段不提交发送动作")
+            finish("DRAFT_READY_PENDING_SEND", requestGeneration)
         } else {
             onLog(
                 "AI 草稿状态：LOCAL_DRAFT_VALIDATION_REJECTED；最终回读校验未通过；" +

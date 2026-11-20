@@ -4489,11 +4489,27 @@ internal class MomoSocialAdapter(
         }
     }
 
-    override fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult =
-        draftInputController.writeDraft(target, expectedText, text)
+    override fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult {
+        if (!isCurrentDraftTarget(target)) {
+            return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_CONTEXT_CHANGED")
+        }
+        return draftInputController.writeDraft(target, expectedText, text)
+    }
 
-    override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult =
-        draftInputController.verifyDraft(target, text)
+    override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult {
+        if (!isCurrentDraftTarget(target)) {
+            return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_CONTEXT_CHANGED")
+        }
+        return draftInputController.verifyDraft(target, text)
+    }
+
+    /** Stage-one gate: the live root must still be the window captured for this chat. */
+    private fun isCurrentDraftTarget(target: ChatDraftInputTarget): Boolean {
+        if (target.packageName != targetPackage || activityClass() != target.activityClass) return false
+        return rootAccess.withActiveTargetRoot { _, window ->
+            window == target.nodeTarget.window
+        } ?: false
+    }
 
     override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
         if (target.packageName != targetPackage || activityClass() != target.activityClass) {

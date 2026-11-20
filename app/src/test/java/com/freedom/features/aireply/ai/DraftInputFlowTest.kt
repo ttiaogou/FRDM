@@ -32,6 +32,13 @@ class DraftInputFlowTest {
             return ChatDraftInputResult(failure ?: if (this.text == text) ChatDraftInputStatus.VERIFIED else ChatDraftInputStatus.TEXT_MISMATCH)
         }
     }
+    private class Send : ChatDraftSendPort {
+        var calls = 0
+        override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+            calls++
+            return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+        }
+    }
     private val window = WindowRef("pkg", "activity", 1, 1)
     private val target = ChatDraftInputTarget("pkg", "activity", "w", "c", "s", NodeTarget(window, NodePath(emptyList())))
     private fun coordinator(input: Input, scheduler: Scheduler) = AiReplyDraftCoordinator(
@@ -44,6 +51,25 @@ class DraftInputFlowTest {
             override fun save(personalization: AiReplyPersonalization) = Unit
         }, input, scheduler, { true }, { false }, {}, { error("unused") }, chooseRandomInt = { _, _ -> 500 }
     )
+
+    @Test fun stageOneLeavesVerifiedDraftPendingWithoutSending() {
+        val input = Input(); val scheduler = Scheduler(); val send = Send()
+        val coordinator = AiReplyDraftCoordinator(
+            object : AiModelConfigurationRepository {
+                override fun load(): AiModelConfiguration = error("unused")
+                override fun save(configuration: AiModelConfiguration) = Unit
+                override fun clearApiKey() = Unit
+            }, AiModelCloudConsent { true }, object : AiReplyPersonalizationRepository {
+                override fun load(): AiReplyPersonalization = error("unused")
+                override fun save(personalization: AiReplyPersonalization) = Unit
+            }, input, scheduler, { true }, { false }, {}, { error("unused") },
+            chooseRandomInt = { _, _ -> 500 }, sendPort = send
+        )
+        coordinator.writeNext(target, "abcdef", listOf("abc", "def"), 0, "", 0)
+        scheduler.next(); scheduler.next()
+        assertEquals(0, send.calls)
+        assertTrue(coordinator.isAwaitingUserSend)
+    }
 
     @Test fun writesAndVerifiesEachPrefixThenRequiresUser() {
         val input = Input(); val scheduler = Scheduler(); val coordinator = coordinator(input, scheduler)
