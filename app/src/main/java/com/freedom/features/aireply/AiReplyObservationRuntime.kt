@@ -139,6 +139,9 @@ class AiReplyObservationRuntime(
         private const val SESSION_SCROLL_DURATION_MS = 480L
         private const val PRIVATE_MESSAGES_TASK_ID = PrivateMessagesTaskController.TASK_ID
         private const val RECEIVED_GREETINGS_TASK_ID = ReceivedGreetingsTaskController.TASK_ID
+        private const val SNAPSHOT_RECOVERY_ROUTE_ID = "AI_REPLY_SNAPSHOT_RECOVERY"
+        private const val RECEIVED_GREETINGS_RECOVERY_ROUTE_ID = "AI_REPLY_RECEIVED_GREETINGS_RECOVERY"
+        private const val MESSAGE_LIST_RECOVERY_ROUTE_ID = "AI_REPLY_MESSAGE_LIST_RECOVERY"
         private val PAGE_CHANGE_RECHECK_EVENT_TYPES = setOf(
             AccessibilityEventType.WINDOW_STATE_CHANGED,
             AccessibilityEventType.WINDOWS_CHANGED,
@@ -450,7 +453,6 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsQuietGeneration = 0L
     private val pageRecoveryVerificationGate = PageRecoveryVerificationGate()
     private var receivedGreetingsRecoveryVerificationPending = false
-    private val receivedGreetingsRecoveryVerificationGate = PageRecoveryVerificationGate()
     private var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
     private var receivedGreetingsRecoveryRetryAttempt = 0
     private var messageRecoveryRetryAttempt = 0
@@ -600,9 +602,9 @@ class AiReplyObservationRuntime(
         transientEmptySnapshotRecovery.reset()
         val recovered = inspection!!
         if (snapshotRecoveryStartedAtMs != 0L) {
-            if (!pageRecoveryVerificationGate.observe(recoveryStructuralKey(recovered))) {
+            if (!pageRecoveryVerificationGate.observe(SNAPSHOT_RECOVERY_ROUTE_ID, recoveryStructuralKey(recovered))) {
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
-                onLog("AI 页面恢复[RECOVERY_VERIFYING]：第${pageRecoveryVerificationGate.stableSamples}/2次独立新鲜快照尚未稳定；350ms后复核")
+                onLog("AI 页面恢复[RECOVERY_VERIFYING]：第${pageRecoveryVerificationGate.stableSamples(SNAPSHOT_RECOVERY_ROUTE_ID)}/2次独立新鲜快照尚未稳定；350ms后复核")
                 scheduleFullInspectionAfter(350L)
                 return
             }
@@ -612,7 +614,7 @@ class AiReplyObservationRuntime(
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
             onLog("AI 页面恢复[RECOVERY_VERIFIED]：连续两次新鲜结构快照一致；恢复消息列表任务")
-            pageRecoveryVerificationGate.reset()
+            pageRecoveryVerificationGate.reset(SNAPSHOT_RECOVERY_ROUTE_ID)
             snapshotRecoveryStartedAtMs = 0L
         }
         if (sessionRunStarted && receivedGreetingsTaskActive &&
@@ -626,9 +628,9 @@ class AiReplyObservationRuntime(
                 scheduleReceivedGreetingsRecoveryRetry("收到招呼列表指纹尚未确认；不执行滚动、点击或导航")
                 return
             }
-            if (!receivedGreetingsRecoveryVerificationGate.observe(fingerprint)) {
+            if (!pageRecoveryVerificationGate.observe(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID, fingerprint)) {
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
-                onLog("收到的招呼恢复[RECOVERY_VERIFYING]：第${receivedGreetingsRecoveryVerificationGate.stableSamples}/2次独立指纹快照尚未稳定；350ms后复核")
+                onLog("收到的招呼恢复[RECOVERY_VERIFYING]：第${pageRecoveryVerificationGate.stableSamples(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)}/2次独立指纹快照尚未稳定；350ms后复核")
                 scheduleFullInspectionAfter(350L)
                 return
             }
@@ -640,7 +642,7 @@ class AiReplyObservationRuntime(
             receivedGreetingsRecoveryVerificationPending = false
             receivedGreetingsRecoveryVerifiedForNextSnapshot = true
             receivedGreetingsRecoveryRetryAttempt = 0
-            receivedGreetingsRecoveryVerificationGate.reset()
+            pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
             onLog("收到的招呼恢复[RECOVERY_VERIFIED]：连续两次新鲜列表指纹一致；恢复收到招呼任务协调器")
         }
         handleInspectionSnapshot(recovered)
@@ -818,7 +820,7 @@ class AiReplyObservationRuntime(
             } else {
                 receivedGreetingsRecoveryVerificationPending = false
                 receivedGreetingsRecoveryVerifiedForNextSnapshot = false
-                receivedGreetingsRecoveryVerificationGate.reset()
+                pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
                 if (!receivedGreetingsTaskFlow.synchronizeRecoveryConfirmation()) {
                     sessionManagerState = SessionManagerState.PAUSED
                     onLog("统一页面恢复[ADAPTER_CONFIRMATION_WAIT]：收到招呼路由已通过双快照，但适配器列表确认状态尚未同步；保持暂停并等待新鲜只读复核")
@@ -1155,7 +1157,7 @@ class AiReplyObservationRuntime(
                     )
                     if (!receivedGreetingsRecoveryVerifiedForNextSnapshot) {
                         receivedGreetingsRecoveryVerificationPending = true
-                        receivedGreetingsRecoveryVerificationGate.reset()
+                        pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
                     }
                     val decision = if (receivedGreetingsRecoveryVerifiedForNextSnapshot) {
                         receivedGreetingsRecoveryVerifiedForNextSnapshot = false
@@ -1382,9 +1384,9 @@ class AiReplyObservationRuntime(
         messageListCheckpointRestored = false
         messageRecoveryRetryAttempt = 0
         transientEmptySnapshotRecovery.reset()
+        pageRecoveryVerificationGate.reset()
         receivedGreetingsRecoveryVerificationPending = false
         receivedGreetingsRecoveryVerifiedForNextSnapshot = false
-        receivedGreetingsRecoveryVerificationGate.reset()
         lastRegionFingerprint = ""
         lastMessageFingerprint = ""
         loggedOcrDebugFingerprints.clear()
@@ -2297,7 +2299,7 @@ class AiReplyObservationRuntime(
 
     private fun handleSessionListPage(snapshot: ChatPageSnapshot) {
         if (messageListRecoveryVerificationPending && sessionRunStarted && !receivedGreetingsTaskActive) {
-            if (!pageRecoveryVerificationGate.observe(recoveryStructuralKey(snapshot))) {
+            if (!pageRecoveryVerificationGate.observe(MESSAGE_LIST_RECOVERY_ROUTE_ID, recoveryStructuralKey(snapshot))) {
                 sessionManagerState = SessionManagerState.PAUSED
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
                 onLog("消息列表恢复[RECOVERY_VERIFYING]：等待第二次独立稳定页面快照；保持暂停")
@@ -2310,7 +2312,7 @@ class AiReplyObservationRuntime(
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
             messageListRecoveryVerificationPending = false
             messageRecoveryRetryAttempt = 0
-            pageRecoveryVerificationGate.reset()
+            pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
             onLog("消息列表恢复[RECOVERY_VERIFIED]：连续两次独立页面快照一致；恢复原有遍历算法")
         }
         if (privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys != null) {
