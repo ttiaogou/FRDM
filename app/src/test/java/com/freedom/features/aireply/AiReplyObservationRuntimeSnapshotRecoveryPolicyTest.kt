@@ -59,11 +59,12 @@ class AiReplyObservationRuntimeSnapshotRecoveryPolicyTest {
 
     @Test fun recoveryGateRequiresTwoEqualFreshStructuralSamples() {
         val gate = PageRecoveryVerificationGate()
-        assertFalse(gate.observe("chat-list|rows=3"))
-        assertEquals(1, gate.stableSamples)
-        assertFalse(gate.observe("chat-list|rows=4"))
-        assertTrue(gate.observe("chat-list|rows=4"))
-        gate.reset()
-        assertEquals(0, gate.stableSamples)
+        val routeId = "AI_REPLY_MESSAGE_LIST_RECOVERY"
+        assertFalse(gate.observe(routeId, "chat-list|rows=3"))
+        assertEquals(1, gate.stableSamples(routeId))
+        assertFalse(gate.observe(routeId, "chat-list|rows=4"))
+        assertTrue(gate.observe(routeId, "chat-list|rows=4"))
+        gate.reset(routeId)
+        assertEquals(0, gate.stableSamples(routeId))
     }
 }

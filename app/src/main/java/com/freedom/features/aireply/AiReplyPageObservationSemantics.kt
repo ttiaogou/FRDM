@@ -14,9 +14,6 @@ internal enum class ObservationStatus {
     CONFIRMED_UNKNOWN
 }
 
-/** Compatibility alias; new code should use [ObservationStatus]. */
-internal typealias AiReplyPageObservationStatus = ObservationStatus
-
 /**
  * The semantic result shared by every AI Reply page observation.
  * ChatPageKind remains adapter evidence; callers must make decisions from this result instead.
@@ -30,15 +27,12 @@ internal data class ObservationResult(
     val failure: Throwable? = null
 )
 
-/** Compatibility name retained while callers migrate to [ObservationResult]. */
-internal typealias AiReplyPageObservationDecision = ObservationResult
-
 internal class AiReplyPageObservationSemantics {
     fun classify(
         snapshot: ChatPageSnapshot?,
         previous: ChatPageSnapshot?,
         targetPackage: String
-    ): AiReplyPageObservationDecision {
+    ): ObservationResult {
         if (snapshot == null) {
             return decision(ObservationStatus.TEMPORARILY_UNAVAILABLE, "NO_FRESH_SNAPSHOT", snapshot)
         }

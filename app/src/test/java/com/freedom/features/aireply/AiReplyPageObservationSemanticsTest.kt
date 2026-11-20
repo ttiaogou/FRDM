@@ -12,7 +12,7 @@ class AiReplyPageObservationSemanticsTest {
     fun emptyUnknownIsTemporaryUnavailable() {
         val decision = semantics.classify(snapshot(ChatPageKind.UNKNOWN), null, TARGET_PACKAGE)
 
-        assertEquals(AiReplyPageObservationStatus.TEMPORARILY_UNAVAILABLE, decision.status)
+        assertEquals(ObservationStatus.TEMPORARILY_UNAVAILABLE, decision.status)
     }
 
     @Test
@@ -22,7 +22,7 @@ class AiReplyPageObservationSemanticsTest {
 
         val decision = semantics.classify(incoming, previous, TARGET_PACKAGE)
 
-        assertEquals(AiReplyPageObservationStatus.TEMPORARILY_UNAVAILABLE, decision.status)
+        assertEquals(ObservationStatus.TEMPORARILY_UNAVAILABLE, decision.status)
     }
 
     @Test
@@ -32,14 +32,14 @@ class AiReplyPageObservationSemanticsTest {
 
         val decision = semantics.classify(incoming, previous, TARGET_PACKAGE)
 
-        assertEquals(AiReplyPageObservationStatus.CONFIRMED_UNKNOWN, decision.status)
+        assertEquals(ObservationStatus.CONFIRMED_UNKNOWN, decision.status)
     }
 
     @Test
     fun knownPageIsConfirmedPage() {
         val decision = semantics.classify(snapshot(ChatPageKind.CHAT_DETAIL_CANDIDATE), null, TARGET_PACKAGE)
 
-        assertEquals(AiReplyPageObservationStatus.CONFIRMED_PAGE, decision.status)
+        assertEquals(ObservationStatus.CONFIRMED_PAGE, decision.status)
     }
 
     private fun snapshot(

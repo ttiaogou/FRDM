@@ -18,7 +18,7 @@ internal class AiReplySessionTraversalCoordinator(retryDelaysMs: LongArray) {
 
     fun isTransient(snapshot: ChatPageSnapshot?): Boolean =
         pageObservationSemantics.classify(snapshot, previous = null, targetPackage = "").status ==
-            AiReplyPageObservationStatus.TEMPORARILY_UNAVAILABLE
+            ObservationStatus.TEMPORARILY_UNAVAILABLE
 
     /** Returns the next fast delay, then keeps returning the low-frequency delay indefinitely. */
     fun nextDelayMs(lowFrequencyDelayMs: Long = DEFAULT_LOW_FREQUENCY_DELAY_MS): Long {
