@@ -189,6 +189,8 @@ class AiReplyObservationRuntime(
         get() = receivedGreetingsTaskFlow.awaitingNormalInboxAfterReturn
 
     private var pageInspectionTask: ScheduledTask? = null
+    /** Purpose carried with the next scheduled full observation. */
+    private var pendingPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
     private var regionRefreshTask: ScheduledTask? = null
     private val inboxPageRecognizer = MomoInboxPageRecognizer()
     private val receivedGreetingsPageRecognizer by lazy(LazyThreadSafetyMode.NONE) {
@@ -215,7 +217,7 @@ class AiReplyObservationRuntime(
             fullInspectionDebounceMs = fullInspectionDebounceMs,
             regionRefreshDebounceMs = regionRefreshDebounceMs,
             maxEventBurstInspectionWaitMs = MAX_EVENT_BURST_INSPECTION_WAIT_MS,
-            runFullInspection = ::runFullInspection,
+            runFullInspection = { runFullInspection() },
             runRegionRefresh = ::runRegionRefresh,
             onReceivedGreetingsConfirmed = ::startReceivedGreetingsTaskFromConfirmedPage,
             onFallbackCheckRequested = ::requestReceivedGreetingsFallbackCheck,
@@ -254,7 +256,7 @@ class AiReplyObservationRuntime(
             isReadRequestAllowed = {
                 isAiReplyActive() && chatPagePort.supportsTargetPackage(targetPackage())
             },
-            inspectActivePage = { readPageSnapshot() },
+            inspectActivePage = { readPageSnapshot(AiReplyPageReadPurpose.FULL_INSPECTION) },
             isResultCurrent = ::isMessageReadResultCurrent,
             shouldDrainPendingSnapshot = { !isReadOnlyGreetingMessageRead() },
             onValidatedResult = { requestedSnapshot, batch, activeSnapshot ->
@@ -443,9 +445,9 @@ class AiReplyObservationRuntime(
         onLog = onLog
     )
 
-    private fun readPageSnapshot(
-        purpose: AiReplyPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
-    ): ChatPageSnapshot? = pageReadCoordinator.read(purpose).snapshot
+    /** Every raw page read must declare its observation entry purpose. */
+    private fun readPageSnapshot(purpose: AiReplyPageReadPurpose): ChatPageSnapshot? =
+        pageReadCoordinator.read(purpose).snapshot
     private var snapshotRecoveryStartedAtMs = 0L
     private var receivedGreetingsUserActive = false
     private var userInteractionActive = false
@@ -523,7 +525,10 @@ class AiReplyObservationRuntime(
         // The watchdog callback is already a fresh-observation request. Schedule it through
         // the runtime-owned inspection slot so a stale/coalesced full-inspection channel cannot
         // swallow the probe while an earlier page inspection is still being retired.
-        scheduleFullInspectionAfter(fullInspectionDebounceMs)
+        scheduleFullInspectionAfter(
+            fullInspectionDebounceMs,
+            AiReplyPageReadPurpose.RECEIVED_GREETINGS
+        )
     }
 
     /** Requests a fresh unified snapshot for a bounded arrival retry; no adapter probe is run here. */
@@ -537,10 +542,17 @@ class AiReplyObservationRuntime(
         // snapshot immediately; adding another full-page debounce here changes the contract
         // from 350ms to 350ms + debounce and leaves LIST_CONFIRMED behind the test/runtime
         // retry boundary.
+        pendingPageReadPurpose = AiReplyPageReadPurpose.RECEIVED_GREETINGS
         runFullInspection()
     }
 
     private fun runFullInspection() {
+        val purpose = pendingPageReadPurpose
+        pendingPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
+        runFullInspection(purpose)
+    }
+
+    private fun runFullInspection(purpose: AiReplyPageReadPurpose) {
         pageInspectionTask = null
         if (!isAiReplyActive()) return
         if (!chatPagePort.supportsTargetPackage(targetPackage())) {
@@ -562,7 +574,7 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼任务观察被阻止：当前任务已不持有 UI 操作权；等待安全恢复")
             return
         }
-        val pageRead = pageReadCoordinator.read(AiReplyPageReadPurpose.FULL_INSPECTION)
+        val pageRead = pageReadCoordinator.read(purpose)
         val inspection = pageRead.snapshot
         val observationDecision = pageObservationSemantics.classify(
             snapshot = inspection,
@@ -1785,6 +1797,9 @@ class AiReplyObservationRuntime(
             pageObservationCoordinator.cancelRegionRefresh()
             pageInspectionTask?.cancel()
             pageInspectionTask = null
+            if (receivedGreetingsPageProbePending) {
+                pendingPageReadPurpose = AiReplyPageReadPurpose.RECEIVED_GREETINGS
+            }
             pageObservationCoordinator.signalFullInspection()
             return
         }
@@ -2044,7 +2059,7 @@ class AiReplyObservationRuntime(
                 draftRetryTask = scheduler.schedule(700L * draftReadRetries) {
                     draftRetryTask = null
                     if (visit != draftVisitToken || run != sessionActionGeneration || !isAiReplyActive()) return@schedule
-                    val fresh = runCatching { readPageSnapshot() }.getOrNull()
+                    val fresh = runCatching { readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY) }.getOrNull()
                     if (fresh == null || !hasSameWindowSession(snapshot, fresh)) {
                         onLog("AI 消息复读停止：窗口或会话已变化")
                         return@schedule
@@ -2825,7 +2840,7 @@ class AiReplyObservationRuntime(
             if (!isAiReplyActive() || !sessionRunStarted ||
                 sessionManagerState != SessionManagerState.WAITING_FOR_UNREAD
             ) return@schedule
-            val fresh = runCatching { readPageSnapshot() }.getOrNull()
+            val fresh = runCatching { readPageSnapshot(AiReplyPageReadPurpose.SESSION_LIST_RETRY) }.getOrNull()
             if (fresh == null || fresh.pageKind != ChatPageKind.CHAT_LIST || fresh.packageName != targetPackage()) {
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI Reply 低频待机复查暂停：未能确认普通消息列表页面；不把未知页面当作无未读，也不执行点击或滑动")
@@ -3274,7 +3289,7 @@ class AiReplyObservationRuntime(
             onLog("AI 会话打开复核被阻止：私人消息任务租约已失效；不处理旧页面状态")
             return
         }
-        val current = runCatching { readPageSnapshot() }.getOrNull()
+        val current = runCatching { readPageSnapshot(AiReplyPageReadPurpose.ACTIVITY_TRANSITION) }.getOrNull()
         if (current?.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             current.packageName == targetPackage()
         ) {
@@ -3399,7 +3414,7 @@ class AiReplyObservationRuntime(
                 return@rejectedReturn
             }
 
-            val current = runCatching { readPageSnapshot() }.getOrNull()
+            val current = runCatching { readPageSnapshot(AiReplyPageReadPurpose.RETURN_NAVIGATION_VERIFY) }.getOrNull()
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 current.packageName != targetPackage() || windowSessionKey(current) != rejectedWindowKey
             ) {
@@ -3517,7 +3532,7 @@ class AiReplyObservationRuntime(
                 onLog("AI 会话返回[STALE_TASK_IGNORED]：私人消息任务租约已失效；不提交返回动作")
                 return@schedule
             }
-            val current = runCatching { readPageSnapshot() }.getOrNull()
+            val current = runCatching { readPageSnapshot(AiReplyPageReadPurpose.RETURN_NAVIGATION_VERIFY) }.getOrNull()
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 current.packageName != snapshot.packageName || !hasSameWindowSession(snapshot, current)
             ) {
@@ -3555,7 +3570,7 @@ class AiReplyObservationRuntime(
         if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID)) return
         // Reacquire the active page immediately before scrolling. A previous list snapshot can
         // become stale after RecyclerView relayout, window changes, or user interaction.
-        val inspectionResult = runCatching { readPageSnapshot() }
+        val inspectionResult = runCatching { readPageSnapshot(AiReplyPageReadPurpose.SCROLL_BEFORE) }
         val rawFresh = inspectionResult.getOrNull()
         val fresh = rawFresh?.let(::stabilizeIncomingPageSnapshot) ?: run {
             sessionManagerState = SessionManagerState.PAUSED
@@ -3752,7 +3767,10 @@ class AiReplyObservationRuntime(
                                     else -> "AI 会话管理：已完成一次底部定位方向的列表滑动；等待新快照确认位置"
                                 }
                             )
-                            scheduleFullInspection()
+                            scheduleFullInspectionAfter(
+                                fullInspectionDebounceMs,
+                                AiReplyPageReadPurpose.SCROLL_AFTER
+                            )
                         }
                         GestureExecutionStatus.CANCELLED -> {
                             // A cancelled gesture is not proof of reaching either list boundary.
@@ -3927,7 +3945,7 @@ class AiReplyObservationRuntime(
 
     /** Acquires the newest page tree and validates it against the last confirmed inbox identity. */
     private fun inspectFreshPageSnapshot(): ChatPageSnapshot? {
-        val raw = runCatching { readPageSnapshot() }.getOrNull() ?: return null
+        val raw = runCatching { readPageSnapshot(AiReplyPageReadPurpose.BOUNDARY_VERIFY) }.getOrNull() ?: return null
         return stabilizeIncomingPageSnapshot(raw)
     }
 
@@ -4029,15 +4047,19 @@ class AiReplyObservationRuntime(
         snapshot.packageName == targetPackage()
 
     private fun scheduleFullInspection() {
-        scheduleFullInspectionAfter(fullInspectionDebounceMs)
+        scheduleFullInspectionAfter(fullInspectionDebounceMs, AiReplyPageReadPurpose.FULL_INSPECTION)
     }
 
-    private fun scheduleFullInspectionAfter(delayMs: Long) {
+    private fun scheduleFullInspectionAfter(
+        delayMs: Long,
+        purpose: AiReplyPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
+    ) {
         cancelMessageReadRetry()
         pageObservationCoordinator.cancelFullInspection()
         pageObservationCoordinator.cancelRegionRefresh()
         pageInspectionTask?.cancel()
-        pageInspectionTask = scheduler.schedule(delayMs, ::runFullInspection)
+        pendingPageReadPurpose = purpose
+        pageInspectionTask = scheduler.schedule(delayMs) { runFullInspection() }
     }
 
     /**
@@ -4066,7 +4088,7 @@ class AiReplyObservationRuntime(
             // The snapshot and node paths are deliberately refreshed after the delay. If the
             // user navigated away, the current page contract will reject the read without using
             // the previous chat's locator.
-            val refreshed = runCatching { readPageSnapshot() }.getOrNull()
+            val refreshed = runCatching { readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY) }.getOrNull()
             if (refreshed == null || refreshed.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 refreshed.packageName != targetPackage() ||
                 refreshed.messageListTarget == null || refreshed.inputFieldTarget == null
