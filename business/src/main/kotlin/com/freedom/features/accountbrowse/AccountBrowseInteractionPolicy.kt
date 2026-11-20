@@ -3,7 +3,7 @@ package com.freedom.features.accountbrowse
 import com.freedom.features.recovery.RecoveryTransactionState
 
 /** Centralizes the existing AccountBrowse automatic-interaction gate. */
-internal class AccountBrowseInteractionPolicy {
+class AccountBrowseInteractionPolicy {
     fun mayPerformAutomaticStep(
         sessionEnabled: Boolean,
         touchActive: Boolean,
