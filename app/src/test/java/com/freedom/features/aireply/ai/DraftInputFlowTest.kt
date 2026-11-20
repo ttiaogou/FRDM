@@ -49,7 +49,7 @@ class DraftInputFlowTest {
         }, AiModelCloudConsent { true }, object : AiReplyPersonalizationRepository {
             override fun load(): AiReplyPersonalization = error("unused")
             override fun save(personalization: AiReplyPersonalization) = Unit
-        }, input, scheduler, { true }, { false }, {}, { error("unused") }, chooseRandomInt = { _, _ -> 500 }
+        }, input, scheduler, { true }, {}, { error("unused") }, chooseRandomInt = { _, _ -> 500 }
     )
 
     @Test fun stageTwoDoesNotSendWithoutAnActiveRequestOwner() {
@@ -62,7 +62,7 @@ class DraftInputFlowTest {
             }, AiModelCloudConsent { true }, object : AiReplyPersonalizationRepository {
                 override fun load(): AiReplyPersonalization = error("unused")
                 override fun save(personalization: AiReplyPersonalization) = Unit
-            }, input, scheduler, { true }, { false }, {}, { error("unused") },
+            }, input, scheduler, { true }, {}, { error("unused") },
             chooseRandomInt = { _, _ -> 500 }, sendPort = send
         )
         coordinator.writeNext(target, "abcdef", listOf("abc", "def"), 0, "", 0)
