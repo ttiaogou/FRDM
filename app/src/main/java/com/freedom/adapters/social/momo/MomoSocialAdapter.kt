@@ -207,6 +207,8 @@ internal class MomoSocialAdapter(
         @Volatile var profileScrollAttempted: Boolean = false
         @Volatile var profileScrollInFlight: Boolean = false
         @Volatile var backAttempts: Int = 0
+        @Volatile var avatarClickState: MomoAvatarClickTransactionState =
+            MomoAvatarClickTransactionState.AVATAR_CLICK_PREPARING
     }
 
     private sealed interface SayHiCardListTapInspection {
@@ -365,6 +367,42 @@ internal class MomoSocialAdapter(
     /** Run-scoped row-anchor cache; never persists a display-name-to-ID mapping across runs. */
     private val verifiedInboxIdentityByAnchor = LinkedHashMap<String, String>()
     private val completedInboxIdentityOutcomes = LinkedHashMap<String, ContactIdentityCaptureOutcome>()
+
+    private fun transitionAvatarClickState(
+        pending: PendingInboxIdentityCapture?,
+        next: MomoAvatarClickTransactionState,
+        reason: String
+    ) {
+        if (pending == null) return
+        val previous = pending.avatarClickState
+        if (previous == next) return
+        if (!previous.canTransitionTo(next)) {
+            onLog(
+                "AI 头像点击事务：非法状态转换被拒绝；" +
+                    "from=${previous.name}；to=${next.name}；reason=$reason"
+            )
+            return
+        }
+        pending.avatarClickState = next
+        onLog(
+            "AI 头像点击事务状态：from=${previous.name}；to=${next.name}；" +
+                "reason=$reason"
+        )
+    }
+
+    private fun releaseAvatarCaptureForRetry(
+        pending: PendingInboxIdentityCapture,
+        reason: String
+    ) {
+        transitionAvatarClickState(
+            pending,
+            MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
+            reason
+        )
+        synchronized(inboxIdentityCaptureLock) {
+            if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
+        }
+    }
 
     init {
         sayHiTraversalState.restore()?.let { restored ->
@@ -4854,6 +4892,7 @@ internal class MomoSocialAdapter(
                 onLog("AI 联系人身份采集失败：CANDIDATE_ANCHOR_INVALID；未进入聊天详情头像采集")
                 return ContactIdentityCaptureRequestResult.REJECTED
             }
+        onLog("AI 头像点击事务：进入 AVATAR_CLICK_PREPARING；准备基于当前聊天详情重新定位头像")
         val anchorKey = anchor.opaqueKey()
         synchronized(inboxIdentityCaptureLock) {
             if (anchorKey in failedInboxIdentityCaptureKeys) {
@@ -4875,55 +4914,6 @@ internal class MomoSocialAdapter(
             return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
 
-        val tree = accessibilityGateway.inspectActiveWindow(
-            TreeInspectionRequest(
-                maxNodes = 1_800,
-                maxDepth = 48,
-                maxDurationMs = 1_000L,
-                allowVisibleWindowFallback = false,
-                textCapture = NodeTextCapture.EPHEMERAL
-            )
-        ) ?: run {
-            onLog("AI 联系人身份采集失败：CHAT_DETAIL_TREE_UNAVAILABLE；等待下一次窗口快照")
-            return ContactIdentityCaptureRequestResult.RETRY_LATER
-        }
-        if (tree.truncated || tree.window.packageName != targetPackage ||
-            !accessibilityGateway.isWindowCurrent(tree.window)
-        ) {
-            onLog(
-                "AI 联系人身份采集失败：CHAT_DETAIL_WINDOW_NOT_READY；" +
-                    "truncated=${tree.truncated}；package=${tree.window.packageName}；" +
-                    "activity=${tree.window.activityClass}；current=${accessibilityGateway.isWindowCurrent(tree.window)}"
-            )
-            return ContactIdentityCaptureRequestResult.RETRY_LATER
-        }
-
-        val index = NodeTreeIndex(tree)
-        val target = MomoSayHiAvatarTargetPolicy.resolveConversationAvatarTarget(index)
-            ?: run {
-                onLog("AI 联系人身份采集失败：CHAT_DETAIL_LEFT_AVATAR_NOT_FOUND；不回退私人列表头像")
-                return ContactIdentityCaptureRequestResult.RETRY_LATER
-            }
-        onLog("AI 联系人身份采集：已定位聊天详情页左侧消息头像；不使用右上角头像")
-        val avatarClickNode = index.nodeAt(target.path)
-            ?: run {
-                onLog("AI 联系人身份采集失败：LEFT_AVATAR_NODE_DISAPPEARED；快照内目标已失效")
-                return ContactIdentityCaptureRequestResult.RETRY_LATER
-            }
-        if (!avatarClickNode.visible || target.targetBounds.isEmpty) {
-            onLog("AI 联系人身份采集失败：LEFT_AVATAR_TARGET_INVALID；不可见或边界为空")
-            return ContactIdentityCaptureRequestResult.REJECTED
-        }
-
-        val metrics = accessibilityGateway.displayMetrics()
-        val executionContext = gesturePolicy.captureContext(
-            tree.window,
-            metrics.toGestureCoordinateContext()
-        ) ?: run {
-            onLog("AI 联系人身份采集失败：GESTURE_CONTEXT_UNAVAILABLE；未提交头像点击")
-            return ContactIdentityCaptureRequestResult.RETRY_LATER
-        }
-
         val pending = PendingInboxIdentityCapture(
             anchor = anchor,
             stage = InboxIdentityCaptureStage.AVATAR_TAP_PENDING,
@@ -4935,6 +4925,68 @@ internal class MomoSocialAdapter(
             }
             pendingInboxIdentityCapture = pending
         }
+
+        transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_PAGE_READING, "开始读取当前聊天详情页")
+        onLog("AI 头像点击事务：进入 AVATAR_PAGE_READING；读取当前聊天详情页")
+        val tree = accessibilityGateway.inspectActiveWindow(
+            TreeInspectionRequest(
+                maxNodes = 1_800,
+                maxDepth = 48,
+                maxDurationMs = 1_000L,
+                allowVisibleWindowFallback = false,
+                textCapture = NodeTextCapture.EPHEMERAL
+            )
+        ) ?: run {
+            onLog("AI 联系人身份采集失败：CHAT_DETAIL_TREE_UNAVAILABLE；等待下一次窗口快照")
+            releaseAvatarCaptureForRetry(pending, "聊天详情节点树暂时不可用")
+            return ContactIdentityCaptureRequestResult.RETRY_LATER
+        }
+        if (tree.truncated || tree.window.packageName != targetPackage ||
+            !accessibilityGateway.isWindowCurrent(tree.window)
+        ) {
+            onLog(
+                "AI 联系人身份采集失败：CHAT_DETAIL_WINDOW_NOT_READY；" +
+                    "truncated=${tree.truncated}；package=${tree.window.packageName}；" +
+                    "activity=${tree.window.activityClass}；current=${accessibilityGateway.isWindowCurrent(tree.window)}"
+            )
+            releaseAvatarCaptureForRetry(pending, "聊天详情页面或窗口暂时不稳定")
+            return ContactIdentityCaptureRequestResult.RETRY_LATER
+        }
+
+        transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_LOCATING, "当前聊天详情页已读取")
+        onLog("AI 头像点击事务：进入 AVATAR_LOCATING；从当前节点树重新定位目标头像")
+        val index = NodeTreeIndex(tree)
+        val target = MomoSayHiAvatarTargetPolicy.resolveConversationAvatarTarget(index)
+            ?: run {
+                onLog("AI 联系人身份采集失败：CHAT_DETAIL_LEFT_AVATAR_NOT_FOUND；不回退私人列表头像")
+                releaseAvatarCaptureForRetry(pending, "当前快照暂时未找到目标头像")
+                return ContactIdentityCaptureRequestResult.RETRY_LATER
+            }
+        onLog("AI 联系人身份采集：已定位聊天详情页左侧消息头像；不使用右上角头像")
+        val avatarClickNode = index.nodeAt(target.path)
+            ?: run {
+                onLog("AI 联系人身份采集失败：LEFT_AVATAR_NODE_DISAPPEARED；快照内目标已失效")
+                releaseAvatarCaptureForRetry(pending, "头像节点在同一快照中失效")
+                return ContactIdentityCaptureRequestResult.RETRY_LATER
+            }
+        transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_IDENTITY_VERIFYING, "当前头像节点已重新定位")
+        onLog("AI 头像点击事务：进入 AVATAR_IDENTITY_VERIFYING；校验当前页面和头像目标")
+        if (!avatarClickNode.visible || target.targetBounds.isEmpty) {
+            onLog("AI 联系人身份采集失败：LEFT_AVATAR_TARGET_INVALID；不可见或边界为空")
+            releaseAvatarCaptureForRetry(pending, "头像目标不可见或边界无效")
+            return ContactIdentityCaptureRequestResult.REJECTED
+        }
+
+        val metrics = accessibilityGateway.displayMetrics()
+        val executionContext = gesturePolicy.captureContext(
+            tree.window,
+            metrics.toGestureCoordinateContext()
+        ) ?: run {
+            onLog("AI 联系人身份采集失败：GESTURE_CONTEXT_UNAVAILABLE；未提交头像点击")
+            releaseAvatarCaptureForRetry(pending, "手势坐标上下文暂时不可用")
+            return ContactIdentityCaptureRequestResult.RETRY_LATER
+        }
+        transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_CLICKING, "当前头像目标已通过身份与页面校验")
 
         val request = GestureIntentRequest(
             id = "momo-inbox-identity-avatar-${System.nanoTime()}",
@@ -4954,10 +5006,17 @@ internal class MomoSocialAdapter(
                     if (result.status == GestureExecutionStatus.COMPLETED) {
                         pending.stage = InboxIdentityCaptureStage.WAITING_PROFILE
                         pending.lastTransitionAtMs = System.currentTimeMillis()
+                        transitionAvatarClickState(
+                            pending,
+                            MomoAvatarClickTransactionState.AVATAR_ENTRY_VERIFYING,
+                            "头像手势完成，等待资料页页面确认"
+                        )
                     } else {
-                        if (result.status != GestureExecutionStatus.DEFERRED) {
-                            failedInboxIdentityCaptureKeys += anchorKey
-                        }
+                        transitionAvatarClickState(
+                            pending,
+                            MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
+                            "头像手势未完成；不将本次点击直接视为事务终止"
+                        )
                         pendingInboxIdentityCapture = null
                     }
                 }
@@ -4977,11 +5036,13 @@ internal class MomoSocialAdapter(
         }
 
         if (submission != GestureSubmission.ACCEPTED) {
+            transitionAvatarClickState(
+                pending,
+                MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
+                "头像手势未被接受；等待下一次当前页面重新定位"
+            )
             synchronized(inboxIdentityCaptureLock) {
                 if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
-                if (submission != GestureSubmission.DEFERRED_NOT_READY) {
-                    failedInboxIdentityCaptureKeys += anchorKey
-                }
             }
             onLog("AI 联系人身份采集失败：AVATAR_TAP_NOT_ACCEPTED；submission=$submission")
             return if (submission == GestureSubmission.DEFERRED_NOT_READY) {
@@ -5128,9 +5189,19 @@ internal class MomoSocialAdapter(
                 if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY) {
                     pending.stage = InboxIdentityCaptureStage.WAITING_PROFILE
                     pending.lastTransitionAtMs = System.currentTimeMillis()
+                    transitionAvatarClickState(
+                        pending,
+                        MomoAvatarClickTransactionState.AVATAR_ENTRY_VERIFYING,
+                        "超时窗口内观察到资料页"
+                    )
                     return true
                 }
                 if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) {
+                    transitionAvatarClickState(
+                        pending,
+                        MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
+                        "头像点击后未观察到资料页；等待重新定位"
+                    )
                     failPendingInboxIdentityCapture(pending, "头像点击后未观察到完成回调或资料页导航")
                     return false
                 }
@@ -5245,6 +5316,11 @@ internal class MomoSocialAdapter(
                         pending,
                         pending.platformUserId != null
                     )
+                    transitionAvatarClickState(
+                        pending,
+                        MomoAvatarClickTransactionState.AVATAR_COMPLETED,
+                        "资料页身份读取完成并返回原聊天详情"
+                    )
                     synchronized(inboxIdentityCaptureLock) {
                         identityReturnReinspectionPending = true
                     }
@@ -5291,6 +5367,11 @@ internal class MomoSocialAdapter(
             failedInboxIdentityCaptureKeys += pending.anchor.opaqueKey()
             shouldLog = loggedInboxIdentityFailureKeys.add(logKey)
         }
+        transitionAvatarClickState(
+            pending,
+            MomoAvatarClickTransactionState.AVATAR_UNKNOWN_RECOVERY,
+            reason
+        )
         if (shouldLog) {
             onLog("AI 联系人身份采集失败：$reason；保留未验证身份，不以昵称关联历史")
         }
