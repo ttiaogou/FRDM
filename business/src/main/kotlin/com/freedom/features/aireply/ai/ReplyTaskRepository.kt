@@ -80,7 +80,7 @@ object ReplyTaskStatusTransitions {
         ),
         ReplyTaskStatus.UNKNOWN to setOf(
             ReplyTaskStatus.SENT,
-            ReplyTaskStatus.FAILED_FINAL
+            ReplyTaskStatus.FAILED_RETRYABLE
         ),
         ReplyTaskStatus.FAILED_RETRYABLE to setOf(ReplyTaskStatus.REQUESTED),
         ReplyTaskStatus.FAILED_FINAL to emptySet(),
