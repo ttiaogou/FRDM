@@ -703,6 +703,14 @@ class AiReplyDraftCoordinator(
                     scheduler.schedule(0L) { writeMessageSegment(pending.target, nextIndex, pending.requestGeneration) }
                     return SendConfirmationResult.WAITING
                 }
+                val allSegmentsSent = replySegmentTaskRepository?.findByRequest(pending.requestId)
+                    ?.let { records ->
+                        records.size == pending.segmentCount && records.all { it.status == ReplySegmentTaskStatus.SENT }
+                    } ?: true
+                if (!allSegmentsSent) {
+                    onLog("AI 发送结果核验：整体任务完成门禁未通过；仍存在未确认消息段；禁止返回列表")
+                    return SendConfirmationResult.WAITING
+                }
                 lastConfirmedSendId = confirmationId
                 updateTaskStatus(ReplyTaskStatus.SENT, pending.requestGeneration)
                 synchronized(lock) {
