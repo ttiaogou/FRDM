@@ -576,6 +576,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() },
             inputOriginClassifier = inputOriginClassifier,
             observeWindowStateEvent = windowContextTracker::observeWindowStateEvent,
+            pageObservationCoordinator = pageObservationCoordinator,
             onDuplicateSuppressed = { event ->
                 val decision = event.inputOriginDecision
                 diagnostics.recordStructured(
