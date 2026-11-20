@@ -13,6 +13,8 @@ class TaskExecutionController(
     private val onLog: (String) -> Unit = {}
 ) {
     private var lease: TaskLease? = null
+    /** Local-only capability used by platform-neutral fixtures without a shared coordinator. */
+    private var isolatedTaskId: String? = null
     private var runGeneration: Long? = null
 
     @Synchronized
@@ -25,6 +27,7 @@ class TaskExecutionController(
             coordinator?.release(current)
             lease = null
         }
+        if (runGeneration != generation) isolatedTaskId = null
         runGeneration = generation
     }
 
@@ -32,9 +35,16 @@ class TaskExecutionController(
     @Synchronized
     fun claim(taskId: String, reason: String): Boolean {
         require(taskId.isNotBlank()) { "taskId must not be blank" }
-        val taskCoordinator = coordinator ?: return true
         val generation = runGeneration ?: currentRunGeneration().also { runGeneration = it }
         require(generation >= 0L) { "runGeneration must be non-negative" }
+        val taskCoordinator = coordinator
+        if (taskCoordinator == null) {
+            val current = isolatedTaskId
+            if (current != null && current != taskId) return false
+            isolatedTaskId = taskId
+            onLog("任务协调[OWNED]：task=$taskId；reason=$reason；runGeneration=$generation；本地隔离租约已确认")
+            return true
+        }
         val current = lease
         val next = when {
             current == null -> taskCoordinator.tryAcquire(taskId, generation)
@@ -59,16 +69,23 @@ class TaskExecutionController(
 
     @Synchronized
     fun owns(taskId: String): Boolean {
-        val taskCoordinator = coordinator ?: return true
+        val taskCoordinator = coordinator
+        if (taskCoordinator == null) return isolatedTaskId == taskId
         val current = lease ?: return false
         return current.taskId == taskId && taskCoordinator.isCurrent(current)
     }
 
     @Synchronized
-    fun activeTaskId(): String? = lease?.taskId
+    fun activeTaskId(): String? = lease?.taskId ?: isolatedTaskId
 
     @Synchronized
     fun release(taskId: String, reason: String): Boolean {
+        if (coordinator == null) {
+            if (isolatedTaskId != taskId) return false
+            isolatedTaskId = null
+            onLog("任务协调[RELEASED]：task=$taskId；reason=$reason；已释放本地隔离租约")
+            return true
+        }
         val current = lease ?: return false
         if (current.taskId != taskId) return false
         // Isolated feature fixtures may intentionally omit the shared coordinator.  The local
@@ -82,6 +99,12 @@ class TaskExecutionController(
 
     @Synchronized
     fun releaseCurrent(reason: String) {
+        if (coordinator == null) {
+            val taskId = isolatedTaskId ?: return
+            isolatedTaskId = null
+            onLog("任务协调[RELEASED]：task=$taskId；reason=$reason；已释放本地隔离租约")
+            return
+        }
         val current = lease ?: return
         val released = coordinator?.release(current) ?: true
         lease = null
@@ -91,6 +114,7 @@ class TaskExecutionController(
     @Synchronized
     fun reset(reason: String) {
         releaseCurrent(reason)
+        isolatedTaskId = null
         runGeneration = null
     }
 

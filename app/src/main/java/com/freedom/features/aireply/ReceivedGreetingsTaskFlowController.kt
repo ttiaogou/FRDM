@@ -81,23 +81,33 @@ internal class ReceivedGreetingsTaskFlowController(
      * Starts the existing adapter-owned navigation flow. The adapter reset remains bounded and
      * best-effort exactly as before; lifecycle ownership moves to this controller.
      */
-    fun beginNavigationTask(): StartResult = when (executor.beginNavigationTask()) {
+    fun beginNavigationTask(): StartResult {
+        if (lifecycle.isActive) {
+            return if (lifecycle.ownsTask()) StartResult.STARTED else StartResult.START_FAILED
+        }
+        return when (executor.beginNavigationTask()) {
         ReceivedGreetingsTaskExecutor.StartResult.STARTED -> {
             lifecycle.markStarted()
             StartResult.STARTED
         }
         ReceivedGreetingsTaskExecutor.StartResult.NOT_SUPPORTED -> StartResult.NOT_SUPPORTED
         ReceivedGreetingsTaskExecutor.StartResult.START_FAILED -> StartResult.START_FAILED
+        }
     }
 
     /** Begins only from a page already confirmed by the dedicated page recognizer. */
-    fun beginFromConfirmedList(): StartResult = when (executor.beginFromConfirmedList()) {
+    fun beginFromConfirmedList(): StartResult {
+        if (lifecycle.isActive) {
+            return if (lifecycle.ownsTask()) StartResult.STARTED else StartResult.START_FAILED
+        }
+        return when (executor.beginFromConfirmedList()) {
         ReceivedGreetingsTaskExecutor.StartResult.STARTED -> {
             lifecycle.markStarted()
             StartResult.STARTED
         }
         ReceivedGreetingsTaskExecutor.StartResult.NOT_SUPPORTED -> StartResult.NOT_SUPPORTED
         ReceivedGreetingsTaskExecutor.StartResult.START_FAILED -> StartResult.START_FAILED
+        }
     }
 
     fun synchronizeRecoveryConfirmation(): Boolean = executor.synchronizeRecoveryConfirmation()
