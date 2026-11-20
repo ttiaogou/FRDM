@@ -76,7 +76,7 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            bad = root / "app/src/test/java/com/freedom/core/runtime/BadBoundaryTest.kt"
+            bad = root / "core/src/test/kotlin/com/freedom/core/runtime/BadBoundaryTest.kt"
             bad.parent.mkdir(parents=True, exist_ok=True)
             bad.write_text(
                 "package com.freedom.core.runtime\n"
@@ -85,7 +85,7 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
             )
             self.assertEqual(
                 guard.core_test_application_dependencies(root),
-                ["app/src/test/java/com/freedom/core/runtime/BadBoundaryTest.kt"],
+                ["core/src/test/kotlin/com/freedom/core/runtime/BadBoundaryTest.kt"],
             )
 
     def test_large_classes_are_advisories_not_automatic_violations(self):
@@ -101,8 +101,8 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
             self.assertIn("LargeRuntime.kt", advisories[0])
 
     def test_account_browse_runtime_owns_immutable_session_snapshot(self):
-        state_path = "app/src/main/java/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt"
-        runtime_path = "app/src/main/java/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
+        state_path = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt"
+        runtime_path = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
         adapter_path = "app/src/main/java/com/freedom/adapters/accessibility/android/Workflow.kt"
         state_code = """
             internal class AccountBrowseSessionStateOwner {
@@ -130,9 +130,9 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         )
 
     def test_account_browse_session_owner_cannot_be_constructed_outside_runtime(self):
-        state_path = "app/src/main/java/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt"
-        runtime_path = "app/src/main/java/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
-        other_path = "app/src/test/java/com/freedom/features/accountbrowse/RuntimeTest.kt"
+        state_path = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt"
+        runtime_path = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
+        other_path = "business/src/test/kotlin/com/freedom/features/accountbrowse/RuntimeTest.kt"
         state_code = "internal class AccountBrowseSessionStateOwner { data class AccountBrowseSessionSnapshot(val pauseReason: String = "") }"
         code = {
             state_path: state_code,
