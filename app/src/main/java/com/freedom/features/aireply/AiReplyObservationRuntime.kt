@@ -293,7 +293,13 @@ class AiReplyObservationRuntime(
                     "AI 启动导航[CONFIRMED]：消息工作区域、底部导航锚点和会话列表视口已连续" +
                         "3 次新快照确认；开始执行启动顶部定位"
                 )
-                handleInspectionSnapshot(snapshot)
+                handleInspectionSnapshot(
+                    ObservationResult(
+                        status = ObservationStatus.CONFIRMED_PAGE,
+                        reason = "STARTUP_READINESS_CONFIRMED",
+                        snapshot = snapshot
+                    )
+                )
             },
             onTimedOut = { sessionManagerState = SessionManagerState.PAUSED },
             onLog = onLog
@@ -585,7 +591,7 @@ class AiReplyObservationRuntime(
             purpose = pageRead.purpose,
             failure = pageRead.failure
         )
-        if (observationDecision.status == AiReplyPageObservationStatus.TEMPORARILY_UNAVAILABLE) {
+        if (observationDecision.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) {
             if (snapshotRecoveryStartedAtMs == 0L) {
                 snapshotRecoveryStartedAtMs = System.currentTimeMillis()
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("EMPTY_SNAPSHOT"))
@@ -657,7 +663,7 @@ class AiReplyObservationRuntime(
             pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
             onLog("收到的招呼恢复[RECOVERY_VERIFIED]：连续两次新鲜列表指纹一致；恢复收到招呼任务协调器")
         }
-        handleInspectionSnapshot(recovered)
+        handleInspectionSnapshot(observationDecision.copy(snapshot = recovered))
     }
 
     private fun recoveryStructuralKey(snapshot: ChatPageSnapshot): String = listOf(
@@ -702,7 +708,10 @@ class AiReplyObservationRuntime(
     }
 
     /** Applies a newly acquired page snapshot after ordinary debounce or verified user stability. */
-    private fun handleInspectionSnapshot(incomingInspection: ChatPageSnapshot) {
+    /** Consumes the semantic observation result; the snapshot remains evidence only. */
+    private fun handleInspectionSnapshot(observation: ObservationResult) {
+        val incomingInspection = observation.snapshot ?: return
+        if (observation.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) return
         val previous = lastPageInspection
         val inspection = stabilizeIncomingPageSnapshot(incomingInspection)
         val pageFingerprint = PageFingerprint(
@@ -1035,7 +1044,7 @@ class AiReplyObservationRuntime(
             // must not bypass the Message-tab/viewport proof owned by the startup gate.
             return
         }
-        if (sessionRunStarted && inspection.pageKind == ChatPageKind.UNKNOWN &&
+        if (sessionRunStarted && observation.status == ObservationStatus.CONFIRMED_UNKNOWN &&
             sessionManagerState in setOf(
                 SessionManagerState.WAITING_FOR_SESSION_LIST,
                 SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP,
@@ -1051,11 +1060,18 @@ class AiReplyObservationRuntime(
         if (inspection.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE) {
             lastRegionFingerprint = ""
         }
-        if (previousKey != nextKey || inspection.pageKind == ChatPageKind.UNKNOWN) {
+        if (previousKey != nextKey || observation.status == ObservationStatus.CONFIRMED_UNKNOWN) {
             onLog("AI 模式页面结构识别：${summarize(inspection)}")
             logStructureEvidence(inspection)
         }
-        when (inspection.pageKind) {
+        // Page kind remains adapter evidence for the existing business branches, while the
+        // UNKNOWN branch is admitted only by the semantic observation status.
+        val businessPageKind = if (observation.status == ObservationStatus.CONFIRMED_UNKNOWN) {
+            ChatPageKind.UNKNOWN
+        } else {
+            inspection.pageKind
+        }
+        when (businessPageKind) {
             ChatPageKind.CHAT_LIST -> {
                 when {
                     sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn -> {
@@ -2710,7 +2726,7 @@ class AiReplyObservationRuntime(
                 return@schedule
             }
             val fresh = inspectFreshPageSnapshot()
-            if (fresh != null && fresh.pageKind == ChatPageKind.UNKNOWN &&
+            if (fresh != null && isSemanticallyUnconfirmed(fresh) &&
                 fresh.packageName == targetPackage() &&
                 fresh.windowIdentityKey() == expectedWindowIdentity
             ) {
@@ -3592,7 +3608,7 @@ class AiReplyObservationRuntime(
                 "WINDOW_IDENTITY_MISMATCH"
             else -> null
         }
-        val sameWindowTransientUnknown = fresh.pageKind == ChatPageKind.UNKNOWN &&
+        val sameWindowTransientUnknown = isSemanticallyUnconfirmed(fresh) &&
             fresh.packageName == snapshot.packageName &&
             fresh.packageName == targetPackage() &&
             fresh.hasSameWindowIdentity(snapshot) &&
@@ -3903,7 +3919,7 @@ class AiReplyObservationRuntime(
                 scheduleSessionSafeViewportRetry(toTop, expectedWindowIdentity, "新页面快照暂不可用")
                 return@retry
             }
-            val transientUnknownOnSameWindow = refreshed.pageKind == ChatPageKind.UNKNOWN &&
+            val transientUnknownOnSameWindow = isSemanticallyUnconfirmed(refreshed) &&
                 refreshed.packageName == targetPackage() &&
                 refreshed.windowIdentityKey() == expectedWindowIdentity &&
                 lastConfirmedChatListInspection?.hasSameWindowIdentity(refreshed) == true
@@ -3949,6 +3965,16 @@ class AiReplyObservationRuntime(
         return stabilizeIncomingPageSnapshot(raw)
     }
 
+    /** Keeps low-level safety checks on the shared observation semantics boundary. */
+    private fun isSemanticallyUnconfirmed(
+        snapshot: ChatPageSnapshot,
+        previous: ChatPageSnapshot? = lastPageInspection
+    ): Boolean = pageObservationSemantics.classify(
+        snapshot = snapshot,
+        previous = previous,
+        targetPackage = targetPackage()
+    ).status != ObservationStatus.CONFIRMED_PAGE
+
     /**
      * Keeps the last positively confirmed inbox identity as comparison-only evidence across
      * transient UNKNOWN samples. It never supplies coordinates or node paths to an action.
@@ -3959,7 +3985,7 @@ class AiReplyObservationRuntime(
         val stable = stabilizeConfirmedChatList(confirmed, incoming)
         when {
             stable.pageKind == ChatPageKind.CHAT_LIST -> lastConfirmedChatListInspection = stable
-            stable.pageKind == ChatPageKind.UNKNOWN && confirmed != null &&
+            isSemanticallyUnconfirmed(stable, confirmed) && confirmed != null &&
                 confirmed.packageName == stable.packageName &&
                 confirmed.hasSameWindowIdentity(stable) ->
                 lastConfirmedChatListInspection = confirmed
