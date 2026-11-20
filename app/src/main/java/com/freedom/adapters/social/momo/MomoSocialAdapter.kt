@@ -6025,8 +6025,8 @@ internal class MomoSocialAdapter(
     }
 
     override fun refreshKnownChatRegions(previous: ChatPageSnapshot): ChatRegionSnapshot {
-        val messageListTarget = messageListTarget
-        val inputFieldTarget = inputFieldTarget
+        val messageListTarget = previous.messageListTarget
+        val inputFieldTarget = previous.inputFieldTarget
         val previousWindow = messageListTarget?.window
             ?: inputFieldTarget?.window
         val bothTargetsShareWindow = messageListTarget == null ||
