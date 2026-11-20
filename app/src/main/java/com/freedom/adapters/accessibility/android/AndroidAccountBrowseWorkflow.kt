@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 40070)
-Total output lines: 2765
-
 package com.freedom.adapters.accessibility.android
 
 import com.freedom.gesture.api.GestureApi
@@ -1077,7 +1074,725 @@ internal class AndroidAccountBrowseWorkflow(
     }
 
     private fun verifyNavigationAction() {
-        val p…10070 tokens truncated… ${accountBrowseSession.swipeCount + 1} 轮滑动前可见节点快照：${accountBrowseSession.sourceSnapshot.ifBlank { "未提取到可见文字节点" }}")
+        val page = socialBrowsePort.inspectPage()
+        if (!socialBrowsePort.supportsTargetPackage(page.packageName)) {
+            if (System.currentTimeMillis() >= accountBrowseSession.navigationActionDeadlineAt) {
+                accountBrowseSession.navigationActionKey = ""
+                accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB
+            }
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+        if (handleMomoPopup()) return
+
+        val currentActivity = page.activityClass.ifBlank { accountBrowseSession.currentActivityClass }
+        val currentFingerprint = page.fingerprint
+        val actionKey = accountBrowseSession.navigationActionKey
+        val tabEvidence = if (actionKey == NAV_ACTION_DYNAMIC_TAB) {
+            socialBrowsePort.inspectDynamicTab()
+        } else null
+        val feedConfirmed = if (actionKey == NAV_ACTION_DYNAMIC_TAB || actionKey == NAV_ACTION_HOME_TAB) {
+            socialBrowsePort.inspectFeed().ready
+        } else false
+
+        val structureChanged = currentFingerprint.isNotBlank() &&
+            currentFingerprint != accountBrowseSession.navigationBeforeFingerprint
+        val backPageEvidence = if (actionKey == NAV_ACTION_BACK) {
+            val tabs = socialBrowsePort.inspectDynamicTab()
+            page.confidence >= 80 && !isRetainedObstructionEvidence(page.reason) &&
+                (page.pageKind == BrowsePageKind.HOME || page.pageKind == BrowsePageKind.DYNAMIC_FEED ||
+                    (tabs.bounds != null && structureChanged))
+        } else false
+        val confirmed = when (actionKey) {
+            NAV_ACTION_DYNAMIC_TAB -> feedConfirmed ||
+                (tabEvidence?.let { it.selectionKnown && it.selected } == true) ||
+                (tabEvidence?.bounds != null && structureChanged)
+            NAV_ACTION_HOME_TAB -> feedConfirmed ||
+                (page.pageKind == BrowsePageKind.HOME && page.confidence >= 80 &&
+                    !isRetainedObstructionEvidence(page.reason) && tabEvidence?.bounds != null) ||
+                (tabEvidence?.bounds != null && structureChanged)
+            NAV_ACTION_BACK -> backPageEvidence
+            else -> false
+        }
+
+        if (confirmed) {
+            if (actionKey == NAV_ACTION_DYNAMIC_TAB) {
+                accountBrowseSession.dynamicTabClickConfirmed = true
+            }
+            addLog("导航结果已验证：动作=$actionKey；Activity=${currentActivity.ifBlank { "未知" }}；页面结构已重新识别")
+            accountBrowseSession.navigationActionKey = ""
+            accountBrowseSession.navigationBeforeActivity = ""
+            accountBrowseSession.navigationBeforeFingerprint = ""
+            accountBrowseSession.navigationActionDeadlineAt = 0L
+            accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB
+            accountBrowseSession.lastDynamicTabWaitReason = ""
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+
+        if (System.currentTimeMillis() >= accountBrowseSession.navigationActionDeadlineAt) {
+            val attempts = accountBrowseSession.navigationActionAttempts
+            val maxAttempts = when (actionKey) {
+                NAV_ACTION_BACK -> MAX_RECOVERY_BACK_STEPS
+                NAV_ACTION_HOME_TAB -> MAX_RECOVERY_HOME_CLICK_ATTEMPTS
+                NAV_ACTION_DYNAMIC_TAB -> MAX_RECOVERY_TAB_CLICK_ATTEMPTS
+                else -> 1
+            }
+            addLog("导航结果未得到确认：动作=$actionKey；页面仍未出现可验证变化（$attempts/$maxAttempts 次）；重新分析当前页面后再决定下一步")
+            accountBrowseSession.navigationActionKey = ""
+            accountBrowseSession.navigationBeforeActivity = ""
+            accountBrowseSession.navigationBeforeFingerprint = ""
+            accountBrowseSession.navigationActionDeadlineAt = 0L
+            accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB
+            if (attempts >= maxAttempts && actionKey != NAV_ACTION_BACK) {
+                pauseAccountBrowse("导航动作 $actionKey 连续 $maxAttempts 次未验证成功；已停止重复点击")
+                return
+            }
+            if (actionKey == NAV_ACTION_BACK && accountBrowseSession.recoveryBackAttempts >= MAX_RECOVERY_BACK_STEPS) {
+                pauseAccountBrowse("连续返回 $MAX_RECOVERY_BACK_STEPS 次后仍未能确认页面层级；已停止自动导航")
+                return
+            }
+            scheduleAccountBrowseStep(NAVIGATION_ACTION_RETRY_DELAY_MS)
+            return
+        }
+
+        scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+    }
+
+    /** The recovery path waits for the known Momo main Activity and a visible nav row. */
+    private fun dynamicFeedRecoveryStartupWaitReason(): String? {
+        val page = socialBrowsePort.inspectPage()
+        if (!socialBrowsePort.supportsTargetPackage(page.packageName)) {
+            return "Debug 恢复启动等待：当前无障碍根节点不属于陌陌（${page.packageName.ifBlank { "未提供" }}）"
+        }
+        val pageKind = page.pageKind
+        if (pageKind != BrowsePageKind.HOME && pageKind != BrowsePageKind.DYNAMIC_FEED) {
+            return "Debug 恢复启动等待：尚未通过首页/动态页结构指纹确认；当前 Activity=${page.activityClass.ifBlank { "尚未报告" }}；pageKind=$pageKind"
+        }
+
+        if (page.confidence < 80 || isRetainedObstructionEvidence(page.reason)) {
+            return "已确认页面身份仅为短期上下文，当前页面仍被遮挡；等待新鲜指纹，不授权刷新或导航"
+        }
+        val feedReady = pageKind == BrowsePageKind.DYNAMIC_FEED && socialBrowsePort.inspectFeed().ready
+        val tabEvidence = socialBrowsePort.inspectDynamicTab()
+        if (!feedReady && tabEvidence.bounds == null && tabEvidence.homeTabBounds == null) {
+            return "Debug 恢复启动等待：首页/动态页备用指纹尚未确认，且导航节点暂不可见；继续重新扫描"
+        }
+
+        accountBrowseSession.feedRefreshStartupReady = true
+        addLog(
+            "恢复启动检查通过：已确认陌陌首页/动态页结构指纹、当前无障碍根节点和导航结构；" +
+                "继续定位顶部‘动态’并验证可见列表，列表未就绪前不会执行首页双击"
+        )
+        return null
+    }
+
+    private fun waitForMomoFeedStable() {
+        val page = socialBrowsePort.inspectPage()
+        if (!socialBrowsePort.supportsTargetPackage(page.packageName)) {
+            accountBrowseSession.lastStableFingerprint = ""
+            accountBrowseSession.stableSamples = 0
+            scheduleOrTimeoutFeedStability()
+            return
+        }
+        if (handleMomoPopup()) return
+        if (isRetainedObstructionEvidence(page.reason)) {
+            addLog("动态页已由先前成功指纹确认；当前识别锚点被遮挡，保留任务并等待遮挡消失，不执行滑动")
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+
+        if (page.pageKind == BrowsePageKind.DYNAMIC_FEED && !matchDynamicFeedRoute(page)) {
+            accountBrowseRuntime.observeRecoveryPage(
+                page.copy(reason = "DYNAMIC_FEED_ROUTE_NOT_MATCHED")
+            )
+            addLog("动态列表页面指纹未匹配统一路由；保持暂停并等待新页面快照")
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+
+        val inspection = socialBrowsePort.inspectFeed()
+        val fingerprint = inspection.fingerprint.takeIf { inspection.ready && it.isNotBlank() }
+        if (fingerprint == null) {
+            accountBrowseSession.lastStableFingerprint = ""
+            accountBrowseSession.stableSamples = 0
+            accountBrowseRuntime.observeDynamicFeedFingerprint("")
+            addLog("动态列表尚不具备操作条件：${inspection.reason}")
+        } else {
+            val recovered = accountBrowseRuntime.observeDynamicFeedFingerprint(fingerprint)
+            accountBrowseSession.lastStableFingerprint = fingerprint
+            accountBrowseSession.stableSamples = accountBrowseRuntime.recoveryStableSamples()
+            addLog("动态列表采样：可见项目=${inspection.visibleCardCount}，稳定计数=${accountBrowseSession.stableSamples}/$REQUIRED_STABLE_FEED_SAMPLES；事务状态=${accountBrowseRuntime.recoveryState().name}；${inspection.reason}")
+            if (recovered) {
+                accountBrowseSession.stableSamples = REQUIRED_STABLE_FEED_SAMPLES
+            }
+        }
+
+        if (accountBrowseRuntime.recoveryState() == com.freedom.features.recovery.RecoveryTransactionState.ACTIVE &&
+            accountBrowseSession.stableSamples >= REQUIRED_STABLE_FEED_SAMPLES
+        ) {
+            accountBrowseSession.swipeCount = 0
+            if (accountBrowseSession.manualRecoveryInProgress) {
+                manualHandoffCoordinator.quietPeriod.reset()
+                accountBrowseSession.manualResumeAllowed = false
+                accountBrowseSession.manualRecoveryInProgress = false
+                accountBrowseSession.manualRecoveryAttemptActive = false
+                addLog("动态浏览人工恢复：已确认动态列表连续稳定 ${REQUIRED_STABLE_FEED_SAMPLES} 次；分级静默恢复流程成功；重新接管自主浏览")
+            }
+            if (accountBrowseSession.pausedContext != null) {
+                addLog("暂停上下文已完成校验：当前动态列表连续稳定；恢复后先执行新的列表滑动，再选择动态，避免重新点击暂停前已打开的卡片")
+                accountBrowseSession.pausedContext = null
+            }
+            accountBrowsePhase = AccountBrowsePhase.FIRST_SWIPE_COUNTDOWN
+            accountBrowseSession.countdownRemaining = FIRST_SWIPE_COUNTDOWN_SECONDS
+            addLog(
+                "已连续确认陌陌动态列表稳定 ${REQUIRED_STABLE_FEED_SAMPLES} 次；" +
+                    "即将开始持续滑动循环，现在开始首次滑动倒计时"
+            )
+            if (!showFirstSwipeCountdown(accountBrowseSession.countdownRemaining)) {
+                pauseAccountBrowse("无法显示首次滑动倒计时提示；为避免无提示操作，已暂停")
+                return
+            }
+            addLog("首次滑动倒计时：${accountBrowseSession.countdownRemaining} 秒")
+            scheduleAccountBrowseStep(FIRST_SWIPE_COUNTDOWN_STEP_MS)
+            return
+        }
+        scheduleOrTimeoutFeedStability()
+    }
+
+    private fun scheduleOrTimeoutFeedStability() {
+        if (System.currentTimeMillis() >= accountBrowseSession.deadlineAt) {
+            accountBrowseSession.deadlineAt =
+                System.currentTimeMillis() + INITIAL_FEED_STABILITY_TIMEOUT_MS
+            addLog("动态列表尚未取得可操作快照；超时仅用于诊断，不终止任务。继续等待遮挡消失/列表加载并重新识别")
+        }
+        scheduleAccountBrowseStep(maxOf(PAGE_STATE_POLL_MS, 750L))
+    }
+
+    /**
+     * A mismatched return snapshot is not treated as a permanent stop. Re-identify
+     * Home -> Dynamic, then use Momo's own Home-tab reselect refresh and verify it.
+     */
+    private fun beginDynamicFeedRefreshRecovery(reason: String) {
+        accountBrowseRuntime.cancelScheduledStep()
+        overlayPort.clearGestureTrail()
+        restoreMonitorOverlayTouchPassthrough("动态页面刷新恢复准备")
+        accountBrowseSession.feedRefreshRecoveryActive = true
+        accountBrowseSession.feedRefreshStartupReady = false
+        accountBrowseSession.feedRefreshAttempts = 0
+        accountBrowseSession.feedRefreshBeforeSnapshot = ""
+        accountBrowseSession.feedRefreshLastSnapshot = ""
+        accountBrowseSession.feedRefreshStableSamples = 0
+        accountBrowseSession.feedRefreshRecyclerContentChangeEvents = 0
+        accountBrowseSession.feedRefreshActionAt = 0L
+        accountBrowseSession.feedRefreshVerificationDeadlineAt = 0L
+        accountBrowseSession.feedRefreshWaitReason = ""
+        accountBrowseSession.navigationActionKey = ""
+        accountBrowseSession.navigationBeforeActivity = ""
+        accountBrowseSession.navigationBeforeFingerprint = ""
+        accountBrowseSession.navigationActionDeadlineAt = 0L
+        accountBrowseSession.navigationActionAttempts = 0
+        accountBrowseSession.recoveryBackAttempts = 0
+        accountBrowseSession.recoveryHomeClickAttempts = 0
+        accountBrowseSession.recoveryDynamicClickAttempts = 0
+        accountBrowseSession.dynamicTabClickConfirmed = false
+        accountBrowseSession.lastDynamicTabWaitReason = ""
+        accountBrowseSession.deadlineAt = System.currentTimeMillis() + INITIAL_DYNAMIC_TAB_WAIT_TIMEOUT_MS
+        accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB
+        addLog(
+            "$reason；启动主动恢复等待：先确认陌陌主 Activity、无障碍根节点和导航结构，" +
+                "再验证顶部‘动态’列表可用，最后才执行首页连续双击刷新"
+        )
+        scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+    }
+
+    /** Submit two actual tap strokes at the verified bottom Home tab. */
+    private fun refreshDynamicFeed() {
+        if (!accountBrowseSession.feedRefreshRecoveryActive) {
+            pauseAccountBrowse("动态刷新恢复状态丢失；没有执行滑动")
+            return
+        }
+        if (accountBrowseSession.feedRefreshAttempts >= MAX_DYNAMIC_FEED_REFRESH_ATTEMPTS) {
+            accountBrowseSession.feedRefreshRecoveryActive = false
+            pauseAccountBrowse("首页连续双击刷新已达到最大尝试次数；没有确认动态列表重新加载，因此未继续滑动")
+            return
+        }
+
+        val page = socialBrowsePort.inspectPage()
+        if (!socialBrowsePort.supportsTargetPackage(page.packageName)) {
+            scheduleDynamicFeedRefreshNavigationWait("当前前台不是陌陌")
+            return
+        }
+        if (handleMomoPopup()) return
+
+        val tabEvidence = socialBrowsePort.inspectDynamicTab()
+        val readiness = socialBrowsePort.inspectFeed()
+        val dynamicTabConfirmed = (tabEvidence.bounds != null && (
+            (tabEvidence.selectionKnown && tabEvidence.selected) ||
+                (!tabEvidence.selectionKnown && accountBrowseSession.dynamicTabClickConfirmed)
+            )) || (page.pageKind == BrowsePageKind.DYNAMIC_FEED && page.confidence >= 80 &&
+            !isRetainedObstructionEvidence(page.reason) && readiness.ready)
+        if (!readiness.ready || !dynamicTabConfirmed) {
+            accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+
+        val homeBounds = tabEvidence.homeTabBounds
+        val homeTargetBounds = tabEvidence.homeTabTargetBounds
+        if (homeBounds == null) {
+            scheduleDynamicFeedRefreshNavigationWait("没有识别到底部‘首页’导航控件")
+            return
+        }
+        if (tabEvidence.homeSelectionKnown && !tabEvidence.homeSelected) {
+            if (homeTargetBounds == null) {
+                scheduleDynamicFeedRefreshNavigationWait("底部‘首页’未选中，但没有找到可安全点击的首页控件范围")
+                return
+            }
+            addLog("已确认底部当前不是‘首页’；先单击底部‘首页’并验证导航，再执行连续双击刷新")
+            submitNavigationClick(
+                tapBounds = homeBounds,
+                targetBounds = homeTargetBounds,
+                beforeFingerprint = page.fingerprint,
+                actionKey = NAV_ACTION_HOME_TAB,
+                actionDescription = "陌陌底部‘首页’标签",
+                expectedWindow = tabEvidence.targetWindow
+            )
+            return
+        }
+        if (homeTargetBounds == null) {
+            scheduleDynamicFeedRefreshNavigationWait("已识别底部‘首页’，但没有找到可点击的首页控件范围")
+            return
+        }
+
+        val targetBounds = homeTargetBounds
+        val metrics = displayMetrics
+        val displayBounds = ScreenRect(0, 0, metrics.widthPixels, metrics.heightPixels)
+        if (targetBounds == null || targetBounds.isEmpty) {
+            scheduleDynamicFeedRefreshNavigationWait("首页文字位置不在可点击控件范围内；拒绝盲目点击")
+            return
+        }
+        if (readiness.scrollBounds == null) {
+            scheduleDynamicFeedRefreshNavigationWait("动态列表容器尚未出现")
+            return
+        }
+        val beforeSnapshot = socialBrowsePort.captureVisibleFeedSnapshot(listOnly = true)
+        if (beforeSnapshot.isBlank()) {
+            scheduleDynamicFeedRefreshNavigationWait("当前动态列表没有可读取的可见内容；暂不执行刷新点击")
+            return
+        }
+        if (!enableMonitorOverlayTouchPassthrough("首页连续双击刷新")) {
+            accountBrowseSession.feedRefreshRecoveryActive = false
+            pauseAccountBrowse("浮动按钮无法启用触摸穿透；首页双击刷新未执行")
+            return
+        }
+
+
+        accountBrowseSession.feedRefreshAttempts++
+        accountBrowseSession.feedRefreshBeforeSnapshot = beforeSnapshot
+        accountBrowseSession.feedRefreshLastSnapshot = ""
+        accountBrowseSession.feedRefreshStableSamples = 0
+        accountBrowseSession.feedRefreshRecyclerContentChangeEvents = 0
+        accountBrowseSession.feedRefreshActionAt = System.currentTimeMillis()
+        accountBrowseSession.feedRefreshVerificationDeadlineAt = accountBrowseSession.feedRefreshActionAt + DYNAMIC_FEED_REFRESH_VERIFY_TIMEOUT_MS
+        accountBrowseSession.feedRefreshWaitReason = ""
+        accountBrowsePhase = AccountBrowsePhase.VERIFY_DYNAMIC_FEED_REFRESH
+        accountBrowseSession.programmaticActionLabel = "Freedom COORDINATE_DOUBLE_TAP 首页刷新动态"
+        accountBrowseSession.ignoreManualEventsUntil = accountBrowseSession.feedRefreshActionAt + HOME_REFRESH_PROGRAMMATIC_EVENT_WINDOW_MS
+        accountBrowseSession.gestureInFlight = true
+        accountBrowseSession.touchStartedDuringGesture = false
+        accountBrowseSession.touchEndedDuringGesture = false
+        addLog(
+            "已确认陌陌首页内顶部‘动态’页面；底部导航证据=${tabEvidence.reason}；" +
+                "对底部‘首页’执行第 ${accountBrowseSession.feedRefreshAttempts}/$MAX_DYNAMIC_FEED_REFRESH_ATTEMPTS 次连续双击，" +
+                "目标控件边界=${targetBounds.toShortString()}，两次点击间隔=${HOME_REFRESH_TAP_INTERVAL_MS - HOME_REFRESH_TAP_DURATION_MS} 毫秒；" +
+                "开始等待动态列表重新加载证据"
+        )
+        val executionContext = tabEvidence.targetWindow?.let { sourceWindow ->
+            gesturePolicy.captureContext(
+                expectedWindow = sourceWindow,
+                expectedCoordinates = metrics.toGestureCoordinateContext()
+            )
+        } ?: run {
+            accountBrowseSession.gestureInFlight = false
+            accountBrowseSession.touchStartedDuringGesture = false
+            accountBrowseSession.touchEndedDuringGesture = false
+            accountBrowseSession.feedRefreshAttempts =
+                (accountBrowseSession.feedRefreshAttempts - 1).coerceAtLeast(0)
+            accountBrowseSession.feedRefreshBeforeSnapshot = ""
+            accountBrowseSession.feedRefreshVerificationDeadlineAt = 0L
+            accountBrowseSession.feedRefreshWaitReason = ""
+            accountBrowseSession.programmaticActionLabel = ""
+            restoreMonitorOverlayTouchPassthrough("首页双击刷新上下文暂时失效")
+            accountBrowsePhase = AccountBrowsePhase.REFRESH_DYNAMIC_FEED
+            addLog("首页双击刷新窗口/显示上下文在派发前发生变化；未消耗刷新次数、拒绝旧坐标，等待新快照后重新确认")
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+        val gestureRequest = GestureIntentRequest(
+            id = "accountbrowse-refresh-${accountBrowseSession.feedRefreshAttempts}-${System.nanoTime()}",
+            intent = GestureIntent.DoubleTap(
+                preferredBounds = homeBounds,
+                targetBounds = targetBounds,
+                durationMs = HOME_REFRESH_TAP_DURATION_MS,
+                intervalMs = HOME_REFRESH_TAP_INTERVAL_MS,
+                displayBounds = displayBounds
+            ),
+            description = "陌陌首页动态刷新",
+            executionContext = executionContext
+        )
+        val submission = runCatching {
+            gesturePolicy.execute(gestureRequest) { result ->
+                if (result.status == GestureExecutionStatus.DEFERRED) {
+                    accountBrowseSession.gestureInFlight = false
+                    accountBrowseSession.programmaticActionLabel = ""
+                    accountBrowseSession.feedRefreshVerificationDeadlineAt = 0L
+                    restoreMonitorOverlayTouchPassthrough("首页刷新在平台派发前延期")
+                    accountBrowsePhase = AccountBrowsePhase.REFRESH_DYNAMIC_FEED
+                    addLog("首页刷新在平台派发前延期；不判定刷新失败，等待重新识别后重试")
+                    scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+                } else if (result.status == GestureExecutionStatus.COMPLETED) {
+                    accountBrowseSession.gestureInFlight = false
+                    accountBrowseSession.touchStartedDuringGesture = false
+                    accountBrowseSession.touchEndedDuringGesture = false
+                    restoreMonitorOverlayTouchPassthrough("首页连续双击刷新手势完成")
+                    if (accountBrowsePhase != AccountBrowsePhase.VERIFY_DYNAMIC_FEED_REFRESH ||
+                        !isMonitoringRunning()
+                    ) return@execute
+                    addLog("Android 已完成首页连续双击手势；正在检查动态列表是否确实重新加载")
+                    scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+                } else {
+                    val touchStarted = accountBrowseSession.touchStartedDuringGesture
+                    val touchEnded = accountBrowseSession.touchEndedDuringGesture
+                    accountBrowseSession.gestureInFlight = false
+                    accountBrowseSession.touchStartedDuringGesture = false
+                    accountBrowseSession.touchEndedDuringGesture = false
+                    restoreMonitorOverlayTouchPassthrough("首页连续双击刷新手势取消")
+                    if (accountBrowsePhase != AccountBrowsePhase.VERIFY_DYNAMIC_FEED_REFRESH) return@execute
+                    val interruptedByTouch = touchStarted || touchEnded
+                    if (interruptedByTouch) {
+                        pauseAccountBrowse("首页连续双击刷新被屏幕触摸中断；等待用户操作结束后重新识别页面", allowManualResume = true)
+                        if (touchEnded) {
+                            accountBrowseSession.touchActive = false
+                            cancelManualTouchResume()
+                            scheduleManualTouchResume()
+                        } else {
+                            accountBrowseSession.touchActive = true
+                        }
+                    } else {
+                        accountBrowseSession.feedRefreshRecoveryActive = false
+                        pauseAccountBrowse("Android 取消了首页连续双击刷新手势；未确认动态列表已重新加载")
+                    }
+                }
+            }
+        }.getOrDefault(GestureSubmission.REJECTED)
+        if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+            accountBrowseSession.gestureInFlight = false
+            accountBrowseSession.feedRefreshAttempts =
+                (accountBrowseSession.feedRefreshAttempts - 1).coerceAtLeast(0)
+            accountBrowseSession.programmaticActionLabel = ""
+            accountBrowseSession.feedRefreshVerificationDeadlineAt = 0L
+            restoreMonitorOverlayTouchPassthrough("首页刷新因页面遮挡而延期")
+            accountBrowsePhase = AccountBrowsePhase.REFRESH_DYNAMIC_FEED
+            addLog("首页刷新手势因页面暂时不可操作而延期；没有派发手势或消耗刷新次数，等待遮挡消失后重新识别")
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+        if (submission != GestureSubmission.ACCEPTED) {
+            accountBrowseSession.gestureInFlight = false
+            restoreMonitorOverlayTouchPassthrough("首页连续双击刷新手势提交失败")
+            accountBrowseSession.feedRefreshRecoveryActive = false
+            pauseAccountBrowse("Android 拒绝首页连续双击刷新手势；没有执行后续滑动")
+        }
+    }
+
+    /** Verify a real RecyclerView reload signal and a stable, recognizable Dynamic feed. */
+    private fun verifyDynamicFeedRefresh() {
+        if (!accountBrowseSession.feedRefreshRecoveryActive) {
+            pauseAccountBrowse("动态刷新验证状态丢失；没有执行滑动")
+            return
+        }
+        val page = socialBrowsePort.inspectPage()
+        if (!socialBrowsePort.supportsTargetPackage(page.packageName)) {
+            scheduleOrRetryDynamicFeedRefresh("刷新期间陌陌不在前台")
+            return
+        }
+        if (handleMomoPopup()) return
+
+        val readiness = socialBrowsePort.inspectFeed()
+        var readinessReason = readiness.reason
+        val tabEvidence = socialBrowsePort.inspectDynamicTab()
+        val dynamicTabConfirmed = (tabEvidence.bounds != null && (
+            (tabEvidence.selectionKnown && tabEvidence.selected) ||
+                (!tabEvidence.selectionKnown && accountBrowseSession.dynamicTabClickConfirmed)
+            )) || (page.pageKind == BrowsePageKind.DYNAMIC_FEED && page.confidence >= 80 &&
+            !isRetainedObstructionEvidence(page.reason) && readiness.ready)
+        val homeConfirmed = (tabEvidence.homeTabBounds != null && (
+            (tabEvidence.homeSelectionKnown && tabEvidence.homeSelected) ||
+                (!tabEvidence.homeSelectionKnown && dynamicTabConfirmed)
+            )) || (page.pageKind == BrowsePageKind.DYNAMIC_FEED && page.confidence >= 80 &&
+            !isRetainedObstructionEvidence(page.reason) && readiness.ready)
+        val currentSnapshot = if (readiness.ready && dynamicTabConfirmed && homeConfirmed &&
+            readiness.scrollBounds != null
+        ) socialBrowsePort.captureVisibleFeedSnapshot(listOnly = true) else ""
+        val isDynamicFeedReady = currentSnapshot.isNotBlank()
+        if (readiness.ready && !dynamicTabConfirmed) {
+            readinessReason = "动态页面主/备用指纹尚未形成稳定的可操作列表证据"
+        } else if (readiness.ready && !homeConfirmed) {
+            readinessReason = "顶部动态列表存在，但底部首页选中状态未能确认"
+        }
+
+        if (!isDynamicFeedReady) {
+            accountBrowseSession.feedRefreshStableSamples = 0
+            accountBrowseSession.feedRefreshLastSnapshot = ""
+            if (readinessReason != accountBrowseSession.feedRefreshWaitReason) {
+                accountBrowseSession.feedRefreshWaitReason = readinessReason
+                addLog("首页双击刷新验证等待：$readinessReason")
+            }
+        } else {
+            accountBrowseSession.feedRefreshWaitReason = ""
+            accountBrowseSession.feedRefreshStableSamples = if (currentSnapshot == accountBrowseSession.feedRefreshLastSnapshot) {
+                accountBrowseSession.feedRefreshStableSamples + 1
+            } else {
+                1
+            }
+            accountBrowseSession.feedRefreshLastSnapshot = currentSnapshot
+        }
+
+        val snapshotChanged = accountBrowseSession.feedRefreshBeforeSnapshot.isNotBlank() &&
+            currentSnapshot.isNotBlank() && currentSnapshot != accountBrowseSession.feedRefreshBeforeSnapshot
+        val reloadEvidence = FeedRefreshVerificationPolicy.hasReloadEvidence(
+            snapshotChanged = snapshotChanged,
+            recyclerContentChangeEvents = accountBrowseSession.feedRefreshRecyclerContentChangeEvents
+        )
+        if (isDynamicFeedReady) {
+            addLog(
+                "刷新验证采样：动态页面=已确认；" +
+                    "列表内容变化=${if (snapshotChanged) "是" else "否"}；" +
+                    "RecyclerView 内容更新事件=${accountBrowseSession.feedRefreshRecyclerContentChangeEvents}；" +
+                    "列表稳定=${accountBrowseSession.feedRefreshStableSamples}/$REQUIRED_DYNAMIC_REFRESH_STABLE_SAMPLES；" +
+                    "刷新证据=${if (reloadEvidence) "已取得" else "不足"}"
+            )
+        }
+        if (isDynamicFeedReady && reloadEvidence &&
+            accountBrowseSession.feedRefreshStableSamples >= REQUIRED_DYNAMIC_REFRESH_STABLE_SAMPLES
+        ) {
+            completeDynamicFeedRefreshRecovery(snapshotChanged)
+            return
+        }
+        if (System.currentTimeMillis() >= accountBrowseSession.feedRefreshVerificationDeadlineAt) {
+            scheduleOrRetryDynamicFeedRefresh("首页连续双击后未取得足够的动态列表刷新证据")
+        } else {
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+        }
+    }
+
+    private fun scheduleDynamicFeedRefreshNavigationWait(reason: String) {
+        if (reason != accountBrowseSession.feedRefreshWaitReason) {
+            accountBrowseSession.feedRefreshWaitReason = reason
+            addLog("首页双击刷新准备等待：$reason")
+        }
+        if (System.currentTimeMillis() >= accountBrowseSession.deadlineAt) {
+            accountBrowseSession.feedRefreshRecoveryActive = false
+            pauseAccountBrowse("无法确认陌陌底部‘首页’和顶部‘动态’导航控件；主动刷新恢复超时")
+        } else {
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+        }
+    }
+
+    private fun scheduleOrRetryDynamicFeedRefresh(reason: String) {
+        if (System.currentTimeMillis() < accountBrowseSession.feedRefreshVerificationDeadlineAt) {
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+
+        when (
+            FeedRefreshVerificationPolicy.timeoutAction(
+                completedAttempts = accountBrowseSession.feedRefreshAttempts,
+                maxAttempts = MAX_DYNAMIC_FEED_REFRESH_ATTEMPTS
+            )
+        ) {
+            FeedRefreshVerificationPolicy.TimeoutAction.RETRY -> {
+                addLog(
+                    "$reason；第 ${accountBrowseSession.feedRefreshAttempts} 次首页连续双击未能完成验证；" +
+                        "重新识别首页/动态标签后再进行最后一次刷新尝试"
+                )
+                accountBrowseSession.feedRefreshLastSnapshot = ""
+                accountBrowseSession.feedRefreshStableSamples = 0
+                accountBrowseSession.feedRefreshRecyclerContentChangeEvents = 0
+                accountBrowseSession.feedRefreshWaitReason = ""
+                accountBrowseSession.recoveryBackAttempts = 0
+                accountBrowseSession.recoveryHomeClickAttempts = 0
+                accountBrowseSession.recoveryDynamicClickAttempts = 0
+                accountBrowseSession.dynamicTabClickConfirmed = false
+                accountBrowseSession.lastDynamicTabWaitReason = ""
+                accountBrowseSession.deadlineAt = System.currentTimeMillis() + INITIAL_DYNAMIC_TAB_WAIT_TIMEOUT_MS
+                accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB
+                scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            }
+
+            FeedRefreshVerificationPolicy.TimeoutAction.SAFE_PAUSE -> {
+                accountBrowseSession.feedRefreshRecoveryActive = false
+                pauseAccountBrowse(
+                    "已尝试 $MAX_DYNAMIC_FEED_REFRESH_ATTEMPTS 次首页连续双击，但仍无法确认动态列表重新加载并稳定；" +
+                        "为避免在未知页面滑动，已安全暂停"
+                )
+            }
+        }
+    }
+
+    private fun completeDynamicFeedRefreshRecovery(snapshotChanged: Boolean) {
+        val attempts = accountBrowseSession.feedRefreshAttempts
+        val events = accountBrowseSession.feedRefreshRecyclerContentChangeEvents
+        accountBrowseSession.feedRefreshRecoveryActive = false
+        accountBrowseSession.detailActivityClass = ""
+        accountBrowseSession.detailFingerprint = ""
+        accountBrowseSession.programmaticActionLabel = ""
+        accountBrowseSession.detailDwellDueAt = 0L
+        accountBrowseSession.detailDwellStartedAt = 0L
+        accountBrowseSession.detailDwellRemainingMs = 0L
+        accountBrowseSession.imageBrowserActive = false
+        accountBrowseSession.imageBrowserReturnActivityClass = ""
+        accountBrowseSession.sourceSnapshot = ""
+        accountBrowseSession.lastReturnedSnapshot = ""
+        accountBrowseSession.returnedStableSamples = 0
+        accountBrowseSession.returnMismatchLogged = false
+        accountBrowseSession.swipeCount = 0
+        accountBrowseSession.lastStableFingerprint = ""
+        accountBrowseSession.stableSamples = 0
+        accountBrowseSession.deadlineAt = System.currentTimeMillis() + INITIAL_FEED_STABILITY_TIMEOUT_MS
+        accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_FEED_STABLE
+        addLog(
+            "首页连续双击刷新已验证成功（尝试次数=$attempts；" +
+                "列表内容变化=${if (snapshotChanged) "是" else "否"}；RecyclerView 内容更新事件=$events；" +
+                "列表连续稳定 $REQUIRED_DYNAMIC_REFRESH_STABLE_SAMPLES 次）；" +
+                "不再沿用旧位置，已建立刷新后的新动态列表基准，准备恢复浏览"
+        )
+        scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+    }
+
+    /** Keep the user informed for three seconds, and re-check the feed before dispatch. */
+    private fun runFirstSwipeCountdown() {
+        val page = obtainTargetPageOrPause() ?: return
+        if (!socialBrowsePort.supportsTargetPackage(page.packageName)) {
+            pauseAccountBrowse("倒计时期间陌陌已不在前台；已取消首次滑动")
+            return
+        }
+        if (!socialBrowsePort.inspectFeed().ready) {
+            accountBrowseSession.lastStableFingerprint = ""
+            accountBrowseSession.stableSamples = 0
+            accountBrowseSession.deadlineAt = System.currentTimeMillis() + INITIAL_FEED_STABILITY_TIMEOUT_MS
+            accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_FEED_STABLE
+            addLog("倒计时期间动态列表暂时不可操作；取消本次滑动倒计时，等待重新确认页面和可见列表")
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+
+        if (accountBrowseSession.countdownRemaining > 1) {
+            accountBrowseSession.countdownRemaining--
+            if (!showFirstSwipeCountdown(accountBrowseSession.countdownRemaining)) {
+                pauseAccountBrowse("首次滑动倒计时提示中断；已取消首次滑动")
+                return
+            }
+            addLog("首次滑动倒计时：${accountBrowseSession.countdownRemaining} 秒")
+            scheduleAccountBrowseStep(FIRST_SWIPE_COUNTDOWN_STEP_MS)
+            return
+        }
+
+        accountBrowseSession.countdownRemaining = 0
+        hideFirstSwipeCountdown()
+        accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_LIST_SCROLL
+        performFeedScroll()
+    }
+
+    /** Use the dedicated overlay component so countdown WindowManager state is not workflow state. */
+    private fun showFirstSwipeCountdown(seconds: Int): Boolean =
+        overlayPort.showFirstSwipeCountdown(
+            secondsRemaining = seconds,
+            message = "首次滑动倒计时\n$seconds\n请观察动态列表是否移动"
+        )
+
+    private fun hideFirstSwipeCountdown() = overlayPort.hideFirstSwipeCountdown()
+
+    private fun obtainTargetPageOrPause(pauseWhenUnavailable: Boolean = true): BrowsePageEvidence? {
+        val page = socialBrowsePort.inspectPage()
+        if (!page.windowAvailable) {
+            if (pauseWhenUnavailable) {
+                addLog("当前活动窗口/无障碍根节点暂时不可读取；保留业务阶段和待执行目标，稍后重新获取新快照")
+                scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            }
+            return null
+        }
+        if (!socialBrowsePort.supportsTargetPackage(page.packageName)) {
+            val externalPopup = socialBrowsePort.inspectExternalPopup()
+            if (externalPopup != null) {
+                addLog("检测到陌陌以外的系统窗口/弹窗：${externalPopup.description}；不对系统或其他应用执行点击，等待用户处理后重新定位动态")
+                beginDynamicNavigationRecovery("检测到陌陌外部系统窗口，需要用户先处理")
+                return null
+            }
+            pauseAccountBrowse("当前没有打开陌陌；自动浏览已暂停")
+            return null
+        }
+        if (handleMomoPopup()) return null
+        return page
+    }
+
+    /** Temporarily remove the live monitor window from the touch path for the swipe. */
+    private fun enableMonitorOverlayTouchPassthrough(
+        actionDescription: String = "首次滑动"
+    ): Boolean {
+        if (!overlayPort.isMonitorAttached()) {
+            accountBrowseSession.overlayPassthroughActive = false
+            addLog("浮动按钮当前未附加（配置中“浮动按钮”已关闭）；$actionDescription 不经过悬浮窗")
+            return true
+        }
+        val before = overlayPort.touchStateDescription()
+        val enabled = overlayPort.setMonitorTouchPassthrough(true, MONITOR_OVERLAY_PASSTHROUGH_WATCHDOG_MS)
+        if (!enabled) {
+            addLog("无法暂时关闭浮动按钮的触摸拦截；未发送首次滑动。$before")
+            return false
+        }
+        accountBrowseSession.overlayPassthroughActive = true
+        scheduleOverlayPassthroughWatchdog(MONITOR_OVERLAY_PASSTHROUGH_WATCHDOG_MS)
+        addLog(
+            "$actionDescription 前已临时隐藏浮动按钮并启用触摸穿透。" +
+                "$before；切换后=${overlayPort.touchStateDescription()}"
+        )
+        return true
+    }
+
+    private fun restoreMonitorOverlayTouchPassthroughImpl(
+        actionDescription: String = "首次滑动检查结束"
+    ): Boolean {
+        if (!accountBrowseSession.overlayPassthroughActive) return true
+        val restored = overlayPort.setMonitorTouchPassthrough(false)
+        if (restored) {
+            accountBrowseSession.overlayPassthroughActive = false
+            cancelOverlayPassthroughWatchdog()
+            addLog("$actionDescription：浮动按钮已恢复显示和触摸操作")
+            return true
+        }
+        addLog("警告：浮动按钮触摸状态恢复失败；悬浮窗可能仍处于隐藏/穿透状态")
+        return false
+    }
+
+    /**
+     * First-stage verification: dispatch the adapter's existing Momo gesture plan through the
+     * generic gateway. The adapter owns target resolution; Gesture Policy Pipeline compiles the physical path.
+     */
+    private fun performFeedScroll() {
+        if (obtainTargetPageOrPause() == null) return
+        if (!socialBrowsePort.inspectFeed().ready) {
+            accountBrowseSession.lastStableFingerprint = ""
+            accountBrowseSession.stableSamples = 0
+            accountBrowseSession.deadlineAt = System.currentTimeMillis() + INITIAL_FEED_STABILITY_TIMEOUT_MS
+            accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_FEED_STABLE
+            addLog("动态页面身份尚未丢失，但列表暂时不可操作；本轮不发送滑动，等待重新确认可见列表")
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+        accountBrowseSession.sourceSnapshot = socialBrowsePort.captureVisibleFeedSnapshot(listOnly = false)
+        addLog("第 ${accountBrowseSession.swipeCount + 1} 轮滑动前可见节点快照：${accountBrowseSession.sourceSnapshot.ifBlank { "未提取到可见文字节点" }}")
         val profile = socialBrowsePort.loadFeedGestureProfile()
         val gesturePlan = socialBrowsePort.planFeedGesture(profile) ?: run {
             pauseAccountBrowse("动态列表有效区域不足以生成安全滑动路径；本轮未发送滑动")
