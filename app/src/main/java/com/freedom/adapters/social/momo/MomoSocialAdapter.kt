@@ -5146,6 +5146,13 @@ internal class MomoSocialAdapter(
         )
     }
 
+    /** Retryable failures must not leave a terminal outcome for the next observation. */
+    private fun clearRetryableInboxIdentityState(anchorKey: String) {
+        completedInboxIdentityOutcomes.remove(anchorKey)
+        failedInboxIdentityCaptureKeys.remove(anchorKey)
+        verifiedInboxIdentityByAnchor.remove(anchorKey)
+    }
+
     private fun localNodeId(viewId: String): String = viewId.substringAfterLast('/')
 
     private fun completePendingInboxIdentityBinding(
@@ -5184,7 +5191,7 @@ internal class MomoSocialAdapter(
                         verificationResult.name
                     )
                 } else {
-                    completedInboxIdentityOutcomes.remove(anchorKey)
+                    clearRetryableInboxIdentityState(anchorKey)
                     ContactIdentityCaptureOutcome.waiting(ContactIdentityCaptureRequestResult.RETRY_LATER)
                 }
                 while (verifiedInboxIdentityByAnchor.size > MAX_INBOX_VERIFIED_IDENTITY_CACHE_ENTRIES) {
@@ -5195,7 +5202,7 @@ internal class MomoSocialAdapter(
                 // Missing profile ID is retryable observation failure, not an identity
                 // conflict. Do not populate either terminal cache: the next observation must
                 // be allowed to reacquire the chat page, relocate the avatar and retry.
-                completedInboxIdentityOutcomes.remove(anchorKey)
+                clearRetryableInboxIdentityState(anchorKey)
             }
             pendingInboxIdentityCapture = null
         }
