@@ -528,10 +528,7 @@ class AiReplyObservationRuntime(
             !receivedGreetingsTaskFlow.supportsWorkflow()
         ) return
         receivedGreetingsPageProbePending = true
-        // The watcher callback already runs from the scheduler's retry task. Execute the
-        // unified read now so the bounded retry remains one fresh observation, without adding
-        // another full-inspection debounce interval.
-        runFullInspection()
+        pageObservationCoordinator.signalFullInspection()
     }
 
     private fun runFullInspection() {
@@ -556,11 +553,16 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼任务观察被阻止：当前任务已不持有 UI 操作权；等待安全恢复")
             return
         }
-        val inspection = runCatching { readPageSnapshot() }.getOrNull()
+        val pageRead = pageReadCoordinator.read(AiReplyPageReadPurpose.FULL_INSPECTION)
+        val inspection = pageRead.snapshot
         val observationDecision = pageObservationSemantics.classify(
             snapshot = inspection,
             previous = lastPageInspection,
             targetPackage = targetPackage()
+        ).copy(
+            observationGeneration = pageRead.observationGeneration,
+            purpose = pageRead.purpose,
+            failure = pageRead.failure
         )
         if (observationDecision.status == AiReplyPageObservationStatus.TEMPORARILY_UNAVAILABLE) {
             if (snapshotRecoveryStartedAtMs == 0L) {

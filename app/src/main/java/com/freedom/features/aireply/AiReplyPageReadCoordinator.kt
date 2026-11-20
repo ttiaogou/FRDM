@@ -25,7 +25,27 @@ internal class AiReplyPageReadCoordinator(
         } else if (snapshot == null) {
             onLog("AI 页面读取[EMPTY]：入口=${purpose.name}；未取得新鲜页面快照")
         }
-        return AiReplyPageReadResult(purpose, snapshot, failure, generation)
+        val availability = if (snapshot == null || failure != null) {
+            ObservationStatus.TEMPORARILY_UNAVAILABLE
+        } else {
+            // Page identity is intentionally classified by AiReplyPageObservationSemantics.
+            // This status only records that a fresh raw snapshot was obtained.
+            ObservationStatus.RAW_SNAPSHOT_AVAILABLE
+        }
+        return AiReplyPageReadResult(
+            purpose = purpose,
+            snapshot = snapshot,
+            failure = failure,
+            observationGeneration = generation,
+            observation = ObservationResult(
+                status = availability,
+                reason = if (failure != null) "READ_FAILED" else if (snapshot == null) "NO_FRESH_SNAPSHOT" else "FRESH_SNAPSHOT",
+                snapshot = snapshot,
+                observationGeneration = generation,
+                purpose = purpose,
+                failure = failure
+            )
+        )
     }
 }
 
@@ -45,5 +65,10 @@ internal data class AiReplyPageReadResult(
     val purpose: AiReplyPageReadPurpose,
     val snapshot: ChatPageSnapshot?,
     val failure: Throwable?,
-    val observationGeneration: Long = 0L
+    val observationGeneration: Long = 0L,
+    /** Raw-read result; semantic page identity is filled by the shared semantics classifier. */
+    val observation: ObservationResult = ObservationResult(
+        status = ObservationStatus.TEMPORARILY_UNAVAILABLE,
+        reason = "NO_OBSERVATION"
+    )
 )

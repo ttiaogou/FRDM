@@ -7,16 +7,31 @@ import com.freedom.features.aireply.ports.ChatPageSnapshot
  * Converts raw page observations into a recovery-neutral semantic result.
  * ChatPageKind.UNKNOWN is never treated as the final business recovery conclusion here.
  */
-internal enum class AiReplyPageObservationStatus {
+internal enum class ObservationStatus {
+    RAW_SNAPSHOT_AVAILABLE,
     CONFIRMED_PAGE,
     TEMPORARILY_UNAVAILABLE,
     CONFIRMED_UNKNOWN
 }
 
-internal data class AiReplyPageObservationDecision(
-    val status: AiReplyPageObservationStatus,
-    val reason: String
+/** Compatibility alias; new code should use [ObservationStatus]. */
+internal typealias AiReplyPageObservationStatus = ObservationStatus
+
+/**
+ * The semantic result shared by every AI Reply page observation.
+ * ChatPageKind remains adapter evidence; callers must make decisions from this result instead.
+ */
+internal data class ObservationResult(
+    val status: ObservationStatus,
+    val reason: String,
+    val snapshot: ChatPageSnapshot? = null,
+    val observationGeneration: Long = 0L,
+    val purpose: AiReplyPageReadPurpose? = null,
+    val failure: Throwable? = null
 )
+
+/** Compatibility name retained while callers migrate to [ObservationResult]. */
+internal typealias AiReplyPageObservationDecision = ObservationResult
 
 internal class AiReplyPageObservationSemantics {
     fun classify(
@@ -25,16 +40,17 @@ internal class AiReplyPageObservationSemantics {
         targetPackage: String
     ): AiReplyPageObservationDecision {
         if (snapshot == null) {
-            return decision(AiReplyPageObservationStatus.TEMPORARILY_UNAVAILABLE, "NO_FRESH_SNAPSHOT")
+            return decision(ObservationStatus.TEMPORARILY_UNAVAILABLE, "NO_FRESH_SNAPSHOT", snapshot)
         }
         if (snapshot.pageKind != ChatPageKind.UNKNOWN) {
             return decision(
-                AiReplyPageObservationStatus.CONFIRMED_PAGE,
-                "PAGE_KIND_${snapshot.pageKind.name}"
+                ObservationStatus.CONFIRMED_PAGE,
+                "PAGE_KIND_${snapshot.pageKind.name}",
+                snapshot
             )
         }
         if (isEmptyUnknown(snapshot)) {
-            return decision(AiReplyPageObservationStatus.TEMPORARILY_UNAVAILABLE, "EMPTY_PAGE_TREE")
+            return decision(ObservationStatus.TEMPORARILY_UNAVAILABLE, "EMPTY_PAGE_TREE", snapshot)
         }
         if (previous != null &&
             previous.pageKind != ChatPageKind.UNKNOWN &&
@@ -45,11 +61,12 @@ internal class AiReplyPageObservationSemantics {
             previous.windowGeneration == snapshot.windowGeneration
         ) {
             return decision(
-                AiReplyPageObservationStatus.TEMPORARILY_UNAVAILABLE,
-                "SAME_WINDOW_STRUCTURE_UNAVAILABLE"
+                ObservationStatus.TEMPORARILY_UNAVAILABLE,
+                "SAME_WINDOW_STRUCTURE_UNAVAILABLE",
+                snapshot
             )
         }
-        return decision(AiReplyPageObservationStatus.CONFIRMED_UNKNOWN, "UNKNOWN_PAGE_IDENTITY")
+        return decision(ObservationStatus.CONFIRMED_UNKNOWN, "UNKNOWN_PAGE_IDENTITY", snapshot)
     }
 
     private fun isEmptyUnknown(snapshot: ChatPageSnapshot): Boolean =
@@ -61,7 +78,8 @@ internal class AiReplyPageObservationSemantics {
             snapshot.messageRelatedViewIdCount == 0
 
     private fun decision(
-        status: AiReplyPageObservationStatus,
-        reason: String
-    ) = AiReplyPageObservationDecision(status, reason)
+        status: ObservationStatus,
+        reason: String,
+        snapshot: ChatPageSnapshot?
+    ) = ObservationResult(status = status, reason = reason, snapshot = snapshot)
 }
