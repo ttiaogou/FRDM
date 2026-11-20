@@ -39,12 +39,12 @@ ALLOWED_PROJECT_DEPENDENCIES = {
     ":ocr-plugin": {":ocr-plugin-api"},
 }
 
-RUNTIME_SOURCE_PREFIX = "app/src/main/java/com/freedom/application/gesture/"
+RUNTIME_SOURCE_PREFIX = "gesture/gesture-runtime/src/main/kotlin/com/freedom/application/gesture/"
 COMPILER_PATH = RUNTIME_SOURCE_PREFIX + "GestureCommandCompiler.kt"
 VALIDATOR_PATH = RUNTIME_SOURCE_PREFIX + "GesturePolicyValidator.kt"
-COMMAND_MODEL_PATH = "app/src/main/java/com/freedom/core/accessibility/gesture/GestureCommand.kt"
-GESTURE_SPEC_PATH = "app/src/main/java/com/freedom/core/accessibility/api/AccessibilityGateway.kt"
-ANDROID_DISPATCHER_PATH = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt"
+COMMAND_MODEL_PATH = "gesture/gesture-runtime/src/main/kotlin/com/freedom/core/accessibility/gesture/GestureCommand.kt"
+GESTURE_SPEC_PATH = "core/src/main/kotlin/com/freedom/core/accessibility/api/AccessibilityGateway.kt"
+ANDROID_DISPATCHER_PATH = "gesture/gesture-android/src/main/kotlin/com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt"
 
 # Kotlin comments and literals are blanked before scanning to avoid false positives from
 # documentation, diagnostics, and test fixture strings while preserving line positions.
@@ -77,6 +77,12 @@ def project_dependencies(build_file: Path) -> set[str]:
 def kotlin_sources(root: Path) -> list[Path]:
     search_roots = [
         root / "app/src/main/java",
+        root / "core/src/main/kotlin",
+        root / "business/src/main/kotlin",
+        root / "gesture/gesture-api/src/main/kotlin",
+        root / "gesture/gesture-core/src/main/kotlin",
+        root / "gesture/gesture-runtime/src/main/kotlin",
+        root / "gesture/gesture-android/src/main/kotlin",
         root / "ocr-plugin/src/main/java",
         root / "ocr-plugin-api/src/main/java",
         root / "gesture",
@@ -84,10 +90,24 @@ def kotlin_sources(root: Path) -> list[Path]:
         root / "core",
     ]
     files: set[Path] = set()
+    legacy_prefixes = (
+        "app/src/main/java/com/freedom/core/",
+        "app/src/main/java/com/freedom/features/",
+        "app/src/main/java/com/freedom/application/gesture/",
+        "app/src/main/java/com/freedom/gesture/api/",
+        "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidGesture",
+        "app/src/main/java/com/freedom/adapters/accessibility/android/GestureTrailOverlay",
+        "app/src/test/java/com/freedom/core/",
+        "app/src/test/java/com/freedom/features/",
+        "app/src/test/java/com/freedom/application/gesture/",
+    )
     for search_root in search_roots:
         if not search_root.exists():
             continue
         for path in search_root.rglob("*.kt"):
+            rel = path.relative_to(root).as_posix()
+            if rel.startswith(legacy_prefixes):
+                continue
             if any(part in {"build", ".gradle", ".git", "test", "androidTest"} for part in path.parts):
                 continue
             files.add(path)
@@ -96,8 +116,8 @@ def kotlin_sources(root: Path) -> list[Path]:
 
 def account_browse_state_ownership_leaks(code_by_path: dict[str, str], state_code: str) -> list[str]:
     """Enforce Runtime ownership of immutable AccountBrowse snapshots and update commands."""
-    state_rel = "app/src/main/java/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt"
-    runtime_rel = "app/src/main/java/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
+    state_rel = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt"
+    runtime_rel = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
     runtime_code = code_by_path.get(runtime_rel, "")
     offenders: set[str] = set()
 
@@ -134,7 +154,7 @@ def core_test_application_dependencies(root: Path) -> list[str]:
     :core compiles app/src/test/java/com/freedom/core/** as its own test source set.
     Such tests may depend on core contracts, but must not import :app application classes.
     """
-    test_root = root / "app/src/test/java/com/freedom/core"
+    test_root = root / "core/src/test/kotlin/com/freedom/core"
     if not test_root.exists():
         return []
     offenders: list[str] = []
@@ -282,7 +302,7 @@ def inspect_project(root: Path) -> list[str]:
             issues.append(f"GestureApi exposes Runtime implementation types: {sorted(set(leaked))}")
 
     # 3) Feature code can depend on the public API but not platform/adapters/Runtime internals.
-    feature_root = root / "app/src/main/java/com/freedom/features"
+    feature_root = root / "business/src/main/kotlin/com/freedom/features"
     if feature_root.exists():
         forbidden_import = re.compile(
             r"^\s*import\s+(?:androidx?\.|com\.freedom\.(?:adapters|data|application|accessibility|overlay|ui|stability)\.)",
@@ -356,7 +376,7 @@ def inspect_project(root: Path) -> list[str]:
     dispatch_call = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\.\s*dispatchGesture\s*\(")
     dispatch_files = [rel for rel, code in code_by_path.items() if dispatch_call.search(code)]
     allowed_dispatch_files = {
-        "app/src/main/java/com/freedom/application/gesture/GestureExecutionCoordinator.kt",
+        "gesture/gesture-runtime/src/main/kotlin/com/freedom/application/gesture/GestureExecutionCoordinator.kt",
         "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt",
         ANDROID_DISPATCHER_PATH,
     }
@@ -471,7 +491,7 @@ def inspect_project(root: Path) -> list[str]:
             issues.append("MainActivity must receive its application dependencies from AppCompositionRoot")
 
     # 9) Feature state must not be exposed as mutable implementation to outer layers.
-    account_state_rel = "app/src/main/java/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt"
+    account_state_rel = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseSessionState.kt"
     account_state_path = root / account_state_rel
     if account_state_path.is_file():
         state_code = code_by_path.get(account_state_rel, mask_kotlin_non_code(account_state_path.read_text(encoding="utf-8")))

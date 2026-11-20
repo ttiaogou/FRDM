@@ -1,0 +1,55 @@
+package com.freedom.features.aireply.ai
+
+import java.io.File
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
+
+class ReplySegmentTaskTest {
+    @Test
+    fun factoryCreatesIndependentMessageTasks() {
+        val records = ReplySegmentTaskFactory.create(
+            requestId = "request-1",
+            conversationKey = "conversation-1",
+            messages = listOf("第一条回复", "第二条回复", "第三条回复"),
+            createdAtMillis = 100L
+        )
+
+        assertEquals(3, records.size)
+        assertEquals(listOf(0, 1, 2), records.map { it.segmentIndex })
+        assertTrue(records.all { it.segmentCount == 3 && it.status == ReplySegmentTaskStatus.CREATED })
+        assertNotEquals(records[0].segmentContentHash, records[1].segmentContentHash)
+    }
+
+    @Test
+    fun repositoryPersistsAndGuardsIndependentState() {
+        val file = File.createTempFile("reply-segments", ".tsv").apply { delete() }
+        try {
+            val repository = object : ReplySegmentTaskRepository {
+                private val records = linkedMapOf<String, ReplySegmentTaskRecord>()
+                override fun find(taskId: String): ReplySegmentTaskRecord? = records[taskId]
+                override fun findByRequest(requestId: String): List<ReplySegmentTaskRecord> =
+                    records.values.filter { it.requestId == requestId }
+                override fun findByConversation(conversationKey: String): List<ReplySegmentTaskRecord> =
+                    records.values.filter { it.conversationKey == conversationKey }
+                override fun save(record: ReplySegmentTaskRecord) { records[record.taskId] = record }
+                override fun update(record: ReplySegmentTaskRecord): Boolean {
+                    if (!records.containsKey(record.taskId)) return false
+                    records[record.taskId] = record
+                    return true
+                }
+            }
+            val records = ReplySegmentTaskFactory.create("request-2", "conversation-2", listOf("甲", "乙"), 200L)
+            records.forEach(repository::save)
+
+            val first = records.first().copy(status = ReplySegmentTaskStatus.DRAFT_APPLIED)
+            assertTrue(repository.update(first))
+            assertEquals(ReplySegmentTaskStatus.DRAFT_APPLIED, repository.find(first.taskId)?.status)
+            assertEquals(ReplySegmentTaskStatus.CREATED, repository.find(records[1].taskId)?.status)
+            assertEquals(2, repository.findByRequest("request-2").size)
+        } finally {
+            file.delete()
+        }
+    }
+}
