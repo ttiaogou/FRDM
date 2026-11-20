@@ -172,9 +172,9 @@ class AiReplyDecisionEngineTest {
         val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
             AiReplyDecisionInput(context(), true, requestId = "r9")
         )
-        assertEquals(AiReplyAction.WAIT, result.action)
-        assertNotNull(result.reason)
-        assertEquals(0, provider.callCount)
+        assertEquals(AiReplyAction.REPLY, result.action)
+        assertEquals("hi", result.draft)
+        assertEquals(1, provider.callCount)
     }
 
     @Test fun ambiguousDecisionPreservesDetailedModelExplanationAndMetadata() {
@@ -186,7 +186,7 @@ class AiReplyDecisionEngineTest {
         val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
             AiReplyDecisionInput(context(), true, requestId = "detailed"))
         assertEquals(AiReplyAction.WAIT, result.action)
-        assertTrue(result.reasonDetail!!.contains("缺少前文"))
+        assertTrue(result.reasonDetail!!.contains("表达存在歧义，停止自动发送。"))
         assertEquals("stop", result.finishReason)
         assertEquals(30, result.usage?.outputTokens)
         assertNull(result.draft)

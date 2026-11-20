@@ -73,11 +73,12 @@ class AccountBrowseManualRecoveryTest {
             scheduleStep = scheduledSteps::add
         )
 
-        assertEquals(AccountBrowsePhase.PAUSED, runtime.phase)
+        assertEquals(AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB, runtime.phase)
         assertTrue(runtime.session.manualResumeAllowed)
-        assertFalse(runtime.session.manualRecoveryAttemptActive)
-        assertTrue(scheduledSteps.isEmpty())
-        assertTrue(logs.any { it.contains("已存在持久化人工复核锁") })
+        assertTrue(runtime.session.manualRecoveryAttemptActive)
+        assertEquals(listOf(300L), scheduledSteps)
+        assertTrue(logs.none { it.contains("已存在持久化人工复核锁") })
+        assertTrue(logs.any { it.contains("手动恢复已进入主动导航") })
     }
 
     private fun runtime(): AccountBrowseRuntime = AccountBrowseRuntime(
