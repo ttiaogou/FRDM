@@ -491,6 +491,61 @@ def inspect_project(root: Path) -> list[str]:
     # 10) Shared recovery transaction is an architecture boundary, not a business-local utility.
     issues.extend(recovery_transaction_boundary_violations(code_by_path))
 
+    # 11) Final hard boundaries for the unified accessibility/recovery architecture.
+    issues.extend(final_architecture_boundary_violations(code_by_path))
+
+    return issues
+
+
+def final_architecture_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
+    """Enforce the final UNKNOWN/RETRYABLE and platform-entry boundaries."""
+    issues: list[str] = []
+    feature_paths = {
+        rel for rel in code_by_path
+        if "/features/" in rel and "/src/main/" in rel and rel.endswith(".kt")
+    }
+    adapter_paths = {
+        rel for rel in code_by_path
+        if "/adapters/" in rel and "/src/main/" in rel and rel.endswith(".kt")
+    }
+
+    direct_android_accessibility = re.compile(
+        r"\bAccessibilityNodeInfo\b|\bandroid\.view\.accessibility\b|\.dispatchGesture\s*\("
+    )
+    for rel in sorted(feature_paths):
+        if direct_android_accessibility.search(code_by_path[rel]):
+            issues.append(f"Feature directly accesses Android Accessibility or dispatchGesture: {rel}")
+
+    task_state_machine = re.compile(
+        r"\b(?:AccountBrowseStateMachine|UnifiedRecoveryTransactionStateMachine|"
+        r"RecoveryTransactionStateMachine)\s*\("
+    )
+    for rel in sorted(adapter_paths):
+        if task_state_machine.search(code_by_path[rel]):
+            issues.append(f"Adapter instantiates a task/recovery state machine: {rel}")
+
+    transition_sources = {
+        rel: code for rel, code in code_by_path.items()
+        if rel.endswith(("ReplyTaskRepository.kt", "ReplySegmentTask.kt"))
+    }
+    unknown_to_final = re.compile(
+        r"(?:ReplyTaskStatus|ReplySegmentTaskStatus)\.UNKNOWN\s+to\s+setOf\([^)]*"
+        r"(?:ReplyTaskStatus|ReplySegmentTaskStatus)\.FAILED_FINAL",
+        re.DOTALL,
+    )
+    for rel, code in transition_sources.items():
+        if unknown_to_final.search(code):
+            issues.append(f"UNKNOWN may transition directly to FAILED_FINAL: {rel}")
+
+    retryable_cache_write = re.compile(
+        r"(?:failedInboxIdentityCaptureKeys|permanentFailure|failedCache)[\s\S]{0,180}"
+        r"FAILED_RETRYABLE|FAILED_RETRYABLE[\s\S]{0,180}"
+        r"(?:failedInboxIdentityCaptureKeys|permanentFailure|failedCache)",
+        re.IGNORECASE,
+    )
+    for rel, code in code_by_path.items():
+        if retryable_cache_write.search(code):
+            issues.append(f"RETRYABLE result is written to a permanent failure cache: {rel}")
     return issues
 
 
