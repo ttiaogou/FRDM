@@ -77,6 +77,14 @@ internal class AndroidAccountBrowseWorkflow(
             channelId = ACCOUNT_BROWSE_PAGE_OBSERVATION_CHANNEL,
             quietPeriodMs = PAGE_OBSERVATION_QUIET_PERIOD_MS,
             maxWaitMs = PAGE_OBSERVATION_MAX_WAIT_MS,
+            eventTypes = setOf(
+                AccessibilityEventType.WINDOW_STATE_CHANGED,
+                AccessibilityEventType.WINDOWS_CHANGED,
+                AccessibilityEventType.WINDOW_CONTENT_CHANGED,
+                AccessibilityEventType.VIEW_CLICKED,
+                AccessibilityEventType.VIEW_SELECTED,
+                AccessibilityEventType.VIEW_SCROLLED
+            ),
             onObservationRequested = ::onCoalescedPageObservationRequested
         )
     }
@@ -347,7 +355,6 @@ internal class AndroidAccountBrowseWorkflow(
             }
         }
         if (accountBrowsePhase == AccountBrowsePhase.IDLE) startAccountBrowseIfNeeded()
-        if (eventType in PAGE_OBSERVATION_EVENT_TYPES) pageObservationChannel.requestSnapshot()
     }
 
     internal fun onRefreshVerificationEvent(eventType: Int, className: String, now: Long) {
@@ -2683,14 +2690,6 @@ internal class AndroidAccountBrowseWorkflow(
         private const val ACCOUNT_BROWSE_PAGE_OBSERVATION_CHANNEL = "ACCOUNT_BROWSE_PAGE_OBSERVATION"
         private const val PAGE_OBSERVATION_QUIET_PERIOD_MS = 300L
         private const val PAGE_OBSERVATION_MAX_WAIT_MS = 1_200L
-        private val PAGE_OBSERVATION_EVENT_TYPES = setOf(
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED,
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_CLICKED,
-            AccessibilityEvent.TYPE_VIEW_SELECTED,
-            AccessibilityEvent.TYPE_VIEW_SCROLLED
-        )
         private val PAGE_OBSERVATION_PHASES = setOf(
             AccountBrowsePhase.VERIFY_DYNAMIC_FEED_REFRESH,
             AccountBrowsePhase.WAIT_FOR_FEED_STABLE,
