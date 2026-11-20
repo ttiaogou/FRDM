@@ -197,8 +197,10 @@ internal class PrivateMessagesTraversalTaskExecutor {
         if (expected.isEmpty()) return true
         val actual = visibleSessionKeys(snapshot)
         if (actual.isEmpty()) return false
-        val expectedIdentityKeys = expected.mapTo(LinkedHashSet()) { it.substringBefore('@') }
-        return actual.any { it.substringBefore('@') in expectedIdentityKeys }
+        // Compatibility is deliberately stricter than re-anchoring: a row identity that is
+        // still visible at a different geometry must enter the re-anchor path instead of
+        // allowing the caller to reuse the old viewport/checkpoint coordinates.
+        return actual == expected
     }
     private data class IdentityReturn(
         val original: ChatListCandidateSnapshot,
