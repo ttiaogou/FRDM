@@ -498,3 +498,75 @@ internal object MomoChatListSessionPolicy {
         if (timestamp.isNullOrBlank() || !timestampBoundsValid || !timestampBoundsWithinRow) {
             if (fireFeatureConfirmed) {
                 return MomoChatListRowClassification(
+                    MomoChatListRowClassification.PRIVATE_CHAT,
+                    "FIRE_FEATURE_ROW_TIMESTAMP_OPTIONAL"
+                )
+            }
+            return MomoChatListRowClassification(
+                MomoChatListRowClassification.UNCLASSIFIED,
+                when {
+                    timestamp.isNullOrBlank() || !timestampBoundsValid ->
+                        "VALID_TIMESTAMP_EVIDENCE_MISSING"
+                    !timestampBoundsWithinRow -> "TIMESTAMP_BOUNDS_OUTSIDE_ROW"
+                    else -> "VALID_TIMESTAMP_EVIDENCE_MISSING"
+                }
+            )
+        }
+        if (!isPlausibleTimestamp(timestamp)) {
+            return MomoChatListRowClassification(
+                MomoChatListRowClassification.UNCLASSIFIED,
+                "TIMESTAMP_FORMAT_NOT_RECOGNIZED"
+            )
+        }
+        return MomoChatListRowClassification(
+            MomoChatListRowClassification.PRIVATE_CHAT,
+            "CHAT_ROW_MINIMUM_STRUCTURE_MATCHED"
+        )
+    }
+
+    /**
+     * Accept only timestamp-like labels observed in Momo session rows. A readable node in the
+     * timestamp slot is not sufficient by itself: recycled or mis-mapped nodes can contain
+     * arbitrary text. Unknown formats remain diagnostic-only until confirmed by a device sample.
+     */
+    private fun isPlausibleTimestamp(value: String): Boolean {
+        val normalized = value.trim().replace(Regex("\\s+"), "")
+        return TIMESTAMP_PATTERNS.any { it.matches(normalized) }
+    }
+
+    private fun isKnownSystemNotificationPreview(preview: String?): Boolean {
+        val normalizedPreview = preview.orEmpty().trim().replace(Regex("\\s+"), " ")
+        // The captured inbox sample exposes achievement notifications as "新成就：...".
+        // Do not classify solely by a generic display name such as "陌陌".
+        return normalizedPreview.startsWith("新成就：") ||
+            normalizedPreview.startsWith("新成就:")
+    }
+
+    private val SYSTEM_ENTRY_NAMES = setOf(
+        "订阅内容",
+        "收到的招呼",
+        "谁看过我",
+        "猜你喜欢",
+        "超级抢车位"
+    )
+    private val TIMESTAMP_PATTERNS = listOf(
+        Regex("\\d{1,2}:\\d{2}"),
+        Regex("(?:昨天|前天)\\d{1,2}:\\d{2}"),
+        Regex("(?:昨天|前天)\\d{1,2}月\\d{1,2}日?"),
+        Regex("\\d{1,2}月\\d{1,2}日?"),
+        Regex("\\d{1,2}-\\d{1,2}"),
+        Regex("(?:周[一二三四五六日天])\\d{1,2}:\\d{2}"),
+        // Momo inbox samples expose relative age labels such as "13分钟前".
+        Regex("\\d{1,4}分钟前"),
+        Regex("\\d{1,3}小时前"),
+        Regex("\\d{1,3}天前")
+    )
+    private const val STATUS_NEW_VIEW_ID_TOKEN = "chatlist_item_tv_status_new"
+        private const val FIRE_FEATURE_VIEW_ID_TOKEN = "session_fire"
+    private const val PREVIEW_VIEW_ID_TOKEN = "chatlist_item_tv_content"
+    private val UNREAD_VIEW_ID_TOKENS = listOf(
+        "unread", "msg_count", "message_count", "msg_badge", "message_badge",
+        "new_msg", "new_message", "unread_badge", "unread_count",
+        "未读", "未读数", "未读角标"
+    )
+}
