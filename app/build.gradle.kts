@@ -76,6 +76,7 @@ dependencies {
     implementation(project(":core"))
     implementation(project(":gesture-api"))
     implementation(project(":gesture-runtime"))
+    implementation(project(":gesture-core"))
     implementation(project(":gesture-android"))
     implementation(project(":ocr-plugin-api"))
     implementation("androidx.core:core-ktx:1.15.0")
