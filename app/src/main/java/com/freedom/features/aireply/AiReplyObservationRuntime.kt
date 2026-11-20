@@ -763,8 +763,17 @@ class AiReplyObservationRuntime(
             previous != null &&
             inboxPageRecognizer.isChatDetail(previous) &&
             matchedRouteId == activeRouteId
+        // A private-message row tap moves from the owned inbox route into its chat-detail
+        // subpage. That subpage is part of the active task's normal workflow, not an UNKNOWN
+        // recovery destination. Keep the state-based classification here; do not infer it from
+        // stale expected-navigation metadata or suppress unrelated route changes.
+        val openingPrivateSessionDetail = activeTaskId == PRIVATE_MESSAGES_TASK_ID &&
+            sessionManagerState == SessionManagerState.OPENING_SESSION &&
+            previous?.pageKind == ChatPageKind.CHAT_LIST &&
+            inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE
         val shouldCreateRouteRecovery = sessionRunStarted && activeTaskId != null &&
             !recoveryContext.pending && selfInitiatedTransition == null &&
+            !openingPrivateSessionDetail &&
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
         if ((shouldCreateRouteRecovery || unmatchedReturnToOwnedRoute) && activeTaskId != null) {
