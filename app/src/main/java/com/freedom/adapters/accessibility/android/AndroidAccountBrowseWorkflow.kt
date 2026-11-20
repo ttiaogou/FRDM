@@ -1979,7 +1979,8 @@ internal class AndroidAccountBrowseWorkflow(
                 scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
                 return
             }
-            if (feed.scrollBounds == null || feed.scrollBounds.isEmpty) {
+            val scrollBounds = feed.scrollBounds
+            if (scrollBounds == null || scrollBounds.isEmpty) {
                 addLog("备用滑动区域暂时不可用；保留当前动态浏览阶段并重新获取页面指纹，不执行坐标猜测")
                 accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB
                 scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
