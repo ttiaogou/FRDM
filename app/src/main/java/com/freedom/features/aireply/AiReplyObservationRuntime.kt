@@ -83,6 +83,10 @@ class AiReplyObservationRuntime(
     /** Loads verified draft history after identity restoration and before OCR starts. */
     private val prepareDraftHistory: (ContactRowIdentity?, ChatPageSnapshot) -> Unit = { _, _ -> },
     private val onDraftConversationObserved: (ChatMessageBatch, ChatPageSnapshot, ContactRowIdentity?, String) -> Boolean = { _, _, _, _ -> false },
+    /** Confirms a previously submitted send against a fresh, validated message batch. */
+    private val onSendConfirmation: (ChatMessageBatch, ChatPageSnapshot) -> com.freedom.features.aireply.ai.SendConfirmationResult = { _, _ -> com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING },
+    /** Returns the stable ID produced by the confirmation matcher exactly once. */
+    private val onConfirmedSendId: () -> String? = { null },
     private val draftStartupFailure: () -> String? = { null },
     /** A verified draft stays on screen so the user can review it and press Send manually. */
     private val isDraftAwaitingUserSend: () -> Boolean = { false },
@@ -246,6 +250,7 @@ class AiReplyObservationRuntime(
     /** Session keys awaiting an externally verified intercept-toggle result, in threshold order. */
     private val pendingInterceptionContactKeys = LinkedHashSet<String>()
     private var ocrDebugBatchLimitLogged = false
+    private var currentSessionSendConfirmed = false
 
     /** Owns asynchronous OCR/message callback lifetime; Runtime handles only validated results. */
     private val messageReadCoordinator by lazy(LazyThreadSafetyMode.NONE) {
@@ -1455,6 +1460,7 @@ class AiReplyObservationRuntime(
         currentSessionName = null
         currentSessionCandidate = null
         currentSessionReadCaptured = false
+        currentSessionSendConfirmed = false
         currentSessionWindowKey = null
         currentSessionBinding = null
         expectedPrivateSessionDetailNavigation = null
@@ -1910,6 +1916,32 @@ class AiReplyObservationRuntime(
                 onLog("消息读取回调[STALE_TASK_IGNORED]：任务租约已失效；不保存样本、不执行后续页面操作；task=$requiredTask")
                 return
             }
+        }
+        when (onSendConfirmation(batch, snapshot)) {
+            com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED -> {
+                if (!currentSessionSendConfirmed) {
+                    currentSessionSendConfirmed = true
+                    val sendConfirmationId = onConfirmedSendId()
+                    if (sendConfirmationId.isNullOrBlank()) {
+                        currentSessionSendConfirmed = false
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 发送成功记录被阻止：缺少稳定 sendConfirmationId；不返回列表")
+                        return
+                    }
+                    recordSuccessfulSend(sendConfirmationId)
+                    privateMessagesTaskController.recordSuccessfulObservation()
+                    onLog("AI 发送成功记录：已记录一次发送成功和一次本轮成功处理")
+                }
+                scheduleReturnToSessionList(snapshot)
+                return
+            }
+            com.freedom.features.aireply.ai.SendConfirmationResult.UNKNOWN -> {
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 发送结果核验：UNKNOWN；暂停当前会话，不返回列表、不重发")
+                return
+            }
+            com.freedom.features.aireply.ai.SendConfirmationResult.WAITING -> return
+            com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING -> Unit
         }
         val greetingDetail = isReadOnlyGreetingMessageRead()
         val privateDetail = sessionRunStarted && currentSessionCandidate != null &&
@@ -2451,6 +2483,7 @@ class AiReplyObservationRuntime(
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
             val observationCompleted = currentSessionReadCaptured
+            val sendAlreadyRecorded = currentSessionSendConfirmed
             onLog(
                 if (observationCompleted) "AI Reply 测试遍历：已验证返回普通消息列表；本次会话只读观察完成"
                 else "AI Reply 测试遍历：已返回普通消息列表，但聊天内容读取未完成；不计入已完成观察数"
@@ -2459,12 +2492,13 @@ class AiReplyObservationRuntime(
             currentSessionName = null
             currentSessionCandidate = null
             currentSessionReadCaptured = false
+            currentSessionSendConfirmed = false
             currentSessionWindowKey = null
             sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
             // The current session may move or change unread state when it is opened/read.
             // That is an expected return mutation, not an unsolicited viewport movement.
             allowExpectedSessionReturnViewportChange = true
-            if (observationCompleted) {
+            if (observationCompleted && !sendAlreadyRecorded) {
                 val completedObservations = privateMessagesTaskController.recordSuccessfulObservation()
                 onLog("AI Reply 模拟回复计数：已成功读取并保存的不同私人聊天=$completedObservations/$normalInboxTaskTargetCount；仅模拟计数，未发送消息")
                 if (privateMessagesTaskController.quotaReached()) {
@@ -2472,6 +2506,8 @@ class AiReplyObservationRuntime(
                     startReceivedGreetingsTask("私人消息成功归档计数达到随机目标 $normalInboxTaskTargetCount")
                     return
                 }
+            } else if (observationCompleted && sendAlreadyRecorded) {
+                onLog("AI Reply 发送处理计数：本次会话已在发送成功确认时记录；返回列表阶段不重复计数")
             }
         }
 
@@ -3149,6 +3185,7 @@ class AiReplyObservationRuntime(
 
     private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) {
         if (!isAiReplyActive() || !sessionRunStarted || !ownsTask(PRIVATE_MESSAGES_TASK_ID)) return
+        currentSessionSendConfirmed = false
 
         // Persist only the business identity used for recovery re-anchoring. The next recovery
         // pass will reacquire the row and coordinates from a fresh page snapshot.

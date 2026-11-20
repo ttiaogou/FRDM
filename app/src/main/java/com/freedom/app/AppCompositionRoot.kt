@@ -337,7 +337,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                 )
             },
             isAiReplyUiOperationOwned = {
-                taskCoordinator.activeTaskId() == "AI_REPLY_PRIVATE_MESSAGES"
+                root.taskCoordinator.activeTaskId() == "AI_REPLY_PRIVATE_MESSAGES"
             }
         )
     }
@@ -460,6 +460,12 @@ internal class AccessibilityServiceDependencies internal constructor(
                     visitToken = visitToken,
                     history = history
                 )
+            },
+            onSendConfirmation = { batch, snapshot ->
+                aiReplyDraftCoordinator.confirmSendResult(batch, snapshot)
+            },
+            onConfirmedSendId = {
+                aiReplyDraftCoordinator.consumeConfirmedSendId()
             },
             onVerifiedConversationObserved = { batch, identity, snapshot ->
                 val verifiedIdentity = identity?.takeIf {

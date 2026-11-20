@@ -2,6 +2,7 @@ package com.freedom.features.aireply.ai
 
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
+import com.freedom.features.aireply.domain.message.MessageContentQuality
 import com.freedom.features.aireply.ports.ChatDraftInputPort
 import com.freedom.features.aireply.ports.ChatDraftSendPort
 import com.freedom.features.aireply.ports.ChatDraftInputResult
@@ -21,6 +22,13 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+
+enum class SendConfirmationResult {
+    NOT_PENDING,
+    WAITING,
+    CONFIRMED,
+    UNKNOWN
+}
 
 /**
  * Calls the configured remote model and fills a verified composer. Sending is deliberately
@@ -52,6 +60,25 @@ class AiReplyDraftCoordinator(
     private val failedRequests = linkedMapOf<String, Pair<Int, Long>>()
     private var activeMessageKey: String? = null
     private var activeRequestId: String? = null
+    private var activeExistingOutgoingKeys: Set<String> = emptySet()
+    private var pendingSendConfirmation: PendingSendConfirmation? = null
+    private var sendConfirmationChecks = 0
+    private var lastConfirmedSendId: String? = null
+
+    private data class PendingSendConfirmation(
+        val sendAttemptId: String,
+        val requestId: String,
+        val conversationKey: String,
+        val segmentIndex: Int,
+        val segmentCount: Int,
+        val segmentContentHash: String,
+        val submittedAt: Long,
+        val confirmationDeadline: Long,
+        val requestGeneration: Long,
+        val target: ChatDraftInputTarget,
+        val draft: String,
+        val existingOutgoingKeys: Set<String>
+    )
 
     val isPending: Boolean get() = pending.get()
     val isAwaitingUserSend: Boolean get() = awaitingUserSend.get()
@@ -66,6 +93,10 @@ class AiReplyDraftCoordinator(
             failedRequests.clear()
             activeMessageKey = null
             activeRequestId = null
+            activeExistingOutgoingKeys = emptySet()
+            pendingSendConfirmation = null
+            sendConfirmationChecks = 0
+            lastConfirmedSendId = null
         }
     }
 
@@ -170,6 +201,9 @@ class AiReplyDraftCoordinator(
             }
             activeMessageKey = dedupeKey
             activeRequestId = requestId
+            activeExistingOutgoingKeys = batch.messages
+                .filter { it.direction == ChatMessageDirection.OUTGOING }
+                .mapTo(LinkedHashSet()) { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
             processedMessageKeys += dedupeKey
             while (processedMessageKeys.size > MAX_PROCESSED_KEYS) {
                 val oldest = processedMessageKeys.firstOrNull() ?: break
@@ -378,7 +412,7 @@ class AiReplyDraftCoordinator(
             if (index + 1 < segments.size) {
                 writeNext(target, draft, segments, index + 1, expected, requestGeneration)
             } else {
-                verifyAndFinish(target, draft, requestGeneration)
+                verifyAndFinish(target, draft, segments, index, requestGeneration)
             }
             return
         }
@@ -412,7 +446,13 @@ class AiReplyDraftCoordinator(
             ChatDraftInputStatus.VERIFICATION_FAILED
         )
 
-    private fun verifyAndFinish(target: ChatDraftInputTarget, draft: String, requestGeneration: Long) {
+    private fun verifyAndFinish(
+        target: ChatDraftInputTarget,
+        draft: String,
+        segments: List<String>,
+        segmentIndex: Int,
+        requestGeneration: Long
+    ) {
         if (!isCurrentGeneration(requestGeneration)) return
         if (!isAiReplyActive() || isManualReviewRequired()) {
             finish("AI_REPLY_STATE_CHANGED_BEFORE_VERIFY", requestGeneration)
@@ -449,9 +489,29 @@ class AiReplyDraftCoordinator(
                     ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_EXCEPTION")
                 }
             if (sent.status == ChatDraftInputStatus.SEND_SUBMITTED) {
+                val sendAttemptId = UUID.randomUUID().toString()
+                val submittedAt = nowMillis()
+                synchronized(lock) {
+                    pendingSendConfirmation = PendingSendConfirmation(
+                        sendAttemptId = sendAttemptId,
+                        requestId = activeRequestId.orEmpty(),
+                        conversationKey = target.conversationIdentityKey,
+                        segmentIndex = segmentIndex,
+                        segmentCount = segments.size,
+                        segmentContentHash = fingerprint(draft),
+                        submittedAt = submittedAt,
+                        confirmationDeadline = submittedAt + SEND_CONFIRMATION_TIMEOUT_MILLIS,
+                        requestGeneration = requestGeneration,
+                        target = target,
+                        draft = draft,
+                        existingOutgoingKeys = activeExistingOutgoingKeys
+                    )
+                    sendConfirmationChecks = 0
+                }
                 onLog("AI 回复状态：SENT_UNCONFIRMED；发送按钮手势已被接受；" +
-                    "不代表 Momo 已产生己方消息；等待后续结果核验")
-                finish("DRAFT_SENT_WAITING_CONFIRMATION", requestGeneration)
+                    "不代表 Momo 已产生己方消息；等待后续结果核验；" +
+                    "sendAttemptId=${sendAttemptId.take(12)}；requestId=${activeRequestId?.take(12)}")
+                pending.set(false)
             } else {
                 val finalFailure = sent.status in setOf(
                     ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND,
@@ -487,6 +547,67 @@ class AiReplyDraftCoordinator(
         activeMessageKey != null && activeRequestId != null
     }
 
+    fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): SendConfirmationResult {
+        val pending = synchronized(lock) { pendingSendConfirmation } ?: return SendConfirmationResult.NOT_PENDING
+        if (generation.get() != pending.requestGeneration) {
+            onLog("AI 发送结果核验：UNKNOWN；运行代次已失效；禁止重发")
+            updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)
+            return SendConfirmationResult.UNKNOWN
+        }
+        val observationMatches = batch.windowSessionKey == pending.target.windowSessionKey &&
+            snapshot.packageName == pending.target.packageName &&
+            snapshot.conversationIdentityKey() == pending.target.conversationIdentityKey &&
+            normalizeTitle(snapshot.chatTitleText) == normalizeTitle(pending.target.expectedChatTitle) &&
+            batch.capturedAtMillis >= pending.submittedAt
+        if (!observationMatches) {
+            val checks = synchronized(lock) { ++sendConfirmationChecks }
+            if (checks >= SEND_CONFIRMATION_MAX_CHECKS) {
+                onLog("AI 发送结果核验：UNKNOWN；窗口、会话标题或时间条件连续不匹配；禁止重发")
+                updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)
+                return SendConfirmationResult.UNKNOWN
+            }
+            onLog("AI 发送结果核验：WAITING；当前批次不属于发送后的稳定聊天观察；检查次数=$checks")
+            return SendConfirmationResult.WAITING
+        }
+        val matched = batch.messages.firstOrNull { message ->
+            message.direction == ChatMessageDirection.OUTGOING &&
+                message.contentQuality == MessageContentQuality.VERIFIED &&
+                fingerprint(message.content.orEmpty()) == pending.segmentContentHash &&
+                messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys
+        }
+        if (matched != null) {
+            val confirmationId = fingerprint(
+                "${pending.conversationKey}|${pending.requestId}|${pending.segmentIndex}|${matched.stableLogicalMessageId}"
+            )
+            if (updateTaskStatus(ReplyTaskStatus.SENT, pending.requestGeneration)) {
+                onLog("AI 发送结果核验：SENT；sendConfirmationId=${confirmationId.take(12)}；" +
+                    "sendAttemptId=${pending.sendAttemptId.take(12)}")
+                synchronized(lock) {
+                    lastConfirmedSendId = confirmationId
+                    pendingSendConfirmation = null
+                    activeMessageKey = null
+                    activeRequestId = null
+                    activeExistingOutgoingKeys = emptySet()
+                    awaitingUserSend.set(false)
+                }
+                return SendConfirmationResult.CONFIRMED
+            }
+            return SendConfirmationResult.UNKNOWN
+        }
+        val checks = synchronized(lock) { ++sendConfirmationChecks }
+        if (checks >= SEND_CONFIRMATION_MAX_CHECKS || nowMillis() >= pending.confirmationDeadline) {
+            updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)
+            onLog("AI 发送结果核验：UNKNOWN；检查次数=$checks；未发现新的己方消息；禁止立即重发")
+            return SendConfirmationResult.UNKNOWN
+        }
+        onLog("AI 发送结果核验：WAITING；检查次数=$checks；等待下一次当前聊天消息观察")
+        return SendConfirmationResult.WAITING
+    }
+
+    fun consumeConfirmedSendId(): String? = synchronized(lock) {
+        lastConfirmedSendId.also { lastConfirmedSendId = null }
+    }
+
     private fun finish(reasonCode: String, requestGeneration: Long) {
         if (reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED", "MODEL_DECISION_MODEL_CALL_FAILED")) {
             updateTaskStatus(if (reasonCode == "MODEL_DECISION_MODEL_CALL_FAILED") ReplyTaskStatus.UNKNOWN else ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
@@ -510,12 +631,12 @@ class AiReplyDraftCoordinator(
         onLog("AI 回复草稿处理结束：$reasonCode")
     }
 
-    private fun updateTaskStatus(status: ReplyTaskStatus, requestGeneration: Long) {
-        if (!isCurrentGeneration(requestGeneration)) return
+    private fun updateTaskStatus(status: ReplyTaskStatus, requestGeneration: Long): Boolean {
+        if (!isCurrentGeneration(requestGeneration)) return false
         val owner = synchronized(lock) { activeMessageKey to activeRequestId }
-        val key = owner.first ?: return
-        val requestId = owner.second ?: return
-        replyTaskRepository?.updateStatus(key, requestId, status, nowMillis())
+        val key = owner.first ?: return false
+        val requestId = owner.second ?: return false
+        return replyTaskRepository?.updateStatus(key, requestId, status, nowMillis()) ?: true
     }
 
     private fun reject(reasonCode: String): Boolean {
@@ -527,6 +648,10 @@ class AiReplyDraftCoordinator(
         .digest(value.toByteArray(StandardCharsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
 
+    private fun messageKey(id: String, revision: String): String = "$id|$revision"
+
+    private fun normalizeTitle(value: String?): String = value.orEmpty().trim().replace(Regex("\\s+"), " ")
+
     private fun ConversationContext.identityConversationMismatch(): Boolean =
         contactId.isBlank() || conversationId != "momo-direct-$contactId"
 
@@ -537,6 +662,8 @@ class AiReplyDraftCoordinator(
         private const val RECOVERY_VERIFY_RETRY_DELAY_MS = 5_000L
         private const val MAX_RECOVERY_VERIFY_RETRIES = 2
         private const val REPLY_TASK_REQUEST_TIMEOUT_MILLIS = 120_000L
+        private const val SEND_CONFIRMATION_TIMEOUT_MILLIS = 8_000L
+        private const val SEND_CONFIRMATION_MAX_CHECKS = 2
 
         private fun newDraftExecutor() = Executors.newSingleThreadExecutor(ThreadFactory { runnable ->
             Thread(runnable, "frdm-ai-model-request").apply { isDaemon = true }
