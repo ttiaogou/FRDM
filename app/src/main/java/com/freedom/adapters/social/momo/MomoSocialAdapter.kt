@@ -5172,11 +5172,10 @@ internal class MomoSocialAdapter(
                     verifiedInboxIdentityByAnchor.remove(oldest)
                 }
             } else {
-                failedInboxIdentityCaptureKeys += anchorKey
-                completedInboxIdentityOutcomes[anchorKey] = ContactIdentityCaptureOutcome.failed(
-                    ContactIdentityCaptureRequestResult.REJECTED,
-                    "IDENTITY_CAPTURE_PROFILE_ID_NOT_CONFIRMED"
-                )
+                // Missing profile ID is retryable observation failure, not an identity
+                // conflict. Do not populate either terminal cache: the next observation must
+                // be allowed to reacquire the chat page, relocate the avatar and retry.
+                completedInboxIdentityOutcomes.remove(anchorKey)
             }
             pendingInboxIdentityCapture = null
         }
@@ -5395,7 +5394,6 @@ internal class MomoSocialAdapter(
         val shouldLog: Boolean
         synchronized(inboxIdentityCaptureLock) {
             if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
-            failedInboxIdentityCaptureKeys += pending.anchor.opaqueKey()
             shouldLog = loggedInboxIdentityFailureKeys.add(logKey)
         }
         transitionAvatarClickState(
