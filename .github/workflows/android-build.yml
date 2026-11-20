@@ -1,13 +1,14 @@
 name: Freedom CI
 
 on:
-  # Run direct-push CI only for integration branches. Feature and Dependabot
-  # branches are validated by pull_request, avoiding duplicate builds for the
-  # same commit on both push and pull_request events.
+  # Validate every branch commit and every pull request.
+  # Omitting branch filters makes this workflow run for all branches.
   push:
-    branches: ["main", "master"]
+    branches:
+      - "**"
   pull_request:
-    branches: ["main", "master"]
+    branches:
+      - "**"
   schedule:
     - cron: "23 3 * * 1"
   workflow_dispatch:
