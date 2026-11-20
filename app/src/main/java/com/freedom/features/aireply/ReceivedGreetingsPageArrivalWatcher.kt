@@ -38,7 +38,12 @@ internal class ReceivedGreetingsPageArrivalWatcher(
 
     /** Called with the result produced by the unified page-observation path. */
     fun onPageSnapshotAvailable(status: ReceivedGreetingsPageArrivalStatus): ReceivedGreetingsPageArrivalStatus {
-        if (retryTask != null) return ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING
+        // A fresh unified snapshot is authoritative. If it arrives before the scheduled
+        // stability retry fires, consume this snapshot instead of returning the old synthetic
+        // LIST_STABILIZING status; otherwise the actual LIST_CONFIRMED result can be stranded
+        // behind the retry task and the task never starts.
+        retryTask?.cancel()
+        retryTask = null
         cancelFallbackCheck()
         return handleStatus(status)
     }

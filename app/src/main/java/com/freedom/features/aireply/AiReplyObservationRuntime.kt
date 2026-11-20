@@ -531,10 +531,11 @@ class AiReplyObservationRuntime(
             !receivedGreetingsTaskFlow.supportsWorkflow()
         ) return
         receivedGreetingsPageProbePending = true
-        // A stability retry must always result in one new snapshot. Bypass the coalescing
-        // channel here; otherwise a pending channel request can consume the retry without
-        // invoking runFullInspection, leaving the arrival watcher stuck at two samples.
-        scheduleFullInspectionAfter(fullInspectionDebounceMs)
+        // The watcher has already supplied the stability delay. Take the fresh read-only
+        // snapshot immediately; adding another full-page debounce here changes the contract
+        // from 350ms to 350ms + debounce and leaves LIST_CONFIRMED behind the test/runtime
+        // retry boundary.
+        runFullInspection()
     }
 
     private fun runFullInspection() {
