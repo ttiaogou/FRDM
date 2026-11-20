@@ -168,3 +168,39 @@ data class GestureDynamicsSettings(
     val randomPhaseTremorAmplitudePx: Float = 1.5f
 )
 
+
+/** Distribution families for bounded gesture waits. */
+enum class GestureTimeDistributionKind {
+    UNIFORM,
+    TRUNCATED_NORMAL,
+    TRUNCATED_LOG_NORMAL
+}
+
+data class GestureTimeDistributionProfile(
+    val enabled: Boolean = true,
+    val kind: GestureTimeDistributionKind = GestureTimeDistributionKind.TRUNCATED_LOG_NORMAL,
+    val centerMs: Double = 400.0,
+    val standardDeviationMs: Double = 80.0,
+    val logNormalSigma: Double = 0.25,
+    val minimumMs: Long = 100L,
+    val maximumMs: Long = 1_000L
+) {
+    fun isValid(): Boolean {
+        if (!centerMs.isFinite() || centerMs < 0.0 ||
+            !standardDeviationMs.isFinite() || standardDeviationMs < 0.0 ||
+            !logNormalSigma.isFinite() || logNormalSigma < 0.0 ||
+            minimumMs < 0L || maximumMs < minimumMs || maximumMs > MAX_WAIT_MS
+        ) return false
+        return when (kind) {
+            GestureTimeDistributionKind.UNIFORM -> true
+            GestureTimeDistributionKind.TRUNCATED_NORMAL ->
+                centerMs in minimumMs.toDouble()..maximumMs.toDouble()
+            GestureTimeDistributionKind.TRUNCATED_LOG_NORMAL ->
+                centerMs > 0.0 && centerMs in minimumMs.toDouble()..maximumMs.toDouble()
+        }
+    }
+
+    companion object {
+        const val MAX_WAIT_MS = 120_000L
+    }
+}
