@@ -2,14 +2,9 @@ package com.freedom.features.accountbrowse
 
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.accountbrowse.ports.BrowsePageEvidence
-import com.freedom.features.accountbrowse.ports.BrowsePageKind
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpoint
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
-import com.freedom.features.recovery.RecoveryTransactionEvent
 import com.freedom.features.recovery.RecoveryTransactionState
-import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
-import com.freedom.features.recovery.RecoveryEventDispatcher
-import com.freedom.features.recovery.RecoveryEventIdentity
 
 /**
  * Coordinates the automatic-browse phase dispatch independently from Android Service APIs.
@@ -48,12 +43,11 @@ class AccountBrowseRuntime(
     )
 
     private val stepScheduler = AccountBrowseScheduler(scheduler, canScheduleStep) { performStep() }
-    private val recoveryTransaction = RecoveryEventDispatcher(
-        UnifiedRecoveryTransactionStateMachine(),
-        onLog
+    private val dynamicPageRecovery = DynamicPageRecovery(
+        targetPackage = targetPackage,
+        currentRunGeneration = currentRunGeneration,
+        onLog = onLog
     )
-    private val recoveryRouteId = "account-browse"
-    private val recoveryCheckpointId = "account-browse-checkpoint"
 
     fun scheduleStep(delayMs: Long) = stepScheduler.schedule(delayMs)
 
@@ -78,25 +72,7 @@ class AccountBrowseRuntime(
             // A restored checkpoint is never executable immediately. The workflow must first
             // re-observe the page and satisfy the shared two-sample verification gate.
             stateMachine.transitionTo(AccountBrowsePhase.PAUSED)
-            recoveryTransaction.activate(
-                RecoveryEventIdentity(
-                    taskId = "ACCOUNT_BROWSE",
-                    routeId = recoveryRouteId,
-                    runGeneration = currentRunGeneration().coerceAtLeast(0L),
-                    checkpointId = recoveryCheckpointId,
-                    observationGeneration = 0L,
-                    unknownReason = "CHECKPOINT_LOADED"
-                )
-            )
-            recoveryTransaction.dispatch(
-                RecoveryTransactionEvent.CheckpointLoaded(
-                    if (checkpoint.savedAtEpochMs > 0L) {
-                        RecoveryTransactionEvent.Source.PROCESS_RESTART
-                    } else {
-                        RecoveryTransactionEvent.Source.SERVICE_RECONNECT
-                    }
-                )
-            )
+            dynamicPageRecovery.restoreFromCheckpoint(checkpoint.savedAtEpochMs)
             sessionStateOwner.update { current ->
                 current.copy(
                     sourceFingerprint = checkpoint.sourceFingerprint,
@@ -124,51 +100,22 @@ class AccountBrowseRuntime(
 
     /** Normalizes page-observation uncertainty before any AccountBrowse action is authorized. */
     fun observeRecoveryPage(page: BrowsePageEvidence): RecoveryTransactionState {
-        val unknown = page.pageKind == BrowsePageKind.UNKNOWN ||
-            page.packageName.isBlank() ||
-            !isTargetPackage(page.packageName) ||
-            page.fingerprint.isBlank() ||
-            page.confidence < 80
-        if (unknown) {
-            recoveryTransaction.activate(
-                RecoveryEventIdentity(
-                    taskId = "ACCOUNT_BROWSE",
-                    routeId = recoveryRouteId,
-                    runGeneration = currentRunGeneration().coerceAtLeast(0L),
-                    checkpointId = recoveryCheckpointId,
-                    observationGeneration = recoveryTransaction.stableVerificationSamples.toLong(),
-                    unknownReason = page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
-                )
-            )
-            return recoveryTransaction.dispatch(
-                RecoveryTransactionEvent.UnknownPage(
-                    page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
-                )
-            ).also {
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
-            }
-        }
-        return recoveryTransaction.state
+        return dynamicPageRecovery.observePage(page)
     }
 
-    fun recoveryState(): RecoveryTransactionState = recoveryTransaction.state
+    fun recoveryState(): RecoveryTransactionState = dynamicPageRecovery.state()
 
-    fun recoveryStableSamples(): Int = recoveryTransaction.stableVerificationSamples
+    fun recoveryStableSamples(): Int = dynamicPageRecovery.stableSamples()
 
     /**
      * Replaces the dynamic-feed-local stableSamples decision with the shared two-sample gate.
      * The caller still owns fingerprint extraction and all feed actions.
      */
     fun observeDynamicFeedFingerprint(fingerprint: String): Boolean {
-        val state = recoveryTransaction.observeFingerprint(fingerprint)
-        if (state != RecoveryTransactionState.VERIFIED) return false
-        recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
-        recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        if (!dynamicPageRecovery.observeFingerprint(fingerprint)) return false
         restoredCheckpointPhase = null
         return true
     }
-
-    private fun isTargetPackage(packageName: String): Boolean = packageName == targetPackage()
 
     /** The AccountBrowse workflow owns all phase transitions. */
     fun transitionTo(nextPhase: AccountBrowsePhase) {
@@ -213,7 +160,7 @@ class AccountBrowseRuntime(
                 sessionEnabled = true,
                 touchActive = isTouchActive(),
                 phase = phase,
-                recoveryState = recoveryTransaction.state
+                recoveryState = dynamicPageRecovery.state()
             )
         ) return
 
@@ -250,7 +197,7 @@ class AccountBrowseRuntime(
         checkpointRepository?.clear()
         stateMachine.reset()
         restoredCheckpointPhase = null
-        recoveryTransaction.reset()
+        dynamicPageRecovery.reset()
         session.reset()
         afterReset()
     }
