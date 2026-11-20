@@ -274,6 +274,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             targetAppReadinessController = targetAppReadinessController,
             inputOriginClassifier = inputOriginClassifier,
+            isUiOperationOwned = {
+                root.taskCoordinator.activeTaskId() != null
+            },
             onReadinessDiagnostic = addLog
         )
     }
