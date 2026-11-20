@@ -15,7 +15,7 @@ class AccessibilityInspectorPipelineBoundaryTest {
         }
 
     private fun source(relativePath: String): String =
-        File(projectRoot, relativePath).readText()
+        TestSourceResolver.resolve(projectRoot, relativePath).readText()
 
     @Test
     fun inspectorRemainsSnapshotOnlyAndDoesNotExecuteTargetActions() {
