@@ -98,7 +98,9 @@ internal class MomoSocialAdapter(
     private val ocrReviewRepository: OcrReviewRepository,
     private val sampleArchivePort: SessionSampleArchivePort,
     /** Registers the imminent profile-to-chat return in the unified navigation provenance layer. */
-    private val registerSelfNavigation: (String) -> Unit = {}
+    private val registerSelfNavigation: (String) -> Unit = {},
+    /** The AI task lease must still be current when a send gesture is admitted. */
+    private val isAiReplyUiOperationOwned: () -> Boolean = { true }
 ) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort,
     ChatDraftSendPort {
 
@@ -4506,17 +4508,37 @@ internal class MomoSocialAdapter(
     /** Stage-one gate: the live root must still be the window captured for this chat. */
     private fun isCurrentDraftTarget(target: ChatDraftInputTarget): Boolean {
         if (target.packageName != targetPackage || activityClass() != target.activityClass) return false
-        return rootAccess.withActiveTargetRoot { _, window ->
-            window == target.nodeTarget.window
+        return rootAccess.withActiveTargetRoot { root, window ->
+            if (window != target.nodeTarget.window) return@withActiveTargetRoot false
+            val titleNodes = root.findAccessibilityNodeInfosByViewId(MomoChatPageContract.CHAT_TITLE_VIEW_ID).orEmpty()
+            try {
+                val currentTitle = titleNodes.firstOrNull { it.isVisibleToUser }
+                    ?.let { it.text?.toString().orEmpty().ifBlank { it.contentDescription?.toString().orEmpty() } }
+                    ?.trim()
+                    .orEmpty()
+                val expectedTitle = target.expectedChatTitle?.trim().orEmpty()
+                expectedTitle.isNotBlank() && normalizeIdentityDisplayName(currentTitle) ==
+                    normalizeIdentityDisplayName(expectedTitle)
+            } finally {
+                titleNodes.forEach { node -> runCatching { node.recycle() } }
+            }
         } ?: false
     }
 
     override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+        if (!isAiReplyUiOperationOwned()) {
+            return ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "TASK_OWNERSHIP_LOST")
+        }
+        if (!isCurrentDraftTarget(target)) {
+            return ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_IDENTITY_CONFLICT")
+        }
         if (target.packageName != targetPackage || activityClass() != target.activityClass) {
             return ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_CONTEXT_CHANGED")
         }
         return try {
-            rootAccess.withActiveWindowRoot { root ->
+            // Use the target application's root so an auxiliary dialog/card window does not
+            // replace the chat controls used by this already-validated send operation.
+            rootAccess.withActiveTargetRoot { root, _ ->
                 val inputs = root.findAccessibilityNodeInfosByViewId(MomoChatPageContract.CHAT_COMPOSER_VIEW_ID).orEmpty()
                 val writableInputs = inputs.filter { node ->
                     node.viewIdResourceName == MomoChatPageContract.CHAT_COMPOSER_VIEW_ID &&
@@ -4524,7 +4546,7 @@ internal class MomoSocialAdapter(
                 }
                 if (writableInputs.size != 1) {
                     inputs.forEach { node -> runCatching { node.recycle() } }
-                    return@withActiveWindowRoot ChatDraftInputResult(
+                    return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "INPUT_IDENTITY_CHANGED"
                     )
                 }
@@ -4532,7 +4554,7 @@ internal class MomoSocialAdapter(
                 val inputText = draftInputText(input)
                 if (inputText != expectedText) {
                     inputs.forEach { node -> runCatching { node.recycle() } }
-                    return@withActiveWindowRoot ChatDraftInputResult(
+                    return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "DRAFT_CHANGED_BEFORE_SEND"
                     )
                 }
@@ -4548,13 +4570,13 @@ internal class MomoSocialAdapter(
                 inputs.forEach { node -> runCatching { node.recycle() } }
                 if (sendNodes.isEmpty()) {
                     sendNodes.forEach { node -> runCatching { node.recycle() } }
-                    return@withActiveWindowRoot ChatDraftInputResult(
+                    return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_FOUND"
                     )
                 }
                 if (sendNodes.size != 1) {
                     sendNodes.forEach { node -> runCatching { node.recycle() } }
-                    return@withActiveWindowRoot ChatDraftInputResult(
+                    return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_CONTROL_AMBIGUOUS, "SEND_CONTROL_AMBIGUOUS"
                     )
                 }
@@ -4564,16 +4586,16 @@ internal class MomoSocialAdapter(
                 val bounds = rect.toScreenRect()
                 send.recycle()
                 if (bounds.isEmpty) {
-                    return@withActiveWindowRoot ChatDraftInputResult(
+                    return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_BOUNDS_INVALID"
                     )
                 }
                 val executionContext = gesturePolicy.captureContext(target.nodeTarget.window)
-                    ?: return@withActiveWindowRoot ChatDraftInputResult(
+                    ?: return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_WINDOW_NOT_CURRENT"
                     )
                 if (executionContext.targetWindow != target.nodeTarget.window) {
-                    return@withActiveWindowRoot ChatDraftInputResult(
+                    return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_WINDOW_GENERATION_CHANGED"
                     )
                 }

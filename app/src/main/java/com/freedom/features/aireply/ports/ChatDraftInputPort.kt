@@ -9,7 +9,9 @@ data class ChatDraftInputTarget(
     val windowIdentityKey: String,
     val conversationIdentityKey: String,
     val windowSessionKey: String,
-    val nodeTarget: NodeTarget
+    val nodeTarget: NodeTarget,
+    /** Title captured after the chat header was validated; used for send-time continuity only. */
+    val expectedChatTitle: String? = null
 )
 
 enum class ChatDraftInputStatus {
@@ -43,8 +45,9 @@ data class ChatDraftInputResult(
 
 /**
  * The only UI capability exposed to AI draft generation. There is intentionally no send method.
- * Implementations must locate the current correct writable composer each time.
- * Stored window/activity/path metadata is diagnostic only and must not block a live composer.
+ * Implementations must locate the current correct writable composer each time. The captured
+ * chat window/title metadata is a safety gate for the current conversation; the node path itself
+ * is never reused as the input locator.
  */
 interface ChatDraftInputPort {
     fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult

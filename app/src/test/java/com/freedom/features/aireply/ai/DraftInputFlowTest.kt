@@ -52,7 +52,7 @@ class DraftInputFlowTest {
         }, input, scheduler, { true }, { false }, {}, { error("unused") }, chooseRandomInt = { _, _ -> 500 }
     )
 
-    @Test fun stageOneLeavesVerifiedDraftPendingWithoutSending() {
+    @Test fun stageTwoSendsOnlyAfterVerifiedDraft() {
         val input = Input(); val scheduler = Scheduler(); val send = Send()
         val coordinator = AiReplyDraftCoordinator(
             object : AiModelConfigurationRepository {
@@ -67,7 +67,7 @@ class DraftInputFlowTest {
         )
         coordinator.writeNext(target, "abcdef", listOf("abc", "def"), 0, "", 0)
         scheduler.next(); scheduler.next()
-        assertEquals(0, send.calls)
+        assertEquals(1, send.calls)
         assertTrue(coordinator.isAwaitingUserSend)
     }
 

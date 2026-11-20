@@ -335,6 +335,9 @@ internal class AccessibilityServiceDependencies internal constructor(
                     packageName = monitorRepository.targetPackage(),
                     targetActivityClass = targetActivityClass
                 )
+            },
+            isAiReplyUiOperationOwned = {
+                taskCoordinator.activeTaskId() == "AI_REPLY_PRIVATE_MESSAGES"
             }
         )
     }

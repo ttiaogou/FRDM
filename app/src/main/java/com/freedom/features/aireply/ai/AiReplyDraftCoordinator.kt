@@ -137,7 +137,8 @@ class AiReplyDraftCoordinator(
             windowIdentityKey = windowIdentity,
             conversationIdentityKey = conversationIdentity,
             windowSessionKey = expectedWindowSessionKey,
-            nodeTarget = inputTarget
+            nodeTarget = inputTarget,
+            expectedChatTitle = snapshot.chatTitleText
         )
         // Window generation is a stale-callback guard, not a new model task identity.
         val dedupeConversationKey = conversationIdentity
@@ -420,17 +421,56 @@ class AiReplyDraftCoordinator(
         val result = runCatching { inputPort.verifyDraft(target, draft) }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
         if (result.status == ChatDraftInputStatus.VERIFIED) {
-            // Stage one ends here. The next phase may consume PENDING_SEND and invoke the
-            // retained send port after its own send-result protocol is implemented.
+            // Stage two consumes PENDING_SEND and invokes the retained send port only after
+            // the adapter has revalidated the live chat and send control.
             synchronized(lock) {
                 if (!isCurrentGeneration(requestGeneration)) return
                 awaitingUserSend.set(true)
             }
             updateTaskStatus(ReplyTaskStatus.DRAFT_APPLIED, requestGeneration)
             updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
-            onLog("AI 草稿状态：DRAFT_ACCEPTED_AND_FILLED；草稿已接受并填入输入框；" +
-                "状态=PENDING_SEND；本阶段不提交发送动作")
-            finish("DRAFT_READY_PENDING_SEND", requestGeneration)
+            val configuredSendPort = sendPort
+            if (configuredSendPort == null) {
+                awaitingUserSend.set(true)
+                onLog("AI 草稿状态：PENDING_SEND；发送端口不可用；保留当前草稿等待人工处理")
+                finish("DRAFT_ENTERED_USER_CONTENT_REVIEW_AND_SEND_REQUIRED", requestGeneration)
+                return
+            }
+            updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
+            awaitingUserSend.set(true)
+            if (!isCurrentGeneration(requestGeneration) || !hasActiveTaskOwner()) {
+                updateTaskStatus(ReplyTaskStatus.FAILED_FINAL, requestGeneration)
+                onLog("AI 回复状态：发送前任务校验失败；status=FAILED_FINAL；reason=REQUEST_GENERATION_INVALID")
+                finish("DRAFT_SEND_REQUEST_GENERATION_INVALID", requestGeneration)
+                return
+            }
+            val sent = runCatching { configuredSendPort.sendDraft(target, draft) }
+                .getOrElse {
+                    ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_EXCEPTION")
+                }
+            if (sent.status == ChatDraftInputStatus.SEND_SUBMITTED) {
+                onLog("AI 回复状态：SENT_UNCONFIRMED；发送按钮手势已被接受；" +
+                    "不代表 Momo 已产生己方消息；等待后续结果核验")
+                finish("DRAFT_SENT_WAITING_CONFIRMATION", requestGeneration)
+            } else {
+                val finalFailure = sent.status in setOf(
+                    ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND,
+                    ChatDraftInputStatus.SEND_CONTROL_AMBIGUOUS,
+                    ChatDraftInputStatus.SEND_PRECONDITION_FAILED,
+                    ChatDraftInputStatus.SEND_GESTURE_REJECTED
+                ) && sent.reasonCode in setOf(
+                    "CHAT_IDENTITY_CONFLICT",
+                    "TASK_OWNERSHIP_LOST",
+                    "REQUEST_GENERATION_INVALID",
+                    "DRAFT_CHANGED_BEFORE_SEND",
+                    "SEND_CONTROL_AMBIGUOUS",
+                    "SEND_CONTROL_BOUNDS_INVALID"
+                )
+                val failureStatus = if (finalFailure) ReplyTaskStatus.FAILED_FINAL else ReplyTaskStatus.FAILED_RETRYABLE
+                updateTaskStatus(failureStatus, requestGeneration)
+                onLog("AI 回复状态：发送手势未提交；status=${failureStatus.name}；reason=${sent.reasonCode}")
+                finish("DRAFT_SEND_${sent.reasonCode}", requestGeneration)
+            }
         } else {
             onLog(
                 "AI 草稿状态：LOCAL_DRAFT_VALIDATION_REJECTED；最终回读校验未通过；" +
@@ -442,6 +482,10 @@ class AiReplyDraftCoordinator(
 
     private fun isCurrentGeneration(requestGeneration: Long): Boolean =
         generation.get() == requestGeneration
+
+    private fun hasActiveTaskOwner(): Boolean = synchronized(lock) {
+        activeMessageKey != null && activeRequestId != null
+    }
 
     private fun finish(reasonCode: String, requestGeneration: Long) {
         if (reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED", "MODEL_DECISION_MODEL_CALL_FAILED")) {
@@ -463,7 +507,7 @@ class AiReplyDraftCoordinator(
                 processedMessageKeys.remove(key)
             }
         }
-        onLog("AI 回复草稿处理结束：$reasonCode；未执行发送动作")
+        onLog("AI 回复草稿处理结束：$reasonCode")
     }
 
     private fun updateTaskStatus(status: ReplyTaskStatus, requestGeneration: Long) {
