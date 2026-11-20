@@ -14,7 +14,7 @@ class FloatingActionEntryPointBoundaryTest {
                 ?: start
         }
 
-    private fun source(path: String): String = File(projectRoot, path).readText()
+    private fun source(path: String): String = TestSourceResolver.resolve(projectRoot, path).readText()
 
     @Test
     fun globalNodeCollectionHasExactlyOneEntryInTheFloatingMenu() {
