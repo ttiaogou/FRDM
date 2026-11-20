@@ -31,6 +31,8 @@ class ReplySegmentTaskTest {
                 override fun find(taskId: String): ReplySegmentTaskRecord? = records[taskId]
                 override fun findByRequest(requestId: String): List<ReplySegmentTaskRecord> =
                     records.values.filter { it.requestId == requestId }
+                override fun findByConversation(conversationKey: String): List<ReplySegmentTaskRecord> =
+                    records.values.filter { it.conversationKey == conversationKey }
                 override fun save(record: ReplySegmentTaskRecord) { records[record.taskId] = record }
                 override fun update(record: ReplySegmentTaskRecord): Boolean {
                     if (!records.containsKey(record.taskId)) return false

@@ -23,6 +23,7 @@ data class ReplySegmentTaskRecord(
     val segmentIndex: Int,
     val segmentCount: Int,
     val segmentContentHash: String,
+    val segmentContent: String = "",
     val status: ReplySegmentTaskStatus,
     val createdAt: Long,
     val sentAt: Long? = null,
@@ -40,6 +41,7 @@ data class ReplySegmentTaskRecord(
 interface ReplySegmentTaskRepository {
     fun find(taskId: String): ReplySegmentTaskRecord?
     fun findByRequest(requestId: String): List<ReplySegmentTaskRecord>
+    fun findByConversation(conversationKey: String): List<ReplySegmentTaskRecord>
     fun save(record: ReplySegmentTaskRecord)
     fun update(record: ReplySegmentTaskRecord): Boolean
 }
@@ -51,7 +53,7 @@ object ReplySegmentTaskTransitions {
         ReplySegmentTaskStatus.PENDING_SEND to setOf(ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.FAILED_RETRYABLE, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.SENDING to setOf(ReplySegmentTaskStatus.SENT_UNCONFIRMED, ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.FAILED_RETRYABLE, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.SENT_UNCONFIRMED to setOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.FAILED_FINAL),
-        ReplySegmentTaskStatus.UNKNOWN to setOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.FAILED_FINAL),
+        ReplySegmentTaskStatus.UNKNOWN to setOf(ReplySegmentTaskStatus.DRAFT_APPLIED, ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.FAILED_RETRYABLE to setOf(ReplySegmentTaskStatus.CREATED),
         ReplySegmentTaskStatus.FAILED_FINAL to emptySet(),
         ReplySegmentTaskStatus.SENT to emptySet()
@@ -81,6 +83,7 @@ object ReplySegmentTaskFactory {
                 segmentIndex = index,
                 segmentCount = count,
                 segmentContentHash = sha256(content),
+                segmentContent = content,
                 status = ReplySegmentTaskStatus.CREATED,
                 createdAt = createdAtMillis
             )

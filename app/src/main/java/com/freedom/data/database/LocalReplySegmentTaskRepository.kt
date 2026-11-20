@@ -18,6 +18,9 @@ internal class LocalReplySegmentTaskRepository(private val file: File) : ReplySe
     override fun findByRequest(requestId: String): List<ReplySegmentTaskRecord> = synchronized(lock) {
         read().values.filter { it.requestId == requestId }.sortedBy { it.segmentIndex }
     }
+    override fun findByConversation(conversationKey: String): List<ReplySegmentTaskRecord> = synchronized(lock) {
+        read().values.filter { it.conversationKey == conversationKey }.sortedBy { it.segmentIndex }
+    }
 
     override fun save(record: ReplySegmentTaskRecord) = synchronized(lock) {
         val records = read(); require(record.taskId !in records) { "Duplicate segment task" }
@@ -34,11 +37,11 @@ internal class LocalReplySegmentTaskRepository(private val file: File) : ReplySe
         val result = LinkedHashMap<String, ReplySegmentTaskRecord>()
         if (!file.isFile) return result
         file.forEachLine { line -> runCatching {
-            val f = line.split('\t'); if (f.size != 11) return@runCatching
+            val f = line.split('\t'); if (f.size !in setOf(11, 12)) return@runCatching
             val record = ReplySegmentTaskRecord(
                 taskId = unpack(f[0]), requestId = unpack(f[1]), conversationKey = unpack(f[2]),
                 segmentIndex = f[3].toInt(), segmentCount = f[4].toInt(), segmentContentHash = f[5],
-                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.valueOf(f[6]),
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.valueOf(f[6]), segmentContent = if (f.size == 12) unpack(f[10]) else "",
                 createdAt = f[7].toLong(), sentAt = f[8].toLongOrNull(), confirmationId = unpack(f[9]).ifBlank { null }
             )
             result[record.taskId] = record
@@ -51,7 +54,7 @@ internal class LocalReplySegmentTaskRepository(private val file: File) : ReplySe
         val tmp = File(file.parentFile, "${file.name}.tmp")
         tmp.writeText(records.values.joinToString("\n") { r ->
             listOf(pack(r.taskId), pack(r.requestId), pack(r.conversationKey), r.segmentIndex, r.segmentCount,
-                r.segmentContentHash, r.status.name, r.createdAt, r.sentAt ?: "", pack(r.confirmationId.orEmpty()), "v1").joinToString("\t")
+                r.segmentContentHash, r.status.name, r.createdAt, r.sentAt ?: "", pack(r.confirmationId.orEmpty()), pack(r.segmentContent), "v2").joinToString("\t")
         }, StandardCharsets.UTF_8)
         Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
     }
