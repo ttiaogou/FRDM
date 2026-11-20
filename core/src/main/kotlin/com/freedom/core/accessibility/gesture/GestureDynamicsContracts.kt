@@ -1,3 +1,5 @@
+package com.freedom.core.accessibility.gesture
+
 /** Ported path families from the supplied examples 1, 2, 3 and 7, 8, 9. */
 enum class GestureTrajectoryKind {
     FIXED_CUBIC_BEZIER,
