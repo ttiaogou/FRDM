@@ -7,6 +7,17 @@ package com.freedom.features.recovery
  * remain responsible for the actual checkpoint data and page fingerprint calculation.
  */
 class RecoveryContext {
+    /** Lifecycle view used by callers instead of combining several legacy flags. */
+    enum class State {
+        IDLE,
+        REQUESTED,
+        CHECKPOINT_SAVED,
+        CHECKPOINT_LOADED,
+        VERIFYING,
+        VERIFIED,
+        UI_OWNERSHIP_TRANSFERRED
+    }
+
     enum class PauseDomain {
         NONE,
         BUSINESS_SAFETY,
@@ -41,6 +52,45 @@ class RecoveryContext {
 
     val pending: Boolean
         get() = sourceTaskId != null
+
+    /** Stable route naming for new callers; the old property remains source-compatible. */
+    val routeId: String?
+        get() = targetRouteId
+
+    val state: State
+        get() = when {
+            sourceTaskId == null -> State.IDLE
+            uiOwnershipTransferred -> State.UI_OWNERSHIP_TRANSFERRED
+            fingerprintVerified -> State.VERIFIED
+            verificationSamples > 0 -> State.VERIFYING
+            checkpointLoaded -> State.CHECKPOINT_LOADED
+            checkpointSaved -> State.CHECKPOINT_SAVED
+            else -> State.REQUESTED
+        }
+
+    /** Immutable view for logging, event creation and tests without exposing mutable ownership. */
+    fun snapshot(): Snapshot = Snapshot(
+        state = state,
+        taskId = sourceTaskId,
+        routeId = routeId,
+        reason = reason,
+        checkpointId = checkpointId,
+        runGeneration = runGeneration,
+        observationGeneration = observationGeneration,
+        checkpointSaved = checkpointSaved,
+        checkpointLoaded = checkpointLoaded,
+        verificationSamples = verificationSamples,
+        fingerprintVerified = fingerprintVerified,
+        uiOwnershipTransferred = uiOwnershipTransferred
+    )
+
+    /** Checks event identity without changing the context or accepting stale work. */
+    fun matches(identity: RecoveryEventIdentity): Boolean =
+        sourceTaskId == identity.taskId &&
+            targetRouteId == identity.routeId &&
+            runGeneration == identity.runGeneration &&
+            checkpointId == identity.checkpointId &&
+            identity.observationGeneration >= observationGeneration
 
     fun request(taskId: String, recoveryReason: String) {
         request(taskId, recoveryReason, "UNKNOWN_ROUTE", 0L, "$taskId:$recoveryReason", 0L)
@@ -132,4 +182,19 @@ class RecoveryContext {
     companion object {
         const val REQUIRED_STABLE_SAMPLES = 2
     }
+
+    data class Snapshot(
+        val state: State,
+        val taskId: String?,
+        val routeId: String?,
+        val reason: String?,
+        val checkpointId: String?,
+        val runGeneration: Long,
+        val observationGeneration: Long,
+        val checkpointSaved: Boolean,
+        val checkpointLoaded: Boolean,
+        val verificationSamples: Int,
+        val fingerprintVerified: Boolean,
+        val uiOwnershipTransferred: Boolean
+    )
 }
