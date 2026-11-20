@@ -66,8 +66,9 @@ class AccountBrowseRuntime(
     val session: AccountBrowseSessionStatePort = sessionStateOwner.port
     private var restoredCheckpointPhase: AccountBrowsePhase? = null
 
-    var phase: AccountBrowsePhase = AccountBrowsePhase.IDLE
-        private set
+    private val stateMachine = AccountBrowseStateMachine()
+    val phase: AccountBrowsePhase
+        get() = stateMachine.phase
 
     init {
         checkpointRepository?.load()?.let { checkpoint ->
@@ -75,7 +76,7 @@ class AccountBrowseRuntime(
                 .getOrDefault(AccountBrowsePhase.PAUSED)
             // A restored checkpoint is never executable immediately. The workflow must first
             // re-observe the page and satisfy the shared two-sample verification gate.
-            phase = AccountBrowsePhase.PAUSED
+            stateMachine.transitionTo(AccountBrowsePhase.PAUSED)
             recoveryTransaction.activate(
                 RecoveryEventIdentity(
                     taskId = "ACCOUNT_BROWSE",
@@ -170,7 +171,7 @@ class AccountBrowseRuntime(
 
     /** The AccountBrowse workflow owns all phase transitions. */
     fun transitionTo(nextPhase: AccountBrowsePhase) {
-        phase = nextPhase
+        stateMachine.transitionTo(nextPhase)
         persistCheckpoint()
     }
 
@@ -243,7 +244,7 @@ class AccountBrowseRuntime(
     ) {
         beforeReset()
         checkpointRepository?.clear()
-        phase = AccountBrowsePhase.IDLE
+        stateMachine.reset()
         restoredCheckpointPhase = null
         recoveryTransaction.reset()
         session.reset()
@@ -271,7 +272,7 @@ class AccountBrowseRuntime(
         session.gestureInFlight = false
         session.countdownRemaining = 0
         hideCountdown()
-        phase = AccountBrowsePhase.PAUSED
+        stateMachine.transitionTo(AccountBrowsePhase.PAUSED)
         session.deadlineAt = 0L
         if (session.pauseReason != reason) {
             session.pauseReason = reason
@@ -348,7 +349,7 @@ class AccountBrowseRuntime(
                 session.recoveryHomeClickAttempts = 0
                 session.recoveryDynamicClickAttempts = 0
                 session.dynamicTabClickConfirmed = false
-                phase = AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB
+                stateMachine.transitionTo(AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB)
                 session.deadlineAt = currentTimeMillis() + initialDynamicTabWaitTimeoutMs
                 session.lastDynamicTabWaitReason = ""
                 onLog("手动恢复已进入主动导航：先识别页面层级，再返回必要的上级页面，主动定位并验证‘动态’标签")
@@ -393,7 +394,7 @@ class AccountBrowseRuntime(
         session.recoveryDynamicClickAttempts = 0
         session.dynamicTabClickConfirmed = false
         session.lastDynamicTabWaitReason = ""
-        phase = AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB
+        stateMachine.transitionTo(AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB)
         session.deadlineAt = currentTimeMillis() + initialDynamicTabWaitTimeoutMs
         onStarted(reason)
         scheduleStep(pageStatePollMs)
