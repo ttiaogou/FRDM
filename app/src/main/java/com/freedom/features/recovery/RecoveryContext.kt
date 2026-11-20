@@ -32,16 +32,40 @@ class RecoveryContext {
         private set
     var uiOwnershipTransferred: Boolean = false
         private set
+    var runGeneration: Long = 0L
+        private set
+    var checkpointId: String? = null
+        private set
+    var observationGeneration: Long = 0L
+        private set
 
     val pending: Boolean
         get() = sourceTaskId != null
 
     fun request(taskId: String, recoveryReason: String) {
+        request(taskId, recoveryReason, "UNKNOWN_ROUTE", 0L, "$taskId:$recoveryReason", 0L)
+    }
+
+    fun request(
+        taskId: String,
+        recoveryReason: String,
+        routeId: String,
+        generation: Long,
+        recoveryCheckpointId: String,
+        pageObservationGeneration: Long
+    ) {
         require(taskId.isNotBlank()) { "taskId must not be blank" }
         require(recoveryReason.isNotBlank()) { "recoveryReason must not be blank" }
+        require(routeId.isNotBlank()) { "routeId must not be blank" }
+        require(recoveryCheckpointId.isNotBlank()) { "checkpointId must not be blank" }
+        require(generation >= 0L) { "runGeneration must not be negative" }
+        require(pageObservationGeneration >= 0L) { "observationGeneration must not be negative" }
         sourceTaskId = taskId
-        targetRouteId = null
+        targetRouteId = routeId
         reason = recoveryReason
+        runGeneration = generation
+        checkpointId = recoveryCheckpointId
+        observationGeneration = pageObservationGeneration
         checkpointSaved = false
         checkpointLoaded = false
         verificationSamples = 0
@@ -99,6 +123,9 @@ class RecoveryContext {
         lastVerificationKey = null
         fingerprintVerified = false
         uiOwnershipTransferred = false
+        runGeneration = 0L
+        checkpointId = null
+        observationGeneration = 0L
         pauseDomain = PauseDomain.NONE
     }
 

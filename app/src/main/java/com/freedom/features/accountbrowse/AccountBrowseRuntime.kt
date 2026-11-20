@@ -8,6 +8,8 @@ import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepositor
 import com.freedom.features.recovery.RecoveryTransactionEvent
 import com.freedom.features.recovery.RecoveryTransactionState
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
+import com.freedom.features.recovery.RecoveryEventDispatcher
+import com.freedom.features.recovery.RecoveryEventIdentity
 
 /**
  * Coordinates the automatic-browse phase dispatch independently from Android Service APIs.
@@ -23,7 +25,9 @@ class AccountBrowseRuntime(
     private val targetPackage: () -> String,
     private val checkpointRepository: AccountBrowseCheckpointRepository? = null,
     private val onResetSession: () -> Unit,
-    private val actions: Actions
+    private val actions: Actions,
+    private val currentRunGeneration: () -> Long = { 0L },
+    private val onLog: (String) -> Unit = {}
 ) {
     data class Actions(
         val waitForDynamicTab: () -> Unit,
@@ -43,7 +47,12 @@ class AccountBrowseRuntime(
     )
 
     private val stepScheduler = AccountBrowseScheduler(scheduler, canScheduleStep) { performStep() }
-    private val recoveryTransaction = UnifiedRecoveryTransactionStateMachine()
+    private val recoveryTransaction = RecoveryEventDispatcher(
+        UnifiedRecoveryTransactionStateMachine(),
+        onLog
+    )
+    private val recoveryRouteId = "account-browse"
+    private val recoveryCheckpointId = "account-browse-checkpoint"
 
     fun scheduleStep(delayMs: Long) = stepScheduler.schedule(delayMs)
 
@@ -67,6 +76,16 @@ class AccountBrowseRuntime(
             // A restored checkpoint is never executable immediately. The workflow must first
             // re-observe the page and satisfy the shared two-sample verification gate.
             phase = AccountBrowsePhase.PAUSED
+            recoveryTransaction.activate(
+                RecoveryEventIdentity(
+                    taskId = "ACCOUNT_BROWSE",
+                    routeId = recoveryRouteId,
+                    runGeneration = currentRunGeneration().coerceAtLeast(0L),
+                    checkpointId = recoveryCheckpointId,
+                    observationGeneration = 0L,
+                    unknownReason = "CHECKPOINT_LOADED"
+                )
+            )
             recoveryTransaction.dispatch(
                 RecoveryTransactionEvent.CheckpointLoaded(
                     if (checkpoint.savedAtEpochMs > 0L) {
@@ -109,6 +128,16 @@ class AccountBrowseRuntime(
             page.fingerprint.isBlank() ||
             page.confidence < 80
         if (unknown) {
+            recoveryTransaction.activate(
+                RecoveryEventIdentity(
+                    taskId = "ACCOUNT_BROWSE",
+                    routeId = recoveryRouteId,
+                    runGeneration = currentRunGeneration().coerceAtLeast(0L),
+                    checkpointId = recoveryCheckpointId,
+                    observationGeneration = recoveryTransaction.stableVerificationSamples.toLong(),
+                    unknownReason = page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
+                )
+            )
             return recoveryTransaction.dispatch(
                 RecoveryTransactionEvent.UnknownPage(
                     page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }

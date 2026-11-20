@@ -42,6 +42,8 @@ import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepo
 import com.freedom.features.recovery.RecoveryTransactionEvent
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 import com.freedom.features.recovery.RecoveryContext
+import com.freedom.features.recovery.RecoveryEventDispatcher
+import com.freedom.features.recovery.RecoveryEventIdentity
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.LinkedHashSet
@@ -289,7 +291,10 @@ class AiReplyObservationRuntime(
 
 
     /** One coordinator-owned transaction shared by message-list and received-greetings recovery. */
-    private val recoveryTransaction = UnifiedRecoveryTransactionStateMachine()
+    private val recoveryTransaction = RecoveryEventDispatcher(
+        UnifiedRecoveryTransactionStateMachine(),
+        onLog
+    )
     private val recoveryContext = RecoveryContext()
     private val privateMessagesTraversalTaskExecutor = PrivateMessagesTraversalTaskExecutor()
     private val messageListRecoveryRoute: PageRecoveryRouteAdapter by lazy(LazyThreadSafetyMode.NONE) {
@@ -307,8 +312,25 @@ class AiReplyObservationRuntime(
         sharedPageObservationCoordinator?.registerFingerprintRoute(receivedGreetingsRecoveryRoute.asRoute())
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
-            recoveryContext.request(PRIVATE_MESSAGES_TASK_ID, "PROCESS_RESTART_CHECKPOINT")
+            recoveryContext.request(
+                PRIVATE_MESSAGES_TASK_ID,
+                "PROCESS_RESTART_CHECKPOINT",
+                recoveryRouteIdForTask(PRIVATE_MESSAGES_TASK_ID) ?: "unknown-route",
+                currentRunGeneration().coerceAtLeast(0L),
+                "${PRIVATE_MESSAGES_TASK_ID}:PROCESS_RESTART_CHECKPOINT",
+                0L
+            )
             recoveryContext.markCheckpointLoaded()
+            recoveryTransaction.activate(
+                RecoveryEventIdentity(
+                    taskId = PRIVATE_MESSAGES_TASK_ID,
+                    routeId = recoveryRouteIdForTask(PRIVATE_MESSAGES_TASK_ID) ?: "unknown-route",
+                    runGeneration = currentRunGeneration().coerceAtLeast(0L),
+                    checkpointId = "${PRIVATE_MESSAGES_TASK_ID}:PROCESS_RESTART_CHECKPOINT",
+                    observationGeneration = 0L,
+                    unknownReason = "PROCESS_RESTART_CHECKPOINT"
+                )
+            )
             recoveryTransaction.dispatch(
                 RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.PROCESS_RESTART)
             )
@@ -1388,12 +1410,36 @@ class AiReplyObservationRuntime(
         else -> null
     }
 
+    private fun activateRecoveryIdentity(taskId: String, reason: String, checkpointId: String) {
+        val routeId = recoveryRouteIdForTask(taskId) ?: "unknown-route"
+        val generation = currentRunGeneration().coerceAtLeast(0L)
+        val observationGeneration = pageReadCoordinator.currentObservationGeneration()
+        recoveryContext.request(
+            taskId = taskId,
+            recoveryReason = reason,
+            routeId = routeId,
+            generation = generation,
+            recoveryCheckpointId = checkpointId,
+            pageObservationGeneration = observationGeneration
+        )
+        recoveryTransaction.activate(
+            RecoveryEventIdentity(
+                taskId = taskId,
+                routeId = routeId,
+                runGeneration = generation,
+                checkpointId = checkpointId,
+                observationGeneration = observationGeneration,
+                unknownReason = reason
+            )
+        )
+    }
+
     /** Single pause/checkpoint entry used by page-route changes and UNKNOWN observations. */
     private fun requestUnifiedPauseAndCheckpoint(taskId: String, reason: String): Boolean {
         if (recoveryContext.pending) return false
         val route = recoveryRouteForTask(taskId) ?: return false
         route.saveCheckpoint()
-        recoveryContext.request(taskId, reason)
+        activateRecoveryIdentity(taskId, reason, "$taskId:$reason")
         recoveryContext.markCheckpointSaved()
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
         recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
@@ -1485,7 +1531,11 @@ class AiReplyObservationRuntime(
         sessionRunStarted = sampleCaptureActive
         if (sessionRunStarted && chatPagePort.hasRestorableReceivedGreetingsCheckpoint()) {
             if (!recoveryContext.pending) {
-                recoveryContext.request(RECEIVED_GREETINGS_TASK_ID, "SERVICE_RECONNECT_CHECKPOINT")
+                activateRecoveryIdentity(
+                    RECEIVED_GREETINGS_TASK_ID,
+                    "SERVICE_RECONNECT_CHECKPOINT",
+                    "${RECEIVED_GREETINGS_TASK_ID}:SERVICE_RECONNECT_CHECKPOINT"
+                )
                 recoveryContext.markCheckpointLoaded()
             }
             recoveryTransaction.dispatch(
@@ -1531,7 +1581,11 @@ class AiReplyObservationRuntime(
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             if (!recoveryContext.pending) {
-                recoveryContext.request(PRIVATE_MESSAGES_TASK_ID, "SERVICE_RECONNECT_CHECKPOINT")
+                activateRecoveryIdentity(
+                    PRIVATE_MESSAGES_TASK_ID,
+                    "SERVICE_RECONNECT_CHECKPOINT",
+                    "${PRIVATE_MESSAGES_TASK_ID}:SERVICE_RECONNECT_CHECKPOINT"
+                )
                 recoveryContext.markCheckpointLoaded()
             }
             recoveryTransaction.dispatch(
@@ -1582,7 +1636,11 @@ class AiReplyObservationRuntime(
     fun reloadReceivedGreetingsCheckpointAfterServiceReconnect(): Boolean = runCatching {
         chatPagePort.reloadReceivedGreetingsCheckpointAfterServiceReconnect().also { loaded ->
             if (loaded && !recoveryContext.pending) {
-                recoveryContext.request(RECEIVED_GREETINGS_TASK_ID, "SERVICE_RECONNECT_CHECKPOINT")
+                activateRecoveryIdentity(
+                    RECEIVED_GREETINGS_TASK_ID,
+                    "SERVICE_RECONNECT_CHECKPOINT",
+                    "${RECEIVED_GREETINGS_TASK_ID}:SERVICE_RECONNECT_CHECKPOINT"
+                )
                 recoveryContext.markCheckpointLoaded()
                 recoveryTransaction.dispatch(
                     RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)
@@ -1596,7 +1654,11 @@ class AiReplyObservationRuntime(
         val checkpoint = privateMessagesCheckpointRepository?.load() ?: return false
         privateMessagesTraversalTaskExecutor.restore(checkpoint)
         if (!recoveryContext.pending) {
-            recoveryContext.request(PRIVATE_MESSAGES_TASK_ID, "SERVICE_RECONNECT_CHECKPOINT")
+            activateRecoveryIdentity(
+                PRIVATE_MESSAGES_TASK_ID,
+                "SERVICE_RECONNECT_CHECKPOINT",
+                "${PRIVATE_MESSAGES_TASK_ID}:SERVICE_RECONNECT_CHECKPOINT"
+            )
             recoveryContext.markCheckpointLoaded()
             recoveryTransaction.dispatch(
                 RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)

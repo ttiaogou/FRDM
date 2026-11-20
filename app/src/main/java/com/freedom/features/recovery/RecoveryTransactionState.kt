@@ -36,6 +36,30 @@ sealed interface RecoveryTransactionEvent {
     }
 }
 
+/** Identity carried by every recovery event, independent of page-fingerprint structure. */
+data class RecoveryEventIdentity(
+    val taskId: String,
+    val routeId: String,
+    val runGeneration: Long,
+    val checkpointId: String,
+    val observationGeneration: Long,
+    val unknownReason: String? = null
+) {
+    init {
+        require(taskId.isNotBlank()) { "taskId must not be blank" }
+        require(routeId.isNotBlank()) { "routeId must not be blank" }
+        require(checkpointId.isNotBlank()) { "checkpointId must not be blank" }
+        require(runGeneration >= 0L) { "runGeneration must not be negative" }
+        require(observationGeneration >= 0L) { "observationGeneration must not be negative" }
+    }
+}
+
+/** A recovery event plus the identity of the task/page observation that produced it. */
+data class RecoveryTransactionEventEnvelope(
+    val identity: RecoveryEventIdentity,
+    val event: RecoveryTransactionEvent
+)
+
 /**
  * Shared, business-neutral recovery transaction.
  *
@@ -51,6 +75,7 @@ class UnifiedRecoveryTransactionStateMachine(
     var stableVerificationSamples: Int = 0
         private set
     private var lastObservedFingerprint: String = ""
+    private var activeEventIdentity: RecoveryEventIdentity? = null
 
     fun dispatch(event: RecoveryTransactionEvent): RecoveryTransactionState {
         when (event) {
@@ -117,6 +142,20 @@ class UnifiedRecoveryTransactionStateMachine(
         return state
     }
 
+    /** Dispatches an identified event and rejects an older identity without changing state. */
+    fun dispatch(envelope: RecoveryTransactionEventEnvelope): RecoveryTransactionState {
+        val active = activeEventIdentity
+        if (active != null &&
+            (active.taskId != envelope.identity.taskId ||
+                active.routeId != envelope.identity.routeId ||
+                active.runGeneration != envelope.identity.runGeneration ||
+                active.checkpointId != envelope.identity.checkpointId ||
+                envelope.identity.observationGeneration < active.observationGeneration)
+        ) return state
+        activeEventIdentity = envelope.identity
+        return dispatch(envelope.event)
+    }
+
     /** Feeds one adapter fingerprint into the shared stable-sample gate. */
     fun observeFingerprint(fingerprint: String): RecoveryTransactionState {
         if (fingerprint.isBlank()) {
@@ -140,6 +179,7 @@ class UnifiedRecoveryTransactionStateMachine(
         state = RecoveryTransactionState.ACTIVE
         stableVerificationSamples = 0
         lastObservedFingerprint = ""
+        activeEventIdentity = null
     }
 
     companion object {

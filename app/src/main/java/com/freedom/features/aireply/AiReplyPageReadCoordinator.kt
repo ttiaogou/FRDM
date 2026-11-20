@@ -10,7 +10,13 @@ internal class AiReplyPageReadCoordinator(
     private val inspectPage: () -> ChatPageSnapshot,
     private val onLog: (String) -> Unit = {}
 ) {
+    private var observationGeneration: Long = 0L
+
+    fun currentObservationGeneration(): Long = observationGeneration
+
     fun read(purpose: AiReplyPageReadPurpose): AiReplyPageReadResult {
+        observationGeneration += 1L
+        val generation = observationGeneration
         val inspected = runCatching { inspectPage() }
         val snapshot = inspected.getOrNull()
         val failure = inspected.exceptionOrNull()
@@ -19,7 +25,7 @@ internal class AiReplyPageReadCoordinator(
         } else if (snapshot == null) {
             onLog("AI 页面读取[EMPTY]：入口=${purpose.name}；未取得新鲜页面快照")
         }
-        return AiReplyPageReadResult(purpose, snapshot, failure)
+        return AiReplyPageReadResult(purpose, snapshot, failure, generation)
     }
 }
 
@@ -38,5 +44,6 @@ internal enum class AiReplyPageReadPurpose {
 internal data class AiReplyPageReadResult(
     val purpose: AiReplyPageReadPurpose,
     val snapshot: ChatPageSnapshot?,
-    val failure: Throwable?
+    val failure: Throwable?,
+    val observationGeneration: Long = 0L
 )
