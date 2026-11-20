@@ -138,8 +138,18 @@ class PageObservationCoordinatorTest {
         val scheduler = FakeScheduler()
         val coordinator = PageObservationCoordinator(scheduler)
         var observations = 0
-        val first = coordinator.registerChannel("first", 200L, 800L) { observations += 1 }
-        val second = coordinator.registerChannel("second", 200L, 800L) { observations += 10 }
+        val first = coordinator.registerChannel(
+            channelId = "first",
+            quietPeriodMs = 200L,
+            maxWaitMs = 800L,
+            onObservationRequested = { observations += 1 }
+        )
+        val second = coordinator.registerChannel(
+            channelId = "second",
+            quietPeriodMs = 200L,
+            maxWaitMs = 800L,
+            onObservationRequested = { observations += 10 }
+        )
 
         first.requestSnapshot()
         second.requestSnapshot()
