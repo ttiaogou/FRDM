@@ -30,6 +30,6 @@ kotlin {
 dependencies {
     api(project(":core"))
     api(project(":gesture-api"))
-    implementation(project(":gesture-core"))
+    api(project(":gesture-core"))
     testImplementation("junit:junit:4.13.2")
 }
