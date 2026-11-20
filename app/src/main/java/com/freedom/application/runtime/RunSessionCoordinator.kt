@@ -149,6 +149,11 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun onAccessibilityServiceDisconnected() {
+        // A reconnect must never reuse capabilities or callbacks issued before the service
+        // boundary.  Advance before notifying the runtime so its reset and any late callback
+        // observe the new generation as stale.
+        advanceRunGeneration()
+        log.append("无障碍服务租约隔离：事件=DISCONNECTED；runGeneration=$runGeneration")
         observedMode?.let { runtimes[it]?.onAccessibilityServiceDisconnected() }
     }
 
@@ -208,16 +213,22 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun resetRuntime(mode: RunMode, reason: String) {
+        advanceRunGeneration()
+        log.append("运行时租约隔离：事件=RESET；mode=$mode；reason=$reason；runGeneration=$runGeneration")
         runtimes[mode]?.resetRuntime(reason)
     }
 
     @Synchronized
     fun onAccessibilityServiceInterrupted(reason: String) {
+        advanceRunGeneration()
+        log.append("无障碍服务租约隔离：事件=INTERRUPTED；reason=$reason；runGeneration=$runGeneration")
         activeMode()?.let { runtimes[it]?.onAccessibilityServiceInterrupted(reason) }
     }
 
     @Synchronized
     fun onServiceDestroyed() {
+        advanceRunGeneration()
+        log.append("无障碍服务租约隔离：事件=DESTROYED；runGeneration=$runGeneration")
         runtimes.values.forEach(ModeRuntimePort::onServiceDestroyed)
     }
 

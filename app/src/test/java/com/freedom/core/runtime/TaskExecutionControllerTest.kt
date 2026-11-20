@@ -69,4 +69,15 @@ class TaskExecutionControllerTest {
         assertTrue(newController.owns("AI_REPLY_PRIVATE_MESSAGES"))
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", coordinator.activeTaskId())
     }
+
+    @Test
+    fun isolatedControllerClearsLocalLeaseWhenReleasedWithoutCoordinator() {
+        val execution = TaskExecutionController(coordinator = null, currentRunGeneration = { 2L })
+        execution.beginRun(2L)
+
+        assertTrue(execution.claim("AI_REPLY_PRIVATE_MESSAGES", "isolated start"))
+        assertTrue(execution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertTrue(execution.release("AI_REPLY_PRIVATE_MESSAGES", "isolated stop"))
+        assertFalse(execution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+    }
 }

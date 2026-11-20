@@ -69,10 +69,12 @@ class TaskExecutionController(
 
     @Synchronized
     fun release(taskId: String, reason: String): Boolean {
-        val taskCoordinator = coordinator ?: return false
         val current = lease ?: return false
         if (current.taskId != taskId) return false
-        val released = taskCoordinator.release(current)
+        // Isolated feature fixtures may intentionally omit the shared coordinator.  The local
+        // capability still has to be invalidated so a late callback cannot retain ownership
+        // forever merely because no platform lease was supplied.
+        val released = coordinator?.release(current) ?: true
         lease = null
         logRelease(current, reason, released)
         return released
@@ -80,9 +82,8 @@ class TaskExecutionController(
 
     @Synchronized
     fun releaseCurrent(reason: String) {
-        val taskCoordinator = coordinator ?: return
         val current = lease ?: return
-        val released = taskCoordinator.release(current)
+        val released = coordinator?.release(current) ?: true
         lease = null
         logRelease(current, reason, released)
     }

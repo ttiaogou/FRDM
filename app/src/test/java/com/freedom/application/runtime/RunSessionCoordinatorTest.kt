@@ -240,4 +240,45 @@ class RunSessionCoordinatorTest {
         assertEquals(2L, coordinator.currentRunGeneration())
         assertFalse(state.requested)
     }
+
+    @Test
+    fun serviceDisconnectInvalidatesTheGenerationBeforeRuntimeCleanup() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val coordinator = RunSessionCoordinator(
+            state,
+            mapOf(RunMode.AI_REPLY to ai),
+            RuntimeLogSink { }
+        )
+        coordinator.synchronizeRunRequest()
+        assertEquals(1L, coordinator.currentRunGeneration())
+
+        coordinator.onAccessibilityServiceDisconnected()
+
+        assertEquals(2L, coordinator.currentRunGeneration())
+        assertEquals(listOf("start", "disconnected"), ai.calls)
+    }
+
+    @Test
+    fun externalRuntimeResetAlsoInvalidatesTheGeneration() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val coordinator = RunSessionCoordinator(
+            state,
+            mapOf(RunMode.AI_REPLY to ai),
+            RuntimeLogSink { }
+        )
+        coordinator.synchronizeRunRequest()
+
+        coordinator.resetRuntime(RunMode.AI_REPLY, "target changed")
+
+        assertEquals(2L, coordinator.currentRunGeneration())
+        assertEquals(listOf("start"), ai.calls)
+    }
 }

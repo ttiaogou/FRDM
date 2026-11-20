@@ -2990,6 +2990,10 @@ class AiReplyObservationRuntime(
     ): ReceivedGreetingsTaskFlowController.StartResult {
         val capabilities = receivedGreetingsTaskFlow.workflowCapabilities()
         if (!capabilities.supported) {
+            // The previous private-message task may still own the single UI slot.  A capability
+            // rejection is terminal for this handoff; release that old lease instead of leaving
+            // a paused task capable of blocking later normal-list re-entry.
+            releaseTaskOwnership("收到的招呼能力不支持；清理切换前的旧任务租约")
             sessionManagerState = SessionManagerState.PAUSED
             onLog(
                 "收到的招呼任务启动[NOT_SUPPORTED]：" +
