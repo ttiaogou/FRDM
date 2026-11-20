@@ -494,6 +494,10 @@ def inspect_project(root: Path) -> list[str]:
     # 11) Final hard boundaries for the unified accessibility/recovery architecture.
     issues.extend(final_architecture_boundary_violations(code_by_path))
 
+    # 12) The platform callback and checkpoint restore gates are mandatory boundaries.
+    issues.extend(unified_accessibility_entry_violations(code_by_path))
+    issues.extend(checkpoint_recovery_boundary_violations(code_by_path))
+
     return issues
 
 
@@ -546,6 +550,83 @@ def final_architecture_boundary_violations(code_by_path: dict[str, str]) -> list
     for rel, code in code_by_path.items():
         if retryable_cache_write.search(code):
             issues.append(f"RETRYABLE result is written to a permanent failure cache: {rel}")
+    return issues
+
+
+def unified_accessibility_entry_violations(code_by_path: dict[str, str]) -> list[str]:
+    """Require every production AccessibilityService callback to use the one event gateway."""
+    issues: list[str] = []
+    production = {
+        rel: code for rel, code in code_by_path.items()
+        if "/src/main/" in rel and rel.endswith(".kt")
+    }
+    callback_declarations = sorted(
+        rel for rel, code in production.items()
+        if re.search(r"\boverride\s+fun\s+onAccessibilityEvent\s*\(", code)
+    )
+    service_rel = "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt"
+    if callback_declarations != [service_rel]:
+        issues.append(
+            "AccessibilityService callback must be declared exactly once at "
+            f"{service_rel}; found {callback_declarations}"
+        )
+
+    service_code = production.get(service_rel, "")
+    callback = re.search(
+        r"override\s+fun\s+onAccessibilityEvent\s*\([^)]*\)\s*\{(?P<body>[\s\S]*?)\n\s*\}",
+        service_code,
+    )
+    if callback is None:
+        issues.append(f"Unified Accessibility entry is missing from {service_rel}")
+    else:
+        body = callback.group("body")
+        if not re.search(r"\baccessibilityEventForwarder\.accept\s*\(", body):
+            issues.append(
+                "FreedomAccessibilityService.onAccessibilityEvent must only forward to "
+                "AndroidAccessibilityEventForwarder.accept"
+            )
+        if re.search(r"\b(?:pipeline|pageObservationCoordinator|onTargetApplicationEvent|onGlobalTouchEvent)\b", body):
+            issues.append(
+                "FreedomAccessibilityService.onAccessibilityEvent must not bypass the unified forwarder"
+            )
+    return issues
+
+
+def checkpoint_recovery_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
+    """Require checkpoint restoration to pass the read-only page-verification gate."""
+    issues: list[str] = []
+    runtime_rel = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
+    recovery_rel = "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt"
+    workflow_rel = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+    runtime = code_by_path.get(runtime_rel, "")
+    recovery = code_by_path.get(recovery_rel, "")
+    workflow = code_by_path.get(workflow_rel, "")
+
+    required = {
+        runtime_rel: (runtime, ("restoreFromCheckpoint", "beginCheckpointVerification", "observeDynamicFeedFingerprint")),
+        recovery_rel: (recovery, ("CheckpointLoaded", "VerificationStarted", "ResumeRequested", "ResumeCompleted")),
+        workflow_rel: (workflow, ("hasPendingCheckpointVerification", "beginCheckpointVerification", "observeDynamicFeedFingerprint")),
+    }
+    for rel, (code, tokens) in required.items():
+        if not code:
+            issues.append(f"Checkpoint recovery boundary source is missing: {rel}")
+            continue
+        missing = [token for token in tokens if token not in code]
+        if missing:
+            issues.append(f"Checkpoint recovery gate is incomplete in {rel}: missing {missing}")
+
+    if runtime and re.search(r"checkpointRepository\?\.load\s*\(\)", runtime):
+        if not re.search(r"stateMachine\.transitionTo\s*\(\s*AccountBrowsePhase\.PAUSED\s*\)", runtime):
+            issues.append("AccountBrowse checkpoint load must enter PAUSED before verification")
+        if not re.search(r"dynamicPageRecovery\.restoreFromCheckpoint\s*\(", runtime):
+            issues.append("AccountBrowse checkpoint load must activate DynamicPageRecovery")
+    if workflow and "startRestoredCheckpointVerification" in workflow:
+        start = re.search(
+            r"private\s+fun\s+startRestoredCheckpointVerification\s*\(\)\s*\{(?P<body>[\s\S]*?)\n\s*\}",
+            workflow,
+        )
+        if start and not re.search(r"beginCheckpointVerification\s*\(\)", start.group("body")):
+            issues.append("Restored checkpoint workflow must begin read-only verification before scheduling")
     return issues
 
 
