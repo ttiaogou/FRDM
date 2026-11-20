@@ -7,19 +7,19 @@ import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 
 /**
  * AI Reply registrations in the service-scoped page-observation coordinator plus its greetings
- * arrival watcher. The generic coalescing mechanism is shared with AccountBrowse; page recognition,
- * stability confirmation and low-frequency fallback remain owned by AI Reply.
+ * arrival scheduler. The generic coalescing mechanism is shared with AccountBrowse; page
+ * recognition and stability confirmation are supplied by the unified AI Reply observation path.
  */
 internal class MomoPageObservationCoordinator(
     scheduler: TaskScheduler,
     fullInspectionDebounceMs: Long,
     regionRefreshDebounceMs: Long,
     maxEventBurstInspectionWaitMs: Long,
-    receivedGreetingsPageRecognizer: MomoReceivedGreetingsPageRecognizer,
     runFullInspection: () -> Unit,
     runRegionRefresh: () -> Unit,
     onReceivedGreetingsConfirmed: () -> Unit,
     onFallbackCheckRequested: () -> Unit,
+    onSnapshotRequested: () -> Unit = {},
     retryDelayMs: Long = 350L,
     maxStabilityRetries: Int = 8,
     fallbackDelayMs: () -> Long,
@@ -40,9 +40,9 @@ internal class MomoPageObservationCoordinator(
     )
     private val receivedGreetingsWatcher = ReceivedGreetingsPageArrivalWatcher(
         scheduler = scheduler,
-        recognizer = receivedGreetingsPageRecognizer,
         onPageConfirmed = onReceivedGreetingsConfirmed,
         onFallbackCheckRequested = onFallbackCheckRequested,
+        onSnapshotRequested = onSnapshotRequested,
         retryDelayMs = retryDelayMs,
         maxStabilityRetries = maxStabilityRetries,
         fallbackDelayMs = fallbackDelayMs
@@ -60,8 +60,8 @@ internal class MomoPageObservationCoordinator(
 
     fun onPageChangeEvent() = receivedGreetingsWatcher.onPageChangeEvent()
 
-    fun onPageSnapshotAvailable(): ReceivedGreetingsPageArrivalStatus =
-        receivedGreetingsWatcher.onPageSnapshotAvailable()
+    fun onPageSnapshotAvailable(status: ReceivedGreetingsPageArrivalStatus): ReceivedGreetingsPageArrivalStatus =
+        receivedGreetingsWatcher.onPageSnapshotAvailable(status)
 
     fun resetReceivedGreetingsWatch() = receivedGreetingsWatcher.reset()
 

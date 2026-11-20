@@ -5,18 +5,17 @@ import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 
 /**
- * Owns only the Received Greetings page-arrival confirmation lifecycle.
+ * Owns only the Received Greetings page-arrival observation scheduling lifecycle.
  *
- * The watcher is intentionally feature-specific: it interprets the received-greetings recognizer,
- * performs bounded stability retries, and keeps the low-frequency idle watchdog armed. It never
- * captures Android nodes or performs UI actions; the supplied recognizer performs a fresh
- * read-only inspection each time.
+ * Page identity is supplied by the unified page-observation path. This class never invokes a
+ * recognizer or decides page identity; it only requests another fresh observation, performs the
+ * existing bounded retry cadence, and keeps the low-frequency idle watchdog armed.
  */
 internal class ReceivedGreetingsPageArrivalWatcher(
     private val scheduler: TaskScheduler,
-    private val recognizer: MomoReceivedGreetingsPageRecognizer,
     private val onPageConfirmed: () -> Unit,
     private val onFallbackCheckRequested: () -> Unit,
+    private val onSnapshotRequested: () -> Unit = {},
     private val retryDelayMs: Long = 350L,
     private val maxStabilityRetries: Int = 8,
     private val fallbackDelayMs: () -> Long
@@ -37,11 +36,11 @@ internal class ReceivedGreetingsPageArrivalWatcher(
         cancelFallbackCheck()
     }
 
-    /** Called only after the observation path has obtained a fresh page snapshot. */
-    fun onPageSnapshotAvailable(): ReceivedGreetingsPageArrivalStatus {
+    /** Called with the result produced by the unified page-observation path. */
+    fun onPageSnapshotAvailable(status: ReceivedGreetingsPageArrivalStatus): ReceivedGreetingsPageArrivalStatus {
         if (retryTask != null) return ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING
         cancelFallbackCheck()
-        return inspectFreshPage()
+        return handleStatus(status)
     }
 
     fun reset() {
@@ -52,8 +51,7 @@ internal class ReceivedGreetingsPageArrivalWatcher(
         stabilityRetryCount = 0
     }
 
-    private fun inspectFreshPage(): ReceivedGreetingsPageArrivalStatus {
-        val status = recognizer.recognize()
+    private fun handleStatus(status: ReceivedGreetingsPageArrivalStatus): ReceivedGreetingsPageArrivalStatus {
         when (status) {
             ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
                 reset()
@@ -84,7 +82,7 @@ internal class ReceivedGreetingsPageArrivalWatcher(
         retryTask = scheduler.schedule(retryDelayMs) retry@{
             if (expectedGeneration != generation) return@retry
             retryTask = null
-            inspectFreshPage()
+            onSnapshotRequested()
         }
     }
 

@@ -198,17 +198,25 @@ class AiReplyObservationRuntime(
             }
         }
     }
+
+    /**
+     * Centralizes the adapter-specific arrival classification at the unified runtime boundary.
+     * The arrival watcher receives only this result and never performs page confirmation itself.
+     */
+    private fun observeReceivedGreetingsPageForUnifiedValidation(): ReceivedGreetingsPageArrivalStatus =
+        receivedGreetingsPageRecognizer.recognize()
+
     private val pageObservationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
         MomoPageObservationCoordinator(
             scheduler = scheduler,
             fullInspectionDebounceMs = fullInspectionDebounceMs,
             regionRefreshDebounceMs = regionRefreshDebounceMs,
             maxEventBurstInspectionWaitMs = MAX_EVENT_BURST_INSPECTION_WAIT_MS,
-            receivedGreetingsPageRecognizer = receivedGreetingsPageRecognizer,
             runFullInspection = ::runFullInspection,
             runRegionRefresh = ::runRegionRefresh,
             onReceivedGreetingsConfirmed = ::startReceivedGreetingsTaskFromConfirmedPage,
             onFallbackCheckRequested = ::requestReceivedGreetingsFallbackCheck,
+            onSnapshotRequested = ::requestReceivedGreetingsSnapshot,
             fallbackDelayMs = {
                 chooseRandomInt(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS)
                     .coerceIn(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS) * 1_000L
@@ -510,6 +518,16 @@ class AiReplyObservationRuntime(
         ) return
         receivedGreetingsPageProbePending = true
         onLog("收到的招呼页面观察[LOW_FREQUENCY_CHECK]：执行一次只读页面结构检查")
+        pageObservationCoordinator.signalFullInspection()
+    }
+
+    /** Requests a fresh unified snapshot for a bounded arrival retry; no adapter probe is run here. */
+    private fun requestReceivedGreetingsSnapshot() {
+        if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
+            receivedGreetingsTaskCompletedAwaitingUserExit ||
+            !receivedGreetingsTaskFlow.supportsWorkflow()
+        ) return
+        receivedGreetingsPageProbePending = true
         pageObservationCoordinator.signalFullInspection()
     }
 
@@ -895,14 +913,16 @@ class AiReplyObservationRuntime(
 
         // Probe after any relevant target-app page-change event. Event provenance never gates
         // the probe or grants task ownership. Event bursts are coalesced by EventAssistedDebouncer;
-        // the listener owns one stability retry and one low-frequency fallback timer. Only
-        // adapter-confirmed page structure can transfer ownership to the Received Greetings task.
+        // the arrival scheduler owns one stability retry and one low-frequency fallback timer.
+        // Only unified page-observation confirmation can transfer ownership to the task.
         if (receivedGreetingsPageProbePending && sessionRunStarted &&
             !receivedGreetingsTaskActive && !receivedGreetingsTaskCompletedAwaitingUserExit &&
             receivedGreetingsTaskFlow.supportsWorkflow()
         ) {
             receivedGreetingsPageProbePending = false
-            val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable()
+            val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable(
+                observeReceivedGreetingsPageForUnifiedValidation()
+            )
             when (arrivalStatus) {
                 ReceivedGreetingsPageArrivalStatus.NOT_TARGET,
                 ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION,

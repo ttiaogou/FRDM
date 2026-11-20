@@ -45,19 +45,19 @@ class MomoPageObservationCoordinatorTest {
                 ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
             )
         )
-        var recognizerCalls = 0
         var confirmed = 0
+        var snapshotRequests = 0
         val coordinator = createCoordinator(
             scheduler = scheduler,
             statuses = statuses,
             onConfirmed = { confirmed++ },
             onFallback = {},
-            inspect = { recognizerCalls++; statuses.removeFirst() }
+            onSnapshotRequested = { snapshotRequests++ }
         )
 
         assertEquals(
             ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
-            coordinator.onPageSnapshotAvailable()
+            coordinator.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING)
         )
         assertEquals(1, scheduler.pendingCount())
         assertEquals(350L, scheduler.nextDelay())
@@ -65,13 +65,13 @@ class MomoPageObservationCoordinatorTest {
         coordinator.onPageChangeEvent()
         assertEquals(
             ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
-            coordinator.onPageSnapshotAvailable()
+            coordinator.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING)
         )
-        assertEquals(1, recognizerCalls)
         assertEquals(1, scheduler.pendingCount())
 
         scheduler.runNext()
-        assertEquals(2, recognizerCalls)
+        assertEquals(1, snapshotRequests)
+        coordinator.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED)
         assertEquals(1, confirmed)
         assertEquals(0, scheduler.pendingCount())
     }
@@ -88,7 +88,7 @@ class MomoPageObservationCoordinatorTest {
 
         assertEquals(
             ReceivedGreetingsPageArrivalStatus.UNKNOWN,
-            coordinator.onPageSnapshotAvailable()
+            coordinator.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.UNKNOWN)
         )
         assertEquals(1, scheduler.pendingCount())
         assertEquals(60_000L, scheduler.nextDelay())
@@ -106,25 +106,21 @@ class MomoPageObservationCoordinatorTest {
     @Test
     fun quickRetryBudgetIsBoundedAndFallbackContinuesAfterExhaustion() {
         val scheduler = FakeScheduler()
-        var inspections = 0
         var fallbackRequests = 0
         val coordinator = createCoordinator(
             scheduler = scheduler,
             statuses = ArrayDeque(),
             onFallback = { fallbackRequests++ },
-            inspect = {
-                inspections++
-                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING
-            }
+            inspect = null
         )
 
-        coordinator.onPageSnapshotAvailable()
+        coordinator.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING)
         repeat(8) {
             assertEquals(350L, scheduler.nextDelay())
             scheduler.runNext()
+            coordinator.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING)
         }
 
-        assertEquals(9, inspections)
         assertEquals(1, scheduler.pendingCount())
         assertEquals(60_000L, scheduler.nextDelay())
         scheduler.runNext()
@@ -141,7 +137,7 @@ class MomoPageObservationCoordinatorTest {
             statuses = ArrayDeque(listOf(ReceivedGreetingsPageArrivalStatus.NOT_TARGET))
         )
         coordinator.signalFullInspection()
-        coordinator.onPageSnapshotAvailable()
+        coordinator.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.NOT_TARGET)
         assertEquals(2, scheduler.pendingCount())
 
         coordinator.reset()
@@ -157,19 +153,18 @@ class MomoPageObservationCoordinatorTest {
         runRegionRefresh: () -> Unit = {},
         onConfirmed: () -> Unit = {},
         onFallback: () -> Unit = {},
+        onSnapshotRequested: () -> Unit = {},
         inspect: (() -> ReceivedGreetingsPageArrivalStatus)? = null
     ): MomoPageObservationCoordinator = MomoPageObservationCoordinator(
         scheduler = scheduler,
         fullInspectionDebounceMs = 250L,
         regionRefreshDebounceMs = 450L,
         maxEventBurstInspectionWaitMs = 1_200L,
-        receivedGreetingsPageRecognizer = MomoReceivedGreetingsPageRecognizer {
-            inspect?.invoke() ?: statuses.removeFirst()
-        },
         runFullInspection = runFullInspection,
         runRegionRefresh = runRegionRefresh,
         onReceivedGreetingsConfirmed = onConfirmed,
         onFallbackCheckRequested = onFallback,
+        onSnapshotRequested = onSnapshotRequested,
         fallbackDelayMs = { 60_000L }
     )
 
