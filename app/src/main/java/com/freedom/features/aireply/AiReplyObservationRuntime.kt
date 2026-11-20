@@ -2911,16 +2911,15 @@ class AiReplyObservationRuntime(
             )
             return
         }
-        if (!claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, "切换收到的招呼任务")) {
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("收到的招呼任务切换暂停：无法原子取得 UI 操作权；不执行入口导航")
-            return
-        }
+        val start = claimAndBeginReceivedGreetingsTask(
+            reason = "切换收到的招呼任务",
+            begin = { receivedGreetingsTaskFlow.beginNavigationTask() }
+        )
+        if (start != ReceivedGreetingsTaskFlowController.StartResult.STARTED) return
         sessionActionGeneration += 1L
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
         val ordinarySessionClickCount = privateMessagesTraversalTaskExecutor.sessionActionCount
-        val workflowSupported = receivedGreetingsTaskFlow.beginNavigationTask()
         currentSessionKey = null
         currentSessionWindowKey = null
         currentSessionName = null
@@ -2932,11 +2931,6 @@ class AiReplyObservationRuntime(
                 "私人聊天成功归档数=$normalCompletedObservationCount/$normalInboxTaskTargetCount；" +
                 "普通聊天会话点击次数=$ordinarySessionClickCount；头像身份与详情 OCR 不触发回复"
         )
-        if (!workflowSupported) {
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("AI Reply 收到的招呼支线暂停：当前社交适配器未声明支持该入口/页面识别能力")
-            return
-        }
         val accepted = receivedGreetingsTaskFlow.performInitialIdleStep()
         if (!accepted) {
             scheduleReceivedGreetingsRecoveryRetry(
@@ -2954,18 +2948,13 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼页面监听：当前列表本轮已经处理完成；保持页面不动，等待用户离开后再次进入")
             return
         }
-        if (!claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, "接管人工打开的收到招呼列表")) {
-            onLog("收到的招呼人工任务启动[OWNERSHIP_REJECTED]：未取得唯一 UI 操作权；不接管当前页面")
-            return
-        }
+        val start = claimAndBeginReceivedGreetingsTask(
+            reason = "接管人工打开的收到招呼列表",
+            begin = { receivedGreetingsTaskFlow.beginFromConfirmedList() }
+        )
+        if (start != ReceivedGreetingsTaskFlowController.StartResult.STARTED) return
         sessionActionGeneration += 1L
         receivedGreetingsPageProbePending = false
-
-        val accepted = receivedGreetingsTaskFlow.beginFromConfirmedList()
-        if (!accepted) {
-            onLog("收到的招呼人工任务启动[REJECTED]：确认后的当前列表未通过第二次窗口/阶段复核；不执行任何导航动作")
-            return
-        }
 
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
@@ -2976,7 +2965,6 @@ class AiReplyObservationRuntime(
         currentSessionReadCaptured = false
         messageReadCoordinator.invalidatePending()
 
-        receivedGreetingsTaskFlow.markStarted()
         receivedGreetingsRecoveryRetryAttempt = 0
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
 
@@ -2989,6 +2977,41 @@ class AiReplyObservationRuntime(
             return
         }
         scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
+    }
+
+    /**
+     * One transaction for both automatic navigation and manually confirmed-list takeover.
+     * Capability checks happen before the UI-operation lease is claimed; any post-claim start
+     * failure rolls the lease back so a paused branch cannot block the next business task.
+     */
+    private fun claimAndBeginReceivedGreetingsTask(
+        reason: String,
+        begin: () -> ReceivedGreetingsTaskFlowController.StartResult
+    ): ReceivedGreetingsTaskFlowController.StartResult {
+        val capabilities = receivedGreetingsTaskFlow.workflowCapabilities()
+        if (!capabilities.supported) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog(
+                "收到的招呼任务启动[NOT_SUPPORTED]：" +
+                    "entry=${capabilities.entry};" +
+                    "pageRecognition=${capabilities.pageRecognition};" +
+                    "traversal=${capabilities.traversal}；未取得UI操作租约"
+            )
+            return ReceivedGreetingsTaskFlowController.StartResult.NOT_SUPPORTED
+        }
+        if (!claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, reason)) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("收到的招呼任务启动[OWNERSHIP_REJECTED]：未取得唯一 UI 操作权；不执行启动动作")
+            return ReceivedGreetingsTaskFlowController.StartResult.OWNERSHIP_REJECTED
+        }
+        val result = runCatching { begin() }
+            .getOrDefault(ReceivedGreetingsTaskFlowController.StartResult.START_FAILED)
+        if (result != ReceivedGreetingsTaskFlowController.StartResult.STARTED) {
+            releaseTaskOwnership("收到的招呼任务启动失败回滚：${result.name}")
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("收到的招呼任务启动[${result.name}]：已回滚UI操作租约；不执行首次遍历和后续页面调度")
+        }
+        return result
     }
 
     /**

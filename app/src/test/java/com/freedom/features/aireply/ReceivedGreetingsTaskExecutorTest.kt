@@ -18,7 +18,7 @@ class ReceivedGreetingsTaskExecutorTest {
         val executor = ReceivedGreetingsTaskExecutor(port) { false }
 
         assertFalse(executor.performIdleStep())
-        assertFalse(executor.beginFromConfirmedList())
+        assertEquals(ReceivedGreetingsTaskExecutor.StartResult.START_FAILED, executor.beginFromConfirmedList())
         assertFalse(executor.returnForPriorityCheck())
         assertFalse(executor.completeDetailInspection(success = true))
         assertEquals(0, port.idleSteps)
@@ -32,9 +32,9 @@ class ReceivedGreetingsTaskExecutorTest {
         val port = FakePagePort()
         val executor = ReceivedGreetingsTaskExecutor(port) { true }
 
-        assertTrue(executor.beginNavigationTask())
+        assertEquals(ReceivedGreetingsTaskExecutor.StartResult.STARTED, executor.beginNavigationTask())
         assertTrue(executor.performIdleStep())
-        assertTrue(executor.beginFromConfirmedList())
+        assertEquals(ReceivedGreetingsTaskExecutor.StartResult.STARTED, executor.beginFromConfirmedList())
         assertTrue(executor.returnForPriorityCheck())
         assertTrue(executor.completeDetailInspection(success = false))
         assertEquals(1, port.navigationStarts)

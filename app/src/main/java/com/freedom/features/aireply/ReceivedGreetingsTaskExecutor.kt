@@ -16,6 +16,16 @@ internal class ReceivedGreetingsTaskExecutor(
     private val pagePort: ChatPagePort,
     private val ownsTask: () -> Boolean
 ) {
+    data class WorkflowCapabilities(
+        val entry: Boolean,
+        val pageRecognition: Boolean,
+        val traversal: Boolean
+    ) {
+        val supported: Boolean
+            get() = entry && pageRecognition && traversal
+    }
+
+    enum class StartResult { STARTED, NOT_SUPPORTED, START_FAILED }
     enum class PageDecision {
         ENTRY_NOT_FOUND,
         COMPLETE,
@@ -75,7 +85,13 @@ internal class ReceivedGreetingsTaskExecutor(
         }
         return StepObservation(accepted, status, decision)
     }
-    fun supportsWorkflow(): Boolean = pagePort.supportsReceivedGreetingsIdleWorkflow()
+    fun workflowCapabilities(): WorkflowCapabilities = WorkflowCapabilities(
+        entry = pagePort.supportsReceivedGreetingsEntry(),
+        pageRecognition = pagePort.supportsReceivedGreetingsPageRecognition(),
+        traversal = pagePort.supportsReceivedGreetingsTraversal()
+    )
+
+    fun supportsWorkflow(): Boolean = workflowCapabilities().supported
 
     fun observeManuallyOpenedPage(): ReceivedGreetingsPageArrivalStatus =
         runCatching { pagePort.observeManuallyOpenedReceivedGreetingsPage() }
@@ -97,12 +113,13 @@ internal class ReceivedGreetingsTaskExecutor(
     }.getOrNull()
 
     /** Resets adapter-owned search state; the caller retains lifecycle and retry decisions. */
-    fun beginNavigationTask(): Boolean {
-        if (!ownsTask()) return false
-        // The previous runtime deliberately ignored adapter reset exceptions and proceeded to the
-        // first bounded step. Preserve that behavior while keeping the call behind the lease gate.
-        runCatching { pagePort.beginReceivedGreetingsNavigationTask() }
-        return true
+    fun beginNavigationTask(): StartResult {
+        if (!workflowCapabilities().supported) return StartResult.NOT_SUPPORTED
+        if (!ownsTask()) return StartResult.START_FAILED
+        return runCatching {
+            pagePort.beginReceivedGreetingsNavigationTask()
+            StartResult.STARTED
+        }.getOrDefault(StartResult.START_FAILED)
     }
 
     /** Executes exactly one adapter-bounded navigation/list step. */
@@ -112,10 +129,16 @@ internal class ReceivedGreetingsTaskExecutor(
     }
 
     /** Starts a read-only traversal from the already confirmed current list. */
-    fun beginFromConfirmedList(): Boolean {
-        if (!ownsTask()) return false
-        return runCatching { pagePort.beginReceivedGreetingsTaskFromCurrentList() }
-            .getOrDefault(false)
+    fun beginFromConfirmedList(): StartResult {
+        if (!workflowCapabilities().supported) return StartResult.NOT_SUPPORTED
+        if (!ownsTask()) return StartResult.START_FAILED
+        return runCatching {
+            if (pagePort.beginReceivedGreetingsTaskFromCurrentList()) {
+                StartResult.STARTED
+            } else {
+                StartResult.START_FAILED
+            }
+        }.getOrDefault(StartResult.START_FAILED)
     }
 
     fun synchronizeRecoveryConfirmation(): Boolean =

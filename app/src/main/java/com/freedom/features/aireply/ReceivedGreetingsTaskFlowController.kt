@@ -17,6 +17,7 @@ internal class ReceivedGreetingsTaskFlowController(
     ownership: AiReplyTaskOwnership,
     pagePort: ChatPagePort
 ) {
+    enum class StartResult { STARTED, NOT_SUPPORTED, OWNERSHIP_REJECTED, START_FAILED }
     enum class DecisionKind {
         ENTRY_NOT_FOUND,
         COMPLETE,
@@ -62,6 +63,9 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun supportsWorkflow(): Boolean = executor.supportsWorkflow()
 
+    fun workflowCapabilities(): ReceivedGreetingsTaskExecutor.WorkflowCapabilities =
+        executor.workflowCapabilities()
+
     fun observeManuallyOpenedPage(): ReceivedGreetingsPageArrivalStatus =
         executor.observeManuallyOpenedPage()
 
@@ -77,14 +81,24 @@ internal class ReceivedGreetingsTaskFlowController(
      * Starts the existing adapter-owned navigation flow. The adapter reset remains bounded and
      * best-effort exactly as before; lifecycle ownership moves to this controller.
      */
-    fun beginNavigationTask(): Boolean {
-        executor.beginNavigationTask()
-        lifecycle.markNavigationStarted()
-        return executor.supportsWorkflow()
+    fun beginNavigationTask(): StartResult = when (executor.beginNavigationTask()) {
+        ReceivedGreetingsTaskExecutor.StartResult.STARTED -> {
+            lifecycle.markStarted()
+            StartResult.STARTED
+        }
+        ReceivedGreetingsTaskExecutor.StartResult.NOT_SUPPORTED -> StartResult.NOT_SUPPORTED
+        ReceivedGreetingsTaskExecutor.StartResult.START_FAILED -> StartResult.START_FAILED
     }
 
     /** Begins only from a page already confirmed by the dedicated page recognizer. */
-    fun beginFromConfirmedList(): Boolean = executor.beginFromConfirmedList()
+    fun beginFromConfirmedList(): StartResult = when (executor.beginFromConfirmedList()) {
+        ReceivedGreetingsTaskExecutor.StartResult.STARTED -> {
+            lifecycle.markStarted()
+            StartResult.STARTED
+        }
+        ReceivedGreetingsTaskExecutor.StartResult.NOT_SUPPORTED -> StartResult.NOT_SUPPORTED
+        ReceivedGreetingsTaskExecutor.StartResult.START_FAILED -> StartResult.START_FAILED
+    }
 
     fun synchronizeRecoveryConfirmation(): Boolean = executor.synchronizeRecoveryConfirmation()
 

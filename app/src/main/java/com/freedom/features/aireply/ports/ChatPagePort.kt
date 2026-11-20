@@ -570,6 +570,11 @@ interface ChatPagePort {
      */
     fun supportsReceivedGreetingsIdleWorkflow(): Boolean = false
 
+    /** Capability checks used before the received-greetings UI-operation lease is claimed. */
+    fun supportsReceivedGreetingsEntry(): Boolean = supportsReceivedGreetingsIdleWorkflow()
+    fun supportsReceivedGreetingsPageRecognition(): Boolean = supportsReceivedGreetingsIdleWorkflow()
+    fun supportsReceivedGreetingsTraversal(): Boolean = supportsReceivedGreetingsIdleWorkflow()
+
     /** Resets adapter-owned entry-search state before a new received-greetings navigation task. */
     fun beginReceivedGreetingsNavigationTask() = Unit
 
