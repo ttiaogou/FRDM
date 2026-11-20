@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit
  * Non-interactive visualization for the exact coordinate path submitted to dispatchGesture().
  * The visual window is an ACCESSIBILITY_OVERLAY and does not require SYSTEM_ALERT_WINDOW.
  */
-internal object GestureTrailOverlay {
+object GestureTrailOverlay {
     private const val SWIPE_HOLD_AFTER_COMPLETE_MS = 650L
     private const val CANCEL_HOLD_MS = 420L
     private const val MAIN_THREAD_WAIT_MS = 1_000L
