@@ -1,5 +1,7 @@
 package com.freedom.core.runtime
 
+import com.freedom.core.accessibility.events.AccessibilityEventType
+
 /**
  * Service-scoped coordinator for event-assisted page observations.
  *
@@ -63,7 +65,8 @@ class PageObservationCoordinator(
         channelId: String,
         quietPeriodMs: Long,
         maxWaitMs: Long,
-        onObservationRequested: () -> Unit
+        onObservationRequested: () -> Unit,
+        eventTypes: Set<AccessibilityEventType> = emptySet()
     ): PageObservationSubscription {
         require(channelId.isNotBlank()) { "channelId must not be blank" }
         check(channelId !in channels) { "Page observation channel already registered: $channelId" }
@@ -75,7 +78,7 @@ class PageObservationCoordinator(
             task = onObservationRequested
         )
         lateinit var subscription: PageObservationSubscription
-        subscription = PageObservationSubscription(channelId, debouncer) {
+        subscription = PageObservationSubscription(channelId, eventTypes, debouncer) {
             unregister(channelId, subscription)
         }
         channels[channelId] = subscription
@@ -92,6 +95,14 @@ class PageObservationCoordinator(
 
     /** Cancels all channels for compatibility with a coordinator owned by one runtime. */
     fun reset() = resetAll()
+
+    /** Signals every channel interested in this normalized event. Only coalescing is performed. */
+    fun signal(eventType: AccessibilityEventType) {
+        synchronized(this) {
+            channels.values.toList()
+        }.filter { it.accepts(eventType) }
+            .forEach(PageObservationSubscription::requestSnapshot)
+    }
 
     fun requestFullPageSnapshot() = requireLegacyFullPage().requestSnapshot()
 
@@ -125,6 +136,7 @@ class PageObservationCoordinator(
 /** A single business area's registration in the shared page-observation coordinator. */
 class PageObservationSubscription internal constructor(
     val channelId: String,
+    private val eventTypes: Set<AccessibilityEventType>,
     private val debouncer: EventAssistedDebouncer,
     private val onClose: () -> Unit
 ) : AutoCloseable {
@@ -140,6 +152,9 @@ class PageObservationSubscription internal constructor(
     }
 
     fun isPending(): Boolean = !closed && debouncer.isPending()
+
+    internal fun accepts(eventType: AccessibilityEventType): Boolean =
+        eventTypes.isEmpty() || eventType in eventTypes
 
     override fun close() {
         if (closed) return
