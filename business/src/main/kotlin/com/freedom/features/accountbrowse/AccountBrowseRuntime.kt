@@ -27,6 +27,7 @@ class AccountBrowseRuntime(
     private val onResetSession: () -> Unit,
     private val actions: Actions,
     private val currentRunGeneration: () -> Long = { 0L },
+    private val interactionPolicy: AccountBrowseInteractionPolicy = AccountBrowseInteractionPolicy(),
     private val onLog: (String) -> Unit = {}
 ) {
     data class Actions(
@@ -208,9 +209,12 @@ class AccountBrowseRuntime(
             onResetSession()
             return
         }
-        if (isTouchActive() || phase == AccountBrowsePhase.PAUSED) return
-        if (recoveryTransaction.state != RecoveryTransactionState.ACTIVE &&
-            phase != AccountBrowsePhase.WAIT_FOR_FEED_STABLE
+        if (!interactionPolicy.mayPerformAutomaticStep(
+                sessionEnabled = true,
+                touchActive = isTouchActive(),
+                phase = phase,
+                recoveryState = recoveryTransaction.state
+            )
         ) return
 
         when (phase) {
