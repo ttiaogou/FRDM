@@ -150,7 +150,6 @@ class AiReplyObservationRuntime(
         private const val MAX_NO_PROGRESS_SCROLLS = 2
         private const val SESSION_BOUNDARY_SETTLE_DELAY_MS = 650L
         private const val MAX_BOUNDARY_STABILITY_CONFIRMATIONS = 2
-        private const val MAX_CANCELLED_SCROLL_RECOVERIES = 2
         private const val SCROLL_CANCEL_RECOVERY_DELAY_MS = 180L
         private const val AI_READINESS_RETRY_DELAY_MS = 400L
         private const val AI_READINESS_RETRY_BACKOFF_MS = 5_000L
@@ -267,6 +266,7 @@ class AiReplyObservationRuntime(
     private var messageReadRetryTask: ScheduledTask? = null
     private var messageReadRetryCount = 0
     private var lastRecoveryAndroidReadinessWait: String? = null
+    private var serviceInterruptionCheckpointPersisted = false
     private var readinessDeferredRetryTask: ScheduledTask? = null
     private var readinessDeferredRetryCount = 0
     private var readinessDeferredRetryLimitLogged = false
@@ -1759,6 +1759,44 @@ class AiReplyObservationRuntime(
         }
     }
 
+    /**
+     * Save the latest traversal cursor before the Service boundary resets in-memory work.
+     * Persisting here never marks a gesture completed or authorizes resumption; reconnect
+     * must still pass the existing Android READY and two-fresh-snapshot checkpoints.
+     * The same boundary may be reported twice (interrupt, disconnect, destroy).
+     */
+    fun persistCheckpointBeforeServiceInterruption(reason: String) {
+        if (!sessionRunStarted || serviceInterruptionCheckpointPersisted) return
+        if (recoveryContext.pending) {
+            // An UNKNOWN transaction already saved its original route checkpoint.
+            onLog("统一恢复[SERVICE_BOUNDARY_PRESERVED]：reason=$reason；沿用待恢复检查点，不覆盖已保存凭据")
+            return
+        }
+        val taskId = taskOwnership.activeTaskId()
+        val persisted = runCatching {
+            when (taskId) {
+                PRIVATE_MESSAGES_TASK_ID -> {
+                    val repository = privateMessagesCheckpointRepository ?: return@runCatching false
+                    repository.save(privateMessagesTraversalTaskExecutor.checkpoint())
+                    true
+                }
+                RECEIVED_GREETINGS_TASK_ID -> {
+                    chatPagePort.persistReceivedGreetingsCheckpoint()
+                    true
+                }
+                else -> false
+            }
+        }.onFailure {
+            onLog("统一恢复[SERVICE_BOUNDARY_CHECKPOINT_ERROR]：reason=$reason；type=${it.javaClass.simpleName}；未改变手势或任务状态")
+        }.getOrDefault(false)
+        if (persisted) {
+            serviceInterruptionCheckpointPersisted = true
+            onLog("统一恢复[SERVICE_BOUNDARY_CHECKPOINT_SAVED]：task=$taskId；reason=$reason；中断前业务进度已保存；等待服务重连后只读验证")
+        } else {
+            onLog("统一恢复[SERVICE_BOUNDARY_CHECKPOINT_UNAVAILABLE]：task=${taskId ?: "NONE"}；reason=$reason；未生成未经验证的检查点")
+        }
+    }
+
     /** Cancel all pending observations when the target changes, run stops, or Service reconnects. */
     /**
      * Only an ended user run clears its durable read-only observation plans.
@@ -1789,6 +1827,7 @@ class AiReplyObservationRuntime(
         cancelSessionSafeViewportRetry(resetCount = true)
         pageObservationCoordinator.reset()
         lastRecoveryAndroidReadinessWait = null
+        serviceInterruptionCheckpointPersisted = false
         sessionTransitionTask?.cancel()
         cancelMessageReadRetry()
         pageInspectionTask = null
@@ -1937,6 +1976,12 @@ class AiReplyObservationRuntime(
         recoveryContext.markCheckpointSaved()
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
         recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        // A new recovery transaction supersedes all pending UI callbacks and intents.
+        // Gesture algorithms are unchanged; only stale callback authority is revoked.
+        sessionActionGeneration += 1L
+        activeSessionGestureRequestId = null
+        cancelAiReadinessRetry(resetCount = true)
+        cancelSessionSafeViewportRetry(resetCount = true)
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
         pageInspectionTask?.cancel()
@@ -1950,6 +1995,24 @@ class AiReplyObservationRuntime(
                 "已保存检查点并暂停全部滚动、点击和导航"
         )
         return true
+    }
+
+    /**
+     * Treat transient platform gesture failures as UNKNOWN transactions rather than permanent
+     * business pauses. Reacquire the page through the existing read-only scheduler; no gesture
+     * command, stale row, or previous coordinates are replayed.
+     */
+    private fun recoverTransientPrivateGesture(reason: String, delayMs: Long = 0L) {
+        privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+        privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+        if (!isAiReplyActive() || !sessionRunStarted) return
+        if (requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, reason) || recoveryContext.pending) {
+            onLog("统一恢复[GESTURE_RECOVERY_REQUESTED]：task=$PRIVATE_MESSAGES_TASK_ID；reason=$reason；保留检查点，继续只读观察")
+            scheduleFullInspectionAfter(delayMs)
+        } else {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("统一恢复[GESTURE_RECOVERY_UNAVAILABLE]：reason=$reason；无法建立恢复检查点，禁止继续手势")
+        }
     }
 
     /** Pending-send UNKNOWN may recover only onto the same semantic chat-detail surface. */
@@ -2067,6 +2130,7 @@ class AiReplyObservationRuntime(
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
         lastRecoveryAndroidReadinessWait = null
+        serviceInterruptionCheckpointPersisted = false
         startupReadinessCoordinator.cancelRecovery()
         recoveryContext.clear()
         messageListCheckpointVerifier.reset()
@@ -2283,6 +2347,15 @@ class AiReplyObservationRuntime(
                 event.type == AccessibilityEventType.VIEW_SELECTED)
         val windowTransition = event.type == AccessibilityEventType.WINDOW_STATE_CHANGED ||
             event.type == AccessibilityEventType.WINDOWS_CHANGED
+        if (windowTransition && sessionRunStarted && !recoveryContext.pending &&
+            !receivedGreetingsTaskActive &&
+            sessionManagerState == SessionManagerState.SCROLLING_SESSION_LIST &&
+            ownsTask(PRIVATE_MESSAGES_TASK_ID)
+        ) {
+            // A window transition during an outstanding list gesture is not proof of success.
+            // Do not run its old callback or replay its old coordinates after the window changes.
+            recoverTransientPrivateGesture("GESTURE_WINDOW_CHANGED")
+        }
         if (windowTransition && recoveryContext.pending) {
             // A window transition interrupts recovery evidence even before the next page read.
             // Checkpoint verifiers must not reuse their first sample from the previous window.
@@ -3724,10 +3797,15 @@ class AiReplyObservationRuntime(
             is PrivateMessagesTaskExecutor.Attempt.Rejected -> {
                 when (attempt.reason) {
                     PrivateMessagesTaskExecutor.RejectionReason.OWNERSHIP_LOST -> {
-                        sessionManagerState = SessionManagerState.PAUSED
-                        onLog("AI 会话点击[OWNERSHIP_REJECTED]：构造手势前或过程中任务租约已变化；拒绝派发旧点击")
+                        onLog("AI 会话点击[OWNERSHIP_REJECTED]：任务租约已变化；不派发旧点击，转入检查点恢复")
+                        recoverTransientPrivateGesture("GESTURE_TAP_OWNERSHIP_CHANGED")
                     }
                     else -> {
+                        if (attempt.reason == PrivateMessagesTaskExecutor.RejectionReason.WINDOW_CONTEXT_CHANGED) {
+                            onLog("AI 会话点击[WINDOW_CONTEXT_CHANGED]：重新确认窗口身份；转入统一恢复事务")
+                            recoverTransientPrivateGesture("GESTURE_TAP_WINDOW_CHANGED")
+                            return
+                        }
                         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                         val message = when (attempt.reason) {
                             PrivateMessagesTaskExecutor.RejectionReason.PAGE_CHANGED ->
@@ -3782,7 +3860,8 @@ class AiReplyObservationRuntime(
                         currentSessionKey = null
                         currentSessionName = null
                         currentSessionCandidate = null
-                        onLog("AI 会话管理已暂停：系统明确拒绝会话点击派发；与页面跳转验证失败分开记录")
+                        onLog("AI 会话管理：系统拒绝会话点击派发；未确认目标聊天已打开，转入安全恢复")
+                        recoverTransientPrivateGesture("GESTURE_TAP_SUBMISSION_REJECTED")
                         return
                     }
                     GestureSubmission.ACCEPTED -> {
@@ -3872,8 +3951,16 @@ class AiReplyObservationRuntime(
         if (result.status != GestureExecutionStatus.COMPLETED) {
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("AI 会话管理已暂停：会话点击手势未完成（${result.status}）；不假定已打开目标聊天")
+            privateMessagesTraversalTaskExecutor.attemptedSessionKeys.remove(selectedKey)
+            privateMessagesTraversalTaskExecutor.sessionActionCount =
+                (privateMessagesTraversalTaskExecutor.sessionActionCount - 1).coerceAtLeast(0)
+            currentSessionKey = null
+            currentSessionName = null
+            currentSessionCandidate = null
+            currentSessionReadCaptured = false
+            currentSessionWindowKey = null
+            onLog("AI 会话管理：会话点击未完成（${result.status}）；不判定已打开或已处理，转入安全恢复")
+            recoverTransientPrivateGesture("GESTURE_TAP_${result.status}")
             return
         }
         // The accessibility window event may arrive before or after this callback. The delayed
@@ -4372,41 +4459,15 @@ class AiReplyObservationRuntime(
                             )
                         }
                         GestureExecutionStatus.CANCELLED -> {
-                            // A cancelled gesture is not proof of reaching either list boundary.
-                            // Discard the old baseline and reacquire the page before any retry.
-                            privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
-                            privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+                            // A cancelled swipe proves neither page movement nor list boundary.
+                            // Preserve the traversal checkpoint and require the same READY +
+                            // two-fresh-snapshot transaction used by reconnect and UNKNOWN.
                             privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount += 1
                             onLog(
-                                "AI 会话管理：列表滚动被系统取消；第 $privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount/" +
-                                    "$MAX_CANCELLED_SCROLL_RECOVERIES 次恢复检查；重新读取页面与列表位置"
+                                "AI 会话管理[SCROLL_CANCELLED]：次数=$privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount；" +
+                                    "不再使用硬重试上限，不假定列表已经移动"
                             )
-                            sessionTransitionTask?.cancel()
-                            sessionTransitionTask = scheduler.schedule(SCROLL_CANCEL_RECOVERY_DELAY_MS) recovery@{
-                                sessionTransitionTask = null
-                                if (!isAiReplyActive() || !sessionRunStarted ||
-                                    sessionManagerState != SessionManagerState.SCROLLING_SESSION_LIST
-                                ) return@recovery
-                                val refreshed = inspectFreshPageSnapshot()
-                                if (refreshed == null ||
-                                    refreshed.pageKind != ChatPageKind.CHAT_LIST ||
-                                    refreshed.packageName != targetPackage() ||
-                                    !refreshed.hasSameWindowIdentity(snapshot)
-                                ) {
-                                    sessionManagerState = SessionManagerState.PAUSED
-                                    onLog(
-                                        "AI 会话管理已暂停：滚动取消后页面复核失败；可能发生页面切换或服务中断；" +
-                                            "不判定遍历完成，也不继续使用旧列表坐标"
-                                    )
-                                } else if (privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount <= MAX_CANCELLED_SCROLL_RECOVERIES) {
-                                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                                    onLog("AI 会话管理：取消后确认仍处于会话列表；使用新快照进行有限重试")
-                                    scrollSessionList(refreshed, toTop)
-                                } else {
-                                    sessionManagerState = SessionManagerState.PAUSED
-                                    onLog("AI 会话管理已暂停：列表滚动连续取消且达到恢复上限；等待用户检查")
-                                }
-                            }
+                            recoverTransientPrivateGesture("GESTURE_SCROLL_CANCELLED", SCROLL_CANCEL_RECOVERY_DELAY_MS)
                         }
                         GestureExecutionStatus.DEFERRED -> {
                             privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
@@ -4421,10 +4482,8 @@ class AiReplyObservationRuntime(
                         }
                         GestureExecutionStatus.REJECTED,
                         GestureExecutionStatus.FAILED -> {
-                            privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
-                            privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
-                            sessionManagerState = SessionManagerState.PAUSED
-                            onLog("AI 会话管理已暂停：列表滚动执行失败（${result.status}）；不判定遍历完成")
+                            onLog("AI 会话管理：列表滚动执行失败（${result.status}）；不判定遍历完成，转入只读恢复")
+                            recoverTransientPrivateGesture("GESTURE_SCROLL_${result.status}")
                         }
                     }
                 }
@@ -4447,8 +4506,8 @@ class AiReplyObservationRuntime(
                 if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
                 privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
                 privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog("AI 会话管理已暂停：系统明确拒绝列表滚动派发；尚未执行页面验证，不判定为页面验证失败")
+                onLog("AI 会话管理：系统拒绝列表滚动派发；尚未验证列表位置，转入只读恢复")
+                recoverTransientPrivateGesture("GESTURE_SCROLL_SUBMISSION_REJECTED")
             }
             GestureSubmission.ACCEPTED -> {
                 // ACCEPTED means the coordinator admitted/scheduled the command. Only the

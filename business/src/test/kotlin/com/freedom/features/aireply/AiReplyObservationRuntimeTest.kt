@@ -314,6 +314,83 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun serviceInterruptionSavesCurrentCheckpointOnceAndResetDoesNotDeleteIt() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply { sessionRunEnabled = true }
+        val logs = ArrayList<String>()
+        var saved: PrivateMessagesTraversalCheckpoint? = null
+        var saveCount = 0
+        val repo = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = saved
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) {
+                saved = checkpoint
+                saveCount++
+            }
+            override fun clear() = Unit
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator()),
+            currentRunGeneration = { 6L },
+            privateMessagesCheckpointRepository = repo
+        )
+        runtime.scheduleInitialObservation()
+        runtime.persistCheckpointBeforeServiceInterruption("SERVICE_INTERRUPTED")
+        runtime.persistCheckpointBeforeServiceInterruption("SERVICE_DISCONNECTED")
+        assertEquals(1, saveCount)
+        assertTrue(logs.any { it.contains("SERVICE_BOUNDARY_CHECKPOINT_SAVED") })
+        runtime.reset("无障碍服务中断")
+        runtime.persistCheckpointBeforeServiceInterruption("SERVICE_DESTROYED")
+        assertEquals(1, saveCount)
+        assertTrue(saved != null)
+    }
+
+    @Test
+    fun cancelledRejectedAndFailedScrollsEnterCheckpointRecoveryInsteadOfTerminalPause() {
+        for (status in listOf(
+            GestureExecutionStatus.CANCELLED, GestureExecutionStatus.REJECTED,
+            GestureExecutionStatus.FAILED
+        )) {
+            val fixture = capturedScrollRecoveryFixture()
+            fixture.listener.onResult(GestureExecutionResult(fixture.request.id, status))
+            runUntilLog(fixture.scheduler, fixture.logs, "GESTURE_RECOVERY_REQUESTED")
+            assertTrue("No checkpoint after $status", fixture.savedCheckpoint() != null)
+            assertTrue(fixture.logs.any {
+                it.contains("PAUSED_CHECKPOINT_SAVED") && it.contains("GESTURE_SCROLL_")
+            })
+            assertEquals("A failed scroll must not be immediately replayed", 1, fixture.dispatchedGestures())
+            assertFalse(fixture.logs.any { it.contains("达到恢复上限") })
+        }
+    }
+
+    @Test
+    fun windowTransitionDuringScrollInvalidatesOldGestureCallbackAndKeepsCheckpoint() {
+        val fixture = capturedScrollRecoveryFixture()
+        fixture.runtime.schedule(event(AccessibilityEventType.WINDOWS_CHANGED))
+        assertTrue(fixture.logs.any {
+            it.contains("GESTURE_RECOVERY_REQUESTED") && it.contains("GESTURE_WINDOW_CHANGED")
+        })
+        assertTrue(fixture.savedCheckpoint() != null)
+        // A delayed completion from the old window must not be interpreted as a success.
+        fixture.listener.onResult(
+            GestureExecutionResult(fixture.request.id, GestureExecutionStatus.COMPLETED)
+        )
+        runUntilLog(fixture.scheduler, fixture.logs, "已忽略过期自主滑动回调")
+        assertEquals(1, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("首次向上准入滑动已完成") })
+    }
+
+    @Test
     fun restoredMessageListWaitsForSharedCheckpointVerificationBeforeExistingTraversal() {
         val scheduler = FakeScheduler()
         val logs = ArrayList<String>()
@@ -3630,6 +3707,81 @@ class AiReplyObservationRuntimeTest {
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
         assertFalse(logs.any { it.contains("未知交互仲裁[PROTECTION_TRIGGERED]") })
         assertFalse(logs.any { it.contains("人工接管") || it.contains("人工复核锁") })
+    }
+
+    private data class CapturedScrollRecoveryFixture(
+        val scheduler: FakeScheduler,
+        val runtime: AiReplyObservationRuntime,
+        val logs: MutableList<String>,
+        val request: GestureIntentRequest,
+        val listener: GestureExecutionListener,
+        val savedCheckpoint: () -> PrivateMessagesTraversalCheckpoint?,
+        val dispatchedGestures: () -> Int
+    )
+
+    private fun capturedScrollRecoveryFixture(): CapturedScrollRecoveryFixture {
+        val scheduler = FakeScheduler()
+        val viewport = ScreenRect(0, 120, 720, 1480)
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = viewport,
+                chatListCandidates = listOf(sessionCandidate(unreadStatus = ChatUnreadStatus.READ))
+            )
+        }
+        val logs = mutableListOf<String>()
+        var request: GestureIntentRequest? = null
+        var listener: GestureExecutionListener? = null
+        var dispatchCount = 0
+        var saved: PrivateMessagesTraversalCheckpoint? = null
+        val repo = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = saved
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { saved = checkpoint }
+            override fun clear() = Unit
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    callback: GestureExecutionListener
+                ): GestureSubmission {
+                    dispatchCount++
+                    request = command
+                    listener = callback
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator()),
+            currentRunGeneration = { 6L },
+            privateMessagesCheckpointRepository = repo
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 60) { request?.intent is GestureIntent.VerticalSwipe && listener != null }
+        return CapturedScrollRecoveryFixture(
+            scheduler, runtime, logs, requireNotNull(request), requireNotNull(listener),
+            { saved }, { dispatchCount }
+        )
     }
 
     private fun runtime(

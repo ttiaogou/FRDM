@@ -65,7 +65,9 @@ internal class AiReplyModeRuntimeAdapter(
     override fun onAccessibilityServiceDisconnected() {
         onReadinessInvalidated("无障碍服务断开；目标应用就绪状态失效")
         awaitingServiceReconnect = true
-        runtime().reset("无障碍服务断开连接")
+        val activeRuntime = runtime()
+        activeRuntime.persistCheckpointBeforeServiceInterruption("SERVICE_DISCONNECTED")
+        activeRuntime.reset("无障碍服务断开连接")
     }
 
     override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = runtime().schedule(event)
@@ -75,12 +77,16 @@ internal class AiReplyModeRuntimeAdapter(
     override fun onAccessibilityServiceInterrupted(reason: String) {
         onReadinessInvalidated("无障碍服务中断；目标应用就绪状态失效：$reason")
         awaitingServiceReconnect = true
-        runtime().reset("无障碍服务中断：$reason")
+        val activeRuntime = runtime()
+        activeRuntime.persistCheckpointBeforeServiceInterruption("SERVICE_INTERRUPTED")
+        activeRuntime.reset("无障碍服务中断：$reason")
     }
 
     override fun onServiceDestroyed() {
         onReadinessInvalidated("无障碍服务销毁；目标应用就绪状态失效")
-        runtime().reset("无障碍服务销毁")
+        val activeRuntime = runtime()
+        activeRuntime.persistCheckpointBeforeServiceInterruption("SERVICE_DESTROYED")
+        activeRuntime.reset("无障碍服务销毁")
     }
 
     override fun resetRuntime(reason: String) = runtime().reset("运行时外部重置：$reason")
