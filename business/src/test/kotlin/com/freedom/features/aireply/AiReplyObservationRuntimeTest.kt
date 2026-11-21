@@ -51,6 +51,8 @@ import com.freedom.features.aireply.ports.ChatRegionSnapshot
 import com.freedom.features.aireply.ports.SessionListNavigationTarget
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
+import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRecord
+import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -81,6 +83,76 @@ private interface TestGestureApi : GestureApi {
 private interface TestGestureApiWithCancellation : TestGestureApi
 
 class AiReplyObservationRuntimeTest {
+    @Test
+    fun receivedGreetingsRestoredCheckpointRequiresSharedProofAndAdapterConfirmation() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            receivedGreetingsCheckpointFingerprint = "greetings-current-window"
+            receivedGreetingsRecoverySyncAccepted = true
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "NewSayHiSessionListActivity",
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 40,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null
+            )
+        }
+        val checkpoint = MomoSayHiTraversalCheckpointRecord(
+            processedRowKeys = setOf("hashed-row"),
+            processedContactIdHashes = setOf("hashed-contact"),
+            deferredRows = emptyMap(),
+            deferredReturnToTopActive = false,
+            deferredReplayStarted = false
+        )
+        val repository = object : MomoSayHiTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): MomoSayHiTraversalCheckpointRecord? = checkpoint
+            override fun save(checkpoint: MomoSayHiTraversalCheckpointRecord) = Unit
+            override fun clear() = Unit
+        }
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = ownership,
+            currentRunGeneration = { 12L },
+            receivedGreetingsCheckpointRepository = repository
+        )
+        runtime.scheduleInitialObservation()
+        // The existing Momo adapter may report an unconfirmed page at the reconnect moment;
+        // the new durable checkpoint path must still enter read-only verification.
+        assertFalse(runtime.reloadReceivedGreetingsCheckpointAfterServiceReconnect())
+        scheduler.runNextWithDelay(0L)
+        assertTrue(logs.any { it.contains("收到招呼通用检查点[VERIFYING]") })
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+
+        scheduler.runNextWithDelay(500L)
+        scheduler.runNextWithDelay(0L)
+        assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertEquals(setOf("hashed-row"), checkpoint.processedRowKeys)
+    }
+
     @Test
     fun restoredMessageListWaitsForSharedCheckpointVerificationBeforeExistingTraversal() {
         val scheduler = FakeScheduler()
@@ -3565,6 +3637,8 @@ class AiReplyObservationRuntimeTest {
         var receivedGreetingsPriorityReturns: Int = 0
         var receivedGreetingsTraversalStatusValue: ReceivedGreetingsTraversalStatus =
             ReceivedGreetingsTraversalStatus.UNKNOWN
+        var receivedGreetingsCheckpointFingerprint: String? = null
+        var receivedGreetingsRecoverySyncAccepted: Boolean = false
         var pageAfterReceivedGreetingsReturn: ChatPageSnapshot? = null
         val resolvedTapCandidateNames = ArrayList<String?>()
 
@@ -3643,6 +3717,10 @@ class AiReplyObservationRuntimeTest {
         }
         override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus =
             receivedGreetingsTraversalStatusValue
+        override fun receivedGreetingsRecoveryFingerprint(): String? =
+            receivedGreetingsCheckpointFingerprint
+        override fun synchronizeReceivedGreetingsRecoveryConfirmation(): Boolean =
+            receivedGreetingsRecoverySyncAccepted
         override fun returnFromReceivedGreetingsForPriorityCheck(): Boolean {
             receivedGreetingsPriorityReturns++
             pageAfterReceivedGreetingsReturn?.let { page = it }

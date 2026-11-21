@@ -522,7 +522,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                 root.taskLaunchParametersRepository.read().imageSendThreshold
             },
             contactMessageLedgerRepository = root.contactMessageLedgerRepository,
-            privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository
+            privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository,
+            receivedGreetingsCheckpointRepository = root.sayHiTraversalCheckpointRepository
         )
     }
     val accountBrowseWorkflow by lazy(LazyThreadSafetyMode.NONE) {
