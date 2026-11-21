@@ -26,7 +26,7 @@ class AccountBrowseInteractionPolicyTest {
                 recoveryState = RecoveryTransactionState.ACTIVE
             )
         )
-        assertTrue(
+        assertFalse(
             policy.mayPerformAutomaticStep(
                 sessionEnabled = true,
                 touchActive = false,
