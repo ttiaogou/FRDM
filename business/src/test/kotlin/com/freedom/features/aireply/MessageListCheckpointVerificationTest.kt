@@ -122,6 +122,66 @@ class MessageListCheckpointVerificationTest {
         assertEquals(null, repository.load())
     }
 
+
+    @Test
+    fun unknownCheckpointPlanRestoresAcrossReconnectAndProcessRestartButNotNewCheckpoint() {
+        val task = "AI_REPLY_PRIVATE_MESSAGES"
+        var stored: RecoveryScheduleSnapshot? = RecoveryScheduleSnapshot(
+            taskId = task, routeId = task, runGeneration = 2L, recoveryReason = "PAGE_ROUTE_CHANGED",
+            checkpointId = AiReplyObservationRuntime.durableRecoveryCheckpointId(
+                task, original.savedAtEpochMs, "PAGE_ROUTE_CHANGED"
+            ),
+            observationCount = 11L, nextObservationAtEpochMs = Long.MAX_VALUE,
+            backoffStage = 4, touchActive = false
+        )
+        val repository = object : RecoveryScheduleRepository {
+            override fun load(): RecoveryScheduleSnapshot? = stored
+            override fun save(snapshot: RecoveryScheduleSnapshot) { stored = snapshot }
+            override fun clear() { stored = null }
+        }
+        for (source in listOf(
+            RecoveryCheckpointRestoreSource.SERVICE_RECONNECT,
+            RecoveryCheckpointRestoreSource.PROCESS_RESTART
+        )) {
+            val (verifier, scheduler) = fixture(repository)
+            assertEquals(
+                RecoveryCheckpointVerificationResult.Verifying(1),
+                verifier.observe(
+                    checkpoint = original,
+                    checkpointId = AiReplyObservationRuntime.durableRecoveryCheckpointId(
+                        task, original.savedAtEpochMs, source.name
+                    ),
+                    recoveryReason = source.name, restoreSource = source,
+                    snapshot = page(), pageFingerprint = "fresh-page",
+                    routeVerified = true, observationGeneration = 1L
+                )
+            )
+            assertEquals(11L, stored?.observationCount)
+            assertEquals(4, stored?.backoffStage)
+            assertEquals(9L, stored?.runGeneration)
+            assertEquals(listOf(10_000L), scheduler.pendingDelays())
+            verifier.reset()
+        }
+        val changedCheckpoint = original.copy(savedAtEpochMs = original.savedAtEpochMs + 1L)
+        val (verifier, scheduler) = fixture(repository)
+        assertEquals(
+            RecoveryCheckpointVerificationResult.Verifying(1),
+            verifier.observe(
+                checkpoint = changedCheckpoint,
+                checkpointId = AiReplyObservationRuntime.durableRecoveryCheckpointId(
+                    task, changedCheckpoint.savedAtEpochMs, "PROCESS_RESTART_CHECKPOINT"
+                ),
+                recoveryReason = "PROCESS_RESTART_CHECKPOINT",
+                restoreSource = RecoveryCheckpointRestoreSource.PROCESS_RESTART,
+                snapshot = page(), pageFingerprint = "fresh-page",
+                routeVerified = true, observationGeneration = 1L
+            )
+        )
+        assertEquals(0L, stored?.observationCount)
+        assertEquals(0, stored?.backoffStage)
+        assertEquals(listOf(500L), scheduler.pendingDelays())
+    }
+
     @Test
     fun twoFreshStructuralSamplesAreRequiredAndTimerCompletesAfterResume() {
         val (verifier, scheduler) = fixture()

@@ -85,6 +85,23 @@ private interface TestGestureApi : GestureApi {
 private interface TestGestureApiWithCancellation : TestGestureApi
 
 class AiReplyObservationRuntimeTest {
+
+    @Test
+    fun samePersistedCheckpointGetsOneIdAcrossUnknownReconnectAndRestart() {
+        val task = "AI_REPLY_PRIVATE_MESSAGES"
+        val otherTask = "AI_REPLY_RECEIVED_GREETINGS"
+        val stamp = 1_700_000_000_999L
+        val id = AiReplyObservationRuntime.durableRecoveryCheckpointId(task, stamp, "PAGE_ROUTE_CHANGED")
+        assertEquals(id, AiReplyObservationRuntime.durableRecoveryCheckpointId(task, stamp, "SERVICE_RECONNECT_CHECKPOINT"))
+        assertEquals(id, AiReplyObservationRuntime.durableRecoveryCheckpointId(task, stamp, "PROCESS_RESTART_CHECKPOINT"))
+        assertFalse(id == AiReplyObservationRuntime.durableRecoveryCheckpointId(task, stamp + 1L, "PROCESS_RESTART_CHECKPOINT"))
+        assertFalse(id == AiReplyObservationRuntime.durableRecoveryCheckpointId(otherTask, stamp, "PROCESS_RESTART_CHECKPOINT"))
+        assertFalse(
+            AiReplyObservationRuntime.durableRecoveryCheckpointId(task, null, "UNKNOWN_PAGE") ==
+                AiReplyObservationRuntime.durableRecoveryCheckpointId(task, null, "SERVICE_RECONNECT_CHECKPOINT")
+        )
+    }
+
     @Test
     fun serviceDisconnectPreservesDurableRecoveryPlansButExplicitRunStopClearsBoth() {
         val scheduler = FakeScheduler()

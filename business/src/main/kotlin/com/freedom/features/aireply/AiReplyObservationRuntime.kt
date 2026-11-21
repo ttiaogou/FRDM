@@ -111,6 +111,21 @@ class AiReplyObservationRuntime(
     private val receivedGreetingsRecoveryScheduleRepository: RecoveryScheduleRepository? = null
 ) {
     companion object {
+        /**
+         * The persisted business checkpoint identifies the observation schedule, not the
+         * UNKNOWN cause or a process-local run generation. Never reuse a durable plan
+         * without a persisted checkpoint with a valid saved-at timestamp.
+         */
+        internal fun durableRecoveryCheckpointId(
+            taskId: String,
+            savedAtEpochMs: Long?,
+            fallbackReason: String
+        ): String = if (savedAtEpochMs != null && savedAtEpochMs > 0L) {
+            "$taskId:CHECKPOINT:$savedAtEpochMs"
+        } else {
+            "$taskId:$fallbackReason"
+        }
+
         private const val MAX_VISIBLE_MESSAGES = 20
         private const val MAX_LOGGED_STRUCTURE_EVIDENCE = 256
         private const val MAX_STRUCTURE_LOG_LINE_CHARS = 3_500
@@ -369,7 +384,7 @@ class AiReplyObservationRuntime(
                 "PROCESS_RESTART_CHECKPOINT",
                 recoveryRouteIdForTask(PRIVATE_MESSAGES_TASK_ID) ?: "unknown-route",
                 currentRunGeneration().coerceAtLeast(0L),
-                "${PRIVATE_MESSAGES_TASK_ID}:PROCESS_RESTART_CHECKPOINT",
+                durableRecoveryCheckpointId(PRIVATE_MESSAGES_TASK_ID, checkpoint.savedAtEpochMs, "PROCESS_RESTART_CHECKPOINT"),
                 0L
             )
             recoveryContext.markCheckpointLoaded()
@@ -378,7 +393,7 @@ class AiReplyObservationRuntime(
                     taskId = PRIVATE_MESSAGES_TASK_ID,
                     routeId = recoveryRouteIdForTask(PRIVATE_MESSAGES_TASK_ID) ?: "unknown-route",
                     runGeneration = currentRunGeneration().coerceAtLeast(0L),
-                    checkpointId = "${PRIVATE_MESSAGES_TASK_ID}:PROCESS_RESTART_CHECKPOINT",
+                    checkpointId = durableRecoveryCheckpointId(PRIVATE_MESSAGES_TASK_ID, checkpoint.savedAtEpochMs, "PROCESS_RESTART_CHECKPOINT"),
                     observationGeneration = 0L,
                     unknownReason = "PROCESS_RESTART_CHECKPOINT"
                 )
@@ -1842,7 +1857,14 @@ class AiReplyObservationRuntime(
             receivedGreetingsCheckpointForUnified = receivedGreetingsCheckpointRepository?.load()
             receivedGreetingsCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION
         }
-        activateRecoveryIdentity(taskId, reason, "$taskId:$reason")
+        val savedAtEpochMs = when (taskId) {
+            PRIVATE_MESSAGES_TASK_ID -> messageListCheckpointForUnified?.savedAtEpochMs
+            RECEIVED_GREETINGS_TASK_ID -> receivedGreetingsCheckpointForUnified?.savedAtEpochMs
+            else -> null
+        }
+        activateRecoveryIdentity(
+            taskId, reason, durableRecoveryCheckpointId(taskId, savedAtEpochMs, reason)
+        )
         recoveryContext.markCheckpointSaved()
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
         recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
@@ -1996,7 +2018,9 @@ class AiReplyObservationRuntime(
                 activateRecoveryIdentity(
                     RECEIVED_GREETINGS_TASK_ID,
                     "SERVICE_RECONNECT_CHECKPOINT",
-                    "${RECEIVED_GREETINGS_TASK_ID}:SERVICE_RECONNECT_CHECKPOINT"
+                    durableRecoveryCheckpointId(
+                        RECEIVED_GREETINGS_TASK_ID, greetingsRecord?.savedAtEpochMs, "SERVICE_RECONNECT_CHECKPOINT"
+                    )
                 )
                 recoveryContext.markCheckpointLoaded()
             }
@@ -2049,7 +2073,7 @@ class AiReplyObservationRuntime(
                 activateRecoveryIdentity(
                     PRIVATE_MESSAGES_TASK_ID,
                     "SERVICE_RECONNECT_CHECKPOINT",
-                    "${PRIVATE_MESSAGES_TASK_ID}:SERVICE_RECONNECT_CHECKPOINT"
+                    durableRecoveryCheckpointId(PRIVATE_MESSAGES_TASK_ID, checkpoint.savedAtEpochMs, "SERVICE_RECONNECT_CHECKPOINT")
                 )
                 recoveryContext.markCheckpointLoaded()
             }
@@ -2112,7 +2136,7 @@ class AiReplyObservationRuntime(
             activateRecoveryIdentity(
                 RECEIVED_GREETINGS_TASK_ID,
                 "SERVICE_RECONNECT_CHECKPOINT",
-                "${RECEIVED_GREETINGS_TASK_ID}:SERVICE_RECONNECT_CHECKPOINT"
+                durableRecoveryCheckpointId(RECEIVED_GREETINGS_TASK_ID, checkpoint?.savedAtEpochMs, "SERVICE_RECONNECT_CHECKPOINT")
             )
             recoveryContext.markCheckpointLoaded()
             recoveryTransaction.dispatch(
@@ -2124,7 +2148,7 @@ class AiReplyObservationRuntime(
             activateRecoveryIdentity(
                 RECEIVED_GREETINGS_TASK_ID,
                 "SERVICE_RECONNECT_CHECKPOINT",
-                "${RECEIVED_GREETINGS_TASK_ID}:SERVICE_RECONNECT_CHECKPOINT"
+                durableRecoveryCheckpointId(RECEIVED_GREETINGS_TASK_ID, checkpoint?.savedAtEpochMs, "SERVICE_RECONNECT_CHECKPOINT")
             )
             recoveryContext.markCheckpointLoaded()
             recoveryTransaction.dispatch(
@@ -2146,7 +2170,7 @@ class AiReplyObservationRuntime(
             activateRecoveryIdentity(
                 PRIVATE_MESSAGES_TASK_ID,
                 "SERVICE_RECONNECT_CHECKPOINT",
-                "${PRIVATE_MESSAGES_TASK_ID}:SERVICE_RECONNECT_CHECKPOINT"
+                durableRecoveryCheckpointId(PRIVATE_MESSAGES_TASK_ID, checkpoint.savedAtEpochMs, "SERVICE_RECONNECT_CHECKPOINT")
             )
             recoveryContext.markCheckpointLoaded()
             recoveryTransaction.dispatch(
