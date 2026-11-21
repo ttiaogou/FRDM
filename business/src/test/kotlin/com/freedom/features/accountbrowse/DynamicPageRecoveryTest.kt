@@ -1,5 +1,7 @@
 package com.freedom.features.accountbrowse
 
+import com.freedom.core.runtime.ScheduledTask
+import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.accountbrowse.ports.BrowsePageEvidence
 import com.freedom.features.accountbrowse.ports.BrowsePageKind
 import com.freedom.features.recovery.RecoveryTransactionState
@@ -12,6 +14,7 @@ class DynamicPageRecoveryTest {
     @Test
     fun unknown_page_requires_two_stable_fingerprints_before_resume() {
         val recovery = DynamicPageRecovery(
+            scheduler = noOpScheduler,
             targetPackage = { "com.immomo.momo" },
             currentRunGeneration = { 7L }
         )
@@ -37,6 +40,7 @@ class DynamicPageRecoveryTest {
     @Test
     fun target_mismatch_is_not_authorized_for_dynamic_recovery() {
         val recovery = DynamicPageRecovery(
+            scheduler = noOpScheduler,
             targetPackage = { "com.immomo.momo" },
             currentRunGeneration = { 1L }
         )
@@ -54,5 +58,9 @@ class DynamicPageRecoveryTest {
                 )
             )
         )
+    }
+
+    private val noOpScheduler = object : TaskScheduler {
+        override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask = ScheduledTask { }
     }
 }
