@@ -9,6 +9,7 @@ import com.freedom.core.accessibility.events.SelfNavigationTransition
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.TargetAppReadinessSnapshot
 import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.PageFingerprint
 import com.freedom.core.runtime.PageRecoveryRouteAdapter
@@ -71,6 +72,8 @@ class AiReplyObservationRuntime(
     private val gesturePolicy: GestureApi,
     private val targetPackage: () -> String,
     private val isAiReplyActive: () -> Boolean,
+    /** Must be freshly evaluated against the active Android window; never a cached permission. */
+    private val inspectAndroidRecoveryReadiness: (ChatPageSnapshot) -> TargetAppReadinessSnapshot,
     private val onLog: (String) -> Unit,
     private val fullInspectionDebounceMs: Long,
     private val regionRefreshDebounceMs: Long,
@@ -263,6 +266,7 @@ class AiReplyObservationRuntime(
     }
     private var messageReadRetryTask: ScheduledTask? = null
     private var messageReadRetryCount = 0
+    private var lastRecoveryAndroidReadinessWait: String? = null
     private var readinessDeferredRetryTask: ScheduledTask? = null
     private var readinessDeferredRetryCount = 0
     private var readinessDeferredRetryLimitLogged = false
@@ -709,6 +713,11 @@ class AiReplyObservationRuntime(
         }
         transientEmptySnapshotRecovery.reset()
         val recovered = inspection!!
+        if (sessionRunStarted &&
+            (snapshotRecoveryStartedAtMs != 0L ||
+                (receivedGreetingsRecoveryVerificationPending && receivedGreetingsCheckpointForUnified == null)) &&
+            !ensureAndroidRecoveryReady(recovered, "LEGACY_PAGE_RECOVERY")
+        ) return
         if (snapshotRecoveryStartedAtMs != 0L) {
             if (!pageRecoveryVerificationGate.observe(SNAPSHOT_RECOVERY_ROUTE_ID, recoveryStructuralKey(recovered))) {
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
@@ -756,6 +765,47 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼恢复[RECOVERY_VERIFIED]：连续两次新鲜列表指纹一致；恢复收到招呼任务协调器")
         }
         handleInspectionSnapshot(observationDecision.copy(snapshot = recovered))
+    }
+
+    /**
+     * Observes the existing Android READY decision on a fresh active-window safety scan.
+     * This is not a gesture permit: the dispatcher repeats its own checks before every action.
+     * Incomplete evidence revokes pre-READY samples without discarding any checkpoint.
+     */
+    private fun ensureAndroidRecoveryReady(snapshot: ChatPageSnapshot, stage: String): Boolean {
+        val evidence = runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()
+        val admission = AndroidRecoveryExecutionGate.assess(
+            snapshot = snapshot, expectedPackage = targetPackage(), evidence = evidence
+        )
+        if (admission.allowed) {
+            if (lastRecoveryAndroidReadinessWait != null) {
+                onLog("统一页面恢复[ANDROID_READINESS_CONFIRMED]：stage=$stage；Android=READY；等待新鲜业务路由复核")
+            }
+            lastRecoveryAndroidReadinessWait = null
+            return true
+        }
+        recoveryContext.invalidateFingerprint()
+        if (recoveryContext.pending) {
+            if (recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+                messageListCheckpointForUnified != null
+            ) messageListCheckpointVerifier.deferOwnership()
+            if (recoveryContext.sourceTaskId == RECEIVED_GREETINGS_TASK_ID &&
+                receivedGreetingsCheckpointForUnified != null
+            ) receivedGreetingsCheckpointVerifier.deferResume()
+        }
+        pageRecoveryVerificationGate.reset(SNAPSHOT_RECOVERY_ROUTE_ID)
+        pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
+        pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
+        sessionManagerState = SessionManagerState.PAUSED
+        if (lastRecoveryAndroidReadinessWait != admission.reasonCode) {
+            onLog(
+                "统一页面恢复[ANDROID_READINESS_PENDING]：stage=$stage；status=${evidence?.status ?: "NO_EVIDENCE"}；" +
+                    "reason=${admission.reasonCode}；保留检查点并持续只读复核"
+            )
+            lastRecoveryAndroidReadinessWait = admission.reasonCode
+        }
+        scheduleFullInspectionAfter(500L)
+        return false
     }
 
     /** Uses the original checkpoint re-anchor algorithm; never reuses saved row coordinates. */
@@ -965,6 +1015,11 @@ class AiReplyObservationRuntime(
                 lastPageInspection = inspection
                 return
             }
+            // Android READY must precede BOTH fresh route samples and UI ownership.
+            if (!ensureAndroidRecoveryReady(inspection, "UNIFIED_ROUTE")) {
+                lastPageInspection = inspection
+                return
+            }
             val verificationKey = listOf(targetRoute, recoveryStructuralKey(inspection)).joinToString("|")
             val sharedProof: RecoveryCheckpointVerificationResult.ResumeReady? =
                 if (sharedMessageListRecovery) {
@@ -1064,6 +1119,10 @@ class AiReplyObservationRuntime(
                     return
                 }
             }
+            if (!ensureAndroidRecoveryReady(inspection, "BEFORE_UI_OWNERSHIP")) {
+                lastPageInspection = inspection
+                return
+            }
             if (targetTaskId == null || !claimTaskOwnership(targetTaskId, "统一页面路由双快照验证完成")) {
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("统一页面恢复[OWNERSHIP_REJECTED]：目标路由=$targetRoute；未取得UI操作权")
@@ -1076,6 +1135,11 @@ class AiReplyObservationRuntime(
                 } else {
                     scheduleFullInspectionAfter(350L)
                 }
+                lastPageInspection = inspection
+                return
+            }
+            // Close the gap between lease claim and checkpoint acknowledgement.
+            if (!ensureAndroidRecoveryReady(inspection, "BEFORE_RESUME_ACK")) {
                 lastPageInspection = inspection
                 return
             }
@@ -1128,6 +1192,10 @@ class AiReplyObservationRuntime(
                     messageListCheckpointForUnified = null
                 }
             }
+            onLog(
+                "统一页面恢复[RECOVERY_EXECUTION_READY]：目标路由=$targetRoute；" +
+                    "Android=READY；双快照=$fingerprintVerified；UI操作权=$uiOwnershipTransferred"
+            )
             onLog(
                 "统一页面恢复[RECOVERY_VERIFIED]：目标路由=$targetRoute；" +
                     "双快照=$fingerprintVerified；" +
@@ -1720,6 +1788,7 @@ class AiReplyObservationRuntime(
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
         pageObservationCoordinator.reset()
+        lastRecoveryAndroidReadinessWait = null
         sessionTransitionTask?.cancel()
         cancelMessageReadRetry()
         pageInspectionTask = null
@@ -1997,6 +2066,7 @@ class AiReplyObservationRuntime(
         }
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
+        lastRecoveryAndroidReadinessWait = null
         startupReadinessCoordinator.cancelRecovery()
         recoveryContext.clear()
         messageListCheckpointVerifier.reset()
@@ -2815,6 +2885,7 @@ class AiReplyObservationRuntime(
 
     private fun handleSessionListPage(snapshot: ChatPageSnapshot) {
         if (messageListRecoveryVerificationPending && sessionRunStarted && !receivedGreetingsTaskActive) {
+            if (!ensureAndroidRecoveryReady(snapshot, "MESSAGE_LIST_RECOVERY")) return
             if (!pageRecoveryVerificationGate.observe(MESSAGE_LIST_RECOVERY_ROUTE_ID, recoveryStructuralKey(snapshot))) {
                 sessionManagerState = SessionManagerState.PAUSED
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))

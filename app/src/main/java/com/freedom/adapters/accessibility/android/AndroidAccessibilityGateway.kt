@@ -43,6 +43,7 @@ import com.freedom.core.runtime.TargetAppPageReadiness
 import com.freedom.core.runtime.TargetAppReadinessController
 import com.freedom.core.runtime.TargetAppReadinessEvidence
 import com.freedom.core.runtime.TargetAppReadinessStatus
+import com.freedom.core.runtime.TargetAppReadinessSnapshot
 import com.freedom.core.accessibility.query.NodeTargetResolver
 import java.util.ArrayDeque
 
@@ -555,6 +556,16 @@ internal class AndroidAccessibilityGateway(
     ): GestureSubmission =
         if (isUiOperationOwned()) gestureDispatcher.dispatchGesture(spec, listener, onPlatformDispatch)
         else GestureSubmission.REJECTED
+
+    /**
+     * Forces the same read-only Android safety evaluation used before dispatch.
+     * This does not dispatch a gesture or grant UI ownership. The cached current()
+     * diagnostic alone is insufficient after a service restart.
+     */
+    fun inspectRecoveryReadiness(): TargetAppReadinessSnapshot {
+        inspectAutonomousDispatchReadiness()
+        return targetAppReadinessController.current()
+    }
 
     private fun inspectAutonomousDispatchReadiness(): String? {
         val expectedPackage = targetPackage()

@@ -444,6 +444,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             isAiReplyActive = {
                 monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
             },
+            inspectAndroidRecoveryReadiness = { _ -> accessibilityGateway.inspectRecoveryReadiness() },
             onLog = addLog,
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,

@@ -17,6 +17,9 @@ import com.freedom.core.accessibility.events.InputOriginEvidence
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.TargetAppReadinessSnapshot
+import com.freedom.core.runtime.TargetAppReadinessStatus
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
@@ -84,6 +87,22 @@ private interface TestGestureApi : GestureApi {
 
 private interface TestGestureApiWithCancellation : TestGestureApi
 
+/** Existing feature fixtures explicitly supply READY; production always rechecks the live gateway. */
+private fun testAndroidRecoveryReadiness(page: ChatPageSnapshot): TargetAppReadinessSnapshot {
+    val window = page.inputFieldTarget?.window ?: page.messageListTarget?.window
+        ?: page.sessionListNavigationTarget?.nodeTarget?.window
+        ?: page.chatListCandidates.firstOrNull()?.rowTarget?.window
+    return TargetAppReadinessSnapshot(
+        status = TargetAppReadinessStatus.READY,
+        targetPackage = "com.immomo.momo",
+        foregroundPackage = "com.immomo.momo",
+        activityClass = page.activityClass.ifBlank { window?.activityClass.orEmpty() },
+        runMode = RunMode.AI_REPLY,
+        windowId = window?.windowId ?: 116,
+        pageGeneration = window?.generation ?: page.windowGeneration
+    )
+}
+
 class AiReplyObservationRuntimeTest {
 
     @Test
@@ -127,6 +146,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = {},
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             privateMessagesRecoveryScheduleRepository = messageStore,
@@ -188,6 +208,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             taskCoordinator = ownership,
@@ -210,6 +231,86 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.receivedGreetingsIdleSteps)
         assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
         assertEquals(setOf("hashed-row"), checkpoint.processedRowKeys)
+    }
+
+    @Test
+    fun processRestartWaitsForAndroidReadyBeforeTwoFreshCheckpointSnapshots() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        var androidStatus = TargetAppReadinessStatus.STARTING
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "MainActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480)
+            )
+        }
+        val checkpoint = PrivateMessagesTraversalCheckpoint(
+            attemptedSessionKeys = setOf("attempted-before-restart"),
+            lockedUnreadSessionKeys = emptySet(),
+            ambiguousSessionIdentityKeys = emptySet(),
+            lastStableVisibleKeys = emptyList(),
+            phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM.name,
+            atTop = false,
+            initialInboxPositionCheckCompleted = false,
+            initialInboxTopPositioningCompleted = false,
+            initialUnreadGateSwipeCompleted = false,
+            lockedUnreadSetFinalized = false,
+            normalInboxHadUnread = false,
+            normalInboxUnreadStateUnknown = false
+        )
+        val repo = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint = checkpoint
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) = Unit
+            override fun clear() = Unit
+        }
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            inspectAndroidRecoveryReadiness = { snapshot ->
+                testAndroidRecoveryReadiness(snapshot).copy(status = androidStatus)
+            },
+            onLog = logs::add,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = ownership,
+            currentRunGeneration = { 7L },
+            privateMessagesCheckpointRepository = repo
+        )
+        runtime.scheduleInitialObservation()
+        scheduler.runNextWithDelay(0L)
+        assertTrue(logs.any { it.contains("ANDROID_READINESS_PENDING") && it.contains("STARTING") })
+        assertFalse(logs.any { it.contains("RECOVERY_VERIFIED") })
+        assertFalse(logs.any { it.contains("消息列表检查点恢复[CONTINUE]") })
+
+        // Android only became READY after the first business observation; the first
+        // eligible snapshot must start a NEW two-snapshot sequence.
+        androidStatus = TargetAppReadinessStatus.READY
+        scheduler.runNextWithDelay(500L)
+        assertTrue(logs.any { it.contains("ANDROID_READINESS_CONFIRMED") })
+        assertTrue(logs.any { it.contains("消息列表统一检查点[VERIFYING]") })
+        assertFalse(logs.any { it.contains("RECOVERY_VERIFIED") })
+        scheduler.runNextWithDelay(500L)
+        scheduler.runNextWithDelay(0L)
+        assertTrue(logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
     }
 
     @Test
@@ -272,6 +373,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             taskCoordinator = ownership,
@@ -358,6 +460,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             taskCoordinator = taskCoordinator,
@@ -441,6 +544,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -501,6 +605,7 @@ class AiReplyObservationRuntimeTest {
                 targetPackage = { "com.immomo.momo" },
                 isAiReplyActive = { true },
                 onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
                 fullInspectionDebounceMs = 300L,
                 regionRefreshDebounceMs = 500L,
                 chooseRandomInt = { minimum, _ -> minimum }
@@ -545,6 +650,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum }
@@ -592,6 +698,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = {},
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum }
@@ -693,6 +800,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = {},
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             taskCoordinator = ownership,
@@ -745,6 +853,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = {},
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             taskCoordinator = ownership,
@@ -802,6 +911,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -870,6 +980,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -933,6 +1044,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1023,6 +1135,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1263,6 +1376,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1419,6 +1533,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1485,6 +1600,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1575,6 +1691,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1663,6 +1780,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1732,6 +1850,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1803,6 +1922,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1876,6 +1996,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1936,6 +2057,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -1991,6 +2113,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -2069,6 +2192,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -2144,6 +2268,7 @@ class AiReplyObservationRuntimeTest {
                 logs += message
                 if (message.contains("AI Reply 启动检查")) sequence += "CURRENT_POSITION_CHECK"
             },
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum }
@@ -2211,6 +2336,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum }
@@ -2280,6 +2406,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum }
@@ -2354,6 +2481,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum }
@@ -2424,6 +2552,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum }
@@ -2493,6 +2622,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum }
@@ -2553,6 +2683,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum }
@@ -2612,6 +2743,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum }
@@ -2669,6 +2801,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -2748,6 +2881,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -2955,6 +3089,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.other.social.app" },
             isAiReplyActive = { true },
             onLog = {},
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L
         )
@@ -2981,6 +3116,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             onMessagesObserved = observed::add
@@ -3011,6 +3147,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = {},
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             onMessagesObserved = observed::add
@@ -3045,6 +3182,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             onMessagesObserved = observed::add
@@ -3084,6 +3222,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = {},
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             onMessagesObserved = observed::add
@@ -3121,6 +3260,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             onMessagesObserved = observed::add
@@ -3151,6 +3291,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = {},
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             onMessagesObserved = observed::add
@@ -3421,6 +3562,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = {},
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             onMessagesObserved = { observed = it }
@@ -3470,6 +3612,7 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             chooseRandomInt = { minimum, _ -> minimum },
@@ -3502,6 +3645,7 @@ class AiReplyObservationRuntimeTest {
         targetPackage = { "com.immomo.momo" },
         isAiReplyActive = { true },
         onLog = onLog,
+        inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
         fullInspectionDebounceMs = 300L,
         regionRefreshDebounceMs = 500L
     )
