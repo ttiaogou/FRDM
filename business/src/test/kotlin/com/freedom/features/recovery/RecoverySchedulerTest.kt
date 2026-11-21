@@ -208,6 +208,115 @@ class RecoverySchedulerTest {
         assertEquals(8L, observations.single().runGeneration)
     }
 
+    /**
+     * 4-B：替代旧的 5s→15s→60s→终止测试。
+     * UNKNOWN 未被验证时，统一恢复必须始终保留下一次只读观察。
+     */
+    @Test
+    fun legacyManualHandoffExhaustionIsReplacedByUnboundedReadOnlyBackoff() {
+        val scheduler = FakeScheduler()
+        val observed = mutableListOf<RecoveryScheduleSnapshot>()
+        val recovery = RecoveryScheduler(scheduler, { 0L }, observed::add)
+        val id = identity()
+
+        recovery.begin(id)
+        val initialDelays = listOf(500L, 1_000L, 2_000L, 5_000L, 10_000L)
+        initialDelays.forEach { delay ->
+            assertEquals(listOf(delay), scheduler.pendingDelays())
+            scheduler.runNext(delay)
+        }
+        repeat(12) {
+            assertEquals(listOf(30_000L), scheduler.pendingDelays())
+            scheduler.runNext(30_000L)
+        }
+
+        assertEquals(17L, recovery.currentPlan()?.observationCount)
+        assertEquals(17, observed.size)
+        assertEquals(5, recovery.currentPlan()?.backoffStage)
+        assertEquals(listOf(30_000L), scheduler.pendingDelays())
+        assertEquals(id.checkpointId, recovery.currentPlan()?.checkpointId)
+    }
+
+    /**
+     * 4-B：替代旧的“人工操作重开第一阶段”测试。
+     * 触摸仅降低只读观察频率；松开后无需人工确认即可复位到快速重检。
+     */
+    @Test
+    fun legacyManualInteractionRestartBecomesAutomaticFastRetryWithoutStaleCallbacks() {
+        val scheduler = FakeScheduler()
+        val observed = mutableListOf<RecoveryScheduleSnapshot>()
+        val recovery = RecoveryScheduler(scheduler, { 10L }, observed::add)
+        val id = identity()
+
+        recovery.begin(id)
+        scheduler.runNext(500L)
+        scheduler.runNext(1_000L)
+        scheduler.runNext(2_000L)
+        scheduler.runNext(5_000L)
+        scheduler.runNext(10_000L)
+        assertEquals(listOf(30_000L), scheduler.pendingDelays())
+
+        val touching = requireNotNull(recovery.onUserInteractionStarted(id))
+        assertTrue(touching.touchActive)
+        assertEquals(listOf(30_000L), scheduler.pendingDelays())
+
+        val ended = requireNotNull(recovery.onUserInteractionEnded(id))
+        assertFalse(ended.touchActive)
+        assertEquals(0, ended.backoffStage)
+        assertEquals(listOf(500L), scheduler.pendingDelays())
+
+        val beforeStaleCallback = observed.size
+        scheduler.runCancelled(30_000L)
+        assertEquals(beforeStaleCallback, observed.size)
+        assertEquals(listOf(500L), scheduler.pendingDelays())
+
+        scheduler.runNext(500L)
+        assertEquals(beforeStaleCallback + 1, observed.size)
+        assertEquals(1, recovery.currentPlan()?.backoffStage)
+        assertEquals(listOf(1_000L), scheduler.pendingDelays())
+    }
+
+    /**
+     * 4-B：替代旧的“第三阶段耗尽后停止”测试。
+     * 仅明确用户停止才取消后续观察；重新开始的运行不继承旧回调或旧计数。
+     */
+    @Test
+    fun legacyManualRetryExhaustionBecomesExplicitUserStopAndFreshTransaction() {
+        val scheduler = FakeScheduler()
+        val observed = mutableListOf<RecoveryScheduleSnapshot>()
+        val recovery = RecoveryScheduler(scheduler, { 50L }, observed::add)
+        val id = identity()
+
+        recovery.begin(id)
+        scheduler.runNext(500L)
+        scheduler.runNext(1_000L)
+        scheduler.runNext(2_000L)
+        scheduler.runNext(5_000L)
+        scheduler.runNext(10_000L)
+        repeat(4) { scheduler.runNext(30_000L) }
+
+        assertEquals(9L, recovery.currentPlan()?.observationCount)
+        assertEquals(listOf(30_000L), scheduler.pendingDelays())
+        assertFalse(recovery.stopByUser(id.copy(observationGeneration = 0L)))
+        assertEquals(listOf(30_000L), scheduler.pendingDelays())
+
+        assertTrue(recovery.stopByUser(id))
+        assertNull(recovery.currentPlan())
+        assertTrue(scheduler.pendingDelays().isEmpty())
+        val beforeStaleCallback = observed.size
+        scheduler.runCancelled(30_000L)
+        assertEquals(beforeStaleCallback, observed.size)
+
+        val nextRun = id.copy(runGeneration = id.runGeneration + 1L)
+        val fresh = recovery.begin(nextRun)
+        assertEquals(0L, fresh.observationCount)
+        assertEquals(0, fresh.backoffStage)
+        assertEquals(nextRun.runGeneration, fresh.runGeneration)
+        assertEquals(listOf(500L), scheduler.pendingDelays())
+        scheduler.runNext(500L)
+        assertEquals(nextRun.runGeneration, observed.last().runGeneration)
+    }
+
     private class FakeRecoveryScheduleRepository : RecoveryScheduleRepository {
         private var current: RecoveryScheduleSnapshot? = null
         var saveCount: Int = 0
