@@ -18,6 +18,36 @@ class RecoverySchedulerTest {
         unknownReason = "UNKNOWN_PAGE"
     )
 
+
+    @Test
+    fun sharedReadOnlyRetryPolicyKeepsExactCadenceWithoutHardStop() {
+        val expected = listOf(500L, 1_000L, 2_000L, 5_000L, 10_000L, 30_000L, 30_000L)
+        assertEquals(expected, (1..7).map(RecoveryScheduler::readOnlyRetryDelayMs))
+        assertEquals(30_000L, RecoveryScheduler.readOnlyRetryDelayMs(Int.MAX_VALUE))
+        assertEquals(expected.take(5), RecoveryScheduler.fastRetryDelaysMs().toList())
+        assertEquals(5, RecoveryScheduler.fastRetryCount)
+        assertEquals(30_000L, RecoveryScheduler.longWaitDelayMs)
+    }
+
+    @Test
+    fun sharedRecoveryDelayArrayCannotBeMutatedByAnAiCaller() {
+        val first = RecoveryScheduler.fastRetryDelaysMs()
+        first[0] = 99L
+        assertEquals(500L, RecoveryScheduler.fastRetryDelaysMs()[0])
+        assertEquals(500L, RecoveryScheduler.readOnlyRetryDelayMs(1))
+    }
+
+    @Test
+    fun sharedReadOnlyRetryPolicyRejectsInvalidAttemptCounts() {
+        var rejectedZero = false
+        try {
+            RecoveryScheduler.readOnlyRetryDelayMs(0)
+        } catch (_: IllegalArgumentException) {
+            rejectedZero = true
+        }
+        assertTrue(rejectedZero)
+    }
+
     @Test
     fun beginsWithAQueryableFastObservationPlanAndContinuesWithoutRetryLimit() {
         val scheduler = FakeScheduler()

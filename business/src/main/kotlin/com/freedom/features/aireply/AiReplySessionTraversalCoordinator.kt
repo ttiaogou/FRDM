@@ -2,6 +2,7 @@ package com.freedom.features.aireply
 
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.recovery.RecoveryScheduler
 
 /**
  * Recovery pacing for temporarily empty accessibility roots; it never invents page identity.
@@ -21,7 +22,7 @@ internal class AiReplySessionTraversalCoordinator(retryDelaysMs: LongArray) {
             ObservationStatus.TEMPORARILY_UNAVAILABLE
 
     /** Returns the next fast delay, then keeps returning the low-frequency delay indefinitely. */
-    fun nextDelayMs(lowFrequencyDelayMs: Long = DEFAULT_LOW_FREQUENCY_DELAY_MS): Long {
+    fun nextDelayMs(lowFrequencyDelayMs: Long = RecoveryScheduler.longWaitDelayMs): Long {
         require(lowFrequencyDelayMs > 0L) { "lowFrequencyDelayMs must be positive" }
         return if (retryCount < retryDelays.size) {
             retryDelays[retryCount++]
@@ -35,7 +36,4 @@ internal class AiReplySessionTraversalCoordinator(retryDelaysMs: LongArray) {
         retryCount = 0
     }
 
-    private companion object {
-        const val DEFAULT_LOW_FREQUENCY_DELAY_MS = 30_000L
-    }
 }

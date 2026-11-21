@@ -51,6 +51,7 @@ import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 import com.freedom.features.recovery.RecoveryContext
 import com.freedom.features.recovery.RecoveryEventDispatcher
 import com.freedom.features.recovery.RecoveryEventIdentity
+import com.freedom.features.recovery.RecoveryScheduler
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.LinkedHashSet
@@ -111,9 +112,6 @@ class AiReplyObservationRuntime(
         private const val MAX_STRUCTURE_LOG_LINE_CHARS = 3_500
         private const val MESSAGE_LIST_RETRY_DELAY_MS = 120L
         private const val MAX_MESSAGE_LIST_RETRIES = 2
-        private val TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L)
-        /** Long waits are polling intervals, not a recovery timeout. */
-        private const val SNAPSHOT_RECOVERY_LOW_FREQUENCY_DELAY_MS = 30_000L
         private const val EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS = 10_000L
         private const val RECEIVED_GREETINGS_USER_QUIET_MIN_MS = 2_000
         private const val RECEIVED_GREETINGS_USER_QUIET_MAX_MS = 5_000
@@ -138,8 +136,6 @@ class AiReplyObservationRuntime(
         private const val STARTUP_MESSAGE_TAB_RETRY_DELAY_MS = 400L
         private const val MAX_STARTUP_MESSAGE_TAB_RETRIES = 75
         private const val MAX_STARTUP_MESSAGE_TAB_TAPS = 1
-        private val MESSAGE_LIST_RECOVERY_RETRY_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L, 30_000L)
-        private val RECEIVED_GREETINGS_RECOVERY_RETRY_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L, 30_000L)
         /** Re-check transient mf_view overlap without pausing the session-list traversal. */
         private const val SESSION_SAFE_VIEWPORT_RETRY_DELAY_MS = 650L
         private const val SESSION_SAFE_VIEWPORT_RETRY_BACKOFF_MS = 5_000L
@@ -473,7 +469,7 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsPageProbePending = false
     /** Short-lived empty accessibility roots are retried without replacing the last confirmed page. */
     private val transientEmptySnapshotRecovery = AiReplySessionTraversalCoordinator(
-        TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS
+        RecoveryScheduler.fastRetryDelaysMs()
     )
     private val pageObservationSemantics = AiReplyPageObservationSemantics()
     private val pageReadCoordinator = AiReplyPageReadCoordinator(
@@ -672,10 +668,8 @@ class AiReplyObservationRuntime(
                 onLog("AI 页面观察[SNAPSHOT_RECOVERY_HOLD]：快照暂时丢失；保留当前任务租约和会话状态")
             }
             val elapsedMs = System.currentTimeMillis() - snapshotRecoveryStartedAtMs
-            val nextDelayMs = transientEmptySnapshotRecovery.nextDelayMs(
-                SNAPSHOT_RECOVERY_LOW_FREQUENCY_DELAY_MS
-            )
-            val phase = if (transientEmptySnapshotRecovery.retryCount <= TRANSIENT_EMPTY_SNAPSHOT_RETRY_DELAYS_MS.size) {
+            val nextDelayMs = transientEmptySnapshotRecovery.nextDelayMs()
+            val phase = if (transientEmptySnapshotRecovery.retryCount <= RecoveryScheduler.fastRetryCount) {
                 "FAST_BACKOFF"
             } else {
                 "LOW_FREQUENCY_WAIT"
@@ -3552,9 +3546,7 @@ class AiReplyObservationRuntime(
         sessionTransitionTask?.cancel()
         messageRecoveryRetryAttempt += 1
         val attempt = messageRecoveryRetryAttempt
-        val delayMs = MESSAGE_LIST_RECOVERY_RETRY_DELAYS_MS[
-            (attempt - 1).coerceAtMost(MESSAGE_LIST_RECOVERY_RETRY_DELAYS_MS.lastIndex)
-        ]
+        val delayMs = RecoveryScheduler.readOnlyRetryDelayMs(attempt)
         recoveryTransaction.dispatch(RecoveryTransactionEvent.RetryScheduled(delayMs))
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         onLog(
@@ -4522,9 +4514,7 @@ class AiReplyObservationRuntime(
         if (!sessionRunStarted || !receivedGreetingsTaskActive) return
         receivedGreetingsRecoveryRetryAttempt += 1
         val retryCount = receivedGreetingsRecoveryRetryAttempt
-        val delayMs = RECEIVED_GREETINGS_RECOVERY_RETRY_DELAYS_MS[
-            (retryCount - 1).coerceAtMost(RECEIVED_GREETINGS_RECOVERY_RETRY_DELAYS_MS.lastIndex)
-        ]
+        val delayMs = RecoveryScheduler.readOnlyRetryDelayMs(retryCount)
         recoveryTransaction.dispatch(RecoveryTransactionEvent.RetryScheduled(delayMs))
         onLog(
             "收到的招呼自动恢复[RETRY]：$reason；第${retryCount}次新鲜快照复核；" +

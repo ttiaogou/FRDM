@@ -201,10 +201,26 @@ class RecoveryScheduler(
     }
 
     companion object {
+        // Single source of truth for read-only recovery pacing. The scheduler's own timers,
+        // AI empty-snapshot polls and list/greetings retries all use this unchanged sequence.
         private val BACKOFF_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 5_000L, 10_000L, 30_000L)
         private const val INITIAL_BACKOFF_STAGE = 0
         private const val LONG_WAIT_BACKOFF_STAGE = 5
         private const val TOUCH_ACTIVE_OBSERVATION_DELAY_MS = 30_000L
+
+        /** First five read-only retry intervals, returned as a defensive copy. */
+        fun fastRetryDelaysMs(): LongArray =
+            BACKOFF_DELAYS_MS.copyOfRange(INITIAL_BACKOFF_STAGE, LONG_WAIT_BACKOFF_STAGE)
+
+        /** Retries at or beyond the last stage continue indefinitely at this interval. */
+        val longWaitDelayMs: Long get() = BACKOFF_DELAYS_MS[LONG_WAIT_BACKOFF_STAGE]
+        val fastRetryCount: Int get() = LONG_WAIT_BACKOFF_STAGE
+
+        /** One-shot AI recovery callbacks retain their existing owners and use this cadence. */
+        fun readOnlyRetryDelayMs(attemptNumber: Int): Long {
+            require(attemptNumber > 0) { "attemptNumber must be positive" }
+            return BACKOFF_DELAYS_MS[(attemptNumber - 1).coerceAtMost(LONG_WAIT_BACKOFF_STAGE)]
+        }
     }
 }
 

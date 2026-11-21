@@ -2,6 +2,7 @@ package com.freedom.features.aireply
 
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.recovery.RecoveryScheduler
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -55,6 +56,16 @@ class AiReplyObservationRuntimeSnapshotRecoveryPolicyTest {
         policy.reset()
         assertEquals(0, policy.retryCount)
         assertEquals(500L, policy.nextDelayMs(30_000L))
+    }
+
+
+    @Test fun aiSnapshotRetryUsesSameFastAndLongWaitStagesAsRecoveryScheduler() {
+        val policy = AiReplySessionTraversalCoordinator(RecoveryScheduler.fastRetryDelaysMs())
+        val observedDelays = (1..8).map { policy.nextDelayMs() }
+        val sharedDelays = (1..8).map(RecoveryScheduler::readOnlyRetryDelayMs)
+        assertEquals(sharedDelays, observedDelays)
+        policy.reset()
+        assertEquals(RecoveryScheduler.readOnlyRetryDelayMs(1), policy.nextDelayMs())
     }
 
     @Test fun recoveryGateRequiresTwoEqualFreshStructuralSamples() {
