@@ -202,16 +202,7 @@ class AccountBrowseRuntime(
             ) {
                 return true
             }
-            dynamicPageRecovery.observePage(
-                BrowsePageEvidence(
-                    packageName = "",
-                    activityClass = "",
-                    pageKind = BrowsePageKind.UNKNOWN,
-                    fingerprint = "",
-                    confidence = 0,
-                    reason = "BROWSE_VERIFIED_FEED_CHANGED_BEFORE_RESUME"
-                )
-            )
+            dynamicPageRecovery.rejectVerifiedFeedBeforeResume()
             return false
         }
 

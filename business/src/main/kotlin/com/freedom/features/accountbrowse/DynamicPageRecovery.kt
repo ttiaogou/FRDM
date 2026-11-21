@@ -168,6 +168,23 @@ class DynamicPageRecovery(
         )
     }
 
+    /**
+     * A feed may change after the shared checkpoint verified it but before the ordinary
+     * WAIT_FOR_FEED_STABLE phase consumes that proof. Start a new UNKNOWN transaction with a
+     * fresh event generation, rather than reusing the shared verifier's stale event identity.
+     */
+    fun rejectVerifiedFeedBeforeResume() {
+        checkpointVerifier = null
+        verifiedCheckpointFingerprint = null
+        checkpointObservationGeneration = 0L
+        dispatcher.reset()
+        val reason = "BROWSE_VERIFIED_FEED_CHANGED_BEFORE_RESUME"
+        val eventIdentity = identity(reason)
+        dispatcher.activate(eventIdentity)
+        dispatcher.dispatch(RecoveryTransactionEvent.UnknownPage(reason), eventIdentity)
+        recoveryScheduler.begin(eventIdentity)
+    }
+
     fun observePage(page: BrowsePageEvidence): RecoveryTransactionState {
         val unknown = page.pageKind == BrowsePageKind.UNKNOWN ||
             page.packageName.isBlank() ||
