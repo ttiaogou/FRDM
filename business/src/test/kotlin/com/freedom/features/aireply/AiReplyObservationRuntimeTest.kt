@@ -53,6 +53,7 @@ import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRecord
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
+import com.freedom.features.recovery.RecoveryScheduleRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -83,6 +84,43 @@ private interface TestGestureApi : GestureApi {
 private interface TestGestureApiWithCancellation : TestGestureApi
 
 class AiReplyObservationRuntimeTest {
+    @Test
+    fun serviceDisconnectPreservesDurableRecoveryPlansButExplicitRunStopClearsBoth() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort()
+        var messageClears = 0
+        var greetingsClears = 0
+        val messageStore = object : RecoveryScheduleRepository {
+            override fun load() = null
+            override fun save(snapshot: com.freedom.features.recovery.RecoveryScheduleSnapshot) = Unit
+            override fun clear() { messageClears++ }
+        }
+        val greetingsStore = object : RecoveryScheduleRepository {
+            override fun load() = null
+            override fun save(snapshot: com.freedom.features.recovery.RecoveryScheduleSnapshot) = Unit
+            override fun clear() { greetingsClears++ }
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            privateMessagesRecoveryScheduleRepository = messageStore,
+            receivedGreetingsRecoveryScheduleRepository = greetingsStore
+        )
+
+        runtime.reset("无障碍服务断开连接")
+        assertEquals(0, messageClears)
+        assertEquals(0, greetingsClears)
+
+        runtime.clearRecoverySchedulesAfterRunStop()
+        assertEquals(1, messageClears)
+        assertEquals(1, greetingsClears)
+    }
+
     @Test
     fun receivedGreetingsRestoredCheckpointRequiresSharedProofAndAdapterConfirmation() {
         val scheduler = FakeScheduler()

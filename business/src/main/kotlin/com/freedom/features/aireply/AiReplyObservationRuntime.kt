@@ -1676,6 +1676,16 @@ class AiReplyObservationRuntime(
     }
 
     /** Cancel all pending observations when the target changes, run stops, or Service reconnects. */
+    /**
+     * Only an ended user run clears its durable read-only observation plans.
+     * Service disconnect, interruption and destruction use reset(), which suspends callbacks
+     * but must preserve the saved schedule for a later intent-checked reconnect.
+     */
+    fun clearRecoverySchedulesAfterRunStop() {
+        privateMessagesRecoveryScheduleRepository?.clear()
+        receivedGreetingsRecoveryScheduleRepository?.clear()
+    }
+
     fun reset(reason: String = "未指定") {
         runCatching { onDraftRuntimeReset() }
         sessionActionGeneration += 1L

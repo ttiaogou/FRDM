@@ -24,7 +24,12 @@ internal class AiReplyModeRuntimeAdapter(
 
     override fun onRunStopped(reason: String) {
         onReadinessInvalidated("AI Reply 已停止：$reason")
-        runtime().reset("运行停止：$reason")
+        val activeRuntime = runtime()
+        try {
+            activeRuntime.reset("运行停止：$reason")
+        } finally {
+            activeRuntime.clearRecoverySchedulesAfterRunStop()
+        }
     }
 
     override fun onAccessibilityServiceConnected() {
