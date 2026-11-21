@@ -839,15 +839,14 @@ class AiReplyObservationRuntime(
                 // Preserve the recovery gate until two new fingerprints and adapter confirmation.
                 onLog("收到招呼通用检查点[SELF_NAVIGATION_NOT_PROOF]：保持检查点复核；导航事件不授予UI操作权")
             } else if (recoveryContext.pending) {
-                recoveryContext.clear()
-                pageRecoveryVerificationGate.reset()
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+                // A self-navigation match only identifies the source of a transition.
+                // It cannot authorize UI execution while a recovery transaction is pending:
+                // the existing route and two-fresh-snapshot gate must finish first.
                 onLog(
-                    "统一页面恢复[SELF_NAVIGATION_CONSUMED]：" +
+                    "统一页面恢复[SELF_NAVIGATION_NOT_PROOF]：" +
                         "actionId=${selfInitiatedTransition.actionId}；" +
                         "targetActivity=${inspection.activityClass}；" +
-                        "已取消误触发的路由恢复并继续当前业务链路"
+                        "保持原检查点和恢复事务；等待目标路由双快照复核后再申请操作授权"
                 )
             } else {
                 onLog(

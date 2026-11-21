@@ -11,6 +11,7 @@ import com.freedom.core.accessibility.events.AccessibilityEventType
 import com.freedom.core.accessibility.events.AccessibilitySourceSnapshot
 import com.freedom.core.accessibility.events.AccessibilityUiSignal
 import com.freedom.core.accessibility.events.InputOrigin
+import com.freedom.core.accessibility.events.SelfNavigationTransition
 import com.freedom.core.accessibility.events.InputOriginDecision
 import com.freedom.core.accessibility.events.InputOriginEvidence
 import com.freedom.core.runtime.ScheduledTask
@@ -261,9 +262,22 @@ class AiReplyObservationRuntimeTest {
             privateMessagesCheckpointRepository = repository
         )
         runtime.scheduleInitialObservation()
+        // P5: a task slot may already be reserved, but a matching self-navigation
+        // attribution must not turn that reservation into permission to execute.
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
-
+        runtime.onSelfNavigationAttached(
+            SelfNavigationTransition(
+                actionId = "self-nav-before-checkpoint-verification",
+                sourcePageGeneration = 0L,
+                targetActivityClass = port.page.activityClass,
+                targetPageGeneration = port.page.windowGeneration,
+                targetWindowId = -1,
+                transitionAtUptimeMs = 1L
+            )
+        )
         scheduler.runNextWithDelay(0L)
+        assertTrue(logs.any { it.contains("SELF_NAVIGATION_NOT_PROOF") })
+        assertFalse(logs.any { it.contains("SELF_NAVIGATION_CONSUMED") })
         assertTrue(logs.any { it.contains("消息列表统一检查点[VERIFYING]") })
         assertFalse(logs.any { it.contains("消息列表检查点恢复[CONTINUE]") })
         assertEquals(0, gestures)
