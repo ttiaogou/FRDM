@@ -2637,7 +2637,6 @@ internal class AndroidAccountBrowseWorkflow(
         private const val MAX_SAFE_CARD_RECHECKS_BEFORE_NEXT_SWIPE = 2
         private const val PROGRAMMATIC_CLICK_EVENT_WINDOW_MS = 900L
         private const val INITIAL_DYNAMIC_TAB_WAIT_TIMEOUT_MS = 60_000L
-        private const val MANUAL_RECOVERY_NAVIGATION_TIMEOUT_MS = 15_000L
         private const val INITIAL_FEED_STABILITY_TIMEOUT_MS = 10_000L
         private const val REQUIRED_STABLE_FEED_SAMPLES = 2
         private const val FIRST_SWIPE_COUNTDOWN_SECONDS = 3
