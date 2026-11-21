@@ -863,7 +863,7 @@ def automatic_recovery_hard_boundary_violations(code_by_path: dict[str, str]) ->
             "message verified completion": r"messageListCheckpointVerifier\.completeResume\s*\(",
             "greetings verifier invocation": r"receivedGreetingsCheckpointVerifier\.observe\s*\(",
             "greetings verified completion": r"receivedGreetingsCheckpointVerifier\.completeResume\s*\(",
-            "greetings adapter confirmation": r"receivedGreetingsTaskFlow\.synchronizeRecoveryConfirmation\s*\(",
+            "greetings adapter confirmation": r"\bval\s+synchronized\s*=\s*receivedGreetingsTaskFlow\.synchronizeRecoveryConfirmation\s*\(",
             "task ownership gate": r"claimTaskOwnership\s*\(",
         },
     }
@@ -880,6 +880,15 @@ def automatic_recovery_hard_boundary_violations(code_by_path: dict[str, str]) ->
     ai_code = code_by_path.get(ai_rel, "")
     if ai_code and len(re.findall(r"recoveryContext\.acknowledgeVerifiedCheckpoint\s*\(", ai_code)) < 2:
         issues.append(f"AI message and greetings recovery must both acknowledge shared proof: {ai_rel}")
+    if ai_code:
+        greetings_confirmation = re.search(
+            r"\bval\s+synchronized\s*=\s*receivedGreetingsTaskFlow\.synchronizeRecoveryConfirmation\s*\(",
+            ai_code,
+        )
+        task_claim = re.search(r"\bclaimTaskOwnership\s*\(\s*targetTaskId\b", ai_code)
+        if (greetings_confirmation is not None and task_claim is not None and
+                greetings_confirmation.start() >= task_claim.start()):
+            issues.append(f"Greetings adapter confirmation must precede UI ownership claim: {ai_rel}")
 
     return issues
 

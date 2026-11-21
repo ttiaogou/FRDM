@@ -149,6 +149,25 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
             for issue in guard.automatic_recovery_hard_boundary_violations(code)
         ))
 
+    def test_greetings_window_sync_must_precede_ui_ownership_even_if_later_fallback_remains(self):
+        ai = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        code = dict(self.recovery_code)
+        confirmation = (
+            "val synchronized = receivedGreetingsTaskFlow.synchronizeRecoveryConfirmation()"
+        )
+        self.assertIn(confirmation, code[ai])
+        # A fallback call later in the function must not satisfy the safety gate.
+        code[ai] = code[ai].replace(confirmation, "val synchronized = true", 1)
+        self.assertTrue(any(
+            "greetings adapter confirmation" in issue
+            for issue in guard.automatic_recovery_hard_boundary_violations(code)
+        ))
+        code[ai] += "\n" + confirmation + "\n"
+        self.assertTrue(any(
+            "confirmation must precede UI ownership claim" in issue
+            for issue in guard.automatic_recovery_hard_boundary_violations(code)
+        ))
+
     def test_automatic_recovery_hard_guards_require_checkpoint_repositories_and_identity(self):
         composition = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
         scheduler = "business/src/main/kotlin/com/freedom/features/recovery/RecoveryScheduler.kt"
