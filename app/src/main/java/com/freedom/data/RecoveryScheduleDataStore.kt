@@ -11,8 +11,16 @@ import org.json.JSONObject
  * Saves values only; no callbacks, page nodes or platform objects cross this boundary.
  * The persisted plan has no retry-count or elapsed-time expiry.
  */
-internal class RecoveryScheduleDataStore(context: Context) : RecoveryScheduleRepository {
-    private val preferences = context.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+internal class RecoveryScheduleDataStore(
+    context: Context,
+    preferencesName: String = PREFERENCES
+) : RecoveryScheduleRepository {
+    // Each recovery route owns a distinct preference file. Keep the default name unchanged
+    // so existing AccountBrowse schedules remain readable after this upgrade.
+    private val preferences = context.applicationContext.getSharedPreferences(
+        preferencesName.also { require(it.isNotBlank()) { "Recovery schedule store name must not be blank" } },
+        Context.MODE_PRIVATE
+    )
 
     @Synchronized
     override fun load(): RecoveryScheduleSnapshot? {

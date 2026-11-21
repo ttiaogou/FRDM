@@ -233,6 +233,54 @@ class RunSessionCoordinatorTest {
         assertFalse(state.requested)
     }
 
+
+    @Test
+    fun reconnectReusesPersistedRunIntentButRebindsOnlyServiceLifecycle() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val coordinator = RunSessionCoordinator(state, mapOf(RunMode.AI_REPLY to ai), RuntimeLogSink { })
+
+        coordinator.onAccessibilityServiceConnected()
+        assertEquals(listOf("start", "connected"), ai.calls)
+        assertEquals(1L, coordinator.currentRunGeneration())
+
+        coordinator.onAccessibilityServiceDisconnected()
+        assertEquals(2L, coordinator.currentRunGeneration())
+        assertEquals(listOf("start", "connected", "disconnected"), ai.calls)
+        assertTrue(state.requested)
+
+        coordinator.onAccessibilityServiceConnected()
+        assertEquals(listOf("start", "connected", "disconnected", "connected"), ai.calls)
+        assertEquals(2L, coordinator.currentRunGeneration())
+        assertEquals(1, ai.calls.count { it == "start" })
+        assertTrue(state.writes.isEmpty())
+    }
+
+    @Test
+    fun userStopBeforeServiceReconnectCannotRestartOldRuntime() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.ACCOUNT_BROWSE
+        }
+        val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
+        val coordinator = RunSessionCoordinator(state, mapOf(RunMode.ACCOUNT_BROWSE to browse), RuntimeLogSink { })
+
+        coordinator.onAccessibilityServiceConnected()
+        coordinator.onAccessibilityServiceDisconnected()
+        coordinator.stop("user_stopped")
+        coordinator.onAccessibilityServiceConnected()
+
+        assertEquals(1, browse.calls.count { it == "start" })
+        assertEquals(1, browse.calls.count { it == "connected" })
+        assertEquals(1, browse.calls.count { it == "disconnected" })
+        assertTrue(browse.calls.any { it == "stop:user_stopped" })
+        assertFalse(state.requested)
+        assertNull(coordinator.resolveActiveModeForRestore())
+    }
+
     @Test
     fun serviceDisconnectInvalidatesTheGenerationBeforeRuntimeCleanup() {
         val state = FakeState().apply {

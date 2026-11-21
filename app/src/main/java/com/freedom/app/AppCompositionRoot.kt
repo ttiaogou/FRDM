@@ -156,6 +156,13 @@ class AppCompositionRoot(context: Context) {
     val recoveryScheduleRepository: RecoveryScheduleRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         RecoveryScheduleDataStore(appContext)
     }
+    // AI list and greetings checkpoint plans must never overwrite Browse or each other.
+    val privateMessagesRecoveryScheduleRepository: RecoveryScheduleRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RecoveryScheduleDataStore(appContext, "recovery_schedule_ai_private_messages")
+    }
+    val receivedGreetingsRecoveryScheduleRepository: RecoveryScheduleRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RecoveryScheduleDataStore(appContext, "recovery_schedule_ai_received_greetings")
+    }
     val sampleArchivePort: SessionSampleArchivePort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MomoChatSampleArchiveDataStore()
     }
@@ -523,7 +530,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             contactMessageLedgerRepository = root.contactMessageLedgerRepository,
             privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository,
-            receivedGreetingsCheckpointRepository = root.sayHiTraversalCheckpointRepository
+            receivedGreetingsCheckpointRepository = root.sayHiTraversalCheckpointRepository,
+            privateMessagesRecoveryScheduleRepository = root.privateMessagesRecoveryScheduleRepository,
+            receivedGreetingsRecoveryScheduleRepository = root.receivedGreetingsRecoveryScheduleRepository
         )
     }
     val accountBrowseWorkflow by lazy(LazyThreadSafetyMode.NONE) {

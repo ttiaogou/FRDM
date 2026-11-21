@@ -38,7 +38,11 @@ class RecoveryCheckpointVerificationCoordinator(
             ),
             identity
         )
-        val plan = scheduler.begin(identity)
+        val plan = when (source) {
+            RecoveryCheckpointRestoreSource.SERVICE_RECONNECT,
+            RecoveryCheckpointRestoreSource.PROCESS_RESTART -> scheduler.restorePersisted(identity)
+            RecoveryCheckpointRestoreSource.PAGE_OBSERVATION -> scheduler.begin(identity)
+        }
         onLog(plan.logFields("checkpoint_restored"))
         return RecoveryCheckpointRestoreResult.Recovering(plan)
     }

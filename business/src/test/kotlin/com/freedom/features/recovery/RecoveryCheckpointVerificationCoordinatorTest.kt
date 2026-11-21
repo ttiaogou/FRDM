@@ -35,6 +35,77 @@ class RecoveryCheckpointVerificationCoordinatorTest {
             observationGeneration = generation
         )
 
+
+    @Test
+    fun serviceReconnectRebindsPersistedReadOnlyPlanWithoutReusingPageProof() {
+        val saved = RecoveryScheduleSnapshot(
+            taskId = "TASK", routeId = "ROUTE", runGeneration = 3L,
+            recoveryReason = "UNKNOWN_PAGE", checkpointId = "checkpoint-1",
+            observationCount = 9L, nextObservationAtEpochMs = 30_000L,
+            backoffStage = 3, touchActive = false
+        )
+        var persisted: RecoveryScheduleSnapshot? = saved
+        val repository = object : RecoveryScheduleRepository {
+            override fun load(): RecoveryScheduleSnapshot? = persisted
+            override fun save(snapshot: RecoveryScheduleSnapshot) { persisted = snapshot }
+            override fun clear() { persisted = null }
+        }
+        val scheduler = FakeScheduler()
+        val recoveryScheduler = RecoveryScheduler(
+            scheduler = scheduler, nowEpochMs = { 1_000L },
+            onReadOnlyObservation = {}, scheduleRepository = repository
+        )
+        val coordinator = RecoveryCheckpointVerificationCoordinator(
+            RecoveryEventDispatcher(UnifiedRecoveryTransactionStateMachine()),
+            recoveryScheduler
+        )
+        val checkpoint = checkpoint().copy(runGeneration = 12L)
+
+        assertTrue(coordinator.restore(checkpoint, RecoveryCheckpointRestoreSource.SERVICE_RECONNECT)
+            is RecoveryCheckpointRestoreResult.Recovering)
+        assertEquals(9L, coordinator.currentObservationPlan()?.observationCount)
+        assertEquals(12L, coordinator.currentObservationPlan()?.runGeneration)
+        assertEquals(listOf(5_000L), scheduler.pendingDelays())
+
+        assertEquals(
+            RecoveryCheckpointVerificationResult.Verifying(1),
+            coordinator.observe(evidence(1L).copy(runGeneration = 12L))
+        )
+        assertEquals(
+            RecoveryCheckpointVerificationResult.ResumeReady("WAIT_FOR_LIST_RETURN"),
+            coordinator.observe(evidence(2L).copy(runGeneration = 12L))
+        )
+        assertTrue(coordinator.completeResume())
+        assertNull(repository.load())
+        assertTrue(scheduler.pendingDelays().isEmpty())
+    }
+
+    @Test
+    fun unmatchedPersistedPlanIsReplacedWithFreshReadOnlyTimer() {
+        val scheduler = FakeScheduler()
+        var persisted: RecoveryScheduleSnapshot? = RecoveryScheduleSnapshot(
+            taskId = "TASK", routeId = "ROUTE", runGeneration = 4L,
+            recoveryReason = "OLD", checkpointId = "different-checkpoint",
+            observationCount = 8L, nextObservationAtEpochMs = 12_000L,
+            backoffStage = 4, touchActive = false
+        )
+        val repository = object : RecoveryScheduleRepository {
+            override fun load(): RecoveryScheduleSnapshot? = persisted
+            override fun save(snapshot: RecoveryScheduleSnapshot) { persisted = snapshot }
+            override fun clear() { persisted = null }
+        }
+        val coordinator = RecoveryCheckpointVerificationCoordinator(
+            RecoveryEventDispatcher(UnifiedRecoveryTransactionStateMachine()),
+            RecoveryScheduler(scheduler, { 1_000L }, {}, scheduleRepository = repository)
+        )
+        coordinator.restore(checkpoint(), RecoveryCheckpointRestoreSource.PROCESS_RESTART)
+
+        assertEquals(listOf(500L), scheduler.pendingDelays())
+        assertEquals(0L, coordinator.currentObservationPlan()?.observationCount)
+        assertEquals("checkpoint-1", repository.load()?.checkpointId)
+        assertEquals(7L, repository.load()?.runGeneration)
+    }
+
     @Test
     fun processRestoreStartsRecoveringWithAQueryableObservationPlan() {
         val scheduler = FakeScheduler()

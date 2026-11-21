@@ -52,6 +52,7 @@ import com.freedom.features.recovery.RecoveryContext
 import com.freedom.features.recovery.RecoveryEventDispatcher
 import com.freedom.features.recovery.RecoveryEventIdentity
 import com.freedom.features.recovery.RecoveryScheduler
+import com.freedom.features.recovery.RecoveryScheduleRepository
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.LinkedHashSet
@@ -104,7 +105,10 @@ class AiReplyObservationRuntime(
     private val contactMessageLedgerRepository: ContactMessageLedgerRepository = InMemoryContactMessageLedgerRepository(),
     private val privateMessagesCheckpointRepository: PrivateMessagesTraversalCheckpointRepository? = null,
     /** Received-greetings business progress stays in its existing adapter/Data repository. */
-    private val receivedGreetingsCheckpointRepository: MomoSayHiTraversalCheckpointRepository? = null
+    private val receivedGreetingsCheckpointRepository: MomoSayHiTraversalCheckpointRepository? = null,
+    /** Only read-only observation plans are persisted; checkpoints and UI leases stay separate. */
+    private val privateMessagesRecoveryScheduleRepository: RecoveryScheduleRepository? = null,
+    private val receivedGreetingsRecoveryScheduleRepository: RecoveryScheduleRepository? = null
 ) {
     companion object {
         private const val MAX_VISIBLE_MESSAGES = 20
@@ -488,7 +492,8 @@ class AiReplyObservationRuntime(
                 scheduleFullInspectionAfter(0L)
             }
         },
-        onLog = onLog
+        onLog = onLog,
+        scheduleRepository = privateMessagesRecoveryScheduleRepository
     )
     private val receivedGreetingsCheckpointVerifier = ReceivedGreetingsCheckpointVerification(
         scheduler = scheduler,
@@ -502,7 +507,8 @@ class AiReplyObservationRuntime(
                 scheduleFullInspectionAfter(0L)
             }
         },
-        onLog = onLog
+        onLog = onLog,
+        scheduleRepository = receivedGreetingsRecoveryScheduleRepository
     )
 
     /** Every raw page read must declare its observation entry purpose. */

@@ -11,6 +11,7 @@ import com.freedom.features.recovery.RecoveryCheckpointVerificationCoordinator
 import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
 import com.freedom.features.recovery.RecoveryEventDispatcher
 import com.freedom.features.recovery.RecoveryScheduler
+import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.recovery.RecoveryTransactionState
 import com.freedom.features.recovery.RecoveryVerificationEvidence
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
@@ -27,7 +28,8 @@ internal class ReceivedGreetingsCheckpointVerification(
     private val targetPackage: () -> String,
     private val currentRunGeneration: () -> Long,
     private val onReadOnlyObservation: () -> Unit,
-    private val onLog: (String) -> Unit = {}
+    private val onLog: (String) -> Unit = {},
+    private val scheduleRepository: RecoveryScheduleRepository? = null
 ) {
     private data class Binding(
         val checkpointId: String,
@@ -88,7 +90,8 @@ internal class ReceivedGreetingsCheckpointVerification(
                 scheduler = scheduler,
                 nowEpochMs = System::currentTimeMillis,
                 onReadOnlyObservation = { onReadOnlyObservation() },
-                onLog = onLog
+                onLog = onLog,
+                scheduleRepository = scheduleRepository
             ).also { schedule = it }
             verifier = RecoveryCheckpointVerificationCoordinator(
                 transaction = RecoveryEventDispatcher(

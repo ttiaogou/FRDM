@@ -9,6 +9,8 @@ import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRecord
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
 import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
+import com.freedom.features.recovery.RecoveryScheduleRepository
+import com.freedom.features.recovery.RecoveryScheduleSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -43,13 +45,14 @@ class ReceivedGreetingsCheckpointVerificationTest {
         inputFieldTarget = null
     )
 
-    private fun fixture(): Pair<ReceivedGreetingsCheckpointVerification, FakeScheduler> {
+    private fun fixture(scheduleRepository: RecoveryScheduleRepository? = null): Pair<ReceivedGreetingsCheckpointVerification, FakeScheduler> {
         val scheduler = FakeScheduler()
         return ReceivedGreetingsCheckpointVerification(
             scheduler = scheduler,
             targetPackage = { "com.immomo.momo" },
             currentRunGeneration = { 8L },
-            onReadOnlyObservation = { scheduler.observations++ }
+            onReadOnlyObservation = { scheduler.observations++ },
+            scheduleRepository = scheduleRepository
         ) to scheduler
     }
 
@@ -85,6 +88,36 @@ class ReceivedGreetingsCheckpointVerificationTest {
             verifier.sample(4L)
         )
         assertEquals(setOf("row-hash"), checkpoint.processedRowKeys)
+    }
+
+
+    @Test
+    fun restoredGreetingsScheduleKeepsBackoffButRequiresTwoFreshObservations() {
+        var saved: RecoveryScheduleSnapshot? = RecoveryScheduleSnapshot(
+            taskId = "AI_REPLY_RECEIVED_GREETINGS", routeId = "AI_REPLY_RECEIVED_GREETINGS",
+            runGeneration = 2L, recoveryReason = "CHECKPOINT_LOADED",
+            checkpointId = "AI_REPLY_RECEIVED_GREETINGS:SERVICE_RECONNECT_CHECKPOINT",
+            observationCount = 5L, nextObservationAtEpochMs = Long.MAX_VALUE,
+            backoffStage = 3, touchActive = false
+        )
+        val repository = object : RecoveryScheduleRepository {
+            override fun load(): RecoveryScheduleSnapshot? = saved
+            override fun save(snapshot: RecoveryScheduleSnapshot) { saved = snapshot }
+            override fun clear() { saved = null }
+        }
+        val (verifier, scheduler) = fixture(repository)
+
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(1L))
+        assertEquals(5L, saved?.observationCount)
+        assertEquals(8L, saved?.runGeneration)
+        assertEquals(listOf(5_000L), scheduler.pendingDelays())
+        assertEquals(
+            RecoveryCheckpointVerificationResult.ResumeReady("SCANNING"),
+            verifier.sample(2L)
+        )
+        assertTrue(verifier.completeResume())
+        assertTrue(scheduler.pendingDelays().isEmpty())
+        assertEquals(null, repository.load())
     }
 
     @Test

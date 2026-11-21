@@ -28,6 +28,13 @@ internal class AiReplyModeRuntimeAdapter(
     }
 
     override fun onAccessibilityServiceConnected() {
+        if (awaitingServiceReconnect) {
+            // Recreate the run-local recovery gates before binding persisted schedules.
+            // A later scheduleInitialObservation() would otherwise erase the newly rebound proof.
+            awaitingServiceReconnect = false
+            onReadinessStarting(mode, "AI Reply 服务重连；重新等待目标应用正式就绪")
+            runtime().scheduleInitialObservation()
+        }
         val messageCheckpointLoaded = runCatching {
             runtime().reloadPrivateMessagesCheckpointAfterServiceReconnect()
         }.getOrDefault(false)
@@ -48,11 +55,6 @@ internal class AiReplyModeRuntimeAdapter(
                 "收到招呼服务重连：断点已尝试读取；当前页面未确认，保持只读等待并由后续页面事件复核"
             }
         )
-        if (awaitingServiceReconnect) {
-            awaitingServiceReconnect = false
-            onReadinessStarting(mode, "AI Reply 服务重连；重新等待目标应用正式就绪")
-            runtime().scheduleInitialObservation()
-        }
     }
 
     override fun onAccessibilityServiceDisconnected() {
