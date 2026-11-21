@@ -8,6 +8,11 @@ import com.freedom.features.recovery.RecoveryTransactionEvent
 import com.freedom.features.recovery.RecoveryTransactionState
 import com.freedom.features.recovery.RecoveryScheduler
 import com.freedom.features.recovery.RecoveryScheduleRepository
+import com.freedom.features.recovery.RecoveryCheckpoint
+import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
+import com.freedom.features.recovery.RecoveryCheckpointVerificationCoordinator
+import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
+import com.freedom.features.recovery.RecoveryVerificationEvidence
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 
@@ -39,6 +44,14 @@ class DynamicPageRecovery(
         scheduleRepository = scheduleRepository
     )
 
+    // The restored-checkpoint branch uses the same dispatcher and read-only scheduler as UNKNOWN.
+    // The ordinary dynamic-page recovery branch is unchanged.
+    private var checkpointVerifier: RecoveryCheckpointVerificationCoordinator? = null
+    private var verifiedCheckpointFingerprint: String? = null
+    private var checkpointObservationGeneration: Long = 0L
+    private var checkpointRestoreSource: RecoveryCheckpointRestoreSource =
+        RecoveryCheckpointRestoreSource.PROCESS_RESTART
+
     fun restoreFromCheckpoint(savedAtEpochMs: Long) {
         restoreObservationPlan(
             if (savedAtEpochMs > 0L) {
@@ -56,12 +69,103 @@ class DynamicPageRecovery(
 
     private fun restoreObservationPlan(source: RecoveryTransactionEvent.Source) {
         // Verification samples and event generation from the old service are no longer valid.
+        checkpointVerifier = null
+        verifiedCheckpointFingerprint = null
+        checkpointObservationGeneration = 0L
+        checkpointRestoreSource = if (source == RecoveryTransactionEvent.Source.SERVICE_RECONNECT) {
+            RecoveryCheckpointRestoreSource.SERVICE_RECONNECT
+        } else {
+            RecoveryCheckpointRestoreSource.PROCESS_RESTART
+        }
         dispatcher.reset()
         val eventIdentity = identity("CHECKPOINT_LOADED")
         dispatcher.activate(eventIdentity)
         dispatcher.dispatch(RecoveryTransactionEvent.CheckpointLoaded(source), eventIdentity)
         val plan = recoveryScheduler.restorePersisted(eventIdentity)
         onLog(plan.logFields("recovery_plan_rebound_" + source.name))
+    }
+
+    /**
+     * A persisted AccountBrowse checkpoint is verified only from newly read, confirmed feed
+     * evidence. Mapping and route checks remain with the feature runtime; this is a second
+     * defense before giving fresh evidence to the shared checkpoint verification coordinator.
+     *
+     * A changing feed fingerprint resets only its verification samples; the business checkpoint
+     * and existing read-only backoff schedule are retained.
+     */
+    fun observeRestoredCheckpoint(
+        checkpoint: RecoveryCheckpoint,
+        page: BrowsePageEvidence
+    ): Boolean {
+        if (checkpoint.taskId != taskId ||
+            checkpoint.routeId != routeId ||
+            checkpoint.checkpointId != checkpointId ||
+            checkpoint.runGeneration != currentRunGeneration() ||
+            page.packageName != targetPackage() ||
+            page.pageKind != BrowsePageKind.DYNAMIC_FEED ||
+            page.confidence < 80 ||
+            !page.windowAvailable ||
+            page.fingerprint.isBlank() ||
+            checkpoint.pageFingerprint.isBlank()
+        ) {
+            invalidateRestoredCheckpointEvidence()
+            return false
+        }
+        if (checkpointVerifier == null ||
+            verifiedCheckpointFingerprint != checkpoint.pageFingerprint
+        ) {
+            // The expected fingerprint is established from a fresh, route-verified feed read.
+            // Rebase on a changed feed without losing the existing business checkpoint.
+            dispatcher.reset()
+            val verifier = RecoveryCheckpointVerificationCoordinator(
+                transaction = dispatcher,
+                scheduler = recoveryScheduler,
+                onLog = onLog
+            )
+            checkpointVerifier = verifier
+            verifiedCheckpointFingerprint = checkpoint.pageFingerprint
+            verifier.restore(checkpoint, checkpointRestoreSource)
+        }
+        check(checkpointObservationGeneration < Long.MAX_VALUE) {
+            "Recovery observation generation exhausted"
+        }
+        val generation = ++checkpointObservationGeneration
+        val result = requireNotNull(checkpointVerifier).observe(
+            RecoveryVerificationEvidence(
+                packageName = page.packageName,
+                pageType = page.pageKind.name,
+                pageFingerprint = checkpoint.pageFingerprint,
+                targetIdentityFingerprint = checkpoint.targetIdentityFingerprint,
+                runGeneration = currentRunGeneration(),
+                observationGeneration = generation
+            )
+        )
+        if (result !is RecoveryCheckpointVerificationResult.ResumeReady ||
+            result.executionPhase != checkpoint.executionPhase
+        ) return false
+        if (!requireNotNull(checkpointVerifier).completeResume()) return false
+        checkpointVerifier = null
+        verifiedCheckpointFingerprint = null
+        onLog("recoveryAction=account_browse_shared_checkpoint_verified; runGeneration=${currentRunGeneration()}")
+        return true
+    }
+
+    /** A rejected fresh observation must reset the shared verifier's stable-sample counter. */
+    fun invalidateRestoredCheckpointEvidence() {
+        val verifier = checkpointVerifier ?: return
+        check(checkpointObservationGeneration < Long.MAX_VALUE) {
+            "Recovery observation generation exhausted"
+        }
+        verifier.observe(
+            RecoveryVerificationEvidence(
+                packageName = "",
+                pageType = BrowsePageKind.UNKNOWN.name,
+                pageFingerprint = "",
+                targetIdentityFingerprint = null,
+                runGeneration = currentRunGeneration(),
+                observationGeneration = ++checkpointObservationGeneration
+            )
+        )
     }
 
     fun observePage(page: BrowsePageEvidence): RecoveryTransactionState {
@@ -114,6 +218,9 @@ class DynamicPageRecovery(
 
     fun reset() {
         dispatcher.currentIdentity()?.let(recoveryScheduler::stopByUser)
+        checkpointVerifier = null
+        verifiedCheckpointFingerprint = null
+        checkpointObservationGeneration = 0L
         dispatcher.reset()
     }
 

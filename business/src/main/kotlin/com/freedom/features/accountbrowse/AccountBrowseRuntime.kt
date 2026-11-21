@@ -2,10 +2,12 @@ package com.freedom.features.accountbrowse
 
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.accountbrowse.ports.BrowsePageEvidence
+import com.freedom.features.accountbrowse.ports.BrowsePageKind
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpoint
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
 import com.freedom.features.recovery.RecoveryTransactionState
 import com.freedom.features.recovery.RecoveryScheduleRepository
+import com.freedom.features.recovery.RecoveryCheckpointAdapterContext
 
 /**
  * Coordinates the automatic-browse phase dispatch independently from Android Service APIs.
@@ -66,6 +68,9 @@ class AccountBrowseRuntime(
     private val sessionStateOwner = AccountBrowseSessionStateOwner()
     val session: AccountBrowseSessionStatePort = sessionStateOwner.port
     private var restoredCheckpointPhase: AccountBrowsePhase? = null
+    private var restoredBusinessCheckpoint: AccountBrowseCheckpoint? = null
+    private var verifiedFeedAwaitingPhaseResume: String? = null
+    private val checkpointAdapter = AccountBrowseRecoveryCheckpointAdapter()
 
     private val stateMachine = AccountBrowseStateMachine()
     val phase: AccountBrowsePhase
@@ -73,6 +78,7 @@ class AccountBrowseRuntime(
 
     init {
         checkpointRepository?.load()?.let { checkpoint ->
+            restoredBusinessCheckpoint = checkpoint
             restoredCheckpointPhase = runCatching { AccountBrowsePhase.valueOf(checkpoint.phase) }
                 .getOrDefault(AccountBrowsePhase.PAUSED)
             // A restored checkpoint is never executable immediately. The workflow must first
@@ -98,6 +104,8 @@ class AccountBrowseRuntime(
     /** Restore only when the current business run still has a valid checkpoint. */
     fun restoreAfterServiceReconnect(): Boolean {
         val checkpoint = checkpointRepository?.load() ?: return false
+        restoredBusinessCheckpoint = checkpoint
+        verifiedFeedAwaitingPhaseResume = null
         restoredCheckpointPhase = runCatching { AccountBrowsePhase.valueOf(checkpoint.phase) }
             .getOrDefault(AccountBrowsePhase.PAUSED)
         // Old execution state and gestures must never be resumed before fresh page verification.
@@ -135,7 +143,78 @@ class AccountBrowseRuntime(
      * Replaces the dynamic-feed-local stableSamples decision with the shared two-sample gate.
      * The caller still owns fingerprint extraction and all feed actions.
      */
-    fun observeDynamicFeedFingerprint(fingerprint: String): Boolean {
+    fun observeDynamicFeedFingerprint(
+        fingerprint: String,
+        page: BrowsePageEvidence? = null,
+        routeVerified: Boolean = false
+    ): Boolean {
+        val checkpoint = restoredBusinessCheckpoint
+        if (checkpoint != null) {
+            // A verified route and newly inspected feed are required; stored business data
+            // alone never proves that the page is ready for an action.
+            if (!routeVerified || page == null ||
+                page.pageKind != BrowsePageKind.DYNAMIC_FEED ||
+                page.packageName != targetPackage() ||
+                page.confidence < 80 ||
+                !page.windowAvailable ||
+                page.fingerprint.isBlank() ||
+                fingerprint.isBlank()
+            ) {
+                dynamicPageRecovery.invalidateRestoredCheckpointEvidence()
+                return false
+            }
+            val unified = runCatching {
+                checkpointAdapter.adapt(
+                    checkpoint,
+                    RecoveryCheckpointAdapterContext(
+                        checkpointId = "account-browse-checkpoint",
+                        runGeneration = currentRunGeneration().coerceAtLeast(0L),
+                        targetPackage = targetPackage(),
+                        pageType = page.pageKind.name,
+                        pageFingerprint = fingerprint,
+                        recoveryReason = "CHECKPOINT_LOADED"
+                    )
+                )
+            }.getOrElse {
+                // Invalid persisted metadata must not bypass the checkpoint verification gate.
+                dynamicPageRecovery.invalidateRestoredCheckpointEvidence()
+                onLog("自动浏览统一检查点适配未通过；保留只读恢复观察，不执行自动操作")
+                return false
+            }
+            if (!dynamicPageRecovery.observeRestoredCheckpoint(unified, page)) return false
+            restoredBusinessCheckpoint = null
+            restoredCheckpointPhase = null
+            // Keep the existing WAIT_FOR_FEED_STABLE -> FIRST_SWIPE_COUNTDOWN transition.
+            // A later, fresh feed read in that phase must still agree with this fingerprint.
+            verifiedFeedAwaitingPhaseResume = fingerprint
+            return true
+        }
+
+        val pendingVerifiedFingerprint = verifiedFeedAwaitingPhaseResume
+        if (pendingVerifiedFingerprint != null) {
+            verifiedFeedAwaitingPhaseResume = null
+            if (routeVerified && page != null &&
+                page.pageKind == BrowsePageKind.DYNAMIC_FEED &&
+                page.packageName == targetPackage() &&
+                page.confidence >= 80 && page.windowAvailable &&
+                page.fingerprint.isNotBlank() &&
+                fingerprint == pendingVerifiedFingerprint
+            ) {
+                return true
+            }
+            dynamicPageRecovery.observePage(
+                BrowsePageEvidence(
+                    packageName = "",
+                    activityClass = "",
+                    pageKind = BrowsePageKind.UNKNOWN,
+                    fingerprint = "",
+                    confidence = 0,
+                    reason = "BROWSE_VERIFIED_FEED_CHANGED_BEFORE_RESUME"
+                )
+            )
+            return false
+        }
+
         if (!dynamicPageRecovery.observeFingerprint(fingerprint)) return false
         restoredCheckpointPhase = null
         return true
@@ -221,6 +300,8 @@ class AccountBrowseRuntime(
         checkpointRepository?.clear()
         stateMachine.reset()
         restoredCheckpointPhase = null
+        restoredBusinessCheckpoint = null
+        verifiedFeedAwaitingPhaseResume = null
         dynamicPageRecovery.reset()
         session.reset()
         afterReset()

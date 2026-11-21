@@ -364,11 +364,18 @@ internal class AndroidAccountBrowseWorkflow(
         if (!isMonitoringRunning() || !isBrowseModeActive()) return
         val page = socialBrowsePort.inspectPage()
         accountBrowseRuntime.observeRecoveryPage(page)
-        if (page.pageKind == BrowsePageKind.DYNAMIC_FEED && matchDynamicFeedRoute(page)) {
+        val verifiedRoute = page.pageKind == BrowsePageKind.DYNAMIC_FEED &&
+            matchDynamicFeedRoute(page)
+        if (verifiedRoute) {
             val inspection = socialBrowsePort.inspectFeed()
             accountBrowseRuntime.observeDynamicFeedFingerprint(
-                inspection.fingerprint.takeIf { inspection.ready && it.isNotBlank() }.orEmpty()
+                inspection.fingerprint.takeIf { inspection.ready && it.isNotBlank() }.orEmpty(),
+                page = page,
+                routeVerified = true
             )
+        } else if (accountBrowseRuntime.hasPendingCheckpointVerification()) {
+            // Page changed or is not yet identified: never count this as a stable sample.
+            accountBrowseRuntime.observeDynamicFeedFingerprint("", page = page)
         }
         if (accountBrowseRuntime.recoveryState() == com.freedom.features.recovery.RecoveryTransactionState.ACTIVE &&
             !accountBrowseSession.touchActive && accountBrowsePhase != AccountBrowsePhase.IDLE
@@ -1153,10 +1160,18 @@ internal class AndroidAccountBrowseWorkflow(
         if (fingerprint == null) {
             accountBrowseSession.lastStableFingerprint = ""
             accountBrowseSession.stableSamples = 0
-            accountBrowseRuntime.observeDynamicFeedFingerprint("")
+            accountBrowseRuntime.observeDynamicFeedFingerprint(
+                "",
+                page = page,
+                routeVerified = page.pageKind == BrowsePageKind.DYNAMIC_FEED && matchDynamicFeedRoute(page)
+            )
             addLog("动态列表尚不具备操作条件：${inspection.reason}")
         } else {
-            val recovered = accountBrowseRuntime.observeDynamicFeedFingerprint(fingerprint)
+            val recovered = accountBrowseRuntime.observeDynamicFeedFingerprint(
+                fingerprint,
+                page = page,
+                routeVerified = page.pageKind == BrowsePageKind.DYNAMIC_FEED && matchDynamicFeedRoute(page)
+            )
             accountBrowseSession.lastStableFingerprint = fingerprint
             accountBrowseSession.stableSamples = accountBrowseRuntime.recoveryStableSamples()
             addLog("动态列表采样：可见项目=${inspection.visibleCardCount}，稳定计数=${accountBrowseSession.stableSamples}/$REQUIRED_STABLE_FEED_SAMPLES；事务状态=${accountBrowseRuntime.recoveryState().name}；${inspection.reason}")
