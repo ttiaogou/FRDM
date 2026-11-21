@@ -75,6 +75,20 @@ class MessageListCheckpointVerificationTest {
         observationGeneration = gen
     )
 
+
+    @Test
+    fun temporarilyUnavailableSnapshotRejectsPriorSampleAndRetainsCheckpoint() {
+        val (verifier, _) = fixture()
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(1L))
+        assertTrue(verifier.reject(2L) is RecoveryCheckpointVerificationResult.Recovering)
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(3L))
+        assertEquals(
+            RecoveryCheckpointVerificationResult.ResumeReady("SCANNING_BOTTOM_TO_TOP"),
+            verifier.sample(4L)
+        )
+        assertEquals(setOf("attempted-hash"), original.attemptedSessionKeys)
+    }
+
     @Test
     fun twoFreshStructuralSamplesAreRequiredAndTimerCompletesAfterResume() {
         val (verifier, scheduler) = fixture()

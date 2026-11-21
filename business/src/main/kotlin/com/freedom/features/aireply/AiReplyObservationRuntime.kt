@@ -648,6 +648,17 @@ class AiReplyObservationRuntime(
             failure = pageRead.failure
         )
         if (observationDecision.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) {
+            if (recoveryContext.pending) {
+                recoveryContext.invalidateFingerprint()
+                if (recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+                    messageListCheckpointForUnified != null
+                ) {
+                    messageListCheckpointVerifier.reject(observationDecision.observationGeneration)
+                }
+            }
+            // Missing evidence breaks the continuity of every pending two-snapshot gate.
+            pageRecoveryVerificationGate.reset(SNAPSHOT_RECOVERY_ROUTE_ID)
+            pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
             if (recoveryContext.sourceTaskId == RECEIVED_GREETINGS_TASK_ID &&
                 receivedGreetingsCheckpointForUnified != null
             ) {
@@ -705,6 +716,7 @@ class AiReplyObservationRuntime(
                 chatPagePort.receivedGreetingsRecoveryFingerprint()
             }.getOrNull()
             if (fingerprint.isNullOrBlank()) {
+                pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
                 onLog("收到的招呼恢复[RECOVERY_VERIFYING]：当前快照未通过收到招呼列表指纹；继续暂停任务")
                 scheduleReceivedGreetingsRecoveryRetry("收到招呼列表指纹尚未确认；不执行滚动、点击或导航")
                 return
@@ -890,6 +902,7 @@ class AiReplyObservationRuntime(
 
         if (recoveryContext.pending) {
             val targetRoute = matchedRouteId
+            if (targetRoute == null) recoveryContext.invalidateFingerprint()
             val loadedMessageCheckpoint = messageListCheckpointForUnified
             val sharedMessageListRecovery =
                 recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
@@ -904,6 +917,7 @@ class AiReplyObservationRuntime(
                     observation.status != ObservationStatus.CONFIRMED_PAGE ||
                     recoveryContext.runGeneration != currentRunGeneration())
             ) {
+                recoveryContext.invalidateFingerprint()
                 receivedGreetingsCheckpointVerifier.reject(observation.observationGeneration)
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("收到招呼通用检查点[ROUTE_WAIT]：页面、路由或运行代次未确认；仅保留只读恢复观察")
@@ -919,6 +933,7 @@ class AiReplyObservationRuntime(
                     recoveryContext.runGeneration != currentRunGeneration())
             ) {
                 // An unrelated route, ambiguous page or stale run must reset shared samples.
+                recoveryContext.invalidateFingerprint()
                 messageListCheckpointVerifier.reject(observation.observationGeneration)
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("消息列表统一检查点[ROUTE_WAIT]：页面路由或运行代次不匹配；保留检查点，仅只读重检")
@@ -993,8 +1008,18 @@ class AiReplyObservationRuntime(
                     }
                     result
                 } else {
-                    // Unrelated business routes and fixtures without checkpoint persistence
-                    // keep the existing verification and scheduling decisions unchanged.
+                    // Unrelated routes and fixtures use the existing two-snapshot context gate,
+                    // but cannot use an ambiguous observation or an old run generation as proof.
+                    if (observation.status != ObservationStatus.CONFIRMED_PAGE ||
+                        recoveryContext.runGeneration != currentRunGeneration()
+                    ) {
+                        recoveryContext.invalidateFingerprint()
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("统一页面恢复[GATE_WAIT]：页面状态或运行代次未确认；保留检查点并继续只读复核")
+                        scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
+                        lastPageInspection = inspection
+                        return
+                    }
                     if (!recoveryContext.observeTarget(targetRoute, verificationKey)) {
                         recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
                         onLog("统一页面恢复[RECOVERY_VERIFYING]：目标路由=$targetRoute；第${recoveryContext.verificationSamples}/2次快照尚未稳定")
@@ -2149,10 +2174,20 @@ class AiReplyObservationRuntime(
                 event.type == AccessibilityEventType.VIEW_SELECTED)
         val windowTransition = event.type == AccessibilityEventType.WINDOW_STATE_CHANGED ||
             event.type == AccessibilityEventType.WINDOWS_CHANGED
-        if (windowTransition) {
-            // The click event normally precedes the Activity transition. Once the new window is
-            // reported, the short-lived self-TAP correlation window is no longer relevant.
+        if (windowTransition && recoveryContext.pending) {
+            // A window transition interrupts recovery evidence even before the next page read.
+            // Checkpoint verifiers must not reuse their first sample from the previous window.
+            recoveryContext.invalidateFingerprint()
+            if (recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+                messageListCheckpointForUnified != null
+            ) {
+                messageListCheckpointVerifier.deferOwnership()
+            } else if (recoveryContext.sourceTaskId == RECEIVED_GREETINGS_TASK_ID &&
+                receivedGreetingsCheckpointForUnified != null
+            ) {
+                receivedGreetingsCheckpointVerifier.deferResume()
             }
+        }
         if (windowTransition || chatListNavigation) {
             // Invalidate before scheduling a debounced inspection. An OCR callback that returns
             // during the debounce window must not be delivered to a different chat/session.

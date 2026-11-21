@@ -147,15 +147,24 @@ class RecoveryContext {
     fun observeTarget(routeId: String, fingerprintKey: String): Boolean {
         require(routeId.isNotBlank()) { "routeId must not be blank" }
         require(fingerprintKey.isNotBlank()) { "fingerprintKey must not be blank" }
+        val sameRouteAndFingerprint = targetRouteId == routeId &&
+            lastVerificationKey == fingerprintKey
         targetRouteId = routeId
-        verificationSamples = if (lastVerificationKey == fingerprintKey) {
-            verificationSamples + 1
-        } else {
-            1
-        }
+        verificationSamples = if (sameRouteAndFingerprint) verificationSamples + 1 else 1
         lastVerificationKey = fingerprintKey
         fingerprintVerified = verificationSamples >= REQUIRED_STABLE_SAMPLES
         return fingerprintVerified
+    }
+
+    /**
+     * Revokes stale page stability evidence without discarding the running recovery transaction,
+     * checkpoint identity, or its UI lease. Actual ownership is managed by TaskCoordinator.
+     */
+    fun invalidateFingerprint() {
+        if (!pending) return
+        verificationSamples = 0
+        lastVerificationKey = null
+        fingerprintVerified = false
     }
 
     /**

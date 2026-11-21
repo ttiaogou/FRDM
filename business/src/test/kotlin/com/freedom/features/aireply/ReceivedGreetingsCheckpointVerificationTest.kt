@@ -73,6 +73,20 @@ class ReceivedGreetingsCheckpointVerificationTest {
         observationGeneration = generation
     )
 
+
+    @Test
+    fun missingSnapshotBreaksGreetingsProofAndRequiresTwoNewFingerprints() {
+        val (verifier, _) = fixture()
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(1L))
+        assertTrue(verifier.reject(2L) is RecoveryCheckpointVerificationResult.Recovering)
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(3L))
+        assertEquals(
+            RecoveryCheckpointVerificationResult.ResumeReady(ReceivedGreetingsTraversalStatus.SCANNING.name),
+            verifier.sample(4L)
+        )
+        assertEquals(setOf("row-hash"), checkpoint.processedRowKeys)
+    }
+
     @Test
     fun twoFreshWindowFingerprintsRequiredBeforeRestoredGreetingsCanResume() {
         val (verifier, scheduler) = fixture()

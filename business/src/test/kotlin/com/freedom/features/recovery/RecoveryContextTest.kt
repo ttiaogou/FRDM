@@ -10,8 +10,8 @@ import org.junit.Test
 /**
  * P0 regression baseline for the in-memory recovery context.
  *
- * These tests describe existing context contracts. Page-observation freshness, a missing-route
- * invalidation callback, and actual UI-lease transfer remain integration responsibilities.
+ * These tests cover context proof invalidation and transaction identity. Actual fresh page reads
+ * and UI-lease transfer remain integration responsibilities.
  */
 class RecoveryContextTest {
     private fun requestedContext(): RecoveryContext = RecoveryContext().apply {
@@ -93,6 +93,68 @@ class RecoveryContextTest {
 
         assertTrue(context.observeTarget("AI_REPLY_RECEIVED_GREETINGS", "greetings|structure"))
         assertEquals(RecoveryContext.State.VERIFIED, context.state)
+    }
+
+
+    @Test
+    fun identicalFingerprintOnDifferentRouteCannotReuseEarlierStableSamples() {
+        val context = requestedContext()
+        assertFalse(context.observeTarget("MESSAGE_LIST", "same-structure"))
+        assertTrue(context.observeTarget("MESSAGE_LIST", "same-structure"))
+
+        assertFalse(context.observeTarget("RECEIVED_GREETINGS", "same-structure"))
+        assertEquals(1, context.verificationSamples)
+        assertFalse(context.fingerprintVerified)
+        assertThrows(IllegalStateException::class.java) {
+            context.markUiOwnershipTransferred()
+        }
+
+        assertTrue(context.observeTarget("RECEIVED_GREETINGS", "same-structure"))
+    }
+
+    @Test
+    fun invalidatedRouteProofRequiresTwoNewSamplesWithoutLosingRecoveryCheckpoint() {
+        val context = requestedContext()
+        context.markCheckpointSaved()
+        context.markCheckpointLoaded()
+        assertFalse(context.observeTarget("AI_REPLY_PRIVATE_MESSAGES", "inbox|stable"))
+        assertTrue(context.observeTarget("AI_REPLY_PRIVATE_MESSAGES", "inbox|stable"))
+        val before = context.snapshot()
+
+        context.invalidateFingerprint()
+
+        assertTrue(context.pending)
+        assertEquals(before.taskId, context.sourceTaskId)
+        assertEquals(before.checkpointId, context.checkpointId)
+        assertEquals(before.runGeneration, context.runGeneration)
+        assertEquals(before.observationGeneration, context.observationGeneration)
+        assertTrue(context.checkpointSaved)
+        assertTrue(context.checkpointLoaded)
+        assertEquals(RecoveryContext.PauseDomain.RECOVERY_TRANSACTION, context.pauseDomain)
+        assertEquals(RecoveryContext.State.CHECKPOINT_LOADED, context.state)
+        assertEquals(0, context.verificationSamples)
+        assertFalse(context.fingerprintVerified)
+        assertFalse(context.uiOwnershipTransferred)
+        assertThrows(IllegalStateException::class.java) {
+            context.markUiOwnershipTransferred()
+        }
+        assertFalse(context.observeTarget("AI_REPLY_PRIVATE_MESSAGES", "inbox|stable"))
+        assertTrue(context.observeTarget("AI_REPLY_PRIVATE_MESSAGES", "inbox|stable"))
+        context.markUiOwnershipTransferred()
+        assertTrue(context.uiOwnershipTransferred)
+    }
+
+    @Test
+    fun invalidationAfterOneSampleAlsoPreventsCrossGapVerification() {
+        val context = requestedContext()
+        assertFalse(context.observeTarget("AI_REPLY_PRIVATE_MESSAGES", "same-key"))
+        context.invalidateFingerprint()
+        context.invalidateFingerprint()
+
+        assertEquals(0, context.verificationSamples)
+        assertFalse(context.observeTarget("AI_REPLY_PRIVATE_MESSAGES", "same-key"))
+        assertEquals(1, context.verificationSamples)
+        assertTrue(context.observeTarget("AI_REPLY_PRIVATE_MESSAGES", "same-key"))
     }
 
     @Test
