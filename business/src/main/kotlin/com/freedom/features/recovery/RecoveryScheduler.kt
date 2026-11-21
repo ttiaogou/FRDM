@@ -68,6 +68,17 @@ class RecoveryScheduler(
         return true
     }
 
+    /** Finishes a verified recovery plan while leaving the underlying business task active. */
+    @Synchronized
+    fun completeRecovery(identity: RecoveryEventIdentity): Boolean {
+        val current = active ?: return false
+        if (!current.accepts(identity)) return false
+        current.cancelPending()
+        active = null
+        onLog(current.logFields("recovery_completed"))
+        return true
+    }
+
     @Synchronized
     private fun scheduleNext(
         schedule: ActiveSchedule,
