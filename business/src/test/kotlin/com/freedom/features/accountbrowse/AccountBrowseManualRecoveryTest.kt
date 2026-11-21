@@ -40,6 +40,26 @@ class AccountBrowseManualRecoveryTest {
     }
 
     @Test
+    fun reservedBrowseTaskCannotDispatchDelayedGestureOnceRecoveryStarts() {
+        val runtime = runtime()
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE)
+        assertTrue(runtime.canExecuteAutomaticStep())
+
+        // Recovery revokes execution permission without requiring a terminal phase
+        // change or relinquishing the task slot. Queued gestures must recheck this.
+        runtime.requestRecovery(
+            reason = "page became unknown after gesture plan",
+            beforePause = {},
+            hideCountdown = {},
+            onPauseReasonChanged = {}
+        )
+
+        assertEquals(AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE, runtime.phase)
+        assertEquals(RecoveryTransactionState.RECOVERING, runtime.recoveryState())
+        assertFalse(runtime.canExecuteAutomaticStep())
+    }
+
+    @Test
     fun reconnectRequiresCheckpointAndPutsExistingRuntimeBackBehindVerificationGate() {
         val store = object : AccountBrowseCheckpointRepository {
             var checkpoint: AccountBrowseCheckpoint? = null

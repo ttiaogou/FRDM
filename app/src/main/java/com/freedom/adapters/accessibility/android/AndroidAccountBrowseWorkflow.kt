@@ -1754,10 +1754,13 @@ internal class AndroidAccountBrowseWorkflow(
         )
 
         gestureDispatchSyncTask?.cancel()
+        val scheduledRunGeneration = currentRunGeneration()
         gestureDispatchSyncTask = taskScheduler.schedule(SWIPE_WINDOW_SYNC_DELAY_MS) {
             gestureDispatchSyncTask = null
             if (accountBrowsePhase != AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE ||
-                accountBrowseSession.touchActive || !isMonitoringRunning()
+                accountBrowseSession.touchActive || !isMonitoringRunning() ||
+                scheduledRunGeneration != currentRunGeneration() ||
+                !accountBrowseRuntime.canExecuteAutomaticStep()
             ) {
                 accountBrowseSession.gestureInFlight = false
                 accountBrowseSession.lastProgrammaticScrollAt = 0L
@@ -1956,9 +1959,13 @@ internal class AndroidAccountBrowseWorkflow(
             )
 
             gestureDispatchSyncTask?.cancel()
+            val scheduledRunGeneration = currentRunGeneration()
             gestureDispatchSyncTask = taskScheduler.schedule(SWIPE_WINDOW_SYNC_DELAY_MS) {
                 gestureDispatchSyncTask = null
-                if (accountBrowseSession.touchActive || !isMonitoringRunning() || !isBrowseModeActive()) {
+                if (accountBrowseSession.touchActive || !isMonitoringRunning() || !isBrowseModeActive() ||
+                    scheduledRunGeneration != currentRunGeneration() ||
+                    !accountBrowseRuntime.canExecuteAutomaticStep()
+                ) {
                     accountBrowseSession.lastProgrammaticScrollAt = 0L
                     accountBrowseSession.lastProgrammaticScrollLabel = ""
                     restoreMonitorOverlayTouchPassthrough("备用坐标滑动未执行")

@@ -132,6 +132,17 @@ class AccountBrowseRuntime(
 
     fun recoveryState(): RecoveryTransactionState = dynamicPageRecovery.state()
 
+    /**
+     * A reserved task slot is not authorization to dispatch a delayed UI action.
+     * Recheck the existing interaction policy at the actual dispatch boundary.
+     */
+    fun canExecuteAutomaticStep(): Boolean = interactionPolicy.mayPerformAutomaticStep(
+        sessionEnabled = isSessionEnabled(),
+        touchActive = isTouchActive(),
+        phase = phase,
+        recoveryState = dynamicPageRecovery.state()
+    )
+
     fun recoveryStableSamples(): Int = dynamicPageRecovery.stableSamples()
 
     /** Touch only changes observation cadence; it never establishes a manual-resume latch. */

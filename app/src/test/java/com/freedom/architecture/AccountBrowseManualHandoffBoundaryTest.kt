@@ -1,6 +1,7 @@
 package com.freedom.architecture
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -51,6 +52,27 @@ class AccountBrowseManualHandoffBoundaryTest {
         assertFalse(workflow.contains("MANUAL_RECOVERY_NAVIGATION_TIMEOUT_MS"))
         assertFalse(workflow.contains("pauseAfterWatchdog"))
         assertFalse(workflow.contains("onResumeManualTouch"))
+    }
+
+    @Test
+    fun queuedBrowseGesturesRecheckRecoveryGateAndRunGenerationBeforeSubmission() {
+        val workflow = source(
+            "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+        )
+        val callbacks = workflow.split(
+            "gestureDispatchSyncTask = taskScheduler.schedule(SWIPE_WINDOW_SYNC_DELAY_MS) {"
+        ).drop(1)
+        assertEquals("Both ordinary and fallback swipe must use the shared dispatch gate", 2, callbacks.size)
+        assertEquals(
+            "Each queued gesture must bind the scheduling run generation",
+            2,
+            Regex("val scheduledRunGeneration = currentRunGeneration\\(\\)").findAll(workflow).count()
+        )
+        callbacks.forEach { callback ->
+            val beforeDispatch = callback.substringBefore("gesturePolicy.execute(")
+            assertTrue(beforeDispatch.contains("scheduledRunGeneration != currentRunGeneration()"))
+            assertTrue(beforeDispatch.contains("!accountBrowseRuntime.canExecuteAutomaticStep()"))
+        }
     }
 
     @Test
