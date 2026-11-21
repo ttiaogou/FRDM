@@ -171,6 +171,24 @@ class RecoverySchedulerTest {
     }
 
     @Test
+    fun missingDurablePlanDoesNotResetTheActiveSameTransactionBackoff() {
+        val scheduler = FakeScheduler()
+        val recovery = RecoveryScheduler(scheduler, { 1_000L }, {})
+        val id = identity()
+        recovery.begin(id)
+        scheduler.runNext(500L)
+        val before = requireNotNull(recovery.currentPlan())
+        assertEquals(listOf(1_000L), scheduler.pendingDelays())
+
+        val rebound = recovery.restorePersisted(id)
+
+        assertEquals(before, rebound)
+        assertEquals(1L, rebound.observationCount)
+        assertEquals(1, rebound.backoffStage)
+        assertEquals(listOf(1_000L), scheduler.pendingDelays())
+    }
+
+    @Test
     fun restoresSavedBackoffWithNewRunGenerationOnlyForMatchingRouteAndCheckpoint() {
         val scheduler = FakeScheduler()
         val repository = FakeRecoveryScheduleRepository()

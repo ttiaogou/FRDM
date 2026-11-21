@@ -63,9 +63,11 @@ class RecoveryScheduler(
                 it.routeId == identity.routeId &&
                 it.checkpointId == identity.checkpointId
         }
+        // A missing or mismatched durable record must not rewind an already-active
+        // same-transaction timer. begin() preserves it and replaces only a different run.
+        if (saved == null) return begin(identity)
         active?.cancelPending()
         active = null
-        if (saved == null) return begin(identity)
 
         val restored = ActiveSchedule(identity.copy(unknownReason = saved.recoveryReason))
         restored.observationCount = saved.observationCount
