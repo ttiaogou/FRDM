@@ -8,6 +8,194 @@ import verify_boundaries as guard  # noqa: E402
 
 
 class ArchitectureVerifierUnitTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Read the actual P1 production graph, not hand-written fragments that could miss
+        # renamed sources or detached verifier calls.
+        root = Path(__file__).resolve().parents[2]
+        cls.recovery_code = {
+            source.relative_to(root).as_posix(): guard.mask_kotlin_non_code(
+                source.read_text(encoding="utf-8")
+            )
+            for source in guard.kotlin_sources(root)
+        }
+
+    def test_automatic_recovery_hard_guards_accept_current_production_graph(self):
+        self.assertEqual(
+            guard.automatic_recovery_hard_boundary_violations(self.recovery_code), []
+        )
+
+    def test_automatic_recovery_hard_guards_reject_old_handoff_interfaces_and_files(self):
+        runtime = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+        for token in (
+            "allowManualResume",
+            "cancelManualTouchResume()",
+            "scheduleManualTouchResume()",
+            "manualRecoveryLock",
+            "recoveryRetryExhausted",
+        ):
+            with self.subTest(symbol=token):
+                code = dict(self.recovery_code)
+                code[runtime] += "\nval reintroduced = " + token + "\n"
+                self.assertTrue(any(
+                    "Legacy manual recovery is forbidden" in issue
+                    for issue in guard.automatic_recovery_hard_boundary_violations(code)
+                ))
+
+        code = dict(self.recovery_code)
+        code["core/src/main/kotlin/com/freedom/core/runtime/TieredManualHandoffQuietPeriod.kt"] = (
+            "class TieredManualHandoffQuietPeriod {}\n"
+        )
+        self.assertTrue(any(
+            "Legacy manual recovery is forbidden" in issue
+            for issue in guard.automatic_recovery_hard_boundary_violations(code)
+        ))
+
+        # A test fixture's history and human-readable diagnostics are not production logic.
+        code = dict(self.recovery_code)
+        code["core/src/test/kotlin/com/freedom/core/runtime/ManualHistoryTest.kt"] = (
+            "val policy = TieredManualHandoffQuietPeriod()\n"
+        )
+        code[runtime] += guard.mask_kotlin_non_code(
+            '\n// allowManualResume is historical\nval description = "scheduleManualTouchResume()"\n'
+        )
+        self.assertEqual(
+            guard.automatic_recovery_hard_boundary_violations(code), []
+        )
+
+    def test_automatic_recovery_hard_guards_reject_regressed_backoff_and_terminal_retry(self):
+        scheduler = "business/src/main/kotlin/com/freedom/features/recovery/RecoveryScheduler.kt"
+        src = self.recovery_code[scheduler]
+        mutations = (
+            ("30_000L)", "60_000L)", "bounded non-terminal backoff"),
+            ("current.callbackToken != token", "current.callbackToken == token",
+             "stale callback token check"),
+            ("fun stopByUser(", "fun stopAfterManualReview(", "explicit user stop"),
+            ("scheduleNext(current, INITIAL_BACKOFF_STAGE)",
+             "scheduleNext(current, LONG_WAIT_BACKOFF_STAGE)", "fast retry after touch"),
+            ("TOUCH_ACTIVE_OBSERVATION_DELAY_MS = 30_000L",
+             "TOUCH_ACTIVE_OBSERVATION_DELAY_MS = 60_000L",
+             "touch observation must remain bounded"),
+        )
+        for old, new, expected in mutations:
+            with self.subTest(regression=expected):
+                self.assertIn(old, src)
+                code = dict(self.recovery_code)
+                code[scheduler] = src.replace(old, new, 1)
+                self.assertTrue(any(
+                    expected in issue
+                    for issue in guard.automatic_recovery_hard_boundary_violations(code)
+                ))
+
+    def test_automatic_recovery_hard_guards_require_two_fresh_snapshots_and_completion(self):
+        verifier = (
+            "business/src/main/kotlin/com/freedom/features/recovery/"
+            "RecoveryCheckpointVerificationCoordinator.kt"
+        )
+        src = self.recovery_code[verifier]
+        mutations = (
+            ("stableVerificationSamples < UnifiedRecoveryTransactionStateMachine.REQUIRED_STABLE_SAMPLES",
+             "stableVerificationSamples < 1", "two stable snapshots"),
+            ("evidence.observationGeneration <= lastObservationGeneration",
+             "evidence.observationGeneration > lastObservationGeneration",
+             "stale observation generation"),
+            ("scheduler.completeRecovery(", "scheduler.stopByUser(",
+             "verified scheduler completion"),
+        )
+        for old, new, expected in mutations:
+            with self.subTest(regression=expected):
+                self.assertIn(old, src)
+                code = dict(self.recovery_code)
+                code[verifier] = src.replace(old, new, 1)
+                self.assertTrue(any(
+                    expected in issue
+                    for issue in guard.automatic_recovery_hard_boundary_violations(code)
+                ))
+
+    def test_automatic_recovery_hard_guards_require_all_three_checkpoint_routes(self):
+        browse = "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt"
+        message = "business/src/main/kotlin/com/freedom/features/aireply/MessageListCheckpointVerification.kt"
+        greetings = "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsCheckpointVerification.kt"
+        ai = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        regressions = (
+            (browse, "RecoveryCheckpointVerificationCoordinator(", "LocalVerifier(",
+             "shared browse verifier"),
+            (message, "PrivateMessagesRecoveryCheckpointAdapter()", "LocalCheckpointParser()",
+             "message checkpoint adapter"),
+            (message, "requireNotNull(verifier).observe(", "requireNotNull(verifier).skipObserve(",
+             "fresh message evidence"),
+            (greetings, "RecoveryCheckpointVerificationCoordinator(", "LocalVerifier(",
+             "shared greetings verifier"),
+            (greetings, "active.completeResume(", "active.forceResume(",
+             "greetings resume completion"),
+            (ai, "receivedGreetingsTaskFlow.synchronizeRecoveryConfirmation(",
+             "receivedGreetingsTaskFlow.trustLastSnapshot(",
+             "greetings adapter confirmation"),
+        )
+        for path, old, new, expected in regressions:
+            with self.subTest(path=path, regression=expected):
+                self.assertIn(old, self.recovery_code[path])
+                code = dict(self.recovery_code)
+                code[path] = code[path].replace(old, new, 1)
+                self.assertTrue(any(
+                    expected in issue
+                    for issue in guard.automatic_recovery_hard_boundary_violations(code)
+                ))
+
+        code = dict(self.recovery_code)
+        del code[greetings]
+        self.assertTrue(any(
+            "Shared checkpoint route source is missing" in issue and greetings in issue
+            for issue in guard.automatic_recovery_hard_boundary_violations(code)
+        ))
+
+    def test_automatic_recovery_hard_guards_require_checkpoint_repositories_and_identity(self):
+        composition = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        scheduler = "business/src/main/kotlin/com/freedom/features/recovery/RecoveryScheduler.kt"
+        verifier = (
+            "business/src/main/kotlin/com/freedom/features/recovery/"
+            "RecoveryCheckpointVerificationCoordinator.kt"
+        )
+        regressions = (
+            (composition,
+             "receivedGreetingsCheckpointRepository = root.sayHiTraversalCheckpointRepository",
+             "receivedGreetingsCheckpointRepository = null",
+             "greetings checkpoint repository injection"),
+            (scheduler, "identity.runGeneration == other.runGeneration",
+             "identity.runGeneration != other.runGeneration", "run generation identity"),
+            (scheduler, "identity.checkpointId == other.checkpointId",
+             "identity.checkpointId != other.checkpointId", "checkpoint identity"),
+            (verifier, "evidence.pageFingerprint == checkpoint.pageFingerprint",
+             "evidence.pageFingerprint != checkpoint.pageFingerprint",
+             "page fingerprint evidence"),
+            (verifier, "evidence.runGeneration == checkpoint.runGeneration",
+             "evidence.runGeneration != checkpoint.runGeneration",
+             "run generation evidence"),
+        )
+        for path, old, new, expected in regressions:
+            with self.subTest(path=path, regression=expected):
+                self.assertIn(old, self.recovery_code[path])
+                code = dict(self.recovery_code)
+                code[path] = code[path].replace(old, new, 1)
+                self.assertTrue(any(
+                    expected in issue
+                    for issue in guard.automatic_recovery_hard_boundary_violations(code)
+                ))
+
+    def test_automatic_recovery_hard_guards_require_both_ai_resume_proofs(self):
+        ai = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        src = self.recovery_code[ai]
+        self.assertEqual(src.count("recoveryContext.acknowledgeVerifiedCheckpoint("), 2)
+        code = dict(self.recovery_code)
+        code[ai] = src.replace(
+            "recoveryContext.acknowledgeVerifiedCheckpoint(",
+            "recoveryContext.acceptUncheckedCheckpoint(", 1
+        )
+        self.assertTrue(any(
+            "must both acknowledge shared proof" in issue
+            for issue in guard.automatic_recovery_hard_boundary_violations(code)
+        ))
+
     def test_final_boundaries_reject_platform_and_terminal_unknown_bypasses(self):
         code = {
             "business/src/main/kotlin/com/freedom/features/bad/BadFeature.kt":

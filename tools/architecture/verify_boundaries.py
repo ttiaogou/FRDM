@@ -568,6 +568,10 @@ def inspect_project(root: Path) -> list[str]:
     issues.extend(unified_accessibility_entry_violations(code_by_path))
     issues.extend(checkpoint_recovery_boundary_violations(code_by_path))
 
+    # 13) Stage 4-C: removed manual handoff must stay removed; all three checkpoint
+    # routes must keep the common verifier and a bounded, non-terminal scheduler.
+    issues.extend(automatic_recovery_hard_boundary_violations(code_by_path))
+
     return issues
 
 
@@ -736,6 +740,150 @@ def recovery_transaction_boundary_violations(code_by_path: dict[str, str]) -> li
     return issues
 
 
+def automatic_recovery_hard_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
+    """Prevent legacy manual recovery and regression of the three shared checkpoint gates.
+
+    inspect_project passes Kotlin with comments/literals masked; this is a source-level
+    contract, not a substitute for the behavioral recovery/gesture tests or Kotlin CI.
+    """
+    issues: list[str] = []
+
+    legacy_files = {
+        "TieredManualHandoffQuietPeriod.kt",
+        "AccountBrowseManualHandoffCoordinator.kt",
+    }
+    legacy_symbols = re.compile(
+        r"\b(?:TieredManualHandoffQuietPeriod|AccountBrowseManualHandoffCoordinator|"
+        r"allowManualResume|cancelManualTouchResume|scheduleManualTouchResume|"
+        r"manualRecoveryLock|manualHandoffLock|manualResumeRequired|"
+        r"manualRecoveryRequired|recoveryRetryExhausted)\b"
+    )
+    for rel, code in sorted(code_by_path.items()):
+        if "/src/main/" not in rel or not rel.endswith(".kt"):
+            continue
+        if Path(rel).name in legacy_files or legacy_symbols.search(code):
+            issues.append(f"Legacy manual recovery is forbidden in production: {rel}")
+
+    scheduler_rel = "business/src/main/kotlin/com/freedom/features/recovery/RecoveryScheduler.kt"
+    scheduler = code_by_path.get(scheduler_rel)
+    if scheduler is None:
+        issues.append(f"Shared recovery scheduler source is missing: {scheduler_rel}")
+    else:
+        backoff = re.search(r"\bBACKOFF_DELAYS_MS\s*=\s*longArrayOf\s*\(([^)]*)\)", scheduler)
+        stages = ([int(number.replace("_", "")) for number in
+                   re.findall(r"\b(\d[\d_]*)L?\b", backoff.group(1))]
+                  if backoff else [])
+        if stages != [500, 1000, 2000, 5000, 10000, 30000]:
+            issues.append(f"Shared recovery scheduler lost the bounded non-terminal backoff: {scheduler_rel}")
+        touch_delay = re.search(
+            r"\bTOUCH_ACTIVE_OBSERVATION_DELAY_MS\s*=\s*(\d[\d_]*)L?\b", scheduler
+        )
+        if touch_delay is None or not 0 < int(touch_delay.group(1).replace("_", "")) <= 30000:
+            issues.append(f"Shared recovery touch observation must remain bounded by 30s: {scheduler_rel}")
+        scheduler_gates = {
+            "read-only observation": r"\bonReadOnlyObservation\s*\(",
+            "fresh recovery plan": r"\bfun\s+begin\s*\(",
+            "service disconnect isolation": r"\bfun\s+suspendForServiceDisconnect\s*\(",
+            "persisted plan restore": r"\bfun\s+restorePersisted\s*\(",
+            "touch start cadence": r"\bfun\s+onUserInteractionStarted\s*\(",
+            "automatic touch end cadence": r"\bfun\s+onUserInteractionEnded\s*\(",
+            "fast retry after touch": r"scheduleNext\s*\(\s*current\s*,\s*INITIAL_BACKOFF_STAGE\s*\)",
+            "stale callback token check": r"current\.callbackToken\s*!=\s*token",
+            "run generation identity": r"identity\.runGeneration\s*==\s*other\.runGeneration",
+            "checkpoint identity": r"identity\.checkpointId\s*==\s*other\.checkpointId",
+            "stale observation acceptance": r"other\.observationGeneration\s*>=\s*identity\.observationGeneration",
+            "explicit user stop": r"\bfun\s+stopByUser\s*\(",
+            "verified completion": r"\bfun\s+completeRecovery\s*\(",
+        }
+        for label, pattern in scheduler_gates.items():
+            if not re.search(pattern, scheduler):
+                issues.append(f"Shared recovery scheduler lost {label}: {scheduler_rel}")
+
+    common_verifier_rel = (
+        "business/src/main/kotlin/com/freedom/features/recovery/"
+        "RecoveryCheckpointVerificationCoordinator.kt"
+    )
+    common_verifier = code_by_path.get(common_verifier_rel)
+    if common_verifier is None:
+        issues.append(f"Shared checkpoint verifier source is missing: {common_verifier_rel}")
+    else:
+        common_requirements = {
+            "two stable snapshots": r"stableVerificationSamples\s*<\s*UnifiedRecoveryTransactionStateMachine\.REQUIRED_STABLE_SAMPLES",
+            "stale observation generation": r"observationGeneration\s*<=\s*lastObservationGeneration",
+            "fresh evidence matching": r"\bevidenceMatches\s*\(",
+            "target package evidence": r"evidence\.packageName\s*==\s*checkpoint\.targetPackage",
+            "page fingerprint evidence": r"evidence\.pageFingerprint\s*==\s*checkpoint\.pageFingerprint",
+            "run generation evidence": r"evidence\.runGeneration\s*==\s*checkpoint\.runGeneration",
+            "resume proof": r"RecoveryCheckpointVerificationResult\.ResumeReady\s*\(",
+            "explicit completed resume": r"\bfun\s+completeResume\s*\(",
+            "verified scheduler completion": r"scheduler\.completeRecovery\s*\(",
+        }
+        for label, pattern in common_requirements.items():
+            if not re.search(pattern, common_verifier):
+                issues.append(f"Shared checkpoint verifier lost {label}: {common_verifier_rel}")
+
+    # Keep the existing page fingerprints, business checkpoints and ownership checks
+    # in their respective owners; require that every restored branch goes through the
+    # common verifier rather than regressing to the old local-only stable-sample gate.
+    routes = {
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt": {
+            "browse checkpoint adapter": r"AccountBrowseRecoveryCheckpointAdapter\s*\(",
+            "browse checkpoint mapping": r"checkpointAdapter\.adapt\s*\(",
+            "browse checkpoint verification": r"dynamicPageRecovery\.observeRestoredCheckpoint\s*\(",
+        },
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": {
+            "shared browse verifier": r"RecoveryCheckpointVerificationCoordinator\s*\(",
+            "read-only browse scheduler": r"scheduler\s*=\s*recoveryScheduler",
+            "fresh browse evidence": r"requireNotNull\s*\(\s*checkpointVerifier\s*\)\.observe\s*\(",
+            "browse resume proof": r"RecoveryCheckpointVerificationResult\.ResumeReady",
+            "browse resume completion": r"requireNotNull\s*\(\s*checkpointVerifier\s*\)\.completeResume\s*\(",
+        },
+        "business/src/main/kotlin/com/freedom/features/aireply/MessageListCheckpointVerification.kt": {
+            "message checkpoint adapter": r"PrivateMessagesRecoveryCheckpointAdapter\s*\(",
+            "message checkpoint mapping": r"adapter\.adapt\s*\(",
+            "shared message verifier": r"RecoveryCheckpointVerificationCoordinator\s*\(",
+            "read-only message scheduler": r"RecoveryScheduler\s*\(",
+            "fresh message evidence": r"requireNotNull\s*\(\s*verifier\s*\)\.observe\s*\(",
+            "message resume completion": r"current\.completeResume\s*\(",
+        },
+        "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsCheckpointVerification.kt": {
+            "greetings checkpoint adapter": r"ReceivedGreetingsRecoveryCheckpointAdapter\s*\(",
+            "greetings checkpoint mapping": r"adapter\.adapt\s*\(",
+            "shared greetings verifier": r"RecoveryCheckpointVerificationCoordinator\s*\(",
+            "read-only greetings scheduler": r"RecoveryScheduler\s*\(",
+            "fresh greetings evidence": r"requireNotNull\s*\(\s*verifier\s*\)\.observe\s*\(",
+            "greetings resume completion": r"active\.completeResume\s*\(",
+        },
+        "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": {
+            "message checkpoint repository injection": r"privateMessagesCheckpointRepository\s*=\s*root\.privateMessagesCheckpointRepository",
+            "greetings checkpoint repository injection": r"receivedGreetingsCheckpointRepository\s*=\s*root\.sayHiTraversalCheckpointRepository",
+        },
+        "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt": {
+            "message verifier invocation": r"messageListCheckpointVerifier\.observe\s*\(",
+            "message verified completion": r"messageListCheckpointVerifier\.completeResume\s*\(",
+            "greetings verifier invocation": r"receivedGreetingsCheckpointVerifier\.observe\s*\(",
+            "greetings verified completion": r"receivedGreetingsCheckpointVerifier\.completeResume\s*\(",
+            "greetings adapter confirmation": r"receivedGreetingsTaskFlow\.synchronizeRecoveryConfirmation\s*\(",
+            "task ownership gate": r"claimTaskOwnership\s*\(",
+        },
+    }
+    for rel, requirements in routes.items():
+        code = code_by_path.get(rel)
+        if code is None:
+            issues.append(f"Shared checkpoint route source is missing: {rel}")
+            continue
+        for label, pattern in requirements.items():
+            if not re.search(pattern, code):
+                issues.append(f"Shared checkpoint route lost {label}: {rel}")
+
+    ai_rel = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+    ai_code = code_by_path.get(ai_rel, "")
+    if ai_code and len(re.findall(r"recoveryContext\.acknowledgeVerifiedCheckpoint\s*\(", ai_code)) < 2:
+        issues.append(f"AI message and greetings recovery must both acknowledge shared proof: {ai_rel}")
+
+    return issues
+
+
 def architecture_advisories(root: Path) -> list[str]:
     """Report high-LOC production classes as review signals, never automatic violations."""
     root = root.resolve()
@@ -775,6 +923,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - GestureCommand/GestureSpec construction: compiler-owned")
     print(" - Android dispatch: confined to AndroidGestureDispatcher")
     print(" - Recovery transaction: adapters cannot bypass it; state machine cannot depend on business page fields")
+    print(" - Automatic recovery: legacy manual handoff forbidden; three checkpoint routes use shared verification")
+    print(" - Recovery scheduler: bounded non-terminal backoff, touch reset, stale-callback and user-stop gates")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")
     print(" - Host/plugin AIDL contract: identical; host does not package ONNX Runtime or OpenCV")
     print(" - AGENTS source integrity and Feature/Adapter/Data/UI ownership boundaries: valid")
