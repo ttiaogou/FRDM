@@ -33,6 +33,7 @@ class RecoveryCheckpointVerificationCoordinator(
                 when (source) {
                     RecoveryCheckpointRestoreSource.SERVICE_RECONNECT -> RecoveryTransactionEvent.Source.SERVICE_RECONNECT
                     RecoveryCheckpointRestoreSource.PROCESS_RESTART -> RecoveryTransactionEvent.Source.PROCESS_RESTART
+                    RecoveryCheckpointRestoreSource.PAGE_OBSERVATION -> RecoveryTransactionEvent.Source.PAGE_OBSERVATION
                 }
             ),
             identity

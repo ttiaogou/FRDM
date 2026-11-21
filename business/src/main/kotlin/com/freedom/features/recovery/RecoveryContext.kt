@@ -158,6 +158,22 @@ class RecoveryContext {
         return fingerprintVerified
     }
 
+    /**
+     * Records the shared checkpoint verifier's actual resume proof instead of running a second
+     * stable-sample decision. UI ownership is still checked and transferred by the task owner.
+     */
+    fun acknowledgeVerifiedCheckpoint(
+        routeId: String,
+        proof: RecoveryCheckpointVerificationResult.ResumeReady
+    ) {
+        check(pending) { "cannot accept recovery proof without a pending transaction" }
+        require(routeId.isNotBlank()) { "routeId must not be blank" }
+        require(proof.executionPhase.isNotBlank()) { "verified execution phase must not be blank" }
+        targetRouteId = routeId
+        verificationSamples = REQUIRED_STABLE_SAMPLES
+        fingerprintVerified = true
+    }
+
     fun markUiOwnershipTransferred() {
         check(fingerprintVerified) { "UI ownership cannot transfer before fingerprint verification" }
         uiOwnershipTransferred = true

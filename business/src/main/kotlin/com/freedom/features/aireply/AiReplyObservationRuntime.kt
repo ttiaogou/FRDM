@@ -40,7 +40,10 @@ import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
+import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
+import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
 import com.freedom.features.recovery.RecoveryTransactionEvent
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 import com.freedom.features.recovery.RecoveryContext
@@ -325,6 +328,10 @@ class AiReplyObservationRuntime(
     )
     private val recoveryContext = RecoveryContext()
     private val privateMessagesTraversalTaskExecutor = PrivateMessagesTraversalTaskExecutor()
+    // 初始化顺序：这些字段必须先于 init 加载进程检查点。
+    private var messageListCheckpointRestored = false
+    private var messageListCheckpointForUnified: PrivateMessagesTraversalCheckpoint? = null
+    private var messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PROCESS_RESTART
     private val messageListRecoveryRoute: PageRecoveryRouteAdapter by lazy(LazyThreadSafetyMode.NONE) {
         MessageListRecoveryRouteAdapter {
             privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
@@ -347,6 +354,8 @@ class AiReplyObservationRuntime(
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             messageListCheckpointRestored = true
+            messageListCheckpointForUnified = checkpoint
+            messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PROCESS_RESTART
             recoveryContext.request(
                 PRIVATE_MESSAGES_TASK_ID,
                 "PROCESS_RESTART_CHECKPOINT",
@@ -465,6 +474,20 @@ class AiReplyObservationRuntime(
         inspectPage = { chatPagePort.inspectChatPage() },
         onLog = onLog
     )
+    private val messageListCheckpointVerifier = MessageListCheckpointVerification(
+        scheduler = scheduler,
+        targetPackage = targetPackage,
+        currentRunGeneration = currentRunGeneration,
+        onReadOnlyObservation = {
+            if (isAiReplyActive() && sessionRunStarted && !userInteractionActive &&
+                recoveryContext.pending && recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+                messageListCheckpointForUnified != null
+            ) {
+                scheduleFullInspectionAfter(0L)
+            }
+        },
+        onLog = onLog
+    )
 
     /** Every raw page read must declare its observation entry purpose. */
     private fun readPageSnapshot(purpose: AiReplyPageReadPurpose): ChatPageSnapshot? =
@@ -480,8 +503,6 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsRecoveryRetryAttempt = 0
     private var messageRecoveryRetryAttempt = 0
     private var messageListRecoveryVerificationPending = false
-    /** True while the next verified message-list snapshot must continue a restored checkpoint. */
-    private var messageListCheckpointRestored = false
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -681,6 +702,24 @@ class AiReplyObservationRuntime(
         handleInspectionSnapshot(observationDecision.copy(snapshot = recovered))
     }
 
+    /** Uses the original checkpoint re-anchor algorithm; never reuses saved row coordinates. */
+    private fun reanchorRestoredMessageList(inspection: ChatPageSnapshot) {
+        if (!messageListCheckpointRestored) return
+        val compatible = privateMessagesTraversalTaskExecutor.isRestoredViewportCompatible(inspection)
+        if (!compatible) {
+            val reanchor = privateMessagesTraversalTaskExecutor.reanchorRestoredCheckpoint(inspection)
+            onLog(
+                "消息列表检查点恢复[REANCHOR]：当前视口与保存视口不同；" +
+                    "status=${reanchor.status.name}；" +
+                    "已重新读取当前位置，不复用旧坐标；" +
+                    "目标会话=${if (reanchor.matchedCandidate != null) "已定位" else "未定位，继续按原方向扫描"}"
+            )
+        } else {
+            onLog("消息列表检查点恢复[CONTINUE]：页面已验证；保留原检查点和遍历游标继续处理")
+        }
+        messageListCheckpointRestored = false
+    }
+
     private fun recoveryStructuralKey(snapshot: ChatPageSnapshot): String = listOf(
         snapshot.packageName, snapshot.pageKind.name, snapshot.scannedNodeCount,
         snapshot.messageListCount, snapshot.editableInputCount, snapshot.sendActionCount,
@@ -817,6 +856,25 @@ class AiReplyObservationRuntime(
 
         if (recoveryContext.pending) {
             val targetRoute = matchedRouteId
+            val loadedMessageCheckpoint = messageListCheckpointForUnified
+            val sharedMessageListRecovery =
+                recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+                    loadedMessageCheckpoint != null && !receivedGreetingsTaskActive
+            if (sharedMessageListRecovery &&
+                (targetRoute != messageListRecoveryRoute.routeId ||
+                    observation.status != ObservationStatus.CONFIRMED_PAGE ||
+                    recoveryContext.runGeneration != currentRunGeneration())
+            ) {
+                // An unrelated route, ambiguous page or stale run must reset shared samples.
+                messageListCheckpointVerifier.reject(observation.observationGeneration)
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("消息列表统一检查点[ROUTE_WAIT]：页面路由或运行代次不匹配；保留检查点，仅只读重检")
+                if (!messageListCheckpointVerifier.hasActiveVerification()) {
+                    scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
+                }
+                lastPageInspection = inspection
+                return
+            }
             if (targetRoute == null) {
                 onLog("统一页面恢复[ROUTE_WAIT]：当前目标应用页面尚未匹配业务指纹；继续等待")
                 scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
@@ -824,22 +882,73 @@ class AiReplyObservationRuntime(
                 return
             }
             val verificationKey = listOf(targetRoute, recoveryStructuralKey(inspection)).joinToString("|")
-            if (!recoveryContext.observeTarget(targetRoute, verificationKey)) {
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
-                onLog("统一页面恢复[RECOVERY_VERIFYING]：目标路由=$targetRoute；第${recoveryContext.verificationSamples}/2次快照尚未稳定")
-                scheduleFullInspectionAfter(350L)
-                lastPageInspection = inspection
-                return
-            }
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            val sharedProof: RecoveryCheckpointVerificationResult.ResumeReady? =
+                if (sharedMessageListRecovery) {
+                    val checkpoint = requireNotNull(loadedMessageCheckpoint)
+                    val result = runCatching {
+                        messageListCheckpointVerifier.observe(
+                            checkpoint = checkpoint,
+                            checkpointId = requireNotNull(recoveryContext.checkpointId),
+                            recoveryReason = requireNotNull(recoveryContext.reason),
+                            restoreSource = messageListCheckpointRestoreSource,
+                            snapshot = inspection,
+                            pageFingerprint = recoveryStructuralKey(inspection),
+                            routeVerified = targetRoute == messageListRecoveryRoute.routeId,
+                            observationGeneration = observation.observationGeneration
+                        )
+                    }.onFailure {
+                        onLog("消息列表统一检查点[ADAPTER_REJECTED]：原因=${it.javaClass.simpleName}；保持暂停")
+                    }.getOrNull()
+                    if (result !is RecoveryCheckpointVerificationResult.ResumeReady) {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("消息列表统一检查点[VERIFYING]：等待连续两次新鲜同路由结构快照；不执行滚动、点击或导航")
+                        if (!messageListCheckpointVerifier.hasActiveVerification()) {
+                            scheduleFullInspectionAfter(350L)
+                        }
+                        lastPageInspection = inspection
+                        return
+                    }
+                    result
+                } else {
+                    // Unrelated business routes and fixtures without checkpoint persistence
+                    // keep the existing verification and scheduling decisions unchanged.
+                    if (!recoveryContext.observeTarget(targetRoute, verificationKey)) {
+                        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
+                        onLog("统一页面恢复[RECOVERY_VERIFYING]：目标路由=$targetRoute；第${recoveryContext.verificationSamples}/2次快照尚未稳定")
+                        scheduleFullInspectionAfter(350L)
+                        lastPageInspection = inspection
+                        return
+                    }
+                    recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+                    recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+                    null
+                }
             val targetTaskId = taskIdForRecoveryRoute(targetRoute)
             if (targetTaskId == null || !claimTaskOwnership(targetTaskId, "统一页面路由双快照验证完成")) {
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("统一页面恢复[OWNERSHIP_REJECTED]：目标路由=$targetRoute；未取得UI操作权")
-                scheduleFullInspectionAfter(350L)
+                if (sharedProof != null) {
+                    messageListCheckpointVerifier.deferOwnership()
+                } else {
+                    scheduleFullInspectionAfter(350L)
+                }
                 lastPageInspection = inspection
                 return
+            }
+            if (sharedProof != null) {
+                // Re-anchor only from the new list snapshot, before acknowledging resume.
+                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                reanchorRestoredMessageList(inspection)
+                if (!messageListCheckpointVerifier.completeResume()) {
+                    sessionManagerState = SessionManagerState.PAUSED
+                    onLog("消息列表统一检查点[COMPLETE_REJECTED]：尚未完成恢复事务确认；保持暂停")
+                    messageListCheckpointVerifier.deferOwnership()
+                    lastPageInspection = inspection
+                    return
+                }
+                recoveryContext.acknowledgeVerifiedCheckpoint(targetRoute, sharedProof)
+                messageListRecoveryVerificationPending = false
+                pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
             }
             recoveryContext.markUiOwnershipTransferred()
             val sourceTaskId = recoveryContext.sourceTaskId
@@ -847,8 +956,14 @@ class AiReplyObservationRuntime(
             val uiOwnershipTransferred = recoveryContext.uiOwnershipTransferred
             recoveryContext.clear()
             pageRecoveryVerificationGate.reset()
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
-            recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+            if (sharedProof == null) {
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+            } else {
+                // The shared verifier has already acknowledged its two samples.
+                recoveryTransaction.reset()
+                messageListCheckpointForUnified = null
+            }
             onLog(
                 "统一页面恢复[RECOVERY_VERIFIED]：目标路由=$targetRoute；" +
                     "双快照=$fingerprintVerified；" +
@@ -862,21 +977,7 @@ class AiReplyObservationRuntime(
                 readVisibleMessages(inspection)
             } else if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                if (messageListCheckpointRestored) {
-                    val compatible = privateMessagesTraversalTaskExecutor.isRestoredViewportCompatible(inspection)
-                    if (!compatible) {
-                        val reanchor = privateMessagesTraversalTaskExecutor.reanchorRestoredCheckpoint(inspection)
-                        onLog(
-                            "消息列表检查点恢复[REANCHOR]：当前视口与保存视口不同；" +
-                                "status=${reanchor.status.name}；" +
-                                "已重新读取当前位置，不复用旧坐标；" +
-                                "目标会话=${if (reanchor.matchedCandidate != null) "已定位" else "未定位，继续按原方向扫描"}"
-                        )
-                    } else {
-                        onLog("消息列表检查点恢复[CONTINUE]：页面已验证；保留原检查点和遍历游标继续处理")
-                    }
-                    messageListCheckpointRestored = false
-                }
+                reanchorRestoredMessageList(inspection)
                 lastPageInspection = inspection
                 handleSessionListPage(inspection)
             } else {
@@ -1448,9 +1549,11 @@ class AiReplyObservationRuntime(
         lastPageInspection = null
         lastConfirmedChatListInspection = null
         recoveryTransaction.reset()
+        messageListCheckpointVerifier.reset()
         if (!recoveryContext.pending) recoveryContext.clear()
         messageListRecoveryVerificationPending = false
         messageListCheckpointRestored = false
+        messageListCheckpointForUnified = null
         messageRecoveryRetryAttempt = 0
         transientEmptySnapshotRecovery.reset()
         pageRecoveryVerificationGate.reset()
@@ -1564,6 +1667,11 @@ class AiReplyObservationRuntime(
         if (recoveryContext.pending) return false
         val route = recoveryRouteForTask(taskId) ?: return false
         route.saveCheckpoint()
+        if (taskId == PRIVATE_MESSAGES_TASK_ID) {
+            messageListCheckpointVerifier.reset()
+            messageListCheckpointForUnified = privateMessagesCheckpointRepository?.load()
+            messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION
+        }
         activateRecoveryIdentity(taskId, reason, "$taskId:$reason")
         recoveryContext.markCheckpointSaved()
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
@@ -1695,6 +1803,8 @@ class AiReplyObservationRuntime(
         cancelSessionSafeViewportRetry(resetCount = true)
         startupReadinessCoordinator.cancelRecovery()
         recoveryContext.clear()
+        messageListCheckpointVerifier.reset()
+        messageListCheckpointForUnified = null
         val directory = runCatching {
             chatSessionManagementPort.beginSessionManagement()
         }.getOrNull()
@@ -1752,6 +1862,8 @@ class AiReplyObservationRuntime(
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             messageListCheckpointRestored = true
+            messageListCheckpointForUnified = checkpoint
+            messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.SERVICE_RECONNECT
             if (!recoveryContext.pending) {
                 activateRecoveryIdentity(
                     PRIVATE_MESSAGES_TASK_ID,
@@ -1825,7 +1937,10 @@ class AiReplyObservationRuntime(
     fun reloadPrivateMessagesCheckpointAfterServiceReconnect(): Boolean {
         val checkpoint = privateMessagesCheckpointRepository?.load() ?: return false
         privateMessagesTraversalTaskExecutor.restore(checkpoint)
+        messageListCheckpointVerifier.reset()
         messageListCheckpointRestored = true
+        messageListCheckpointForUnified = checkpoint
+        messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.SERVICE_RECONNECT
         if (!recoveryContext.pending) {
             activateRecoveryIdentity(
                 PRIVATE_MESSAGES_TASK_ID,

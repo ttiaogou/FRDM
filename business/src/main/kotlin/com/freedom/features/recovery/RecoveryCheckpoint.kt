@@ -45,7 +45,9 @@ interface RecoveryCheckpointRepository {
 
 enum class RecoveryCheckpointRestoreSource {
     SERVICE_RECONNECT,
-    PROCESS_RESTART
+    PROCESS_RESTART,
+    /** An active task saved a checkpoint after a fresh page-route change or UNKNOWN. */
+    PAGE_OBSERVATION
 }
 
 /** Fresh, value-only evidence captured after recovery has begun. */

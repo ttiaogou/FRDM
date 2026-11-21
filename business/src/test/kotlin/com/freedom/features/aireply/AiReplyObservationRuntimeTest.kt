@@ -49,6 +49,8 @@ import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatListUnreadDiagnostics
 import com.freedom.features.aireply.ports.ChatRegionSnapshot
 import com.freedom.features.aireply.ports.SessionListNavigationTarget
+import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
+import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -79,6 +81,87 @@ private interface TestGestureApi : GestureApi {
 private interface TestGestureApiWithCancellation : TestGestureApi
 
 class AiReplyObservationRuntimeTest {
+    @Test
+    fun restoredMessageListWaitsForSharedCheckpointVerificationBeforeExistingTraversal() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "MainActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480)
+            )
+        }
+        val saved = PrivateMessagesTraversalCheckpoint(
+            attemptedSessionKeys = setOf("already-attempted-hash"),
+            lockedUnreadSessionKeys = emptySet(),
+            ambiguousSessionIdentityKeys = emptySet(),
+            lastStableVisibleKeys = emptyList(),
+            phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM.name,
+            atTop = false,
+            initialInboxPositionCheckCompleted = false,
+            initialInboxTopPositioningCompleted = false,
+            initialUnreadGateSwipeCompleted = false,
+            lockedUnreadSetFinalized = false,
+            normalInboxHadUnread = false,
+            normalInboxUnreadStateUnknown = false
+        )
+        val repository = object : PrivateMessagesTraversalCheckpointRepository {
+            var current: PrivateMessagesTraversalCheckpoint? = saved
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = current
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { current = checkpoint }
+            override fun clear() { current = null }
+        }
+        var gestures = 0
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    gestures++
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = ownership,
+            currentRunGeneration = { 7L },
+            privateMessagesCheckpointRepository = repository
+        )
+        runtime.scheduleInitialObservation()
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+
+        scheduler.runNextWithDelay(0L)
+        assertTrue(logs.any { it.contains("消息列表统一检查点[VERIFYING]") })
+        assertFalse(logs.any { it.contains("消息列表检查点恢复[CONTINUE]") })
+        assertEquals(0, gestures)
+
+        scheduler.runNextWithDelay(500L)
+        scheduler.runNextWithDelay(0L)
+        assertTrue(logs.any { it.contains("消息列表检查点恢复[CONTINUE]") })
+        assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+    }
+
     @Test
     fun manuallyOpenedReceivedGreetingsListTakesPriorityOverMessageTabRecovery() {
         val scheduler = FakeScheduler()
