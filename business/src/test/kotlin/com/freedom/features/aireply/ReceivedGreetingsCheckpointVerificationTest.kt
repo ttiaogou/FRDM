@@ -158,7 +158,8 @@ class ReceivedGreetingsCheckpointVerificationTest {
             assertEquals(9L, stored?.observationCount)
             assertEquals(3, stored?.backoffStage)
             assertEquals(8L, stored?.runGeneration)
-            assertEquals(listOf(5_000L), scheduler.pendingDelays())
+            // Rebinding preserves the stage but its remaining delay decreases with wall time.
+            assertTrue(scheduler.pendingDelays().single() in 0L..5_000L)
             verifier.reset()
         }
         val changedCheckpoint = checkpoint.copy(savedAtEpochMs = checkpoint.savedAtEpochMs + 1L)
