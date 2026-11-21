@@ -543,7 +543,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             onRequestScreenOff = requestScreenOff,
             pageObservationCoordinator = pageObservationCoordinator,
             accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository,
-            recoveryScheduleRepository = root.recoveryScheduleRepository
+            recoveryScheduleRepository = root.recoveryScheduleRepository,
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() }
         )
     }
     val accountBrowseRuntimeAdapter by lazy(LazyThreadSafetyMode.NONE) {

@@ -60,7 +60,8 @@ internal class AndroidAccountBrowseWorkflow(
     private val onRequestScreenOff: () -> Boolean = { false },
     private val pageObservationCoordinator: PageObservationCoordinator? = null,
     private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null,
-    private val recoveryScheduleRepository: RecoveryScheduleRepository? = null
+    private val recoveryScheduleRepository: RecoveryScheduleRepository? = null,
+    private val currentRunGeneration: () -> Long = { 0L }
 ) {
     private val displayMetrics get() = accessibilityGateway.displayMetrics()
     private val navigationExecutor = AccountBrowseNavigationExecutor(gesturePolicy) { displayMetrics }
@@ -118,6 +119,18 @@ internal class AndroidAccountBrowseWorkflow(
         }
     }
 
+    internal fun suspendRecoveryForServiceDisconnect() =
+        accountBrowseRuntime.suspendRecoveryOnServiceDisconnect()
+
+    internal fun restoreRecoveryAfterServiceReconnect(): Boolean {
+        if (!isMonitoringRunning() || !isBrowseModeActive()) return false
+        val restored = accountBrowseRuntime.restoreAfterServiceReconnect()
+        if (restored) {
+            addLog("自动浏览服务重连：恢复只读观察调度，等待新页面双快照验证，不重放旧手势")
+        }
+        return restored
+    }
+
     private fun matchDynamicFeedRoute(page: BrowsePageEvidence): Boolean =
         observationCoordinator.matchFingerprint(
             PageFingerprint(
@@ -164,6 +177,7 @@ internal class AndroidAccountBrowseWorkflow(
             targetPackage = targetPackage,
             checkpointRepository = accountBrowseCheckpointRepository,
             recoveryScheduleRepository = recoveryScheduleRepository,
+            currentRunGeneration = currentRunGeneration,
             onResetSession = ::resetAccountBrowseSession,
             onReadOnlyRecoveryObservation = ::observeAccountBrowseRecoveryReadOnly,
             actions = AccountBrowseRuntime.Actions(

@@ -95,6 +95,19 @@ class AccountBrowseRuntime(
         }
     }
 
+    /** Restore only when the current business run still has a valid checkpoint. */
+    fun restoreAfterServiceReconnect(): Boolean {
+        val checkpoint = checkpointRepository?.load() ?: return false
+        restoredCheckpointPhase = runCatching { AccountBrowsePhase.valueOf(checkpoint.phase) }
+            .getOrDefault(AccountBrowsePhase.PAUSED)
+        // Old execution state and gestures must never be resumed before fresh page verification.
+        stateMachine.transitionTo(AccountBrowsePhase.PAUSED)
+        dynamicPageRecovery.restoreAfterServiceReconnect()
+        return true
+    }
+
+    fun suspendRecoveryOnServiceDisconnect() = dynamicPageRecovery.suspendForServiceDisconnect()
+
     fun hasPendingCheckpointVerification(): Boolean = restoredCheckpointPhase != null
 
     /** Moves a restored session into a read-only feed verification phase. */

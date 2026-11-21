@@ -39,6 +39,46 @@ class RecoveryScheduler(
         }.snapshot()
     }
 
+    /**
+     * Cancel the old service's timer but preserve its durable read-only observation plan.
+     * Stale callbacks cannot report observations after disconnect.
+     */
+    @Synchronized
+    fun suspendForServiceDisconnect() {
+        val current = active ?: return
+        current.cancelPending()
+        current.callbackToken++
+        onLog(current.logFields("recovery_observation_suspended"))
+    }
+
+    /**
+     * Reconstruct only a read-only observation timer after the caller verifies run intent,
+     * business route and checkpoint. Generation is process-local: the new [identity] binds
+     * callbacks to the current run, never revives an old UI lease or gesture.
+     */
+    @Synchronized
+    fun restorePersisted(identity: RecoveryEventIdentity): RecoveryScheduleSnapshot {
+        val saved = scheduleRepository?.load()?.takeIf {
+            it.taskId == identity.taskId &&
+                it.routeId == identity.routeId &&
+                it.checkpointId == identity.checkpointId
+        }
+        active?.cancelPending()
+        active = null
+        if (saved == null) return begin(identity)
+
+        val restored = ActiveSchedule(identity.copy(unknownReason = saved.recoveryReason))
+        restored.observationCount = saved.observationCount
+        restored.touchActive = saved.touchActive
+        active = restored
+        val stage = saved.backoffStage.coerceIn(INITIAL_BACKOFF_STAGE, LONG_WAIT_BACKOFF_STAGE)
+        val maxDelay = if (saved.touchActive) TOUCH_ACTIVE_OBSERVATION_DELAY_MS else BACKOFF_DELAYS_MS[stage]
+        val remaining = (saved.nextObservationAtEpochMs - nowEpochMs()).coerceIn(0L, maxDelay)
+        scheduleNext(restored, stage, remaining)
+        onLog(restored.logFields("recovery_observation_restored"))
+        return restored.snapshot()
+    }
+
     /** Returns the in-memory plan; the optional repository persists its latest value. */
     @Synchronized
     fun currentPlan(): RecoveryScheduleSnapshot? = active?.snapshot()

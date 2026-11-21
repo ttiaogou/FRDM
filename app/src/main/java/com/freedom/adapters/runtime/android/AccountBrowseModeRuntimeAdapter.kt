@@ -33,7 +33,7 @@ internal class AccountBrowseModeRuntimeAdapter(
         }
         try {
             onReadinessStarting(mode, "AccountBrowse 已启动；等待目标应用正式就绪")
-            workflow().startAccountBrowseIfNeeded()
+            workflow().startIfIdle()
         } catch (error: Throwable) {
             releaseTaskOwnership("自动浏览启动失败")
             throw error
@@ -55,7 +55,8 @@ internal class AccountBrowseModeRuntimeAdapter(
             if (!ensureTaskOwnership("无障碍服务重连")) return
             awaitingServiceReconnect = false
             onReadinessStarting(mode, "AccountBrowse 服务重连；重新等待目标应用正式就绪")
-            workflow().startAccountBrowseIfNeeded()
+            workflow().restoreRecoveryAfterServiceReconnect()
+            workflow().startIfIdle()
         }
     }
 
@@ -64,6 +65,7 @@ internal class AccountBrowseModeRuntimeAdapter(
         awaitingServiceReconnect = true
         workflow().cancelScheduledStep()
         workflow().cancelPageObservation()
+        workflow().suspendRecoveryForServiceDisconnect()
     }
 
     override fun onExternalRefresh() {
@@ -114,6 +116,7 @@ internal class AccountBrowseModeRuntimeAdapter(
         onReadinessInvalidated("无障碍服务中断；目标应用就绪状态失效：$reason")
         awaitingServiceReconnect = true
         workflow().pauseAccountBrowse(reason)
+        workflow().suspendRecoveryForServiceDisconnect()
     }
 
     override fun onServiceDestroyed() {

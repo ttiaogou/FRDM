@@ -140,6 +140,74 @@ class RecoverySchedulerTest {
         assertEquals(2, repository.clearCount)
     }
 
+    @Test
+    fun restoresSavedBackoffWithNewRunGenerationOnlyForMatchingRouteAndCheckpoint() {
+        val scheduler = FakeScheduler()
+        val repository = FakeRecoveryScheduleRepository()
+        val initial = identity()
+        repository.save(
+            RecoveryScheduleSnapshot(
+                taskId = initial.taskId,
+                routeId = initial.routeId,
+                runGeneration = 3L,
+                recoveryReason = "UNKNOWN_PAGE",
+                checkpointId = initial.checkpointId,
+                observationCount = 12L,
+                nextObservationAtEpochMs = 2_500L,
+                backoffStage = 4,
+                touchActive = false
+            )
+        )
+        val restored = RecoveryScheduler(scheduler, { 1_000L }, {}, scheduleRepository = repository)
+            .restorePersisted(initial)
+        assertEquals(7L, restored.runGeneration)
+        assertEquals(12L, restored.observationCount)
+        assertEquals(4, restored.backoffStage)
+        assertEquals(2_500L, restored.nextObservationAtEpochMs)
+        assertEquals(listOf(1_500L), scheduler.pendingDelays())
+        assertEquals(restored, repository.load())
+    }
+
+    @Test
+    fun mismatchedCheckpointCannotRestoreOldBackoffOrObservationCount() {
+        val scheduler = FakeScheduler()
+        val repository = FakeRecoveryScheduleRepository()
+        val original = identity()
+        repository.save(
+            RecoveryScheduleSnapshot("TASK", "ROUTE", 7L, "OLD", "WRONG_CHECKPOINT",
+                25L, 9_999L, 5, false)
+        )
+        val restored = RecoveryScheduler(scheduler, { 1_000L }, {}, scheduleRepository = repository)
+            .restorePersisted(original)
+        assertEquals(0L, restored.observationCount)
+        assertEquals(0, restored.backoffStage)
+        assertEquals(original.checkpointId, restored.checkpointId)
+        assertEquals(listOf(500L), scheduler.pendingDelays())
+    }
+
+    @Test
+    fun disconnectCancelsStaleTimerAndReconnectRebindsReadOnlyObservation() {
+        val scheduler = FakeScheduler()
+        val repository = FakeRecoveryScheduleRepository()
+        val observations = mutableListOf<RecoveryScheduleSnapshot>()
+        val recovery = RecoveryScheduler(scheduler, { 1_000L }, observations::add, scheduleRepository = repository)
+        val oldIdentity = identity()
+        recovery.begin(oldIdentity)
+        recovery.suspendForServiceDisconnect()
+        assertTrue(scheduler.pendingDelays().isEmpty())
+        assertEquals(1_500L, repository.load()?.nextObservationAtEpochMs)
+        scheduler.runCancelled(500L)
+        assertTrue(observations.isEmpty())
+
+        val newIdentity = oldIdentity.copy(runGeneration = 8L)
+        val restored = recovery.restorePersisted(newIdentity)
+        assertEquals(8L, restored.runGeneration)
+        assertEquals(listOf(500L), scheduler.pendingDelays())
+        scheduler.runNext(500L)
+        assertEquals(1, observations.size)
+        assertEquals(8L, observations.single().runGeneration)
+    }
+
     private class FakeRecoveryScheduleRepository : RecoveryScheduleRepository {
         private var current: RecoveryScheduleSnapshot? = null
         var saveCount: Int = 0
@@ -176,6 +244,12 @@ class RecoverySchedulerTest {
         }
 
         fun pendingDelays(): List<Long> = entries.filterNot { it.cancelled }.map { it.delayMs }
+
+        fun runCancelled(delayMs: Long) {
+            val entry = entries.firstOrNull { it.cancelled && it.delayMs == delayMs }
+                ?: error("No cancelled task with delay=$delayMs")
+            entry.task()
+        }
 
         fun runNext(delayMs: Long) {
             val entry = entries.firstOrNull { !it.cancelled && it.delayMs == delayMs }

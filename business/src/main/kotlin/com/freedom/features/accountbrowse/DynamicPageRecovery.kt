@@ -40,17 +40,28 @@ class DynamicPageRecovery(
     )
 
     fun restoreFromCheckpoint(savedAtEpochMs: Long) {
-        dispatcher.activate(identity("CHECKPOINT_LOADED"))
-        dispatcher.dispatch(
-            RecoveryTransactionEvent.CheckpointLoaded(
-                if (savedAtEpochMs > 0L) {
-                    RecoveryTransactionEvent.Source.PROCESS_RESTART
-                } else {
-                    RecoveryTransactionEvent.Source.SERVICE_RECONNECT
-                }
-            )
+        restoreObservationPlan(
+            if (savedAtEpochMs > 0L) {
+                RecoveryTransactionEvent.Source.PROCESS_RESTART
+            } else {
+                RecoveryTransactionEvent.Source.SERVICE_RECONNECT
+            }
         )
-        recoveryScheduler.begin(identity("CHECKPOINT_LOADED"))
+    }
+
+    fun suspendForServiceDisconnect() = recoveryScheduler.suspendForServiceDisconnect()
+
+    fun restoreAfterServiceReconnect() =
+        restoreObservationPlan(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)
+
+    private fun restoreObservationPlan(source: RecoveryTransactionEvent.Source) {
+        // Verification samples and event generation from the old service are no longer valid.
+        dispatcher.reset()
+        val eventIdentity = identity("CHECKPOINT_LOADED")
+        dispatcher.activate(eventIdentity)
+        dispatcher.dispatch(RecoveryTransactionEvent.CheckpointLoaded(source), eventIdentity)
+        val plan = recoveryScheduler.restorePersisted(eventIdentity)
+        onLog(plan.logFields("recovery_plan_rebound_" + source.name))
     }
 
     fun observePage(page: BrowsePageEvidence): RecoveryTransactionState {
