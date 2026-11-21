@@ -8,6 +8,8 @@ resolution; those are exercised by the Android build job.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -52,6 +54,91 @@ _KOTLIN_NON_CODE = re.compile(
     r'"""[\s\S]*?"""|/\*[\s\S]*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
     re.MULTILINE,
 )
+
+
+
+def agents_integrity_violations(root: Path) -> list[str]:
+    """Verify the indexed AGENTS archive, its manifest, and the active ordered fragments."""
+    agent_dir = root / "docs/agent"
+    manifest_path = agent_dir / "INTEGRITY.json"
+    if not manifest_path.is_file():
+        return ["AGENTS integrity: docs/agent/INTEGRITY.json is missing"]
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        return [f"AGENTS integrity: invalid manifest: {error}"]
+    if not isinstance(manifest, dict):
+        return ["AGENTS integrity: manifest must be a JSON object"]
+
+    originals = manifest.get("originals")
+    parts = manifest.get("parts")
+    active = manifest.get("active_manual")
+    if (not isinstance(originals, list) or not isinstance(parts, list)
+            or not isinstance(active, dict)
+            or not all(isinstance(entry, dict) for entry in originals + parts)):
+        return ["AGENTS integrity: manifest originals, parts, or active_manual is invalid"]
+
+    expected_originals = [
+        "docs/agent/source/Freedom_按需执行索引.original.md",
+        "docs/agent/source/Android_无障碍落地开发手册.original.md",
+    ]
+    expected_active = "docs/agent/source/Android_无障碍落地开发手册.current.md"
+    issues: list[str] = []
+    if [entry.get("path") for entry in originals] != expected_originals:
+        issues.append("AGENTS integrity: expected exactly the two protected original archives")
+    if active.get("path") != expected_active:
+        issues.append("AGENTS integrity: active manual path differs from the approved source")
+
+    part_names = [entry.get("path") for entry in parts]
+    expected_prefixes = [f"{number:02d}-" for number in range(1, 11)]
+    if (len(part_names) != 10 or
+            any(not isinstance(name, str) or
+                not name.startswith(f"docs/agent/parts/{prefix}") or
+                not name.endswith(".md")
+                for name, prefix in zip(part_names, expected_prefixes))):
+        issues.append("AGENTS integrity: expected exactly ten ordered parts 01-10")
+
+    parts_dir = agent_dir / "parts"
+    actual_names = sorted(path.relative_to(root).as_posix()
+                          for path in parts_dir.glob("*.md")) if parts_dir.is_dir() else []
+    if actual_names != sorted(name for name in part_names if isinstance(name, str)):
+        issues.append("AGENTS integrity: actual parts do not match the manifest file list")
+
+    def read_verified(entry: dict, role: str) -> bytes | None:
+        name = entry.get("path")
+        if (not isinstance(name, str) or not name.startswith("docs/agent/") or
+                ".." in Path(name).parts or Path(name).is_absolute()):
+            issues.append(f"AGENTS integrity: unsafe or missing {role} path")
+            return None
+        source = root / name
+        if not source.is_file():
+            issues.append(f"AGENTS integrity: missing {role}: {name}")
+            return None
+        content = source.read_bytes()
+        if entry.get("bytes") != len(content):
+            issues.append(f"AGENTS integrity: byte length mismatch: {name}")
+        if entry.get("sha256") != hashlib.sha256(content).hexdigest():
+            issues.append(f"AGENTS integrity: SHA-256 mismatch: {name}")
+        return content
+
+    originals_data = [read_verified(entry, "original") for entry in originals]
+    parts_data = [read_verified(entry, "part") for entry in parts]
+    active_data = read_verified(active, "active manual")
+    if active_data is not None and all(fragment is not None for fragment in parts_data):
+        if b"".join(parts_data) != active_data:
+            issues.append("AGENTS integrity: concatenated parts differ from the active manual")
+
+    entry_path = root / "AGENTS.md"
+    if not entry_path.is_file():
+        issues.append("AGENTS integrity: project AGENTS.md entry is missing")
+    elif (len(originals_data) >= 1 and originals_data[0] is not None):
+        original_index = originals_data[0]
+        if not entry_path.read_bytes().startswith(original_index):
+            issues.append("AGENTS integrity: AGENTS.md does not preserve the original index prefix")
+        if manifest.get("root_index_original_prefix_sha256") != hashlib.sha256(original_index).hexdigest():
+            issues.append("AGENTS integrity: index prefix SHA-256 does not match the archive")
+    return issues
 
 
 def mask_kotlin_non_code(source: str) -> str:
@@ -393,25 +480,8 @@ def inspect_project(root: Path) -> list[str]:
         if not re.search(r"approvedCommand\s*:\s*ApprovedGestureCommand", coordinator_code):
             issues.append("GestureExecutionCoordinator must accept ApprovedGestureCommand")
 
-    # 6) AGENTS source integrity: the eight ordered fragments must reconstruct the archive byte-for-byte.
-    agent_archive = root / "docs/agent/source/AGENTS.original.md"
-    agent_parts_dir = root / "docs/agent/parts"
-    if agent_archive.is_file() and agent_parts_dir.is_dir():
-        parts = sorted(agent_parts_dir.glob("*.md"))
-        expected_names = [f"{index:02d}" for index in range(8)]
-        actual_prefixes = [part.name[:2] for part in parts]
-        if actual_prefixes != expected_names:
-            issues.append(
-                "AGENTS integrity: expected exactly ordered parts 00-07; "
-                f"found {actual_prefixes}"
-            )
-        elif b"".join(part.read_bytes() for part in parts) != agent_archive.read_bytes():
-            issues.append(
-                "AGENTS integrity: concatenated docs/agent/parts/00-07 differs byte-for-byte "
-                "from docs/agent/source/AGENTS.original.md; do not auto-rewrite protected specs"
-            )
-    else:
-        issues.append("AGENTS integrity: source archive or docs/agent/parts is missing")
+    # 6) Verify the current indexed AGENTS sources without weakening the content checks.
+    issues.extend(agents_integrity_violations(root))
 
     # 7) Clean/Hexagonal boundaries across every production Kotlin source, not just selected files.
     def imported_packages(code: str) -> list[str]:

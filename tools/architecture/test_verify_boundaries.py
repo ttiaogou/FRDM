@@ -215,5 +215,63 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
             self.assertNotEqual(b"".join(p.read_bytes() for p in sorted(parts.glob("*.md"))), archive.read_bytes())
 
 
+    def test_current_agents_manifest_and_parts_pass_integrity_check(self):
+        root = Path(__file__).resolve().parents[2]
+        self.assertEqual(guard.agents_integrity_violations(root), [])
+
+    def test_agents_integrity_rejects_modified_or_missing_content(self):
+        import shutil
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(__file__).resolve().parents[2]
+            root = Path(tmp)
+            shutil.copytree(repository / "docs/agent", root / "docs/agent")
+            shutil.copyfile(repository / "AGENTS.md", root / "AGENTS.md")
+
+            self.assertEqual(guard.agents_integrity_violations(root), [])
+            fragment = next((root / "docs/agent/parts").glob("01-*.md"))
+            original = fragment.read_bytes()
+            fragment.write_bytes(original + b"corrupted")
+            self.assertTrue(any("SHA-256 mismatch" in item for item in
+                                guard.agents_integrity_violations(root)))
+            fragment.write_bytes(original)
+
+            fragment.unlink()
+            self.assertTrue(any("missing part" in item for item in
+                                guard.agents_integrity_violations(root)))
+            fragment.write_bytes(original)
+
+            archive = root / "docs/agent/source/Android_无障碍落地开发手册.original.md"
+            archive_content = archive.read_bytes()
+            archive.write_bytes(archive_content + b"corrupted")
+            self.assertTrue(any("SHA-256 mismatch" in item for item in
+                                guard.agents_integrity_violations(root)))
+            archive.write_bytes(archive_content)
+
+            entry = root / "AGENTS.md"
+            entry.write_bytes(b"modified prefix\n" + entry.read_bytes())
+            self.assertTrue(any("original index prefix" in item for item in
+                                guard.agents_integrity_violations(root)))
+
+    def test_agents_integrity_rejects_manifest_mismatch(self):
+        import json
+        import shutil
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(__file__).resolve().parents[2]
+            root = Path(tmp)
+            shutil.copytree(repository / "docs/agent", root / "docs/agent")
+            shutil.copyfile(repository / "AGENTS.md", root / "AGENTS.md")
+            manifest_path = root / "docs/agent/INTEGRITY.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["parts"][0]["sha256"] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+            self.assertTrue(any("SHA-256 mismatch" in item for item in
+                                guard.agents_integrity_violations(root)))
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
