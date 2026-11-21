@@ -37,6 +37,13 @@ class TaskExecutionController(
         require(taskId.isNotBlank()) { "taskId must not be blank" }
         val generation = runGeneration ?: currentRunGeneration().also { runGeneration = it }
         require(generation >= 0L) { "runGeneration must be non-negative" }
+        // The run coordinator may have advanced its generation on service disconnect,
+        // interruption or external reset before a new task lease has been issued. Never
+        // accept an otherwise-current capability from that earlier run.
+        if (generation != currentRunGeneration()) {
+            onLog("任务协调[STALE_GENERATION_REJECTED]：task=$taskId；reason=$reason；runGeneration=$generation")
+            return false
+        }
         val taskCoordinator = coordinator
         if (taskCoordinator == null) {
             val current = isolatedTaskId
@@ -72,6 +79,7 @@ class TaskExecutionController(
 
     @Synchronized
     fun owns(taskId: String): Boolean {
+        if (runGeneration != currentRunGeneration()) return false
         val taskCoordinator = coordinator
         if (taskCoordinator == null) return isolatedTaskId == taskId
         val current = lease ?: return false
@@ -79,7 +87,12 @@ class TaskExecutionController(
     }
 
     @Synchronized
-    fun activeTaskId(): String? = lease?.taskId ?: isolatedTaskId
+    fun activeTaskId(): String? {
+        if (runGeneration != currentRunGeneration()) return null
+        val current = lease
+        return if (coordinator == null) isolatedTaskId
+        else current?.takeIf { coordinator.isCurrent(it) }?.taskId
+    }
 
     @Synchronized
     fun release(taskId: String, reason: String): Boolean {

@@ -42,10 +42,12 @@ class TaskExecutionControllerTest {
     @Test
     fun sameControllerDoesNotReuseItsLeaseAcrossRunGenerations() {
         val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
-        val execution = TaskExecutionController(coordinator, currentRunGeneration = { 12L })
+        var generation = 11L
+        val execution = TaskExecutionController(coordinator, currentRunGeneration = { generation })
         execution.beginRun(11L)
         assertTrue(execution.claim("ACCOUNT_BROWSE", "first generation"))
 
+        generation = 12L
         execution.beginRun(12L)
 
         assertFalse(execution.owns("ACCOUNT_BROWSE"))
@@ -68,6 +70,47 @@ class TaskExecutionControllerTest {
         assertFalse(oldController.release("ACCOUNT_BROWSE", "late stop"))
         assertTrue(newController.owns("AI_REPLY_PRIVATE_MESSAGES"))
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", coordinator.activeTaskId())
+    }
+
+
+    @Test
+    fun advancedRunGenerationRejectsOldClaimAndOwnershipBeforeAnyReplacementLeaseExists() {
+        val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var generation = 21L
+        val logs = mutableListOf<String>()
+        val execution = TaskExecutionController(coordinator, { generation }, logs::add)
+        execution.beginRun(generation)
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "original run"))
+        assertTrue(execution.owns("ACCOUNT_BROWSE"))
+
+        // The service advances its generation before any new task has claimed the slot.
+        generation = 22L
+        assertFalse(execution.owns("ACCOUNT_BROWSE"))
+        assertEquals(null, execution.activeTaskId())
+        assertFalse(execution.claim("ACCOUNT_BROWSE", "late old-run callback"))
+        assertFalse(execution.claim("AI_REPLY_PRIVATE_MESSAGES", "late handoff"))
+        assertTrue(logs.any { it.contains("STALE_GENERATION_REJECTED") })
+
+        execution.beginRun(generation)
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "new service verified"))
+        assertTrue(execution.owns("ACCOUNT_BROWSE"))
+        assertEquals(22L, coordinator.currentLease()?.runGeneration)
+    }
+
+    @Test
+    fun isolatedRuntimeAlsoRejectsOldGenerationUntilItIsRebound() {
+        var generation = 3L
+        val execution = TaskExecutionController(coordinator = null, currentRunGeneration = { generation })
+        execution.beginRun(3L)
+        assertTrue(execution.claim("AI_REPLY_PRIVATE_MESSAGES", "original run"))
+        generation = 4L
+        assertFalse(execution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertEquals(null, execution.activeTaskId())
+        assertFalse(execution.claim("AI_REPLY_PRIVATE_MESSAGES", "late callback"))
+        execution.beginRun(4L)
+        assertFalse(execution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertTrue(execution.claim("AI_REPLY_PRIVATE_MESSAGES", "new run"))
+        assertTrue(execution.owns("AI_REPLY_PRIVATE_MESSAGES"))
     }
 
     @Test

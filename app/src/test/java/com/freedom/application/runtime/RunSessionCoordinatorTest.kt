@@ -5,6 +5,9 @@ import com.freedom.core.runtime.ModeRuntimePort
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.RunStateRepository
 import com.freedom.core.runtime.RuntimeLogSink
+import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.TaskExecutionController
+import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -279,6 +282,38 @@ class RunSessionCoordinatorTest {
         assertTrue(browse.calls.any { it == "stop:user_stopped" })
         assertFalse(state.requested)
         assertNull(coordinator.resolveActiveModeForRestore())
+    }
+
+
+    @Test
+    fun disconnectedRunRevokesOldTaskExecutionAndReconnectCanClaimNewGeneration() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.ACCOUNT_BROWSE
+        }
+        val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
+        val session = RunSessionCoordinator(
+            state,
+            mapOf(RunMode.ACCOUNT_BROWSE to browse),
+            RuntimeLogSink { }
+        )
+        val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val execution = TaskExecutionController(coordinator, session::currentRunGeneration)
+
+        session.onAccessibilityServiceConnected()
+        execution.beginRun(session.currentRunGeneration())
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "connected"))
+        assertTrue(execution.owns("ACCOUNT_BROWSE"))
+
+        session.onAccessibilityServiceDisconnected()
+        assertFalse(execution.owns("ACCOUNT_BROWSE"))
+        assertFalse(execution.claim("ACCOUNT_BROWSE", "disconnected old callback"))
+
+        session.onAccessibilityServiceConnected()
+        execution.beginRun(session.currentRunGeneration())
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "reconnected"))
+        assertTrue(execution.owns("ACCOUNT_BROWSE"))
+        assertEquals(session.currentRunGeneration(), coordinator.currentLease()?.runGeneration)
     }
 
     @Test

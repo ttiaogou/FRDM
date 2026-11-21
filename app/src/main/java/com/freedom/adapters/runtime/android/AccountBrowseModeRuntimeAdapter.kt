@@ -63,9 +63,13 @@ internal class AccountBrowseModeRuntimeAdapter(
     override fun onAccessibilityServiceDisconnected() {
         onReadinessInvalidated("无障碍服务断开；目标应用就绪状态失效")
         awaitingServiceReconnect = true
-        workflow().cancelScheduledStep()
-        workflow().cancelPageObservation()
-        workflow().suspendRecoveryForServiceDisconnect()
+        try {
+            workflow().cancelScheduledStep()
+            workflow().cancelPageObservation()
+            workflow().suspendRecoveryForServiceDisconnect()
+        } finally {
+            releaseTaskOwnership("无障碍服务断开；撤销旧 UI 操作租约")
+        }
     }
 
     override fun onExternalRefresh() {
@@ -115,8 +119,12 @@ internal class AccountBrowseModeRuntimeAdapter(
     override fun onAccessibilityServiceInterrupted(reason: String) {
         onReadinessInvalidated("无障碍服务中断；目标应用就绪状态失效：$reason")
         awaitingServiceReconnect = true
-        workflow().pauseAccountBrowse(reason)
-        workflow().suspendRecoveryForServiceDisconnect()
+        try {
+            workflow().pauseAccountBrowse(reason)
+            workflow().suspendRecoveryForServiceDisconnect()
+        } finally {
+            releaseTaskOwnership("无障碍服务中断；撤销旧 UI 操作租约")
+        }
     }
 
     override fun onServiceDestroyed() {
