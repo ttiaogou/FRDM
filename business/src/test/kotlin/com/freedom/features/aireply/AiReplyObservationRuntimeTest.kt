@@ -108,6 +108,9 @@ class AiReplyObservationRuntimeTest {
             gesturePolicy = NoOpGestureApi,
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
+            onLog = {},
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
             privateMessagesRecoveryScheduleRepository = messageStore,
             receivedGreetingsRecoveryScheduleRepository = greetingsStore
         )
