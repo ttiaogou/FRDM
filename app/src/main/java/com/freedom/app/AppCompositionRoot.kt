@@ -63,6 +63,7 @@ import com.freedom.data.RunDiagnosticsManager
 import com.freedom.data.SharedPreferencesAiModelCloudConsent
 import com.freedom.data.SharedPreferencesGestureSettingsRepository
 import com.freedom.data.TaskLaunchParametersStore
+import com.freedom.data.ContactMessageLedgerDataStore
 import com.freedom.data.ai.EncryptedAiModelConfigurationRepository
 import com.freedom.data.ai.AiReplyPersonalizationStore
 import com.freedom.data.database.LocalConversationRepository
@@ -73,6 +74,7 @@ import com.freedom.features.aireply.ai.ReplySegmentTaskRepository
 import com.freedom.data.social.momo.MomoSayHiTraversalCheckpointDataStore
 import com.freedom.data.PrivateMessagesTraversalCheckpointDataStore
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
+import com.freedom.features.aireply.domain.contact.ContactMessageLedgerRepository
 import com.freedom.data.samples.MomoChatSampleArchiveDataStore
 import com.freedom.features.aireply.AiReplyObservationRuntime
 import com.freedom.features.aireply.ai.AiModelServiceProvider
@@ -111,6 +113,9 @@ class AppCompositionRoot(context: Context) {
     }
     val taskLaunchParametersRepository: TaskLaunchParametersRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TaskLaunchParametersStore(appContext)
+    }
+    val contactMessageLedgerRepository: ContactMessageLedgerRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ContactMessageLedgerDataStore(appContext)
     }
     val aiModelCloudConsent: AiModelCloudConsentSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         SharedPreferencesAiModelCloudConsent(appContext)
@@ -511,6 +516,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             imageSendThreshold = {
                 root.taskLaunchParametersRepository.read().imageSendThreshold
             },
+            contactMessageLedgerRepository = root.contactMessageLedgerRepository,
             privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository
         )
     }

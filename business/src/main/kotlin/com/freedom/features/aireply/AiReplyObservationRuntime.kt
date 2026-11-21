@@ -24,7 +24,9 @@ import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.MessageReadStatus
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
-import com.freedom.features.aireply.domain.contact.TemporaryContactMessageLedger
+import com.freedom.features.aireply.domain.contact.ContactMessageLedger
+import com.freedom.features.aireply.domain.contact.ContactMessageLedgerRepository
+import com.freedom.features.aireply.domain.contact.InMemoryContactMessageLedgerRepository
 import com.freedom.features.aireply.domain.contact.ContactSendCountUpdate
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatPageKind
@@ -93,6 +95,7 @@ class AiReplyObservationRuntime(
     /** User configuration is read at confirmed-send time; zero disables the matching action. */
     private val messageInterceptionThreshold: () -> Int = { 0 },
     private val imageSendThreshold: () -> Int = { 0 },
+    private val contactMessageLedgerRepository: ContactMessageLedgerRepository = InMemoryContactMessageLedgerRepository(),
     private val privateMessagesCheckpointRepository: PrivateMessagesTraversalCheckpointRepository? = null
 ) {
     companion object {
@@ -247,7 +250,7 @@ class AiReplyObservationRuntime(
     private var lastRegionFingerprint = ""
     private var lastMessageFingerprint = ""
     private val loggedOcrDebugFingerprints = LinkedHashSet<String>()
-    private val temporaryContactMessageLedger = TemporaryContactMessageLedger()
+    private val contactMessageLedger = ContactMessageLedger(contactMessageLedgerRepository)
     /** Session keys awaiting an externally verified intercept-toggle result, in threshold order. */
     private val pendingInterceptionContactKeys = LinkedHashSet<String>()
     private var ocrDebugBatchLimitLogged = false
@@ -1495,7 +1498,7 @@ class AiReplyObservationRuntime(
         userInteractionActive = false
         privateMessagesTraversalTaskExecutor.reset()
         lastMessageFingerprint = ""
-        temporaryContactMessageLedger.clearAll()
+        contactMessageLedger.clearAll()
         pendingInterceptionContactKeys.clear()
         privateMessagesTaskController.resetQuota()
         receivedGreetingsTaskFlow.reset()
@@ -1643,7 +1646,7 @@ class AiReplyObservationRuntime(
         }
         val interceptionThreshold = messageInterceptionThreshold().coerceAtLeast(0)
         val imageThreshold = imageSendThreshold().coerceAtLeast(0)
-        val update = temporaryContactMessageLedger.recordSuccessfulSend(
+        val update = contactMessageLedger.recordSuccessfulSend(
             contactIdentityKey = contactKey,
             sendConfirmationId = sendConfirmationId,
             interceptionThreshold = interceptionThreshold,
@@ -1672,7 +1675,7 @@ class AiReplyObservationRuntime(
      */
     fun confirmMessageInterceptionEnabled(): Boolean {
         val contactKey = pendingInterceptionContactKeys.firstOrNull() ?: return false
-        val cleared = temporaryContactMessageLedger.confirmInterceptionEnabled(contactKey)
+        val cleared = contactMessageLedger.confirmInterceptionEnabled(contactKey)
         if (cleared) {
             pendingInterceptionContactKeys.remove(contactKey)
             onLog("AI 联系人临时账本：消息拦截状态已确认开启；该联系人临时数据已清除")

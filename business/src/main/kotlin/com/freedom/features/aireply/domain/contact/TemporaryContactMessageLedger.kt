@@ -33,14 +33,19 @@ data class ContactSendCountUpdate(
  * outgoing bubbles is not a send. The contact entry is removed only after
  * [confirmInterceptionEnabled] verifies the external intercept switch has actually become enabled.
  */
-internal class TemporaryContactMessageLedger(
+/** Unified, durable counter. The legacy source path is retained to avoid an unnecessary file delete. */
+internal class ContactMessageLedger(
+    private val repository: ContactMessageLedgerRepository = InMemoryContactMessageLedgerRepository(),
     private val defaultInterceptionThreshold: Int = 0,
     private val defaultImageThreshold: Int = 0
 ) {
     private data class ContactState(
-        val successfulSendConfirmationIds: LinkedHashSet<String> = LinkedHashSet(),
+        val successfulSendConfirmationHashes: LinkedHashSet<String> = LinkedHashSet(),
         var interceptionThresholdReached: Boolean = false,
-        var imageThresholdReached: Boolean = false
+        var imageThresholdReached: Boolean = false,
+        var imageStatus: ContactImageSendStatus = ContactImageSendStatus.NOT_DUE,
+        var interceptionStatus: ContactInterceptionStatus = ContactInterceptionStatus.NOT_DUE,
+        var pendingRecoveryAction: ContactPendingRecoveryAction = ContactPendingRecoveryAction.NONE
     )
 
     private val contacts = LinkedHashMap<String, ContactState>()
@@ -48,6 +53,16 @@ internal class TemporaryContactMessageLedger(
     init {
         require(defaultInterceptionThreshold >= 0) { "default interception threshold must not be negative" }
         require(defaultImageThreshold >= 0) { "default image threshold must not be negative" }
+        repository.loadAll().forEach { entry ->
+            contacts[entry.contactKeyHash] = ContactState(
+                successfulSendConfirmationHashes = LinkedHashSet(entry.confirmedSendEventHashes),
+                interceptionThresholdReached = entry.interceptionStatus != ContactInterceptionStatus.NOT_DUE,
+                imageThresholdReached = entry.imageStatus != ContactImageSendStatus.NOT_DUE,
+                imageStatus = entry.imageStatus,
+                interceptionStatus = entry.interceptionStatus,
+                pendingRecoveryAction = entry.pendingRecoveryAction
+            )
+        }
     }
 
     @Synchronized
@@ -73,27 +88,39 @@ internal class TemporaryContactMessageLedger(
         if (interceptionThreshold > 0 && state.interceptionThresholdReached) {
             return ContactSendCountUpdate(
                 ContactSendRecordStatus.CONTACT_LIMIT_REACHED,
-                state.successfulSendConfirmationIds.size,
+                state.successfulSendConfirmationHashes.size,
                 interceptionThreshold,
                 thresholdReachedNow = false,
                 shouldPauseContact = true
             )
         }
-        if (!state.successfulSendConfirmationIds.add(confirmationId)) {
+        if (!state.successfulSendConfirmationHashes.add(hashConfirmationId(confirmationId))) {
             return ContactSendCountUpdate(
                 ContactSendRecordStatus.DUPLICATE,
-                state.successfulSendConfirmationIds.size,
+                state.successfulSendConfirmationHashes.size,
                 interceptionThreshold,
                 thresholdReachedNow = false,
                 shouldPauseContact = false
             )
         }
 
-        val count = state.successfulSendConfirmationIds.size
+        val count = state.successfulSendConfirmationHashes.size
         val reachedNow = interceptionThreshold > 0 && count >= interceptionThreshold
-        if (reachedNow) state.interceptionThresholdReached = true
+        if (reachedNow) {
+            state.interceptionThresholdReached = true
+            state.interceptionStatus = ContactInterceptionStatus.PENDING_ENABLE
+        }
         val imageReachedNow = imageThreshold > 0 && !state.imageThresholdReached && count >= imageThreshold
-        if (imageReachedNow) state.imageThresholdReached = true
+        if (imageReachedNow) {
+            state.imageThresholdReached = true
+            state.imageStatus = ContactImageSendStatus.PENDING_SEND
+        }
+        state.pendingRecoveryAction = when {
+            state.imageStatus == ContactImageSendStatus.PENDING_SEND -> ContactPendingRecoveryAction.SEND_IMAGE
+            state.interceptionStatus == ContactInterceptionStatus.PENDING_ENABLE -> ContactPendingRecoveryAction.ENABLE_INTERCEPTION
+            else -> ContactPendingRecoveryAction.NONE
+        }
+        persist(contactHash, state)
         return ContactSendCountUpdate(
             ContactSendRecordStatus.RECORDED,
             count,
@@ -109,20 +136,43 @@ internal class TemporaryContactMessageLedger(
     fun confirmInterceptionEnabled(contactIdentityKey: String?): Boolean {
         val key = hashContactKey(contactIdentityKey) ?: return false
         val state = contacts[key] ?: return false
-        if (!state.interceptionThresholdReached) return false
-        contacts.remove(key)
+        if (!state.interceptionThresholdReached || state.interceptionStatus == ContactInterceptionStatus.ENABLED) return false
+        state.interceptionStatus = ContactInterceptionStatus.ENABLED
+        state.pendingRecoveryAction = when {
+            state.imageStatus == ContactImageSendStatus.PENDING_SEND -> ContactPendingRecoveryAction.SEND_IMAGE
+            else -> ContactPendingRecoveryAction.NONE
+        }
+        persist(key, state)
         return true
     }
 
     @Synchronized
     fun successfulSendCount(contactIdentityKey: String?): Int {
         val key = hashContactKey(contactIdentityKey) ?: return 0
-        return contacts[key]?.successfulSendConfirmationIds?.size ?: 0
+        return contacts[key]?.successfulSendConfirmationHashes?.size ?: 0
     }
 
     @Synchronized
     fun clearAll() {
         contacts.clear()
+        repository.clearAll()
+    }
+
+    @Synchronized
+    fun pendingRecoveryAction(contactIdentityKey: String?): ContactPendingRecoveryAction {
+        val key = hashContactKey(contactIdentityKey) ?: return ContactPendingRecoveryAction.NONE
+        return contacts[key]?.pendingRecoveryAction ?: ContactPendingRecoveryAction.NONE
+    }
+
+    private fun persist(contactHash: String, state: ContactState) {
+        repository.save(ContactMessageLedgerEntry(
+            contactKeyHash = contactHash,
+            confirmedTextCount = state.successfulSendConfirmationHashes.size,
+            confirmedSendEventHashes = state.successfulSendConfirmationHashes.toSet(),
+            imageStatus = state.imageStatus,
+            interceptionStatus = state.interceptionStatus,
+            pendingRecoveryAction = state.pendingRecoveryAction
+        ))
     }
 
     private fun hashContactKey(value: String?): String? {
@@ -135,6 +185,10 @@ internal class TemporaryContactMessageLedger(
             .digest(normalized.toByteArray(StandardCharsets.UTF_8))
         return digest.joinToString("") { byte -> "%02x".format(byte) }
     }
+
+    private fun hashConfirmationId(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(StandardCharsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }
 
     private companion object {
         const val MAX_CONFIRMATION_ID_LENGTH = 128

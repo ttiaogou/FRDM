@@ -5,10 +5,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class TemporaryContactMessageLedgerTest {
+class ContactMessageLedgerTest {
     @Test
     fun countsOnlyDistinctConfirmedSendEventsPerContact() {
-        val ledger = TemporaryContactMessageLedger(defaultInterceptionThreshold = 3)
+        val ledger = ContactMessageLedger(defaultInterceptionThreshold = 3)
         val first = ledger.recordSuccessfulSend("Contact A", "send-event-1")
         val duplicate = ledger.recordSuccessfulSend("Contact A", "send-event-1")
         val second = ledger.recordSuccessfulSend("Contact A", "send-event-2")
@@ -26,7 +26,7 @@ class TemporaryContactMessageLedgerTest {
 
     @Test
     fun thresholdPausesContactAndCleanupWaitsForConfirmedInterception() {
-        val ledger = TemporaryContactMessageLedger(defaultInterceptionThreshold = 2)
+        val ledger = ContactMessageLedger(defaultInterceptionThreshold = 2)
         ledger.recordSuccessfulSend("Contact A", "send-event-1")
         val reached = ledger.recordSuccessfulSend("Contact A", "send-event-2")
 
@@ -35,13 +35,13 @@ class TemporaryContactMessageLedgerTest {
         assertEquals(2, reached.count)
         assertFalse(ledger.confirmInterceptionEnabled("Contact B"))
         assertTrue(ledger.confirmInterceptionEnabled("Contact A"))
-        assertEquals(0, ledger.successfulSendCount("Contact A"))
+        assertEquals(2, ledger.successfulSendCount("Contact A"))
         assertFalse(ledger.confirmInterceptionEnabled("Contact A"))
     }
 
     @Test
     fun contactCannotAccumulateMoreSendsAfterThresholdUntilInterception() {
-        val ledger = TemporaryContactMessageLedger(defaultInterceptionThreshold = 1)
+        val ledger = ContactMessageLedger(defaultInterceptionThreshold = 1)
         ledger.recordSuccessfulSend("Contact A", "send-event-1")
         val next = ledger.recordSuccessfulSend("Contact A", "send-event-2")
 
@@ -52,7 +52,7 @@ class TemporaryContactMessageLedgerTest {
 
     @Test
     fun blankInputsAreRejectedAndRunResetClearsAllContacts() {
-        val ledger = TemporaryContactMessageLedger()
+        val ledger = ContactMessageLedger()
         val invalid = ledger.recordSuccessfulSend(" ", "send-event-1")
         assertEquals(ContactSendRecordStatus.INVALID_INPUT, invalid.status)
 
@@ -66,7 +66,7 @@ class TemporaryContactMessageLedgerTest {
 
     @Test
     fun zeroThresholdsDisableActionsAndImageThresholdIsReportedOnce() {
-        val ledger = TemporaryContactMessageLedger()
+        val ledger = ContactMessageLedger()
 
         val disabled = ledger.recordSuccessfulSend("Contact A", "send-event-1", 0, 0)
         assertFalse(disabled.thresholdReachedNow)
@@ -77,5 +77,29 @@ class TemporaryContactMessageLedgerTest {
         assertTrue(imageReached.imageThresholdReachedNow)
         assertFalse(next.imageThresholdReachedNow)
         assertFalse(imageReached.thresholdReachedNow)
+    }
+
+    @Test
+    fun confirmedCountsAndPendingActionSurviveLedgerRecreation() {
+        val repository = InMemoryContactMessageLedgerRepository()
+        ContactMessageLedger(repository).recordSuccessfulSend("Contact A", "send-event-1", 3, 1)
+
+        val restored = ContactMessageLedger(repository)
+
+        assertEquals(1, restored.successfulSendCount("Contact A"))
+        assertEquals(ContactPendingRecoveryAction.SEND_IMAGE, restored.pendingRecoveryAction("Contact A"))
+    }
+
+    @Test
+    fun interceptionConfirmationIsPersistedInsteadOfDeletingTheContactRecord() {
+        val repository = InMemoryContactMessageLedgerRepository()
+        val ledger = ContactMessageLedger(repository)
+        ledger.recordSuccessfulSend("Contact A", "send-event-1", 1, 0)
+        assertTrue(ledger.confirmInterceptionEnabled("Contact A"))
+
+        val restored = ContactMessageLedger(repository)
+
+        assertEquals(1, restored.successfulSendCount("Contact A"))
+        assertEquals(ContactPendingRecoveryAction.NONE, restored.pendingRecoveryAction("Contact A"))
     }
 }
