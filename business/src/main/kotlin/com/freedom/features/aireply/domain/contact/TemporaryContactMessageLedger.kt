@@ -18,7 +18,8 @@ data class ContactSendCountUpdate(
     val count: Int,
     val threshold: Int,
     val thresholdReachedNow: Boolean,
-    val shouldPauseContact: Boolean
+    val shouldPauseContact: Boolean,
+    val imageThresholdReachedNow: Boolean = false
 )
 
 /**
@@ -33,39 +34,47 @@ data class ContactSendCountUpdate(
  * [confirmInterceptionEnabled] verifies the external intercept switch has actually become enabled.
  */
 internal class TemporaryContactMessageLedger(
-    private val threshold: Int = 10
+    private val defaultInterceptionThreshold: Int = 0,
+    private val defaultImageThreshold: Int = 0
 ) {
     private data class ContactState(
         val successfulSendConfirmationIds: LinkedHashSet<String> = LinkedHashSet(),
-        var thresholdReached: Boolean = false
+        var interceptionThresholdReached: Boolean = false,
+        var imageThresholdReached: Boolean = false
     )
 
     private val contacts = LinkedHashMap<String, ContactState>()
 
     init {
-        require(threshold > 0) { "threshold must be positive" }
+        require(defaultInterceptionThreshold >= 0) { "default interception threshold must not be negative" }
+        require(defaultImageThreshold >= 0) { "default image threshold must not be negative" }
     }
 
     @Synchronized
     fun recordSuccessfulSend(
         contactIdentityKey: String?,
-        sendConfirmationId: String?
+        sendConfirmationId: String?,
+        interceptionThreshold: Int = defaultInterceptionThreshold,
+        imageThreshold: Int = defaultImageThreshold
     ): ContactSendCountUpdate {
         val contactHash = hashContactKey(contactIdentityKey)
         val confirmationId = sendConfirmationId?.trim().orEmpty()
         if (contactHash == null || confirmationId.isBlank() || confirmationId.length > MAX_CONFIRMATION_ID_LENGTH) {
             return ContactSendCountUpdate(
-                ContactSendRecordStatus.INVALID_INPUT, 0, threshold,
+                ContactSendRecordStatus.INVALID_INPUT, 0, interceptionThreshold.coerceAtLeast(0),
                 thresholdReachedNow = false, shouldPauseContact = false
             )
         }
+        if (interceptionThreshold < 0 || imageThreshold < 0) {
+            return ContactSendCountUpdate(ContactSendRecordStatus.INVALID_INPUT, 0, 0, false, false)
+        }
 
         val state = contacts.getOrPut(contactHash) { ContactState() }
-        if (state.thresholdReached) {
+        if (interceptionThreshold > 0 && state.interceptionThresholdReached) {
             return ContactSendCountUpdate(
                 ContactSendRecordStatus.CONTACT_LIMIT_REACHED,
                 state.successfulSendConfirmationIds.size,
-                threshold,
+                interceptionThreshold,
                 thresholdReachedNow = false,
                 shouldPauseContact = true
             )
@@ -74,21 +83,24 @@ internal class TemporaryContactMessageLedger(
             return ContactSendCountUpdate(
                 ContactSendRecordStatus.DUPLICATE,
                 state.successfulSendConfirmationIds.size,
-                threshold,
+                interceptionThreshold,
                 thresholdReachedNow = false,
                 shouldPauseContact = false
             )
         }
 
         val count = state.successfulSendConfirmationIds.size
-        val reachedNow = count >= threshold
-        if (reachedNow) state.thresholdReached = true
+        val reachedNow = interceptionThreshold > 0 && count >= interceptionThreshold
+        if (reachedNow) state.interceptionThresholdReached = true
+        val imageReachedNow = imageThreshold > 0 && !state.imageThresholdReached && count >= imageThreshold
+        if (imageReachedNow) state.imageThresholdReached = true
         return ContactSendCountUpdate(
             ContactSendRecordStatus.RECORDED,
             count,
-            threshold,
+            interceptionThreshold,
             thresholdReachedNow = reachedNow,
-            shouldPauseContact = reachedNow
+            shouldPauseContact = reachedNow,
+            imageThresholdReachedNow = imageReachedNow
         )
     }
 
@@ -97,7 +109,7 @@ internal class TemporaryContactMessageLedger(
     fun confirmInterceptionEnabled(contactIdentityKey: String?): Boolean {
         val key = hashContactKey(contactIdentityKey) ?: return false
         val state = contacts[key] ?: return false
-        if (!state.thresholdReached) return false
+        if (!state.interceptionThresholdReached) return false
         contacts.remove(key)
         return true
     }

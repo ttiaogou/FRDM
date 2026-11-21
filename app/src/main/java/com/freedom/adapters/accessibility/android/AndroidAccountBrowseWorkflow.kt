@@ -189,24 +189,27 @@ internal class AndroidAccountBrowseWorkflow(
     private val interactionEventClassifier = AccountBrowseInteractionEventClassifier()
     private val interactionEvidenceClassifier = AccountBrowseInteractionEvidenceClassifier(interactionEventClassifier)
     private var gestureDispatchSyncTask: ScheduledTask? = null
-
-    private val manualHandoffCoordinator by lazy(LazyThreadSafetyMode.NONE) {
-        AccountBrowseManualHandoffCoordinator(
-            scheduler = taskScheduler,
-            isOverlayPassthroughActive = { accountBrowseSession.overlayPassthroughActive },
-            isWaitingForScrollSettle = { accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE },
-            restoreOverlayTouchPassthrough = { restoreMonitorOverlayTouchPassthrough() },
-            pauseAfterWatchdog = ::pauseAccountBrowse
-        )
-    }
+    private var overlayPassthroughWatchdogTask: ScheduledTask? = null
 
     private fun addLog(message: String) = onLog(message)
 
-    private fun scheduleOverlayPassthroughWatchdog(delayMs: Long) =
-        manualHandoffCoordinator.scheduleOverlayPassthroughWatchdog(delayMs)
+    private fun scheduleOverlayPassthroughWatchdog(delayMs: Long) {
+        overlayPassthroughWatchdogTask?.cancel()
+        overlayPassthroughWatchdogTask = taskScheduler.schedule(delayMs) {
+            overlayPassthroughWatchdogTask = null
+            if (accountBrowseSession.overlayPassthroughActive) {
+                restoreMonitorOverlayTouchPassthrough()
+                if (accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE) {
+                    pauseAccountBrowse("滑动回调超时；已恢复浮动按钮触摸状态")
+                }
+            }
+        }
+    }
 
-    private fun cancelOverlayPassthroughWatchdog() =
-        manualHandoffCoordinator.cancelOverlayPassthroughWatchdog()
+    private fun cancelOverlayPassthroughWatchdog() {
+        overlayPassthroughWatchdogTask?.cancel()
+        overlayPassthroughWatchdogTask = null
+    }
 
     // Legacy call sites may still signal an interrupted gesture. They no longer create a
     // handoff timer: the unified scheduler owns the next read-only observation.
@@ -225,7 +228,7 @@ internal class AndroidAccountBrowseWorkflow(
         restoreMonitorOverlayTouchPassthrough()
         cancelScheduledStep()
         pageObservationChannel.cancel()
-        manualHandoffCoordinator.cleanup()
+        cancelOverlayPassthroughWatchdog()
         gestureDispatchSyncTask?.cancel()
         gestureDispatchSyncTask = null
         hideFirstSwipeCountdown()

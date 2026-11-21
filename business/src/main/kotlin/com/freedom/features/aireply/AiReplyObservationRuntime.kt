@@ -90,6 +90,9 @@ class AiReplyObservationRuntime(
     private val draftStartupFailure: () -> String? = { null },
     /** Invalidates late model callbacks when this runtime is reset. */
     private val onDraftRuntimeReset: () -> Unit = {},
+    /** User configuration is read at confirmed-send time; zero disables the matching action. */
+    private val messageInterceptionThreshold: () -> Int = { 0 },
+    private val imageSendThreshold: () -> Int = { 0 },
     private val privateMessagesCheckpointRepository: PrivateMessagesTraversalCheckpointRepository? = null
 ) {
     companion object {
@@ -244,7 +247,7 @@ class AiReplyObservationRuntime(
     private var lastRegionFingerprint = ""
     private var lastMessageFingerprint = ""
     private val loggedOcrDebugFingerprints = LinkedHashSet<String>()
-    private val temporaryContactMessageLedger = TemporaryContactMessageLedger(threshold = 10)
+    private val temporaryContactMessageLedger = TemporaryContactMessageLedger()
     /** Session keys awaiting an externally verified intercept-toggle result, in threshold order. */
     private val pendingInterceptionContactKeys = LinkedHashSet<String>()
     private var ocrDebugBatchLimitLogged = false
@@ -329,9 +332,15 @@ class AiReplyObservationRuntime(
             chatPagePort.persistReceivedGreetingsCheckpoint()
         }
     }
+    private val chatDetailRecoveryRoute: PageRecoveryRouteAdapter by lazy(LazyThreadSafetyMode.NONE) {
+        ChatDetailRecoveryRouteAdapter {
+            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+        }
+    }
     init {
         sharedPageObservationCoordinator?.registerFingerprintRoute(messageListRecoveryRoute.asRoute())
         sharedPageObservationCoordinator?.registerFingerprintRoute(receivedGreetingsRecoveryRoute.asRoute())
+        sharedPageObservationCoordinator?.registerFingerprintRoute(chatDetailRecoveryRoute.asRoute())
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             messageListCheckpointRestored = true
@@ -727,7 +736,7 @@ class AiReplyObservationRuntime(
         )
         val matchedRouteId = if (pageFingerprint.packageName == targetPackage()) {
             sharedPageObservationCoordinator?.matchFingerprint(pageFingerprint)
-                ?: listOf(messageListRecoveryRoute, receivedGreetingsRecoveryRoute)
+                ?: listOf(messageListRecoveryRoute, receivedGreetingsRecoveryRoute, chatDetailRecoveryRoute)
                     .firstOrNull { it.matches(pageFingerprint) }?.routeId
         } else null
 
@@ -774,6 +783,11 @@ class AiReplyObservationRuntime(
             sessionManagerState == SessionManagerState.OPENING_SESSION &&
             previous?.pageKind == ChatPageKind.CHAT_LIST &&
             inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE
+        val activePrivateChatDetail = activeTaskId == PRIVATE_MESSAGES_TASK_ID &&
+            !receivedGreetingsTaskActive &&
+            inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            currentSessionKey != null &&
+            currentSessionWindowKey == windowSessionKey(inspection)
         // The received-greetings adapter legitimately traverses from its confirmed list into a
         // profile card (and then back to the verified list). That intermediate NON_CHAT page is
         // part of the same task workflow; it must not be converted into a generic route-recovery
@@ -784,7 +798,7 @@ class AiReplyObservationRuntime(
             inspection.pageKind == ChatPageKind.NON_CHAT
         val shouldCreateRouteRecovery = sessionRunStarted && activeTaskId != null &&
             !recoveryContext.pending && selfInitiatedTransition == null &&
-            !openingPrivateSessionDetail && !receivedGreetingsWorkflowTransition &&
+            !openingPrivateSessionDetail && !activePrivateChatDetail && !receivedGreetingsWorkflowTransition &&
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
         if ((shouldCreateRouteRecovery || unmatchedReturnToOwnedRoute) && activeTaskId != null) {
@@ -838,7 +852,12 @@ class AiReplyObservationRuntime(
                     "UI操作权=$uiOwnershipTransferred；" +
                     "已从任务=${sourceTaskId}恢复任务=$targetTaskId"
             )
-            if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
+            if (targetRoute == chatDetailRecoveryRoute.routeId) {
+                sessionManagerState = SessionManagerState.READING_SESSION
+                lastPageInspection = inspection
+                onLog("AI 发送恢复[RECOVERY_VERIFIED]：聊天详情页已连续双快照确认；重新读取消息，仅核验既有发送，不重发")
+                readVisibleMessages(inspection)
+            } else if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                 if (messageListCheckpointRestored) {
                     val compatible = privateMessagesTraversalTaskExecutor.isRestoredViewportCompatible(inspection)
@@ -1502,6 +1521,7 @@ class AiReplyObservationRuntime(
 
     private fun taskIdForRecoveryRoute(routeId: String): String? = when (routeId) {
         messageListRecoveryRoute.routeId -> PRIVATE_MESSAGES_TASK_ID
+        chatDetailRecoveryRoute.routeId -> PRIVATE_MESSAGES_TASK_ID
         receivedGreetingsRecoveryRoute.routeId -> RECEIVED_GREETINGS_TASK_ID
         else -> null
     }
@@ -1560,6 +1580,39 @@ class AiReplyObservationRuntime(
         return true
     }
 
+    /** Pending-send UNKNOWN may recover only onto the same semantic chat-detail surface. */
+    private fun requestSendConfirmationRecovery(reason: String): Boolean {
+        if (recoveryContext.pending || !sessionRunStarted || receivedGreetingsTaskActive) return false
+        chatDetailRecoveryRoute.saveCheckpoint()
+        val generation = currentRunGeneration().coerceAtLeast(0L)
+        val observationGeneration = pageReadCoordinator.currentObservationGeneration()
+        recoveryContext.request(
+            taskId = PRIVATE_MESSAGES_TASK_ID,
+            recoveryReason = reason,
+            routeId = chatDetailRecoveryRoute.routeId,
+            generation = generation,
+            recoveryCheckpointId = "$PRIVATE_MESSAGES_TASK_ID:$reason",
+            pageObservationGeneration = observationGeneration
+        )
+        recoveryContext.markCheckpointSaved()
+        recoveryTransaction.activate(
+            RecoveryEventIdentity(
+                taskId = PRIVATE_MESSAGES_TASK_ID,
+                routeId = chatDetailRecoveryRoute.routeId,
+                runGeneration = generation,
+                checkpointId = "$PRIVATE_MESSAGES_TASK_ID:$reason",
+                observationGeneration = observationGeneration,
+                unknownReason = reason
+            )
+        )
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        sessionManagerState = SessionManagerState.PAUSED
+        onLog("AI 发送恢复[PAUSED_CHECKPOINT_SAVED]：reason=$reason；停止危险动作，等待聊天详情页双快照后仅核验发送结果")
+        scheduleFullInspectionAfter(0L)
+        return true
+    }
+
     private fun pageIdentityChanged(previous: ChatPageSnapshot, current: ChatPageSnapshot): Boolean =
         previous.packageName != current.packageName ||
             previous.activityClass != current.activityClass ||
@@ -1588,7 +1641,20 @@ class AiReplyObservationRuntime(
         val contactKey = currentSessionKey.takeIf {
             sessionManagerState == SessionManagerState.READING_SESSION
         }
-        val update = temporaryContactMessageLedger.recordSuccessfulSend(contactKey, sendConfirmationId)
+        val interceptionThreshold = messageInterceptionThreshold().coerceAtLeast(0)
+        val imageThreshold = imageSendThreshold().coerceAtLeast(0)
+        val update = temporaryContactMessageLedger.recordSuccessfulSend(
+            contactIdentityKey = contactKey,
+            sendConfirmationId = sendConfirmationId,
+            interceptionThreshold = interceptionThreshold,
+            imageThreshold = imageThreshold
+        )
+        if (update.imageThresholdReachedNow) {
+            onLog(
+                "AI 联系人临时账本：当前会话达到图片发送阈值=$imageThreshold；" +
+                    "图片发送事务尚未接入，本次仅保留已达阈值状态"
+            )
+        }
         if (update.thresholdReachedNow) {
             contactKey?.let(pendingInterceptionContactKeys::add)
             onLog(
@@ -1953,8 +2019,9 @@ class AiReplyObservationRuntime(
                 return
             }
             com.freedom.features.aireply.ai.SendConfirmationResult.UNKNOWN -> {
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog("AI 发送结果核验：UNKNOWN；暂停当前会话，不返回列表、不重发")
+                if (!requestSendConfirmationRecovery("SEND_CONFIRMATION_UNKNOWN")) {
+                    onLog("AI 发送结果核验：UNKNOWN；恢复事务已在等待新鲜页面证据；不返回列表、不重发")
+                }
                 return
             }
             com.freedom.features.aireply.ai.SendConfirmationResult.WAITING -> return

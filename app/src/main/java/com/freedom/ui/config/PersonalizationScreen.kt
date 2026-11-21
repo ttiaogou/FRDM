@@ -34,13 +34,14 @@ internal class PersonalizationScreen(
     private val onBack: () -> Unit,
     private val taskParameters: () -> TaskLaunchParameters,
     private val onTaskParametersChanged: (TaskLaunchParameters) -> Unit,
+    private val onImageResourceImportRequested: () -> Unit,
     private val loadAiReplyPersonalization: () -> AiReplyPersonalization,
     private val onAiReplyPersonalizationChanged: (AiReplyPersonalization) -> Unit
 ) {
     private var parameters = taskParameters()
     private var personalization = loadAiReplyPersonalization()
-    private var replyLimitValue: TextView? = null
-    private var imagePreReplyValue: TextView? = null
+    private var messageInterceptionThresholdValue: TextView? = null
+    private var imageSendThresholdValue: TextView? = null
     private var customInstructionsInput: EditText? = null
     private var personalizationStatus: TextView? = null
 
@@ -313,16 +314,16 @@ internal class PersonalizationScreen(
                 setTextColor(FreedomUi.TEXT)
             })
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        replyLimitValue = TextView(activity).apply {
-            text = parameters.replyLimit.toString()
+        messageInterceptionThresholdValue = TextView(activity).apply {
+            text = parameters.messageInterceptionThreshold.toString()
             textSize = 20f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setTextColor(FreedomUi.TEXT)
             background = FreedomUi.roundedSurface(dp(9), Color.WHITE, FreedomUi.DIVIDER)
-            contentDescription = "消息拦截 ${parameters.replyLimit}，点击编辑"
+            contentDescription = "消息拦截 ${parameters.messageInterceptionThreshold}，点击编辑"
         }
-        row.addView(replyLimitValue, LinearLayout.LayoutParams(dp(64), dp(40)))
+        row.addView(messageInterceptionThresholdValue, LinearLayout.LayoutParams(dp(64), dp(40)))
         wrapper.addView(row)
         wrapper.addView(View(activity).apply {
             setBackgroundColor(FreedomUi.DIVIDER)
@@ -332,7 +333,7 @@ internal class PersonalizationScreen(
 
     private fun showReplyLimitEditor() {
         val input = EditText(activity).apply {
-            setText(parameters.replyLimit.toString())
+            setText(parameters.messageInterceptionThreshold.toString())
             setSelection(text.length)
             inputType = InputType.TYPE_CLASS_NUMBER
             isSingleLine = true
@@ -365,9 +366,13 @@ internal class PersonalizationScreen(
                     input.error = "请输入大于或等于 0 的数字"
                     return@setOnClickListener
                 }
-                parameters = parameters.copy(replyLimit = parsed)
+                if (parsed > 0 && parameters.imageSendThreshold > parsed) {
+                    input.error = "图片发送阈值大于消息拦截阈值；拦截会先阻断后续回复"
+                    return@setOnClickListener
+                }
+                parameters = parameters.copy(messageInterceptionThreshold = parsed)
                 onTaskParametersChanged(parameters)
-                replyLimitValue?.apply {
+                messageInterceptionThresholdValue?.apply {
                     text = parsed.toString()
                     contentDescription = "消息拦截 $parsed，点击编辑"
                 }
@@ -399,16 +404,16 @@ internal class PersonalizationScreen(
                 setTextColor(FreedomUi.TEXT)
             })
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        imagePreReplyValue = TextView(activity).apply {
-            text = parameters.imagePreReplyLimit.toString()
+        imageSendThresholdValue = TextView(activity).apply {
+            text = parameters.imageSendThreshold.toString()
             textSize = 20f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setTextColor(FreedomUi.TEXT)
             background = FreedomUi.roundedSurface(dp(9), Color.WHITE, FreedomUi.DIVIDER)
-            contentDescription = "图片预回复 ${parameters.imagePreReplyLimit}，点击编辑"
+            contentDescription = "图片预回复 ${parameters.imageSendThreshold}，点击编辑"
         }
-        row.addView(imagePreReplyValue, LinearLayout.LayoutParams(dp(64), dp(40)))
+        row.addView(imageSendThresholdValue, LinearLayout.LayoutParams(dp(64), dp(40)))
         wrapper.addView(row)
         wrapper.addView(View(activity).apply {
             setBackgroundColor(FreedomUi.DIVIDER)
@@ -418,7 +423,7 @@ internal class PersonalizationScreen(
 
     private fun showImagePreReplyEditor() {
         val input = EditText(activity).apply {
-            setText(parameters.imagePreReplyLimit.toString())
+            setText(parameters.imageSendThreshold.toString())
             setSelection(text.length)
             inputType = InputType.TYPE_CLASS_NUMBER
             isSingleLine = true
@@ -432,7 +437,7 @@ internal class PersonalizationScreen(
             setPadding(dp(22), dp(8), dp(22), dp(4))
             addView(input, LinearLayout.LayoutParams(-1, dp(52)))
             addView(TextView(activity).apply {
-                text = "回复消息满足后执行/0不开启"
+                text = "回复消息满足后发送图片 / 0 不开启"
                 textSize = 11f
                 setTextColor(FreedomUi.MUTED)
                 setPadding(dp(2), dp(8), 0, 0)
@@ -451,15 +456,35 @@ internal class PersonalizationScreen(
                     input.error = "请输入大于或等于 0 的数字"
                     return@setOnClickListener
                 }
-                parameters = parameters.copy(imagePreReplyLimit = parsed)
+                if (parsed > 0 && parameters.messageInterceptionThreshold > 0 &&
+                    parsed > parameters.messageInterceptionThreshold
+                ) {
+                    input.error = "图片发送阈值大于消息拦截阈值；拦截会先阻断后续回复"
+                    return@setOnClickListener
+                }
+                parameters = parameters.copy(imageSendThreshold = parsed)
                 onTaskParametersChanged(parameters)
-                imagePreReplyValue?.apply {
+                imageSendThresholdValue?.apply {
                     text = parsed.toString()
                     contentDescription = "图片预回复 $parsed，点击编辑"
                 }
                 dialog.dismiss()
             }
         }
+        content.addView(TextView(activity).apply {
+            text = "发送图片"
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(FreedomUi.TEXT)
+            setPadding(dp(2), dp(18), 0, dp(6))
+        })
+        content.addView(Button(activity).apply {
+            text = "导入图片（已导入 ${parameters.imageResourceUris.size} 张）"
+            setOnClickListener {
+                dialog.dismiss()
+                onImageResourceImportRequested()
+            }
+        })
         dialog.show()
         FreedomUi.styleAlertDialog(dialog, activity, dp)
     }

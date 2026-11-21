@@ -8,7 +8,7 @@ import org.junit.Test
 class TemporaryContactMessageLedgerTest {
     @Test
     fun countsOnlyDistinctConfirmedSendEventsPerContact() {
-        val ledger = TemporaryContactMessageLedger(threshold = 3)
+        val ledger = TemporaryContactMessageLedger(defaultInterceptionThreshold = 3)
         val first = ledger.recordSuccessfulSend("Contact A", "send-event-1")
         val duplicate = ledger.recordSuccessfulSend("Contact A", "send-event-1")
         val second = ledger.recordSuccessfulSend("Contact A", "send-event-2")
@@ -26,7 +26,7 @@ class TemporaryContactMessageLedgerTest {
 
     @Test
     fun thresholdPausesContactAndCleanupWaitsForConfirmedInterception() {
-        val ledger = TemporaryContactMessageLedger(threshold = 2)
+        val ledger = TemporaryContactMessageLedger(defaultInterceptionThreshold = 2)
         ledger.recordSuccessfulSend("Contact A", "send-event-1")
         val reached = ledger.recordSuccessfulSend("Contact A", "send-event-2")
 
@@ -41,7 +41,7 @@ class TemporaryContactMessageLedgerTest {
 
     @Test
     fun contactCannotAccumulateMoreSendsAfterThresholdUntilInterception() {
-        val ledger = TemporaryContactMessageLedger(threshold = 1)
+        val ledger = TemporaryContactMessageLedger(defaultInterceptionThreshold = 1)
         ledger.recordSuccessfulSend("Contact A", "send-event-1")
         val next = ledger.recordSuccessfulSend("Contact A", "send-event-2")
 
@@ -62,5 +62,20 @@ class TemporaryContactMessageLedgerTest {
 
         assertEquals(0, ledger.successfulSendCount("Contact A"))
         assertEquals(0, ledger.successfulSendCount("Contact B"))
+    }
+
+    @Test
+    fun zeroThresholdsDisableActionsAndImageThresholdIsReportedOnce() {
+        val ledger = TemporaryContactMessageLedger()
+
+        val disabled = ledger.recordSuccessfulSend("Contact A", "send-event-1", 0, 0)
+        assertFalse(disabled.thresholdReachedNow)
+        assertFalse(disabled.imageThresholdReachedNow)
+
+        val imageReached = ledger.recordSuccessfulSend("Contact B", "send-event-1", 3, 1)
+        val next = ledger.recordSuccessfulSend("Contact B", "send-event-2", 3, 1)
+        assertTrue(imageReached.imageThresholdReachedNow)
+        assertFalse(next.imageThresholdReachedNow)
+        assertFalse(imageReached.thresholdReachedNow)
     }
 }

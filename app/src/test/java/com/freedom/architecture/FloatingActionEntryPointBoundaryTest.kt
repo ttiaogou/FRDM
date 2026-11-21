@@ -173,7 +173,7 @@ class FloatingActionEntryPointBoundaryTest {
     }
 
     @Test
-    fun replyLimitAndImagePreReplyLiveInPersonalizationAndPersistAsPreferences() {
+    fun imageAndInterceptionThresholdsLiveInPersonalizationAndPersistAsPreferences() {
         val home = source("app/src/main/java/com/freedom/ui/config/ConfigurationHome.kt")
         val homeOnly = home
         val personalization = source("app/src/main/java/com/freedom/ui/config/PersonalizationScreen.kt")
@@ -183,12 +183,14 @@ class FloatingActionEntryPointBoundaryTest {
         assertFalse(homeOnly.contains("回复数量限制"))
         assertTrue(personalization.contains("messageInterceptionPreferenceRow()"))
         assertTrue(personalization.contains("图片预回复"))
-        assertTrue(model.contains("imagePreReplyLimit"))
-        assertTrue(store.contains("KEY_IMAGE_PRE_REPLY_ENABLED"))
-        assertTrue(store.contains("KEY_IMAGE_PRE_REPLY_LIMIT"))
-        assertTrue(store.contains("getInt(KEY_IMAGE_PRE_REPLY_LIMIT, 0)"))
-        assertTrue(store.contains("putInt(KEY_IMAGE_PRE_REPLY_LIMIT"))
-        assertTrue(personalization.contains("回复消息满足后执行/0不开启"))
+        assertTrue(model.contains("messageInterceptionThreshold"))
+        assertTrue(model.contains("imageSendThreshold"))
+        assertTrue(model.contains("imageResourceUris"))
+        assertTrue(store.contains("KEY_MESSAGE_INTERCEPTION_THRESHOLD"))
+        assertTrue(store.contains("KEY_IMAGE_SEND_THRESHOLD"))
+        assertTrue(store.contains("KEY_IMAGE_RESOURCE_URIS"))
+        assertTrue(personalization.contains("回复消息满足后发送图片 / 0 不开启"))
+        assertTrue(personalization.contains("onImageResourceImportRequested"))
     }
 
     @Test

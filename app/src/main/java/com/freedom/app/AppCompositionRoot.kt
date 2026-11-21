@@ -505,6 +505,12 @@ internal class AccessibilityServiceDependencies internal constructor(
                     aiReplyDraftCoordinator.resetForRuntimeReset()
                 }
             },
+            messageInterceptionThreshold = {
+                root.taskLaunchParametersRepository.read().messageInterceptionThreshold
+            },
+            imageSendThreshold = {
+                root.taskLaunchParametersRepository.read().imageSendThreshold
+            },
             privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository
         )
     }
