@@ -23,6 +23,7 @@ class AccountBrowseRuntime(
     private val actions: Actions,
     private val currentRunGeneration: () -> Long = { 0L },
     private val interactionPolicy: AccountBrowseInteractionPolicy = AccountBrowseInteractionPolicy(),
+    private val onReadOnlyRecoveryObservation: () -> Unit = {},
     private val onLog: (String) -> Unit = {}
 ) {
     data class Actions(
@@ -44,9 +45,11 @@ class AccountBrowseRuntime(
 
     private val stepScheduler = AccountBrowseScheduler(scheduler, canScheduleStep) { performStep() }
     private val dynamicPageRecovery = DynamicPageRecovery(
+        scheduler = scheduler,
         targetPackage = targetPackage,
         currentRunGeneration = currentRunGeneration,
-        onLog = onLog
+        onLog = onLog,
+        onReadOnlyObservation = onReadOnlyRecoveryObservation
     )
 
     fun scheduleStep(delayMs: Long) = stepScheduler.schedule(delayMs)
@@ -106,6 +109,11 @@ class AccountBrowseRuntime(
     fun recoveryState(): RecoveryTransactionState = dynamicPageRecovery.state()
 
     fun recoveryStableSamples(): Int = dynamicPageRecovery.stableSamples()
+
+    /** Touch only changes observation cadence; it never establishes a manual-resume latch. */
+    fun onUserInteractionStarted() = dynamicPageRecovery.onUserInteractionStarted()
+
+    fun onUserInteractionEnded() = dynamicPageRecovery.onUserInteractionEnded()
 
     /**
      * Replaces the dynamic-feed-local stableSamples decision with the shared two-sample gate.
@@ -202,111 +210,36 @@ class AccountBrowseRuntime(
         afterReset()
     }
 
-    /** Centralize pause-state ordering; Android-specific cleanup remains callback-owned. */
-    fun pauseSession(
+    /**
+     * Unknown or unsafe evidence pauses only dangerous operations.  The task remains alive in
+     * RECOVERING and the shared scheduler continues fresh, read-only page observations.
+     */
+    fun requestRecovery(
         reason: String,
-        allowManualResume: Boolean,
-        capturePausedContext: (AccountBrowsePhase) -> Unit,
         beforePause: () -> Unit,
         hideCountdown: () -> Unit,
         onPauseReasonChanged: (String) -> Unit
     ) {
-        if (allowManualResume && phase != AccountBrowsePhase.PAUSED) {
-            capturePausedContext(phase)
-        }
         beforePause()
-        if (allowManualResume) {
-            session.manualResumeAllowed = true
-            session.manualRecoveryInProgress = true
-            session.manualRecoveryAttemptActive = false
-        }
         session.gestureInFlight = false
         session.countdownRemaining = 0
         hideCountdown()
-        stateMachine.transitionTo(AccountBrowsePhase.PAUSED)
         session.deadlineAt = 0L
         if (session.pauseReason != reason) {
             session.pauseReason = reason
             onPauseReasonChanged(reason)
         }
         persistCheckpoint()
-    }
-
-    /** Record manual takeover while already paused, without replacing the first snapshot. */
-    fun recordManualTakeoverWhilePaused(
-        activityClass: String,
-        sourceFingerprint: String,
-        detailFingerprint: String,
-        imageBrowserActive: Boolean,
-        lastProgrammaticAction: String,
-        currentTimeMillis: () -> Long
-    ) {
-        session.manualResumeAllowed = true
-        session.manualRecoveryInProgress = true
-        session.manualRecoveryAttemptActive = false
-        if (session.pausedContext == null) {
-            session.pausedContext = ManualResumeContext(
-                phaseName = "PAUSED",
-                activityClass = activityClass,
-                sourceFingerprint = sourceFingerprint,
-                detailFingerprint = detailFingerprint,
-                imageBrowserActive = imageBrowserActive,
-                lastProgrammaticAction = lastProgrammaticAction,
-                capturedAt = currentTimeMillis()
+        dynamicPageRecovery.observePage(
+            BrowsePageEvidence(
+                packageName = "",
+                activityClass = "",
+                pageKind = com.freedom.features.accountbrowse.ports.BrowsePageKind.UNKNOWN,
+                fingerprint = "",
+                confidence = 0,
+                reason = reason
             )
-        }
-    }
-
-    /**
-     * Apply the existing post-touch quiet-period checks and state reset before navigation.
-     * Predicates are lambdas so they are evaluated lazily in their original branch order.
-     */
-    fun resumeAfterManualTouch(
-        isMonitoringRunning: () -> Boolean,
-        isBrowseModeEnabled: () -> Boolean,
-        quietPeriodMs: Long,
-        quietPeriodStage: Int,
-        initialDynamicTabWaitTimeoutMs: Long,
-        pageStatePollMs: Long,
-        currentTimeMillis: () -> Long,
-        onLog: (String) -> Unit,
-        scheduleStep: (Long) -> Unit
-    ) {
-        when {
-            !session.manualResumeAllowed -> Unit
-            session.touchActive -> onLog("手动恢复检查未执行：仍检测到屏幕触摸，继续等待用户操作结束")
-            !isMonitoringRunning() -> onLog("手动恢复检查未执行：监听已停止")
-            !isBrowseModeEnabled() -> onLog("手动恢复检查未执行：自动浏览模式已关闭")
-            else -> {
-                session.manualRecoveryInProgress = true
-                session.manualRecoveryAttemptActive = true
-                val context = session.pausedContext
-                onLog(
-                    "用户最后一次屏幕操作后已静默 ${quietPeriodMs / 1000.0} 秒（第${quietPeriodStage}轮）；" +
-                        "开始基于暂停上下文重新分析当前页面；暂停前阶段=${context?.phaseName ?: "未知"}，" +
-                        "暂停前 Activity=${context?.activityClass?.ifBlank { "未知" } ?: "未知"}"
-                )
-                session.pauseReason = ""
-                session.sourceFingerprint = ""
-                session.detailFingerprint = ""
-                session.lastStableFingerprint = ""
-                session.stableSamples = 0
-                session.navigationActionKey = ""
-                session.navigationBeforeActivity = ""
-                session.navigationBeforeFingerprint = ""
-                session.navigationActionDeadlineAt = 0L
-                session.navigationActionAttempts = 0
-                session.recoveryBackAttempts = 0
-                session.recoveryHomeClickAttempts = 0
-                session.recoveryDynamicClickAttempts = 0
-                session.dynamicTabClickConfirmed = false
-                stateMachine.transitionTo(AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB)
-                session.deadlineAt = currentTimeMillis() + initialDynamicTabWaitTimeoutMs
-                session.lastDynamicTabWaitReason = ""
-                onLog("手动恢复已进入主动导航：先识别页面层级，再返回必要的上级页面，主动定位并验证‘动态’标签")
-                scheduleStep(pageStatePollMs)
-            }
-        }
+        )
     }
 
     /** Move only recovery-state preparation; Android overlay and Handler operations stay outside. */
@@ -319,22 +252,8 @@ class AccountBrowseRuntime(
         onStarted: (String) -> Unit,
         scheduleStep: (Long) -> Unit
     ) {
-        if (session.pausedContext == null) {
-            session.pausedContext = ManualResumeContext(
-                phaseName = phase.name,
-                activityClass = session.currentActivityClass,
-                sourceFingerprint = session.sourceFingerprint,
-                detailFingerprint = session.detailFingerprint,
-                imageBrowserActive = session.imageBrowserActive,
-                lastProgrammaticAction = session.programmaticActionLabel,
-                capturedAt = currentTimeMillis()
-            )
-        }
         beforeRecovery()
         session.pauseReason = reason
-        session.manualResumeAllowed = false
-        session.manualRecoveryInProgress = false
-        session.manualRecoveryAttemptActive = false
         session.navigationActionKey = ""
         session.navigationBeforeActivity = ""
         session.navigationBeforeFingerprint = ""

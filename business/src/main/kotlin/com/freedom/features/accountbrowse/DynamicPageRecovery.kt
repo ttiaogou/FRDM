@@ -6,6 +6,8 @@ import com.freedom.features.recovery.RecoveryEventDispatcher
 import com.freedom.features.recovery.RecoveryEventIdentity
 import com.freedom.features.recovery.RecoveryTransactionEvent
 import com.freedom.features.recovery.RecoveryTransactionState
+import com.freedom.features.recovery.RecoveryScheduler
+import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 
 /**
@@ -13,9 +15,11 @@ import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
  * The caller supplies fresh page evidence and remains responsible for scheduling and actions.
  */
 class DynamicPageRecovery(
+    scheduler: TaskScheduler,
     private val targetPackage: () -> String,
     private val currentRunGeneration: () -> Long,
-    private val onLog: (String) -> Unit = {}
+    private val onLog: (String) -> Unit = {},
+    onReadOnlyObservation: () -> Unit = {}
 ) {
     private val dispatcher = RecoveryEventDispatcher(
         UnifiedRecoveryTransactionStateMachine(),
@@ -25,6 +29,12 @@ class DynamicPageRecovery(
     private val taskId = "ACCOUNT_BROWSE"
     private val routeId = "account-browse"
     private val checkpointId = "account-browse-checkpoint"
+    private val recoveryScheduler = RecoveryScheduler(
+        scheduler = scheduler,
+        nowEpochMs = System::currentTimeMillis,
+        onReadOnlyObservation = { onReadOnlyObservation() },
+        onLog = onLog
+    )
 
     fun restoreFromCheckpoint(savedAtEpochMs: Long) {
         dispatcher.activate(identity("CHECKPOINT_LOADED"))
@@ -37,6 +47,7 @@ class DynamicPageRecovery(
                 }
             )
         )
+        recoveryScheduler.begin(identity("CHECKPOINT_LOADED"))
     }
 
     fun observePage(page: BrowsePageEvidence): RecoveryTransactionState {
@@ -53,6 +64,7 @@ class DynamicPageRecovery(
                 page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
             )
         )
+        recoveryScheduler.begin(identity(page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }))
         return dispatcher.state
     }
 
@@ -68,6 +80,7 @@ class DynamicPageRecovery(
         }
         dispatcher.dispatch(RecoveryTransactionEvent.ResumeRequested)
         dispatcher.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        recoveryScheduler.completeRecovery(identity("RECOVERY_VERIFIED"))
         return true
     }
 
@@ -77,7 +90,18 @@ class DynamicPageRecovery(
 
     fun hasPendingVerification(): Boolean = dispatcher.state != RecoveryTransactionState.ACTIVE
 
-    fun reset() = dispatcher.reset()
+    fun onUserInteractionStarted() {
+        dispatcher.currentIdentity()?.let(recoveryScheduler::onUserInteractionStarted)
+    }
+
+    fun onUserInteractionEnded() {
+        dispatcher.currentIdentity()?.let(recoveryScheduler::onUserInteractionEnded)
+    }
+
+    fun reset() {
+        dispatcher.currentIdentity()?.let(recoveryScheduler::stopByUser)
+        dispatcher.reset()
+    }
 
     private fun identity(reason: String): RecoveryEventIdentity = RecoveryEventIdentity(
         taskId = taskId,

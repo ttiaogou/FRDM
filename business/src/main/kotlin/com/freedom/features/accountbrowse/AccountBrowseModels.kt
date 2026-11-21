@@ -20,13 +20,3 @@ enum class AccountBrowsePhase {
     WAIT_FOR_LIST_RETURN,
     PAUSED
 }
-
-data class ManualResumeContext(
-    val phaseName: String,
-    val activityClass: String,
-    val sourceFingerprint: String,
-    val detailFingerprint: String,
-    val imageBrowserActive: Boolean,
-    val lastProgrammaticAction: String,
-    val capturedAt: Long
-)

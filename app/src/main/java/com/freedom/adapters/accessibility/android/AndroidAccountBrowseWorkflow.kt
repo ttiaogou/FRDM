@@ -34,7 +34,6 @@ import com.freedom.features.accountbrowse.AccountBrowseSessionStatePort
 import com.freedom.features.accountbrowse.FeedRefreshVerificationPolicy
 import com.freedom.features.accountbrowse.FeedReturnStability
 import com.freedom.features.accountbrowse.FeedReturnVerificationPolicy
-import com.freedom.features.accountbrowse.ManualResumeContext
 import com.freedom.features.accountbrowse.ports.*
 
 /**
@@ -163,6 +162,7 @@ internal class AndroidAccountBrowseWorkflow(
             targetPackage = targetPackage,
             checkpointRepository = accountBrowseCheckpointRepository,
             onResetSession = ::resetAccountBrowseSession,
+            onReadOnlyRecoveryObservation = ::observeAccountBrowseRecoveryReadOnly,
             actions = AccountBrowseRuntime.Actions(
                 waitForDynamicTab = ::waitForMomoDynamicTab,
                 verifyNavigationAction = ::verifyNavigationAction,
@@ -193,19 +193,6 @@ internal class AndroidAccountBrowseWorkflow(
     private val manualHandoffCoordinator by lazy(LazyThreadSafetyMode.NONE) {
         AccountBrowseManualHandoffCoordinator(
             scheduler = taskScheduler,
-            onResumeManualTouch = { quietPeriodMs, quietPeriodStage ->
-                accountBrowseRuntime.resumeAfterManualTouch(
-                    isMonitoringRunning = isMonitoringRunning,
-                    isBrowseModeEnabled = isBrowseModeActive,
-                    quietPeriodMs = quietPeriodMs,
-                    quietPeriodStage = quietPeriodStage,
-                    initialDynamicTabWaitTimeoutMs = MANUAL_RECOVERY_NAVIGATION_TIMEOUT_MS,
-                    pageStatePollMs = PAGE_STATE_POLL_MS,
-                    currentTimeMillis = System::currentTimeMillis,
-                    onLog = ::addLog,
-                    scheduleStep = ::scheduleAccountBrowseStep
-                )
-            },
             isOverlayPassthroughActive = { accountBrowseSession.overlayPassthroughActive },
             isWaitingForScrollSettle = { accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE },
             restoreOverlayTouchPassthrough = { restoreMonitorOverlayTouchPassthrough() },
@@ -215,38 +202,21 @@ internal class AndroidAccountBrowseWorkflow(
 
     private fun addLog(message: String) = onLog(message)
 
-    internal fun cancelManualTouchResume() = manualHandoffCoordinator.cancelManualTouchResume()
-
-    internal fun scheduleManualTouchResume(
-        delayMs: Long = manualHandoffCoordinator.quietPeriod.currentDelayMs
-    ) = manualHandoffCoordinator.scheduleManualTouchResume(delayMs)
-
     private fun scheduleOverlayPassthroughWatchdog(delayMs: Long) =
         manualHandoffCoordinator.scheduleOverlayPassthroughWatchdog(delayMs)
 
     private fun cancelOverlayPassthroughWatchdog() =
         manualHandoffCoordinator.cancelOverlayPassthroughWatchdog()
 
+    // Legacy call sites may still signal an interrupted gesture. They no longer create a
+    // handoff timer: the unified scheduler owns the next read-only observation.
+    private fun cancelManualTouchResume() = Unit
+    private fun scheduleManualTouchResume(delayMs: Long = 0L) = accountBrowseRuntime.onUserInteractionEnded()
+
     internal fun cancelScheduledStep() = accountBrowseRuntime.cancelScheduledStep()
 
     /** Cancels only the shared page-observation request owned by AccountBrowse. */
     internal fun cancelPageObservation() = pageObservationChannel.cancel()
-    internal fun recordManualTakeoverWhilePaused(
-        activityClass: String,
-        sourceFingerprint: String,
-        detailFingerprint: String,
-        imageBrowserActive: Boolean,
-        lastProgrammaticAction: String,
-        currentTimeMillis: () -> Long
-    ) = accountBrowseRuntime.recordManualTakeoverWhilePaused(
-        activityClass = activityClass,
-        sourceFingerprint = sourceFingerprint,
-        detailFingerprint = detailFingerprint,
-        imageBrowserActive = imageBrowserActive,
-        lastProgrammaticAction = lastProgrammaticAction,
-        currentTimeMillis = currentTimeMillis
-    )
-
     internal fun restoreOverlayTouchPassthrough(
         actionDescription: String = "首次滑动检查结束"
     ): Boolean = restoreMonitorOverlayTouchPassthrough(actionDescription)
@@ -292,21 +262,9 @@ internal class AndroidAccountBrowseWorkflow(
                 )
                 if (!accountBrowseSession.touchActive) {
                     accountBrowseSession.touchActive = true
-                    cancelManualTouchResume()
-                    if (accountBrowsePhase != AccountBrowsePhase.PAUSED) {
-                        pauseAccountBrowse("检测到手动触摸；自动浏览暂时让出操作权", allowManualResume = true)
-                    } else {
-                        manualHandoffCoordinator.quietPeriod.restart()
-                        accountBrowseRuntime.recordManualTakeoverWhilePaused(
-                            activityClass = accountBrowseSession.currentActivityClass,
-                            sourceFingerprint = accountBrowseSession.sourceFingerprint,
-                            detailFingerprint = accountBrowseSession.detailFingerprint,
-                            imageBrowserActive = accountBrowseSession.imageBrowserActive,
-                            lastProgrammaticAction = accountBrowseSession.programmaticActionLabel,
-                            currentTimeMillis = System::currentTimeMillis
-                        )
-                        addLog("检测到用户正在操作屏幕；原暂停原因=${accountBrowseSession.pauseReason.ifBlank { "未记录" }}；操作结束后重新分析页面层级并导航到动态标签")
-                    }
+                    accountBrowseRuntime.cancelScheduledStep()
+                    accountBrowseRuntime.onUserInteractionStarted()
+                    pauseAccountBrowse("检测到用户触摸；停止危险操作并持续只读观察")
                 }
             }
 
@@ -335,12 +293,8 @@ internal class AndroidAccountBrowseWorkflow(
                 )
                 if (accountBrowseSession.touchActive) {
                     accountBrowseSession.touchActive = false
-                    if (accountBrowseSession.manualResumeAllowed) {
-                        addLog("用户已停止操作屏幕；开始第一轮静默 5 秒倒计时；后续验证不通过时依次等待 15 秒和 60 秒；新操作会重置到第一轮")
-                        scheduleManualTouchResume()
-                    } else {
-                        addLog("用户已停止操作屏幕；当前暂停不允许自动恢复，保留原安全暂停状态")
-                    }
+                    accountBrowseRuntime.onUserInteractionEnded()
+                    addLog("用户已停止操作屏幕；统一恢复调度器已回到快速只读观察，无需人工恢复")
                 } else {
                     addLog("收到 TYPE_TOUCH_INTERACTION_END，但当前没有匹配的触摸开始状态；未推断用户是否完成了实际操作")
                 }
@@ -385,6 +339,24 @@ internal class AndroidAccountBrowseWorkflow(
      * AccountBrowseScheduler keeps ownership of phase timing and does not replace an already
      * pending step, so event bursts cannot skip countdown, dwell, or gesture phases.
      */
+    /** Scheduler callback: inspect fresh evidence only; never click, navigate or scroll here. */
+    private fun observeAccountBrowseRecoveryReadOnly() {
+        if (!isMonitoringRunning() || !isBrowseModeActive()) return
+        val page = socialBrowsePort.inspectPage()
+        accountBrowseRuntime.observeRecoveryPage(page)
+        if (page.pageKind == BrowsePageKind.DYNAMIC_FEED && matchDynamicFeedRoute(page)) {
+            val inspection = socialBrowsePort.inspectFeed()
+            accountBrowseRuntime.observeDynamicFeedFingerprint(
+                inspection.fingerprint.takeIf { inspection.ready && it.isNotBlank() }.orEmpty()
+            )
+        }
+        if (accountBrowseRuntime.recoveryState() == com.freedom.features.recovery.RecoveryTransactionState.ACTIVE &&
+            !accountBrowseSession.touchActive && accountBrowsePhase != AccountBrowsePhase.IDLE
+        ) {
+            accountBrowseRuntime.scheduleStep(PAGE_STATE_POLL_MS)
+        }
+    }
+
     private fun onCoalescedPageObservationRequested() {
         if (!isMonitoringRunning() || !isBrowseModeActive() || accountBrowseSession.touchActive ||
             accountBrowsePhase !in PAGE_OBSERVATION_PHASES
@@ -439,50 +411,20 @@ internal class AndroidAccountBrowseWorkflow(
     }
 
     internal fun resetAccountBrowseSession() {
-        manualHandoffCoordinator.quietPeriod.reset()
         accountBrowseTask.stop(
             beforeReset = {
                 restoreMonitorOverlayTouchPassthrough()
                 pageObservationChannel.cancel()
                 accountBrowseRuntime.cancelScheduledStep()
-                cancelManualTouchResume()
             },
             afterReset = ::hideFirstSwipeCountdown
         )
     }
 
-    internal fun pauseAccountBrowse(
-        reason: String,
-        allowManualResume: Boolean = false
-    ) {
-        val failedManualRecoveryAttempt = !allowManualResume &&
-            accountBrowseSession.manualRecoveryInProgress &&
-            accountBrowseSession.manualRecoveryAttemptActive &&
-            !accountBrowseSession.touchActive
-        if (allowManualResume) {
-            manualHandoffCoordinator.quietPeriod.restart()
-            accountBrowseSession.manualRecoveryAttemptActive = false
-        }
-        accountBrowseRuntime.pauseSession(
+    /** Retains the call boundary while converting every former pause into a recovery transaction. */
+    internal fun pauseAccountBrowse(reason: String, allowManualResume: Boolean = false) {
+        accountBrowseRuntime.requestRecovery(
             reason = reason,
-            allowManualResume = allowManualResume,
-            capturePausedContext = { phaseAtPause ->
-                accountBrowseSession.pausedContext = ManualResumeContext(
-                    phaseName = phaseAtPause.name,
-                    activityClass = accountBrowseSession.currentActivityClass,
-                    sourceFingerprint = accountBrowseSession.sourceFingerprint,
-                    detailFingerprint = accountBrowseSession.detailFingerprint,
-                    imageBrowserActive = accountBrowseSession.imageBrowserActive,
-                    lastProgrammaticAction = accountBrowseSession.programmaticActionLabel,
-                    capturedAt = System.currentTimeMillis()
-                )
-                addLog(
-                    "已保存暂停上下文：阶段=${phaseAtPause.name}；" +
-                        "Activity=${accountBrowseSession.currentActivityClass.ifBlank { "未知" }}；" +
-                        "详情上下文=${if (accountBrowseSession.detailFingerprint.isNotBlank()) "已保存" else "无"}；" +
-                        "图片浏览状态=${accountBrowseSession.imageBrowserActive}"
-                )
-            },
             beforePause = {
                 restoreMonitorOverlayTouchPassthrough()
                 pageObservationChannel.cancel()
@@ -490,32 +432,8 @@ internal class AndroidAccountBrowseWorkflow(
             },
             hideCountdown = ::hideFirstSwipeCountdown,
             onPauseReasonChanged = { changedReason ->
-                addLog("动态浏览已暂停：$changedReason")
+                addLog("动态浏览已进入统一恢复观察：$changedReason")
             }
-        )
-        if (failedManualRecoveryAttempt) onManualRecoveryAttemptFailed(reason)
-    }
-
-    private fun onManualRecoveryAttemptFailed(reason: String) {
-        accountBrowseSession.manualRecoveryAttemptActive = false
-        val nextDelayMs = manualHandoffCoordinator.quietPeriod.advanceAfterUnmetCondition()
-        if (nextDelayMs != null) {
-            addLog(
-                "动态浏览人工恢复：第${manualHandoffCoordinator.quietPeriod.stageNumber - 1}轮未满足动态列表操作条件；" +
-                    "等待第${manualHandoffCoordinator.quietPeriod.stageNumber}轮静默 ${nextDelayMs / 1_000} 秒后重新导航和验证"
-            )
-            scheduleManualTouchResume(nextDelayMs)
-            return
-        }
-
-        accountBrowseSession.manualResumeAllowed = false
-        accountBrowseSession.manualRecoveryInProgress = false
-        accountBrowseSession.pausedContext = null
-        val latchReason = "动态浏览人工接管后，第三轮静默 60 秒结束仍未满足动态列表操作条件；$reason"
-        val screenOffAccepted = runCatching { onRequestScreenOff() }.getOrDefault(false)
-        addLog(
-            "动态浏览[MANUAL_HANDOFF_PAUSED]：$latchReason；不写入持久化人工复核锁；" +
-                "已请求息屏=${screenOffAccepted}；必须显式停止并重新启动运行"
         )
     }
 
@@ -901,8 +819,7 @@ internal class AndroidAccountBrowseWorkflow(
     }
 
     private fun isKnownMomoChildPage(): Boolean {
-        val imageBrowserKnown = accountBrowseSession.imageBrowserActive ||
-            accountBrowseSession.pausedContext?.imageBrowserActive == true
+        val imageBrowserKnown = accountBrowseSession.imageBrowserActive
         if (imageBrowserKnown && socialBrowsePort.isImageBrowserActivity(accountBrowseSession.currentActivityClass)) {
             return true
         }
@@ -1232,17 +1149,7 @@ internal class AndroidAccountBrowseWorkflow(
             accountBrowseSession.stableSamples >= REQUIRED_STABLE_FEED_SAMPLES
         ) {
             accountBrowseSession.swipeCount = 0
-            if (accountBrowseSession.manualRecoveryInProgress) {
-                manualHandoffCoordinator.quietPeriod.reset()
-                accountBrowseSession.manualResumeAllowed = false
-                accountBrowseSession.manualRecoveryInProgress = false
-                accountBrowseSession.manualRecoveryAttemptActive = false
-                addLog("动态浏览人工恢复：已确认动态列表连续稳定 ${REQUIRED_STABLE_FEED_SAMPLES} 次；分级静默恢复流程成功；重新接管自主浏览")
-            }
-            if (accountBrowseSession.pausedContext != null) {
-                addLog("暂停上下文已完成校验：当前动态列表连续稳定；恢复后先执行新的列表滑动，再选择动态，避免重新点击暂停前已打开的卡片")
-                accountBrowseSession.pausedContext = null
-            }
+            addLog("动态浏览恢复验证完成：已确认动态列表连续稳定 ${REQUIRED_STABLE_FEED_SAMPLES} 次；恢复自主浏览")
             accountBrowsePhase = AccountBrowsePhase.FIRST_SWIPE_COUNTDOWN
             accountBrowseSession.countdownRemaining = FIRST_SWIPE_COUNTDOWN_SECONDS
             addLog(
@@ -2364,15 +2271,7 @@ internal class AndroidAccountBrowseWorkflow(
         }
 
         if (socialBrowsePort.isImageBrowserActivity(activityClass)) {
-            if (accountBrowsePhase == AccountBrowsePhase.PAUSED && accountBrowseSession.manualResumeAllowed) {
-                accountBrowseSession.imageBrowserReturnActivityClass = previousActivity
-                    .takeIf { it.isNotBlank() && !socialBrowsePort.isImageBrowserActivity(it) }
-                    ?: socialBrowsePort.detailActivityClass
-                accountBrowseSession.imageBrowserActive = true
-                accountBrowseSession.detailDwellRemainingMs =
-                    (accountBrowseSession.detailDwellDueAt - System.currentTimeMillis()).coerceAtLeast(0L)
-                addLog("已识别用户暂停期间进入陌陌动态图片浏览页面：保留 PAUSED 状态；静默结束后由恢复导航逐级返回动态标签")
-            } else if (accountBrowsePhase == AccountBrowsePhase.DETAIL_DWELL) {
+            if (accountBrowsePhase == AccountBrowsePhase.DETAIL_DWELL) {
                 accountBrowseSession.imageBrowserReturnActivityClass = previousActivity
                     .takeIf { it.isNotBlank() && !socialBrowsePort.isImageBrowserActivity(it) }
                     ?: socialBrowsePort.detailActivityClass
@@ -2381,7 +2280,6 @@ internal class AndroidAccountBrowseWorkflow(
                     (accountBrowseSession.detailDwellDueAt - System.currentTimeMillis()).coerceAtLeast(0L)
                 cancelManualTouchResume()
                 accountBrowseRuntime.cancelScheduledStep()
-                accountBrowseSession.manualResumeAllowed = false
                 accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN
                 accountBrowseSession.deadlineAt = System.currentTimeMillis() + IMAGE_BROWSER_RETURN_TIMEOUT_MS
                 addLog("自动详情停留期间进入陌陌图片浏览页面：保留详情上下文，等待图片页面返回")
@@ -2394,15 +2292,6 @@ internal class AndroidAccountBrowseWorkflow(
             val returnedPage = socialBrowsePort.inspectPage()
             val returnedToDetail = returnedPage.pageKind == BrowsePageKind.DETAIL &&
                 returnedPage.confidence >= 80 && !isRetainedObstructionEvidence(returnedPage.reason)
-            if (accountBrowsePhase == AccountBrowsePhase.PAUSED && accountBrowseSession.manualResumeAllowed) {
-                if (returnedToDetail) {
-                    accountBrowseSession.imageBrowserActive = false
-                    addLog("用户已手动退出图片浏览页面；保持安全暂停，静默结束后仍会重新识别并导航到动态标签")
-                } else {
-                    addLog("用户暂停期间图片浏览 Activity 已变化：$activityClass；保持安全暂停，交由恢复导航重新判断")
-                }
-                return
-            }
             if (accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_DYNAMIC_TAB ||
                 accountBrowsePhase == AccountBrowsePhase.VERIFY_NAVIGATION_ACTION ||
                 accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_FEED_STABLE
@@ -2586,24 +2475,7 @@ internal class AndroidAccountBrowseWorkflow(
                 "自动浏览阶段=${accountBrowsePhase.name}；${currentMonitorPageContext()}；" +
                 "事件证据分类=${evidence.category}；${evidence.description}；$sourceDetails"
         )
-        if (accountBrowsePhase != AccountBrowsePhase.PAUSED) {
-            pauseAccountBrowse(
-                "$reason；自动浏览暂时让出操作权",
-                allowManualResume = true
-            )
-        } else {
-            manualHandoffCoordinator.quietPeriod.restart()
-            accountBrowseSession.manualRecoveryAttemptActive = false
-            accountBrowseRuntime.recordManualTakeoverWhilePaused(
-                activityClass = accountBrowseSession.currentActivityClass,
-                sourceFingerprint = accountBrowseSession.sourceFingerprint,
-                detailFingerprint = accountBrowseSession.detailFingerprint,
-                imageBrowserActive = accountBrowseSession.imageBrowserActive,
-                lastProgrammaticAction = accountBrowseSession.programmaticActionLabel,
-                currentTimeMillis = { now }
-            )
-            addLog("用户操作发生时自动浏览已处于安全暂停；原暂停原因=${accountBrowseSession.pauseReason.ifBlank { "未记录" }}；静默结束后重新分析页面层级并导航到动态标签")
-        }
+        pauseAccountBrowse("$reason；停止危险操作并交由统一恢复观察")
 
         cancelManualTouchResume()
         if (accountBrowseSession.touchActive) {

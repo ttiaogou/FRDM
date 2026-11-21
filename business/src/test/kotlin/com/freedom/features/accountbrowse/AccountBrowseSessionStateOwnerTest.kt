@@ -55,15 +55,6 @@ class AccountBrowseSessionStateOwnerTest {
         owner.port.pauseReason = "manual"
         owner.port.touchActive = true
         owner.port.overlayPassthroughActive = true
-        owner.port.pausedContext = ManualResumeContext(
-            phaseName = "PAUSED",
-            activityClass = "ExampleActivity",
-            sourceFingerprint = "source",
-            detailFingerprint = "detail",
-            imageBrowserActive = false,
-            lastProgrammaticAction = "tap",
-            capturedAt = 1L,
-        )
 
         owner.port.reset()
 
@@ -71,6 +62,5 @@ class AccountBrowseSessionStateOwnerTest {
         assertEquals("", reset.pauseReason)
         assertEquals(false, reset.touchActive)
         assertEquals(true, reset.overlayPassthroughActive)
-        assertNull(reset.pausedContext)
     }
 }

@@ -18,9 +18,6 @@ interface AccountBrowseSessionStatePort {
     var lastStableFingerprint: String
     var stableSamples: Int
     var touchActive: Boolean
-    var manualResumeAllowed: Boolean
-    var manualRecoveryInProgress: Boolean
-    var manualRecoveryAttemptActive: Boolean
     var touchStartedDuringGesture: Boolean
     var touchEndedDuringGesture: Boolean
     var gestureInFlight: Boolean
@@ -52,7 +49,6 @@ interface AccountBrowseSessionStatePort {
     var lastTargetInteractionDescription: String
     var lastProgrammaticScrollAt: Long
     var lastProgrammaticScrollLabel: String
-    var pausedContext: ManualResumeContext?
     var navigationActionKey: String
     var navigationBeforeActivity: String
     var navigationBeforeFingerprint: String
@@ -95,9 +91,6 @@ data class AccountBrowseSessionSnapshot(
     val lastStableFingerprint: String = "",
     val stableSamples: Int = 0,
     val touchActive: Boolean = false,
-    val manualResumeAllowed: Boolean = false,
-    val manualRecoveryInProgress: Boolean = false,
-    val manualRecoveryAttemptActive: Boolean = false,
     val touchStartedDuringGesture: Boolean = false,
     val touchEndedDuringGesture: Boolean = false,
     val gestureInFlight: Boolean = false,
@@ -129,7 +122,6 @@ data class AccountBrowseSessionSnapshot(
     val lastTargetInteractionDescription: String = "",
     val lastProgrammaticScrollAt: Long = 0L,
     val lastProgrammaticScrollLabel: String = "",
-    val pausedContext: ManualResumeContext? = null,
     val navigationActionKey: String = "",
     val navigationBeforeActivity: String = "",
     val navigationBeforeFingerprint: String = "",
@@ -200,15 +192,6 @@ internal class AccountBrowseSessionStateOwner {
         override var touchActive: Boolean
             get() = snapshot().touchActive
             set(value) = update { it.copy(touchActive = value) }
-        override var manualResumeAllowed: Boolean
-            get() = snapshot().manualResumeAllowed
-            set(value) = update { it.copy(manualResumeAllowed = value) }
-        override var manualRecoveryInProgress: Boolean
-            get() = snapshot().manualRecoveryInProgress
-            set(value) = update { it.copy(manualRecoveryInProgress = value) }
-        override var manualRecoveryAttemptActive: Boolean
-            get() = snapshot().manualRecoveryAttemptActive
-            set(value) = update { it.copy(manualRecoveryAttemptActive = value) }
         override var touchStartedDuringGesture: Boolean
             get() = snapshot().touchStartedDuringGesture
             set(value) = update { it.copy(touchStartedDuringGesture = value) }
@@ -302,9 +285,6 @@ internal class AccountBrowseSessionStateOwner {
         override var lastProgrammaticScrollLabel: String
             get() = snapshot().lastProgrammaticScrollLabel
             set(value) = update { it.copy(lastProgrammaticScrollLabel = value) }
-        override var pausedContext: ManualResumeContext?
-            get() = snapshot().pausedContext
-            set(value) = update { it.copy(pausedContext = value) }
         override var navigationActionKey: String
             get() = snapshot().navigationActionKey
             set(value) = update { it.copy(navigationActionKey = value) }
@@ -422,9 +402,6 @@ internal class AccountBrowseSessionStateOwner {
             popupActionAttempts = 0,
             popupExhaustedLogged = false,
             touchActive = false,
-            manualResumeAllowed = false,
-            manualRecoveryInProgress = false,
-            manualRecoveryAttemptActive = false,
             touchStartedDuringGesture = false,
             touchEndedDuringGesture = false,
             gestureInFlight = false,
@@ -451,7 +428,6 @@ internal class AccountBrowseSessionStateOwner {
             lastTargetInteractionDescription = "",
             lastProgrammaticScrollAt = 0L,
             lastProgrammaticScrollLabel = "",
-            pausedContext = null,
             navigationActionKey = "",
             navigationBeforeActivity = "",
             navigationBeforeFingerprint = "",

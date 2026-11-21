@@ -11,7 +11,8 @@ class AccountBrowseInteractionPolicy {
         recoveryState: RecoveryTransactionState
     ): Boolean {
         if (!sessionEnabled || touchActive || phase == AccountBrowsePhase.PAUSED) return false
-        return recoveryState == RecoveryTransactionState.ACTIVE ||
-            phase == AccountBrowsePhase.WAIT_FOR_FEED_STABLE
+        // Verification and recovery are deliberately read-only.  A phase name must never
+        // bypass the transaction gate: every click, scroll and navigation waits for ACTIVE.
+        return recoveryState == RecoveryTransactionState.ACTIVE
     }
 }
