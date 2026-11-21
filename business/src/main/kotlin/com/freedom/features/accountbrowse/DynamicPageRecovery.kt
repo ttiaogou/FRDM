@@ -57,6 +57,9 @@ class DynamicPageRecovery(
     }
 
     fun observeFingerprint(fingerprint: String): Boolean {
+        if (fingerprint.isNotBlank() && dispatcher.state == RecoveryTransactionState.RECOVERING) {
+            dispatcher.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        }
         dispatcher.observeFingerprint(fingerprint)
         if (dispatcher.state != RecoveryTransactionState.VERIFYING ||
             dispatcher.stableVerificationSamples < UnifiedRecoveryTransactionStateMachine.REQUIRED_STABLE_SAMPLES
