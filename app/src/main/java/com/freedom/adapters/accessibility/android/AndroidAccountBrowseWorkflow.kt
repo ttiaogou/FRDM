@@ -228,11 +228,6 @@ internal class AndroidAccountBrowseWorkflow(
         overlayPassthroughWatchdogTask = null
     }
 
-    // Legacy call sites may still signal an interrupted gesture. They no longer create a
-    // handoff timer: the unified scheduler owns the next read-only observation.
-    private fun cancelManualTouchResume() = Unit
-    private fun scheduleManualTouchResume(delayMs: Long = 0L) = accountBrowseRuntime.onUserInteractionEnded()
-
     internal fun cancelScheduledStep() = accountBrowseRuntime.cancelScheduledStep()
 
     /** Cancels only the shared page-observation request owned by AccountBrowse. */
@@ -254,7 +249,7 @@ internal class AndroidAccountBrowseWorkflow(
         actionDescription: String = "首次滑动检查结束"
     ): Boolean = restoreMonitorOverlayTouchPassthroughImpl(actionDescription)
 
-    /** Own global touch start/end semantics for manual takeover and quiet-period resume. */
+    /** 统一处理触摸开始/结束：暂停危险操作，并通知通用恢复调度器继续只读观察。 */
     internal fun handleGlobalTouchEvent(eventType: Int, eventPackage: String) {
         when (eventType) {
             AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> {
@@ -448,8 +443,8 @@ internal class AndroidAccountBrowseWorkflow(
         )
     }
 
-    /** Retains the call boundary while converting every former pause into a recovery transaction. */
-    internal fun pauseAccountBrowse(reason: String, allowManualResume: Boolean = false) {
+    /** 所有暂停请求均转入统一恢复事务，不再接受旧人工恢复参数。 */
+    internal fun pauseAccountBrowse(reason: String) {
         accountBrowseRuntime.requestRecovery(
             reason = reason,
             beforePause = {
@@ -937,11 +932,8 @@ internal class AndroidAccountBrowseWorkflow(
                     return@execute
                 }
                 if (result.status != GestureExecutionStatus.COMPLETED) {
-                    val interruptedByTouch = accountBrowseSession.touchStartedDuringGesture ||
-                        accountBrowseSession.touchEndedDuringGesture || accountBrowseSession.touchActive
                     pauseAccountBrowse(
-                        "‘$actionDescription’坐标手势被系统或用户操作中断；停止本次自动导航",
-                        allowManualResume = interruptedByTouch
+                        "‘$actionDescription’坐标手势被系统或用户操作中断；停止本次自动导航"
                     )
                     return@execute
                 }
@@ -1413,11 +1405,10 @@ internal class AndroidAccountBrowseWorkflow(
                     if (accountBrowsePhase != AccountBrowsePhase.VERIFY_DYNAMIC_FEED_REFRESH) return@execute
                     val interruptedByTouch = touchStarted || touchEnded
                     if (interruptedByTouch) {
-                        pauseAccountBrowse("首页连续双击刷新被屏幕触摸中断；等待用户操作结束后重新识别页面", allowManualResume = true)
+                        pauseAccountBrowse("首页连续双击刷新被屏幕触摸中断；等待用户操作结束后重新识别页面")
                         if (touchEnded) {
                             accountBrowseSession.touchActive = false
-                            cancelManualTouchResume()
-                            scheduleManualTouchResume()
+                            accountBrowseRuntime.onUserInteractionEnded()
                         } else {
                             accountBrowseSession.touchActive = true
                         }
@@ -1823,18 +1814,16 @@ internal class AndroidAccountBrowseWorkflow(
                         if (accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE) {
                             val interruptedByTouch = touchStarted || touchEnded
                             pauseAccountBrowse(
-                                "第 ${accountBrowseSession.swipeCount + 1} 轮屏幕滑动被系统或用户操作中断",
-                                allowManualResume = interruptedByTouch
+                                "第 ${accountBrowseSession.swipeCount + 1} 轮屏幕滑动被系统或用户操作中断"
                             )
                             if (interruptedByTouch) {
                                 if (touchEnded) {
                                     accountBrowseSession.touchActive = false
-                                    addLog("检测到手动触摸中断了自动滑动，且触摸已经结束；开始第一轮静默 5 秒等待")
-                                    cancelManualTouchResume()
-                                    scheduleManualTouchResume()
+                                    addLog("检测到手动触摸中断了自动滑动，且触摸已经结束；统一恢复调度器继续只读观察")
+                                    accountBrowseRuntime.onUserInteractionEnded()
                                 } else {
                                     accountBrowseSession.touchActive = true
-                                    addLog("检测到手动触摸中断了自动滑动；等待用户松开屏幕后再开始静默等待")
+                                    addLog("检测到手动触摸中断了自动滑动；等待用户松开屏幕后由统一恢复调度器继续只读观察")
                                 }
                             }
                         }
@@ -2016,8 +2005,7 @@ internal class AndroidAccountBrowseWorkflow(
                             scheduleAccountBrowseStep(SCROLL_SETTLE_MS)
                         } else {
                             pauseAccountBrowse(
-                                "备用坐标滑动被系统或用户操作中断；不再尝试节点级滚动",
-                                allowManualResume = true
+                                "备用坐标滑动被系统或用户操作中断；不再尝试节点级滚动"
                             )
                         }
                     }
@@ -2133,11 +2121,8 @@ internal class AndroidAccountBrowseWorkflow(
                     return@execute
                 }
                 if (result.status != GestureExecutionStatus.COMPLETED) {
-                    val interruptedByTouch = accountBrowseSession.touchStartedDuringGesture ||
-                        accountBrowseSession.touchEndedDuringGesture || accountBrowseSession.touchActive
                     pauseAccountBrowse(
-                        "普通动态卡片坐标点击被系统或用户操作中断；停止本轮自动浏览",
-                        allowManualResume = interruptedByTouch
+                        "普通动态卡片坐标点击被系统或用户操作中断；停止本轮自动浏览"
                     )
                     return@execute
                 }
@@ -2313,7 +2298,6 @@ internal class AndroidAccountBrowseWorkflow(
                 accountBrowseSession.imageBrowserActive = true
                 accountBrowseSession.detailDwellRemainingMs =
                     (accountBrowseSession.detailDwellDueAt - System.currentTimeMillis()).coerceAtLeast(0L)
-                cancelManualTouchResume()
                 accountBrowseRuntime.cancelScheduledStep()
                 accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN
                 accountBrowseSession.deadlineAt = System.currentTimeMillis() + IMAGE_BROWSER_RETURN_TIMEOUT_MS
@@ -2512,12 +2496,11 @@ internal class AndroidAccountBrowseWorkflow(
         )
         pauseAccountBrowse("$reason；停止危险操作并交由统一恢复观察")
 
-        cancelManualTouchResume()
         if (accountBrowseSession.touchActive) {
-            addLog("目标控件事件发生时全局触摸仍处于活动状态；暂不启动静默倒计时，等待 TYPE_TOUCH_INTERACTION_END")
+            addLog("目标控件事件发生时全局触摸仍处于活动状态；暂不恢复快速只读观察，等待 TYPE_TOUCH_INTERACTION_END")
         } else {
-            addLog("已记录目标控件交互；最后一次操作后等待第一轮静默 5 秒，再重新识别当前页面")
-            scheduleManualTouchResume()
+            addLog("已记录目标控件交互；由统一恢复调度器重新读取并验证当前页面")
+            accountBrowseRuntime.onUserInteractionEnded()
         }
     }
 
