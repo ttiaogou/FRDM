@@ -282,6 +282,16 @@ class AiReplyObservationRuntimeTest {
         assertFalse(logs.any { it.contains("消息列表检查点恢复[CONTINUE]") })
         assertEquals(0, gestures)
 
+        // P5: the reserved private-message lease must not authorize an old queued
+        // scroll while the checkpoint is still waiting for its second fresh sample.
+        val readsBeforeBlockedScroll = port.fullInspections
+        val scrollMethod = runtime.javaClass.getDeclaredMethod(
+            "scrollSessionList", ChatPageSnapshot::class.java, Boolean::class.javaPrimitiveType!!
+        ).apply { isAccessible = true }
+        scrollMethod.invoke(runtime, port.page, false)
+        assertEquals(readsBeforeBlockedScroll, port.fullInspections)
+        assertEquals(0, gestures)
+
         scheduler.runNextWithDelay(500L)
         scheduler.runNextWithDelay(0L)
         assertTrue(logs.any { it.contains("消息列表检查点恢复[CONTINUE]") })
