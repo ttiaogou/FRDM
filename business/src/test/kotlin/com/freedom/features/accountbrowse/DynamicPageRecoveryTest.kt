@@ -17,7 +17,7 @@ class DynamicPageRecoveryTest {
         )
 
         assertEquals(
-            RecoveryTransactionState.VERIFYING,
+            RecoveryTransactionState.RECOVERING,
             recovery.observePage(
                 BrowsePageEvidence(
                     packageName = "com.immomo.momo",
@@ -42,7 +42,7 @@ class DynamicPageRecoveryTest {
         )
 
         assertEquals(
-            RecoveryTransactionState.VERIFYING,
+            RecoveryTransactionState.RECOVERING,
             recovery.observePage(
                 BrowsePageEvidence(
                     packageName = "other.package",

@@ -40,6 +40,6 @@ class RecoveryEventDispatcherTest {
 
         dispatcher.dispatch(RecoveryTransactionEvent.ResumeCompleted, identity(2L, runGeneration = 9L))
 
-        assertEquals(RecoveryTransactionState.PAUSED, dispatcher.state)
+        assertEquals(RecoveryTransactionState.RECOVERING, dispatcher.state)
     }
 }

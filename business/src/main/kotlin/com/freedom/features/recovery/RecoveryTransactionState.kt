@@ -8,12 +8,10 @@ package com.freedom.features.recovery
  */
 enum class RecoveryTransactionState {
     ACTIVE,
-    RECOVERY_REQUESTED,
-    PAUSED,
+    RECOVERING,
     VERIFYING,
-    VERIFIED,
     RESUMING,
-    CANCELLED
+    STOPPED_BY_USER
 }
 
 /** Events understood by the shared recovery transaction. Payloads contain no page-specific data. */
@@ -27,7 +25,8 @@ sealed interface RecoveryTransactionEvent {
     data object ResumeRequested : RecoveryTransactionEvent
     data object ResumeCompleted : RecoveryTransactionEvent
     data class RetryScheduled(val delayMs: Long) : RecoveryTransactionEvent
-    data class Cancelled(val reason: String) : RecoveryTransactionEvent
+    /** The only terminal event. It may be emitted only from an explicit user stop action. */
+    data class StoppedByUser(val reason: String) : RecoveryTransactionEvent
 
     enum class Source {
         SERVICE_RECONNECT,
@@ -64,8 +63,9 @@ data class RecoveryTransactionEventEnvelope(
  * Shared, business-neutral recovery transaction.
  *
  * The page adapters only provide observations. The feature coordinator owns this reducer and
- * decides when the task is paused or may resume. It deliberately has no retry limit: a retry
- * schedule is an event, not a terminal condition.
+ * decides when the task may resume. It deliberately has no retry limit: a retry schedule is an
+ * event, not a terminal condition. Recovery states stop dangerous actions while keeping the
+ * transaction available for fresh, read-only observation.
  */
 class UnifiedRecoveryTransactionStateMachine(
     initialState: RecoveryTransactionState = RecoveryTransactionState.ACTIVE
@@ -78,53 +78,48 @@ class UnifiedRecoveryTransactionStateMachine(
     private var activeEventIdentity: RecoveryEventIdentity? = null
 
     fun dispatch(event: RecoveryTransactionEvent): RecoveryTransactionState {
+        if (state == RecoveryTransactionState.STOPPED_BY_USER &&
+            event !is RecoveryTransactionEvent.StoppedByUser
+        ) return state
         when (event) {
             is RecoveryTransactionEvent.UnknownPage -> {
                 stableVerificationSamples = 0
-                state = RecoveryTransactionState.PAUSED
+                state = RecoveryTransactionState.RECOVERING
             }
             is RecoveryTransactionEvent.CheckpointLoaded -> {
                 stableVerificationSamples = 0
-                state = RecoveryTransactionState.VERIFYING
+                state = RecoveryTransactionState.RECOVERING
             }
             is RecoveryTransactionEvent.VerificationStarted -> {
-                stableVerificationSamples = 0
-                state = RecoveryTransactionState.VERIFYING
+                if (state != RecoveryTransactionState.STOPPED_BY_USER) {
+                    stableVerificationSamples = 0
+                    state = RecoveryTransactionState.VERIFYING
+                }
             }
             is RecoveryTransactionEvent.VerificationSample -> {
-                if (state != RecoveryTransactionState.VERIFYING &&
-                    state != RecoveryTransactionState.PAUSED
-                ) return state
+                if (state != RecoveryTransactionState.VERIFYING) return state
                 stableVerificationSamples = if (event.stable) {
                     stableVerificationSamples + 1
                 } else {
                     0
                 }
-                state = if (stableVerificationSamples >= REQUIRED_STABLE_SAMPLES) {
-                    RecoveryTransactionState.VERIFIED
-                } else {
-                    RecoveryTransactionState.VERIFYING
-                }
             }
             RecoveryTransactionEvent.UserInteractionStarted -> {
-                if (state != RecoveryTransactionState.CANCELLED) {
-                    state = RecoveryTransactionState.PAUSED
-                    stableVerificationSamples = 0
-                }
+                // Touch is an interaction-policy condition, not a recovery-task state.
             }
             RecoveryTransactionEvent.UserInteractionEnded -> {
-                if (state == RecoveryTransactionState.PAUSED) {
-                    state = RecoveryTransactionState.VERIFYING
-                    stableVerificationSamples = 0
-                }
+                // Observation continues automatically; no manual-resume state is introduced.
             }
             is RecoveryTransactionEvent.RetryScheduled -> {
-                if (state != RecoveryTransactionState.CANCELLED) {
-                    state = RecoveryTransactionState.PAUSED
+                if (state != RecoveryTransactionState.STOPPED_BY_USER) {
+                    stableVerificationSamples = 0
+                    state = RecoveryTransactionState.RECOVERING
                 }
             }
             RecoveryTransactionEvent.ResumeRequested -> {
-                if (state == RecoveryTransactionState.VERIFIED) {
+                if (state == RecoveryTransactionState.VERIFYING &&
+                    stableVerificationSamples >= REQUIRED_STABLE_SAMPLES
+                ) {
                     state = RecoveryTransactionState.RESUMING
                 }
             }
@@ -134,8 +129,8 @@ class UnifiedRecoveryTransactionStateMachine(
                     stableVerificationSamples = 0
                 }
             }
-            is RecoveryTransactionEvent.Cancelled -> {
-                state = RecoveryTransactionState.CANCELLED
+            is RecoveryTransactionEvent.StoppedByUser -> {
+                state = RecoveryTransactionState.STOPPED_BY_USER
                 stableVerificationSamples = 0
             }
         }
@@ -164,9 +159,7 @@ class UnifiedRecoveryTransactionStateMachine(
         }
         if (fingerprint != lastObservedFingerprint) {
             lastObservedFingerprint = fingerprint
-            if (state != RecoveryTransactionState.VERIFYING &&
-                state != RecoveryTransactionState.PAUSED
-            ) {
+            if (state != RecoveryTransactionState.VERIFYING) {
                 dispatch(RecoveryTransactionEvent.VerificationStarted(1))
             } else if (stableVerificationSamples > 0) {
                 dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))

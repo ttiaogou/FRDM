@@ -53,11 +53,14 @@ class DynamicPageRecovery(
                 page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
             )
         )
-        return dispatcher.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        return dispatcher.state
     }
 
     fun observeFingerprint(fingerprint: String): Boolean {
-        if (dispatcher.observeFingerprint(fingerprint) != RecoveryTransactionState.VERIFIED) {
+        dispatcher.observeFingerprint(fingerprint)
+        if (dispatcher.state != RecoveryTransactionState.VERIFYING ||
+            dispatcher.stableVerificationSamples < UnifiedRecoveryTransactionStateMachine.REQUIRED_STABLE_SAMPLES
+        ) {
             return false
         }
         dispatcher.dispatch(RecoveryTransactionEvent.ResumeRequested)
