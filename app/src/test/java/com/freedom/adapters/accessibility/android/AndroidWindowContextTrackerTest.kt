@@ -17,6 +17,26 @@ class AndroidWindowContextTrackerTest {
     }
 
     @Test
+    fun recoveredActivityIsScopedToVerifiedWindowAndGeneration() {
+        val tracker = AndroidWindowContextTracker()
+        assertEquals(true, tracker.restoreActivityClass("com.immomo.momo.maintab.MaintabActivity", 116, 0L))
+        assertEquals(true, tracker.recoveredActivityMatches(116, 0L))
+        assertEquals(false, tracker.recoveredActivityMatches(117, 0L))
+        assertEquals(false, tracker.recoveredActivityMatches(116, 1L))
+        tracker.invalidateRecoveredActivity()
+        assertEquals("", tracker.currentActivityClass())
+    }
+
+    @Test
+    fun platformActivityEventOverridesReadOnlyRecoveryEvidence() {
+        val tracker = AndroidWindowContextTracker(uptimeMillis = { 100L })
+        tracker.restoreActivityClass("com.immomo.momo.maintab.MaintabActivity", 116, 0L)
+        tracker.observeWindowStateEvent("com.immomo.momo.message.activity.ChatActivity", 117)
+        assertEquals("com.immomo.momo.message.activity.ChatActivity", tracker.currentActivityClass())
+        assertEquals(true, tracker.recoveredActivityMatches(116, 0L))
+    }
+
+    @Test
     fun dialogWindowIsTrackedSeparatelyAndClearedWhenActivityReturns() {
         val tracker = AndroidWindowContextTracker(uptimeMillis = { 12_345L })
         tracker.updateActivityClass("com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity")

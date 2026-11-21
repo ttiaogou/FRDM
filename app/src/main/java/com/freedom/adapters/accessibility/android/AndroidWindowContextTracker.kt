@@ -14,16 +14,44 @@ internal class AndroidWindowContextTracker(
 ) {
     private var activityClass: String = ""
     private var dialogWindowObservation: AndroidDialogWindowObservation? = null
+    private var restoredActivityBinding: Pair<Int, Long>? = null
 
     fun currentActivityClass(): String = activityClass
 
     fun updateActivityClass(value: String) {
         activityClass = value
+        // A new platform window-state event supersedes provisional usage-event proof.
+        restoredActivityBinding = null
+    }
+
+    /** A recovered Activity is valid only for this exact live window and generation. */
+    fun restoreActivityClass(value: String, windowId: Int, generation: Long): Boolean {
+        if (activityClass.isNotBlank() || windowId < 0 || generation < 0L ||
+            !isActivityWindowClassName(value)
+        ) return false
+        activityClass = value
+        restoredActivityBinding = windowId to generation
+        return true
+    }
+
+    fun recoveredActivityMatches(windowId: Int, generation: Long): Boolean {
+        val binding = restoredActivityBinding ?: return true
+        return binding.first == windowId && binding.second == generation
+    }
+
+    /** Never retain a usage-derived Activity across any observed window transition. */
+    fun invalidateRecoveredActivity() {
+        if (restoredActivityBinding != null) {
+            activityClass = ""
+            restoredActivityBinding = null
+            dialogWindowObservation = null
+        }
     }
 
     fun clearActivityClass() {
         activityClass = ""
         dialogWindowObservation = null
+        restoredActivityBinding = null
     }
 
     /**
@@ -38,6 +66,7 @@ internal class AndroidWindowContextTracker(
             dialogWindowObservation = AndroidDialogWindowObservation(className, windowId, uptimeMillis())
         } else if (isActivityWindowClassName(className)) {
             activityClass = className
+            restoredActivityBinding = null
             dialogWindowObservation = null
         }
     }

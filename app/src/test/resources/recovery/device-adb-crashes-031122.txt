@@ -1,0 +1,5 @@
+# Extracted from user-supplied recovery(2).txt
+# Device test on 2026-11-22, system-induced process restart markers.
+11-22 03:31:22.568 E/AndroidRuntime(25270): android.app.RemoteServiceException$CrashedByAdbException: shell-induced crash
+11-22 03:31:55.135 E/AndroidRuntime(27213): android.app.RemoteServiceException$CrashedByAdbException: shell-induced crash
+# ADB-induced crash is test stimulus, not evidence of application logic throwing.

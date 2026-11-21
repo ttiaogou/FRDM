@@ -278,6 +278,31 @@ internal class AccessibilityServiceDependencies internal constructor(
     val pageObservationCoordinator: PageObservationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
         PageObservationCoordinator(taskScheduler)
     }
+    /** Service-scoped Activity recovery; no gesture or page-action capability is injected. */
+    val activityEvidenceReader by lazy(LazyThreadSafetyMode.NONE) {
+        com.freedom.adapters.accessibility.android.AndroidUsageActivityEvidenceReader(
+            service = service,
+            targetPackage = monitorRepository::targetPackage,
+            currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() }
+        )
+    }
+    val activityRecoveryCoordinator by lazy(LazyThreadSafetyMode.NONE) {
+        com.freedom.adapters.accessibility.android.AndroidForegroundActivityRecoveryCoordinator(
+            scheduler = taskScheduler,
+            isRunRequested = {
+                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() != null
+            },
+            currentActivityClass = windowContextTracker::currentActivityClass,
+            readEvidence = activityEvidenceReader::probe,
+            acceptEvidence = { evidence ->
+                accessibilityGateway.currentWindowGeneration() == evidence.windowGeneration &&
+                    windowContextTracker.restoreActivityClass(
+                        evidence.activityClass, evidence.windowId, evidence.windowGeneration
+                    )
+            },
+            onLog = addLog
+        )
+    }
     val accessibilityGateway: AndroidAccessibilityGateway by lazy(LazyThreadSafetyMode.NONE) {
         AndroidAccessibilityGateway(
             service = service,
@@ -294,7 +319,12 @@ internal class AccessibilityServiceDependencies internal constructor(
             isUiOperationOwned = {
                 root.taskCoordinator.activeTaskId() != null
             },
-            onReadinessDiagnostic = addLog
+            onReadinessDiagnostic = addLog,
+            recoveredActivityBindingCurrent = windowContextTracker::recoveredActivityMatches,
+            onRecoveredActivityBindingMismatch = {
+                windowContextTracker.invalidateRecoveredActivity()
+                activityRecoveryCoordinator.ensureStarted()
+            }
         )
     }
     val gestureVisualizerDelegate = lazy(LazyThreadSafetyMode.NONE) { AndroidGestureVisualizer(service) }

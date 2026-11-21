@@ -61,7 +61,9 @@ internal class AndroidAccessibilityGateway(
     private val inspectPageReadiness: (AccessibilityNodeInfo, String, RunMode) -> TargetAppPageReadiness,
     private val targetAppReadinessController: TargetAppReadinessController,
     private val isUiOperationOwned: () -> Boolean,
-    private val onReadinessDiagnostic: (String) -> Unit = {}
+    private val onReadinessDiagnostic: (String) -> Unit = {},
+    private val recoveredActivityBindingCurrent: (Int, Long) -> Boolean = { _, _ -> true },
+    private val onRecoveredActivityBindingMismatch: () -> Unit = {}
 ) : AccessibilityGateway, GestureExecutionPort, AndroidActiveWindowRootAccess, AndroidScreenshotCapture {
 
     @Volatile
@@ -150,11 +152,12 @@ internal class AndroidAccessibilityGateway(
         return try {
             val packageName = safeString { root.packageName?.toString().orEmpty() }
             if (packageName.isBlank()) return null
+            val currentWindowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: -1
             WindowRef(
                 packageName = packageName,
-                activityClass = activityClass(),
+                activityClass = activityForWindow(currentWindowId),
                 generation = windowGeneration,
-                windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: -1
+                windowId = currentWindowId
             )
         } finally {
             recycle(root)
@@ -576,8 +579,13 @@ internal class AndroidAccessibilityGateway(
 
         try {
             val foregroundPackage = safeString { root.packageName?.toString().orEmpty() }
-            val currentActivity = activityClass()
             val windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: -1
+            val currentActivity = activityForWindow(windowId)
+            if (currentActivity.isBlank() && activityClass().isNotBlank()) {
+                // The recovered identity was tied to a different window or generation.
+                // Revoke that provisional clue and re-enter read-only evidence collection.
+                onRecoveredActivityBindingMismatch()
+            }
             val pageReadiness = if (mode != null && foregroundPackage == expectedPackage) {
                 runCatching { inspectPageReadiness(root, currentActivity, mode) }
                     .getOrElse {
@@ -928,15 +936,19 @@ internal class AndroidAccessibilityGateway(
         }
     }
 
+    private fun activityForWindow(windowId: Int): String =
+        if (recoveredActivityBindingCurrent(windowId, windowGeneration)) activityClass() else ""
+
     private fun createWindowRef(root: AccessibilityNodeInfo, windowIdFallback: Int = -1): WindowRef? {
         displayContextTracker.snapshot()
         val packageName = safeString { root.packageName?.toString().orEmpty() }
         if (packageName.isBlank() || packageName != targetPackage()) return null
+        val windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: windowIdFallback
         return WindowRef(
             packageName = packageName,
-            activityClass = activityClass(),
+            activityClass = activityForWindow(windowId),
             generation = windowGeneration,
-            windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: windowIdFallback
+            windowId = windowId
         )
     }
 

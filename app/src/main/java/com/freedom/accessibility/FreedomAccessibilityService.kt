@@ -80,6 +80,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     private val serviceReceiverRegistry get() = dependencies.serviceReceiverRegistry
     private val serviceRecoveryCoordinatorDelegate get() = dependencies.serviceRecoveryCoordinatorDelegate
     private val serviceRecoveryCoordinator get() = dependencies.serviceRecoveryCoordinator
+    private val activityRecoveryCoordinator get() = dependencies.activityRecoveryCoordinator
 
     private val accessibilityEventForwarder by lazy(LazyThreadSafetyMode.NONE) {
         AndroidAccessibilityEventForwarder(
@@ -103,12 +104,14 @@ class FreedomAccessibilityService : AccessibilityService() {
                 runSessionCoordinator.resetRuntime(RunMode.ACCOUNT_BROWSE, "监听目标已更新")
             }
             runSessionCoordinator.resetRuntime(RunMode.AI_REPLY, "监听目标已更新")
+            activityRecoveryCoordinator.stop()
             windowContextTracker.clearActivityClass()
             LatestAccessibilityNodeDump.clear()
             overlayPort.clearNodeBoundsHighlight()
             NodeHierarchyOverlay.clear()
             globalNodeLayoutVisualizationUseCase.clear()
             applyTargetPackageFilter()
+            activityRecoveryCoordinator.ensureStarted()
             addLog("监听目标已更新：${monitorRepository.targetPackage()}；清除上一目标的节点快照")
         }
     }
@@ -117,7 +120,12 @@ class FreedomAccessibilityService : AccessibilityService() {
         override fun onReceive(context: Context?, intent: Intent?) {
             runSessionCoordinator.onExternalRefresh()
             applyTargetPackageFilter()
-            if (!monitorRepository.isRunRequested()) windowContextTracker.clearActivityClass()
+            if (!monitorRepository.isRunRequested()) {
+                activityRecoveryCoordinator.stop()
+                windowContextTracker.clearActivityClass()
+            } else {
+                activityRecoveryCoordinator.ensureStarted()
+            }
         }
     }
 
@@ -376,6 +384,9 @@ class FreedomAccessibilityService : AccessibilityService() {
         applyTargetPackageFilter()
         serviceRecoveryCoordinator.onServiceConnected()
         applyTargetPackageFilter()
+        // Reacquire live Activity evidence even when Momo stays on the same page and
+        // Android emits no new TYPE_WINDOW_STATE_CHANGED callback after reconnect.
+        activityRecoveryCoordinator.restart()
         diagnostics.recordStructured(
             eventType = "accessibility_service_connected",
             category = RunLogCategory.LIFECYCLE,
@@ -444,6 +455,8 @@ class FreedomAccessibilityService : AccessibilityService() {
         // owned by the forwarder boundary; the Service callback itself remains pure forwarding.
         val sourcePageGeneration = accessibilityGateway.currentWindowGeneration()
         accessibilityGateway.noteWindowTransition()
+        windowContextTracker.invalidateRecoveredActivity()
+        activityRecoveryCoordinator.onWindowTransition()
         overlayPort.clearNodeBoundsHighlight()
         NodeHierarchyOverlay.clear()
         if (globalNodeLayoutVisualizationUseCase.snapshots().isNotEmpty()) {
@@ -507,6 +520,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        activityRecoveryCoordinator.stop()
         diagnostics.recordStructured(
             eventType = "accessibility_service_interrupted",
             category = RunLogCategory.LIFECYCLE,
@@ -537,6 +551,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        activityRecoveryCoordinator.stop()
         diagnostics.recordStructured(
             eventType = "accessibility_service_destroyed",
             category = RunLogCategory.LIFECYCLE,
