@@ -7,6 +7,7 @@ import com.freedom.features.recovery.RecoveryEventIdentity
 import com.freedom.features.recovery.RecoveryTransactionEvent
 import com.freedom.features.recovery.RecoveryTransactionState
 import com.freedom.features.recovery.RecoveryScheduler
+import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 
@@ -19,7 +20,8 @@ class DynamicPageRecovery(
     private val targetPackage: () -> String,
     private val currentRunGeneration: () -> Long,
     private val onLog: (String) -> Unit = {},
-    onReadOnlyObservation: () -> Unit = {}
+    onReadOnlyObservation: () -> Unit = {},
+    scheduleRepository: RecoveryScheduleRepository? = null
 ) {
     private val dispatcher = RecoveryEventDispatcher(
         UnifiedRecoveryTransactionStateMachine(),
@@ -33,7 +35,8 @@ class DynamicPageRecovery(
         scheduler = scheduler,
         nowEpochMs = System::currentTimeMillis,
         onReadOnlyObservation = { onReadOnlyObservation() },
-        onLog = onLog
+        onLog = onLog,
+        scheduleRepository = scheduleRepository
     )
 
     fun restoreFromCheckpoint(savedAtEpochMs: Long) {

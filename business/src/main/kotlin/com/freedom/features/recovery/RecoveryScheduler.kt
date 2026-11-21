@@ -14,7 +14,8 @@ class RecoveryScheduler(
     private val scheduler: TaskScheduler,
     private val nowEpochMs: () -> Long,
     private val onReadOnlyObservation: (RecoveryScheduleSnapshot) -> Unit,
-    private val onLog: (String) -> Unit = {}
+    private val onLog: (String) -> Unit = {},
+    private val scheduleRepository: RecoveryScheduleRepository? = null
 ) {
     private var active: ActiveSchedule? = null
 
@@ -23,10 +24,13 @@ class RecoveryScheduler(
     fun begin(identity: RecoveryEventIdentity): RecoveryScheduleSnapshot {
         val current = active
         if (current != null && current.matchesTransaction(identity)) {
+            val previous = current.snapshot()
             if (identity.observationGeneration >= current.identity.observationGeneration) {
                 current.identity = identity
             }
-            return current.snapshot()
+            return current.snapshot().also { updated ->
+                if (updated != previous) scheduleRepository?.save(updated)
+            }
         }
         current?.cancelPending()
         return ActiveSchedule(identity).also {
@@ -35,7 +39,7 @@ class RecoveryScheduler(
         }.snapshot()
     }
 
-    /** Returns the durable in-memory record callers can query while recovery is active. */
+    /** Returns the in-memory plan; the optional repository persists its latest value. */
     @Synchronized
     fun currentPlan(): RecoveryScheduleSnapshot? = active?.snapshot()
 
@@ -64,6 +68,7 @@ class RecoveryScheduler(
         if (!current.accepts(identity)) return false
         current.cancelPending()
         active = null
+        scheduleRepository?.clear()
         onLog(current.logFields("stopped_by_user"))
         return true
     }
@@ -75,6 +80,7 @@ class RecoveryScheduler(
         if (!current.accepts(identity)) return false
         current.cancelPending()
         active = null
+        scheduleRepository?.clear()
         onLog(current.logFields("recovery_completed"))
         return true
     }
@@ -111,6 +117,8 @@ class RecoveryScheduler(
                 onReadOnlyObservation(it)
             }
         }
+        // Persist the next read-only observation plan, not the Handler callback itself.
+        scheduleRepository?.save(schedule.snapshot())
         onLog(schedule.snapshot().logFields("observation_scheduled"))
     }
 

@@ -59,6 +59,7 @@ import com.freedom.data.MonitorStoreRepository
 import com.freedom.data.MonitorStoreSnapshotRepository
 import com.freedom.data.OcrReviewStore
 import com.freedom.data.AccountBrowseCheckpointDataStore
+import com.freedom.data.RecoveryScheduleDataStore
 import com.freedom.data.RunDiagnosticsManager
 import com.freedom.data.SharedPreferencesAiModelCloudConsent
 import com.freedom.data.SharedPreferencesGestureSettingsRepository
@@ -83,6 +84,7 @@ import com.freedom.features.aireply.ai.AiModelConfigurationRepository
 import com.freedom.features.aireply.ai.AiReplyPersonalizationRepository
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
+import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.ports.ConversationRepository
 import com.freedom.gesture.api.GestureApi as PublicGestureApi
@@ -150,6 +152,9 @@ class AppCompositionRoot(context: Context) {
     }
     val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         AccountBrowseCheckpointDataStore(appContext)
+    }
+    val recoveryScheduleRepository: RecoveryScheduleRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RecoveryScheduleDataStore(appContext)
     }
     val sampleArchivePort: SessionSampleArchivePort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MomoChatSampleArchiveDataStore()
@@ -537,7 +542,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             onLog = addLog,
             onRequestScreenOff = requestScreenOff,
             pageObservationCoordinator = pageObservationCoordinator,
-            accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository
+            accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository,
+            recoveryScheduleRepository = root.recoveryScheduleRepository
         )
     }
     val accountBrowseRuntimeAdapter by lazy(LazyThreadSafetyMode.NONE) {

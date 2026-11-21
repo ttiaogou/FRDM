@@ -30,6 +30,7 @@ import com.freedom.features.accountbrowse.AccountBrowsePhase
 import com.freedom.features.accountbrowse.AccountBrowseRuntime
 import com.freedom.features.accountbrowse.AccountBrowseTask
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
+import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.accountbrowse.AccountBrowseSessionStatePort
 import com.freedom.features.accountbrowse.FeedRefreshVerificationPolicy
 import com.freedom.features.accountbrowse.FeedReturnStability
@@ -58,7 +59,8 @@ internal class AndroidAccountBrowseWorkflow(
     private val onLog: (String) -> Unit,
     private val onRequestScreenOff: () -> Boolean = { false },
     private val pageObservationCoordinator: PageObservationCoordinator? = null,
-    private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null
+    private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null,
+    private val recoveryScheduleRepository: RecoveryScheduleRepository? = null
 ) {
     private val displayMetrics get() = accessibilityGateway.displayMetrics()
     private val navigationExecutor = AccountBrowseNavigationExecutor(gesturePolicy) { displayMetrics }
@@ -161,6 +163,7 @@ internal class AndroidAccountBrowseWorkflow(
             isTouchActive = { accountBrowseSession.touchActive },
             targetPackage = targetPackage,
             checkpointRepository = accountBrowseCheckpointRepository,
+            recoveryScheduleRepository = recoveryScheduleRepository,
             onResetSession = ::resetAccountBrowseSession,
             onReadOnlyRecoveryObservation = ::observeAccountBrowseRecoveryReadOnly,
             actions = AccountBrowseRuntime.Actions(

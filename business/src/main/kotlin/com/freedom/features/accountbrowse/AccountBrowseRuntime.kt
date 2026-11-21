@@ -5,6 +5,7 @@ import com.freedom.features.accountbrowse.ports.BrowsePageEvidence
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpoint
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
 import com.freedom.features.recovery.RecoveryTransactionState
+import com.freedom.features.recovery.RecoveryScheduleRepository
 
 /**
  * Coordinates the automatic-browse phase dispatch independently from Android Service APIs.
@@ -24,7 +25,8 @@ class AccountBrowseRuntime(
     private val currentRunGeneration: () -> Long = { 0L },
     private val interactionPolicy: AccountBrowseInteractionPolicy = AccountBrowseInteractionPolicy(),
     private val onReadOnlyRecoveryObservation: () -> Unit = {},
-    private val onLog: (String) -> Unit = {}
+    private val onLog: (String) -> Unit = {},
+    recoveryScheduleRepository: RecoveryScheduleRepository? = null
 ) {
     data class Actions(
         val waitForDynamicTab: () -> Unit,
@@ -49,7 +51,8 @@ class AccountBrowseRuntime(
         targetPackage = targetPackage,
         currentRunGeneration = currentRunGeneration,
         onLog = onLog,
-        onReadOnlyObservation = onReadOnlyRecoveryObservation
+        onReadOnlyObservation = onReadOnlyRecoveryObservation,
+        scheduleRepository = recoveryScheduleRepository
     )
 
     fun scheduleStep(delayMs: Long) = stepScheduler.schedule(delayMs)
