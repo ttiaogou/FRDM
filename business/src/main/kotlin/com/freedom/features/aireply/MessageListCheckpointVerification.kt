@@ -145,6 +145,7 @@ internal class MessageListCheckpointVerification(
 
     /** On a denied task lease, require fresh verification again instead of reusing ResumeReady. */
     fun deferOwnership() {
+        onLog("消息列表统一检查点[VERIFIER_DEFER]：verifierActive=${verifier != null}；bindingActive=${binding != null}")
         restartVerificationLane()
         verifier = null
         binding = null
@@ -163,6 +164,7 @@ internal class MessageListCheckpointVerification(
 
     /** Service boundaries invalidate all pending read-only callbacks and verification samples. */
     fun reset() {
+        onLog("消息列表统一检查点[VERIFIER_RESET]：verifierActive=${verifier != null}；bindingActive=${binding != null}")
         restartVerificationLane()
         schedule?.suspendForServiceDisconnect()
         schedule = null
