@@ -314,6 +314,54 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         self.assertTrue(any("missing required wiring" in item
                             for item in guard.unified_page_observation_violations(changed)))
 
+    def test_p3_shared_task_lifecycle_accepts_current_production_graph(self):
+        self.assertEqual(guard.unified_task_lifecycle_violations(self.recovery_code), [])
+
+    def test_p3_rejects_missing_generation_to_task_slot_revoke(self):
+        changed = dict(self.recovery_code)
+        session = "app/src/main/java/com/freedom/application/runtime/RunSessionCoordinator.kt"
+        changed[session] = changed[session].replace(
+            "taskCoordinator?.advanceRunGeneration(generationClock.advance())",
+            "generationClock.advance()"
+        )
+        self.assertTrue(any("P3 task lifecycle unified wiring missing" in item
+                            for item in guard.unified_task_lifecycle_violations(changed)))
+
+    def test_p3_rejects_unshared_root_task_coordinator(self):
+        changed = dict(self.recovery_code)
+        root = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        changed[root] = changed[root].replace(
+            "taskCoordinator = root.taskCoordinator",
+            "taskCoordinator = null",
+            1
+        )
+        self.assertTrue(any("all three production owners" in item
+                            for item in guard.unified_task_lifecycle_violations(changed)))
+
+    def test_p3_rejects_stale_active_task_visibility_and_extra_execution_owner(self):
+        changed = dict(self.recovery_code)
+        task = "core/src/main/kotlin/com/freedom/core/runtime/TaskCoordinator.kt"
+        changed[task] = changed[task].replace(
+            "fun activeTaskId(): String? = currentLease()?.taskId",
+            "fun activeTaskId(): String? = activeLease?.taskId"
+        )
+        self.assertTrue(any("P3 task lifecycle unified wiring missing" in item
+                            for item in guard.unified_task_lifecycle_violations(changed)))
+
+        changed = dict(self.recovery_code)
+        changed["business/src/main/kotlin/com/freedom/features/bad/OtherOwner.kt"] = (
+            "val independent = TaskExecutionController(coordinator, generation)\n"
+        )
+        self.assertTrue(any("construction drift" in item
+                            for item in guard.unified_task_lifecycle_violations(changed)))
+
+    def test_p3_rejects_business_owned_generation_advance(self):
+        changed = dict(self.recovery_code)
+        extra = "business/src/main/kotlin/com/freedom/features/bad/OtherOwner.kt"
+        changed[extra] = "fun bypass() = coordinator.advanceRunGeneration(42L)\n"
+        self.assertTrue(any("generation must advance only" in item
+                            for item in guard.unified_task_lifecycle_violations(changed)))
+
     def test_p0_authority_guard_accepts_current_production_graph(self):
         self.assertEqual(guard.architecture_authority_violations(self.recovery_code), [])
 

@@ -62,6 +62,44 @@ class TaskCoordinatorTest {
     }
 
     @Test
+    fun runGenerationBoundaryRevokesTaskAndUiLeaseBeforeAnyReplacementClaim() {
+        val uiOwnership = UiOperationOwnershipCoordinator()
+        val coordinator = TaskCoordinator(uiOwnership)
+        val old = requireNotNull(coordinator.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", 4L))
+
+        coordinator.advanceRunGeneration(5L)
+
+        assertNull(coordinator.activeTaskId())
+        assertNull(coordinator.currentLease())
+        assertNull(uiOwnership.currentOwnerId())
+        assertFalse(coordinator.isCurrent(old))
+        assertFalse(coordinator.release(old))
+        assertNull(coordinator.tryAcquire("ACCOUNT_BROWSE", 4L))
+
+        val fresh = requireNotNull(coordinator.tryAcquire("ACCOUNT_BROWSE", 5L))
+        assertTrue(coordinator.isCurrent(fresh))
+        assertEquals("ACCOUNT_BROWSE", uiOwnership.currentOwnerId())
+    }
+
+    @Test
+    fun repeatedOrStaleGenerationNotificationCannotRevokeCurrentTask() {
+        val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        coordinator.advanceRunGeneration(6L)
+        val current = requireNotNull(coordinator.tryAcquire("AI_REPLY_RECEIVED_GREETINGS", 6L))
+
+        coordinator.advanceRunGeneration(6L)
+        coordinator.advanceRunGeneration(5L)
+
+        assertTrue(coordinator.isCurrent(current))
+        assertEquals(current, coordinator.currentLease())
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", coordinator.activeTaskId())
+
+        coordinator.advanceRunGeneration(7L)
+        assertNull(coordinator.activeTaskId())
+        assertFalse(coordinator.release(current))
+    }
+
+    @Test
     fun nextRunReleasesPreviousTaskAndRejectsLateOldGenerationWork() {
         val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
         val oldTask = requireNotNull(coordinator.tryAcquire("account_browse", 10L))

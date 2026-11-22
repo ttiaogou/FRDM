@@ -627,7 +627,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                 )
             ),
             log = monitorRepository,
-            generationClock = root.runGenerationClock
+            generationClock = root.runGenerationClock,
+            taskCoordinator = root.taskCoordinator
         )
     }
     // Service-scoped platform-neutral routing gateway. Existing runtime dispatch order

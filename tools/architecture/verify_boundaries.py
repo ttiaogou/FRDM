@@ -564,6 +564,7 @@ def inspect_project(root: Path) -> list[str]:
     # P0: freeze single authority declarations and known construction routes.
     issues.extend(architecture_authority_violations(code_by_path))
     issues.extend(unified_page_observation_violations(code_by_path))
+    issues.extend(unified_task_lifecycle_violations(code_by_path))
 
     # 11) Final hard boundaries for the unified accessibility/recovery architecture.
     issues.extend(final_architecture_boundary_violations(code_by_path))
@@ -847,6 +848,95 @@ def unified_page_observation_violations(code_by_path: dict[str, str]) -> list[st
         r"[^}]*\baccountBrowseRuntime\.scheduleStep\s*\(", browse
     ):
         issues.append("P2 page observer callback directly schedules a business step")
+    return issues
+
+
+def unified_task_lifecycle_violations(code_by_path: dict[str, str]) -> list[str]:
+    """P3: the process run clock invalidates one shared task slot before mode callbacks."""
+    issues: list[str] = []
+    root_rel = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+    session_rel = "app/src/main/java/com/freedom/application/runtime/RunSessionCoordinator.kt"
+    task_rel = "core/src/main/kotlin/com/freedom/core/runtime/TaskCoordinator.kt"
+    execution_rel = "core/src/main/kotlin/com/freedom/core/runtime/TaskExecutionController.kt"
+    ai_rel = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyTaskOwnership.kt"
+    browse_rel = "app/src/main/java/com/freedom/adapters/runtime/android/AccountBrowseModeRuntimeAdapter.kt"
+
+    required = {
+        root_rel: (
+            r"\bgenerationClock\s*=\s*root\.runGenerationClock\b",
+            r"\btaskCoordinator\s*=\s*root\.taskCoordinator\b",
+            r"\bTaskCoordinator\s*\(\s*uiOperationOwnershipCoordinator\s*\)",
+        ),
+        session_rel: (
+            r"\bprivate\s+val\s+taskCoordinator\s*:\s*TaskCoordinator\?\s*=\s*null\b",
+            r"\btaskCoordinator\?\.advanceRunGeneration\s*\(\s*generationClock\.advance\(\)\s*\)",
+        ),
+        task_rel: (
+            r"\bfun\s+advanceRunGeneration\s*\(\s*runGeneration\s*:\s*Long\s*\)",
+            r"\bif\s*\(\s*runGeneration\s*<=\s*latestRunGeneration\s*\)\s*return\b",
+            r"\bactiveLease\?\.let\s*\{\s*uiOperationOwnership\.release\s*\(\s*it\.uiOperationLease\s*\)\s*\}",
+            r"\bactiveLease\s*=\s*null\b",
+            r"\blatestRunGeneration\s*=\s*runGeneration\b",
+            r"\bif\s*\(\s*runGeneration\s*>\s*latestRunGeneration\s*\)\s*advanceRunGeneration\s*\(\s*runGeneration\s*\)",
+            r"\bfun\s+activeTaskId\s*\(\s*\)\s*:\s*String\?\s*=\s*currentLease\s*\(\s*\)\?\.taskId\b",
+        ),
+        execution_rel: (
+            r"\btaskCoordinator\.isCurrent\s*\(\s*current\s*\)",
+            r"\btaskCoordinator\.transfer\s*\(\s*current\s*,\s*taskId\s*\)",
+            r"\btaskCoordinator\.tryAcquire\s*\(\s*taskId\s*,\s*generation\s*\)",
+            r"\bgeneration\s*!=\s*currentRunGeneration\s*\(\s*\)",
+        ),
+        ai_rel: (
+            r"\bprivate\s+val\s+delegate\s*=\s*TaskExecutionController\s*\(",
+            r"\bcoordinator\s*=\s*coordinator\b",
+        ),
+        browse_rel: (
+            r"\bprivate\s+val\s+taskExecutionController\s*=\s*TaskExecutionController\s*\(",
+            r"\bcoordinator\s*=\s*taskCoordinator\b",
+            r"\btaskExecutionController\.beginRun\s*\(\s*currentRunGeneration\(\)\s*\)",
+            r"\btaskExecutionController\.claim\s*\(\s*TASK_ID\s*,\s*reason\s*\)",
+            r"\btaskExecutionController\.release\s*\(\s*TASK_ID\s*,\s*reason\s*\)",
+        ),
+    }
+    for rel, patterns in required.items():
+        code = code_by_path.get(rel, "")
+        for pattern in patterns:
+            if not re.search(pattern, code):
+                issues.append(f"P3 task lifecycle unified wiring missing: {rel}: {pattern}")
+
+    root = code_by_path.get(root_rel, "")
+    if len(re.findall(r"\btaskCoordinator\s*=\s*root\.taskCoordinator\b", root)) != 3:
+        issues.append("P3 all three production owners (AI, Browse, session) must share root.taskCoordinator")
+
+    production = {
+        rel: code for rel, code in code_by_path.items()
+        if "/src/main/" in rel and rel.endswith(".kt")
+    }
+    approved_execution_owners = {ai_rel: 1, browse_rel: 1}
+    execution_owners = {}
+    for rel, code in production.items():
+        body = re.sub(r"\bclass\s+TaskExecutionController\b(?=\s*\()", "", code)
+        count = len(re.findall(r"\bTaskExecutionController\s*\(", body))
+        if count:
+            execution_owners[rel] = count
+        if rel != session_rel and rel != task_rel and re.search(
+            r"\.advanceRunGeneration\s*\(", code
+        ):
+            issues.append(f"P3 run generation must advance only in the session/task coordinators: {rel}")
+    if execution_owners != approved_execution_owners:
+        issues.append(
+            "P3 shared task execution controller construction drift: "
+            f"expected {approved_execution_owners}; found {execution_owners}"
+        )
+    session_creators = {
+        rel: len(re.findall(r"\bRunSessionCoordinator\s*\(", re.sub(
+            r"\bclass\s+RunSessionCoordinator\b(?=\s*\()", "", code
+        )))
+        for rel, code in production.items()
+    }
+    session_creators = {rel: count for rel, count in session_creators.items() if count}
+    if session_creators != {root_rel: 1}:
+        issues.append(f"P3 session coordinator construction drift: {session_creators}")
     return issues
 
 
@@ -1207,6 +1297,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - P0 ownership baseline: authority declarations, construction sites, and legacy aliases pinned")
     print(" - P1 accessibility: target/touch/Activity/navigation notifications use one business entry")
     print(" - P2 observation: one injected scheduler, mode-isolated channels, task decisions owned by runtimes")
+    print(" - P3 task lifecycle: process run clock synchronously revokes shared task/UI leases")
     print(" - Automatic recovery: legacy manual handoff forbidden; three checkpoint routes use shared verification")
     print(" - Recovery scheduler: bounded non-terminal backoff, touch reset, stale-callback and user-stop gates")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")

@@ -4,6 +4,7 @@ import com.freedom.core.runtime.ModeRuntimePort
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.RunStateRepository
 import com.freedom.core.runtime.RuntimeLogSink
+import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 
 /**
@@ -29,7 +30,9 @@ class RunSessionCoordinator(
     private val state: RunStateRepository,
     private val runtimes: Map<RunMode, ModeRuntimePort>,
     private val log: RuntimeLogSink,
-    private val generationClock: RunGenerationClock = RunGenerationClock()
+    private val generationClock: RunGenerationClock = RunGenerationClock(),
+    /** Shared process task slot; optional only for lifecycle-only test fixtures. */
+    private val taskCoordinator: TaskCoordinator? = null
 ) {
     private var observedMode: RunMode? = null
     private var observedRunRequested: Boolean = false
@@ -40,7 +43,9 @@ class RunSessionCoordinator(
     fun currentRunGeneration(): Long = runGeneration
 
     private fun advanceRunGeneration() {
-        generationClock.advance()
+        // Invalidate old task/UI leases before stopping or starting business runtimes.
+        // The process clock is authoritative across recreated service instances.
+        taskCoordinator?.advanceRunGeneration(generationClock.advance())
     }
 
     /** Clear persisted intent and notify only the runtime that owned the active session. */

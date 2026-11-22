@@ -45,6 +45,21 @@ class TaskCoordinator(
     @Synchronized
     fun lastBusinessTaskSwitchEvent(): BusinessTaskSwitchEvent? = lastBusinessTaskSwitchEvent
 
+    /**
+     * Seals the previous run's task capability at the run-generation boundary, even if
+     * no replacement task has yet been claimed. A late callback cannot keep an old
+     * owner visible to other runtime and UI gateway consumers during a stop/reconnect.
+     * Older or repeated notifications never roll the shared clock backwards.
+     */
+    @Synchronized
+    fun advanceRunGeneration(runGeneration: Long) {
+        require(runGeneration >= 0L) { "runGeneration must be non-negative" }
+        if (runGeneration <= latestRunGeneration) return
+        activeLease?.let { uiOperationOwnership.release(it.uiOperationLease) }
+        activeLease = null
+        latestRunGeneration = runGeneration
+    }
+
     /** Start a task if the single task/UI slot is free; repeated claims by the owner are idempotent. */
     @Synchronized
     fun tryAcquire(taskId: String, runGeneration: Long): TaskLease? {
@@ -52,11 +67,7 @@ class TaskCoordinator(
         require(runGeneration >= 0L) { "runGeneration must be non-negative" }
 
         if (runGeneration < latestRunGeneration) return null
-        if (runGeneration > latestRunGeneration) {
-            activeLease?.let { uiOperationOwnership.release(it.uiOperationLease) }
-            activeLease = null
-            latestRunGeneration = runGeneration
-        }
+        if (runGeneration > latestRunGeneration) advanceRunGeneration(runGeneration)
 
         val current = activeLease
         if (current != null) {
@@ -114,7 +125,7 @@ class TaskCoordinator(
     }
 
     @Synchronized
-    fun activeTaskId(): String? = activeLease?.taskId
+    fun activeTaskId(): String? = currentLease()?.taskId
 
     private fun createLease(
         taskId: String,

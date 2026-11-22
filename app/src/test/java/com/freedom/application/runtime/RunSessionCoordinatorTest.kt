@@ -223,6 +223,97 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun sharedTaskLifecycleRevokesLeasesAcrossModeSwitchReconnectAndUserStop() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        val shared = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val session = RunSessionCoordinator(
+            state = state,
+            runtimes = mapOf(
+                RunMode.AI_REPLY to FakeRuntime(RunMode.AI_REPLY),
+                RunMode.ACCOUNT_BROWSE to FakeRuntime(RunMode.ACCOUNT_BROWSE)
+            ),
+            log = RuntimeLogSink { },
+            taskCoordinator = shared
+        )
+        val ai = TaskExecutionController(shared, session::currentRunGeneration)
+        val browse = TaskExecutionController(shared, session::currentRunGeneration)
+
+        assertTrue(session.synchronizeRunRequest())
+        ai.beginRun(session.currentRunGeneration())
+        assertTrue(ai.claim("AI_REPLY_PRIVATE_MESSAGES", "confirmed inbox"))
+        val old = requireNotNull(shared.currentLease())
+        assertTrue(ai.claim("AI_REPLY_RECEIVED_GREETINGS", "confirmed greeting page"))
+        assertFalse(ai.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertTrue(ai.owns("AI_REPLY_RECEIVED_GREETINGS"))
+        assertFalse(shared.release(old))
+
+        state.mode = RunMode.ACCOUNT_BROWSE
+        assertTrue(session.synchronizeRunRequest())
+        assertNull(shared.activeTaskId())
+        assertFalse(ai.owns("AI_REPLY_RECEIVED_GREETINGS"))
+        assertFalse(ai.release("AI_REPLY_RECEIVED_GREETINGS", "late AI stop"))
+        assertFalse(ai.claim("AI_REPLY_PRIVATE_MESSAGES", "late AI callback"))
+        browse.beginRun(session.currentRunGeneration())
+        assertTrue(browse.claim("ACCOUNT_BROWSE", "verified browser run"))
+        assertFalse(ai.claim("AI_REPLY_PRIVATE_MESSAGES", "other mode is active"))
+
+        val beforeDisconnect = requireNotNull(shared.currentLease())
+        session.onAccessibilityServiceDisconnected()
+        assertNull(shared.activeTaskId())
+        assertFalse(shared.isCurrent(beforeDisconnect))
+        assertFalse(browse.owns("ACCOUNT_BROWSE"))
+        assertFalse(browse.claim("ACCOUNT_BROWSE", "late queued event"))
+
+        session.onAccessibilityServiceConnected()
+        browse.beginRun(session.currentRunGeneration())
+        assertTrue(browse.claim("ACCOUNT_BROWSE", "reconnected validated run"))
+        assertTrue(browse.owns("ACCOUNT_BROWSE"))
+
+        session.stop("user stop")
+        assertNull(shared.activeTaskId())
+        assertFalse(browse.owns("ACCOUNT_BROWSE"))
+        assertFalse(browse.claim("ACCOUNT_BROWSE", "post-stop callback"))
+    }
+
+    @Test
+    fun resetInterruptionAndDestructionRevokeTaskSlotImmediately() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        val shared = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val session = RunSessionCoordinator(
+            state = state,
+            runtimes = mapOf(RunMode.AI_REPLY to FakeRuntime(RunMode.AI_REPLY)),
+            log = RuntimeLogSink { },
+            taskCoordinator = shared
+        )
+        val owner = TaskExecutionController(shared, session::currentRunGeneration)
+        session.synchronizeRunRequest()
+        owner.beginRun(session.currentRunGeneration())
+        assertTrue(owner.claim("AI_REPLY_PRIVATE_MESSAGES", "start"))
+
+        session.resetRuntime(RunMode.AI_REPLY, "activity invalidated")
+        assertNull(shared.activeTaskId())
+        assertFalse(owner.owns("AI_REPLY_PRIVATE_MESSAGES"))
+
+        owner.beginRun(session.currentRunGeneration())
+        assertTrue(owner.claim("AI_REPLY_PRIVATE_MESSAGES", "revalidated"))
+        session.onAccessibilityServiceInterrupted("connection lost")
+        assertNull(shared.activeTaskId())
+        assertFalse(owner.owns("AI_REPLY_PRIVATE_MESSAGES"))
+
+        owner.beginRun(session.currentRunGeneration())
+        assertTrue(owner.claim("AI_REPLY_PRIVATE_MESSAGES", "revalidated again"))
+        session.onServiceDestroyed()
+        assertNull(shared.activeTaskId())
+        assertFalse(owner.owns("AI_REPLY_PRIVATE_MESSAGES"))
+    }
+
+    @Test
     fun manualObservationRunAlsoReceivesItsOwnGeneration() {
         val state = FakeState().apply { requested = true }
         val coordinator = RunSessionCoordinator(state, emptyMap(), RuntimeLogSink { })
