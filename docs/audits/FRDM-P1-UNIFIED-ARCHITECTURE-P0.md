@@ -21,11 +21,11 @@
 
 无障碍事件：FreedomAccessibilityService.onAccessibilityEvent → AndroidAccessibilityEventForwarder → AndroidAccessibilityEventPipeline → 页面观察 signal / RunSessionCoordinator 业务分发。核心契约 UnifiedAccessibilityEntry 已声明，但尚不是生产中唯一强制的标准化消费边界；窗口导航仍存在 Service 到业务运行时的直接通知，留待 P1。
 
-页面观察：AppCompositionRoot 创建服务级 PageObservationCoordinator；MomoPageObservationCoordinator 默认注入它，但保留 SharedPageObservationCoordinator(scheduler) 兼容创建路径（主要供非生产注入场景），留待 P2。
+页面观察：AppCompositionRoot 创建服务级 PageObservationCoordinator；MomoPageObservationCoordinator 默认注入它，但保留 SharedPageObservationCoordinator(scheduler) 兼容创建路径（主要供非生产注入场景）。AndroidAccountBrowseWorkflow 也保留 pageObservationCoordinator ?: PageObservationCoordinator(taskScheduler) 的兜底创建，均留待 P2 收口。
 
 任务与 UI：AppCompositionRoot 创建 UiOperationOwnershipCoordinator 和 TaskCoordinator，并注入业务运行时。GestureExecutionCoordinator 已有任务租约校验；AndroidAccessibilityGateway 部分操作当前只检查是否存在 activeTaskId，尚非每次都验证请求方精确租约，留待 P3/P4。P0 不改变该行为。
 
-恢复：AI Reply 与 AccountBrowse 各有一个 UnifiedRecoveryTransactionStateMachine / RecoveryEventDispatcher；DynamicPageRecovery、MessageListCheckpointVerification、ReceivedGreetingsCheckpointVerification 分别创建 RecoveryScheduler 和 RecoveryCheckpointVerificationCoordinator。它们复用同一实现，但不是单一事务控制实例；P5/P6 再收口。已有 UNKNOWN 不终结、双新鲜快照、身份和检查点验证规则必须保留。
+恢复：AI Reply 与 AccountBrowse 各有自己的 UnifiedRecoveryTransactionStateMachine / RecoveryEventDispatcher；CheckpointVerificationWiring.newDispatcher() 另有一次状态机与分发器的工厂构造，供路由调用。DynamicPageRecovery、MessageListCheckpointVerification、ReceivedGreetingsCheckpointVerification 分别创建 RecoveryScheduler 和 RecoveryCheckpointVerificationCoordinator。它们复用同一实现，但不是单一事务控制实例；P5/P6 再收口。已有 UNKNOWN 不终结、双新鲜快照、身份和检查点验证规则必须保留。
 
 ## 3. P0 自动化硬约束
 

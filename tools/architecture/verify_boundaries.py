@@ -655,6 +655,7 @@ P0_AUTHORITY_CONSTRUCTIONS = {
     },
     "PageObservationCoordinator": {
         "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": 1,
+        "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt": 1,
     },
     "TaskCoordinator": {
         "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": 1,
@@ -665,10 +666,12 @@ P0_AUTHORITY_CONSTRUCTIONS = {
     "UnifiedRecoveryTransactionStateMachine": {
         "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt": 1,
         "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 1,
+        "business/src/main/kotlin/com/freedom/features/aireply/CheckpointVerificationWiring.kt": 1,
     },
     "RecoveryEventDispatcher": {
         "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt": 1,
         "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 1,
+        "business/src/main/kotlin/com/freedom/features/aireply/CheckpointVerificationWiring.kt": 1,
     },
     "RecoveryScheduler": {
         "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 1,

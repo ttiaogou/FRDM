@@ -274,6 +274,22 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         self.assertTrue(any("construction drift" in item and "UnifiedRecoveryTransactionStateMachine" in item
                             for item in guard.architecture_authority_violations(changed)))
 
+    def test_p0_authority_guard_limits_existing_transition_factories(self):
+        changed = dict(self.recovery_code)
+        browse = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+        changed[browse] += "\nval unintended = PageObservationCoordinator(taskScheduler)\n"
+        self.assertTrue(any("construction drift" in item and "PageObservationCoordinator" in item
+                            for item in guard.architecture_authority_violations(changed)))
+
+        changed = dict(self.recovery_code)
+        wiring = "business/src/main/kotlin/com/freedom/features/aireply/CheckpointVerificationWiring.kt"
+        changed[wiring] += "\nval unintended = RecoveryEventDispatcher(UnifiedRecoveryTransactionStateMachine())\n"
+        violations = guard.architecture_authority_violations(changed)
+        self.assertTrue(any("construction drift" in item and "RecoveryEventDispatcher" in item
+                            for item in violations))
+        self.assertTrue(any("construction drift" in item and "UnifiedRecoveryTransactionStateMachine" in item
+                            for item in violations))
+
     def test_p0_authority_guard_rejects_alias_and_typealias_bypasses(self):
         changed = dict(self.recovery_code)
         changed["business/src/main/kotlin/com/freedom/features/bad/OtherObserver.kt"] = (
