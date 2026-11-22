@@ -673,7 +673,23 @@ class AiReplyObservationRuntimeTest {
         assertTrue(manager.snapshot("AI_REPLY_PRIVATE_MESSAGES") != null)
         assertFalse(logs.any { it.contains("已从任务=AI_REPLY_PRIVATE_MESSAGES恢复任务=AI_REPLY_PRIVATE_MESSAGES") })
 
-        runUntilLog(scheduler, logs, "统一页面恢复[RECOVERY_VERIFIED]")
+        // Force two distinct fresh page observations. The fake scheduler does not model
+        // wall-clock priority: iterating runNext() can starve immediate page reads behind
+        // recurring long-backoff observation tasks while keeping the source gate unchanged.
+        repeat(6) {
+            if (logs.none { it.contains("消息列表统一检查点[VERIFYING]") } &&
+                scheduler.hasPendingDelay(0L)
+            ) scheduler.runNextWithDelay(0L)
+        }
+        assertTrue("Private checkpoint must request a fresh first sample", logs.any {
+            it.contains("消息列表统一检查点[VERIFYING]")
+        })
+        assertEquals(null, ownership.activeTaskId())
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertTrue("Private task must only resume after second independent list proof", logs.any {
+            it.contains("统一页面恢复[RECOVERY_VERIFIED]")
+        })
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
         assertEquals(null, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES"))
         assertEquals(original, repository.load())
