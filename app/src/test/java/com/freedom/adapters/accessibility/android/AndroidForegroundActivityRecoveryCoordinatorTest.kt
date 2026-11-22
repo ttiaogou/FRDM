@@ -64,6 +64,8 @@ class AndroidForegroundActivityRecoveryCoordinatorTest {
         scheduler.runNext()
         assertEquals(5_000L, scheduler.delays.last())
         assertTrue(logs.any { it.contains("USAGE_ACCESS_NOT_GRANTED") })
+        assertTrue(logs.any { it.contains("activityEvidenceSource=USAGE_ACTIVITY_RESUMED") })
+        assertTrue(logs.any { it.contains("rejectReason=USAGE_ACCESS_NOT_GRANTED") })
         recovery.stop()
         assertEquals(0, scheduler.pendingCount)
     }

@@ -134,6 +134,46 @@ class AndroidAccessibilityEventPipelineTest {
     }
 
     @Test
+    fun windowEventDiagnosticsRunBeforeVisibleDedupAndDoNotChangeRouting() {
+        val trace = mutableListOf<String>()
+        val diagnoses = mutableListOf<String>()
+        var currentActivity = ""
+        val pipeline = AndroidAccessibilityEventPipeline(
+            targetPackage = { TARGET_PACKAGE },
+            freedomPackage = FREEDOM_PACKAGE,
+            resolveAppLabel = { "Momo" },
+            dispatchTargetApplicationEvent = { trace += "dispatch-target" },
+            dispatchGlobalTouchEvent = { },
+            dispatchActivityTransition = { trace += "activity-transition" },
+            interactionDiagnostics = { _, _ -> emptyList() },
+            handleManualInteractionFallback = { },
+            updateAppPage = { _, _ -> },
+            appendLog = { trace += "append-log" },
+            currentActivityClass = { currentActivity },
+            updateCurrentActivityClass = { currentActivity = it },
+            onBrowseEventLogged = { },
+            onActivityWindowEventDiagnostic = { clazz, window, generation, tracked ->
+                diagnoses += "$clazz|$window|$generation|$tracked"
+            }
+        )
+        val activity = event(AccessibilityEventType.WINDOW_STATE_CHANGED, TARGET_PACKAGE, ACTIVITY)
+        pipeline.processNormalized(activity, AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.AI_REPLY, 1000L)
+        pipeline.processNormalized(activity, AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.AI_REPLY, 1100L)
+        assertEquals(2, diagnoses.size)
+        assertTrue(diagnoses.all { it == "$ACTIVITY|-1|0|true" })
+        assertEquals(1, trace.count { it == "activity-transition" })
+        assertEquals(1, trace.count { it == "dispatch-target" })
+        assertEquals(ACTIVITY, currentActivity)
+
+        pipeline.processNormalized(
+            event(AccessibilityEventType.WINDOW_STATE_CHANGED, TARGET_PACKAGE, "android.widget.FrameLayout"),
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.AI_REPLY, 1300L
+        )
+        assertEquals("android.widget.FrameLayout|-1|0|false", diagnoses.last())
+        assertEquals(ACTIVITY, currentActivity)
+    }
+
+    @Test
     fun aiReplyWindowContentChangesContinueToReachThePageObserver() {
         val trace = mutableListOf<String>()
         val pipeline = pipeline(trace)

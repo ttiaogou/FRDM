@@ -647,6 +647,17 @@ internal class AccessibilityServiceDependencies internal constructor(
             inputOriginClassifier = inputOriginClassifier,
             observeWindowStateEvent = windowContextTracker::observeWindowStateEvent,
             pageObservationCoordinator = pageObservationCoordinator,
+            onActivityWindowEventDiagnostic = { className, windowId, generation, tracked ->
+                addLog(
+                    "ACTIVITY_EVENT_DIAGNOSTIC stage=PIPELINE; " +
+                        "activityEvidenceSource=ACCESSIBILITY_WINDOW_STATE; " +
+                        "eventClass=${com.freedom.adapters.accessibility.android.safeActivityEventClassName(className)}; " +
+                        "windowId=$windowId; pageGeneration=$generation; " +
+                        "classIsActivity=${com.freedom.adapters.accessibility.android.isActivityWindowClassName(className)}; " +
+                        "tracked=$tracked; result=${if (tracked) "ACTIVITY_CLUE_RECORDED" else "CLASS_NOT_TRACKED"}; " +
+                        "readinessNotGrantedByDiagnostic=true"
+                )
+            },
             onDuplicateSuppressed = { event ->
                 val decision = event.inputOriginDecision
                 diagnostics.recordStructured(

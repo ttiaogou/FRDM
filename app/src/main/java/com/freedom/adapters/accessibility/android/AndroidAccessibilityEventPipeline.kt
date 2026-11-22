@@ -38,7 +38,10 @@ internal class AndroidAccessibilityEventPipeline(
     private val inputOriginClassifier: InputOriginClassifier = InputOriginClassifier(),
     private val onDuplicateSuppressed: (AccessibilityEventEnvelope) -> Unit = {},
     private val observeWindowStateEvent: (className: String, windowId: Int) -> Unit = { _, _ -> },
-    private val pageObservationCoordinator: PageObservationCoordinator? = null
+    private val pageObservationCoordinator: PageObservationCoordinator? = null,
+    private val onActivityWindowEventDiagnostic: (
+        className: String, windowId: Int, generation: Long, tracked: Boolean
+    ) -> Unit = { _, _, _, _ -> }
 ) : AccessibilityEventPipelinePort {
 
     /** Entry point for Android callbacks. The platform event is normalized synchronously. */
@@ -148,6 +151,17 @@ internal class AndroidAccessibilityEventPipeline(
             classNameEndsWithActivity(className)
         ) {
             updateCurrentActivityClass(className)
+        }
+
+        // Report activity clue classification before visible-log deduplication. This callback
+        // cannot change readiness, route selection or business behavior.
+        if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            runCatching {
+                onActivityWindowEventDiagnostic(
+                    className, eventForRouting.windowId, currentWindowGeneration(),
+                    isActivityWindowClassName(className) && currentActivityClass() == className
+                )
+            }
         }
 
         val rawEventName = AccessibilityEventFormatter.rawEventName(androidEventType)

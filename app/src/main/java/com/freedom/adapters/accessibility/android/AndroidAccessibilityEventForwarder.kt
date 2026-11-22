@@ -17,8 +17,11 @@ internal class AndroidAccessibilityEventForwarder(
     private val onLog: (String) -> Unit,
     private val onGlobalTouch: (AccessibilityEventType, Long, Long, String?, Int) -> Unit,
     private val onWindowTransition: (AccessibilityEvent, RunMode?) -> Unit,
-    private val pipeline: AccessibilityEventPipelinePort
+    private val pipeline: AccessibilityEventPipelinePort,
+    private val currentRunGeneration: () -> Long = { -1L },
+    private val currentWindowGeneration: () -> Long = { -1L }
 ) {
+    private var windowCallbackSequence = 0L
     fun accept(event: AccessibilityEvent?) {
         if (event == null) return
         val mode = activeMode()
@@ -50,19 +53,89 @@ internal class AndroidAccessibilityEventForwarder(
                 runCatching { event.windowId }.getOrDefault(-1)
             )
         }
+        val isWindowEvent = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        // Only metadata is observed. Filtering and transition callbacks retain their order.
+        fun logWindowEvent(runRequested: Boolean) {
+            if (!isWindowEvent) return
+            runCatching {
+                windowCallbackSequence++
+                onLog(formatActivityWindowCallbackDiagnostic(
+                    eventTypeName = eventTypeName,
+                    eventPackage = eventPackage,
+                    targetPackage = targetPackage(),
+                    eventClassName = if (eventPackage == targetPackage()) {
+                        event.className?.toString()
+                    } else null,
+                    windowId = event.windowId,
+                    callbackAccepted = accepted,
+                    runRequested = runRequested,
+                    mode = mode,
+                    runGeneration = currentRunGeneration(),
+                    windowGeneration = currentWindowGeneration(),
+                    sequence = windowCallbackSequence
+                ))
+            }
+        }
         if (!accepted) {
+            logWindowEvent(false)
             if (isGlobalTouch) onLog("全局触摸链路[SERVICE_DROPPED]：回调入口过滤拒绝；事件=$eventTypeName")
             return
         }
         if (isGlobalTouch) onLog("全局触摸链路[SERVICE_ACCEPTED]：已放行至事件管线；事件=$eventTypeName")
 
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
-        ) {
+        if (isWindowEvent) {
             onWindowTransition(event, mode)
         }
-        if (!isRunRequested()) return
+        val runRequested = isRunRequested()
+        logWindowEvent(runRequested)
+        if (!runRequested) return
         val runMode = mode ?: return
         pipeline.process(event, runMode)
     }
+}
+
+/** Only plain Android class identifiers from the target package may appear in logs. */
+internal fun safeActivityEventClassName(value: String?): String {
+    val className = value.orEmpty()
+    return className.takeIf {
+        it.length in 1..120 && it.matches(Regex("[A-Za-z_][A-Za-z0-9_.$]*"))
+    } ?: "UNAVAILABLE_OR_REDACTED"
+}
+
+/** Pure diagnostic formatter; never reads nodes, chat content or foreign application names. */
+internal fun formatActivityWindowCallbackDiagnostic(
+    eventTypeName: String,
+    eventPackage: String?,
+    targetPackage: String,
+    eventClassName: String?,
+    windowId: Int,
+    callbackAccepted: Boolean,
+    runRequested: Boolean,
+    mode: RunMode?,
+    runGeneration: Long,
+    windowGeneration: Long,
+    sequence: Long
+): String {
+    val source = when {
+        targetPackage.isBlank() -> "TARGET_UNCONFIGURED"
+        eventPackage == targetPackage -> "TARGET"
+        eventPackage == null -> "NULL"
+        else -> "OTHER"
+    }
+    val pipelineEligible = callbackAccepted && runRequested && mode != null
+    val reason = when {
+        !callbackAccepted -> "CALLBACK_FILTER_REJECTED"
+        !runRequested -> "RUN_NOT_REQUESTED"
+        mode == null -> "MODE_UNAVAILABLE"
+        eventTypeName != "TYPE_WINDOW_STATE_CHANGED" -> "WINDOW_CHANGE_ONLY"
+        !isActivityWindowClassName(eventClassName.orEmpty()) -> "NO_ACTIVITY_CLASS_CANDIDATE"
+        else -> "FORWARDED_ACTIVITY_CANDIDATE"
+    }
+    return "ACTIVITY_EVENT_DIAGNOSTIC stage=SERVICE_CALLBACK; sequence=$sequence;" +
+        " eventType=$eventTypeName; sourcePackage=$source;" +
+        " eventClass=${safeActivityEventClassName(eventClassName)}; windowId=$windowId;" +
+        " runGeneration=$runGeneration; pageGeneration=$windowGeneration;" +
+        " mode=${mode?.name ?: "NONE"}; callbackAccepted=$callbackAccepted;" +
+        " pipelineEligible=$pipelineEligible; rejectReason=$reason"
 }
