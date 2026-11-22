@@ -8,12 +8,9 @@ import com.freedom.features.recovery.RecoveryCheckpointAdapterContext
 import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
 import com.freedom.features.recovery.RecoveryCheckpointVerificationCoordinator
 import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
-import com.freedom.features.recovery.RecoveryEventDispatcher
 import com.freedom.features.recovery.RecoveryScheduler
 import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.recovery.RecoveryTransactionState
-import com.freedom.features.recovery.RecoveryVerificationEvidence
-import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 
 /**
  * 消息列表检查点的只读验证接线。页面身份与结构指纹由原 AI 页面观察链提供；
@@ -85,29 +82,24 @@ internal class MessageListCheckpointVerification(
                     recoveryReason = recoveryReason
                 )
             )
-            val observationSchedule = schedule ?: RecoveryScheduler(
+            val observationSchedule = schedule ?: CheckpointVerificationWiring.createScheduler(
                 scheduler = scheduler,
-                nowEpochMs = System::currentTimeMillis,
-                onReadOnlyObservation = { onReadOnlyObservation() },
+                onReadOnlyObservation = onReadOnlyObservation,
                 onLog = onLog,
                 scheduleRepository = scheduleRepository
             ).also { schedule = it }
-            verifier = RecoveryCheckpointVerificationCoordinator(
-                transaction = RecoveryEventDispatcher(
-                    UnifiedRecoveryTransactionStateMachine(),
-                    onLog
-                ),
-                scheduler = observationSchedule,
+            verifier = CheckpointVerificationWiring.restoreVerifier(
+                checkpoint = unified,
+                restoreSource = restoreSource,
+                schedule = observationSchedule,
                 onLog = onLog
-            ).also { it.restore(unified, restoreSource) }
+            )
             binding = newBinding
         }
         return requireNotNull(verifier).observe(
-            RecoveryVerificationEvidence(
-                packageName = snapshot.packageName,
-                pageType = snapshot.pageKind.name,
+            CheckpointVerificationWiring.verifiedEvidence(
+                snapshot = snapshot,
                 pageFingerprint = pageFingerprint,
-                targetIdentityFingerprint = null,
                 runGeneration = currentRunGeneration(),
                 observationGeneration = observationGeneration
             )
@@ -122,11 +114,7 @@ internal class MessageListCheckpointVerification(
         lastObservationGeneration = observationGeneration
         val activeVerifier = verifier ?: return RecoveryCheckpointVerificationResult.NoActiveCheckpoint
         return activeVerifier.observe(
-            RecoveryVerificationEvidence(
-                packageName = "",
-                pageType = ChatPageKind.UNKNOWN.name,
-                pageFingerprint = "",
-                targetIdentityFingerprint = null,
+            CheckpointVerificationWiring.rejectedEvidence(
                 runGeneration = currentRunGeneration(),
                 observationGeneration = observationGeneration
             )

@@ -269,6 +269,32 @@ class MessageListCheckpointVerificationTest {
     }
 
     @Test
+    fun independentlyWiredCheckpointVerifiersDoNotSharePageProofOrTimers() {
+        val (first, firstScheduler) = fixture()
+        val (second, secondScheduler) = fixture()
+
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), first.sample(1L))
+        assertFalse(second.hasActiveVerification())
+        assertEquals(listOf(500L), firstScheduler.pendingDelays())
+        assertTrue(secondScheduler.pendingDelays().isEmpty())
+
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), second.sample(1L))
+        assertEquals(
+            RecoveryCheckpointVerificationResult.ResumeReady("SCANNING_BOTTOM_TO_TOP"),
+            first.sample(2L)
+        )
+        // The second verifier must still require its own second fresh observation.
+        assertTrue(second.hasActiveVerification())
+        assertEquals(
+            RecoveryCheckpointVerificationResult.ResumeReady("SCANNING_BOTTOM_TO_TOP"),
+            second.sample(2L)
+        )
+        assertTrue(first.completeResume())
+        assertFalse(first.hasActiveVerification())
+        assertTrue(second.completeResume())
+    }
+
+    @Test
     fun unknownPageCheckpointUsesTheSharedPageObservationRestoreSource() {
         val (verifier, _) = fixture()
         assertEquals(

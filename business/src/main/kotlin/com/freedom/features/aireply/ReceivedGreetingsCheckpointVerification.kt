@@ -9,12 +9,9 @@ import com.freedom.features.recovery.RecoveryCheckpointAdapterContext
 import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
 import com.freedom.features.recovery.RecoveryCheckpointVerificationCoordinator
 import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
-import com.freedom.features.recovery.RecoveryEventDispatcher
 import com.freedom.features.recovery.RecoveryScheduler
 import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.recovery.RecoveryTransactionState
-import com.freedom.features.recovery.RecoveryVerificationEvidence
-import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 
 /**
  * 收到招呼持久化检查点的只读验证入口。
@@ -86,29 +83,24 @@ internal class ReceivedGreetingsCheckpointVerification(
                     executionPhase = executionStatus.name
                 )
             )
-            val readOnlySchedule = schedule ?: RecoveryScheduler(
+            val readOnlySchedule = schedule ?: CheckpointVerificationWiring.createScheduler(
                 scheduler = scheduler,
-                nowEpochMs = System::currentTimeMillis,
-                onReadOnlyObservation = { onReadOnlyObservation() },
+                onReadOnlyObservation = onReadOnlyObservation,
                 onLog = onLog,
                 scheduleRepository = scheduleRepository
             ).also { schedule = it }
-            verifier = RecoveryCheckpointVerificationCoordinator(
-                transaction = RecoveryEventDispatcher(
-                    UnifiedRecoveryTransactionStateMachine(),
-                    onLog
-                ),
-                scheduler = readOnlySchedule,
+            verifier = CheckpointVerificationWiring.restoreVerifier(
+                checkpoint = unified,
+                restoreSource = restoreSource,
+                schedule = readOnlySchedule,
                 onLog = onLog
-            ).also { it.restore(unified, restoreSource) }
+            )
             binding = current
         }
         return requireNotNull(verifier).observe(
-            RecoveryVerificationEvidence(
-                packageName = snapshot.packageName,
-                pageType = snapshot.pageKind.name,
+            CheckpointVerificationWiring.verifiedEvidence(
+                snapshot = snapshot,
                 pageFingerprint = pageFingerprint,
-                targetIdentityFingerprint = null,
                 runGeneration = currentRunGeneration(),
                 observationGeneration = observationGeneration
             )
@@ -122,11 +114,7 @@ internal class ReceivedGreetingsCheckpointVerification(
         }
         lastObservationGeneration = observationGeneration
         return verifier?.observe(
-            RecoveryVerificationEvidence(
-                packageName = "",
-                pageType = ChatPageKind.UNKNOWN.name,
-                pageFingerprint = "",
-                targetIdentityFingerprint = null,
+            CheckpointVerificationWiring.rejectedEvidence(
                 runGeneration = currentRunGeneration(),
                 observationGeneration = observationGeneration
             )
