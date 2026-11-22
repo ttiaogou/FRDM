@@ -6,6 +6,7 @@ import com.freedom.features.accountbrowse.ports.BrowsePageKind
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpoint
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
 import com.freedom.features.recovery.RecoveryTransactionState
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.recovery.RecoveryCheckpointAdapterContext
 
@@ -28,7 +29,8 @@ class AccountBrowseRuntime(
     private val interactionPolicy: AccountBrowseInteractionPolicy = AccountBrowseInteractionPolicy(),
     private val onReadOnlyRecoveryObservation: () -> Unit = {},
     private val onLog: (String) -> Unit = {},
-    recoveryScheduleRepository: RecoveryScheduleRepository? = null
+    recoveryScheduleRepository: RecoveryScheduleRepository? = null,
+    recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null
 ) {
     data class Actions(
         val waitForDynamicTab: () -> Unit,
@@ -54,7 +56,8 @@ class AccountBrowseRuntime(
         currentRunGeneration = currentRunGeneration,
         onLog = onLog,
         onReadOnlyObservation = onReadOnlyRecoveryObservation,
-        scheduleRepository = recoveryScheduleRepository
+        scheduleRepository = recoveryScheduleRepository,
+        sharedManager = recoveryTransactionManager
     )
 
     fun scheduleStep(delayMs: Long) = stepScheduler.schedule(delayMs)

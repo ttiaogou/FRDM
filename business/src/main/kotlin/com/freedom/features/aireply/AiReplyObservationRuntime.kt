@@ -51,6 +51,7 @@ import com.freedom.features.recovery.RecoveryTransactionEvent
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 import com.freedom.features.recovery.RecoveryContext
 import com.freedom.features.recovery.RecoveryEventDispatcher
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 import com.freedom.features.recovery.RecoveryEventIdentity
 import com.freedom.features.recovery.RecoveryScheduler
 import com.freedom.features.recovery.RecoveryScheduleRepository
@@ -113,7 +114,9 @@ class AiReplyObservationRuntime(
     private val receivedGreetingsCheckpointRepository: MomoSayHiTraversalCheckpointRepository? = null,
     /** Only read-only observation plans are persisted; checkpoints and UI leases stay separate. */
     private val privateMessagesRecoveryScheduleRepository: RecoveryScheduleRepository? = null,
-    private val receivedGreetingsRecoveryScheduleRepository: RecoveryScheduleRepository? = null
+    private val receivedGreetingsRecoveryScheduleRepository: RecoveryScheduleRepository? = null,
+    /** Injected from the process composition root; null only in isolated test fixtures. */
+    private val recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null
 ) {
     companion object {
         /**
@@ -345,7 +348,8 @@ class AiReplyObservationRuntime(
     /** One coordinator-owned transaction shared by message-list and received-greetings recovery. */
     private val recoveryTransaction = RecoveryEventDispatcher(
         UnifiedRecoveryTransactionStateMachine(),
-        onLog
+        onLog,
+        sharedManager = recoveryTransactionManager
     )
     private val recoveryContext = RecoveryContext()
     private val privateMessagesTraversalTaskExecutor = PrivateMessagesTraversalTaskExecutor()
@@ -510,7 +514,8 @@ class AiReplyObservationRuntime(
             }
         },
         onLog = onLog,
-        scheduleRepository = privateMessagesRecoveryScheduleRepository
+        scheduleRepository = privateMessagesRecoveryScheduleRepository,
+        recoveryTransactionManager = recoveryTransactionManager
     )
     private val receivedGreetingsCheckpointVerifier = ReceivedGreetingsCheckpointVerification(
         scheduler = scheduler,
@@ -525,7 +530,8 @@ class AiReplyObservationRuntime(
             }
         },
         onLog = onLog,
-        scheduleRepository = receivedGreetingsRecoveryScheduleRepository
+        scheduleRepository = receivedGreetingsRecoveryScheduleRepository,
+        recoveryTransactionManager = recoveryTransactionManager
     )
 
     /** Every raw page read must declare its observation entry purpose. */
@@ -742,8 +748,17 @@ class AiReplyObservationRuntime(
             }
             if (snapshotRecoveryStartedAtMs == 0L) {
                 snapshotRecoveryStartedAtMs = System.currentTimeMillis()
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("EMPTY_SNAPSHOT"))
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+                // P6: once a task is running, missing page evidence is an actual
+                // recovery transaction, never only a local verification flag.
+                val activeTask = taskOwnership.activeTaskId()
+                val checkpointRequested = sessionRunStarted && activeTask != null &&
+                    (requestUnifiedPauseAndCheckpoint(activeTask, "EMPTY_SNAPSHOT") || recoveryContext.pending)
+                if (!checkpointRequested) {
+                    // Pre-run sampling has no task identity; it cannot manufacture a
+                    // durable checkpoint or acquire UI authority from missing evidence.
+                    recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("EMPTY_SNAPSHOT"))
+                    recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+                }
                 onLog("AI 页面观察[SNAPSHOT_RECOVERY_HOLD]：快照暂时丢失；保留当前任务租约和会话状态")
             }
             val elapsedMs = System.currentTimeMillis() - snapshotRecoveryStartedAtMs
@@ -1227,6 +1242,7 @@ class AiReplyObservationRuntime(
                 }
             }
             recoveryContext.markUiOwnershipTransferred()
+            val completedRecoveryIdentity = recoveryTransaction.currentIdentity()
             val sourceTaskId = recoveryContext.sourceTaskId
             val fingerprintVerified = recoveryContext.fingerprintVerified
             val uiOwnershipTransferred = recoveryContext.uiOwnershipTransferred
@@ -1236,7 +1252,10 @@ class AiReplyObservationRuntime(
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
             } else {
-                // The shared verifier has already acknowledged its two samples.
+                // The shared verifier has already acknowledged its two samples and
+                // the task owner transferred the UI lease. Only now may P6 clear
+                // the process-level recovery admission slot for this checkpoint.
+                completedRecoveryIdentity?.let { recoveryTransactionManager?.completeVerified(it) }
                 recoveryTransaction.reset()
                 if (sharedGreetingsRecovery) {
                     receivedGreetingsCheckpointForUnified = null
@@ -1536,6 +1555,7 @@ class AiReplyObservationRuntime(
                                 privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = true
                                 sessionManagerState = SessionManagerState.PAUSED
                                 onLog("AI Reply 测试遍历暂停：返回普通消息页存在 UNKNOWN 未读状态；不将未知判定为无消息")
+                                recoverRetryablePrivateList("INBOX_UNREAD_UNKNOWN_AFTER_GREETINGS")
                             }
                             eligibleUnread > 0 -> {
                                 privateMessagesTraversalTaskExecutor.normalInboxHadUnread = true
@@ -2045,6 +2065,20 @@ class AiReplyObservationRuntime(
         } else {
             sessionManagerState = SessionManagerState.PAUSED
             onLog("统一恢复[GESTURE_RECOVERY_UNAVAILABLE]：reason=$reason；无法建立恢复检查点，禁止继续手势")
+        }
+    }
+
+    /**
+     * A confirmed retryable list uncertainty must enter the same checkpointed recovery
+     * transaction as UNKNOWN. The existing read-only backoff is retained; a stable
+     * fingerprint alone is not permission to ignore the original unread-state gate.
+     */
+    private fun recoverRetryablePrivateList(reason: String) {
+        if (!sessionRunStarted || receivedGreetingsTaskActive || !isAiReplyActive()) return
+        if (requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, reason) ||
+            recoveryContext.pending
+        ) {
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
         }
     }
 
@@ -3300,6 +3334,7 @@ class AiReplyObservationRuntime(
                 PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED -> {
                     sessionManagerState = SessionManagerState.PAUSED
                     onLog("AI Reply 启动准入[UNREAD_STATE_UNKNOWN]：首次成功滑动后的视口存在 UNKNOWN；暂停，不把未知当作无未读")
+                    recoverRetryablePrivateList("INITIAL_UNREAD_STATE_UNKNOWN")
                     return
                 }
                 PrivateMessagesUnreadAdmissionDecision.NO_UNREAD -> {
@@ -3462,8 +3497,7 @@ class AiReplyObservationRuntime(
                 fresh.packageName == targetPackage() &&
                 fresh.windowIdentityKey() == expectedWindowIdentity
             ) {
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_BOUNDARY_UNKNOWN"))
-                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+                requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "MESSAGE_LIST_BOUNDARY_UNKNOWN")
                 privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
                 privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
@@ -3592,6 +3626,7 @@ class AiReplyObservationRuntime(
             if (fresh == null || fresh.pageKind != ChatPageKind.CHAT_LIST || fresh.packageName != targetPackage()) {
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI Reply 低频待机复查暂停：未能确认普通消息列表页面；不把未知页面当作无未读，也不执行点击或滑动")
+                recoverRetryablePrivateList("IDLE_INBOX_PAGE_UNCONFIRMED")
                 return@schedule
             }
             val unread = fresh.chatListCandidates.count {
@@ -3605,6 +3640,7 @@ class AiReplyObservationRuntime(
                 privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = true
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI Reply 低频待机复查暂停：当前列表存在 UNKNOWN 未读状态，不能按无消息处理")
+                recoverRetryablePrivateList("IDLE_INBOX_UNREAD_UNKNOWN")
             } else if (unread > 0) {
                 privateMessagesTraversalTaskExecutor.normalInboxHadUnread = true
                 privateMessagesTraversalTaskExecutor.attemptedSessionKeys.clear()

@@ -6,7 +6,9 @@ package com.freedom.features.recovery
  */
 class RecoveryEventDispatcher(
     private val transaction: UnifiedRecoveryTransactionStateMachine,
-    private val onLog: (String) -> Unit = {}
+    private val onLog: (String) -> Unit = {},
+    private val sharedManager: UnifiedRecoveryTransactionManager? = null,
+    private val managerLaneId: String = UnifiedRecoveryTransactionManager.PRIMARY_LANE
 ) {
     private var activeIdentity: RecoveryEventIdentity? = null
 
@@ -21,6 +23,7 @@ class RecoveryEventDispatcher(
     ): RecoveryTransactionState {
         val eventIdentity = identity
         if (eventIdentity == null) {
+            sharedManager?.onUnboundEvent(event)
             onLog("recoveryType=legacy_dispatch; event=${event.javaClass.simpleName}; accepted=true")
             return transaction.dispatch(event)
         }
@@ -31,11 +34,18 @@ class RecoveryEventDispatcher(
                 " activeObservationGeneration=${current.observationGeneration}")
             return transaction.state
         }
-        activeIdentity = eventIdentity
         val before = transaction.state
-        val after = transaction.dispatch(RecoveryTransactionEventEnvelope(eventIdentity, event))
+        val envelope = RecoveryTransactionEventEnvelope(eventIdentity, event)
+        val result = sharedManager?.dispatch(
+            eventIdentity, event, before, managerLaneId
+        ) {
+            transaction.dispatch(envelope)
+        }
+        val after = result?.state ?: transaction.dispatch(envelope)
+        val accepted = result?.accepted ?: true
+        if (accepted) activeIdentity = eventIdentity
         onLog(eventIdentity.logFields("recovery_event", event.javaClass.simpleName) +
-            "; stateBefore=$before; stateAfter=$after; accepted=true")
+            "; stateBefore=$before; stateAfter=$after; accepted=$accepted")
         return after
     }
 

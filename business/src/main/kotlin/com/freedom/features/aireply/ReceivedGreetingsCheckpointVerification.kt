@@ -12,6 +12,7 @@ import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
 import com.freedom.features.recovery.RecoveryScheduler
 import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.recovery.RecoveryTransactionState
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 
 /**
  * 收到招呼持久化检查点的只读验证入口。
@@ -26,7 +27,8 @@ internal class ReceivedGreetingsCheckpointVerification(
     private val currentRunGeneration: () -> Long,
     private val onReadOnlyObservation: () -> Unit,
     private val onLog: (String) -> Unit = {},
-    private val scheduleRepository: RecoveryScheduleRepository? = null
+    private val scheduleRepository: RecoveryScheduleRepository? = null,
+    private val recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null
 ) {
     private data class Binding(
         val checkpointId: String,
@@ -91,7 +93,9 @@ internal class ReceivedGreetingsCheckpointVerification(
                 scheduleRepository = scheduleRepository
             ).also { schedule = it }
             verifier = RecoveryCheckpointVerificationCoordinator(
-                transaction = CheckpointVerificationWiring.newDispatcher(onLog),
+                transaction = CheckpointVerificationWiring.newDispatcher(
+                    onLog, recoveryTransactionManager, "AI_REPLY_RECEIVED_GREETINGS_CHECKPOINT"
+                ),
                 scheduler = readOnlySchedule,
                 onLog = onLog
             ).also { it.restore(unified, restoreSource) }

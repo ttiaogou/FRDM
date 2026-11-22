@@ -478,6 +478,60 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         self.assertTrue(any("typed checkpoint mapper interface" in issue
                             for issue in guard.unified_recovery_adapter_registration_violations(changed)))
 
+    def test_p6_unified_recovery_manager_accepts_production_wiring(self):
+        self.assertEqual(guard.unified_recovery_transaction_manager_violations(self.recovery_code), [])
+
+    def test_p6_rejects_missing_process_manager_injection_and_extra_manager_owner(self):
+        app = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        changed = dict(self.recovery_code)
+        changed[app] = changed[app].replace(
+            "recoveryTransactionManager = root.recoveryTransactionManager",
+            "recoveryTransactionManager = null"
+        )
+        self.assertTrue(any("P6 unified recovery transaction manager wiring missing" in issue
+                            for issue in guard.unified_recovery_transaction_manager_violations(changed)))
+        changed = dict(self.recovery_code)
+        changed["app/src/main/java/com/freedom/app/OtherManager.kt"] = (
+            "val manager = UnifiedRecoveryTransactionManager({ 0L })\n"
+        )
+        self.assertTrue(any("constructed only by AppCompositionRoot" in issue
+                            for issue in guard.unified_recovery_transaction_manager_violations(changed)))
+
+    def test_p6_rejects_unchecked_old_generation_and_missing_verified_completion(self):
+        manager = "business/src/main/kotlin/com/freedom/features/recovery/UnifiedRecoveryTransactionManager.kt"
+        changed = dict(self.recovery_code)
+        changed[manager] = changed[manager].replace(
+            "identity.runGeneration != generation",
+            "identity.runGeneration == generation"
+        )
+        self.assertTrue(any("P6 unified recovery transaction manager wiring missing" in issue
+                            for issue in guard.unified_recovery_transaction_manager_violations(changed)))
+        ai = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        changed = dict(self.recovery_code)
+        changed[ai] = changed[ai].replace(
+            "recoveryTransactionManager?.completeVerified(it)",
+            "Unit"
+        )
+        self.assertTrue(any("P6 unified recovery transaction manager wiring missing" in issue
+                            for issue in guard.unified_recovery_transaction_manager_violations(changed)))
+
+    def test_p6_rejects_unknown_retryable_pause_without_shared_checkpoint_entry(self):
+        ai = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        changed = dict(self.recovery_code)
+        changed[ai] = changed[ai].replace(
+            "requestUnifiedPauseAndCheckpoint(activeTask,",
+            "run { false } //"
+        )
+        self.assertTrue(any("P6 unified recovery transaction manager wiring missing" in issue
+                            for issue in guard.unified_recovery_transaction_manager_violations(changed)))
+        changed = dict(self.recovery_code)
+        changed[ai] = changed[ai].replace(
+            "recoverRetryablePrivateList(",
+            "unmanagedRetryable(",
+        )
+        self.assertTrue(any("P6" in issue
+                            for issue in guard.unified_recovery_transaction_manager_violations(changed)))
+
     def test_p0_authority_guard_accepts_current_production_graph(self):
         self.assertEqual(guard.architecture_authority_violations(self.recovery_code), [])
 

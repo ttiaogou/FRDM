@@ -90,6 +90,7 @@ import com.freedom.features.aireply.ai.AiReplyPersonalizationRepository
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
 import com.freedom.features.recovery.RecoveryScheduleRepository
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.ports.ConversationRepository
 import com.freedom.gesture.api.GestureApi as PublicGestureApi
@@ -181,6 +182,13 @@ class AppCompositionRoot(context: Context) {
     }
     val taskCoordinator by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TaskCoordinator(uiOperationOwnershipCoordinator)
+    }
+    /** P6: one process recovery admission manager, shared by both automation modes. */
+    val recoveryTransactionManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        UnifiedRecoveryTransactionManager(
+            currentRunGeneration = runGenerationClock::current,
+            onLog = monitorRepository::addLog
+        )
     }
     val monitorSnapshotRepository: MonitorSnapshotRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MonitorStoreSnapshotRepository(appContext)
@@ -580,7 +588,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository,
             receivedGreetingsCheckpointRepository = root.sayHiTraversalCheckpointRepository,
             privateMessagesRecoveryScheduleRepository = root.privateMessagesRecoveryScheduleRepository,
-            receivedGreetingsRecoveryScheduleRepository = root.receivedGreetingsRecoveryScheduleRepository
+            receivedGreetingsRecoveryScheduleRepository = root.receivedGreetingsRecoveryScheduleRepository,
+            recoveryTransactionManager = root.recoveryTransactionManager
         )
     }
     val accountBrowseWorkflow by lazy(LazyThreadSafetyMode.NONE) {
@@ -602,6 +611,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             pageObservationCoordinator = pageObservationCoordinator,
             accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository,
             recoveryScheduleRepository = root.recoveryScheduleRepository,
+            recoveryTransactionManager = root.recoveryTransactionManager,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() }
         )
     }

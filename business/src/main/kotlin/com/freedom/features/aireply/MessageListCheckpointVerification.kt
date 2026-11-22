@@ -11,6 +11,7 @@ import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
 import com.freedom.features.recovery.RecoveryScheduler
 import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.recovery.RecoveryTransactionState
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 
 /**
  * 消息列表检查点的只读验证接线。页面身份与结构指纹由原 AI 页面观察链提供；
@@ -25,7 +26,8 @@ internal class MessageListCheckpointVerification(
     private val currentRunGeneration: () -> Long,
     private val onReadOnlyObservation: () -> Unit,
     private val onLog: (String) -> Unit = {},
-    private val scheduleRepository: RecoveryScheduleRepository? = null
+    private val scheduleRepository: RecoveryScheduleRepository? = null,
+    private val recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null
 ) {
     private data class Binding(
         val checkpointId: String,
@@ -90,7 +92,9 @@ internal class MessageListCheckpointVerification(
                 scheduleRepository = scheduleRepository
             ).also { schedule = it }
             verifier = RecoveryCheckpointVerificationCoordinator(
-                transaction = CheckpointVerificationWiring.newDispatcher(onLog),
+                transaction = CheckpointVerificationWiring.newDispatcher(
+                    onLog, recoveryTransactionManager, "AI_REPLY_PRIVATE_MESSAGES_CHECKPOINT"
+                ),
                 scheduler = observationSchedule,
                 onLog = onLog
             ).also { it.restore(unified, restoreSource) }

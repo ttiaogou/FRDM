@@ -567,6 +567,7 @@ def inspect_project(root: Path) -> list[str]:
     issues.extend(unified_task_lifecycle_violations(code_by_path))
     issues.extend(unified_ui_write_authorization_violations(code_by_path))
     issues.extend(unified_recovery_adapter_registration_violations(code_by_path))
+    issues.extend(unified_recovery_transaction_manager_violations(code_by_path))
 
     # 11) Final hard boundaries for the unified accessibility/recovery architecture.
     issues.extend(final_architecture_boundary_violations(code_by_path))
@@ -1040,6 +1041,102 @@ def unified_recovery_adapter_registration_violations(code_by_path: dict[str, str
     return issues
 
 
+def unified_recovery_transaction_manager_violations(code_by_path: dict[str, str]) -> list[str]:
+    """P6: identified UNKNOWN and included retryables converge before local reducers."""
+    issues: list[str] = []
+    manager_rel = "business/src/main/kotlin/com/freedom/features/recovery/UnifiedRecoveryTransactionManager.kt"
+    dispatcher_rel = "business/src/main/kotlin/com/freedom/features/recovery/RecoveryEventDispatcher.kt"
+    app_rel = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+    ai_rel = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+    browse_rel = "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt"
+    browse_runtime = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
+    workflow = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+    wiring = "business/src/main/kotlin/com/freedom/features/aireply/CheckpointVerificationWiring.kt"
+    list_verifier = "business/src/main/kotlin/com/freedom/features/aireply/MessageListCheckpointVerification.kt"
+    greetings_verifier = "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsCheckpointVerification.kt"
+
+    required = {
+        manager_rel: (
+            r"\bclass\s+UnifiedRecoveryTransactionManager\s*\(",
+            r"\bcurrentRunGeneration\s*:\s*\(\)\s*->\s*Long",
+            r"\bprivate\s+val\s+transactions\s*=\s*LinkedHashMap\s*<\s*LaneKey",
+            r"\bfun\s+dispatch\s*\(",
+            r"\bidentity\.runGeneration\s*!=\s*generation",
+            r"\bidentity\.observationGeneration\s*<\s*old\.observationGeneration",
+            r"\bfun\s+completeVerified\s*\(",
+            r"\bfun\s+snapshot\s*\(",
+            r"\bval\s+key\s*=\s*LaneKey\s*\(\s*identity\.taskId\s*,\s*laneId\s*\)",
+            r"\bval\s+next\s*=\s*apply\s*\(\s*\)",
+            r"\bevent\s*==\s*RecoveryTransactionEvent\.ResumeCompleted\s*&&\s*next\s*==\s*RecoveryTransactionState\.ACTIVE",
+        ),
+        dispatcher_rel: (
+            r"\bprivate\s+val\s+sharedManager\s*:\s*UnifiedRecoveryTransactionManager\?",
+            r"\bprivate\s+val\s+managerLaneId\s*:\s*String",
+            r"\bsharedManager\?\.dispatch\s*\(",
+            r"\btransaction\.dispatch\s*\(\s*envelope\s*\)",
+            r"\bif\s*\(\s*accepted\s*\)\s*activeIdentity\s*=\s*eventIdentity",
+        ),
+        app_rel: (
+            r"\bval\s+recoveryTransactionManager\s+by\s+lazy\b",
+            r"\bUnifiedRecoveryTransactionManager\s*\(\s*currentRunGeneration\s*=\s*runGenerationClock::current",
+            r"\brecoveryTransactionManager\s*=\s*root\.recoveryTransactionManager",
+        ),
+        ai_rel: (
+            r"\bsharedManager\s*=\s*recoveryTransactionManager",
+            r"\brecoveryTransactionManager\s*=\s*recoveryTransactionManager",
+            r"\brequestUnifiedPauseAndCheckpoint\s*\(\s*activeTask\s*,",
+            r"\brequestUnifiedPauseAndCheckpoint\s*\(\s*PRIVATE_MESSAGES_TASK_ID\s*,",
+            r"\bprivate\s+fun\s+recoverRetryablePrivateList\s*\(",
+            r"\bval\s+checkpointRequested\s*=\s*sessionRunStarted\s*&&\s*activeTask\s*!=\s*null",
+            r"\brecoveryTransactionManager\?\.completeVerified\s*\(",
+        ),
+        workflow: (r"\brecoveryTransactionManager\s*=\s*recoveryTransactionManager",),
+        browse_runtime: (r"\bsharedManager\s*=\s*recoveryTransactionManager",),
+        browse_rel: (
+            r"\bsharedManager\s*:\s*UnifiedRecoveryTransactionManager\?",
+            r"\bsharedManager\s*=\s*sharedManager",
+            r"\brecoveryScheduler\.begin\s*\(",
+            r"\bRecoveryTransactionEvent\.UnknownPage\s*\(",
+        ),
+        wiring: (
+            r"\bmanagerLaneId\s*=\s*laneId",
+            r"\bsharedManager\s*=\s*manager",
+        ),
+        list_verifier: (
+            r"\bCheckpointVerificationWiring\.newDispatcher\s*\(",
+            r"\bCheckpointVerificationWiring\.newDispatcher\s*\(\s*onLog\s*,\s*recoveryTransactionManager\s*,",
+        ),
+        greetings_verifier: (
+            r"\bCheckpointVerificationWiring\.newDispatcher\s*\(",
+            r"\bCheckpointVerificationWiring\.newDispatcher\s*\(\s*onLog\s*,\s*recoveryTransactionManager\s*,",
+        ),
+    }
+    for rel, patterns in required.items():
+        code = code_by_path.get(rel, "")
+        for pattern in patterns:
+            if not re.search(pattern, code):
+                issues.append(f"P6 unified recovery transaction manager wiring missing: {rel}: {pattern}")
+
+    if len(re.findall(r"\brecoverRetryablePrivateList\s*\(", code_by_path.get(ai_rel, ""))) < 5:
+        issues.append("P6 AI retryable unread/page uncertainty must have four managed recovery call sites")
+
+    constructed = {
+        rel: len(re.findall(r"\bUnifiedRecoveryTransactionManager\s*\(", code))
+        for rel, code in code_by_path.items()
+        if "/src/main/" in rel and rel.endswith(".kt")
+    }
+    # Strip the class declaration from the one legitimate source.
+    constructed[manager_rel] = len(re.findall(
+        r"\bUnifiedRecoveryTransactionManager\s*\(",
+        re.sub(r"\bclass\s+UnifiedRecoveryTransactionManager(?=\s*\()", "",
+               code_by_path.get(manager_rel, ""))
+    ))
+    constructed = {rel: n for rel, n in constructed.items() if n}
+    if constructed != {app_rel: 1}:
+        issues.append(f"P6 manager must be constructed only by AppCompositionRoot: {constructed}")
+    return issues
+
+
 def unified_ui_write_authorization_violations(code_by_path: dict[str, str]) -> list[str]:
     """P4: every business-owned Android mutation must cross the exact lease gate."""
     issues: list[str] = []
@@ -1469,6 +1566,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - P3 task lifecycle: process run clock synchronously revokes shared task/UI leases")
     print(" - P4 UI authorization: exact task/generation/mode gate owns every automated write outlet")
     print(" - P5 recovery adapters: shared task-scoped registry, common interface, no local route fallback")
+    print(" - P6 recovery transaction: single process admission manager with isolated route verification lanes")
     print(" - Automatic recovery: legacy manual handoff forbidden; three checkpoint routes use shared verification")
     print(" - Recovery scheduler: bounded non-terminal backoff, touch reset, stale-callback and user-stop gates")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")

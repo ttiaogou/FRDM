@@ -21,6 +21,7 @@ import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.PageFingerprint
 import com.freedom.features.accountbrowse.DynamicFeedRecoveryRouteAdapter
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 import com.freedom.core.runtime.PageObservationSubscription
 import com.freedom.features.accountbrowse.AccountBrowseInteractionContext
 import com.freedom.features.accountbrowse.AccountBrowseInteractionEventClassifier
@@ -61,6 +62,7 @@ internal class AndroidAccountBrowseWorkflow(
     private val pageObservationCoordinator: PageObservationCoordinator,
     private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null,
     private val recoveryScheduleRepository: RecoveryScheduleRepository? = null,
+    private val recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null,
     private val currentRunGeneration: () -> Long = { 0L }
 ) {
     private val displayMetrics get() = accessibilityGateway.displayMetrics()
@@ -178,6 +180,7 @@ internal class AndroidAccountBrowseWorkflow(
             targetPackage = targetPackage,
             checkpointRepository = accountBrowseCheckpointRepository,
             recoveryScheduleRepository = recoveryScheduleRepository,
+            recoveryTransactionManager = recoveryTransactionManager,
             currentRunGeneration = currentRunGeneration,
             onResetSession = ::resetAccountBrowseSession,
             onReadOnlyRecoveryObservation = ::observeAccountBrowseRecoveryReadOnly,

@@ -3,6 +3,7 @@ package com.freedom.features.aireply
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.recovery.RecoveryEventDispatcher
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 import com.freedom.features.recovery.RecoveryVerificationEvidence
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 
@@ -13,8 +14,15 @@ import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
  * This object holds no active scheduler, verifier, route identity, or page proof.
  */
 internal object CheckpointVerificationWiring {
-    fun newDispatcher(onLog: (String) -> Unit): RecoveryEventDispatcher =
-        RecoveryEventDispatcher(UnifiedRecoveryTransactionStateMachine(), onLog)
+    fun newDispatcher(
+        onLog: (String) -> Unit,
+        manager: UnifiedRecoveryTransactionManager? = null,
+        laneId: String = UnifiedRecoveryTransactionManager.PRIMARY_LANE
+    ): RecoveryEventDispatcher =
+        RecoveryEventDispatcher(
+            UnifiedRecoveryTransactionStateMachine(), onLog,
+            sharedManager = manager, managerLaneId = laneId
+        )
 
     fun verifiedEvidence(
         snapshot: ChatPageSnapshot,

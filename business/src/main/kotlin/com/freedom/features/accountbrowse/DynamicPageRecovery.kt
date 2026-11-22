@@ -15,6 +15,7 @@ import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
 import com.freedom.features.recovery.RecoveryVerificationEvidence
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 
 /**
  * Owns dynamic-page recovery verification without owning page inspection or browse actions.
@@ -26,11 +27,13 @@ class DynamicPageRecovery(
     private val currentRunGeneration: () -> Long,
     private val onLog: (String) -> Unit = {},
     onReadOnlyObservation: () -> Unit = {},
-    scheduleRepository: RecoveryScheduleRepository? = null
+    scheduleRepository: RecoveryScheduleRepository? = null,
+    sharedManager: UnifiedRecoveryTransactionManager? = null
 ) {
     private val dispatcher = RecoveryEventDispatcher(
         UnifiedRecoveryTransactionStateMachine(),
-        onLog
+        onLog,
+        sharedManager = sharedManager
     )
 
     private val taskId = "ACCOUNT_BROWSE"
