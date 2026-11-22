@@ -629,6 +629,8 @@ class ArchitectureBoundaryTest {
             "app/src/main/java/com/freedom/core/accessibility/AccessibilityEventRouter.kt",
             "app/src/main/java/com/freedom/core/runtime/RunCoordinator.kt",
             "business/src/main/kotlin/com/freedom/features/aireply/AiReplyMessageObservationCoordinator.kt",
+            "business/src/main/kotlin/com/freedom/features/aireply/AiReplyReceivedGreetingsCoordinator.kt",
+            "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsPageArrivalListener.kt",
             "app/src/test/java/com/freedom/accessibility/chat/momo/MomoChatPageClassifierTest.kt",
             "app/src/test/java/com/freedom/runtime/RunModeTest.kt",
             "app/src/test/java/com/freedom/core/accessibility/AccessibilityEventRouterTest.kt",
