@@ -600,24 +600,67 @@ class ArchitectureBoundaryTest {
             .findAll(jobsSection)
             .map { it.groupValues[1] }
             .toList()
-        assertEquals("CI must use one job for architecture checks and the Android build", listOf("ci"), jobIds)
+        assertEquals(
+            "CI must keep the architecture gate, test, both APK builds and CodeQL as five jobs",
+            listOf("arch-guard", "test", "build-freedom-apk", "build-ocr-plugin-apk", "codeql"),
+            jobIds
+        )
 
-        val verifierUnitTests = workflow.indexOf("python3 -m unittest discover -s tools/architecture")
-        val architectureGate = workflow.indexOf("python3 tools/architecture/verify_boundaries.py")
-        // The cache strategy is an implementation detail. The ordering contract is that the
-        // Gradle build invocation itself remains after both architecture checks.
-        val androidBuild = workflow.indexOf("gradle --no-daemon")
+        fun jobBody(jobId: String): String {
+            val marker = "\n  $jobId:\n"
+            val start = jobsSection.indexOf(marker)
+            assertTrue("CI must define job $jobId", start >= 0)
+            val remainder = jobsSection.substring(start + marker.length)
+            val nextJob = Regex("(?m)^  [A-Za-z0-9_-]+:\\s*$").find(remainder)
+            return remainder.substring(0, nextJob?.range?.first ?: remainder.length)
+        }
+
+        val architectureJob = jobBody("arch-guard")
+        val verifierUnitTests = architectureJob.indexOf("python3 -m unittest discover -s tools/architecture")
+        val architectureGate = architectureJob.indexOf("python3 tools/architecture/verify_boundaries.py")
         assertTrue("CI must run verifier unit tests", verifierUnitTests >= 0)
         assertTrue("CI must run the static architecture verifier", architectureGate >= 0)
-        assertTrue("Architecture verification must finish before the Android Gradle build", verifierUnitTests < architectureGate && architectureGate < androidBuild)
+        assertTrue(
+            "Both architecture checks must execute in the gate before any Android build",
+            verifierUnitTests < architectureGate && !architectureJob.contains("gradle --no-daemon")
+        )
+        assertTrue("Architecture gate must validate Android XML resources", architectureJob.contains("ET.parse(path)"))
 
-        assertTrue("Android build must execute the core JVM module tests", workflow.contains(":core:test"))
-        assertTrue("Android build must execute the business JVM module tests", workflow.contains(":business:test"))
-        assertTrue("Android build must execute the gesture-core JVM module tests", workflow.contains(":gesture-core:test"))
-        assertTrue("Android build must execute the gesture-runtime JVM module tests", workflow.contains(":gesture-runtime:test"))
-        assertTrue("Android build must execute app architecture tests", workflow.contains(":app:testDebugUnitTest"))
-        assertTrue("CI must build the Freedom debug APK", workflow.contains(":app:assembleDebug"))
-        assertTrue("CI must build the OCR plugin debug APK", workflow.contains(":ocr-plugin:assembleDebug"))
+        for (jobId in listOf("test", "build-freedom-apk", "build-ocr-plugin-apk")) {
+            val body = jobBody(jobId)
+            assertTrue(
+                "$jobId must wait for the full architecture and resource gate",
+                Regex("(?m)^    needs: arch-guard\\s*$").containsMatchIn(body)
+            )
+            assertTrue("$jobId must execute its own Gradle task", body.contains("gradle --no-daemon"))
+        }
+
+        val testJob = jobBody("test")
+        assertTrue("Android build must execute the core JVM module tests", testJob.contains(":core:test"))
+        assertTrue("Android build must execute the business JVM module tests", testJob.contains(":business:test"))
+        assertTrue("Android build must execute the gesture-core JVM module tests", testJob.contains(":gesture-core:test"))
+        assertTrue("Android build must execute the gesture-runtime JVM module tests", testJob.contains(":gesture-runtime:test"))
+        assertTrue("Android build must execute app architecture tests", testJob.contains(":app:testDebugUnitTest"))
+        assertTrue("Failed tests must still upload their reports", testJob.contains("if: always()"))
+
+        val freedomJob = jobBody("build-freedom-apk")
+        val ocrJob = jobBody("build-ocr-plugin-apk")
+        assertTrue("CI must build the Freedom debug APK", freedomJob.contains(":app:assembleDebug"))
+        assertTrue("CI must build the OCR plugin debug APK", ocrJob.contains(":ocr-plugin:assembleDebug"))
+        assertTrue("Freedom APK must be uploaded", freedomJob.contains("Freedom-debug-apk"))
+        assertTrue("OCR APK must be uploaded", ocrJob.contains("Freedom-OCR-plugin-debug-apk"))
+
+        val codeqlJob = jobBody("codeql")
+        assertTrue(
+            "CodeQL must wait for the Freedom build",
+            Regex("(?m)^    needs: build-freedom-apk\\s*$").containsMatchIn(codeqlJob)
+        )
+        assertTrue("CodeQL must retain manual Java/Kotlin scanning", codeqlJob.contains("languages: java-kotlin") && codeqlJob.contains("build-mode: manual"))
+        assertTrue("CodeQL must retain extended security and quality queries", codeqlJob.contains("security-extended,security-and-quality"))
+        assertTrue(
+            "CodeQL must compile both applications rather than reuse an APK",
+            codeqlJob.contains(":app:assembleDebug") && codeqlJob.contains(":ocr-plugin:assembleDebug")
+        )
     }
 
     @Test
