@@ -43,6 +43,7 @@ import com.freedom.core.accessibility.gesture.VerticalSwipeDirection
 import com.freedom.features.aireply.ports.ChatHeaderNodeDiagnostic
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatPageKind
+import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.features.aireply.ports.ChatPageNodeEvidence
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
