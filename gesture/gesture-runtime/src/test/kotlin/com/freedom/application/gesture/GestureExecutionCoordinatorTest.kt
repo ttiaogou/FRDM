@@ -25,8 +25,12 @@ import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.TaskLease
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
+import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.UiWriteAuthorization
+import com.freedom.core.runtime.UiWriteScope
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -453,6 +457,130 @@ class GestureExecutionCoordinatorTest {
         assertEquals(GestureExecutionStatus.REJECTED, staleResult?.status)
         assertTrue(staleResult?.reason.orEmpty().contains("task_lease_changed"))
         assertTrue(taskCoordinator.isCurrent(newLease))
+    }
+
+
+    @Test
+    fun delayedOldGestureCallbackAfterTaskHandoffCannotReclaimUiOrSkipSerialDrain() {
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val generation = 51L
+        val page = 8L
+        val oldLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", generation))
+        val gate = UiWriteAuthorization(tasks, { generation }, { RunMode.AI_REPLY })
+        val events = mutableListOf<String>()
+        val dispatcher = FakeDispatcher(events)
+        val coordinator = GestureExecutionCoordinator(
+            displayMetrics = { DisplayMetricsSnapshot(1_080, 2_400, 3f) },
+            dispatcher = dispatcher,
+            visualizer = FakeVisualizer(events),
+            currentRunGeneration = { generation },
+            currentPageGeneration = { page },
+            taskCoordinator = tasks
+        )
+        val results = mutableMapOf<String, GestureExecutionResult>()
+        assertEquals(
+            GestureSubmission.ACCEPTED,
+            coordinator.executeApproved(validSwipe(
+                id = "old-platform", runGeneration = generation,
+                windowGeneration = page, taskLease = oldLease
+            )) { results[it.commandId] = it }
+        )
+        val latePlatformCallback = requireNotNull(dispatcher.callback)
+        assertEquals(
+            GestureSubmission.ACCEPTED,
+            coordinator.executeApproved(validSwipe(
+                id = "old-queued", runGeneration = generation,
+                windowGeneration = page, taskLease = oldLease
+            )) { results[it.commandId] = it }
+        )
+
+        val newLease = requireNotNull(
+            tasks.transfer(oldLease, "AI_REPLY_RECEIVED_GREETINGS")
+        )
+        assertFalse(tasks.isCurrent(oldLease))
+        assertFalse(gate.permits(UiWriteScope.AI_COMPOSER))
+        assertTrue(gate.permits(UiWriteScope.AUTONOMOUS_GESTURE))
+        assertEquals(
+            GestureSubmission.ACCEPTED,
+            coordinator.executeApproved(validSwipe(
+                id = "new-task", runGeneration = generation,
+                windowGeneration = page, taskLease = newLease
+            )) { results[it.commandId] = it }
+        )
+        // The old Android stroke still owns the platform slot despite lease transfer.
+        assertEquals(1, dispatcher.callbacks.size)
+        assertEquals(listOf("show", "dispatch"), events)
+
+        latePlatformCallback.onResult(GestureCompletion.COMPLETED)
+        assertEquals(GestureExecutionStatus.CANCELLED, results["old-platform"]?.status)
+        assertEquals(GestureExecutionStatus.REJECTED, results["old-queued"]?.status)
+        assertTrue(results["old-queued"]?.reason.orEmpty().contains("task_lease_changed"))
+        assertEquals(2, dispatcher.callbacks.size)
+        assertEquals(listOf("show", "dispatch", "show", "dispatch"), events)
+        dispatcher.callbacks[1].onResult(GestureCompletion.COMPLETED)
+        assertEquals(GestureExecutionStatus.COMPLETED, results["new-task"]?.status)
+
+        // Duplicate or delayed callbacks from the former owner cannot reopen a slot.
+        val delivered = results.toMap()
+        latePlatformCallback.onResult(GestureCompletion.COMPLETED)
+        assertEquals(2, dispatcher.callbacks.size)
+        assertEquals(delivered, results)
+        assertNull(tasks.withCurrentLease(oldLease) { "stale-write" })
+        assertTrue(tasks.isCurrent(newLease))
+    }
+
+    @Test
+    fun unknownHoldDuringPredispatchDelayRejectsStaleCommandBeforeNewRunCanWrite() {
+        var generation = 61L
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val oldLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", generation))
+        val gate = UiWriteAuthorization(tasks, { generation }, { RunMode.AI_REPLY })
+        val events = mutableListOf<String>()
+        val dispatcher = FakeDispatcher(events)
+        val scheduler = FakeTaskScheduler()
+        val coordinator = GestureExecutionCoordinator(
+            displayMetrics = { DisplayMetricsSnapshot(1_080, 2_400, 3f) },
+            dispatcher = dispatcher,
+            visualizer = FakeVisualizer(events),
+            scheduler = scheduler,
+            currentRunGeneration = { generation },
+            taskCoordinator = tasks
+        )
+        var oldResult: GestureExecutionResult? = null
+        assertEquals(
+            GestureSubmission.ACCEPTED,
+            coordinator.executeApproved(validSwipe(
+                id = "unknown-pending",
+                runGeneration = generation, taskLease = oldLease, preDispatchDelayMs = 350L
+            )) { oldResult = it }
+        )
+        assertEquals(1, scheduler.pendingCount)
+        assertTrue(tasks.release(oldLease))
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE) { "unsafe" })
+
+        // The timer callback is still scheduled, but no old lease may reach Android.
+        scheduler.runNext()
+        assertEquals(0, dispatcher.callbacks.size)
+        assertEquals(GestureExecutionStatus.REJECTED, oldResult?.status)
+        assertTrue(oldResult?.reason.orEmpty().contains("task_lease_changed"))
+        assertEquals(0, scheduler.pendingCount)
+
+        generation = 62L
+        tasks.advanceRunGeneration(generation)
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE) { "unsafe" })
+        val freshLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", generation))
+        assertTrue(gate.permits(UiWriteScope.AUTONOMOUS_GESTURE))
+        var freshResult: GestureExecutionResult? = null
+        assertEquals(
+            GestureSubmission.ACCEPTED,
+            coordinator.executeApproved(validSwipe(
+                id = "fresh-run", runGeneration = generation, taskLease = freshLease
+            )) { freshResult = it }
+        )
+        assertEquals(1, dispatcher.callbacks.size)
+        dispatcher.callbacks.single().onResult(GestureCompletion.COMPLETED)
+        assertEquals(GestureExecutionStatus.COMPLETED, freshResult?.status)
+        assertFalse(tasks.isCurrent(oldLease))
     }
 
     @Test

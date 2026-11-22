@@ -1,5 +1,10 @@
 package com.freedom.features.recovery
 
+import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.UiOperationOwnershipCoordinator
+import com.freedom.core.runtime.UiWriteAuthorization
+import com.freedom.core.runtime.UiWriteScope
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -103,6 +108,131 @@ class UnifiedRecoveryTransactionManagerTest {
         assertTrue(manager.snapshot(id.taskId) != null)
         dispatcher.dispatch(RecoveryTransactionEvent.ResumeCompleted)
         assertNull(manager.snapshot(id.taskId))
+    }
+
+
+    @Test
+    fun taskSwitchDuringUnknownCannotGrantUiOwnershipBeforeVerifiedHandoff() {
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val runGeneration = 31L
+        val gate = UiWriteAuthorization(tasks, { runGeneration }, { RunMode.AI_REPLY })
+        val previousLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", runGeneration))
+        var writes = 0
+        assertEquals(1, gate.withAuthorizedWrite(UiWriteScope.AI_COMPOSER) { ++writes })
+
+        val manager = UnifiedRecoveryTransactionManager({ runGeneration })
+        val privateRecovery = dispatcher(manager)
+        privateRecovery.activate(identity("AI_REPLY_PRIVATE_MESSAGES", runGeneration))
+        assertEquals(
+            RecoveryTransactionState.RECOVERING,
+            privateRecovery.dispatch(RecoveryTransactionEvent.UnknownPage("PAGE_UNKNOWN"))
+        )
+
+        // UNKNOWN is a read-only hold; the business coordinator withdraws its exact
+        // lease. The recovery manager itself must not be treated as a lease issuer.
+        assertTrue(tasks.release(previousLease))
+        tasks.receiveBusinessTaskSwitch(
+            "AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS", "unknown_recovery_handoff"
+        )
+        assertNull(tasks.currentLease())
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.GLOBAL_NAVIGATION) { ++writes })
+
+        val greetings = dispatcher(manager)
+        greetings.activate(identity(
+            "AI_REPLY_RECEIVED_GREETINGS", runGeneration, checkpoint = "greetings-checkpoint"
+        ))
+        greetings.dispatch(RecoveryTransactionEvent.CheckpointLoaded(
+            RecoveryTransactionEvent.Source.PAGE_OBSERVATION
+        ))
+        greetings.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        greetings.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        assertEquals(
+            RecoveryTransactionState.VERIFYING,
+            greetings.dispatch(RecoveryTransactionEvent.ResumeRequested)
+        )
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE) { ++writes })
+
+        greetings.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        assertEquals(
+            RecoveryTransactionState.RESUMING,
+            greetings.dispatch(RecoveryTransactionEvent.ResumeRequested)
+        )
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.GLOBAL_NAVIGATION) { ++writes })
+        assertEquals(
+            RecoveryTransactionState.ACTIVE,
+            greetings.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        )
+        // Even verified recovery is not an implicit UI lease grant.
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.GLOBAL_NAVIGATION) { ++writes })
+
+        val nextLease = requireNotNull(tasks.tryAcquire("AI_REPLY_RECEIVED_GREETINGS", runGeneration))
+        assertTrue(tasks.isCurrent(nextLease))
+        assertFalse(gate.permits(UiWriteScope.AI_COMPOSER))
+        assertTrue(gate.permits(UiWriteScope.GLOBAL_NAVIGATION))
+        assertNull(tasks.withCurrentLease(previousLease) { ++writes })
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.AI_COMPOSER) { ++writes })
+        assertEquals(2, gate.withAuthorizedWrite(UiWriteScope.GLOBAL_NAVIGATION) { ++writes })
+        assertEquals(2, writes)
+        assertEquals(RecoveryTransactionState.RECOVERING, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.state)
+    }
+
+    @Test
+    fun oldRunRecoveryCallbacksCannotReauthorizeAfterRunGenerationRevocation() {
+        var runGeneration = 41L
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val gate = UiWriteAuthorization(tasks, { runGeneration }, { RunMode.AI_REPLY })
+        val oldLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", runGeneration))
+        val manager = UnifiedRecoveryTransactionManager({ runGeneration })
+        val oldRecovery = dispatcher(manager)
+        oldRecovery.activate(identity("AI_REPLY_PRIVATE_MESSAGES", runGeneration, checkpoint = "old"))
+        oldRecovery.dispatch(RecoveryTransactionEvent.UnknownPage("PAGE_UNKNOWN"))
+        assertTrue(gate.permits(UiWriteScope.AI_COMPOSER))
+
+        // A service-reconnect/new run invalidates all previously captured capabilities.
+        runGeneration = 42L
+        tasks.advanceRunGeneration(runGeneration)
+        assertFalse(tasks.isCurrent(oldLease))
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.AI_COMPOSER) { "unsafe" })
+        assertEquals(
+            RecoveryTransactionState.RECOVERING,
+            oldRecovery.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        )
+        assertEquals(
+            RecoveryTransactionState.RECOVERING,
+            oldRecovery.dispatch(RecoveryTransactionEvent.ResumeRequested)
+        )
+        assertNull(manager.snapshot("AI_REPLY_PRIVATE_MESSAGES"))
+
+        val freshRecovery = dispatcher(manager)
+        freshRecovery.activate(identity(
+            "AI_REPLY_PRIVATE_MESSAGES", runGeneration, checkpoint = "fresh-checkpoint"
+        ))
+        freshRecovery.dispatch(RecoveryTransactionEvent.CheckpointLoaded(
+            RecoveryTransactionEvent.Source.SERVICE_RECONNECT
+        ))
+        freshRecovery.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        freshRecovery.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        assertEquals(
+            RecoveryTransactionState.VERIFYING,
+            freshRecovery.dispatch(RecoveryTransactionEvent.ResumeRequested)
+        )
+        assertNull(tasks.currentLease())
+        freshRecovery.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        assertEquals(
+            RecoveryTransactionState.RESUMING,
+            freshRecovery.dispatch(RecoveryTransactionEvent.ResumeRequested)
+        )
+        freshRecovery.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.AI_COMPOSER) { "unsafe" })
+
+        val freshLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", runGeneration))
+        assertTrue(tasks.isCurrent(freshLease))
+        assertNull(tasks.withCurrentLease(oldLease) { "unsafe" })
+        assertEquals(
+            "authorized",
+            gate.withAuthorizedWrite(UiWriteScope.AI_COMPOSER) { "authorized" }
+        )
+        assertNull(manager.snapshot("AI_REPLY_PRIVATE_MESSAGES"))
     }
 
     @Test
