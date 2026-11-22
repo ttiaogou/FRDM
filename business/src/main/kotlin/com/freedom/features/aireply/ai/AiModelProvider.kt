@@ -1,8 +1,8 @@
 package com.freedom.features.aireply.ai
 
-/** Provider-neutral request/response contract. Implementations must not log prompts or secrets. */
+/** 不依赖具体服务商的请求与响应契约；实现不得记录提示词或密钥。 */
 interface AiModelProvider {
-    /** Cloud-capable providers must require explicit consent; local providers may override to false. */
+    /** 云端服务商必须取得用户明确授权；本地服务商可覆盖为无需授权。 */
     val requiresCloudConsent: Boolean get() = true
 
     fun generate(request: AiModelRequest): AiModelResult
@@ -28,7 +28,7 @@ data class AiModelRequest(
 sealed interface AiModelResponseFormat {
     data object PlainText : AiModelResponseFormat
 
-    /** The provider should request a strict structured response rather than free-form prose. */
+    /** 服务商应请求严格的结构化响应，而不是自由格式文本。 */
     data class JsonSchema(
         val name: String,
         val schema: String,
@@ -61,7 +61,7 @@ data class TokenUsage(val inputTokens: Int, val outputTokens: Int) {
     init { require(inputTokens >= 0 && outputTokens >= 0) }
 }
 
-/** A valid transport response with no usable text. Retain only bounded technical fields. */
+/** 传输响应有效但没有可用文本时，仅保留受限的技术字段。 */
 class AiModelEmptyOutputException(
     override val responseContentState: String,
     override val responseFinishReason: String?,
@@ -81,14 +81,14 @@ sealed interface AiModelFailure {
     data object TimedOut : AiModelFailure
 }
 
-/** Explicit adapter boundary for HTTP/provider implementations. */
+/** HTTP 与具体服务商实现使用的适配器接口边界。 */
 interface AiModelTransport {
     fun execute(request: AiModelRequest): Result<AiModelResult>
 }
 
 /**
- * Transport-backed model access is opt-in only. Consent is checked here again, at the outbound
- * boundary, so a caller cannot bypass the setting by constructing a model request directly.
+ * 使用传输层访问模型必须获得用户授权；在发出请求的边界再次检查授权，
+ * 防止调用方通过直接构造模型请求绕过配置检查。
  */
 class TransportBackedAiModelProvider(
     private val providerName: String,

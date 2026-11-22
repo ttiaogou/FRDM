@@ -31,8 +31,8 @@ enum class SendConfirmationResult {
 }
 
 /**
- * Calls the configured remote model and fills a verified composer. Sending is deliberately
- * outside this phase; the next phase may consume the persisted PENDING_SEND state.
+ * 调用已配置的远端模型并填写已验证的输入框。发送操作在本阶段之外，
+ * 后续阶段可继续处理已持久化的 PENDING_SEND 状态。
  */
 class AiReplyDraftCoordinator(
     private val configurationRepository: AiModelConfigurationRepository,
@@ -62,13 +62,13 @@ class AiReplyDraftCoordinator(
     private var activeRequestId: String? = null
     private var activeExistingOutgoingKeys: Set<String> = emptySet()
     private var pendingSendConfirmation: PendingSendConfirmation? = null
-    // A reply attempt keeps its chat page until a fresh outgoing message is confirmed.
-    // Clearing the model/input "pending" flag is not a send-success signal.
+    // 回复尝试应保留当前聊天页，直到新发出的消息得到确认。
+    // 清除模型或输入的 pending 标志不代表消息发送成功。
     private var replyAwaitingConfirmedSend = false
     private var sendConfirmationChecks = 0
     private var lastConfirmedSendId: String? = null
     private var activeMessageSegments: List<String> = emptyList()
-    /** An observed missing button means no gesture was submitted; preserve exactly this segment. */
+    /** 观察到发送按钮缺失时，说明未提交手势；必须原样保留当前消息段。 */
     private var pendingSendControl: PendingSendControl? = null
     private var sendControlRetryScheduled = false
     private var sendControlRetryTicket = 0L
@@ -100,14 +100,14 @@ class AiReplyDraftCoordinator(
 
     val isPending: Boolean get() = pending.get()
     val isAwaitingUserSend: Boolean get() = awaitingUserSend.get()
-    /** For the existing page-return gate: waiting on an unsubmitted button is not task completion. */
+    /** 对现有页面返回门禁而言，等待尚未提交的发送按钮不等于任务完成。 */
     val isSendControlRecoveryPending: Boolean get() = synchronized(lock) { pendingSendControl != null }
     val isConversationReturnBlocked: Boolean get() = synchronized(lock) {
         pending.get() || awaitingUserSend.get() ||
             pendingSendConfirmation != null || replyAwaitingConfirmedSend
     }
 
-    /** Invalidates late callbacks when the AI Reply runtime is stopped or rebuilt. */
+    /** AI 回复运行环境停止或重建时，使迟到的回调失效。 */
     fun resetForRuntimeReset() {
         synchronized(lock) {
             pendingSendConfirmation?.let { pendingConfirmation ->
@@ -154,7 +154,7 @@ class AiReplyDraftCoordinator(
         return generateAndFill(batch, null, snapshot, context, visitToken)
     }
 
-    /** Called only after platform identity and the current chat header have been verified. */
+    /** 仅在平台身份和当前聊天标题均已验证后调用。 */
     fun generateAndFill(
         batch: ChatMessageBatch,
         identity: ContactRowIdentity?,
@@ -209,11 +209,11 @@ class AiReplyDraftCoordinator(
             nodeTarget = inputTarget,
             expectedChatTitle = snapshot.chatTitleText
         )
-        // Window generation is a stale-callback guard, not a new model task identity.
+        // 窗口代次用于防止旧回调继续执行，不代表新的模型任务身份。
         val dedupeConversationKey = conversationIdentity
         val dedupeKey = fingerprint("$contactId|$dedupeConversationKey|${latestIncoming.stableLogicalMessageId}|${latestIncoming.effectiveContentRevision}")
-        // A fresh verified chat observation may rebind a pending, unsubmitted send to a new
-        // window generation. Do not regenerate the model response or rewrite the composer.
+        // 新的已验证聊天观察可以将尚未提交的待发送动作重新绑定到新的
+        // 窗口代次；不得重新生成模型回复，也不得重写输入框内容。
         val awaitingControl = synchronized(lock) { pendingSendControl }
         if (awaitingControl != null) {
             if (awaitingControl.messageKey != dedupeKey) return reject("SEND_CONTROL_PENDING_OTHER_CONVERSATION")
@@ -232,8 +232,8 @@ class AiReplyDraftCoordinator(
             }
             return true
         }
-        // After service/process recovery, only PENDING_SEND means the previous gesture had
-        // not yet been dispatched. SENDING/UNKNOWN/SENT_UNCONFIRMED are never retried here.
+        // 服务或进程恢复后，只有 PENDING_SEND 表示上一次手势
+        // 尚未派发；此处绝不重试 SENDING、UNKNOWN 或 SENT_UNCONFIRMED。
         val savedPending = replySegmentTaskRepository?.findByConversation(dedupeConversationKey)
             ?.groupBy { it.requestId }
             ?.values
@@ -443,8 +443,8 @@ class AiReplyDraftCoordinator(
                 val scheduled = runCatching {
                     scheduler.schedule(EMPTY_MODEL_RETRY_DELAY_MS) {
                         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) return@schedule
-                        // A user may have switched chats or entered text during the delay.
-                        // Revalidate the exact live composer before sending another model request.
+                        // 等待期间用户可能切换了会话或自行输入文字。
+                        // 再次发送模型请求前，必须重新验证当前真实输入框。
                         val composerReady = runCatching { inputPort.verifyDraft(target, "") }
                             .getOrNull()?.status == ChatDraftInputStatus.VERIFIED
                         if (!composerReady) {
@@ -491,9 +491,9 @@ class AiReplyDraftCoordinator(
                 finish("AI_REPLY_STATE_CHANGED_BEFORE_INPUT", requestGeneration)
                 return@schedule
             }
-            // The model owns message boundaries; the existing input cadence still owns
-            // 2-3-grapheme writes inside each queued message. Stage one stops after the
-            // complete draft is verified; it must not submit a send gesture.
+            // 消息边界由模型决定；现有输入节奏仍负责将每条消息按
+            // 2～3 个字素簇逐段写入。第一阶段在完整草稿验证后停止，
+            // 不得在该阶段提交发送手势。
             val parsedMessages = ReplyMessageSegments.parse(decision.draft)
             onLog(
                 "AI 回复解析诊断：requestId=$requestId；" +
@@ -564,8 +564,8 @@ class AiReplyDraftCoordinator(
         if (synchronized(lock) { pendingSendConfirmation != null }) return
         updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.PENDING_SEND)
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
-        // Keep the durable SENDING-before-gesture safety marker. Only an explicit
-        // SEND_CONTROL_NOT_READY result may roll it back; no gesture was dispatched.
+        // 保留手势提交前持久化的 SENDING 安全标记；只有明确返回
+        // SEND_CONTROL_NOT_READY 且确认未派发手势时，才允许回退此状态。
         updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.SENDING)
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
         val sent = runCatching { sendPort?.sendDraft(target, message) ?: ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_UNAVAILABLE") }
@@ -573,8 +573,8 @@ class AiReplyDraftCoordinator(
         if (sent.status == ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND &&
             sent.reasonCode == "SEND_CONTROL_NOT_READY"
         ) {
-            // The adapter verified the exact composer text, but no eligible send control
-            // existed. It therefore did NOT submit a gesture. Never terminate this task.
+            // 适配器已经验证输入框内容完全匹配，但未发现符合条件的发送控件，
+            // 因而没有提交手势；不得因此终止任务。
             updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.PENDING_SEND)
             if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
             synchronized(lock) {
@@ -618,7 +618,7 @@ class AiReplyDraftCoordinator(
             }
         } ?: return
         val (current, ticket) = scheduled
-        // Bounded frequency, not a terminal attempt budget: UI readiness may be delayed.
+        // 仅限制检查频率，不设置终止性重试次数上限；界面就绪可能延迟。
         val delayMs = when {
             current.observations <= 2 -> 1_000L
             current.observations <= 4 -> 2_000L
@@ -776,8 +776,8 @@ class AiReplyDraftCoordinator(
 
     private fun isTransientVerificationFailure(status: ChatDraftInputStatus): Boolean =
         status in setOf(
-            // A missing or changed input node requires a fresh workflow admission;
-            // retrying the same draft callback could target a stale conversation.
+            // 输入节点缺失或发生变化时，必须重新获得工作流准入许可；
+            // 直接重试旧草稿回调可能误操作已过期的会话。
             ChatDraftInputStatus.VERIFICATION_FAILED
         )
 
@@ -796,8 +796,8 @@ class AiReplyDraftCoordinator(
         val result = runCatching { inputPort.verifyDraft(target, draft) }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
         if (result.status == ChatDraftInputStatus.VERIFIED) {
-            // Stage two consumes PENDING_SEND and invokes the retained send port only after
-            // the adapter has revalidated the live chat and send control.
+            // 第二阶段处理 PENDING_SEND；只有适配器重新确认当前聊天页及发送控件后，
+            // 才能调用已有的发送端口。
             synchronized(lock) {
                 if (!isCurrentGeneration(requestGeneration)) return
                 awaitingUserSend.set(true)

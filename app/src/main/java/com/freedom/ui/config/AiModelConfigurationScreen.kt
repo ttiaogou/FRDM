@@ -26,7 +26,7 @@ import java.net.URL
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
-/** User-facing editor with provider/model choices; only the API key is required as free text. */
+/** 面向用户的模型配置界面，提供服务商与模型选项，并支持 API Key 文本输入。 */
 internal class AiModelConfigurationScreen(
     private val activity: Activity,
     private val dp: (Int) -> Int,
@@ -194,8 +194,8 @@ internal class AiModelConfigurationScreen(
                 if (nextProvider == selectedProvider) return
                 val previousProvider = selectedProvider
                 selectedProvider = nextProvider
-                // A key belongs to the selected provider. Never reuse an OpenAI key for DeepSeek
-                // (or vice versa); the user must enter the new provider's key explicitly.
+                // API Key 归属于当前选中的服务商，不得将 OpenAI 密钥用于 DeepSeek，
+                // 反之亦然；用户必须为新的服务商明确输入相应密钥。
                 configuration = configuration.copy(
                     apiKey = savedConfiguration.apiKey
                         .takeIf { savedConfiguration.provider == nextProvider }

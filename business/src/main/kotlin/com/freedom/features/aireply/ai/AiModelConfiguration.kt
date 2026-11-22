@@ -7,7 +7,7 @@ data class AiModelOption(
     val displayName: String
 )
 
-/** Providers currently supported by the app. CUSTOM_OPENAI_COMPAT preserves existing custom endpoints. */
+/** 应用当前支持的模型服务商；CUSTOM_OPENAI_COMPAT 保留已有的自定义接口地址。 */
 enum class AiModelServiceProvider(
     val storageKey: String,
     val displayName: String,
@@ -62,8 +62,8 @@ enum class AiModelServiceProvider(
 }
 
 /**
- * User-owned configuration for a selected cloud model provider.
- * The API key is deliberately excluded from toString() to prevent accidental log disclosure.
+ * 用户为所选云端模型服务商配置的参数。
+ * toString() 不包含 API Key，避免日志意外泄露。
  */
 data class AiModelConfiguration(
     val apiBaseUrl: String = AiModelServiceProvider.DEEPSEEK.defaultBaseUrl,
@@ -91,7 +91,7 @@ data class AiModelConfiguration(
         require(!modelName.contains('\n') && !modelName.contains('\r')) { "模型名称不能包含换行符" }
     }
 
-    /** Empty endpoint/model/key values are allowed while the user is still configuring the form. */
+    /** 用户尚在填写配置时，允许接口地址、模型名称和密钥为空。 */
     fun validationError(): String? {
         val endpoint = apiBaseUrl.trim()
         if (endpoint.isEmpty()) return null
@@ -135,7 +135,7 @@ data class AiModelConfiguration(
     }
 }
 
-/** Persistence boundary for the user-owned model configuration. */
+/** 用户模型配置的持久化接口边界。 */
 interface AiModelConfigurationRepository {
     fun load(): AiModelConfiguration
     fun save(configuration: AiModelConfiguration)

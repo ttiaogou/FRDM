@@ -7,7 +7,7 @@ import com.freedom.features.aireply.domain.message.ChatMessageDirection
 import com.freedom.features.conversation.domain.message.ConversationMessageInput
 import com.freedom.features.conversation.ports.ConversationRepository
 
-/** Builds bounded, verified-only context for one resolved contact. */
+/** 为已解析的单一联系人构建有数量限制且仅包含已验证消息的上下文。 */
 class ConversationContextManager(
     private val repository: ConversationRepository,
     private val maxHistoryMessages: Int = 30,
@@ -40,9 +40,9 @@ class ConversationContextManager(
                 observationRowIndex = message.observationRowIndex
             )
         }
-        // The Momo adapter may already have persisted this exact validated batch while saving
-        // its read-only chat sample. Only write observations that are actually missing; this
-        // preserves recovery when that write failed without counting one UI observation twice.
+        // 陌陌适配器在保存只读聊天样本时，可能已经持久化了同一批经过验证的消息。
+        // 这里只补写实际缺失的观察记录，避免重复计入同一次界面观察，
+        // 同时保留对之前写入失败的恢复能力。
         val existing = repository.messagesForConversation(contactId, conversationId)
         val missingInputs = inputs.filter { input ->
             existing.none { record ->
@@ -71,7 +71,7 @@ class ConversationContextManager(
         )
     }
 
-    /** Loads already-persisted history for exactly one verified contact/conversation pair. */
+    /** 仅加载与已验证联系人及会话组合精确匹配的持久化历史。 */
     fun loadForConversation(
         contactId: String,
         conversationId: String,

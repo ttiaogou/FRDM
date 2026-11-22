@@ -1,12 +1,12 @@
 package com.freedom.features.aireply.ai
 
-/** Technical failure metadata only: never retain exception messages, URLs, bodies or credentials. */
+/** 仅记录技术故障元数据，禁止保留异常消息、URL、响应正文或凭据。 */
 enum class AiModelCallStage {
     MODEL_CALL, CONFIGURATION, ENDPOINT, REQUEST_ENCODING, CONNECTION_OPEN,
     CONNECTION_SETUP, REQUEST_WRITE, RESPONSE_STATUS, RESPONSE_READ, RESPONSE_PARSE
 }
 
-/** Implemented by network adapters without making the business layer depend on those adapters. */
+/** 由网络适配器实现，业务层不直接依赖具体适配器。 */
 interface AiModelCallFailureDetails {
     val safeCode: String
     val retryable: Boolean
@@ -15,7 +15,7 @@ interface AiModelCallFailureDetails {
     val providerErrorCode: String? get() = null
     val providerErrorType: String? get() = null
     val providerErrorParam: String? get() = null
-    /** Fixed technical metadata only; the provider response body is never retained. */
+    /** 仅保留固定格式的技术元数据，不保存供应商响应正文。 */
     val responseContentState: String? get() = null
     val responseFinishReason: String? get() = null
     val responseInputTokens: Int? get() = null
@@ -84,7 +84,7 @@ data class AiModelCallDiagnostics(
 
         fun from(failure: Throwable): AiModelCallDiagnostics {
             val details = failure as? AiModelCallFailureDetails
-            // Only these local, constant validation messages may become codes. Never log arbitrary messages.
+            // 只有这些本地固定的校验消息可以映射为错误码，禁止记录任意异常消息。
             val localCode = when (failure.message) {
                 "Model provider returned empty output" -> "EMPTY_MODEL_OUTPUT"
                 "Cloud model processing consent has not been granted" -> "CLOUD_PROCESSING_CONSENT_REQUIRED"

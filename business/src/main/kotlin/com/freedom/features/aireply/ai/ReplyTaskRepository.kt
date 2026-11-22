@@ -4,14 +4,14 @@ enum class ReplyTaskStatus {
     REQUESTED,
     MODEL_COMPLETED,
     DRAFT_APPLIED,
-    /** Draft is ready and is waiting for the sending phase. */
+    /** 草稿已就绪，正在等待发送阶段。 */
     PENDING_SEND,
-    /** A send attempt has been admitted and must not be duplicated. */
+    /** 发送尝试已获得准入许可，不得重复执行。 */
     SENDING,
-    /** The platform accepted the action, but message visibility is not confirmed yet. */
+    /** 平台已接受发送动作，但尚未确认消息可见。 */
     SENT_UNCONFIRMED,
     SENT,
-    /** Legacy value retained so old ledgers remain readable. */
+    /** 保留旧版状态值，以兼容读取历史任务账本。 */
     COMPLETED,
     UNKNOWN,
     FAILED_RETRYABLE,
@@ -26,7 +26,7 @@ data class ReplyTaskRecord(
     val status: ReplyTaskStatus,
     val requestId: String,
     val updatedAtMillis: Long,
-    /** Required memory-buffer identity fields; defaults preserve old call sites and ledgers. */
+    /** 内存缓冲区所需的身份字段；默认值用于兼容旧调用方和历史账本。 */
     val userId: String = "",
     val contentHash: String = "",
     val createdAtMillis: Long = updatedAtMillis,
@@ -41,7 +41,7 @@ interface ReplyTaskRepository {
     fun updateStatus(requestKey: String, requestId: String, status: ReplyTaskStatus, updatedAtMillis: Long): Boolean
 }
 
-/** Single source of truth for durable reply-task state transitions. */
+/** 持久化回复任务状态转移的唯一事实来源。 */
 object ReplyTaskStatusTransitions {
     private val allowed = mapOf(
         ReplyTaskStatus.REQUESTED to setOf(
@@ -66,7 +66,7 @@ object ReplyTaskStatusTransitions {
             ReplyTaskStatus.FAILED_RETRYABLE,
             ReplyTaskStatus.FAILED_FINAL
         ),
-        // PENDING_SEND rollback is only used when the send control was absent before gesture dispatch.
+        // 只有在派发手势前确认发送控件缺失时，才允许回退 PENDING_SEND 状态。
         ReplyTaskStatus.SENDING to setOf(
             ReplyTaskStatus.PENDING_SEND,
             ReplyTaskStatus.SENT_UNCONFIRMED,

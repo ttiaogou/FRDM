@@ -5,7 +5,7 @@ import com.freedom.core.runtime.ModeRuntimePort
 import com.freedom.core.runtime.RunMode
 import com.freedom.features.aireply.AiReplyObservationRuntime
 
-/** Keeps AI page observation behind the application runtime contract. */
+/** 通过应用运行时契约封装 AI 页面观察能力。 */
 internal class AiReplyModeRuntimeAdapter(
     private val runtime: () -> AiReplyObservationRuntime,
     private val onLog: (String) -> Unit = {},
@@ -34,8 +34,8 @@ internal class AiReplyModeRuntimeAdapter(
 
     override fun onAccessibilityServiceConnected() {
         if (awaitingServiceReconnect) {
-            // Recreate the run-local recovery gates before binding persisted schedules.
-            // A later scheduleInitialObservation() would otherwise erase the newly rebound proof.
+            // 在重新绑定持久化调度之前，先重建本次运行所需的恢复门禁。
+            // 否则后续 scheduleInitialObservation() 可能清除刚刚重新绑定的验证证据。
             awaitingServiceReconnect = false
             onReadinessStarting(mode, "AI Reply 服务重连；重新等待目标应用正式就绪")
             runtime().scheduleInitialObservation()

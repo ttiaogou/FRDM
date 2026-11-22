@@ -61,7 +61,7 @@ internal object AiReplyDecisionJsonParser {
     private val REQUIRED_KEYS = setOf("action", "reason", "draft")
     private val REASON_PATTERN = Regex("[A-Z0-9_]{1,120}")
 
-    /** Accepts only a root object whose values are JSON strings or null; rejects duplicates/trailing data. */
+    /** 仅接受值为 JSON 字符串或 null 的根对象；拒绝重复字段和末尾多余数据。 */
     private class StrictJsonStringObjectReader(private val source: String) {
         private var index = 0
 

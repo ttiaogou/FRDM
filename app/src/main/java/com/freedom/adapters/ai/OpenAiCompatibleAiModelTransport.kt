@@ -15,7 +15,7 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.nio.charset.StandardCharsets
 
-/** Safe, non-secret transport failure suitable for diagnostics. Response bodies are never exposed. */
+/** 用于诊断的安全传输故障信息，不含敏感数据，也不暴露响应正文。 */
 class AiModelHttpException(
     override val safeCode: String,
     override val retryable: Boolean = false,
@@ -31,7 +31,7 @@ class AiModelHttpException(
     override val responseOutputTokens: Int? = null
 ) : IOException(safeCode, cause), com.freedom.features.aireply.ai.AiModelCallFailureDetails
 
-/** One trace per invocation: concurrent calls cannot overwrite each other's status or stage. */
+/** 每次调用使用独立追踪记录，避免并发请求相互覆盖状态或阶段信息。 */
 internal class AiModelHttpCallTrace {
     var stage = AiModelCallStage.CONFIGURATION
     var httpStatus: Int? = null
@@ -64,7 +64,7 @@ internal class AiModelHttpCallTrace {
             throw AiModelHttpException(
                 safeCode = safeCode,
                 retryable = known?.retryable ?: false,
-                // Retain the original wrapper/type and cause for technical diagnostics only.
+                // 仅为技术诊断保留原始异常包装、类型及原因链。
                 cause = failure,
                 httpStatus = httpStatus,
                 stage = stage,
@@ -79,15 +79,15 @@ internal class AiModelHttpCallTrace {
         }
 }
 
-/** Opens a connection; injected in tests so the transport can be verified without network access. */
+/** 打开网络连接；测试时可以注入实现，以便在无网络环境中验证传输逻辑。 */
 fun interface AiHttpConnectionFactory {
     fun open(url: URL): HttpURLConnection
 }
 
 /**
- * OpenAI-compatible Chat Completions transport. The configured API Base URL is treated as a
- * prefix (normally ending in /v1); /chat/completions is appended unless already present.
- * It never logs request bodies, response bodies, API keys, or conversation text.
+ * 兼容 OpenAI 的 Chat Completions 传输实现；配置的 API 基础地址被视为
+ * 地址前缀（通常以 /v1 结尾），若未包含 /chat/completions 则自动补齐。
+ * 不记录请求正文、响应正文、API Key 或对话文本。
  */
 class OpenAiCompatibleAiModelTransport(
     private val configuration: AiModelConfiguration,
@@ -124,7 +124,7 @@ class OpenAiCompatibleAiModelTransport(
             val status = connection.responseCode
             trace.httpStatus = status
             if (status !in 200..299) {
-                // Read only a bounded amount to release the stream; do not surface provider text.
+                // 仅在长度限制内读取并释放响应流，不向日志暴露服务商返回文本。
                 runCatching { connection.errorStream?.use {
                     trace.captureProviderError(String(readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8))
                 } }

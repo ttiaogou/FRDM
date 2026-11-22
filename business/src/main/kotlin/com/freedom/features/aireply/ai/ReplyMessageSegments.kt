@@ -1,6 +1,6 @@
 package com.freedom.features.aireply.ai
 
-/** AI-selected message boundaries. No punctuation-based fallback is performed. */
+/** 按 AI 模型指定的消息边界拆分回复，不使用标点符号作为备用拆分依据。 */
 internal object ReplyMessageSegments {
     data class ParseResult(
         val messages: List<String>,

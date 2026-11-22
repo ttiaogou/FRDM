@@ -1,6 +1,6 @@
 package com.freedom.features.aireply.ai
 
-/** Provider-neutral, user-facing preferences for the style of generated chat drafts. */
+/** 与模型服务商无关、供用户设置的聊天草稿风格偏好。 */
 data class AiReplyPersonalization(
     val personalityStyle: PersonalityStyle = PersonalityStyle.FLIRTATIOUS_PROBING,
     val languageStyle: LanguageStyle = LanguageStyle.CASUAL,
@@ -113,7 +113,7 @@ enum class InteractionLevel(val displayName: String, val systemInstruction: Stri
     EXTEND_AND_SUGGEST("主动延伸话题、提供建议", "在回答当前问题后，可补充相关思路、可行建议或自然的后续话题。")
 }
 
-/** Persistence boundary for the user's provider-neutral AI reply style preferences. */
+/** 用户 AI 回复风格偏好的持久化接口边界，不依赖具体模型服务商。 */
 interface AiReplyPersonalizationRepository {
     fun load(): AiReplyPersonalization
     fun save(personalization: AiReplyPersonalization)

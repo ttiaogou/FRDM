@@ -1,6 +1,6 @@
 package com.freedom.features.aireply.ai
 
-/** Explicit opt-in gate for sending conversation context to a remote model provider. */
+/** 向远端模型服务商发送对话上下文前，必须通过用户明确授权检查。 */
 fun interface AiModelCloudConsent {
     fun isGranted(): Boolean
 
@@ -9,7 +9,7 @@ fun interface AiModelCloudConsent {
     }
 }
 
-/** Removes common high-risk personal identifiers before conversation text leaves the device. */
+/** 对话文本离开设备前，脱敏常见的高风险个人身份标识。 */
 object AiModelDataRedactor {
     private val emailPattern = Regex("(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b")
     private val mainlandMobilePattern = Regex("(?<![0-9])(?:\\+?86[- ]?)?1[3-9][0-9]{9}(?![0-9])")

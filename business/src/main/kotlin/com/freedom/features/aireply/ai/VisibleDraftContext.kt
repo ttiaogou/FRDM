@@ -22,12 +22,12 @@ internal object VisibleDraftContext {
                     "LATEST_MESSAGE_UNAVAILABLE"
                 }
             )
-        // A truncated viewport cannot prove that the latest visible row is the
-        // actual conversation tail, so it remains ineligible for automatic
-        // drafting. An unrelated dynamic/system card or a partially read row
-        // does not prove that the active input field is covered or that the
-        // chat changed. The writer re-inspects the live conversation and
-        // editable input immediately before and after SET_TEXT.
+        // 被截断的视口无法证明最后一条可见消息就是
+        // 会话的真正末尾，因此不能直接用于自动
+        // 起草。无关的动态或系统卡片以及未完整读取的消息行，
+        // 并不能证明当前输入框被遮挡，也不能证明
+        // 会话发生变化。写入器会在 SET_TEXT 前后重新检查
+        // 当前会话及可编辑输入框。
         if (batch.truncated) return retry("MESSAGE_LIST_TRUNCATED")
         if (latest.type != ChatMessageType.TEXT) return Admission(false, false, "LATEST_MESSAGE_UNSUPPORTED")
         if (latest.direction == ChatMessageDirection.OUTGOING) return Admission(false, false, "LATEST_MESSAGE_OUTGOING")

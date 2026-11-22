@@ -11,7 +11,7 @@ import com.freedom.features.aireply.ai.LanguageStyle
 import com.freedom.features.aireply.ai.PersonalityStyle
 import com.freedom.features.aireply.ai.ReplyLength
 
-/** Stores non-sensitive, provider-neutral AI reply preferences separately from task filters. */
+/** 将不含敏感信息且与服务商无关的 AI 回复偏好独立于任务筛选条件存储。 */
 internal class AiReplyPersonalizationStore(context: Context) : AiReplyPersonalizationRepository {
     private val preferences: SharedPreferences = context.applicationContext.getSharedPreferences(
         PREFERENCES_NAME,
@@ -48,7 +48,7 @@ internal class AiReplyPersonalizationStore(context: Context) : AiReplyPersonaliz
     }
 
     private fun readReplyLength(): ReplyLength = when (preferences.getString(KEY_REPLY_LENGTH, null)) {
-        // Preserve the closest equivalent for users upgrading from the previous settings screen.
+        // 为从旧版设置界面升级的用户保留最接近原配置的对应选项。
         "CONCISE" -> ReplyLength.SHORT
         else -> readEnum(KEY_REPLY_LENGTH, ReplyLength.MINIMAL)
     }

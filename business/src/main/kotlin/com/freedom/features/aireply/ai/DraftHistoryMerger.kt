@@ -31,9 +31,9 @@ internal object DraftHistoryMerger {
                 .thenBy { it.bounds.top }
                 .thenBy { it.recordId }
         )
-        // Anchor against any current visible row, not only the first row. A newly scrolled
-        // viewport can contain messages that were not persisted in the previous run, while a
-        // later visible row still provides a valid conversation boundary.
+        // 允许使用当前任一可见消息行作为锚点，不仅限于第一行；新滚动到的
+        // 视口可能包含上次运行未持久化的消息，而后续仍可见的消息行
+        // 依然能够提供有效的会话边界。
         val logicalAnchor = current.asSequence().mapNotNull { message ->
             records.indexOfFirst { record ->
                 record.messageFingerprint == message.stableLogicalMessageId &&
@@ -42,7 +42,7 @@ internal object DraftHistoryMerger {
         }.firstOrNull()
         val legacyAnchor = if (logicalAnchor == null) current.asSequence().mapNotNull { message ->
             records.indexOfFirst { record ->
-                // Legacy records may still carry a text-derived fingerprint.
+                // 旧版记录可能仍保存根据文本生成的指纹。
                 record.content == message.content && record.direction == message.direction.name
             }.takeIf { it >= 0 }
         }.firstOrNull() else null

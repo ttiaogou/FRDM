@@ -3,7 +3,7 @@ package com.freedom.features.aireply.ai
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 
-/** State of one model-level message segment. Input 2-3 grapheme chunks are not segment tasks. */
+/** 一条模型级消息段的状态；输入时使用的 2～3 字素簇片段不属于消息段任务。 */
 enum class ReplySegmentTaskStatus {
     CREATED,
     DRAFT_APPLIED,
@@ -51,7 +51,7 @@ object ReplySegmentTaskTransitions {
         ReplySegmentTaskStatus.CREATED to setOf(ReplySegmentTaskStatus.DRAFT_APPLIED, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.DRAFT_APPLIED to setOf(ReplySegmentTaskStatus.PENDING_SEND, ReplySegmentTaskStatus.FAILED_RETRYABLE, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.PENDING_SEND to setOf(ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.FAILED_RETRYABLE, ReplySegmentTaskStatus.FAILED_FINAL),
-        // Return to PENDING_SEND only after the adapter explicitly confirms NO gesture was submitted.
+        // 只有适配器明确确认没有提交手势后，才允许返回 PENDING_SEND。
         ReplySegmentTaskStatus.SENDING to setOf(ReplySegmentTaskStatus.PENDING_SEND, ReplySegmentTaskStatus.SENT_UNCONFIRMED, ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.FAILED_RETRYABLE, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.SENT_UNCONFIRMED to setOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.UNKNOWN to setOf(ReplySegmentTaskStatus.DRAFT_APPLIED, ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.FAILED_RETRYABLE),
