@@ -2713,6 +2713,8 @@ class AiReplyObservationRuntime(
                 return
             }
             onLog("AI 消息复读停止：${draftAdmission.reason}；已达两次重试上限，不猜测内容")
+            onLog("AI 会话返回门禁[OCR_READ_NOT_CONFIRMED]：消息证据仍不完整；保留当前聊天页，等待新的页面观察")
+            return
         }
 
         val rowIdentity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()
@@ -2771,6 +2773,12 @@ class AiReplyObservationRuntime(
         }
         // This method is reached only after the asynchronous callback has passed the active
         // package/activity/window-generation check. Never log OCR output before that point.
+        if (draftTargetConfirmed && draftAdmission.accepted &&
+            !draftHoldsPage && !currentSessionSendConfirmed
+        ) {
+            onLog("AI 会话返回门禁[DRAFT_NOT_STARTED]：最新对方消息可回复，但草稿任务未取得有效终态；不返回列表")
+            return
+        }
         logTemporaryOcrResults(batch)
         // Observers are a future AI-input boundary: expose only verified text with a known
         // direction, ordered bottom-to-top. Own outgoing text remains available as AI context;
@@ -4216,6 +4224,13 @@ class AiReplyObservationRuntime(
             if (!canPerformPrivateMessagesUiAction()) {
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话返回[STALE_TASK_IGNORED]：私人消息任务租约或恢复门禁已失效；不提交返回动作")
+                return@schedule
+            }
+            // A model request can start after this delayed BACK was scheduled. Recheck
+            // the live reply transaction here, not only when scheduling the BACK.
+            if (runCatching { isConversationDraftPending() }.getOrDefault(true)) {
+                onLog("AI 会话返回门禁[RECHECK_DRAFT_PENDING]：返回派发前发现草稿或发送事务未完成；重新等待")
+                scheduleReturnToSessionList(snapshot, draftPendingWaitedMs + SESSION_RETURN_DELAY_MS)
                 return@schedule
             }
             val current = runCatching { readPageSnapshot(AiReplyPageReadPurpose.RETURN_NAVIGATION_VERIFY) }.getOrNull()

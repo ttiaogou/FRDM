@@ -547,7 +547,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             sharedPageObservationCoordinator = pageObservationCoordinator,
-            isConversationDraftPending = { aiReplyDraftCoordinator.isPending },
+            isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
             onDraftRuntimeReset = {
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {
                     aiReplyDraftCoordinator.resetForRuntimeReset()

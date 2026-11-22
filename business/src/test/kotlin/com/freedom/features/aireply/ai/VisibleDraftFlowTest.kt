@@ -9,7 +9,7 @@ import org.junit.Test
 import java.util.concurrent.Executor
 
 class VisibleDraftFlowTest {
-    private class Fixture {
+    private class Fixture(private val sendPort: ChatDraftSendPort? = null) {
         val tasks = mutableListOf<() -> Unit>()
         var active = true
         var consent = true
@@ -62,7 +62,8 @@ class VisibleDraftFlowTest {
                     if (fail) error("simulated transport failure")
                     return AiModelResult(modelOutput, "fake", "fake", TokenUsage(10, 20), "stop")
                 }
-            } }, backgroundExecutor = Executor { it.run() }, nowMillis = { now }, chooseRandomInt = { min, _ -> min })
+            } }, backgroundExecutor = Executor { it.run() }, nowMillis = { now }, chooseRandomInt = { min, _ -> min },
+            sendPort = sendPort)
         fun drain() { while (tasks.isNotEmpty()) tasks.removeAt(0).invoke() }
     }
 
@@ -128,4 +129,42 @@ class VisibleDraftFlowTest {
         assertFalse(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
         assertEquals(0, f.calls)
     }
+
+    @Test fun returnGateStaysClosedAfterModelFailureAndResetsOnRuntimeReset() {
+        val f = Fixture()
+        f.fail = true
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        assertFalse(f.coordinator.isPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        f.coordinator.resetForRuntimeReset()
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+    }
+
+    @Test fun returnGateStaysClosedAfterDraftInputButSendIsUnavailable() {
+        val f = Fixture()
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertFalse(f.coordinator.isPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertTrue(f.logs.any { it.contains("DRAFT_SEND_SEND_PORT_UNAVAILABLE") })
+    }
+
+    @Test fun returnGateOpensOnlyAfterNewOutgoingBubbleConfirmsSend() {
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+        })
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertFalse(f.coordinator.isPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        val outgoing = ChatMessage("new-outgoing", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val afterSend = f.batch.copy(messages = listOf(outgoing), capturedAtMillis = f.now + 1L)
+        assertEquals(SendConfirmationResult.CONFIRMED, f.coordinator.confirmSendResult(afterSend, f.snapshot))
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+    }
+
+
 }

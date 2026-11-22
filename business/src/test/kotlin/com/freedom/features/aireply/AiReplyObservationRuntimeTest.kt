@@ -3838,6 +3838,122 @@ class AiReplyObservationRuntimeTest {
         assertTrue("Condition not reached after $steps scheduler steps", condition())
     }
 
+
+    @Test
+    fun retryableOcrFailureAfterBoundedReadsNeverCompletesSessionOrNavigatesBack() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val listPage = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            messageReadStatuses = listOf(
+                MessageReadStatus.OCR_FAILED,
+                MessageReadStatus.OCR_FAILED,
+                MessageReadStatus.OCR_FAILED
+            )
+            page = listPage
+        }
+        val logs = ArrayList<String>()
+        val gesture = object : TestGestureApi {
+            override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                if (command.kind == GestureKind.TAP) {
+                    port.page = chatDetailSnapshot()
+                }
+                listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                return GestureSubmission.ACCEPTED
+            }
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = gesture,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 130) { logs.any { it.contains("OCR_READ_NOT_CONFIRMED") } }
+        assertEquals(3, port.messageReads)
+        assertEquals(0, port.persistedChatSamples)
+        assertEquals(0, port.navigateBackCalls)
+    }
+
+    @Test
+    fun delayedBackRechecksDraftTransactionBeforeDispatch() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val listPage = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            messageDirection = ChatMessageDirection.OUTGOING
+            page = listPage
+        }
+        var replyStillUnconfirmed = false
+        val logs = ArrayList<String>()
+        val gesture = object : TestGestureApi {
+            override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                return GestureSubmission.ACCEPTED
+            }
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = gesture,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            isConversationDraftPending = { replyStillUnconfirmed }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 130) {
+            logs.any { it.contains("聊天样本已保存") } && scheduler.hasPendingDelay(1_500L)
+        }
+        replyStillUnconfirmed = true
+        scheduler.runNextWithDelay(1_500L)
+        assertEquals(0, port.navigateBackCalls)
+        assertTrue(logs.any { it.contains("RECHECK_DRAFT_PENDING") })
+    }
+
     private fun sessionCandidate(
         rowIndex: Int = 0,
         nameText: String = "Sample Contact",

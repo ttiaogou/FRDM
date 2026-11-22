@@ -62,6 +62,9 @@ class AiReplyDraftCoordinator(
     private var activeRequestId: String? = null
     private var activeExistingOutgoingKeys: Set<String> = emptySet()
     private var pendingSendConfirmation: PendingSendConfirmation? = null
+    // A reply attempt keeps its chat page until a fresh outgoing message is confirmed.
+    // Clearing the model/input "pending" flag is not a send-success signal.
+    private var replyAwaitingConfirmedSend = false
     private var sendConfirmationChecks = 0
     private var lastConfirmedSendId: String? = null
     private var activeMessageSegments: List<String> = emptyList()
@@ -83,6 +86,10 @@ class AiReplyDraftCoordinator(
 
     val isPending: Boolean get() = pending.get()
     val isAwaitingUserSend: Boolean get() = awaitingUserSend.get()
+    val isConversationReturnBlocked: Boolean get() = synchronized(lock) {
+        pending.get() || awaitingUserSend.get() ||
+            pendingSendConfirmation != null || replyAwaitingConfirmedSend
+    }
 
     /** Invalidates late callbacks when the AI Reply runtime is stopped or rebuilt. */
     fun resetForRuntimeReset() {
@@ -105,6 +112,7 @@ class AiReplyDraftCoordinator(
             activeRequestId = null
             activeExistingOutgoingKeys = emptySet()
             pendingSendConfirmation = null
+            replyAwaitingConfirmedSend = false
             sendConfirmationChecks = 0
             lastConfirmedSendId = null
             activeMessageSegments = emptyList()
@@ -198,6 +206,7 @@ class AiReplyDraftCoordinator(
             if (currentHashAlreadyVisible) return reject("RECOVERY_REQUIRES_OBSERVED_SEND_CONFIRMATION")
             val requestGeneration = synchronized(lock) {
                 activeMessageKey = dedupeKey
+                replyAwaitingConfirmedSend = true
                 activeRequestId = current.requestId
                 activeExistingOutgoingKeys = batch.messages.filter { it.direction == ChatMessageDirection.OUTGOING }
                     .mapTo(LinkedHashSet()) { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
@@ -235,6 +244,7 @@ class AiReplyDraftCoordinator(
                 return reject("PERSISTED_REPLY_TASK_$status")
             }
             activeMessageKey = dedupeKey
+            replyAwaitingConfirmedSend = true
             activeRequestId = requestId
             activeExistingOutgoingKeys = batch.messages
                 .filter { it.direction == ChatMessageDirection.OUTGOING }
@@ -717,6 +727,7 @@ class AiReplyDraftCoordinator(
                     activeMessageKey = null
                     activeRequestId = null
                     activeExistingOutgoingKeys = emptySet()
+                    replyAwaitingConfirmedSend = false
                 }
                 return SendConfirmationResult.CONFIRMED
             }
