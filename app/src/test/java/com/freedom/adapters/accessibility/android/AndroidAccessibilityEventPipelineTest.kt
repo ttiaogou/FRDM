@@ -150,6 +150,46 @@ class AndroidAccessibilityEventPipelineTest {
     }
 
     @Test
+    fun clearedActivityAfterReconnectRequiresANewTargetWindowStateEvent() {
+        val trace = mutableListOf<String>()
+        val tracker = AndroidWindowContextTracker(uptimeMillis = { 0L })
+        tracker.updateActivityClass(ACTIVITY)
+        tracker.clearActivityClass()
+
+        val pipeline = pipeline(
+            trace,
+            currentActivityClass = tracker::currentActivityClass,
+            updateCurrentActivityClass = tracker::updateActivityClass
+        )
+        // A fresh content or scroll event does not prove which Activity owns the window.
+        pipeline.processNormalized(
+            event(AccessibilityEventType.WINDOW_CONTENT_CHANGED, TARGET_PACKAGE, ACTIVITY),
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, RunMode.AI_REPLY, 2_300L
+        )
+        pipeline.processNormalized(
+            event(AccessibilityEventType.VIEW_SCROLLED, TARGET_PACKAGE, "androidx.recyclerview.widget.RecyclerView"),
+            AccessibilityEvent.TYPE_VIEW_SCROLLED, RunMode.AI_REPLY, 2_500L
+        )
+        // Neither a widget-class window event nor a foreign application's event is Activity proof.
+        pipeline.processNormalized(
+            event(AccessibilityEventType.WINDOW_STATE_CHANGED, TARGET_PACKAGE, "android.widget.FrameLayout"),
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.AI_REPLY, 2_700L
+        )
+        pipeline.processNormalized(
+            event(AccessibilityEventType.WINDOW_STATE_CHANGED, "com.other.app", ACTIVITY),
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.AI_REPLY, 2_900L
+        )
+        assertEquals("", tracker.currentActivityClass())
+
+        // When Android actually emits a new target Activity event, the existing pipeline records it.
+        pipeline.processNormalized(
+            event(AccessibilityEventType.WINDOW_STATE_CHANGED, TARGET_PACKAGE, ACTIVITY),
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.AI_REPLY, 3_100L
+        )
+        assertEquals(ACTIVITY, tracker.currentActivityClass())
+    }
+
+    @Test
     fun aiReplyLongClickContextClickAndSelectionRemainOrdinaryPageEvents() {
         val trace = mutableListOf<String>()
         val pipeline = pipeline(trace)
