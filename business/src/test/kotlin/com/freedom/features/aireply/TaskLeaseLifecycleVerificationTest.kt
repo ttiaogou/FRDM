@@ -140,7 +140,7 @@ class TaskLeaseLifecycleVerificationTest {
         val ownership = AiReplyTaskOwnership(coordinator, { 1L }, {})
         ownership.beginRun(1L)
         val greetings = ReceivedGreetingsTaskController(ownership)
-        val privateMessages = PrivateMessagesTaskController(ownership) { _, _ -> 5 }
+        val privateMessages = PrivateMessagesTaskController(ownership)
         assertTrue(greetings.claimOwnership("greetings"))
 
         assertTrue(privateMessages.claimOwnership("returned normal inbox"))
