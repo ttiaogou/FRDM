@@ -372,6 +372,52 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun repeatedServiceRecreationsKeepUiLeaseEpochMonotonicAcrossThreeConnections() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        val processClock = RunGenerationClock()
+        val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var previousRunGeneration = -1L
+
+        repeat(3) { reconnect ->
+            val runtime = FakeRuntime(RunMode.AI_REPLY)
+            val serviceSession = RunSessionCoordinator(
+                state, mapOf(RunMode.AI_REPLY to runtime), RuntimeLogSink { }, processClock
+            )
+            serviceSession.resetRuntime(RunMode.ACCOUNT_BROWSE, "AI mode reconnect")
+            serviceSession.onAccessibilityServiceConnected()
+
+            val generation = serviceSession.currentRunGeneration()
+            assertTrue("Service $reconnect must advance the process clock", generation > previousRunGeneration)
+            val taskExecution = TaskExecutionController(taskCoordinator, serviceSession::currentRunGeneration)
+            taskExecution.beginRun(generation)
+            assertTrue(taskExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "service reconnect $reconnect"))
+            assertTrue(taskExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+            val ownedLease = requireNotNull(taskCoordinator.currentLease())
+            if (previousRunGeneration >= 0L) {
+                assertNull(taskCoordinator.tryAcquire("AI_REPLY_RECEIVED_GREETINGS", previousRunGeneration))
+            }
+
+            serviceSession.onAccessibilityServiceDisconnected()
+            assertFalse(taskExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+            assertFalse(taskExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "disconnected callback"))
+            taskExecution.releaseCurrent("service disconnected")
+            serviceSession.onServiceDestroyed()
+
+            assertFalse(taskCoordinator.isCurrent(ownedLease))
+            assertFalse(taskCoordinator.release(ownedLease))
+            assertNull(taskCoordinator.activeTaskId())
+            assertEquals(listOf("start", "connected", "disconnected"), runtime.calls)
+            previousRunGeneration = serviceSession.currentRunGeneration()
+        }
+
+        assertTrue("Reconnect must preserve persisted run intent", state.requested)
+        assertTrue(state.writes.isEmpty())
+    }
+
+    @Test
     fun serviceDisconnectInvalidatesTheGenerationBeforeRuntimeCleanup() {
         val state = FakeState().apply {
             requested = true

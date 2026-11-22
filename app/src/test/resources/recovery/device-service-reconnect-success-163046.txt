@@ -1,0 +1,15 @@
+# Sanitized chronological excerpts from user's 2026-11-22 service-reconnect run log (16:30:46 export).
+# Only lifecycle, task lease, Activity proof, recovery and gesture status; no chat content or node dumps.
+16:30:07.671  无障碍服务租约隔离：事件=DISCONNECTED；runGeneration=2
+16:30:08.380  任务协调[RELEASED]：task=AI_REPLY_PRIVATE_MESSAGES；reason=运行时重置：无障碍服务断开连接；已释放 UI 操作权
+16:30:08.403  无障碍服务租约隔离：事件=DESTROYED；runGeneration=3
+16:30:19.963  运行时租约隔离：事件=RESET；mode=ACCOUNT_BROWSE；reason=AI 模式恢复；runGeneration=4
+16:30:20.057  任务协调[OWNED]：task=AI_REPLY_PRIVATE_MESSAGES；reason=启动私人消息任务；runGeneration=5；lease 已确认
+16:30:22.559  技术详情：原始事件名=TYPE_WINDOW_STATE_CHANGED；事件类型值=32；来源应用=com.immomo.momo；原始控件类名=com.immomo.momo.maintab.MaintabActivity
+16:30:27.503  目标应用就绪状态[TRANSITION]：STARTING->READY；mode=AI_REPLY；package=com.immomo.momo；activity=com.immomo.momo.maintab.MaintabActivity；windowId=116；pageGeneration=1
+16:30:28.712  recoveryType=recovery_event; outcome=VerificationSample; taskId=AI_REPLY_PRIVATE_MESSAGES; routeId=AI_REPLY_PRIVATE_MESSAGES; runGeneration=5; observationGeneration=13
+16:30:28.724  recoveryType=recovery_event; outcome=ResumeRequested; taskId=AI_REPLY_PRIVATE_MESSAGES; routeId=AI_REPLY_PRIVATE_MESSAGES; runGeneration=5; observationGeneration=13
+16:30:28.752  任务协调[OWNED]：task=AI_REPLY_PRIVATE_MESSAGES；reason=统一页面路由双快照验证完成；runGeneration=5；lease 已确认
+16:30:28.777  消息列表检查点恢复[CONTINUE]：页面已验证；保留原检查点和遍历游标继续处理
+16:30:28.819  统一页面恢复[RECOVERY_EXECUTION_READY]：目标路由=AI_REPLY_PRIVATE_MESSAGES；Android=READY；双快照=true；UI操作权=true
+16:30:32.735  手势结束：id=momo-session-scroll-1795336231650；类型=SWIPE；状态=COMPLETED；原因=none
