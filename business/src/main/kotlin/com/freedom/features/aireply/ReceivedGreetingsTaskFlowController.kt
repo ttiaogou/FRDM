@@ -41,8 +41,6 @@ internal class ReceivedGreetingsTaskFlowController(
         val origin: DecisionOrigin
     )
 
-    data class RetryPlan(val retryCount: Int, val delayMs: Long)
-
     private val lifecycle = ReceivedGreetingsTaskController(ownership)
     private val executor = ReceivedGreetingsTaskExecutor(pagePort) { lifecycle.ownsTask() }
 
@@ -131,13 +129,6 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun acknowledgeCompletedTaskExit() = lifecycle.acknowledgeCompletedTaskExit()
 
-    fun resetRecoveryRetryCount() = lifecycle.resetRecoveryRetryCount()
-
-    fun nextRecoveryRetryPlan(): RetryPlan {
-        val count = lifecycle.nextRecoveryRetryCount()
-        return RetryPlan(count, ReceivedGreetingsRetrySchedule.delayForRetry(count))
-    }
-
     /**
      * Converts a fresh classified page snapshot into one stable task decision. A classified
      * ordinary inbox that still reports ENTRY_NOT_FOUND is treated as the confirmed missing-entry
@@ -172,10 +163,6 @@ internal class ReceivedGreetingsTaskFlowController(
                 return Decision(DecisionKind.ENTRY_NOT_FOUND, observation.status, DecisionOrigin.ADAPTER_STEP)
             }
             return Decision(DecisionKind.RETRY_REQUIRED, observation.status, DecisionOrigin.ADAPTER_STEP)
-        }
-
-        if (classifiedPage || observation.decision == ReceivedGreetingsTaskExecutor.StepDecision.LIST_CONTINUES) {
-            lifecycle.resetRecoveryRetryCount()
         }
 
         val kind = when (observation.decision) {

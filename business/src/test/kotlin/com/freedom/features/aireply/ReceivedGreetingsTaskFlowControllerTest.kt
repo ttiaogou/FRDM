@@ -88,18 +88,17 @@ class ReceivedGreetingsTaskFlowControllerTest {
     }
 
     @Test
-    fun classifiedPageStepMapsAdapterOutcomesAndResetsSuccessfulRetryEpisode() {
+    fun classifiedPageStepMapsAdapterOutcomesWithoutOwningRecoveryRetryLedger() {
         val port = FakePagePort()
         val flow = createFlow(port)
         assertTrue(flow.claimOwnership("test"))
 
-        assertEquals(1, flow.nextRecoveryRetryPlan().retryCount)
         port.status = ReceivedGreetingsTraversalStatus.SCANNING
         assertEquals(
             ReceivedGreetingsTaskFlowController.DecisionKind.LIST_CONTINUES,
             flow.evaluatePageSnapshot(ChatPageKind.CHAT_LIST).kind
         )
-        assertEquals(1, flow.nextRecoveryRetryPlan().retryCount)
+        assertEquals(1, port.idleSteps)
 
         port.status = ReceivedGreetingsTraversalStatus.PROFILE_CARD
         assertEquals(
@@ -134,18 +133,17 @@ class ReceivedGreetingsTaskFlowControllerTest {
     }
 
     @Test
-    fun unclassifiedListProgressNeverExecutesBusinessStepAndKeepsRecoveryRetryState() {
+    fun unclassifiedListProgressNeverExecutesBusinessStepOrAdvancesTraversal() {
         val port = FakePagePort()
         val flow = createFlow(port)
         assertTrue(flow.claimOwnership("test"))
 
-        flow.nextRecoveryRetryPlan()
         port.status = ReceivedGreetingsTraversalStatus.SCANNING
         assertEquals(
             ReceivedGreetingsTaskFlowController.DecisionKind.RETRY_REQUIRED,
             flow.evaluateUnclassifiedPageSnapshot().kind
         )
-        assertEquals(2, flow.nextRecoveryRetryPlan().retryCount)
+        assertEquals(0, port.idleSteps)
 
         port.status = ReceivedGreetingsTraversalStatus.PROFILE_CARD
         assertEquals(
@@ -155,11 +153,9 @@ class ReceivedGreetingsTaskFlowControllerTest {
     }
 
     @Test
-    fun retryPlanUsesExistingProgressiveBoundedScheduleAndLifecycleOwnsExitLatch() {
+    fun lifecycleOwnsExitLatchIndependentlyOfRecoveryScheduling() {
         val port = FakePagePort()
         val flow = createFlow(port)
-        assertEquals(500L, flow.nextRecoveryRetryPlan().delayMs)
-        assertEquals(1_000L, flow.nextRecoveryRetryPlan().delayMs)
 
         flow.markCompletedAwaitingUserExit()
         assertTrue(flow.completedAwaitingUserExit)

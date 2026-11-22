@@ -631,6 +631,7 @@ class ArchitectureBoundaryTest {
             "business/src/main/kotlin/com/freedom/features/aireply/AiReplyMessageObservationCoordinator.kt",
             "business/src/main/kotlin/com/freedom/features/aireply/AiReplyReceivedGreetingsCoordinator.kt",
             "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsPageArrivalListener.kt",
+            "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsRetrySchedule.kt",
             "app/src/test/java/com/freedom/accessibility/chat/momo/MomoChatPageClassifierTest.kt",
             "app/src/test/java/com/freedom/runtime/RunModeTest.kt",
             "app/src/test/java/com/freedom/core/accessibility/AccessibilityEventRouterTest.kt",
@@ -638,6 +639,15 @@ class ArchitectureBoundaryTest {
         )
         val present = removedPaths.filter { projectFile(it).exists() }
         assertTrue("Legacy duplicate implementations must be removed: $present", present.isEmpty())
+        val greetingsLifecycle = projectFile(
+            "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsTaskController.kt"
+        ).readText()
+        val greetingsFlow = projectFile(
+            "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsTaskFlowController.kt"
+        ).readText()
+        assertFalse("Legacy greetings retry counter must remain absent", greetingsLifecycle.contains("recoveryRetryCount"))
+        assertFalse("Legacy greetings retry plan must remain absent", greetingsFlow.contains("nextRecoveryRetryPlan"))
+        assertFalse("Legacy greetings retry schedule must remain absent", greetingsFlow.contains("ReceivedGreetingsRetrySchedule"))
     }
 
     @Test

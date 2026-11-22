@@ -2,7 +2,6 @@ package com.freedom.features.aireply
 
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -18,13 +17,11 @@ class ReceivedGreetingsTaskControllerTest {
         assertTrue(controller.isActive)
         assertFalse(controller.completedAwaitingUserExit)
 
-        controller.nextRecoveryRetryCount()
         controller.markCompletedAwaitingUserExit()
 
         assertFalse(controller.isActive)
         assertTrue(controller.completedAwaitingUserExit)
         assertFalse(controller.awaitingNormalInboxAfterReturn)
-        assertEquals(0, controller.recoveryRetryCount)
     }
 
     @Test
@@ -32,35 +29,38 @@ class ReceivedGreetingsTaskControllerTest {
         val controller = ReceivedGreetingsTaskController(AiReplyTaskOwnership(null, { 1L }, {}))
         controller.markStarted()
         controller.markAwaitingNormalInboxAfterReturn()
-        controller.nextRecoveryRetryCount()
 
         controller.markTraversalReturnedToInbox()
 
         assertFalse(controller.isActive)
         assertFalse(controller.awaitingNormalInboxAfterReturn)
-        assertEquals(0, controller.recoveryRetryCount)
     }
 
     @Test
     fun confirmedUserExitClearsOnlyTheCompletedPageLatch() {
         val controller = ReceivedGreetingsTaskController(AiReplyTaskOwnership(null, { 1L }, {}))
         controller.markCompletedAwaitingUserExit()
-        controller.nextRecoveryRetryCount()
 
+        controller.markAwaitingNormalInboxAfterReturn()
         controller.acknowledgeCompletedTaskExit()
 
         assertFalse(controller.isActive)
         assertFalse(controller.completedAwaitingUserExit)
-        assertEquals(1, controller.recoveryRetryCount)
+        assertTrue(controller.awaitingNormalInboxAfterReturn)
     }
 
     @Test
-    fun retryCounterIsOwnedAndResetByGreetingsTaskController() {
+    fun resetClearsLifecycleFlagsWithoutRestoringCompletedTask() {
         val controller = ReceivedGreetingsTaskController(AiReplyTaskOwnership(null, { 1L }, {}))
-
-        assertEquals(1, controller.nextRecoveryRetryCount())
-        assertEquals(2, controller.nextRecoveryRetryCount())
-        controller.resetRecoveryRetryCount()
-        assertEquals(0, controller.recoveryRetryCount)
+        controller.markStarted()
+        controller.markCompletedAwaitingUserExit()
+        controller.markAwaitingNormalInboxAfterReturn()
+        assertFalse(controller.isActive)
+        assertTrue(controller.completedAwaitingUserExit)
+        assertTrue(controller.awaitingNormalInboxAfterReturn)
+        controller.reset()
+        assertFalse(controller.isActive)
+        assertFalse(controller.completedAwaitingUserExit)
+        assertFalse(controller.awaitingNormalInboxAfterReturn)
     }
 }
