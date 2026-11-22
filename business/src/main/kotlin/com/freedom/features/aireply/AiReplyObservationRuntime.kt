@@ -1016,7 +1016,14 @@ class AiReplyObservationRuntime(
         // the active task lease, NAVIGATING stage, exact target package and a fresh,
         // adapter-verified profile structure must all agree. This neither grants a new
         // UI lease nor bypasses the adapter's independent profile/BACK safety checks.
-        val receivedGreetingsWorkflowTransition = activeTaskId == RECEIVED_GREETINGS_TASK_ID &&
+        // Preserve the existing greetings entry-profile-card transition from the ordinary
+        // CHAT_LIST. It is distinct from the avatar identity profile reached *after* the
+        // dedicated greetings list (which is exposed as NON_CHAT).
+        val receivedGreetingsEntryCardTransition = activeTaskId == RECEIVED_GREETINGS_TASK_ID &&
+            receivedGreetingsTaskActive &&
+            previous?.pageKind == ChatPageKind.CHAT_LIST &&
+            inspection.pageKind == ChatPageKind.NON_CHAT
+        val receivedGreetingsIdentityProfileTransition = activeTaskId == RECEIVED_GREETINGS_TASK_ID &&
             receivedGreetingsTaskActive &&
             ownsTask(RECEIVED_GREETINGS_TASK_ID) &&
             previous != null && previous.packageName == targetPackage() &&
@@ -1026,7 +1033,9 @@ class AiReplyObservationRuntime(
             runCatching {
                 chatPagePort.isReceivedGreetingsIdentityProfileNavigationActive(inspection)
             }.getOrDefault(false)
-        if (receivedGreetingsWorkflowTransition && previous != null && pageIdentityChanged(previous, inspection)) {
+        val receivedGreetingsWorkflowTransition =
+            receivedGreetingsEntryCardTransition || receivedGreetingsIdentityProfileTransition
+        if (receivedGreetingsIdentityProfileTransition && previous != null && pageIdentityChanged(previous, inspection)) {
             // A source ticket may be valid but unmatchable after a dialog.h window change.
             // Discard only a ticket for this *independently verified* destination; it is
             // not evidence for another page or an authorization to execute BACK.
