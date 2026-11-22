@@ -237,7 +237,7 @@ jobs:
           build-mode: manual
           queries: security-extended,security-and-quality
 
-      - name: Compile both apps and unit test sources for CodeQL
+      - name: Compile both apps and unit test sources for CodeQL without APK packaging
         run: |
           mkdir -p "$HOME/.cache/freedom-ocr"
           gradle --no-daemon --no-build-cache \
@@ -248,8 +248,10 @@ jobs:
             :gesture-runtime:testClasses \
             :app:compileDebugUnitTestKotlin \
             :app:compileDebugUnitTestJavaWithJavac \
-            :app:assembleDebug \
-            :ocr-plugin:assembleDebug
+            :app:compileDebugKotlin \
+            :app:compileDebugJavaWithJavac \
+            :ocr-plugin:compileDebugKotlin \
+            :ocr-plugin:compileDebugJavaWithJavac
 
       - name: Analyze Kotlin and Java with CodeQL
         uses: github/codeql-action/analyze@v4

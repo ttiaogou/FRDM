@@ -658,8 +658,23 @@ class ArchitectureBoundaryTest {
         assertTrue("CodeQL must retain manual Java/Kotlin scanning", codeqlJob.contains("languages: java-kotlin") && codeqlJob.contains("build-mode: manual"))
         assertTrue("CodeQL must retain extended security and quality queries", codeqlJob.contains("security-extended,security-and-quality"))
         assertTrue(
-            "CodeQL must compile both applications rather than reuse an APK",
-            codeqlJob.contains(":app:assembleDebug") && codeqlJob.contains(":ocr-plugin:assembleDebug")
+            "CodeQL must compile both applications and preserve Kotlin/Java extraction",
+            listOf(
+                ":app:compileDebugKotlin",
+                ":app:compileDebugJavaWithJavac",
+                ":ocr-plugin:compileDebugKotlin",
+                ":ocr-plugin:compileDebugJavaWithJavac",
+                ":app:compileDebugUnitTestKotlin",
+                ":app:compileDebugUnitTestJavaWithJavac",
+                ":core:testClasses",
+                ":business:testClasses",
+                ":gesture-core:testClasses",
+                ":gesture-runtime:testClasses"
+            ).all(codeqlJob::contains)
+        )
+        assertTrue(
+            "CodeQL must not repeat APK assembly or final packaging",
+            !codeqlJob.contains(":app:assembleDebug") && !codeqlJob.contains(":ocr-plugin:assembleDebug")
         )
     }
 
