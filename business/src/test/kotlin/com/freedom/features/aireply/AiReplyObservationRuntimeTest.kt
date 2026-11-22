@@ -1834,12 +1834,13 @@ class AiReplyObservationRuntimeTest {
                         // Simulate the missing binding while keeping the verified row/navigation.
                         AiReplyObservationRuntime::class.java.getDeclaredField("currentSessionBinding")
                             .apply { isAccessible = true }.set(runtime, null)
-                        if (mode == "UNSAFE_FRESH_PAGE") {
-                            // Message-read callback sees a valid page, but the independent
-                            // fallback inspection sees a different conversation title.
-                            port.inspectionPages = List(port.fullInspections + 1) { port.page } +
-                                chatDetailSnapshot().copy(chatTitleText = "与Another Contact对话")
-                        }
+                    }
+                    if (mode == "UNSAFE_FRESH_PAGE" &&
+                        line.contains("已采集平台ID但当前会话绑定未就绪")
+                    ) {
+                        // The first message-read callback has already validated the original
+                        // window. Change the live page just before fallback's independent read.
+                        port.page = chatDetailSnapshot().copy(chatTitleText = "与Another Contact对话")
                     }
                 },
                 inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
