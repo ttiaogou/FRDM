@@ -28,7 +28,8 @@ class VisibleDraftContextTest {
         }, AiModelCloudConsent { true })
         val decision = engine.decide(AiReplyDecisionInput(context, false, false, "request"))
         assertEquals(1, calls)
-        assertEquals(AiReplyAction.REPLY, decision.action)
+        assertTrue(decision is AiReplyEvaluation.Model)
+        assertEquals(AiReplyAction.REPLY, (decision as AiReplyEvaluation.Model).decision.action)
     }
 
     @Test fun structurallyAdmittedOcrTextEntersDraftContext() {
