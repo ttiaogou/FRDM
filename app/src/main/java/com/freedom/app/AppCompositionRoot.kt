@@ -43,6 +43,7 @@ import com.freedom.application.ports.RunDiagnosticsPort
 import com.freedom.application.ports.SessionSampleArchivePort
 import com.freedom.application.ports.TaskLaunchParametersRepository
 import com.freedom.application.runtime.RunSessionCommandUseCase
+import com.freedom.application.runtime.RunGenerationClock
 import com.freedom.application.runtime.RunSessionCoordinator
 import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
 import com.freedom.core.accessibility.events.InputOriginClassifier
@@ -165,6 +166,10 @@ class AppCompositionRoot(context: Context) {
     }
     val sampleArchivePort: SessionSampleArchivePort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MomoChatSampleArchiveDataStore()
+    }
+    /** Process-scoped alongside the UI leases; a recreated Service must not restart generation at zero. */
+    val runGenerationClock by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RunGenerationClock()
     }
     /** Shared across the mutually exclusive business modes and AI Reply sub-tasks. */
     val uiOperationOwnershipCoordinator by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
@@ -619,7 +624,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                     }
                 )
             ),
-            log = monitorRepository
+            log = monitorRepository,
+            generationClock = root.runGenerationClock
         )
     }
     val accessibilityEventPipelineDelegate = lazy(LazyThreadSafetyMode.NONE) {

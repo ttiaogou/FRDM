@@ -11,22 +11,36 @@ import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
  * most one mode runtime. RunSessionCommandUseCase is the sole user-command write boundary. A null
  * mode is a valid manual-observation session with no business runtime.
  */
+/** Shared by service-scoped coordinators and their process-owned task lease coordinators. */
+class RunGenerationClock {
+    private var generation = 0L
+
+    @Synchronized
+    fun current(): Long = generation
+
+    @Synchronized
+    fun advance(): Long {
+        check(generation < Long.MAX_VALUE) { "run generation exhausted" }
+        return ++generation
+    }
+}
+
 class RunSessionCoordinator(
     private val state: RunStateRepository,
     private val runtimes: Map<RunMode, ModeRuntimePort>,
-    private val log: RuntimeLogSink
+    private val log: RuntimeLogSink,
+    private val generationClock: RunGenerationClock = RunGenerationClock()
 ) {
     private var observedMode: RunMode? = null
     private var observedRunRequested: Boolean = false
-    /** Monotonic process-local generation used to invalidate commands from a previous run. */
-    private var runGeneration: Long = 0L
+    /** Read from the process-owned clock so a recreated Service cannot issue lower generations. */
+    private val runGeneration: Long get() = generationClock.current()
 
     @Synchronized
     fun currentRunGeneration(): Long = runGeneration
 
     private fun advanceRunGeneration() {
-        check(runGeneration < Long.MAX_VALUE) { "run generation exhausted" }
-        runGeneration += 1L
+        generationClock.advance()
     }
 
     /** Clear persisted intent and notify only the runtime that owned the active session. */

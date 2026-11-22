@@ -317,6 +317,61 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun recreatedServiceUsesProcessGenerationAndCanClaimReleasedAiTaskSlot() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        // The Application root and its UI lease coordinators survive a Service recreation.
+        val processClock = RunGenerationClock()
+        val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val originalRuntime = FakeRuntime(RunMode.AI_REPLY)
+        val originalSession = RunSessionCoordinator(
+            state, mapOf(RunMode.AI_REPLY to originalRuntime),
+            RuntimeLogSink { }, processClock
+        )
+        val oldExecution = TaskExecutionController(taskCoordinator, originalSession::currentRunGeneration)
+
+        originalSession.onAccessibilityServiceConnected()
+        oldExecution.beginRun(originalSession.currentRunGeneration())
+        assertTrue(oldExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "original service"))
+        val oldLease = requireNotNull(taskCoordinator.currentLease())
+        val oldGeneration = originalSession.currentRunGeneration()
+
+        originalSession.onAccessibilityServiceDisconnected()
+        assertFalse(oldExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertFalse(oldExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "old disconnected callback"))
+        oldExecution.releaseCurrent("service cleanup")
+        originalSession.onServiceDestroyed()
+        assertNull(taskCoordinator.activeTaskId())
+
+        // A fresh Service owns a fresh RunSessionCoordinator but not a fresh TaskCoordinator.
+        val recreatedRuntime = FakeRuntime(RunMode.AI_REPLY)
+        val recreatedSession = RunSessionCoordinator(
+            state, mapOf(RunMode.AI_REPLY to recreatedRuntime),
+            RuntimeLogSink { }, processClock
+        )
+        recreatedSession.resetRuntime(RunMode.ACCOUNT_BROWSE, "AI mode restore")
+        recreatedSession.onAccessibilityServiceConnected()
+        val newGeneration = recreatedSession.currentRunGeneration()
+        assertTrue(newGeneration > oldGeneration)
+
+        val newExecution = TaskExecutionController(taskCoordinator, recreatedSession::currentRunGeneration)
+        newExecution.beginRun(newGeneration)
+        assertTrue(newExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "service reconnect"))
+        assertTrue(newExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertEquals(newGeneration, taskCoordinator.currentLease()?.runGeneration)
+
+        // Stale capabilities still cannot alter the new run, even when the old owner is the same.
+        assertFalse(taskCoordinator.isCurrent(oldLease))
+        assertFalse(taskCoordinator.release(oldLease))
+        assertFalse(oldExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "late callback after recreation"))
+        assertNull(taskCoordinator.tryAcquire("AI_REPLY_RECEIVED_GREETINGS", oldGeneration))
+        assertTrue(newExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertEquals(listOf("start", "connected"), recreatedRuntime.calls)
+    }
+
+    @Test
     fun serviceDisconnectInvalidatesTheGenerationBeforeRuntimeCleanup() {
         val state = FakeState().apply {
             requested = true
