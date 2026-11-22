@@ -72,6 +72,20 @@ internal class MessageListCheckpointVerification(
             pageFingerprint = pageFingerprint
         )
         if (verifier == null || binding != newBinding) {
+            val previousBinding = binding
+            if (previousBinding != null) {
+                // Log only changed binding dimensions, never raw contact, checkpoint or
+                // structural fingerprint values. Helps distinguish real page instability
+                // from a verifier that was retired by a separate safety gate.
+                onLog(
+                    "消息列表统一检查点[BINDING_CHANGED]：" +
+                        "verifierMissing=${verifier == null}；" +
+                        "phaseChanged=${previousBinding.phase != newBinding.phase}；" +
+                        "fingerprintChanged=${previousBinding.pageFingerprint != newBinding.pageFingerprint}；" +
+                        "checkpointChanged=${previousBinding.checkpointId != newBinding.checkpointId || previousBinding.savedAtEpochMs != newBinding.savedAtEpochMs}；" +
+                        "generationChanged=${previousBinding.runGeneration != newBinding.runGeneration}"
+                )
+            }
             // A fresh binding invalidates only this checkpoint's verification lane.
             // The primary UNKNOWN transaction and durable business cursor remain owned elsewhere.
             restartVerificationLane()
