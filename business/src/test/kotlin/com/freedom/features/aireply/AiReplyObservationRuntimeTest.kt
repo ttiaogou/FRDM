@@ -2350,9 +2350,13 @@ class AiReplyObservationRuntimeTest {
             logs.any { it.contains("AI 联系人身份采集中") }
         }
         assertEquals(0, draftCalls)
+        port.deferNextStructureRead = true
         val freshInspection = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
             isAccessible = true
         }
+        freshInspection.invoke(runtime)
+        assertTrue("Expected a pre-recovery in-flight read", port.hasDeferredStructureRead())
+
         // Simulate a transient empty accessibility tree during profile-to-chat BACK.
         port.page = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -2370,6 +2374,15 @@ class AiReplyObservationRuntimeTest {
         freshInspection.invoke(runtime)
         assertTrue(logs.any { it.contains("AI 聊天详情恢复[ROUTE_SELECTED]") })
         val readsBeforeRecovery = port.messageReads
+
+        // An old in-flight structure callback cannot cross this recovery boundary.
+        port.completeDeferredStructureRead()
+        // Delayed adapter callbacks are marshalled through the runtime scheduler.
+        // Drain the zero-delay deliveries while the recovery transaction is still pending.
+        repeat(8) {
+            if (scheduler.hasPendingDelay(0L)) scheduler.runNextWithDelay(0L)
+        }
+        assertEquals("Stale pre-recovery callback must not trigger a draft", 0, draftCalls)
 
         // A different chat title cannot complete the detail checkpoint even with two samples.
         port.page = chatDetailSnapshot(windowGeneration = 2L).copy(
@@ -2402,6 +2415,99 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("AI 聊天详情恢复[RECOVERY_VERIFIED]") })
         assertTrue("Fresh detail must be read after recovery", port.messageReads > readsBeforeRecovery)
         assertEquals("Only the verified current target may draft", 1, draftCalls)
+        assertEquals(0, port.navigateBackCalls)
+    }
+
+    @Test
+    fun identityReturnKeepsReceiptUntilSelectedChatIsIndependentlyVerified() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            identityCaptureOutcomeOverride = ContactIdentityCaptureOutcome.waiting(
+                ContactIdentityCaptureRequestResult.RETRY_LATER
+            )
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+        }
+        val logs = ArrayList<String>()
+        var draftCalls = 0
+        var passedIdentity: ContactRowIdentity? = null
+        val gesture = object : TestGestureApi {
+            override fun execute(
+                command: GestureIntentRequest,
+                listener: GestureExecutionListener
+            ): GestureSubmission {
+                if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                return GestureSubmission.ACCEPTED
+            }
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = gesture,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            onDraftConversationObserved = { _, _, identity, _ ->
+                draftCalls++
+                passedIdentity = identity
+                true
+            }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) { logs.any { it.contains("AI 联系人身份采集中") } }
+
+        port.pendingIdentityReturnReinspection = true
+        port.identityCaptureOutcomeOverride = ContactIdentityCaptureOutcome.completed(
+            ContactRowIdentity(
+                snapshotId = "test-platform-id",
+                temporaryUserId = "test-temp",
+                contactId = "test-platform-user",
+                confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+            )
+        )
+        val read = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
+            isAccessible = true
+        }
+        // Another title in the SAME Android window must not consume the one-shot receipt.
+        port.page = chatDetailSnapshot().copy(chatTitleText = "与Another Contact对话")
+        read.invoke(runtime)
+        assertTrue("Foreign chat must preserve the return receipt", port.pendingIdentityReturnReinspection)
+        assertEquals(0, draftCalls)
+
+        port.page = chatDetailSnapshot()
+        var attempts = 0
+        while (draftCalls == 0 && attempts < 12) {
+            read.invoke(runtime)
+            attempts++
+        }
+        assertTrue(logs.any { it.contains("AI 身份业务续接[IDENTITY_RETURN_CONFIRMED]") })
+        assertFalse(port.pendingIdentityReturnReinspection)
+        assertEquals(1, draftCalls)
+        assertEquals(ContactIdentityConfidence.PLATFORM_ID_VERIFIED, passedIdentity?.confidence)
         assertEquals(0, port.navigateBackCalls)
     }
 
@@ -5016,6 +5122,14 @@ class AiReplyObservationRuntimeTest {
         var messageReads = 0
         var identityCaptureOutcomeOverride: ContactIdentityCaptureOutcome? = null
         var pendingIdentityReturnReinspection = false
+        var deferNextStructureRead = false
+        private var deferredStructureRead: Pair<ChatPageSnapshot, (ChatMessageBatch) -> Unit>? = null
+        fun hasDeferredStructureRead() = deferredStructureRead != null
+        fun completeDeferredStructureRead() {
+            val pending = requireNotNull(deferredStructureRead)
+            deferredStructureRead = null
+            pending.second(readRecentMessages(pending.first, 20))
+        }
         var lastMessageLimit = 0
         var lastMessagePage: ChatPageSnapshot? = null
         var messageContentQuality = MessageContentQuality.VERIFIED
@@ -5205,6 +5319,19 @@ class AiReplyObservationRuntimeTest {
             regionRefreshes++
             lastRefreshInput = previous
             return regionResult
+        }
+
+        override fun readRecentMessagesStructureAsync(
+            page: ChatPageSnapshot,
+            limit: Int,
+            onResult: (ChatMessageBatch) -> Unit
+        ) {
+            if (deferNextStructureRead) {
+                deferNextStructureRead = false
+                deferredStructureRead = page to onResult
+            } else {
+                super<ChatMessagePort>.readRecentMessagesStructureAsync(page, limit, onResult)
+            }
         }
 
         override fun readRecentMessages(page: ChatPageSnapshot, limit: Int): ChatMessageBatch {

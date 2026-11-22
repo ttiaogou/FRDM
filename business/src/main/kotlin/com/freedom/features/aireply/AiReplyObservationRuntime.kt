@@ -291,14 +291,19 @@ class AiReplyObservationRuntime(
             messagePort = chatMessagePort,
             messageLimit = MAX_VISIBLE_MESSAGES,
             isReadRequestAllowed = {
-                isAiReplyActive() && chatPagePort.supportsTargetPackage(targetPackage())
+                isAiReplyActive() && !recoveryContext.pending &&
+                    chatPagePort.supportsTargetPackage(targetPackage())
             },
             inspectActivePage = { readPageSnapshot(AiReplyPageReadPurpose.FULL_INSPECTION) },
             isResultCurrent = ::isMessageReadResultCurrent,
             shouldDrainPendingSnapshot = { !isReadOnlyGreetingMessageRead() },
             onValidatedResult = { requestedSnapshot, batch, activeSnapshot ->
-                lastPageInspection = activeSnapshot
-                handleMessageReadBatch(batch, requestedSnapshot)
+                if (!recoveryContext.pending) {
+                    lastPageInspection = activeSnapshot
+                    handleMessageReadBatch(batch, requestedSnapshot)
+                } else {
+                    onLog("AI 身份业务续接[STALE_MESSAGE_READ_IGNORED]：恢复事务仍在进行；丢弃旧消息批次")
+                }
             },
             onTimeout = { timeoutMs ->
                 onLog(
@@ -1467,18 +1472,24 @@ class AiReplyObservationRuntime(
         val nextKey = inspection.stableKey()
         lastPageInspection = inspection
 
+        // Consume the adapter's one-shot identity-return receipt only after fresh,
+        // task-owned evidence independently identifies the selected conversation.
+        // A foreign/ambiguous detail page must not consume the valid return receipt.
         if (!receivedGreetingsTaskActive &&
-            inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            sessionRunStarted && !recoveryContext.pending &&
+            sessionManagerState == SessionManagerState.READING_SESSION &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE &&
+            isVerifiedRecoveredPrivateDetail(inspection) &&
             chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()
         ) {
-            val restoredSessionKey = windowSessionKey(inspection) ?: run {
-                onLog("AI 身份事务回接失败：返回聊天页未生成新的 windowSessionKey；暂不读取消息")
-                return
-            }
+            val restoredSessionKey = requireNotNull(windowSessionKey(inspection))
+            // Invalidate any pre-profile asynchronous OCR result before binding the
+            // newly verified window; the next read must use this fresh observation.
+            invalidatePendingMessageRead()
             currentSessionWindowKey = restoredSessionKey
             onLog(
-                "AI 身份事务回接：资料页返回已确认原聊天；已写回返回页新的 windowSessionKey；" +
-                    "主动重新观察聊天页并读取消息，启动 OCR"
+                "AI 身份业务续接[IDENTITY_RETURN_CONFIRMED]：目标会话、任务租约和当前窗口已复核；" +
+                    "更新会话窗口键并重新读取消息，继续现有 OCR/草稿流水线"
             )
             readVisibleMessages(inspection)
             return
@@ -2405,7 +2416,9 @@ class AiReplyObservationRuntime(
         recoveryContext.markCheckpointSaved()
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
         recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
-        // A new recovery transaction supersedes all pending UI callbacks and intents.
+        // A new recovery transaction also invalidates pending structure/OCR callbacks.
+        // Their old batch cannot resume identity processing or start a draft before route proof.
+        invalidatePendingMessageRead()
         // Gesture algorithms are unchanged; only stale callback authority is revoked.
         sessionActionGeneration += 1L
         activeSessionGestureRequestId = null
@@ -2851,6 +2864,10 @@ class AiReplyObservationRuntime(
      */
     private fun readVisibleMessages(snapshot: ChatPageSnapshot) {
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
+        if (sessionRunStarted && recoveryContext.pending) {
+            onLog("AI 身份业务续接[READ_DEFERRED]：恢复事务未完成；禁止旧消息批次启动 OCR 或草稿")
+            return
+        }
         if (sessionRunStarted) {
             val requiredTask = if (receivedGreetingsTaskActive) {
                 RECEIVED_GREETINGS_TASK_ID
