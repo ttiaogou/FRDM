@@ -9,13 +9,13 @@ class AiReplyDecisionEngine(
 ) {
     init { require(systemInstruction.isNotBlank()); require(maxDraftChars in 1..10_000) }
 
-    fun decide(input: AiReplyDecisionInput): AiReplyDecision {
-        if (!input.contactIdentityVerified && !input.context.currentWindowDraft) return AiReplyDecision(AiReplyAction.WAIT, "CONTACT_IDENTITY_UNVERIFIED")
-        if (!input.context.hasVerifiedIncoming && !input.context.currentWindowDraft) return AiReplyDecision(AiReplyAction.WAIT, "NO_VERIFIED_INCOMING_MESSAGE")
-        if (input.context.messages.isEmpty()) return AiReplyDecision(AiReplyAction.WAIT, "EMPTY_CONTEXT")
-        if (input.cooldownActive) return AiReplyDecision(AiReplyAction.WAIT, "CONTACT_COOLDOWN")
+    fun decide(input: AiReplyDecisionInput): AiReplyEvaluation {
+        if (!input.contactIdentityVerified && !input.context.currentWindowDraft) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.IDENTITY_RETRYABLE)
+        if (!input.context.hasVerifiedIncoming && !input.context.currentWindowDraft) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.MESSAGE_EVIDENCE_UNAVAILABLE)
+        if (input.context.messages.isEmpty()) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.EMPTY_CONTEXT)
+        if (input.cooldownActive) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.COOLDOWN_PENDING)
         if (modelProvider.requiresCloudConsent && !cloudConsent.isGranted()) {
-            return AiReplyDecision(AiReplyAction.WAIT, "CLOUD_PROCESSING_CONSENT_REQUIRED")
+            return AiReplyEvaluation.Execution(AiReplyExecutionStatus.CLOUD_CONSENT_REQUIRED)
         }
 
         val request = AiModelRequest(
@@ -34,21 +34,27 @@ class AiReplyDecisionEngine(
             )
         )
         val result = runCatching { modelProvider.generate(request) }.getOrElse { failure ->
-            return AiReplyDecision(
-                AiReplyAction.WAIT, "MODEL_CALL_FAILED",
-                callDiagnostics = AiModelCallDiagnostics.from(failure)
+            val diagnostics = AiModelCallDiagnostics.from(failure)
+            return AiReplyEvaluation.Execution(
+                status = if (diagnostics.safeCode == "CLOUD_PROCESSING_CONSENT_REQUIRED") {
+                    AiReplyExecutionStatus.CLOUD_CONSENT_REQUIRED
+                } else {
+                    AiReplyExecutionStatus.MODEL_CALL_FAILED
+                },
+                callDiagnostics = diagnostics
             )
         }
         val raw = result.text?.trim().orEmpty()
-        if (raw.isBlank()) return AiReplyDecision(AiReplyAction.WAIT, "EMPTY_MODEL_OUTPUT")
+        if (raw.isBlank()) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT)
         val parsed = AiReplyDecisionJsonParser.parse(raw, maxDraftChars)
-            ?: return AiReplyDecision(
-                AiReplyAction.WAIT,
-                "MODEL_OUTPUT_SCHEMA_INVALID",
+            ?: return AiReplyEvaluation.Execution(
+                AiReplyExecutionStatus.MODEL_OUTPUT_INVALID,
                 provider = result.provider,
                 model = result.model
             )
-        return parsed.copy(provider = result.provider, model = result.model, finishReason = result.finishReason, usage = result.usage)
+        return AiReplyEvaluation.Model(
+            parsed.copy(provider = result.provider, model = result.model, finishReason = result.finishReason, usage = result.usage)
+        )
     }
 
     companion object {
@@ -89,6 +95,28 @@ data class AiReplyDecision(
     val model: String? = null,
     val reasonDetail: String? = null,
     val finishReason: String? = null,
-    val usage: TokenUsage? = null,
-    val callDiagnostics: AiModelCallDiagnostics? = null
+    val usage: TokenUsage? = null
 )
+
+/** Model protocol decisions and local execution outcomes have disjoint types. */
+sealed interface AiReplyEvaluation {
+    data class Model(val decision: AiReplyDecision) : AiReplyEvaluation
+    data class Execution(
+        val status: AiReplyExecutionStatus,
+        val callDiagnostics: AiModelCallDiagnostics? = null,
+        val provider: String? = null,
+        val model: String? = null
+    ) : AiReplyEvaluation
+}
+
+/** These are program-side gates/failures; none is a model WAIT decision. */
+enum class AiReplyExecutionStatus(val reasonCode: String) {
+    IDENTITY_RETRYABLE("CONTACT_IDENTITY_UNVERIFIED"),
+    MESSAGE_EVIDENCE_UNAVAILABLE("NO_VERIFIED_INCOMING_MESSAGE"),
+    EMPTY_CONTEXT("EMPTY_CONTEXT"),
+    COOLDOWN_PENDING("CONTACT_COOLDOWN"),
+    CLOUD_CONSENT_REQUIRED("CLOUD_PROCESSING_CONSENT_REQUIRED"),
+    MODEL_CALL_FAILED("MODEL_CALL_FAILED"),
+    MODEL_EMPTY_OUTPUT("EMPTY_MODEL_OUTPUT"),
+    MODEL_OUTPUT_INVALID("MODEL_OUTPUT_SCHEMA_INVALID")
+}

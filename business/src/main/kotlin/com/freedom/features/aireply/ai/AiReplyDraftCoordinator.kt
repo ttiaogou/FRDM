@@ -383,7 +383,7 @@ class AiReplyDraftCoordinator(
                 "model=${configuration.modelName}；" +
                 "contextMessages=${context.messages.size}"
         )
-        val decision = try {
+        val evaluation = try {
             val provider = createProvider(configuration)
             AiReplyDecisionEngine(
                 modelProvider = provider,
@@ -406,6 +406,75 @@ class AiReplyDraftCoordinator(
             )
             throw error
         }
+        fun safeLog(value: String?): String = AiModelDataRedactor.redact(value.orEmpty())
+            .replace(Regex("[\\r\\n\\t\\p{Cntrl}]"), " ").take(1_000)
+        if (evaluation is AiReplyEvaluation.Execution) {
+            // A local gate, transport failure or invalid protocol is never a model WAIT.
+            onLog(
+                "AI 程序执行状态：requestId=$requestId；executionState=${evaluation.status.name}；" +
+                    "reason=${evaluation.status.reasonCode}；draftPresent=false"
+            )
+            evaluation.callDiagnostics?.let { diagnostics ->
+                onLog("AI 模型调用失败：requestId=${safeLog(requestId)}；" +
+                    "provider=${safeLog(configuration.provider.name)}；model=${safeLog(configuration.modelName)}；" +
+                    "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；${diagnostics.logFields()}")
+            }
+            if (evaluation.status == AiReplyExecutionStatus.MODEL_CALL_FAILED) {
+                val diagnostics = evaluation.callDiagnostics
+                if (diagnostics?.safeCode == "EMPTY_MODEL_OUTPUT" && diagnostics.retryable == true &&
+                    emptyRetryAttempt < MAX_EMPTY_MODEL_RETRIES &&
+                    isCurrentGeneration(requestGeneration) && isAiReplyActive()
+                ) {
+                    onLog("AI 模型空输出有限恢复：requestId=$requestId；" +
+                        "attempt=${emptyRetryAttempt + 1}/$MAX_EMPTY_MODEL_RETRIES；" +
+                        "delayMs=$EMPTY_MODEL_RETRY_DELAY_MS；不写草稿、不执行发送")
+                    val scheduled = runCatching {
+                        scheduler.schedule(EMPTY_MODEL_RETRY_DELAY_MS) {
+                            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) return@schedule
+                            // 等待期间用户可能切换了会话或自行输入文字。
+                            // 再次发送模型请求前，必须重新验证当前真实输入框。
+                            val composerReady = runCatching { inputPort.verifyDraft(target, "") }
+                                .getOrNull()?.status == ChatDraftInputStatus.VERIFIED
+                            if (!composerReady) {
+                                onLog("AI 模型空输出恢复取消：原会话或空输入框已变化；不重试、不发送")
+                                finish("MODEL_EMPTY_RETRY_CONTEXT_CHANGED", requestGeneration)
+                                return@schedule
+                            }
+                            val accepted = runCatching {
+                                backgroundExecutor.execute {
+                                    try {
+                                        generateOnBackground(
+                                            configuration, context, target, requestGeneration, requestId,
+                                            emptyRetryAttempt + 1
+                                        )
+                                    } catch (_: Throwable) {
+                                        finish("DRAFT_GENERATION_FAILED", requestGeneration)
+                                    }
+                                }
+                            }.isSuccess
+                            if (!accepted) finish("BACKGROUND_EXECUTOR_REJECTED", requestGeneration)
+                        }
+                    }.isSuccess
+                    if (scheduled) return
+                }
+                finish("MODEL_DECISION_MODEL_CALL_FAILED", requestGeneration)
+                return
+            }
+            val finishCode = when (evaluation.status) {
+                AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT,
+                AiReplyExecutionStatus.MODEL_OUTPUT_INVALID ->
+                    "MODEL_DECISION_${evaluation.status.reasonCode}"
+                else -> "EXECUTION_${evaluation.status.reasonCode}"
+            }
+            // Retain the existing persisted MODEL_COMPLETED transition only for a model
+            // response that arrived but was empty or failed schema validation.
+            if (evaluation.status == AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT ||
+                evaluation.status == AiReplyExecutionStatus.MODEL_OUTPUT_INVALID
+            ) updateTaskStatus(ReplyTaskStatus.MODEL_COMPLETED, requestGeneration)
+            finish(finishCode, requestGeneration)
+            return
+        }
+        val decision = (evaluation as AiReplyEvaluation.Model).decision
         onLog(
             "AI 模型调用完成：requestId=$requestId；" +
                 "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；" +
@@ -414,72 +483,22 @@ class AiReplyDraftCoordinator(
                 "draftPresent=${!decision.draft.isNullOrBlank()}"
         )
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
-            fun safeLog(value: String?): String = AiModelDataRedactor.redact(value.orEmpty())
-                .replace(Regex("[\\r\\n\\t\\p{Cntrl}]"), " ").take(1_000)
-            decision.callDiagnostics?.let { diagnostics ->
-                onLog("AI 模型调用失败：requestId=${safeLog(requestId)}；" +
-                    "provider=${safeLog(configuration.provider.name)}；model=${safeLog(configuration.modelName)}；" +
-                    "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；${diagnostics.logFields()}")
-            }
-            val fallbackDetail = if (decision.callDiagnostics != null) {
-                "本地捕获到模型调用异常；未取得可用回复；请查看同一 requestId 的调用失败日志"
-            } else "模型未提供详细解释；请核查模型响应协议"
             onLog("AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
-                "reason=${safeLog(decision.reason)}；reasonDetail=${safeLog(decision.reasonDetail ?: fallbackDetail)}；" +
+                "reason=${safeLog(decision.reason)}；reasonDetail=${safeLog(decision.reasonDetail ?: "模型未提供详细解释；请核查模型响应协议")}；" +
                 "provider=${safeLog(decision.provider)}；model=${safeLog(decision.model)}；" +
                 "finishReason=${safeLog(decision.finishReason)}；contextMessages=${context.messages.size}；" +
                 "inputTokens=${decision.usage?.inputTokens}；outputTokens=${decision.usage?.outputTokens}；" +
                 "draftPresent=${!decision.draft.isNullOrBlank()}")
         }
-        if (decision.reason == "MODEL_CALL_FAILED") {
-            val diagnostics = decision.callDiagnostics
-            if (diagnostics?.safeCode == "EMPTY_MODEL_OUTPUT" && diagnostics.retryable == true &&
-                emptyRetryAttempt < MAX_EMPTY_MODEL_RETRIES &&
-                isCurrentGeneration(requestGeneration) && isAiReplyActive()
-            ) {
-                onLog("AI 模型空输出有限恢复：requestId=$requestId；" +
-                    "attempt=${emptyRetryAttempt + 1}/$MAX_EMPTY_MODEL_RETRIES；" +
-                    "delayMs=$EMPTY_MODEL_RETRY_DELAY_MS；不写草稿、不执行发送")
-                val scheduled = runCatching {
-                    scheduler.schedule(EMPTY_MODEL_RETRY_DELAY_MS) {
-                        if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) return@schedule
-                        // 等待期间用户可能切换了会话或自行输入文字。
-                        // 再次发送模型请求前，必须重新验证当前真实输入框。
-                        val composerReady = runCatching { inputPort.verifyDraft(target, "") }
-                            .getOrNull()?.status == ChatDraftInputStatus.VERIFIED
-                        if (!composerReady) {
-                            onLog("AI 模型空输出恢复取消：原会话或空输入框已变化；不重试、不发送")
-                            finish("MODEL_EMPTY_RETRY_CONTEXT_CHANGED", requestGeneration)
-                            return@schedule
-                        }
-                        val accepted = runCatching {
-                            backgroundExecutor.execute {
-                                try {
-                                    generateOnBackground(
-                                        configuration, context, target, requestGeneration, requestId,
-                                        emptyRetryAttempt + 1
-                                    )
-                                } catch (_: Throwable) {
-                                    finish("DRAFT_GENERATION_FAILED", requestGeneration)
-                                }
-                            }
-                        }.isSuccess
-                        if (!accepted) finish("BACKGROUND_EXECUTOR_REJECTED", requestGeneration)
-                    }
-                }.isSuccess
-                if (scheduled) return
-            }
-            finish("MODEL_DECISION_MODEL_CALL_FAILED", requestGeneration)
-            return
-        }
         updateTaskStatus(ReplyTaskStatus.MODEL_COMPLETED, requestGeneration)
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
             onLog(
                 "AI 草稿状态：MODEL_DID_NOT_RETURN_DRAFT；模型未返回可用草稿；" +
-                    "中文原因=${decision.reasonDetail ?: decision.reason}；" +
+                    "中文原因=${safeLog(decision.reasonDetail ?: decision.reason)}；" +
                     "action=${decision.action.name}；draftPresent=${!decision.draft.isNullOrBlank()}"
             )
-            finish("MODEL_DECISION_${decision.reason}", requestGeneration)
+            // Never interpret an untrusted model reason as a technical retry code.
+            finish("MODEL_BUSINESS_${decision.action.name}", requestGeneration)
             return
         }
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {

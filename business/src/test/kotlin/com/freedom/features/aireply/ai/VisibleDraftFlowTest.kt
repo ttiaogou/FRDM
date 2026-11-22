@@ -124,18 +124,30 @@ class VisibleDraftFlowTest {
 
     @Test fun nonReplyDecisionLogsExplanationWithoutWritingOrLeakingPhoneNumber() {
         val f = Fixture()
-        f.modelOutput = """{"action":"WAIT","reason":"SEXUAL_INNUENDO_AMBIGUOUS","reasonDetail":"缺少前文无法确认含义；停止自动发送。","draft":null}"""
+        f.modelOutput = """{"action":"WAIT","reason":"FINANCIAL_TRANSACTION_REVIEW","reasonDetail":"涉及转账等高后果事项；停止自动发送。","draft":null}"""
         assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
         f.drain()
         val log = f.logs.single { it.startsWith("AI 模型决策详情：") }
         assertTrue(log.contains("action=WAIT"))
-        assertTrue(log.contains("reason=SEXUAL_INNUENDO_AMBIGUOUS"))
-        assertTrue(log.contains("缺少前文无法确认含义"))
+        assertTrue(log.contains("reason=FINANCIAL_TRANSACTION_REVIEW"))
+        assertTrue(log.contains("涉及转账等高后果事项"))
         assertTrue(log.contains("provider=fake"))
         assertTrue(log.contains("finishReason=stop"))
         assertTrue(log.contains("outputTokens=20"))
         assertFalse(log.contains("13800138000"))
         assertEquals("", f.text)
+    }
+
+    @Test fun modelWaitWithTechnicalLookingReasonNeverSchedulesTechnicalRetry() {
+        val f = Fixture()
+        f.modelOutput = """{"action":"WAIT","reason":"MODEL_CALL_FAILED","reasonDetail":"涉及转账，不自动回复。","draft":null}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(1, f.calls)
+        assertEquals("", f.text)
+        assertTrue(f.logs.any { it.contains("action=WAIT") && it.contains("reason=MODEL_CALL_FAILED") })
+        assertFalse(f.logs.any { it.contains("AI 模型空输出有限恢复") })
+        assertFalse(f.logs.any { it.startsWith("AI 程序执行状态：") })
     }
 
     @Test fun emptyModelOutputRetriesExactlyOnceAfterValidatedDelayAndThenWritesDraft() {
@@ -198,6 +210,8 @@ class VisibleDraftFlowTest {
         assertFalse(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
         assertEquals(2, f.calls)
         assertEquals("", f.text)
+        assertTrue(f.logs.any { it.startsWith("AI 程序执行状态：") && it.contains("executionState=MODEL_CALL_FAILED") })
+        assertFalse(f.logs.any { it.contains("action=WAIT") })
     }
 
     @Test fun existingInputIsPreserved() {

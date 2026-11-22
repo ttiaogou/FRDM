@@ -31,7 +31,7 @@ class AiReplyDecisionEngineTest {
         val provider = FakeProvider(replyJson("你好"))
         val engine = AiReplyDecisionEngine(provider, grantedConsent)
         val result = engine.decide(AiReplyDecisionInput(context(), contactIdentityVerified = false, requestId = "r1"))
-        assertEquals(AiReplyAction.WAIT, result.action)
+        assertEquals(AiReplyExecutionStatus.IDENTITY_RETRYABLE, execution(result).status)
         assertEquals(0, provider.callCount)
     }
 
@@ -39,8 +39,8 @@ class AiReplyDecisionEngineTest {
         val provider = FakeProvider(replyJson("你好"))
         val engine = AiReplyDecisionEngine(provider)
         val result = engine.decide(AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r2"))
-        assertEquals(AiReplyAction.WAIT, result.action)
-        assertEquals("CLOUD_PROCESSING_CONSENT_REQUIRED", result.reason)
+        assertEquals(AiReplyExecutionStatus.CLOUD_CONSENT_REQUIRED, execution(result).status)
+        assertEquals("CLOUD_PROCESSING_CONSENT_REQUIRED", execution(result).status.reasonCode)
         assertEquals(0, provider.callCount)
     }
 
@@ -48,8 +48,8 @@ class AiReplyDecisionEngineTest {
         val provider = FakeProvider(replyJson("你好，很高兴认识你"))
         val engine = AiReplyDecisionEngine(provider, grantedConsent)
         val result = engine.decide(AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r3"))
-        assertEquals(AiReplyAction.REPLY, result.action)
-        assertEquals("你好，很高兴认识你", result.draft)
+        assertEquals(AiReplyAction.REPLY, model(result).action)
+        assertEquals("你好，很高兴认识你", model(result).draft)
         val responseFormat = provider.lastRequest?.responseFormat as AiModelResponseFormat.JsonSchema
         assertTrue(responseFormat.strict)
         assertTrue(responseFormat.schema.contains("additionalProperties"))
@@ -116,9 +116,9 @@ class AiReplyDecisionEngineTest {
         val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
             AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r-newline")
         )
-        assertEquals(AiReplyAction.REPLY, result.action)
-        assertEquals("第一条\n第二条", result.draft)
-        assertEquals(listOf("第一条", "第二条"), ReplyMessageSegments.split(result.draft!!))
+        assertEquals(AiReplyAction.REPLY, model(result).action)
+        assertEquals("第一条\n第二条", model(result).draft)
+        assertEquals(listOf("第一条", "第二条"), ReplyMessageSegments.split(model(result).draft!!))
     }
 
     @Test fun systemInstructionDoesNotRequireFalseClaimsAboutAiIdentity() {
@@ -151,8 +151,8 @@ class AiReplyDecisionEngineTest {
         val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
             AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r5")
         )
-        assertEquals(AiReplyAction.WAIT, result.action)
-        assertEquals("MODEL_OUTPUT_SCHEMA_INVALID", result.reason)
+        assertEquals(AiReplyExecutionStatus.MODEL_OUTPUT_INVALID, execution(result).status)
+        assertEquals("MODEL_OUTPUT_SCHEMA_INVALID", execution(result).status.reasonCode)
     }
 
     @Test fun unknownOrDuplicateJsonPropertiesAreRejected() {
@@ -162,8 +162,8 @@ class AiReplyDecisionEngineTest {
             val result = AiReplyDecisionEngine(FakeProvider(output), grantedConsent).decide(
                 AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r6-$index")
             )
-            assertEquals(AiReplyAction.WAIT, result.action)
-            assertEquals("MODEL_OUTPUT_SCHEMA_INVALID", result.reason)
+            assertEquals(AiReplyExecutionStatus.MODEL_OUTPUT_INVALID, execution(result).status)
+            assertEquals("MODEL_OUTPUT_SCHEMA_INVALID", execution(result).status.reasonCode)
         }
     }
 
@@ -172,7 +172,7 @@ class AiReplyDecisionEngineTest {
         val result = AiReplyDecisionEngine(FakeProvider(output), grantedConsent).decide(
             AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r7")
         )
-        assertEquals(AiReplyAction.WAIT, result.action)
+        assertEquals(AiReplyExecutionStatus.MODEL_OUTPUT_INVALID, execution(result).status)
     }
 
     @Test fun replyDraftOverConfiguredLimitIsRejectedRatherThanTruncated() {
@@ -180,8 +180,8 @@ class AiReplyDecisionEngineTest {
         val result = AiReplyDecisionEngine(provider, grantedConsent, maxDraftChars = 4).decide(
             AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r8")
         )
-        assertEquals(AiReplyAction.WAIT, result.action)
-        assertNull(result.draft)
+        assertEquals(AiReplyExecutionStatus.MODEL_OUTPUT_INVALID, execution(result).status)
+        assertTrue(result is AiReplyEvaluation.Execution)
     }
 
     @Test fun removedReviewGateDoesNotOverrideModel() {
@@ -189,24 +189,24 @@ class AiReplyDecisionEngineTest {
         val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
             AiReplyDecisionInput(context(), true, requestId = "r9")
         )
-        assertEquals(AiReplyAction.REPLY, result.action)
-        assertEquals("hi", result.draft)
+        assertEquals(AiReplyAction.REPLY, model(result).action)
+        assertEquals("hi", model(result).draft)
         assertEquals(1, provider.callCount)
     }
 
-    @Test fun ambiguousDecisionPreservesDetailedModelExplanationAndMetadata() {
+    @Test fun highConsequenceWaitPreservesDetailedModelExplanationAndMetadata() {
         val provider = object : AiModelProvider {
             override fun generate(request: AiModelRequest) = AiModelResult(
-                """{"action":"WAIT","reason":"SEXUAL_INNUENDO_AMBIGUOUS","reasonDetail":"表达存在歧义，停止自动发送。","draft":null}""",
+                """{"action":"WAIT","reason":"FINANCIAL_TRANSACTION_REVIEW","reasonDetail":"涉及转账或借贷等高后果事项，停止自动发送。","draft":null}""",
                 "fake", "test", TokenUsage(40, 30), "stop")
         }
         val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
             AiReplyDecisionInput(context(), true, requestId = "detailed"))
-        assertEquals(AiReplyAction.WAIT, result.action)
-        assertTrue(result.reasonDetail!!.contains("表达存在歧义，停止自动发送。"))
-        assertEquals("stop", result.finishReason)
-        assertEquals(30, result.usage?.outputTokens)
-        assertNull(result.draft)
+        assertEquals(AiReplyAction.WAIT, model(result).action)
+        assertTrue(model(result).reasonDetail!!.contains("涉及转账或借贷等高后果事项"))
+        assertEquals("stop", model(result).finishReason)
+        assertEquals(30, model(result).usage?.outputTokens)
+        assertNull(model(result).draft)
     }
 
     @Test fun explanationIsRequiredBySchemaAndMalformedExplanationIsRejected() {
@@ -218,8 +218,62 @@ class AiReplyDecisionEngineTest {
             val output = """{"action":"WAIT","reason":"AMBIGUOUS","reasonDetail":$detail,"draft":null}"""
             val result = AiReplyDecisionEngine(FakeProvider(output), grantedConsent).decide(
                 AiReplyDecisionInput(context(), true, requestId = "bad-detail"))
-            assertEquals("MODEL_OUTPUT_SCHEMA_INVALID", result.reason)
+            assertEquals("MODEL_OUTPUT_SCHEMA_INVALID", execution(result).status.reasonCode)
         }
+    }
+
+
+    @Test fun safeAmbiguousInputCanYieldLowCommitmentClarification() {
+        val provider = FakeProvider(replyJson("你说的是哪件事呀？"))
+        val outcome = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context("这个"), true, requestId = "safe-ambiguous")
+        )
+        assertEquals(AiReplyAction.REPLY, model(outcome).action)
+        assertEquals("你说的是哪件事呀？", model(outcome).draft)
+        assertTrue(provider.lastRequest!!.systemInstruction.contains("语义模糊"))
+        assertTrue(provider.lastRequest!!.systemInstruction.contains("低承诺"))
+    }
+
+    private fun model(result: AiReplyEvaluation): AiReplyDecision =
+        (result as AiReplyEvaluation.Model).decision
+
+    private fun execution(result: AiReplyEvaluation): AiReplyEvaluation.Execution =
+        result as AiReplyEvaluation.Execution
+
+    @Test fun programFailureNeverMasqueradesAsModelWait() {
+        val provider = object : AiModelProvider {
+            override fun generate(request: AiModelRequest): AiModelResult =
+                error("temporary transport failure")
+        }
+        val outcome = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "technical")
+        )
+        val technical = execution(outcome)
+        assertEquals(AiReplyExecutionStatus.MODEL_CALL_FAILED, technical.status)
+        assertNotNull(technical.callDiagnostics)
+    }
+
+    @Test fun modelWaitReasonCannotSelectProgramFailureStatus() {
+        val provider = FakeProvider(
+            """{"action":"WAIT","reason":"MODEL_CALL_FAILED","reasonDetail":"涉及资金转账，需要人工确认。","draft":null}"""
+        )
+        val outcome = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "model-wait")
+        )
+        assertEquals(AiReplyAction.WAIT, model(outcome).action)
+        assertEquals("MODEL_CALL_FAILED", model(outcome).reason)
+        assertEquals(1, provider.callCount)
+    }
+
+    @Test fun consentRevokedDuringProviderCallIsProgramConsentStatus() {
+        val provider = object : AiModelProvider {
+            override fun generate(request: AiModelRequest): AiModelResult =
+                error("Cloud model processing consent has not been granted")
+        }
+        val outcome = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "revoked")
+        )
+        assertEquals(AiReplyExecutionStatus.CLOUD_CONSENT_REQUIRED, execution(outcome).status)
     }
 
     private fun replyJson(draft: String) =
