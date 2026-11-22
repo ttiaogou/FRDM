@@ -3888,7 +3888,9 @@ class AiReplyObservationRuntimeTest {
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
             onLog = logs::add,
-            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L
         )
         runtime.scheduleInitialObservation()
         runUntil(scheduler, 130) { logs.any { it.contains("OCR_READ_NOT_CONFIRMED") } }
@@ -3942,6 +3944,8 @@ class AiReplyObservationRuntimeTest {
             isAiReplyActive = { true },
             onLog = logs::add,
             inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
             isConversationDraftPending = { replyStillUnconfirmed }
         )
         runtime.scheduleInitialObservation()
