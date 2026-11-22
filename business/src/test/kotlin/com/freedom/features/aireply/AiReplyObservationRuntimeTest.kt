@@ -708,7 +708,16 @@ class AiReplyObservationRuntimeTest {
         )
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
         assertEquals(null, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES"))
-        assertEquals(original, repository.load())
+        // The checkpoint is identical while suspended and while rearming; AFTER verified
+        // resumption the private inbox is allowed to advance and persist a new row/position.
+        // Never lose or re-process the already-attempted identities from the original cursor.
+        val resumedCheckpoint = repository.load()
+        assertTrue(resumedCheckpoint != null)
+        assertEquals(original.attemptedSessionKeys, resumedCheckpoint?.attemptedSessionKeys)
+        assertEquals(original.lockedUnreadSessionKeys, resumedCheckpoint?.lockedUnreadSessionKeys)
+        assertTrue(resumedCheckpoint!!.initialInboxPositionCheckCompleted)
+        assertTrue(resumedCheckpoint.lastStableVisibleKeys.isNotEmpty())
+        assertTrue(resumedCheckpoint.savedAtEpochMs >= original.savedAtEpochMs)
     }
 
     @Test
