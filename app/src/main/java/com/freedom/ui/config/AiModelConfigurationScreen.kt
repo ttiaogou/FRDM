@@ -2,7 +2,6 @@ package com.freedom.ui.config
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.text.InputType
@@ -14,7 +13,6 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
-import android.widget.Switch
 import android.widget.TextView
 import com.freedom.features.aireply.ai.AiModelConfiguration
 import com.freedom.features.aireply.ai.AiModelOption
@@ -33,8 +31,6 @@ internal class AiModelConfigurationScreen(
     initialConfiguration: AiModelConfiguration,
     private val onBack: () -> Unit,
     private val onSave: (AiModelConfiguration) -> Result<Unit>,
-    private val onClearApiKey: () -> Result<Unit>,
-    private val cloudConsentGranted: () -> Boolean,
     private val onCloudConsentChanged: (Boolean) -> Unit
 ) {
     private var savedConfiguration = initialConfiguration.normalized()
@@ -361,90 +357,6 @@ internal class AiModelConfigurationScreen(
         setPadding(dp(2), dp(8), dp(2), dp(8))
     }
 
-    private fun cloudConsentPreferenceRow(): View {
-        val wrapper = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-        wrapper.addView(sectionTitle("云端模型处理授权"))
-        val row = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(72)
-            setPadding(dp(2), dp(6), dp(4), dp(8))
-        }
-        val consentSwitch = Switch(activity).apply {
-            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
-            thumbTintList = ColorStateList(states, intArrayOf(FreedomUi.TEXT, Color.WHITE))
-            trackTintList = ColorStateList(states, intArrayOf(FreedomUi.LIME, 0xFFD9DED5.toInt()))
-            minWidth = dp(52)
-            showText = false
-            isChecked = cloudConsentGranted()
-            contentDescription = "云端模型处理授权"
-        }
-        val consentStatusTitle = TextView(activity).apply {
-            text = if (cloudConsentGranted()) "已授权云端模型处理" else "尚未授权云端模型处理"
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(FreedomUi.TEXT)
-        }
-        row.addView(LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(consentStatusTitle)
-            addView(TextView(activity).apply {
-                text = "开启后，允许将本地脱敏后的聊天上下文发送给当前配置的云端模型；可随时撤销。"
-                textSize = 11f
-                setTextColor(FreedomUi.MUTED)
-                setPadding(0, dp(4), 0, 0)
-                maxLines = 3
-            })
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-
-        fun installConsentListener() {
-            consentSwitch.setOnCheckedChangeListener { button, checked ->
-                if (checked) {
-                    button.setOnCheckedChangeListener(null)
-                    button.isChecked = false
-                    installConsentListener()
-                    val dialog = AlertDialog.Builder(activity)
-                        .setTitle("授权云端模型处理")
-                        .setMessage(
-                            "授权后，应用可以将本地脱敏后的聊天上下文发送给当前配置的云端模型服务。系统会尝试对常见手机号、邮箱和中国大陆居民身份证号进行脱敏，但无法保证识别所有敏感信息。授权保存在本机，可随时关闭。生成内容仍受现有回复校验流程约束，不会因授权而自动发送消息。"
-                        )
-                        .setNegativeButton("暂不授权", null)
-                        .setPositiveButton("同意并授权") { _, _ ->
-                            runCatching { onCloudConsentChanged(true) }
-                                .onSuccess {
-                                    consentStatusTitle.text = "已授权云端模型处理"
-                                    consentSwitch.setOnCheckedChangeListener(null)
-                                    consentSwitch.isChecked = true
-                                    installConsentListener()
-                                }
-                                .onFailure { failure ->
-                                    showStatus(failure.message ?: "保存云端授权状态失败。", error = true)
-                                }
-                        }
-                        .create()
-                    dialog.show()
-                    FreedomUi.styleAlertDialog(dialog, activity, dp)
-                } else {
-                    runCatching { onCloudConsentChanged(false) }
-                        .onSuccess { consentStatusTitle.text = "尚未授权云端模型处理" }
-                        .onFailure { failure ->
-                            showStatus(failure.message ?: "撤销云端授权失败。", error = true)
-                            consentSwitch.setOnCheckedChangeListener(null)
-                            consentSwitch.isChecked = true
-                            installConsentListener()
-                        }
-                }
-            }
-        }
-        installConsentListener()
-        row.addView(consentSwitch)
-        wrapper.addView(row)
-        wrapper.addView(View(activity).apply {
-            setBackgroundColor(FreedomUi.DIVIDER)
-        }, LinearLayout.LayoutParams(-1, dp(1)))
-        return wrapper
-    }
-
     private fun showApiAddressEditor() {
         showTextEditor(
             title = "API 地址",
@@ -700,31 +612,6 @@ internal class AiModelConfigurationScreen(
                 )
             }
         }
-        dialog.show()
-        FreedomUi.styleAlertDialog(dialog, activity, dp)
-    }
-
-    private fun confirmClearApiKey() {
-        if (configuration.apiKey.isBlank()) return
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("删除 API Key")
-            .setMessage("将从本机加密配置中删除已保存的 API Key。其他模型参数不会改变。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("删除") { _, _ ->
-                onClearApiKey().fold(
-                    onSuccess = {
-                        configuration = configuration.copy(apiKey = "")
-                        savedConfiguration = savedConfiguration.copy(apiKey = "")
-                        apiKeyStatus?.text = apiKeyStatusText()
-                        apiKeyValue?.text = "未设置"
-                        showStatus("已删除本机保存的 API Key。", error = false)
-                    },
-                    onFailure = { failure ->
-                        showStatus(failure.message ?: "删除 API Key 失败。", error = true)
-                    }
-                )
-            }
-            .create()
         dialog.show()
         FreedomUi.styleAlertDialog(dialog, activity, dp)
     }

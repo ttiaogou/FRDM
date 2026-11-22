@@ -1356,8 +1356,6 @@ class MainActivity : Activity() {
                 initialConfiguration = configuration,
                 onBack = ::showConfigurationPage,
                 onSave = { value -> runCatching { aiModelConfigurationRepository.save(value) } },
-                onClearApiKey = { runCatching { aiModelConfigurationRepository.clearApiKey() } },
-                cloudConsentGranted = aiModelCloudConsent::isGranted,
                 onCloudConsentChanged = aiModelCloudConsent::setGranted
             ).create()
         )
