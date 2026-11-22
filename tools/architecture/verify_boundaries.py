@@ -1189,6 +1189,8 @@ def legacy_architecture_bypass_violations(code_by_path: dict[str, str]) -> list[
             r"\brecoveryObservationGeneration\b",
             r"\brecoveryTransactionManager\?\.completeVerified\s*\(",
             r"\brecoveryTransactionManager\?\.restartVerificationLane\s*\(",
+            r"\bif\s*\(\s*checkpointVerifier\s*!=\s*null\s*\)\s*checkpointDispatcher\.state",
+            r"\bif\s*\(\s*checkpointVerifier\s*!=\s*null\s*\)\s*checkpointDispatcher\.stableVerificationSamples",
         ),
         ai_rel: (
             r"\bprivate\s+fun\s+activateRecoveryIdentity\s*\(",

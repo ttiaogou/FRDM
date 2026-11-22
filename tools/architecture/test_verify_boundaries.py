@@ -582,6 +582,16 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         self.assertTrue(any("P7 bypass migration missing" in issue
                             for issue in guard.legacy_architecture_bypass_violations(changed)))
 
+    def test_p7_browse_checkpoint_state_must_surface_the_active_verification_lane(self):
+        browse = "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt"
+        changed = dict(self.recovery_code)
+        changed[browse] = changed[browse].replace(
+            "if (checkpointVerifier != null) checkpointDispatcher.state else dispatcher.state",
+            "dispatcher.state"
+        )
+        self.assertTrue(any("P7 bypass migration missing" in issue
+                            for issue in guard.legacy_architecture_bypass_violations(changed)))
+
     def test_p7_rejects_reused_browse_verifier_lane_and_duplicate_send_identity(self):
         browse = "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt"
         changed = dict(self.recovery_code)

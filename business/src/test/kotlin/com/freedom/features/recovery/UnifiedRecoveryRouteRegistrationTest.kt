@@ -72,7 +72,9 @@ class UnifiedRecoveryRouteRegistrationTest {
 
         coordinator.recoveryAdapterForRoute(browse.routeId)?.saveCheckpoint()
         assertEquals(listOf("browse"), writes)
-        coordinator.unregisterFingerprintRoute(browse.routeId)
+        // P7: only the typed recovery adapter outlet can unregister a business route;
+        // raw observation-only route removal must not take ownership of this task.
+        coordinator.unregisterRecoveryAdapter(browse.routeId)
         assertNull(coordinator.primaryRecoveryAdapterForTask("ACCOUNT_BROWSE"))
         assertNull(coordinator.matchRecoveryAdapter(
             page("DYNAMIC_FEED", "feed-structural-fingerprint"), setOf("ACCOUNT_BROWSE")

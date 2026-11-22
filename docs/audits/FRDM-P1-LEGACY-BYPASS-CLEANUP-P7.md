@@ -46,6 +46,16 @@ Android AccessibilityEvent
 - Business 原有 UNKNOWN / 服务重连 / 进程恢复测试继续执行；新增管理器未识别事件拒绝、旧代次指纹防旁路、动态浏览普通初始稳定双快照、UNKNOWN 中断复核、恢复检查点双槽隔离，以及动态页指纹变化后的重新双样本验证。
 - 完整 CI：Python 测试/强制架构门禁、Android 资源、Core/Business/Gesture/App 全部单元测试、Freedom 和 OCR Plugin 两份 Debug APK、CodeQL。
 
+## 第一次 CI 回归根因及最小修复
+
+首个 P7 提交的 Python 强制架构检查和 Android 资源检查通过，Gradle 实际 Kotlin 编译通过；Business 单测报告 4 条回归失败，而非语法/构建依赖问题：
+
+- `AccountBrowseManualRecoveryTest` 的三个既有安全断言要求恢复检查点第 1 次验证时显示 `VERIFYING / stableSamples=1`，中途不完整证据必须退回 `RECOVERING / 0`。首次拆分子验证槽时，`DynamicPageRecovery.state()/stableSamples()` 仍错误地返回主 UNKNOWN lane，导致对外显示状态不同步。修复为有活动 checkpointVerifier 时读取 checkpointDispatcher 的状态与样本数；二次确认成功才恢复主事务 ACTIVE，未放宽任何样本门槛。
+- `UnifiedRecoveryRouteRegistrationTest` 仍用旧 `unregisterFingerprintRoute` 取消恢复业务注册。P7 已禁止普通指纹接口删除恢复适配器，因此测试改用唯一的 typed `unregisterRecoveryAdapter`，仍断言业务注销成功、恢复路由不可匹配；Core 额外测试继续证明 raw 注销不能移除业务 route。
+- 在 P7 Python 门禁中增加对浏览检查点验证状态出口的正/负测试，防止“内部验证中，外部误报 ACTIVE”的安全回退。
+
+失败后未删除测试，也未降低安全断言或修改 CI 规则。最终成功与否须以补丁所在最终 SHA 的完整新 CI 为准。
+
 ## 与上一轮 P6 的关系、遗留
 
 P6 的目标是同一个进程级 UNKNOWN 事务管理器，但仍允许分发器在无身份/指纹入口直接改局部 reducer；P7 去掉这些最后的具体业务旁路，并纠正自动浏览在主 UNKNOWN 与恢复检查点之间共用同一 reducer 的验证代次冲突。P5 的业务路由仍可被旧无作用域路由表重复注册，P7 现在消除了该重复。

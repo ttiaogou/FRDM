@@ -252,11 +252,20 @@ class DynamicPageRecovery(
         return true
     }
 
-    fun state(): RecoveryTransactionState = dispatcher.state
+    /**
+     * During restored-checkpoint verification, expose that independent reducer's
+     * current safety state. The owning UNKNOWN lane stays tracked by the same
+     * process manager; callers must never see ACTIVE until both samples finish.
+     */
+    fun state(): RecoveryTransactionState =
+        if (checkpointVerifier != null) checkpointDispatcher.state else dispatcher.state
 
-    fun stableSamples(): Int = dispatcher.stableVerificationSamples
+    fun stableSamples(): Int =
+        if (checkpointVerifier != null) checkpointDispatcher.stableVerificationSamples
+        else dispatcher.stableVerificationSamples
 
-    fun hasPendingVerification(): Boolean = dispatcher.state != RecoveryTransactionState.ACTIVE
+    fun hasPendingVerification(): Boolean =
+        checkpointVerifier != null || dispatcher.state != RecoveryTransactionState.ACTIVE
 
     fun onUserInteractionStarted() {
         dispatcher.currentIdentity()?.let(recoveryScheduler::onUserInteractionStarted)
