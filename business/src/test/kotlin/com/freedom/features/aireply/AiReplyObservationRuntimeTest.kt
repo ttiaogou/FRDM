@@ -1858,11 +1858,19 @@ class AiReplyObservationRuntimeTest {
             )
             runtime.scheduleInitialObservation()
             runUntilLog(scheduler, logs, "AI Reply 启动准入[UNREAD_LOCKING]")
-            runUntil(scheduler, 100) {
-                if (mode == "UNSAFE_FRESH_PAGE") logs.any {
-                    it.contains("CURRENT_TARGET_NOT_CONFIRMED")
-                } else draftCalls == 1
+            fun expectedOutcomeReached(): Boolean = if (mode == "UNSAFE_FRESH_PAGE") {
+                logs.any { it.contains("CURRENT_TARGET_NOT_CONFIRMED") }
+            } else draftCalls == 1
+            var steps = 0
+            while (!expectedOutcomeReached() && steps < 100 && scheduler.pendingCount() > 0) {
+                scheduler.runNext()
+                steps++
             }
+            assertTrue(
+                "mode=$mode; steps=$steps; draftCalls=$draftCalls; " +
+                    "lastLogs=${logs.takeLast(30)}",
+                expectedOutcomeReached()
+            )
             if (mode == "UNSAFE_FRESH_PAGE") {
                 assertEquals(0, draftCalls)
                 assertTrue(logs.any { it.contains("CURRENT_TARGET_NOT_CONFIRMED") })
