@@ -674,10 +674,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             targetPackage = { monitorRepository.targetPackage() },
             freedomPackage = service.packageName,
             resolveAppLabel = appLabelResolver::resolve,
-            // Legacy constructor callbacks are test-only seams; the runtime uses unifiedAccessibilityEntry.
-            dispatchTargetApplicationEvent = { error("Direct target event dispatch is forbidden in production") },
-            dispatchGlobalTouchEvent = { error("Direct touch event dispatch is forbidden in production") },
-            dispatchActivityTransition = { error("Direct Activity dispatch is forbidden in production") },
             interactionDiagnostics = runSessionCoordinator::interactionDiagnostics,
             handleManualInteractionFallback = runSessionCoordinator::handleManualInteractionFallback,
             updateAppPage = { appLabel, pageLabel -> monitorRepository.updateAppPage(appLabel, pageLabel) },

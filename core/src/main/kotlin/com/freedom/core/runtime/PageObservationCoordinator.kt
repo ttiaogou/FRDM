@@ -18,13 +18,16 @@ class PageObservationCoordinator(
     private val recoveryAdapterRegistry = PageRecoveryAdapterRegistry()
 
     /**
-     * Shared production registration for all feature-owned recovery adapters.
-     * A replacement is atomic with the existing read-only fingerprint route.
+     * Single production registration for feature recovery adapters.
+     * Raw fingerprint routes are observation-only and cannot duplicate or override
+     * the task-scoped recovery registry.
      */
     @Synchronized
     fun registerRecoveryAdapter(adapter: PageRecoveryRouteAdapter) {
+        check(adapter.routeId !in fingerprintRouter.registeredRouteIds()) {
+            "Recovery adapter routeId conflicts with observation-only route: ${adapter.routeId}"
+        }
         recoveryAdapterRegistry.register(adapter)
-        fingerprintRouter.register(adapter.asRoute())
     }
 
     @Synchronized
@@ -44,20 +47,27 @@ class PageObservationCoordinator(
     @Synchronized
     fun registeredRecoveryAdapterIds(): Set<String> = recoveryAdapterRegistry.registeredRouteIds()
 
-    /** Legacy raw fingerprint registration is retained for observation-only routes and tests. */
+    /** Observation-only routes cannot replace or unregister any business recovery adapter. */
     @Synchronized
     fun registerFingerprintRoute(route: PageFingerprintRoute) {
-        recoveryAdapterRegistry.unregister(route.routeId)
+        check(recoveryAdapterRegistry.adapterForRoute(route.routeId) == null) {
+            "Observation-only routeId conflicts with recovery adapter: ${route.routeId}"
+        }
         fingerprintRouter.register(route)
     }
 
     @Synchronized
     fun unregisterFingerprintRoute(routeId: String) {
-        recoveryAdapterRegistry.unregister(routeId)
         fingerprintRouter.unregister(routeId)
     }
 
-    /** Matches a fresh adapter fingerprint without granting ownership or performing UI actions. */
+    /** Use this typed path to remove a feature-owned recovery adapter. */
+    @Synchronized
+    fun unregisterRecoveryAdapter(routeId: String) {
+        recoveryAdapterRegistry.unregister(routeId)
+    }
+
+    /** Matches observation-only routes. Business recovery must call matchRecoveryAdapter. */
     fun matchFingerprint(fingerprint: PageFingerprint): String? = fingerprintRouter.match(fingerprint)
 
     @Synchronized

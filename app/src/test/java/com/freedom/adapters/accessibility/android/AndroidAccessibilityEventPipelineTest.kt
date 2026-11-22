@@ -142,9 +142,15 @@ class AndroidAccessibilityEventPipelineTest {
             targetPackage = { TARGET_PACKAGE },
             freedomPackage = FREEDOM_PACKAGE,
             resolveAppLabel = { "Momo" },
-            dispatchTargetApplicationEvent = { trace += "dispatch-target" },
-            dispatchGlobalTouchEvent = { },
-            dispatchActivityTransition = { trace += "activity-transition" },
+            unifiedAccessibilityEntry = com.freedom.core.accessibility.api.UnifiedAccessibilityEntry { event ->
+                when (event) {
+                    is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.TargetApplication ->
+                        trace += "dispatch-target"
+                    is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.ActivityTransition ->
+                        trace += "activity-transition"
+                    else -> Unit
+                }
+            },
             interactionDiagnostics = { _, _ -> emptyList() },
             handleManualInteractionFallback = { },
             updateAppPage = { _, _ -> },
@@ -468,9 +474,6 @@ class AndroidAccessibilityEventPipelineTest {
             targetPackage = { TARGET_PACKAGE },
             freedomPackage = FREEDOM_PACKAGE,
             resolveAppLabel = { "Momo" },
-            dispatchTargetApplicationEvent = { error("legacy target dispatch must not be used") },
-            dispatchGlobalTouchEvent = { error("legacy touch dispatch must not be used") },
-            dispatchActivityTransition = { error("legacy activity dispatch must not be used") },
             interactionDiagnostics = { _, _ -> emptyList() },
             handleManualInteractionFallback = { trace += "manual-fallback" },
             updateAppPage = { _, _ -> },
@@ -504,9 +507,6 @@ class AndroidAccessibilityEventPipelineTest {
             targetPackage = { TARGET_PACKAGE },
             freedomPackage = FREEDOM_PACKAGE,
             resolveAppLabel = { "Momo" },
-            dispatchTargetApplicationEvent = { error("legacy target bypass") },
-            dispatchGlobalTouchEvent = { error("legacy touch bypass") },
-            dispatchActivityTransition = { error("legacy activity bypass") },
             interactionDiagnostics = { _, _ -> emptyList() },
             handleManualInteractionFallback = {},
             updateAppPage = { _, _ -> },
@@ -544,9 +544,18 @@ class AndroidAccessibilityEventPipelineTest {
         targetPackage = { TARGET_PACKAGE },
         freedomPackage = FREEDOM_PACKAGE,
         resolveAppLabel = { packageName -> "label:$packageName" },
-        dispatchTargetApplicationEvent = { trace += "dispatch-target" },
-        dispatchGlobalTouchEvent = dispatchGlobalTouchEvent,
-        dispatchActivityTransition = { trace += "activity-transition" },
+        unifiedAccessibilityEntry = com.freedom.core.accessibility.api.UnifiedAccessibilityEntry { event ->
+            when (event) {
+                is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.TargetApplication ->
+                    trace += "dispatch-target"
+                is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.GlobalTouch ->
+                    dispatchGlobalTouchEvent(event.event)
+                is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.ActivityTransition ->
+                    trace += "activity-transition"
+                is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.NavigationObservation ->
+                    Unit
+            }
+        },
         interactionDiagnostics = { _, _ -> listOf("test-diagnostics") },
         handleManualInteractionFallback = { trace += "manual-fallback" },
         updateAppPage = updateAppPage,

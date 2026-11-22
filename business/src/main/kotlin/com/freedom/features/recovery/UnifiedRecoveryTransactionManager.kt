@@ -70,7 +70,9 @@ class UnifiedRecoveryTransactionManager(
                 transactions.remove(key)
             event == RecoveryTransactionEvent.ResumeCompleted && next == RecoveryTransactionState.ACTIVE ->
                 transactions.remove(key)
-            beginning || old != null -> transactions[key] = TransactionSnapshot(
+            // A fresh verification-only feed observation also belongs to this manager.
+            // Only a reducer-confirmed non-ACTIVE state creates that initial slot.
+            beginning || old != null || next != RecoveryTransactionState.ACTIVE -> transactions[key] = TransactionSnapshot(
                 taskId = identity.taskId,
                 routeId = identity.routeId,
                 runGeneration = generation,
@@ -90,6 +92,29 @@ class UnifiedRecoveryTransactionManager(
         if (event is RecoveryTransactionEvent.UnknownPage ||
             event is RecoveryTransactionEvent.RetryScheduled
         ) onLog("recoveryManager=unbound_observation;event=${event.javaClass.simpleName};taskLease=false")
+    }
+
+    /**
+     * A new fresh fingerprint invalidates an unfinished checkpoint *verification lane*
+     * without replacing the owning task's primary UNKNOWN transaction or persisted
+     * business checkpoint. The original route verifier must start from zero samples.
+     */
+    @Synchronized
+    fun restartVerificationLane(identity: RecoveryEventIdentity, laneId: String): Boolean {
+        if (laneId == PRIMARY_LANE || laneId.isBlank() ||
+            identity.runGeneration != currentRunGeneration()
+        ) return false
+        val key = LaneKey(identity.taskId, laneId)
+        val old = transactions[key] ?: return false
+        if (old.routeId != identity.routeId ||
+            old.runGeneration != identity.runGeneration ||
+            old.checkpointId != identity.checkpointId ||
+            identity.observationGeneration < old.observationGeneration
+        ) return false
+        transactions.remove(key)
+        onLog("recoveryManager=verification_lane_restarted;taskId=${identity.taskId};" +
+            "routeId=${identity.routeId};laneId=$laneId")
+        return true
     }
 
     /** Called after the original route verifier and UI lease transfer both succeed. */

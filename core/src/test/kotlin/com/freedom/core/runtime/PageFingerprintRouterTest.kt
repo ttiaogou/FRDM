@@ -174,6 +174,56 @@ class PageFingerprintRouterTest {
     }
 
     @Test
+    fun taskScopedRecoveryRoutesNeverLeakIntoLegacyUnscopedFingerprintRouter() {
+        val scheduler = object : TaskScheduler {
+            override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask =
+                ScheduledTask { }
+        }
+        val observation = PageObservationCoordinator(scheduler)
+        var checkpointWrites = 0
+        val route = object : PageRecoveryRouteAdapter {
+            override val routeId = "ACCOUNT_BROWSE"
+            override val taskId = "ACCOUNT_BROWSE"
+            override fun matches(fingerprint: PageFingerprint): Boolean = true
+            override fun saveCheckpoint() { checkpointWrites++ }
+        }
+        observation.registerRecoveryAdapter(route)
+        val candidate = page("DYNAMIC_FEED", adapterFingerprint = "fresh-feed")
+        // The old unrestricted route table may no longer match a business recovery route.
+        assertNull(observation.matchFingerprint(candidate))
+        assertTrue(observation.registeredFingerprintRouteIds().isEmpty())
+        assertEquals(route,
+            observation.matchRecoveryAdapter(candidate, setOf("ACCOUNT_BROWSE")))
+        assertNull(observation.matchRecoveryAdapter(candidate, setOf("AI_REPLY_PRIVATE_MESSAGES")))
+        assertThrows(IllegalStateException::class.java) {
+            observation.registerFingerprintRoute(PageFingerprintRoute("ACCOUNT_BROWSE") { true })
+        }
+        observation.unregisterFingerprintRoute("ACCOUNT_BROWSE")
+        assertEquals(route, observation.recoveryAdapterForRoute("ACCOUNT_BROWSE"))
+        assertEquals(0, checkpointWrites)
+        observation.unregisterRecoveryAdapter("ACCOUNT_BROWSE")
+        assertNull(observation.recoveryAdapterForRoute("ACCOUNT_BROWSE"))
+    }
+
+    @Test
+    fun observationOnlyAndRecoveryRoutesCannotReuseTheSameRouteId() {
+        val coordinator = PageObservationCoordinator(object : TaskScheduler {
+            override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask =
+                ScheduledTask { }
+        })
+        coordinator.registerFingerprintRoute(PageFingerprintRoute("SHARED") { true })
+        val adapter = object : PageRecoveryRouteAdapter {
+            override val routeId = "SHARED"
+            override fun matches(fingerprint: PageFingerprint): Boolean = true
+            override fun saveCheckpoint() = Unit
+        }
+        assertThrows(IllegalStateException::class.java) {
+            coordinator.registerRecoveryAdapter(adapter)
+        }
+        assertNull(coordinator.recoveryAdapterForRoute("SHARED"))
+    }
+
+    @Test
     fun secondaryChatDetailRouteCannotReplaceMessageListCheckpointOwner() {
         val registry = PageRecoveryAdapterRegistry()
         fun route(id: String, primary: Boolean) = object : PageRecoveryRouteAdapter {

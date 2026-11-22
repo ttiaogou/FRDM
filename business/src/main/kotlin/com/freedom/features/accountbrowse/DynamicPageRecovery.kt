@@ -30,11 +30,21 @@ class DynamicPageRecovery(
     scheduleRepository: RecoveryScheduleRepository? = null,
     sharedManager: UnifiedRecoveryTransactionManager? = null
 ) {
+    private val recoveryTransactionManager = sharedManager
     private val dispatcher = RecoveryEventDispatcher(
         UnifiedRecoveryTransactionStateMachine(),
         onLog,
         sharedManager = sharedManager
     )
+    /** Checkpoint samples start at zero and must never rewind the primary UNKNOWN lane. */
+    private val checkpointDispatcher = RecoveryEventDispatcher(
+        UnifiedRecoveryTransactionStateMachine(),
+        onLog,
+        sharedManager = sharedManager,
+        managerLaneId = "ACCOUNT_BROWSE_CHECKPOINT"
+    )
+    /** Independent from the stable-sample count; never reuse an earlier event identity. */
+    private var recoveryObservationGeneration = 0L
 
     private val taskId = "ACCOUNT_BROWSE"
     private val routeId = "account-browse"
@@ -73,6 +83,7 @@ class DynamicPageRecovery(
     private fun restoreObservationPlan(source: RecoveryTransactionEvent.Source) {
         // Verification samples and event generation from the old service are no longer valid.
         checkpointVerifier = null
+        checkpointDispatcher.reset()
         verifiedCheckpointFingerprint = null
         checkpointObservationGeneration = 0L
         checkpointRestoreSource = if (source == RecoveryTransactionEvent.Source.SERVICE_RECONNECT) {
@@ -118,10 +129,20 @@ class DynamicPageRecovery(
             verifiedCheckpointFingerprint != checkpoint.pageFingerprint
         ) {
             // The expected fingerprint is established from a fresh, route-verified feed read.
-            // Rebase on a changed feed without losing the existing business checkpoint.
-            dispatcher.reset()
+            // A changed feed starts a new checkpoint verification lane with zero samples,
+            // while retaining the original task UNKNOWN transaction and business checkpoint.
+            if (checkpointVerifier != null &&
+                verifiedCheckpointFingerprint != checkpoint.pageFingerprint
+            ) {
+                checkpointDispatcher.currentIdentity()?.let { active ->
+                    recoveryTransactionManager?.restartVerificationLane(
+                        active, "ACCOUNT_BROWSE_CHECKPOINT"
+                    )
+                }
+            }
+            checkpointDispatcher.reset()
             val verifier = RecoveryCheckpointVerificationCoordinator(
-                transaction = dispatcher,
+                transaction = checkpointDispatcher,
                 scheduler = recoveryScheduler,
                 onLog = onLog
             )
@@ -147,7 +168,13 @@ class DynamicPageRecovery(
             result.executionPhase != checkpoint.executionPhase
         ) return false
         if (!requireNotNull(checkpointVerifier).completeResume()) return false
+        // The shared checkpoint verifier has provided two fresh verified samples.
+        // Only after its explicit acknowledgement may the original UNKNOWN lane
+        // be closed; no UI permission is minted by this bookkeeping step.
+        dispatcher.currentIdentity()?.let { recoveryTransactionManager?.completeVerified(it) }
+        dispatcher.reset()
         checkpointVerifier = null
+        checkpointDispatcher.reset()
         verifiedCheckpointFingerprint = null
         onLog("recoveryAction=account_browse_shared_checkpoint_verified; runGeneration=${currentRunGeneration()}")
         return true
@@ -207,6 +234,9 @@ class DynamicPageRecovery(
     }
 
     fun observeFingerprint(fingerprint: String): Boolean {
+        // Even the pre-UNKNOWN feed stability gate must use the identified
+        // manager route, not the dispatcher's former unbound fingerprint bypass.
+        dispatcher.activate(identity("DYNAMIC_FEED_FINGERPRINT_OBSERVATION"))
         if (fingerprint.isNotBlank() && dispatcher.state == RecoveryTransactionState.RECOVERING) {
             dispatcher.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
         }
@@ -239,17 +269,23 @@ class DynamicPageRecovery(
     fun reset() {
         dispatcher.currentIdentity()?.let(recoveryScheduler::stopByUser)
         checkpointVerifier = null
+        checkpointDispatcher.reset()
         verifiedCheckpointFingerprint = null
         checkpointObservationGeneration = 0L
         dispatcher.reset()
     }
 
-    private fun identity(reason: String): RecoveryEventIdentity = RecoveryEventIdentity(
-        taskId = taskId,
-        routeId = routeId,
-        runGeneration = currentRunGeneration().coerceAtLeast(0L),
-        checkpointId = checkpointId,
-        observationGeneration = dispatcher.stableVerificationSamples.toLong(),
-        unknownReason = reason
-    )
+    private fun identity(reason: String): RecoveryEventIdentity {
+        check(recoveryObservationGeneration < Long.MAX_VALUE) {
+            "Recovery observation generation exhausted"
+        }
+        return RecoveryEventIdentity(
+            taskId = taskId,
+            routeId = routeId,
+            runGeneration = currentRunGeneration().coerceAtLeast(0L),
+            checkpointId = checkpointId,
+            observationGeneration = ++recoveryObservationGeneration,
+            unknownReason = reason
+        )
+    }
 }

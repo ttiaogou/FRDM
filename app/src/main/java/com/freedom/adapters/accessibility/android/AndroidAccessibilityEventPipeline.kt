@@ -25,9 +25,8 @@ internal class AndroidAccessibilityEventPipeline(
     private val targetPackage: () -> String,
     private val freedomPackage: String,
     private val resolveAppLabel: (String) -> String,
-    private val dispatchTargetApplicationEvent: (AccessibilityEventEnvelope) -> Unit,
-    private val dispatchGlobalTouchEvent: (AccessibilityEventEnvelope) -> Unit,
-    private val dispatchActivityTransition: (String) -> Unit,
+    /** Mandatory business dispatch boundary, including in isolated normalized-event tests. */
+    private val unifiedAccessibilityEntry: UnifiedAccessibilityEntry,
     private val interactionDiagnostics: (AccessibilityEventEnvelope, Long) -> List<String>,
     private val handleManualInteractionFallback: (AccessibilityEventEnvelope) -> Unit,
     private val updateAppPage: (appLabel: String, pageLabel: String) -> Unit,
@@ -44,8 +43,7 @@ internal class AndroidAccessibilityEventPipeline(
     private val onActivityWindowEventDiagnostic: (
         className: String, windowId: Int, generation: Long, tracked: Boolean
     ) -> Unit = { _, _, _, _ -> },
-    // Kept only for existing unit-test fixtures; production always supplies one gateway.
-    private val unifiedAccessibilityEntry: UnifiedAccessibilityEntry? = null
+    // No secondary business-facing dispatch callbacks: all events use the same entry.
 ) : AccessibilityEventPipelinePort {
 
     /** Entry point for Android callbacks. The platform event is normalized synchronously. */
@@ -118,11 +116,7 @@ internal class AndroidAccessibilityEventPipeline(
                 )
                 val routedTouchEvent = eventForRouting.copy(inputOriginDecision = originDecision)
                 runCatching {
-                    if (unifiedAccessibilityEntry != null) {
-                        unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.GlobalTouch(routedTouchEvent))
-                    } else {
-                        dispatchGlobalTouchEvent(routedTouchEvent)
-                    }
+                    unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.GlobalTouch(routedTouchEvent))
                 }
                     .onSuccess {
                         appendLog("全局触摸链路[PIPELINE_FORWARDED]：事件=${eventForRouting.type}；模式=$runMode")
@@ -157,11 +151,7 @@ internal class AndroidAccessibilityEventPipeline(
         // scroll counters and refresh verification even when the matching log line is suppressed.
         if (runMode == RunMode.ACCOUNT_BROWSE) {
             // AccountBrowse must receive this before the visible-log dedup gate.
-            if (unifiedAccessibilityEntry != null) {
-                unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.TargetApplication(normalizedEvent))
-            } else {
-                dispatchTargetApplicationEvent(normalizedEvent)
-            }
+            unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.TargetApplication(normalizedEvent))
         } else if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             classNameEndsWithActivity(className)
         ) {
@@ -200,11 +190,7 @@ internal class AndroidAccessibilityEventPipeline(
 
         if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && className.isNotBlank()) {
             if (classNameEndsWithActivity(className)) updateCurrentActivityClass(className)
-            if (unifiedAccessibilityEntry != null) {
-                unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.ActivityTransition(className))
-            } else {
-                dispatchActivityTransition(className)
-            }
+            unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.ActivityTransition(className))
         }
 
         val appLabel = resolveAppLabel(eventPackage)
@@ -244,11 +230,7 @@ internal class AndroidAccessibilityEventPipeline(
             onBrowseEventLogged()
         } else {
             // AI event delivery intentionally follows visible-event de-duplication and logging.
-            if (unifiedAccessibilityEntry != null) {
-                unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.TargetApplication(routedTargetEvent))
-            } else {
-                dispatchTargetApplicationEvent(routedTargetEvent)
-            }
+            unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.TargetApplication(routedTargetEvent))
         }
     }
 

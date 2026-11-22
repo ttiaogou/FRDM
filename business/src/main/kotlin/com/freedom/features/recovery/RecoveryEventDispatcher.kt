@@ -23,8 +23,15 @@ class RecoveryEventDispatcher(
     ): RecoveryTransactionState {
         val eventIdentity = identity
         if (eventIdentity == null) {
-            sharedManager?.onUnboundEvent(event)
-            onLog("recoveryType=legacy_dispatch; event=${event.javaClass.simpleName}; accepted=true")
+            // P7: a production recovery event without task/checkpoint identity cannot
+            // bypass the process manager by mutating the local reducer directly.
+            if (sharedManager != null) {
+                sharedManager.onUnboundEvent(event)
+                onLog("recoveryType=unbound_dispatch; event=${event.javaClass.simpleName}; accepted=false")
+                return transaction.state
+            }
+            // Isolated reducer fixtures retain their original no-manager behavior.
+            onLog("recoveryType=isolated_dispatch; event=${event.javaClass.simpleName}; accepted=true")
             return transaction.dispatch(event)
         }
         val current = activeIdentity
@@ -61,8 +68,26 @@ class RecoveryEventDispatcher(
     val stableVerificationSamples: Int
         get() = transaction.stableVerificationSamples
 
-    fun observeFingerprint(fingerprint: String): RecoveryTransactionState =
-        transaction.observeFingerprint(fingerprint)
+    /**
+     * The original two-fingerprint reducer remains authoritative, but an identified
+     * production observation must cross the same manager gate as explicit events.
+     * No raw fingerprint leaves this dispatcher or enters manager diagnostics.
+     */
+    fun observeFingerprint(fingerprint: String): RecoveryTransactionState {
+        val manager = sharedManager ?: return transaction.observeFingerprint(fingerprint)
+        val identity = activeIdentity
+        if (identity == null) {
+            manager.onUnboundEvent(RecoveryTransactionEvent.VerificationSample(stable = false))
+            onLog("recoveryType=unbound_fingerprint; accepted=false")
+            return transaction.state
+        }
+        val event = RecoveryTransactionEvent.VerificationSample(stable = fingerprint.isNotBlank())
+        val result = manager.dispatch(identity, event, transaction.state, managerLaneId) {
+            transaction.observeFingerprint(fingerprint)
+        }
+        onLog(identity.logFields("recovery_fingerprint", if (result.accepted) "admitted" else "stale_discarded"))
+        return result.state
+    }
 
     fun reset() {
         transaction.reset()

@@ -139,6 +139,41 @@ class UnifiedRecoveryTransactionManagerTest {
     }
 
     @Test
+    fun unidentifiedProductionEventCannotMutateLocalReducer() {
+        val diagnostics = mutableListOf<String>()
+        val manager = UnifiedRecoveryTransactionManager({ 9L }, diagnostics::add)
+        val dispatcher = RecoveryEventDispatcher(
+            UnifiedRecoveryTransactionStateMachine(), sharedManager = manager
+        )
+        assertEquals(RecoveryTransactionState.ACTIVE,
+            dispatcher.dispatch(RecoveryTransactionEvent.UnknownPage("NO_TASK")))
+        assertEquals(RecoveryTransactionState.ACTIVE, dispatcher.state)
+        assertTrue(manager.trackedTaskIds().isEmpty())
+        assertTrue(diagnostics.any { it.contains("unbound_observation") })
+        assertEquals(RecoveryTransactionState.ACTIVE,
+            dispatcher.observeFingerprint("unverified-fingerprint"))
+        assertTrue(manager.trackedTaskIds().isEmpty())
+    }
+
+    @Test
+    fun staleRunFingerprintCannotBypassManagerAndCompleteRecovery() {
+        var currentGeneration = 2L
+        val manager = UnifiedRecoveryTransactionManager({ currentGeneration })
+        val dispatcher = RecoveryEventDispatcher(
+            UnifiedRecoveryTransactionStateMachine(), sharedManager = manager
+        )
+        val id = identity("ACCOUNT_BROWSE", 2L)
+        dispatcher.activate(id)
+        dispatcher.dispatch(RecoveryTransactionEvent.UnknownPage("PAGE_UNKNOWN"))
+        currentGeneration = 3L
+        assertEquals(RecoveryTransactionState.RECOVERING,
+            dispatcher.observeFingerprint("fresh-visual-page"))
+        assertEquals(0, dispatcher.stableVerificationSamples)
+        assertEquals(RecoveryTransactionState.RECOVERING, dispatcher.state)
+        assertTrue(manager.trackedTaskIds().isEmpty())
+    }
+
+    @Test
     fun unboundPreRunObservationsNeverCreateInventedTasks() {
         val seen = mutableListOf<String>()
         val manager = UnifiedRecoveryTransactionManager({ 0L }, seen::add)

@@ -1992,8 +1992,12 @@ class AiReplyObservationRuntime(
         taskId?.takeIf { it == PRIVATE_MESSAGES_TASK_ID || it == RECEIVED_GREETINGS_TASK_ID }
             ?.let(sharedPageObservationCoordinator::primaryRecoveryAdapterForTask)
 
-    private fun activateRecoveryIdentity(taskId: String, reason: String, checkpointId: String) {
-        val routeId = recoveryRouteIdForTask(taskId) ?: "unknown-route"
+    private fun activateRecoveryIdentity(
+        taskId: String,
+        reason: String,
+        checkpointId: String,
+        routeId: String = recoveryRouteIdForTask(taskId) ?: "unknown-route"
+    ) {
         val generation = currentRunGeneration().coerceAtLeast(0L)
         val observationGeneration = pageReadCoordinator.currentObservationGeneration()
         recoveryContext.request(
@@ -2098,27 +2102,15 @@ class AiReplyObservationRuntime(
     private fun requestSendConfirmationRecovery(reason: String): Boolean {
         if (recoveryContext.pending || !sessionRunStarted || receivedGreetingsTaskActive) return false
         chatDetailRecoveryRoute.saveCheckpoint()
-        val generation = currentRunGeneration().coerceAtLeast(0L)
-        val observationGeneration = pageReadCoordinator.currentObservationGeneration()
-        recoveryContext.request(
+        // Use the same task/route/run/checkpoint identity authority as list UNKNOWN.
+        // Chat-detail recovery still performs only read-only send confirmation.
+        activateRecoveryIdentity(
             taskId = PRIVATE_MESSAGES_TASK_ID,
-            recoveryReason = reason,
-            routeId = chatDetailRecoveryRoute.routeId,
-            generation = generation,
-            recoveryCheckpointId = "$PRIVATE_MESSAGES_TASK_ID:$reason",
-            pageObservationGeneration = observationGeneration
+            reason = reason,
+            checkpointId = "$PRIVATE_MESSAGES_TASK_ID:$reason",
+            routeId = chatDetailRecoveryRoute.routeId
         )
         recoveryContext.markCheckpointSaved()
-        recoveryTransaction.activate(
-            RecoveryEventIdentity(
-                taskId = PRIVATE_MESSAGES_TASK_ID,
-                routeId = chatDetailRecoveryRoute.routeId,
-                runGeneration = generation,
-                checkpointId = "$PRIVATE_MESSAGES_TASK_ID:$reason",
-                observationGeneration = observationGeneration,
-                unknownReason = reason
-            )
-        )
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
         recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
         sessionManagerState = SessionManagerState.PAUSED

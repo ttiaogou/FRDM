@@ -568,6 +568,7 @@ def inspect_project(root: Path) -> list[str]:
     issues.extend(unified_ui_write_authorization_violations(code_by_path))
     issues.extend(unified_recovery_adapter_registration_violations(code_by_path))
     issues.extend(unified_recovery_transaction_manager_violations(code_by_path))
+    issues.extend(legacy_architecture_bypass_violations(code_by_path))
 
     # 11) Final hard boundaries for the unified accessibility/recovery architecture.
     issues.extend(final_architecture_boundary_violations(code_by_path))
@@ -637,9 +638,9 @@ def final_architecture_boundary_violations(code_by_path: dict[str, str]) -> list
 
 
 
-# P0 authority baseline: these are the current production owners, not a claim
-# that P1-P6 routing has already been migrated to the final single-entry design.
-# A migration must explicitly revise this inventory and its regression tests.
+# P0 authority baseline retains an exact inventory of current production owners.
+# P7 removes the old event and recovery-routing bypasses while retaining isolated
+# per-task verification reducers; new construction counts stay exact and audited.
 P0_AUTHORITY_DECLARATIONS = {
     "UnifiedAccessibilityEntry": "core/src/main/kotlin/com/freedom/core/accessibility/api/UnifiedAccessibilityEntry.kt",
     "AndroidAccessibilityEventPipeline": "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt",
@@ -652,9 +653,9 @@ P0_AUTHORITY_DECLARATIONS = {
     "RecoveryCheckpointVerificationCoordinator": "business/src/main/kotlin/com/freedom/features/recovery/RecoveryCheckpointVerificationCoordinator.kt",
 }
 
-# Exact counts prevent a new authority being silently created in an already-approved
-# owner file. Existing per-route recovery components are deliberately grandfathered
-# until P5/P6; they are not evidence of a single runtime recovery instance.
+# Exact counts prevent a new authority being silently created in an approved owner.
+# The second DynamicPageRecovery reducer is the independently verified checkpoint
+# lane behind the P6 process manager, not another UI-operation authorization path.
 P0_AUTHORITY_CONSTRUCTIONS = {
     "AndroidAccessibilityEventPipeline": {
         "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": 1,
@@ -670,12 +671,12 @@ P0_AUTHORITY_CONSTRUCTIONS = {
     },
     "UnifiedRecoveryTransactionStateMachine": {
         "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt": 1,
-        "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 1,
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 2,
         "business/src/main/kotlin/com/freedom/features/aireply/CheckpointVerificationWiring.kt": 1,
     },
     "RecoveryEventDispatcher": {
         "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt": 1,
-        "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 1,
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 2,
         "business/src/main/kotlin/com/freedom/features/aireply/CheckpointVerificationWiring.kt": 1,
     },
     "RecoveryScheduler": {
@@ -978,7 +979,8 @@ def unified_recovery_adapter_registration_violations(code_by_path: dict[str, str
             r"\brecoveryAdapterRegistry\s*=\s*PageRecoveryAdapterRegistry\s*\(\s*\)",
             r"\bfun\s+registerRecoveryAdapter\s*\(\s*adapter\s*:\s*PageRecoveryRouteAdapter\s*\)",
             r"\brecoveryAdapterRegistry\.register\s*\(\s*adapter\s*\)",
-            r"\bfingerprintRouter\.register\s*\(\s*adapter\.asRoute\s*\(\s*\)\s*\)",
+            r"\bcheck\s*\(\s*adapter\.routeId\s+!in\s+fingerprintRouter\.registeredRouteIds\s*\(\s*\)\s*\)",
+            r"\bcheck\s*\(\s*recoveryAdapterRegistry\.adapterForRoute\s*\(\s*route\.routeId\s*\)\s*==\s*null\s*\)",
             r"\bfun\s+matchRecoveryAdapter\s*\(",
             r"\brecoveryAdapterRegistry\.match\s*\(\s*fingerprint\s*,\s*allowedTaskIds\s*\)",
             r"\bfun\s+primaryRecoveryAdapterForTask\s*\(",
@@ -1138,6 +1140,105 @@ def unified_recovery_transaction_manager_violations(code_by_path: dict[str, str]
     return issues
 
 
+def legacy_architecture_bypass_violations(code_by_path: dict[str, str]) -> list[str]:
+    """P7: legacy event, route, and reducer paths cannot coexist with unified owners."""
+    issues: list[str] = []
+    pipeline_rel = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt"
+    root_rel = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+    coordinator_rel = "core/src/main/kotlin/com/freedom/core/runtime/PageObservationCoordinator.kt"
+    dispatcher_rel = "business/src/main/kotlin/com/freedom/features/recovery/RecoveryEventDispatcher.kt"
+    manager_rel = "business/src/main/kotlin/com/freedom/features/recovery/UnifiedRecoveryTransactionManager.kt"
+    browse_rel = "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt"
+    ai_rel = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+    pipeline = code_by_path.get(pipeline_rel, "")
+    coordinator = code_by_path.get(coordinator_rel, "")
+    dispatcher = code_by_path.get(dispatcher_rel, "")
+    manager = code_by_path.get(manager_rel, "")
+    browse = code_by_path.get(browse_rel, "")
+    ai = code_by_path.get(ai_rel, "")
+
+    required = {
+        pipeline_rel: (
+            r"\bprivate\s+val\s+unifiedAccessibilityEntry\s*:\s*UnifiedAccessibilityEntry\s*[,)]",
+            r"\bunifiedAccessibilityEntry\.accept\s*\(\s*UnifiedAccessibilityEvent\.GlobalTouch",
+            r"\bunifiedAccessibilityEntry\.accept\s*\(\s*UnifiedAccessibilityEvent\.TargetApplication",
+            r"\bunifiedAccessibilityEntry\.accept\s*\(\s*UnifiedAccessibilityEvent\.ActivityTransition",
+        ),
+        coordinator_rel: (
+            r"\brecoveryAdapterRegistry\.register\s*\(\s*adapter\s*\)",
+            r"\bcheck\s*\(\s*adapter\.routeId\s+!in\s+fingerprintRouter\.registeredRouteIds\s*\(\s*\)\s*\)",
+            r"\bcheck\s*\(\s*recoveryAdapterRegistry\.adapterForRoute\s*\(\s*route\.routeId\s*\)\s*==\s*null\s*\)",
+            r"\bfun\s+unregisterRecoveryAdapter\s*\(",
+        ),
+        dispatcher_rel: (
+            r"\bif\s*\(\s*sharedManager\s*!=\s*null\s*\)",
+            r"\bsharedManager\b",
+            r"\bmanager\.dispatch\s*\(\s*identity\s*,\s*event\s*,\s*transaction\.state\s*,\s*managerLaneId\s*\)",
+            r"\bfun\s+observeFingerprint\s*\(",
+        ),
+        manager_rel: (
+            r"\bnext\s*!=\s*RecoveryTransactionState\.ACTIVE",
+            r"\bfun\s+restartVerificationLane\s*\(",
+            r"\blaneId\s*==\s*PRIMARY_LANE",
+        ),
+        browse_rel: (
+            r"\bprivate\s+val\s+checkpointDispatcher\s*=\s*RecoveryEventDispatcher\s*\(",
+            r"\bmanagerLaneId\s*=\s*",
+            r"\btransaction\s*=\s*checkpointDispatcher\b",
+            r"\bdispatcher\.activate\s*\(\s*identity\s*\(",
+            r"\brecoveryObservationGeneration\b",
+            r"\brecoveryTransactionManager\?\.completeVerified\s*\(",
+            r"\brecoveryTransactionManager\?\.restartVerificationLane\s*\(",
+        ),
+        ai_rel: (
+            r"\bprivate\s+fun\s+activateRecoveryIdentity\s*\(",
+            r"\brouteId\s*:\s*String\s*=\s*recoveryRouteIdForTask\s*\(",
+            r"\brouteId\s*=\s*chatDetailRecoveryRoute\.routeId\b",
+        ),
+    }
+    for rel, expressions in required.items():
+        code = code_by_path.get(rel, "")
+        for pattern in expressions:
+            if not re.search(pattern, code):
+                issues.append(f"P7 bypass migration missing: {rel}: {pattern}")
+
+    # The platform pipeline must not expose its former direct business callbacks,
+    # even as nullable test fixtures. Tests now inject the unified gateway as well.
+    if re.search(r"\bdispatch(?:TargetApplicationEvent|GlobalTouchEvent|ActivityTransition)\b", pipeline):
+        issues.append(f"P7 legacy business callback remains in event pipeline: {pipeline_rel}")
+    if re.search(r"\bunifiedAccessibilityEntry\s*!=\s*null\b", pipeline):
+        issues.append(f"P7 nullable unified-entry fallback remains: {pipeline_rel}")
+    if re.search(r"\bdispatch(?:TargetApplicationEvent|GlobalTouchEvent|ActivityTransition)\s*=", code_by_path.get(root_rel, "")):
+        issues.append(f"P7 app root still injects direct business event callbacks: {root_rel}")
+
+    # Recovery adapters cannot be copied into the unscoped fingerprint router.
+    if re.search(r"\bfingerprintRouter\.register\s*\(\s*adapter\.asRoute\s*\(", coordinator):
+        issues.append(f"P7 duplicate recovery route registration remains: {coordinator_rel}")
+    if re.search(r"\brecoveryAdapterRegistry\.unregister\s*\(\s*route\.routeId\s*\)", coordinator):
+        issues.append(f"P7 raw route can evict a task-scoped adapter: {coordinator_rel}")
+
+    # All production unidentified events and fingerprint samples must be rejected
+    # or admitted via the process-owned transaction manager respectively.
+    if not re.search(r"\bif\s*\(\s*eventIdentity\s*==\s*null\s*\)[\s\S]{0,440}"
+                     r"\bif\s*\(\s*sharedManager\s*!=\s*null\s*\)[\s\S]{0,200}"
+                     r"\breturn\s+transaction\.state\b", dispatcher):
+        issues.append(f"P7 unbound recovery event can bypass manager: {dispatcher_rel}")
+    if re.search(r"\bfun\s+observeFingerprint\s*\([^)]*\)\s*:\s*RecoveryTransactionState\s*=\s*"
+                 r"transaction\.observeFingerprint\s*\(", dispatcher):
+        issues.append(f"P7 fingerprint observation bypasses manager: {dispatcher_rel}")
+    if re.search(r"\btransaction\s*=\s*dispatcher\b", browse):
+        issues.append(f"P7 browse checkpoint and UNKNOWN reuse one reducer lane: {browse_rel}")
+
+    send_block = re.search(
+        r"\bprivate\s+fun\s+requestSendConfirmationRecovery\s*\([^)]*\)[\s\S]*?"
+        r"(?=\bprivate\s+fun\s+pageIdentityChanged\s*\()", ai)
+    if send_block is None or re.search(
+        r"\bRecoveryEventIdentity\s*\(|\brecoveryContext\.request\s*\(", send_block.group(0)
+    ):
+        issues.append(f"P7 send confirmation still owns duplicate recovery identity logic: {ai_rel}")
+    return issues
+
+
 def unified_ui_write_authorization_violations(code_by_path: dict[str, str]) -> list[str]:
     """P4: every business-owned Android mutation must cross the exact lease gate."""
     issues: list[str] = []
@@ -1228,7 +1329,7 @@ def unified_business_event_entry_violations(code_by_path: dict[str, str]) -> lis
             r"\bUnifiedAccessibilityEvent\.NavigationObservation\b",
         )),
         pipeline_rel: (pipeline, (
-            r"\bprivate\s+val\s+unifiedAccessibilityEntry\s*:\s*UnifiedAccessibilityEntry\?",
+            r"\bprivate\s+val\s+unifiedAccessibilityEntry\s*:\s*UnifiedAccessibilityEntry\s*[,)]",
             r"\bunifiedAccessibilityEntry\.accept\s*\(\s*UnifiedAccessibilityEvent\.TargetApplication",
             r"\bunifiedAccessibilityEntry\.accept\s*\(\s*UnifiedAccessibilityEvent\.GlobalTouch",
             r"\bunifiedAccessibilityEntry\.accept\s*\(\s*UnifiedAccessibilityEvent\.ActivityTransition",
@@ -1568,6 +1669,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - P4 UI authorization: exact task/generation/mode gate owns every automated write outlet")
     print(" - P5 recovery adapters: shared task-scoped registry, common interface, no local route fallback")
     print(" - P6 recovery transaction: single process admission manager with isolated route verification lanes")
+    print(" - P7 bypass cleanup: mandatory event gateway, task-scoped recovery-only registry, managed fingerprint verification")
     print(" - Automatic recovery: legacy manual handoff forbidden; three checkpoint routes use shared verification")
     print(" - Recovery scheduler: bounded non-terminal backoff, touch reset, stale-callback and user-stop gates")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")

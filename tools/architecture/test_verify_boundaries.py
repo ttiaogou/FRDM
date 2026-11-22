@@ -532,6 +532,76 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         self.assertTrue(any("P6" in issue
                             for issue in guard.unified_recovery_transaction_manager_violations(changed)))
 
+    def test_p7_legacy_bypass_guards_accept_migrated_production_graph(self):
+        self.assertEqual(guard.legacy_architecture_bypass_violations(self.recovery_code), [])
+
+    def test_p7_rejects_old_business_callbacks_and_nullable_event_fallback(self):
+        pipeline = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt"
+        changed = dict(self.recovery_code)
+        changed[pipeline] += "\nval dispatchTargetApplicationEvent = {}\n"
+        self.assertTrue(any("legacy business callback" in issue
+                            for issue in guard.legacy_architecture_bypass_violations(changed)))
+        changed = dict(self.recovery_code)
+        changed[pipeline] = changed[pipeline].replace(
+            "private val unifiedAccessibilityEntry: UnifiedAccessibilityEntry,",
+            "private val unifiedAccessibilityEntry: UnifiedAccessibilityEntry? = null,"
+        )
+        self.assertTrue(any("P7 bypass migration missing" in issue
+                            for issue in guard.legacy_architecture_bypass_violations(changed)))
+        changed = dict(self.recovery_code)
+        changed[pipeline] += "\nif (unifiedAccessibilityEntry != null) fallback()\n"
+        self.assertTrue(any("nullable unified-entry fallback" in issue
+                            for issue in guard.legacy_architecture_bypass_violations(changed)))
+
+    def test_p7_rejects_double_recovery_route_registration_and_raw_eviction(self):
+        coordinator = "core/src/main/kotlin/com/freedom/core/runtime/PageObservationCoordinator.kt"
+        changed = dict(self.recovery_code)
+        changed[coordinator] += "\nfingerprintRouter.register(adapter.asRoute())\n"
+        self.assertTrue(any("duplicate recovery route registration" in issue
+                            for issue in guard.legacy_architecture_bypass_violations(changed)))
+        changed = dict(self.recovery_code)
+        changed[coordinator] += "\nrecoveryAdapterRegistry.unregister(route.routeId)\n"
+        self.assertTrue(any("raw route can evict" in issue
+                            for issue in guard.legacy_architecture_bypass_violations(changed)))
+
+    def test_p7_rejects_unidentified_recovery_dispatch_and_fingerprint_bypass(self):
+        dispatcher = "business/src/main/kotlin/com/freedom/features/recovery/RecoveryEventDispatcher.kt"
+        changed = dict(self.recovery_code)
+        changed[dispatcher] = changed[dispatcher].replace(
+            "if (sharedManager != null) {",
+            "if (sharedManager == null) {",
+            1
+        )
+        self.assertTrue(any("unbound recovery event can bypass" in issue
+                            for issue in guard.legacy_architecture_bypass_violations(changed)))
+        changed = dict(self.recovery_code)
+        changed[dispatcher] = changed[dispatcher].replace(
+            "manager.dispatch(identity, event, transaction.state, managerLaneId)",
+            "transaction.observeFingerprint(fingerprint)"
+        )
+        self.assertTrue(any("P7 bypass migration missing" in issue
+                            for issue in guard.legacy_architecture_bypass_violations(changed)))
+
+    def test_p7_rejects_reused_browse_verifier_lane_and_duplicate_send_identity(self):
+        browse = "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt"
+        changed = dict(self.recovery_code)
+        changed[browse] = changed[browse].replace(
+            "transaction = checkpointDispatcher",
+            "transaction = dispatcher"
+        )
+        self.assertTrue(any("checkpoint and UNKNOWN reuse one reducer lane" in issue
+                            for issue in guard.legacy_architecture_bypass_violations(changed)))
+        ai = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        changed = dict(self.recovery_code)
+        idx = changed[ai].index("private fun requestSendConfirmationRecovery")
+        changed[ai] = changed[ai][:idx] + changed[ai][idx:].replace(
+            "chatDetailRecoveryRoute.saveCheckpoint()",
+            "chatDetailRecoveryRoute.saveCheckpoint()\nval duplicate = RecoveryEventIdentity(",
+            1
+        )
+        self.assertTrue(any("duplicate recovery identity logic" in issue
+                            for issue in guard.legacy_architecture_bypass_violations(changed)))
+
     def test_p0_authority_guard_accepts_current_production_graph(self):
         self.assertEqual(guard.architecture_authority_violations(self.recovery_code), [])
 
