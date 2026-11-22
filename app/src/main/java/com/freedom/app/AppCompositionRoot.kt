@@ -57,6 +57,8 @@ import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
+import com.freedom.core.runtime.UiWriteAuthorization
+import com.freedom.core.runtime.UiWriteScope
 import com.freedom.core.runtime.TargetAppReadinessController
 import com.freedom.data.MonitorStoreRepository
 import com.freedom.data.MonitorStoreSnapshotRepository
@@ -310,6 +312,15 @@ internal class AccessibilityServiceDependencies internal constructor(
             onLog = addLog
         )
     }
+    val uiWriteAuthorization: UiWriteAuthorization by lazy(LazyThreadSafetyMode.NONE) {
+        UiWriteAuthorization(
+            taskCoordinator = root.taskCoordinator,
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+            activeRunMode = {
+                if (monitorRepository.isRunRequested()) runSessionCoordinator.activeMode() else null
+            }
+        )
+    }
     val accessibilityGateway: AndroidAccessibilityGateway by lazy(LazyThreadSafetyMode.NONE) {
         AndroidAccessibilityGateway(
             service = service,
@@ -323,9 +334,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             targetAppReadinessController = targetAppReadinessController,
             inputOriginClassifier = inputOriginClassifier,
-            isUiOperationOwned = {
-                root.taskCoordinator.activeTaskId() != null
-            },
+            uiWriteAuthorization = uiWriteAuthorization,
             onReadinessDiagnostic = addLog,
             recoveredActivityBindingCurrent = windowContextTracker::recoveredActivityMatches,
             onRecoveredActivityBindingMismatch = {
@@ -396,7 +405,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                 )
             },
             isAiReplyUiOperationOwned = {
-                root.taskCoordinator.activeTaskId() == "AI_REPLY_PRIVATE_MESSAGES"
+                uiWriteAuthorization.permits(UiWriteScope.AI_COMPOSER)
             }
         )
     }

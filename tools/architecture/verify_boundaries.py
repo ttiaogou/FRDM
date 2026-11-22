@@ -565,6 +565,7 @@ def inspect_project(root: Path) -> list[str]:
     issues.extend(architecture_authority_violations(code_by_path))
     issues.extend(unified_page_observation_violations(code_by_path))
     issues.extend(unified_task_lifecycle_violations(code_by_path))
+    issues.extend(unified_ui_write_authorization_violations(code_by_path))
 
     # 11) Final hard boundaries for the unified accessibility/recovery architecture.
     issues.extend(final_architecture_boundary_violations(code_by_path))
@@ -905,8 +906,8 @@ def unified_task_lifecycle_violations(code_by_path: dict[str, str]) -> list[str]
                 issues.append(f"P3 task lifecycle unified wiring missing: {rel}: {pattern}")
 
     root = code_by_path.get(root_rel, "")
-    if len(re.findall(r"\btaskCoordinator\s*=\s*root\.taskCoordinator\b", root)) != 4:
-        issues.append("P3 all four production consumers (gesture, AI, Browse, session) must share root.taskCoordinator")
+    if len(re.findall(r"\btaskCoordinator\s*=\s*root\.taskCoordinator\b", root)) != 5:
+        issues.append("P3/P4 all five production consumers (gesture, AI, Browse, session, authorization) must share root.taskCoordinator")
 
     production = {
         rel: code for rel, code in code_by_path.items()
@@ -937,6 +938,75 @@ def unified_task_lifecycle_violations(code_by_path: dict[str, str]) -> list[str]
     session_creators = {rel: count for rel, count in session_creators.items() if count}
     if session_creators != {root_rel: 1}:
         issues.append(f"P3 session coordinator construction drift: {session_creators}")
+    return issues
+
+
+def unified_ui_write_authorization_violations(code_by_path: dict[str, str]) -> list[str]:
+    """P4: every business-owned Android mutation must cross the exact lease gate."""
+    issues: list[str] = []
+    root_rel = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+    gateway_rel = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt"
+    core_rel = "core/src/main/kotlin/com/freedom/core/runtime/UiWriteAuthorization.kt"
+    root = code_by_path.get(root_rel, "")
+    gateway = code_by_path.get(gateway_rel, "")
+    core = code_by_path.get(core_rel, "")
+    required = {
+        root_rel: (
+            r"\bval\s+uiWriteAuthorization\s*:\s*UiWriteAuthorization\s+by\s+lazy\b",
+            r"\bUiWriteAuthorization\s*\(\s*taskCoordinator\s*=\s*root\.taskCoordinator\b",
+            r"\buiWriteAuthorization\s*=\s*uiWriteAuthorization\b",
+            r"\buiWriteAuthorization\.permits\s*\(\s*UiWriteScope\.AI_COMPOSER\s*\)",
+        ),
+        gateway_rel: (
+            r"\bprivate\s+val\s+uiWriteAuthorization\s*:\s*UiWriteAuthorization\b",
+            r"\buiWriteAuthorization\.permits\s*\(\s*UiWriteScope\.BROWSE_NODE_ACTION\s*\)",
+            r"\buiWriteAuthorization\.withAuthorizedWrite\s*\(\s*UiWriteScope\.BROWSE_NODE_ACTION\s*\)",
+            r"\buiWriteAuthorization\.permits\s*\(\s*UiWriteScope\.VERIFIED_AI_BACK\s*\)",
+            r"\buiWriteAuthorization\.withAuthorizedWrite\s*\(\s*UiWriteScope\.VERIFIED_AI_BACK\s*\)",
+            r"\buiWriteAuthorization\.permits\s*\(\s*UiWriteScope\.GLOBAL_NAVIGATION\s*\)",
+            r"\buiWriteAuthorization\.withAuthorizedWrite\s*\(\s*UiWriteScope\.GLOBAL_NAVIGATION\s*,\s*submit\s*\)",
+            r"\buiWriteAuthorization\.withAuthorizedWrite\s*\(\s*UiWriteScope\.AUTONOMOUS_GESTURE\s*,\s*submit\s*\)",
+            r"\buiWriteAuthorization\.withAuthorizedWrite\s*\(\s*UiWriteScope\.AI_COMPOSER\s*\)",
+            r"\bprivate\s+fun\s+authorizedGestureDispatch\s*\(",
+            r"\bcurrentActiveWindowPackage\s*\(\s*\)\s*==\s*service\.packageName\b",
+        ),
+        core_rel: (
+            r"\bclass\s+UiWriteAuthorization\s*\(",
+            r"\bprivate\s+val\s+taskCoordinator\s*:\s*TaskCoordinator\b",
+            r"\bprivate\s+val\s+currentRunGeneration\s*:\s*\(\)\s*->\s*Long\b",
+            r"\bprivate\s+val\s+activeRunMode\s*:\s*\(\)\s*->\s*RunMode\?",
+            r"\blease\.runGeneration\s*!=\s*runGeneration\b",
+            r"\btaskCoordinator\.withCurrentLease\s*\(\s*lease\s*\)",
+            r"\bUiWriteScope\.AI_COMPOSER\s*->\s*privateMessages\b",
+            r"\bUiWriteScope\.BROWSE_NODE_ACTION\s*->\s*browse\b",
+        ),
+    }
+    for rel, patterns in required.items():
+        code = code_by_path.get(rel, "")
+        for pattern in patterns:
+            if not re.search(pattern, code):
+                issues.append(f"P4 UI mutation authorization missing: {rel}: {pattern}")
+    if "isUiOperationOwned" in gateway:
+        issues.append("P4 gateway still uses broad any-task authorization")
+    if re.search(r"\broot\.taskCoordinator\.activeTaskId\s*\(\s*\)\s*(!=|==)", root):
+        issues.append("P4 composition still authorizes UI writes by any active task ID")
+    if re.search(r"\bperformCurrentInputAction\s*\([^)]*\)\s*:\s*Boolean\s*=\s*when\b", gateway):
+        issues.append("P4 current input focus/set-text bypasses the exact lease gate")
+    if re.search(
+        r"\boverride\s+fun\s+dispatchGesture\s*\([^)]*\)[\s\S]*?"
+        r"=\s*(?:gestureDispatcher\.dispatchGesture|if\s*\(\s*isUiOperationOwned\s*\()",
+        gateway
+    ):
+        issues.append("P4 gesture dispatch bypasses the final authorization outlet")
+    # Explicit user calibration and manual-review lock-screen safety are not autonomous
+    # business actions. The only permitted direct Android platform mutation owners follow.
+    for rel, code in code_by_path.items():
+        if not rel.startswith("app/src/main/") or not rel.endswith(".kt"):
+            continue
+        if rel != gateway_rel and re.search(
+            r"\bservice\.performGlobalAction\s*\(|\b(?:node|target)\.performAction\s*\(", code
+        ):
+            issues.append(f"P4 direct Android node/global mutation bypass: {rel}")
     return issues
 
 
@@ -1298,6 +1368,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - P1 accessibility: target/touch/Activity/navigation notifications use one business entry")
     print(" - P2 observation: one injected scheduler, mode-isolated channels, task decisions owned by runtimes")
     print(" - P3 task lifecycle: process run clock synchronously revokes shared task/UI leases")
+    print(" - P4 UI authorization: exact task/generation/mode gate owns every automated write outlet")
     print(" - Automatic recovery: legacy manual handoff forbidden; three checkpoint routes use shared verification")
     print(" - Recovery scheduler: bounded non-terminal backoff, touch reset, stale-callback and user-stop gates")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")

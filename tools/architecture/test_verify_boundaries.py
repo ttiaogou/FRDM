@@ -335,7 +335,7 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
             "taskCoordinator = null",
             1
         )
-        self.assertTrue(any("all four production consumers" in item
+        self.assertTrue(any("all five production consumers" in item
                             for item in guard.unified_task_lifecycle_violations(changed)))
 
     def test_p3_rejects_stale_active_task_visibility_and_extra_execution_owner(self):
@@ -361,6 +361,57 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         changed[extra] = "fun bypass() = coordinator.advanceRunGeneration(42L)\n"
         self.assertTrue(any("generation must advance only" in item
                             for item in guard.unified_task_lifecycle_violations(changed)))
+
+    def test_p4_authorization_accepts_current_production_outlets(self):
+        self.assertEqual(guard.unified_ui_write_authorization_violations(self.recovery_code), [])
+
+    def test_p4_rejects_broad_any_task_gateway_checks(self):
+        changed = dict(self.recovery_code)
+        gateway = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt"
+        changed[gateway] += "\nval old = isUiOperationOwned()\n"
+        self.assertTrue(any("broad any-task" in x
+                            for x in guard.unified_ui_write_authorization_violations(changed)))
+
+    def test_p4_rejects_unprotected_composer_semantic_write(self):
+        changed = dict(self.recovery_code)
+        gateway = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt"
+        changed[gateway] = changed[gateway].replace(
+            "): Boolean = uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.AI_COMPOSER) {",
+            "): Boolean = when (action) {"
+        )
+        self.assertTrue(any("P4 UI mutation authorization missing" in x or "input focus/set-text bypasses" in x
+                            for x in guard.unified_ui_write_authorization_violations(changed)))
+
+    def test_p4_rejects_ungated_global_action_and_browse_input(self):
+        changed = dict(self.recovery_code)
+        gateway = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt"
+        changed[gateway] = changed[gateway].replace(
+            "uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.GLOBAL_NAVIGATION, submit)",
+            "submit()"
+        )
+        changed[gateway] = changed[gateway].replace(
+            "uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.BROWSE_NODE_ACTION)",
+            "run"
+        )
+        self.assertTrue(any("P4 UI mutation authorization missing" in x
+                            for x in guard.unified_ui_write_authorization_violations(changed)))
+
+    def test_p4_rejects_unapproved_platform_node_action_owner(self):
+        changed = dict(self.recovery_code)
+        changed["app/src/main/java/com/freedom/adapters/social/momo/Unsafe.kt"] = (
+            "fun write(node: AccessibilityNodeInfo) = node.performAction(16)\n"
+        )
+        self.assertTrue(any("direct Android node/global mutation bypass" in x
+                            for x in guard.unified_ui_write_authorization_violations(changed)))
+
+    def test_p4_rejects_bypassed_shared_authorization_in_composition_root(self):
+        changed = dict(self.recovery_code)
+        root = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        changed[root] = changed[root].replace(
+            "uiWriteAuthorization = uiWriteAuthorization",
+            "isUiOperationOwned = { root.taskCoordinator.activeTaskId() != null }"
+        )
+        self.assertTrue(any("P4" in x for x in guard.unified_ui_write_authorization_violations(changed)))
 
     def test_p0_authority_guard_accepts_current_production_graph(self):
         self.assertEqual(guard.architecture_authority_violations(self.recovery_code), [])
