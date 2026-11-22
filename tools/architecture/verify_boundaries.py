@@ -869,7 +869,7 @@ def unified_task_lifecycle_violations(code_by_path: dict[str, str]) -> list[str]
         ),
         session_rel: (
             r"\bprivate\s+val\s+taskCoordinator\s*:\s*TaskCoordinator\?\s*=\s*null\b",
-            r"\btaskCoordinator\?\.advanceRunGeneration\s*\(\s*generationClock\.advance\(\)\s*\)",
+            r"\bval\s+newGeneration\s*=\s*generationClock\.advance\(\)\s*taskCoordinator\?\.advanceRunGeneration\s*\(\s*newGeneration\s*\)",
         ),
         task_rel: (
             r"\bfun\s+advanceRunGeneration\s*\(\s*runGeneration\s*:\s*Long\s*\)",

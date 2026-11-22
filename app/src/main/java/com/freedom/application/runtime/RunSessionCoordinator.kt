@@ -45,7 +45,8 @@ class RunSessionCoordinator(
     private fun advanceRunGeneration() {
         // Invalidate old task/UI leases before stopping or starting business runtimes.
         // The process clock is authoritative across recreated service instances.
-        taskCoordinator?.advanceRunGeneration(generationClock.advance())
+        val newGeneration = generationClock.advance()
+        taskCoordinator?.advanceRunGeneration(newGeneration)
     }
 
     /** Clear persisted intent and notify only the runtime that owned the active session. */

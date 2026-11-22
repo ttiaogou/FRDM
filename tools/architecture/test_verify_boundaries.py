@@ -321,8 +321,8 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         changed = dict(self.recovery_code)
         session = "app/src/main/java/com/freedom/application/runtime/RunSessionCoordinator.kt"
         changed[session] = changed[session].replace(
-            "taskCoordinator?.advanceRunGeneration(generationClock.advance())",
-            "generationClock.advance()"
+            "taskCoordinator?.advanceRunGeneration(newGeneration)",
+            "Unit"
         )
         self.assertTrue(any("P3 task lifecycle unified wiring missing" in item
                             for item in guard.unified_task_lifecycle_violations(changed)))
