@@ -3629,6 +3629,23 @@ internal class MomoSocialAdapter(
         return accepted
     }
 
+    override fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean {
+        if (snapshot.packageName != targetPackage ||
+            snapshot.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
+            snapshot.pageKind != ChatPageKind.NON_CHAT ||
+            sayHiSelectedGreeting == null ||
+            sayHiReadOnlyStage !in setOf(
+                SayHiReadOnlyStage.AVATAR_TAP_PENDING,
+                SayHiReadOnlyStage.WAITING_PROFILE,
+                SayHiReadOnlyStage.PROFILE_SCROLL_PENDING,
+                SayHiReadOnlyStage.PROFILE_BACK_PENDING
+            )
+        ) return false
+        // Existing five-anchor profile proof plus live-window validity. Do not infer the
+        // destination from the Activity event or an already-consumed gesture callback.
+        return isSayHiProfileSurfacePresent()
+    }
+
     override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus {
         val currentActivity = activityClass()
         if (receivedGreetingsEntrySearchActive || receivedGreetingsEntrySearchGestureInFlight) {

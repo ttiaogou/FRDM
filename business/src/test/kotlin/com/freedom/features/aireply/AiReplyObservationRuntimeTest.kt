@@ -590,6 +590,131 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("收到的招呼任务[COMPLETE_STAY_ON_PAGE]") })
     }
 
+
+    /**
+     * Reproduces the device trace: a manually confirmed greetings list is NON_CHAT,
+     * the avatar tap opens a profile, then dialog.h advances the observed page generation.
+     * The generic source ticket no longer matches; the exact adapter proof must preserve
+     * the already-owned task so its existing safe profile BACK stage can run.
+     */
+    @Test
+    fun verifiedGreetingAvatarProfileStaysInOwnedWorkflowAcrossDialogGeneration() {
+        val result = runGreetingAvatarProfileRouteCase(
+            profileVerified = true,
+            stage = ReceivedGreetingsTraversalStatus.NAVIGATING
+        )
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", result.owner)
+        assertTrue(result.idleStepsAfterProfile > result.idleStepsBeforeProfile)
+        assertTrue(result.logs.any { it.contains("IDENTITY_PROFILE_VERIFIED") })
+        assertFalse(result.logs.any { it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") })
+    }
+
+    @Test
+    fun unverifiedOrNonNavigatingGreetingProfileMustKeepRouteRecoveryGate() {
+        listOf(
+            false to ReceivedGreetingsTraversalStatus.NAVIGATING,
+            true to ReceivedGreetingsTraversalStatus.SCANNING
+        ).forEach { (profileVerified, stage) ->
+            val result = runGreetingAvatarProfileRouteCase(profileVerified, stage)
+            assertEquals("AI_REPLY_RECEIVED_GREETINGS", result.owner)
+            assertEquals(result.idleStepsBeforeProfile, result.idleStepsAfterProfile)
+            assertFalse(result.logs.any { it.contains("IDENTITY_PROFILE_VERIFIED") })
+            assertTrue(result.logs.any {
+                it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") && it.contains("PAGE_ROUTE_CHANGED")
+            })
+        }
+    }
+
+    private data class GreetingProfileRouteCaseResult(
+        val owner: String?,
+        val idleStepsBeforeProfile: Int,
+        val idleStepsAfterProfile: Int,
+        val logs: List<String>
+    )
+
+    private fun runGreetingAvatarProfileRouteCase(
+        profileVerified: Boolean,
+        stage: ReceivedGreetingsTraversalStatus
+    ): GreetingProfileRouteCaseResult {
+        val scheduler = FakeScheduler()
+        val listActivity = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
+        val profileActivity = "com.immomo.momo.personalprofile.presentation.activity.PersonalProfileActivityK"
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = listActivity,
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 32,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                windowGeneration = 12L
+            )
+            manualGreetingsArrivalStatuses = listOf(
+                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
+                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+            )
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        }
+        val logs = mutableListOf<String>()
+        val owner = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = owner,
+            currentRunGeneration = { 5L }
+        )
+        runtime.scheduleInitialObservation()
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", owner.activeTaskId())
+        val idleBefore = port.receivedGreetingsIdleSteps
+
+        port.receivedGreetingsIdentityProfileProof = profileVerified
+        port.receivedGreetingsTraversalStatusValue = stage
+        port.page = port.page.copy(
+            activityClass = profileActivity,
+            pageKind = ChatPageKind.NON_CHAT,
+            scannedNodeCount = 170,
+            windowGeneration = 14L
+        )
+        runtime.onSelfNavigationAttached(
+            SelfNavigationTransition(
+                actionId = "verified-avatar-gesture",
+                sourcePageGeneration = 12L,
+                targetActivityClass = profileActivity,
+                targetPageGeneration = 13L,
+                targetWindowId = 1113,
+                transitionAtUptimeMs = 1_000L
+            )
+        )
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        return GreetingProfileRouteCaseResult(
+            owner = owner.activeTaskId(),
+            idleStepsBeforeProfile = idleBefore,
+            idleStepsAfterProfile = port.receivedGreetingsIdleSteps,
+            logs = logs
+        )
+    }
+
     @Test
     fun manuallyOpenedReceivedGreetingsListCanStartWithoutLegacyMessageTabGuard() {
         val scheduler = FakeScheduler()
@@ -4510,6 +4635,7 @@ class AiReplyObservationRuntimeTest {
         var receivedGreetingsPriorityReturns: Int = 0
         var receivedGreetingsTraversalStatusValue: ReceivedGreetingsTraversalStatus =
             ReceivedGreetingsTraversalStatus.UNKNOWN
+        var receivedGreetingsIdentityProfileProof = false
         var receivedGreetingsCheckpointFingerprint: String? = null
         var receivedGreetingsRecoverySyncAccepted: Boolean = false
         var pageAfterReceivedGreetingsReturn: ChatPageSnapshot? = null
@@ -4602,6 +4728,11 @@ class AiReplyObservationRuntimeTest {
         }
         override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus =
             receivedGreetingsTraversalStatusValue
+        override fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean =
+            receivedGreetingsIdentityProfileProof &&
+                snapshot.packageName == "com.immomo.momo" &&
+                snapshot.activityClass == "com.immomo.momo.personalprofile.presentation.activity.PersonalProfileActivityK" &&
+                snapshot.pageKind == ChatPageKind.NON_CHAT
         override fun receivedGreetingsRecoveryFingerprint(): String? =
             receivedGreetingsCheckpointFingerprint
         override fun synchronizeReceivedGreetingsRecoveryConfirmation(): Boolean =

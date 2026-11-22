@@ -631,6 +631,16 @@ interface ChatPagePort {
     fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus =
         ReceivedGreetingsTraversalStatus.UNKNOWN
 
+    /**
+     * Read-only proof that the *current* page is the identity profile belonging to an
+     * in-progress received-greetings avatar transaction. False for overlays, unrelated
+     * pages, stale windows and adapters without this exact structural evidence.
+     *
+     * This is an intermediate business-page check, NOT a recovery-route fingerprint or
+     * permission to navigate/back; the adapter's existing gesture safety gate still applies.
+     */
+    fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean = false
+
     /** Display name captured from the exact unread greeting row currently being inspected. */
     fun receivedGreetingsCurrentDisplayName(): String? = null
 

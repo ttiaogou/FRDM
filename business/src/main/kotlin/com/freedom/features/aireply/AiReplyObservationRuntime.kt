@@ -1009,14 +1009,35 @@ class AiReplyObservationRuntime(
             inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             currentSessionKey != null &&
             currentSessionWindowKey == windowSessionKey(inspection)
-        // The received-greetings adapter legitimately traverses from its confirmed list into a
-        // profile card (and then back to the verified list). That intermediate NON_CHAT page is
-        // part of the same task workflow; it must not be converted into a generic route-recovery
-        // request merely because it has no list fingerprint yet.
+        // The received-greetings list is deliberately exposed as NON_CHAT, not CHAT_LIST.
+        // A live avatar identity profile is an adapter-owned subpage, even when a transient
+        // dialog window advances the page generation and the generic navigation receipt
+        // cannot be matched to this later observation. Never accept an arbitrary NON_CHAT:
+        // the active task lease, NAVIGATING stage, exact target package and a fresh,
+        // adapter-verified profile structure must all agree. This neither grants a new
+        // UI lease nor bypasses the adapter's independent profile/BACK safety checks.
         val receivedGreetingsWorkflowTransition = activeTaskId == RECEIVED_GREETINGS_TASK_ID &&
             receivedGreetingsTaskActive &&
-            previous?.pageKind == ChatPageKind.CHAT_LIST &&
-            inspection.pageKind == ChatPageKind.NON_CHAT
+            ownsTask(RECEIVED_GREETINGS_TASK_ID) &&
+            previous != null && previous.packageName == targetPackage() &&
+            inspection.packageName == targetPackage() &&
+            inspection.pageKind == ChatPageKind.NON_CHAT &&
+            receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING &&
+            runCatching {
+                chatPagePort.isReceivedGreetingsIdentityProfileNavigationActive(inspection)
+            }.getOrDefault(false)
+        if (receivedGreetingsWorkflowTransition && previous != null && pageIdentityChanged(previous, inspection)) {
+            // A source ticket may be valid but unmatchable after a dialog.h window change.
+            // Discard only a ticket for this *independently verified* destination; it is
+            // not evidence for another page or an authorization to execute BACK.
+            val attachedToProfile = pendingNavigationSourceResult?.targetActivityClass == inspection.activityClass
+            if (attachedToProfile) pendingNavigationSourceResult = null
+            onLog(
+                "收到招呼业务导航[IDENTITY_PROFILE_VERIFIED]：原任务与UI操作权有效；" +
+                    "独立资料页结构已确认；导航来源关联=$attachedToProfile；" +
+                    "继续适配器原有资料采集和安全BACK流程"
+            )
+        }
         val shouldCreateRouteRecovery = sessionRunStarted && activeTaskId != null &&
             !recoveryContext.pending && selfInitiatedTransition == null &&
             !openingPrivateSessionDetail && !activePrivateChatDetail && !receivedGreetingsWorkflowTransition &&
