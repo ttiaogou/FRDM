@@ -9,6 +9,7 @@ internal class MessageListRecoveryRouteAdapter(
     private val persist: () -> Unit
 ) : PageRecoveryRouteAdapter {
     override val routeId: String = "AI_REPLY_PRIVATE_MESSAGES"
+    override val taskId: String = PrivateMessagesTaskController.TASK_ID
 
     override fun matches(fingerprint: PageFingerprint): Boolean =
         fingerprint.semanticPage == ChatPageKind.CHAT_LIST.name &&

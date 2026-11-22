@@ -15,13 +15,47 @@ class PageObservationCoordinator(
 ) {
     private val channels = LinkedHashMap<String, PageObservationSubscription>()
     private val fingerprintRouter = PageFingerprintRouter()
+    private val recoveryAdapterRegistry = PageRecoveryAdapterRegistry()
 
-    /** Registers or replaces a destination route used by all business observers. */
+    /**
+     * Shared production registration for all feature-owned recovery adapters.
+     * A replacement is atomic with the existing read-only fingerprint route.
+     */
     @Synchronized
-    fun registerFingerprintRoute(route: PageFingerprintRoute) = fingerprintRouter.register(route)
+    fun registerRecoveryAdapter(adapter: PageRecoveryRouteAdapter) {
+        recoveryAdapterRegistry.register(adapter)
+        fingerprintRouter.register(adapter.asRoute())
+    }
 
     @Synchronized
-    fun unregisterFingerprintRoute(routeId: String) = fingerprintRouter.unregister(routeId)
+    fun recoveryAdapterForRoute(routeId: String): PageRecoveryRouteAdapter? =
+        recoveryAdapterRegistry.adapterForRoute(routeId)
+
+    @Synchronized
+    fun primaryRecoveryAdapterForTask(taskId: String): PageRecoveryRouteAdapter? =
+        recoveryAdapterRegistry.primaryForTask(taskId)
+
+    @Synchronized
+    fun matchRecoveryAdapter(
+        fingerprint: PageFingerprint,
+        allowedTaskIds: Set<String>
+    ): PageRecoveryRouteAdapter? = recoveryAdapterRegistry.match(fingerprint, allowedTaskIds)
+
+    @Synchronized
+    fun registeredRecoveryAdapterIds(): Set<String> = recoveryAdapterRegistry.registeredRouteIds()
+
+    /** Legacy raw fingerprint registration is retained for observation-only routes and tests. */
+    @Synchronized
+    fun registerFingerprintRoute(route: PageFingerprintRoute) {
+        recoveryAdapterRegistry.unregister(route.routeId)
+        fingerprintRouter.register(route)
+    }
+
+    @Synchronized
+    fun unregisterFingerprintRoute(routeId: String) {
+        recoveryAdapterRegistry.unregister(routeId)
+        fingerprintRouter.unregister(routeId)
+    }
 
     /** Matches a fresh adapter fingerprint without granting ownership or performing UI actions. */
     fun matchFingerprint(fingerprint: PageFingerprint): String? = fingerprintRouter.match(fingerprint)

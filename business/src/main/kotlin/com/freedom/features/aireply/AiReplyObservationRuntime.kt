@@ -371,9 +371,9 @@ class AiReplyObservationRuntime(
         }
     }
     init {
-        sharedPageObservationCoordinator.registerFingerprintRoute(messageListRecoveryRoute.asRoute())
-        sharedPageObservationCoordinator.registerFingerprintRoute(receivedGreetingsRecoveryRoute.asRoute())
-        sharedPageObservationCoordinator.registerFingerprintRoute(chatDetailRecoveryRoute.asRoute())
+        sharedPageObservationCoordinator.registerRecoveryAdapter(messageListRecoveryRoute)
+        sharedPageObservationCoordinator.registerRecoveryAdapter(receivedGreetingsRecoveryRoute)
+        sharedPageObservationCoordinator.registerRecoveryAdapter(chatDetailRecoveryRoute)
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             messageListCheckpointRestored = true
@@ -935,9 +935,9 @@ class AiReplyObservationRuntime(
             }.getOrNull()
         )
         val matchedRouteId = if (pageFingerprint.packageName == targetPackage()) {
-            sharedPageObservationCoordinator.matchFingerprint(pageFingerprint)
-                ?: listOf(messageListRecoveryRoute, receivedGreetingsRecoveryRoute, chatDetailRecoveryRoute)
-                    .firstOrNull { it.matches(pageFingerprint) }?.routeId
+            sharedPageObservationCoordinator.matchRecoveryAdapter(
+                pageFingerprint, setOf(PRIVATE_MESSAGES_TASK_ID, RECEIVED_GREETINGS_TASK_ID)
+            )?.routeId
         } else null
 
         val activeTaskId = taskOwnership.activeTaskId()
@@ -1948,24 +1948,17 @@ class AiReplyObservationRuntime(
         else -> false
     }
 
-    private fun recoveryRouteIdForTask(taskId: String?): String? = when (taskId) {
-        PRIVATE_MESSAGES_TASK_ID -> messageListRecoveryRoute.routeId
-        RECEIVED_GREETINGS_TASK_ID -> receivedGreetingsRecoveryRoute.routeId
-        else -> null
-    }
+    private fun recoveryRouteIdForTask(taskId: String?): String? =
+        recoveryRouteForTask(taskId)?.routeId
 
-    private fun taskIdForRecoveryRoute(routeId: String): String? = when (routeId) {
-        messageListRecoveryRoute.routeId -> PRIVATE_MESSAGES_TASK_ID
-        chatDetailRecoveryRoute.routeId -> PRIVATE_MESSAGES_TASK_ID
-        receivedGreetingsRecoveryRoute.routeId -> RECEIVED_GREETINGS_TASK_ID
-        else -> null
-    }
+    private fun taskIdForRecoveryRoute(routeId: String): String? =
+        sharedPageObservationCoordinator.recoveryAdapterForRoute(routeId)?.taskId?.takeIf {
+            it == PRIVATE_MESSAGES_TASK_ID || it == RECEIVED_GREETINGS_TASK_ID
+        }
 
-    private fun recoveryRouteForTask(taskId: String?): PageRecoveryRouteAdapter? = when (taskId) {
-        PRIVATE_MESSAGES_TASK_ID -> messageListRecoveryRoute
-        RECEIVED_GREETINGS_TASK_ID -> receivedGreetingsRecoveryRoute
-        else -> null
-    }
+    private fun recoveryRouteForTask(taskId: String?): PageRecoveryRouteAdapter? =
+        taskId?.takeIf { it == PRIVATE_MESSAGES_TASK_ID || it == RECEIVED_GREETINGS_TASK_ID }
+            ?.let(sharedPageObservationCoordinator::primaryRecoveryAdapterForTask)
 
     private fun activateRecoveryIdentity(taskId: String, reason: String, checkpointId: String) {
         val routeId = recoveryRouteIdForTask(taskId) ?: "unknown-route"

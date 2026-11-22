@@ -108,6 +108,95 @@ class PageFingerprintRouterTest {
     }
 
     @Test
+    fun unifiedRecoveryRegistryScopesOverlappingLegacyMatchersByTask() {
+        val scheduler = object : TaskScheduler {
+            override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask =
+                object : ScheduledTask { override fun cancel() = Unit }
+        }
+        val coordinator = PageObservationCoordinator(scheduler)
+        var checkpointWrites = 0
+        val greetings = object : PageRecoveryRouteAdapter {
+            override val routeId = "AI_REPLY_RECEIVED_GREETINGS"
+            override val taskId = "AI_REPLY_RECEIVED_GREETINGS"
+            override fun matches(fingerprint: PageFingerprint) =
+                !fingerprint.adapterFingerprint.isNullOrBlank()
+            override fun saveCheckpoint() { checkpointWrites++ }
+        }
+        val browse = object : PageRecoveryRouteAdapter {
+            override val routeId = "account-browse.dynamic-feed"
+            override val taskId = "ACCOUNT_BROWSE"
+            override fun matches(fingerprint: PageFingerprint) =
+                fingerprint.semanticPage == "DYNAMIC_FEED" &&
+                    !fingerprint.adapterFingerprint.isNullOrBlank()
+            override fun saveCheckpoint() { checkpointWrites++ }
+        }
+        coordinator.registerRecoveryAdapter(greetings)
+        coordinator.registerRecoveryAdapter(browse)
+        val fingerprint = page("DYNAMIC_FEED", adapterFingerprint = "fresh-feed")
+
+        assertEquals("account-browse.dynamic-feed",
+            coordinator.matchRecoveryAdapter(fingerprint, setOf("ACCOUNT_BROWSE"))?.routeId)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS",
+            coordinator.matchRecoveryAdapter(fingerprint, setOf("AI_REPLY_RECEIVED_GREETINGS"))?.routeId)
+        assertNull(coordinator.matchRecoveryAdapter(fingerprint, emptySet()))
+        assertNull(coordinator.matchRecoveryAdapter(fingerprint, setOf("UNKNOWN_TASK")))
+        assertEquals("ACCOUNT_BROWSE",
+            coordinator.recoveryAdapterForRoute("account-browse.dynamic-feed")?.taskId)
+        assertEquals("account-browse.dynamic-feed",
+            coordinator.primaryRecoveryAdapterForTask("ACCOUNT_BROWSE")?.routeId)
+        assertEquals(0, checkpointWrites)
+    }
+
+    @Test
+    fun registeredRecoveryAdapterReplacementAndUnregisterHaveNoStaleCallback() {
+        val router = PageRecoveryAdapterRegistry()
+        var oldWrites = 0
+        var newWrites = 0
+        fun adapter(onWrite: () -> Unit) = object : PageRecoveryRouteAdapter {
+            override val routeId = "AI_REPLY_PRIVATE_MESSAGES"
+            override val taskId = "AI_REPLY_PRIVATE_MESSAGES"
+            override fun matches(fingerprint: PageFingerprint) = fingerprint.semanticPage == "CHAT_LIST"
+            override fun saveCheckpoint() = onWrite()
+        }
+        val old = adapter { oldWrites++ }
+        val fresh = adapter { newWrites++ }
+        router.register(old)
+        router.register(fresh)
+        assertEquals(setOf("AI_REPLY_PRIVATE_MESSAGES"), router.registeredRouteIds())
+        assertEquals(fresh, router.primaryForTask("AI_REPLY_PRIVATE_MESSAGES"))
+        assertEquals(fresh, router.adapterForRoute("AI_REPLY_PRIVATE_MESSAGES"))
+        router.primaryForTask("AI_REPLY_PRIVATE_MESSAGES")?.saveCheckpoint()
+        assertEquals(0, oldWrites)
+        assertEquals(1, newWrites)
+        router.unregister("AI_REPLY_PRIVATE_MESSAGES")
+        assertNull(router.primaryForTask("AI_REPLY_PRIVATE_MESSAGES"))
+        assertNull(router.adapterForRoute("AI_REPLY_PRIVATE_MESSAGES"))
+    }
+
+    @Test
+    fun secondaryChatDetailRouteCannotReplaceMessageListCheckpointOwner() {
+        val registry = PageRecoveryAdapterRegistry()
+        fun route(id: String, primary: Boolean) = object : PageRecoveryRouteAdapter {
+            override val routeId = id
+            override val taskId = "AI_REPLY_PRIVATE_MESSAGES"
+            override val primaryForTask = primary
+            override fun matches(fingerprint: PageFingerprint) = true
+            override fun saveCheckpoint() = Unit
+        }
+        val message = route("AI_REPLY_PRIVATE_MESSAGES", true)
+        val chatDetail = route("AI_REPLY_CHAT_DETAIL", false)
+        registry.register(message)
+        registry.register(chatDetail)
+        assertEquals(message, registry.primaryForTask("AI_REPLY_PRIVATE_MESSAGES"))
+        assertEquals(chatDetail, registry.adapterForRoute("AI_REPLY_CHAT_DETAIL"))
+        assertThrows(IllegalStateException::class.java) {
+            registry.register(route("INVALID_SECOND_PRIMARY", true))
+        }
+        assertEquals(setOf("AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_CHAT_DETAIL"),
+            registry.registeredRouteIds())
+    }
+
+    @Test
     fun sharedObservationCoordinatorRoutesWithoutStartingSnapshotWork() {
         var scheduledTasks = 0
         val scheduler = object : TaskScheduler {

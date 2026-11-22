@@ -413,6 +413,71 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         )
         self.assertTrue(any("P4" in x for x in guard.unified_ui_write_authorization_violations(changed)))
 
+    def test_p5_recovery_adapter_registry_accepts_all_existing_business_routes(self):
+        self.assertEqual(
+            guard.unified_recovery_adapter_registration_violations(self.recovery_code), []
+        )
+
+    def test_p5_rejects_business_raw_route_registration_or_local_fallback(self):
+        ai = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        changed = dict(self.recovery_code)
+        changed[ai] = changed[ai].replace(
+            "registerRecoveryAdapter(messageListRecoveryRoute)",
+            "registerFingerprintRoute(messageListRecoveryRoute.asRoute())"
+        )
+        self.assertTrue(any("P5" in issue
+                            for issue in guard.unified_recovery_adapter_registration_violations(changed)))
+        changed = dict(self.recovery_code)
+        changed[ai] += "\nval matching = listOf(messageListRecoveryRoute, chatDetailRecoveryRoute)\n"
+        self.assertTrue(any("business routes must use shared" in issue
+                            for issue in guard.unified_recovery_adapter_registration_violations(changed)))
+
+    def test_p5_rejects_browse_bypassing_mode_scoped_recovery_matching(self):
+        path = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+        changed = dict(self.recovery_code)
+        changed[path] = changed[path].replace(
+            "allowedTaskIds = setOf(dynamicFeedRecoveryRoute.taskId)",
+            "allowedTaskIds = emptySet()"
+        )
+        self.assertTrue(any("P5 shared recovery adapter registration missing" in issue
+                            for issue in guard.unified_recovery_adapter_registration_violations(changed)))
+
+    def test_p5_rejects_missing_secondary_task_ownership_and_new_registry(self):
+        chat = "business/src/main/kotlin/com/freedom/features/aireply/ChatDetailRecoveryRouteAdapter.kt"
+        changed = dict(self.recovery_code)
+        changed[chat] = changed[chat].replace(
+            "override val primaryForTask: Boolean = false",
+            "override val primaryForTask: Boolean = true"
+        )
+        self.assertTrue(any("P5 shared recovery adapter registration missing" in issue
+                            for issue in guard.unified_recovery_adapter_registration_violations(changed)))
+
+        changed = dict(self.recovery_code)
+        changed["app/src/main/java/com/freedom/app/OtherRegistry.kt"] = (
+            "val registry = PageRecoveryAdapterRegistry()\n"
+        )
+        self.assertTrue(any("construction drift" in issue
+                            for issue in guard.unified_recovery_adapter_registration_violations(changed)))
+
+    def test_p5_rejects_unsafe_unscoped_match_or_loss_of_typed_checkpoint_adapter(self):
+        router = "core/src/main/kotlin/com/freedom/core/runtime/PageFingerprintRouter.kt"
+        changed = dict(self.recovery_code)
+        changed[router] = changed[router].replace(
+            "it.taskId in allowedTaskIds && it.matches(fingerprint)",
+            "it.matches(fingerprint)"
+        )
+        self.assertTrue(any("P5 shared recovery adapter registration missing" in issue
+                            for issue in guard.unified_recovery_adapter_registration_violations(changed)))
+
+        checkpoint = "business/src/main/kotlin/com/freedom/features/recovery/RecoveryCheckpointAdapter.kt"
+        changed = dict(self.recovery_code)
+        changed[checkpoint] = changed[checkpoint].replace(
+            "interface RecoveryCheckpointAdapter<T>",
+            "interface LegacyCheckpointMapper<T>"
+        )
+        self.assertTrue(any("typed checkpoint mapper interface" in issue
+                            for issue in guard.unified_recovery_adapter_registration_violations(changed)))
+
     def test_p0_authority_guard_accepts_current_production_graph(self):
         self.assertEqual(guard.architecture_authority_violations(self.recovery_code), [])
 

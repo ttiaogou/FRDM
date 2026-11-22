@@ -566,6 +566,7 @@ def inspect_project(root: Path) -> list[str]:
     issues.extend(unified_page_observation_violations(code_by_path))
     issues.extend(unified_task_lifecycle_violations(code_by_path))
     issues.extend(unified_ui_write_authorization_violations(code_by_path))
+    issues.extend(unified_recovery_adapter_registration_violations(code_by_path))
 
     # 11) Final hard boundaries for the unified accessibility/recovery architecture.
     issues.extend(final_architecture_boundary_violations(code_by_path))
@@ -938,6 +939,104 @@ def unified_task_lifecycle_violations(code_by_path: dict[str, str]) -> list[str]
     session_creators = {rel: count for rel, count in session_creators.items() if count}
     if session_creators != {root_rel: 1}:
         issues.append(f"P3 session coordinator construction drift: {session_creators}")
+    return issues
+
+
+def unified_recovery_adapter_registration_violations(code_by_path: dict[str, str]) -> list[str]:
+    """P5: one registered, task-scoped recovery route adapter contract for every feature."""
+    issues: list[str] = []
+    router_rel = "core/src/main/kotlin/com/freedom/core/runtime/PageFingerprintRouter.kt"
+    coordinator_rel = "core/src/main/kotlin/com/freedom/core/runtime/PageObservationCoordinator.kt"
+    ai_rel = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+    browse_rel = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+    adapter_rels = {
+        "business/src/main/kotlin/com/freedom/features/aireply/MessageListRecoveryRouteAdapter.kt":
+            (r"\btaskId\s*:\s*String\s*=\s*PrivateMessagesTaskController\.TASK_ID\b",),
+        "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsRecoveryRouteAdapter.kt":
+            (r"\btaskId\s*:\s*String\s*=\s*ReceivedGreetingsTaskController\.TASK_ID\b",),
+        "business/src/main/kotlin/com/freedom/features/aireply/ChatDetailRecoveryRouteAdapter.kt":
+            (r"\btaskId\s*:\s*String\s*=\s*PrivateMessagesTaskController\.TASK_ID\b",
+             r"\bprimaryForTask\s*:\s*Boolean\s*=\s*false\b"),
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicFeedRecoveryRouteAdapter.kt":
+            (r"\btaskId\s*:\s*String\s*=",),
+    }
+    required = {
+        router_rel: (
+            r"\binterface\s+PageRecoveryRouteAdapter\b",
+            r"\bval\s+taskId\s*:\s*String\s+get\s*\(\s*\)\s*=\s*routeId\b",
+            r"\bval\s+primaryForTask\s*:\s*Boolean\s+get\s*\(\s*\)\s*=\s*true\b",
+            r"\bclass\s+PageRecoveryAdapterRegistry\b",
+            r"\bfun\s+register\s*\(\s*adapter\s*:\s*PageRecoveryRouteAdapter\s*\)",
+            r"\bfun\s+primaryForTask\s*\(\s*taskId\s*:\s*String\s*\)",
+            r"\bfun\s+adapterForRoute\s*\(\s*routeId\s*:\s*String\s*\)",
+            r"\bfun\s+match\s*\(\s*fingerprint\s*:\s*PageFingerprint\s*,\s*allowedTaskIds\s*:\s*Set<String>\s*\)",
+            r"\bit\.taskId\s+in\s+allowedTaskIds\s*&&\s*it\.matches\s*\(\s*fingerprint\s*\)",
+            r"\bit\.routeId\s*!=\s*adapter\.routeId\s*&&\s*it\.taskId\s*==\s*adapter\.taskId",
+        ),
+        coordinator_rel: (
+            r"\brecoveryAdapterRegistry\s*=\s*PageRecoveryAdapterRegistry\s*\(\s*\)",
+            r"\bfun\s+registerRecoveryAdapter\s*\(\s*adapter\s*:\s*PageRecoveryRouteAdapter\s*\)",
+            r"\brecoveryAdapterRegistry\.register\s*\(\s*adapter\s*\)",
+            r"\bfingerprintRouter\.register\s*\(\s*adapter\.asRoute\s*\(\s*\)\s*\)",
+            r"\bfun\s+matchRecoveryAdapter\s*\(",
+            r"\brecoveryAdapterRegistry\.match\s*\(\s*fingerprint\s*,\s*allowedTaskIds\s*\)",
+            r"\bfun\s+primaryRecoveryAdapterForTask\s*\(",
+            r"\bfun\s+recoveryAdapterForRoute\s*\(",
+            r"\brecoveryAdapterRegistry\.unregister\s*\(\s*routeId\s*\)",
+        ),
+        ai_rel: (
+            r"\bregisterRecoveryAdapter\s*\(\s*messageListRecoveryRoute\s*\)",
+            r"\bregisterRecoveryAdapter\s*\(\s*receivedGreetingsRecoveryRoute\s*\)",
+            r"\bregisterRecoveryAdapter\s*\(\s*chatDetailRecoveryRoute\s*\)",
+            r"\bmatchRecoveryAdapter\s*\(\s*pageFingerprint\s*,\s*setOf\s*\(\s*PRIVATE_MESSAGES_TASK_ID\s*,\s*RECEIVED_GREETINGS_TASK_ID\s*\)",
+            r"\brecoveryAdapterForRoute\s*\(\s*routeId\s*\)\?\.taskId\b",
+            r"\bprimaryRecoveryAdapterForTask\b",
+        ),
+        browse_rel: (
+            r"\bregisterRecoveryAdapter\s*\(\s*dynamicFeedRecoveryRoute\s*\)",
+            r"\bmatchRecoveryAdapter\s*\(",
+            r"\ballowedTaskIds\s*=\s*setOf\s*\(\s*dynamicFeedRecoveryRoute\.taskId\s*\)",
+        ),
+        **adapter_rels
+    }
+    for rel, patterns in required.items():
+        code = code_by_path.get(rel, "")
+        for pattern in patterns:
+            if not re.search(pattern, code):
+                issues.append(f"P5 shared recovery adapter registration missing: {rel}: {pattern}")
+
+    # The typed checkpoint-to-durable-record adapters already share
+    # RecoveryCheckpointAdapter<T>; keep all three existing business calls and
+    # their business-owned persistence rather than weakening the resume gates.
+    checkpoint_interface = (
+        "business/src/main/kotlin/com/freedom/features/recovery/RecoveryCheckpointAdapter.kt"
+    )
+    if not re.search(r"\binterface\s+RecoveryCheckpointAdapter\s*<\s*T\s*>",
+                     code_by_path.get(checkpoint_interface, "")):
+        issues.append("P5 typed checkpoint mapper interface must remain shared")
+
+    raw_fingerprint_registration = re.compile(r"\bregisterFingerprintRoute\s*\(")
+    local_fallback = re.compile(r"\blistOf\s*\(\s*messageListRecoveryRoute\s*,")
+    for rel in (ai_rel, browse_rel):
+        code = code_by_path.get(rel, "")
+        if raw_fingerprint_registration.search(code) or local_fallback.search(code):
+            issues.append(f"P5 business routes must use shared recovery adapter registry: {rel}")
+    if re.search(r"\bwhen\s*\(\s*routeId\s*\)", code_by_path.get(ai_rel, "")):
+        issues.append("P5 AI recovery task lookup must use registered adapter ownership")
+    if re.search(r"\bmatchFingerprint\s*\(", code_by_path.get(browse_rel, "")):
+        issues.append("P5 browse recovery route match must be scoped by task")
+
+    production = {
+        rel: code for rel, code in code_by_path.items()
+        if "/src/main/" in rel and rel.endswith(".kt")
+    }
+    constructs = {
+        rel: len(re.findall(r"\bPageRecoveryAdapterRegistry\s*\(", code))
+        for rel, code in production.items()
+    }
+    constructs = {rel: number for rel, number in constructs.items() if number}
+    if constructs != {coordinator_rel: 1}:
+        issues.append(f"P5 recovery adapter registry construction drift: {constructs}")
     return issues
 
 
@@ -1369,6 +1468,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - P2 observation: one injected scheduler, mode-isolated channels, task decisions owned by runtimes")
     print(" - P3 task lifecycle: process run clock synchronously revokes shared task/UI leases")
     print(" - P4 UI authorization: exact task/generation/mode gate owns every automated write outlet")
+    print(" - P5 recovery adapters: shared task-scoped registry, common interface, no local route fallback")
     print(" - Automatic recovery: legacy manual handoff forbidden; three checkpoint routes use shared verification")
     print(" - Recovery scheduler: bounded non-terminal backoff, touch reset, stale-callback and user-stop gates")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")

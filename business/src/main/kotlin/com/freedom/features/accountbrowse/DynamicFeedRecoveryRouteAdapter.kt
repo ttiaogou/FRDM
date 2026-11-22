@@ -12,6 +12,7 @@ class DynamicFeedRecoveryRouteAdapter(
     private val save: () -> Unit
 ) : PageRecoveryRouteAdapter {
     override val routeId: String = ROUTE_ID
+    override val taskId: String = "ACCOUNT_BROWSE"
 
     override fun matches(fingerprint: PageFingerprint): Boolean =
         fingerprint.packageName == targetPackage() &&

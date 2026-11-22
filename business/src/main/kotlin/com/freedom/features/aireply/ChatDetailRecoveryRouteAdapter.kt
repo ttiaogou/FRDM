@@ -12,6 +12,8 @@ internal class ChatDetailRecoveryRouteAdapter(
     private val persist: () -> Unit
 ) : PageRecoveryRouteAdapter {
     override val routeId: String = "AI_REPLY_CHAT_DETAIL"
+    override val taskId: String = PrivateMessagesTaskController.TASK_ID
+    override val primaryForTask: Boolean = false
 
     override fun matches(fingerprint: PageFingerprint): Boolean =
         fingerprint.semanticPage == ChatPageKind.CHAT_DETAIL_CANDIDATE.name

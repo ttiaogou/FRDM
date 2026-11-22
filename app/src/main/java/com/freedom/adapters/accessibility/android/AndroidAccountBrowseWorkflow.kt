@@ -93,7 +93,7 @@ internal class AndroidAccountBrowseWorkflow(
     }
 
     init {
-        observationCoordinator.registerFingerprintRoute(dynamicFeedRecoveryRoute.asRoute())
+        observationCoordinator.registerRecoveryAdapter(dynamicFeedRecoveryRoute)
     }
 
     internal var phase: AccountBrowsePhase
@@ -132,14 +132,15 @@ internal class AndroidAccountBrowseWorkflow(
     }
 
     private fun matchDynamicFeedRoute(page: BrowsePageEvidence): Boolean =
-        observationCoordinator.matchFingerprint(
+        observationCoordinator.matchRecoveryAdapter(
             PageFingerprint(
                 packageName = page.packageName,
                 activityClass = page.activityClass,
                 semanticPage = page.pageKind.name,
                 adapterFingerprint = page.fingerprint
-            )
-        ) == DynamicFeedRecoveryRouteAdapter.ROUTE_ID
+            ),
+            allowedTaskIds = setOf(dynamicFeedRecoveryRoute.taskId)
+        )?.routeId == DynamicFeedRecoveryRouteAdapter.ROUTE_ID
 
     private fun startRestoredCheckpointVerification() {
         if (!isMonitoringRunning() || !isBrowseModeActive()) return
