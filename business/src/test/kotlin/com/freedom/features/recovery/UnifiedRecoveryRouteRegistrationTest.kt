@@ -38,7 +38,11 @@ class UnifiedRecoveryRouteRegistrationTest {
         assertNull(coordinator.matchRecoveryAdapter(page("CHAT_LIST"), browseTasks))
         assertEquals(browse.routeId,
             coordinator.matchRecoveryAdapter(page("DYNAMIC_FEED", "verified-feed-window"), browseTasks)?.routeId)
-        assertNull(coordinator.matchRecoveryAdapter(page("DYNAMIC_FEED", "verified-feed-window"), aiTasks))
+        // The AI observation path supplies only its *own* live greetings-list fingerprint.
+        // A dynamic feed does not create one, even when AccountBrowse has its own feed proof.
+        // Supplying a browse fingerprint directly to the greetings matcher would bypass
+        // the adapter boundary and would not represent an actual AI page observation.
+        assertNull(coordinator.matchRecoveryAdapter(page("DYNAMIC_FEED"), aiTasks))
         assertNull(coordinator.matchRecoveryAdapter(page("DYNAMIC_FEED"), browseTasks))
         assertNull(coordinator.matchRecoveryAdapter(
             page("DYNAMIC_FEED", "verified-feed-window", pkg = "foreign.app"), browseTasks))
