@@ -69,7 +69,7 @@ internal class AndroidAccountBrowseWorkflow(
     private val popupExecutor = AccountBrowsePopupExecutor()
     private val recoveryExecutor = AccountBrowseRecoveryExecutor()
 
-    // Injected once by the AccessibilityService composition root; no local fallback.
+    // Injected once by the application composition root; no local fallback.
     private val observationCoordinator = pageObservationCoordinator
     private val dynamicFeedRecoveryRoute = DynamicFeedRecoveryRouteAdapter(targetPackage) {
         accountBrowseRuntime.saveRecoveryCheckpoint()
