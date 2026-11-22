@@ -695,7 +695,10 @@ class AiReplyObservationRuntimeTest {
         assertEquals(null, ownership.activeTaskId())
         repeat(4) {
             if (logs.none { it.contains("统一页面恢复[RECOVERY_VERIFIED]") }) {
-                runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+                // A new content snapshot in the SAME window is independent evidence.
+                // WINDOW_STATE_CHANGED intentionally invalidates the first sample; it must
+                // be used only for the actual return transition, not each stable sample.
+                runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
                 scheduler.runNextWithDelay(300L)
             }
         }
