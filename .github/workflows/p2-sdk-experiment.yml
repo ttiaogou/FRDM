@@ -1,0 +1,262 @@
+name: P2-1 Android SDK setup comparison (temporary)
+
+on:
+  push:
+    branches: [P1]
+    paths:
+      - ".github/workflows/p2-sdk-experiment.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+concurrency:
+  # Runs for the same PR share one group; event type separates direct pushes,
+  # scheduled runs, and manual runs so they cannot cancel one another.
+  group: freedom-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+
+  arch-guard:
+    name: Architecture and resource gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test architecture verifier
+        run: python3 -m unittest discover -s tools/architecture -p 'test_*.py' -v
+
+      - name: Enforce architecture boundaries
+        run: python3 tools/architecture/verify_boundaries.py --root . --show-advisories
+
+      - name: Validate Android resources
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          for source_root in (Path("app/src/main"), Path("ocr-plugin/src/main")):
+              for path in source_root.rglob("*.xml"):
+                  ET.parse(path)
+                  print(f"XML OK: {path}")
+          PY
+
+  test:
+    name: Unit tests and reports
+    needs: arch-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: "20.0"
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Set up Gradle 8.9 and restore Gradle caches
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Run all module unit tests
+        run: |
+          gradle --no-daemon --build-cache \
+            :core:test \
+            :business:test \
+            :gesture-core:test \
+            :gesture-runtime:test \
+            :app:testDebugUnitTest
+
+      - name: Upload Gradle test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gradle-test-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            **/build/test-results/**/*.xml
+            **/build/reports/tests/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  build-freedom-apk:
+    name: Build Freedom debug APK
+    needs: arch-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: "20.0"
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Set up Gradle 8.9 and restore Gradle caches
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build Freedom debug APK
+        run: |
+          gradle --no-daemon --build-cache :app:assembleDebug
+
+      - name: Upload Freedom debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Freedom-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  build-ocr-plugin-apk:
+    name: Build OCR plugin debug APK
+    needs: arch-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: "20.0"
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Set up Gradle 8.9 and restore Gradle caches
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Restore PaddleOCR SDK and ONNX model cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/freedom-ocr
+          key: freedom-ocr-${{ runner.os }}-${{ hashFiles('ocr-plugin/build.gradle.kts', 'ocr-plugin/src/main/assets/ocr-model-catalog.json') }}
+          restore-keys: |
+            freedom-ocr-${{ runner.os }}-
+
+      - name: Build OCR plugin debug APK
+        run: |
+          mkdir -p "$HOME/.cache/freedom-ocr"
+          gradle --no-daemon --build-cache \
+            -PfreedomOcrCacheDir="$HOME/.cache/freedom-ocr" \
+            :ocr-plugin:assembleDebug
+
+      - name: Upload OCR plugin debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Freedom-OCR-plugin-debug-apk
+          path: ocr-plugin/build/outputs/apk/debug/ocr-plugin-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  codeql:
+    name: Java and Kotlin CodeQL analysis
+    needs: arch-guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: "20.0"
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Set up Gradle 8.9 and restore Gradle caches
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Restore PaddleOCR SDK and ONNX model cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/freedom-ocr
+          key: freedom-ocr-${{ runner.os }}-${{ hashFiles('ocr-plugin/build.gradle.kts', 'ocr-plugin/src/main/assets/ocr-model-catalog.json') }}
+          restore-keys: |
+            freedom-ocr-${{ runner.os }}-
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          build-mode: manual
+          queries: security-extended,security-and-quality
+
+      - name: Compile both apps and unit test sources for CodeQL without APK packaging
+        run: |
+          mkdir -p "$HOME/.cache/freedom-ocr"
+          gradle --no-daemon --no-build-cache \
+            -PfreedomOcrCacheDir="$HOME/.cache/freedom-ocr" \
+            :core:testClasses \
+            :business:testClasses \
+            :gesture-core:testClasses \
+            :gesture-runtime:testClasses \
+            :app:compileDebugUnitTestKotlin \
+            :app:compileDebugUnitTestJavaWithJavac \
+            :app:compileDebugKotlin \
+            :app:compileDebugJavaWithJavac \
+            :ocr-plugin:compileDebugKotlin \
+            :ocr-plugin:compileDebugJavaWithJavac
+
+      - name: Analyze Kotlin and Java with CodeQL
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:java-kotlin-p2-sdk-experiment"
+
