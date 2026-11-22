@@ -193,7 +193,7 @@ jobs:
 
   codeql:
     name: Java and Kotlin CodeQL analysis
-    needs: build-freedom-apk
+    needs: arch-guard
     runs-on: ubuntu-latest
     permissions:
       contents: read

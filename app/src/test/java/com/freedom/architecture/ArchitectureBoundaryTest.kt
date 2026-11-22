@@ -652,8 +652,8 @@ class ArchitectureBoundaryTest {
 
         val codeqlJob = jobBody("codeql")
         assertTrue(
-            "CodeQL must wait for the Freedom build",
-            Regex("(?m)^    needs: build-freedom-apk\\s*$").containsMatchIn(codeqlJob)
+            "CodeQL must wait for the architecture and resource gate without depending on APK builds",
+            Regex("(?m)^    needs: arch-guard\\s*$").containsMatchIn(codeqlJob)
         )
         assertTrue("CodeQL must retain manual Java/Kotlin scanning", codeqlJob.contains("languages: java-kotlin") && codeqlJob.contains("build-mode: manual"))
         assertTrue("CodeQL must retain extended security and quality queries", codeqlJob.contains("security-extended,security-and-quality"))
