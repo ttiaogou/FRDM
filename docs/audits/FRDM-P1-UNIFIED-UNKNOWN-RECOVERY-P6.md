@@ -42,7 +42,7 @@ AppCompositionRoot (process scope)
 - `RecoveryEventDispatcher` 的原有事件接口不变。生产 AI 和 Browse 均注入同一个管理器；AI 两个检查点子验证器也通过 `CheckpointVerificationWiring` 注入同一管理器，但使用独立验证子槽，从而不改变原样本计数。
 - 任一任务只有显式的 `ResumeCompleted` 或原业务完成了**新鲜同路由双快照、业务确认和 UI 租约转交**后才清理对应管理槽。AI 在既有 `markUiOwnershipTransferred()` 之后调用 `completeVerified`。
 - 无业务任务身份的启动前观察只记录 unbound 诊断，不捏造 checkpoint/task/已确认页面、不授予 UI 许可；旧代次晚到的异步回调一律拒绝修改当前事务状态。
-- AI `EMPTY_SNAPSHOT` 和 `MESSAGE_LIST_BOUNDARY_UNKNOWN` 在有正在运行的任务时进入原 `requestUnifiedPauseAndCheckpoint`；初始未读 UNKNOWN、从收到招呼返回普通消息列表后的未读 UNKNOWN、低频复查页不确定或未读状态不确定，均进入原检查点恢复并使用已经存在的 `RecoveryScheduler.readOnlyRetryDelayMs(1)` 只读观察间隔。首次必需的上滑准入、手势执行节奏和安全点击限制不变。
+- AI `EMPTY_SNAPSHOT` 和 `MESSAGE_LIST_BOUNDARY_UNKNOWN` 在有正在运行的任务时进入原 `requestUnifiedPauseAndCheckpoint`；初始未读 UNKNOWN、从收到招呼返回普通消息列表后的未读 UNKNOWN、低频复查页不确定或未读状态不确定，均进入原检查点恢复并使用已经存在的 `RecoveryScheduler.readOnlyRetryDelayMs(1)` 只读观察间隔。额外收口当前私聊任务的通用 `CONFIRMED_UNKNOWN`（即使缺少先前稳定列表页面）和点击会话后非预期页面的可重试异常：仅重新取证和检查点恢复，不重放点击、不盲目返回。首次必需的上滑准入、手势执行节奏和安全点击限制不变。
 - 浏览业务的 `pauseAccountBrowse → AccountBrowseRuntime.requestRecovery → DynamicPageRecovery.observePage` 原路径保持：任何动作未获确认后继续安全暂停和只读观察，原有限次导航/动作尝试的保护仍在**动作端**生效，并不变成 UNKNOWN 事务的硬终止上限。
 - `RecoveryScheduler` 继续按照原来的 500ms、1s、2s、5s、10s、30s 非终止退避；触摸期间仍不执行危险操作，失效页/窗口/Activity/身份仍不能通过恢复验证。
 

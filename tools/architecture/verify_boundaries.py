@@ -1087,6 +1087,7 @@ def unified_recovery_transaction_manager_violations(code_by_path: dict[str, str]
             r"\brequestUnifiedPauseAndCheckpoint\s*\(\s*activeTask\s*,",
             r"\brequestUnifiedPauseAndCheckpoint\s*\(\s*PRIVATE_MESSAGES_TASK_ID\s*,",
             r"\bprivate\s+fun\s+recoverRetryablePrivateList\s*\(",
+            r"\bbusinessPageKind\s*==\s*ChatPageKind\.UNKNOWN\s*&&\s*taskOwnership\.activeTaskId\s*\(\s*\)\s*==\s*PRIVATE_MESSAGES_TASK_ID",
             r"\bval\s+checkpointRequested\s*=\s*sessionRunStarted\s*&&\s*activeTask\s*!=\s*null",
             r"\brecoveryTransactionManager\?\.completeVerified\s*\(",
         ),
@@ -1117,8 +1118,8 @@ def unified_recovery_transaction_manager_violations(code_by_path: dict[str, str]
             if not re.search(pattern, code):
                 issues.append(f"P6 unified recovery transaction manager wiring missing: {rel}: {pattern}")
 
-    if len(re.findall(r"\brecoverRetryablePrivateList\s*\(", code_by_path.get(ai_rel, ""))) < 5:
-        issues.append("P6 AI retryable unread/page uncertainty must have four managed recovery call sites")
+    if len(re.findall(r"\brecoverRetryablePrivateList\s*\(", code_by_path.get(ai_rel, ""))) < 7:
+        issues.append("P6 AI retryable unread, unexpected page and UNKNOWN must use six managed recovery call sites")
 
     constructed = {
         rel: len(re.findall(r"\bUnifiedRecoveryTransactionManager\s*\(", code))

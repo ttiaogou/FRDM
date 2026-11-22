@@ -1612,6 +1612,17 @@ class AiReplyObservationRuntime(
                 }
             }
             ChatPageKind.UNKNOWN, ChatPageKind.NON_CHAT -> {
+                // P6: any confirmed UNKNOWN belonging to an active private-message task
+                // must have a durable recovery transaction, including when no previous
+                // stable list page was available for the usual route-change detector.
+                // This is read-only; no click, return gesture or draft is replayed.
+                if (sessionRunStarted && !receivedGreetingsTaskActive &&
+                    businessPageKind == ChatPageKind.UNKNOWN &&
+                    taskOwnership.activeTaskId() == PRIVATE_MESSAGES_TASK_ID
+                ) {
+                    recoverRetryablePrivateList("PRIVATE_MESSAGE_PAGE_UNKNOWN")
+                    return
+                }
                 if (sessionRunStarted && receivedGreetingsTaskActive) {
                     requestUnifiedPauseAndCheckpoint(RECEIVED_GREETINGS_TASK_ID, "RECEIVED_GREETINGS_UNKNOWN")
                     // A page classification failure is a recovery request, never a business step.
@@ -1697,6 +1708,7 @@ class AiReplyObservationRuntime(
                     sessionTransitionTask = null
                     sessionManagerState = SessionManagerState.PAUSED
                     onLog("AI 会话管理已暂停：点击后进入非预期页面；不继续点击或盲目返回")
+                    recoverRetryablePrivateList("OPEN_SESSION_UNEXPECTED_PAGE")
                 }
             }
         }
