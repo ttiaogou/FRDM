@@ -30,11 +30,12 @@ class AiModelFailureDiagnosticsTest {
     private fun diagnostics(deepSeek: Boolean, factory: AiHttpConnectionFactory): AiModelCallDiagnostics {
         val provider = TransportBackedAiModelProvider("test", "configured-model", transport(deepSeek, factory), consent)
         val context = ConversationContext("contact", "conversation", request().conversation, 1, 0, 0, true)
-        val decision = AiReplyDecisionEngine(provider, consent).decide(AiReplyDecisionInput(context, true, requestId = "request-1"))
-        assertEquals("MODEL_CALL_FAILED", decision.reason)
-        assertEquals(AiReplyAction.WAIT, decision.action)
-        assertNull(decision.draft)
-        return decision.callDiagnostics!!
+        val result = AiReplyDecisionEngine(provider, consent).decide(AiReplyDecisionInput(context, true, requestId = "request-1"))
+        assertTrue(result is AiReplyEvaluation.Execution)
+        val execution = result as AiReplyEvaluation.Execution
+        assertEquals(AiReplyExecutionStatus.MODEL_CALL_FAILED, execution.status)
+        assertEquals("MODEL_CALL_FAILED", execution.status.reasonCode)
+        return execution.callDiagnostics!!
     }
 
     @Test fun httpRejectionsRetainExactStatusAndExistingRetryClassificationForBothProviders() {
@@ -214,7 +215,10 @@ class AiModelFailureDiagnosticsTest {
         assertTrue(log.contains("safeCode=HTTP_401_UNAUTHORIZED"))
         val requestId = log.substringAfter("requestId=").substringBefore("；")
         assertTrue(requestId.isNotBlank())
-        assertTrue(logs.single { it.startsWith("AI 模型决策详情：") }.contains("requestId=$requestId"))
+        val executionLog = logs.single { it.startsWith("AI 程序执行状态：") }
+        assertTrue(executionLog.contains("requestId=$requestId"))
+        assertTrue(executionLog.contains("executionState=MODEL_CALL_FAILED"))
+        assertFalse(logs.any { it.startsWith("AI 模型决策详情：") })
         assertFalse(logs.joinToString().contains("模型未提供详细解释"))
         assertFalse(logs.joinToString().contains(secret))
         assertFalse(logs.joinToString().contains(privateText))
