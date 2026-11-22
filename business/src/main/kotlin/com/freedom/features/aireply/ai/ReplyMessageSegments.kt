@@ -1,10 +1,9 @@
 package com.freedom.features.aireply.ai
 
-/** 按 AI 模型指定的消息边界拆分回复，不使用标点符号作为备用拆分依据。 */
+/** 仅按换行拆分模型回复；不使用其他分隔符或标点符号作为备用依据。 */
 internal object ReplyMessageSegments {
     data class ParseResult(
         val messages: List<String>,
-        val delimiterCount: Int,
         val lineBreakCount: Int,
         val fallbackToSingleMessage: Boolean
     )
@@ -13,14 +12,9 @@ internal object ReplyMessageSegments {
 
     fun parse(text: String): ParseResult {
         val normalized = text.replace("\r\n", "\n").replace('\r', '\n').trim()
-        if (normalized.isBlank()) return ParseResult(emptyList(), 0, 0, false)
+        if (normalized.isBlank()) return ParseResult(emptyList(), 0, false)
         val lineBreakCount = normalized.count { it == '\n' }
-        val lines = normalized.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
-        if (lines.size > 1) {
-            return ParseResult(lines, 0, lineBreakCount, false)
-        }
-        val delimiterCount = normalized.windowed("<MSG>".length).count { it == "<MSG>" }
-        val messages = normalized.split("<MSG>").map(String::trim).filter(String::isNotEmpty)
-        return ParseResult(messages, delimiterCount, lineBreakCount, delimiterCount == 0)
+        val messages = normalized.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        return ParseResult(messages, lineBreakCount, messages.size == 1)
     }
 }

@@ -104,6 +104,23 @@ class AiReplyDecisionEngineTest {
         assertTrue(request.systemInstruction.contains("不要刻意讨好我。"))
     }
 
+    @Test fun multiReplyInstructionUsesOnlySingleNewlines() {
+        val instruction = AiReplyDecisionEngine.DEFAULT_SYSTEM_INSTRUCTION
+        assertTrue(instruction.contains("多条回复只能使用单个换行符分隔"))
+        assertTrue(instruction.contains("在 JSON 字符串中用 \\n 表示换行"))
+        assertFalse(instruction.contains("<MSG>"))
+    }
+
+    @Test fun jsonEscapedNewlineParsesIntoSeparateMessages() {
+        val provider = FakeProvider("""{"action":"REPLY","reason":"GREETING","draft":"第一条\n第二条"}""")
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "r-newline")
+        )
+        assertEquals(AiReplyAction.REPLY, result.action)
+        assertEquals("第一条\n第二条", result.draft)
+        assertEquals(listOf("第一条", "第二条"), ReplyMessageSegments.split(result.draft!!))
+    }
+
     @Test fun systemInstructionDoesNotRequireFalseClaimsAboutAiIdentity() {
         val instruction = AiReplyDecisionEngine.DEFAULT_SYSTEM_INSTRUCTION
         assertTrue(instruction.contains("如果对方直接询问你是否为人工智能，必须如实回答"))

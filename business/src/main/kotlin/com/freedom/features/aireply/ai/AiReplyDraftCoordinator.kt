@@ -497,7 +497,6 @@ class AiReplyDraftCoordinator(
             val parsedMessages = ReplyMessageSegments.parse(decision.draft)
             onLog(
                 "AI 回复解析诊断：requestId=$requestId；" +
-                    "delimiterCount=${parsedMessages.delimiterCount}；" +
                     "lineBreakCount=${parsedMessages.lineBreakCount}；" +
                     "messageCount=${parsedMessages.messages.size}；" +
                     "messageLengths=${parsedMessages.messages.joinToString(",", prefix="[", postfix="]") { it.codePointCount(0, it.length).toString() }}；" +
