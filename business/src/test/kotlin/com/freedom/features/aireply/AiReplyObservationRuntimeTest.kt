@@ -65,6 +65,7 @@ import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepo
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRecord
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import com.freedom.features.recovery.RecoveryScheduleRepository
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -505,6 +506,177 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("消息列表检查点恢复[CONTINUE]") })
         assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+    }
+
+
+    private data class CrossTaskRecoveryFixture(
+        val runtime: AiReplyObservationRuntime,
+        val scheduler: FakeScheduler,
+        val port: FakeChatPort,
+        val ownership: TaskCoordinator,
+        val manager: UnifiedRecoveryTransactionManager,
+        val repository: PrivateMessagesTraversalCheckpointRepository,
+        val originalCheckpoint: PrivateMessagesTraversalCheckpoint,
+        val logs: MutableList<String>
+    )
+
+    private fun crossTaskRecoveryFixture(
+        arrivalStatus: ReceivedGreetingsPageArrivalStatus = ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED,
+        adapterConfirmation: Boolean = true
+    ): CrossTaskRecoveryFixture {
+        val scheduler = FakeScheduler()
+        val logs = mutableListOf<String>()
+        val original = PrivateMessagesTraversalCheckpoint(
+            attemptedSessionKeys = setOf("processed-before-handoff"),
+            lockedUnreadSessionKeys = emptySet(),
+            ambiguousSessionIdentityKeys = emptySet(),
+            lastStableVisibleKeys = emptyList(),
+            phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM.name,
+            atTop = false,
+            initialInboxPositionCheckCompleted = false,
+            initialInboxTopPositioningCompleted = false,
+            initialUnreadGateSwipeCompleted = false,
+            lockedUnreadSetFinalized = false,
+            normalInboxHadUnread = false,
+            normalInboxUnreadStateUnknown = false
+        )
+        val repository = object : PrivateMessagesTraversalCheckpointRepository {
+            private var value = original
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint = value
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { value = checkpoint }
+            override fun clear() = error("Cross-task handoff must never erase the private checkpoint")
+        }
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            receivedGreetingsCheckpointFingerprint = "sayhi-window-1110-generation-12"
+            receivedGreetingsRecoverySyncAccepted = adapterConfirmation
+            manualGreetingsArrivalStatus = arrivalStatus
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity",
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 144,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                windowGeneration = 12L
+            )
+        }
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val manager = UnifiedRecoveryTransactionManager({ 7L }, logs::add)
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = ownership,
+            currentRunGeneration = { 7L },
+            privateMessagesCheckpointRepository = repository,
+            recoveryTransactionManager = manager
+        )
+        return CrossTaskRecoveryFixture(runtime, scheduler, port, ownership, manager, repository, original, logs)
+    }
+
+    @Test
+    fun pendingPrivateCheckpointTransfersOnlyAfterIndependentGreetingsEvidenceAndKeepsPrimaryRecovery() {
+        val fixture = crossTaskRecoveryFixture()
+        val (runtime, scheduler, port, ownership, manager, repository, original, logs) = fixture
+        runtime.scheduleInitialObservation()
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        val originalRecovery = manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")
+        assertTrue(originalRecovery != null)
+
+        scheduler.runNextWithDelay(0L)
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_VERIFYING") })
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+
+        scheduler.runNextWithDelay(350L)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_TRANSFERRED") })
+        assertFalse(logs.any { it.contains("PRIVATE_TO_GREETINGS_ROLLBACK") })
+        assertEquals(original, repository.load())
+        assertEquals(originalRecovery?.checkpointId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertEquals(null, manager.snapshot("AI_REPLY_RECEIVED_GREETINGS"))
+    }
+
+    @Test
+    fun incompleteOrUnsynchronizedGreetingsEvidenceCannotPreemptPendingPrivateRecovery() {
+        listOf(
+            ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING to true,
+            ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED to false
+        ).forEach { (arrival, adapterConfirmed) ->
+            val (runtime, scheduler, port, ownership, manager, repository, original, logs) =
+                crossTaskRecoveryFixture(arrival, adapterConfirmed)
+            runtime.scheduleInitialObservation()
+            scheduler.runNextWithDelay(0L)
+            scheduler.runNextWithDelay(350L)
+            assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+            assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+            assertEquals(0, port.receivedGreetingsIdleSteps)
+            assertEquals(original, repository.load())
+            assertTrue(manager.snapshot("AI_REPLY_PRIVATE_MESSAGES") != null)
+            assertFalse(logs.any { it.contains("PRIVATE_TO_GREETINGS_TRANSFERRED") })
+        }
+    }
+
+    @Test
+    fun completedGreetingsRearmsOriginalPrivateCheckpointAndRequiresFreshResumeProof() {
+        val fixture = crossTaskRecoveryFixture()
+        val (runtime, scheduler, port, ownership, manager, repository, original, logs) = fixture
+        runtime.scheduleInitialObservation()
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
+        runUntilLog(scheduler, logs, "收到的招呼任务[COMPLETE_STAY_ON_PAGE]")
+        assertEquals(null, ownership.activeTaskId())
+
+        port.receivedGreetingsCheckpointFingerprint = null
+        port.page = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            windowGeneration = 20L
+        )
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilLog(scheduler, logs, "跨任务恢复[PRIVATE_CHECKPOINT_REARMED]")
+        assertEquals(null, ownership.activeTaskId())
+        assertEquals(original, repository.load())
+        assertTrue(manager.snapshot("AI_REPLY_PRIVATE_MESSAGES") != null)
+        assertFalse(logs.any { it.contains("已从任务=AI_REPLY_PRIVATE_MESSAGES恢复任务=AI_REPLY_PRIVATE_MESSAGES") })
+
+        runUntilLog(scheduler, logs, "统一页面恢复[RECOVERY_VERIFIED]")
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        assertEquals(null, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES"))
+        assertEquals(original, repository.load())
     }
 
     @Test
