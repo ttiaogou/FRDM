@@ -18,11 +18,13 @@ class UnifiedAccessibilityEntryContractTest {
             contentDescription = null,
             source = null
         )
-        var received: AccessibilityEventEnvelope? = null
+        var received: UnifiedAccessibilityEvent? = null
         val entry = UnifiedAccessibilityEntry { received = it }
+        val notification = UnifiedAccessibilityEvent.TargetApplication(event)
 
-        entry.accept(event)
+        entry.accept(notification)
 
-        assertSame(event, received)
+        assertSame(notification, received)
+        assertSame(event, (received as UnifiedAccessibilityEvent.TargetApplication).event)
     }
 }
