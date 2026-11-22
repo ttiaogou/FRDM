@@ -940,226 +940,6 @@ class AiReplyObservationRuntime(
         }
     }
 
-    /**
-     * Transfers only the UI task lease to a manually opened greetings list. The private-message
-     * checkpoint remains durable and the process manager's primary UNKNOWN transaction remains
-     * unresolved; neither is marked completed by this cross-task handoff.
-     *
-     * The target route MUST be independently matched, Android READY must precede BOTH fresh
-     * same-window samples, and the adapter's full list-container confirmation must still pass.
-     * Incomplete/stale evidence leaves the original private recovery in control.
-     */
-    private fun tryVerifiedPrivateRecoveryToGreetingsHandoff(
-        observation: ObservationResult,
-        inspection: ChatPageSnapshot,
-        matchedRouteId: String?,
-        observedGreetingFingerprint: String?
-    ): Boolean {
-        if (!recoveryContext.pending ||
-            recoveryContext.sourceTaskId != PRIVATE_MESSAGES_TASK_ID ||
-            messageListCheckpointForUnified == null ||
-            suspendedPrivateRecovery != null
-        ) return false
-        val gate = CROSS_TASK_GREETING_HANDOFF_GATE
-        if (!sessionRunStarted || !isAiReplyActive() ||
-            receivedGreetingsTaskActive || receivedGreetingsTaskCompletedAwaitingUserExit ||
-            matchedRouteId != receivedGreetingsRecoveryRoute.routeId ||
-            inspection.packageName != targetPackage() ||
-            inspection.pageKind != ChatPageKind.NON_CHAT ||
-            observation.status != ObservationStatus.CONFIRMED_PAGE ||
-            recoveryContext.runGeneration != currentRunGeneration() ||
-            observedGreetingFingerprint.isNullOrBlank() ||
-            !receivedGreetingsTaskFlow.supportsWorkflow()
-        ) {
-            pageRecoveryVerificationGate.reset(gate)
-            return false
-        }
-        if (isConversationDraftPending()) {
-            pageRecoveryVerificationGate.reset(gate)
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_WAIT]：仍有未决草稿事务；仅保留原私人消息检查点")
-            scheduleFullInspectionAfter(350L)
-            lastPageInspection = inspection
-            return true
-        }
-        if (!ensureAndroidRecoveryReady(inspection, "CROSS_TASK_GREETINGS_OBSERVATION")) {
-            pageRecoveryVerificationGate.reset(gate)
-            lastPageInspection = inspection
-            return true
-        }
-        // This adapter call is read-only; it verifies the exact listview structure and
-        // maintains its own spaced-snapshot arrival confirmation.
-        val arrival = observeReceivedGreetingsPageForUnifiedValidation()
-        val currentFingerprint = runCatching { chatPagePort.receivedGreetingsRecoveryFingerprint() }.getOrNull()
-        if (arrival != ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED ||
-            currentFingerprint != observedGreetingFingerprint
-        ) {
-            pageRecoveryVerificationGate.reset(gate)
-            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_VERIFYING]：列表观察=$arrival；等待适配器完整指纹及独立快照")
-            scheduleFullInspectionAfter(350L)
-            lastPageInspection = inspection
-            return true
-        }
-        val stableFingerprint = currentFingerprint ?: return true
-        if (!pageRecoveryVerificationGate.observe(gate, stableFingerprint)) {
-            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_VERIFYING]：第${pageRecoveryVerificationGate.stableSamples(gate)}/2次独立列表快照；私人消息检查点保留")
-            scheduleFullInspectionAfter(350L)
-            lastPageInspection = inspection
-            return true
-        }
-        val adapterConfirmed = receivedGreetingsTaskFlow.synchronizeRecoveryConfirmation()
-        val fingerprintUnchanged =
-            runCatching { chatPagePort.receivedGreetingsRecoveryFingerprint() }.getOrNull() == currentFingerprint
-        if (!adapterConfirmed || !fingerprintUnchanged ||
-            !ensureAndroidRecoveryReady(inspection, "CROSS_TASK_GREETINGS_OWNERSHIP")
-        ) {
-            pageRecoveryVerificationGate.reset(gate)
-            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_ADAPTER_WAIT]：列表结构或Android执行资格未再次确认；不转交租约")
-            scheduleFullInspectionAfter(350L)
-            lastPageInspection = inspection
-            return true
-        }
-        val pending = recoveryContext.snapshot()
-        val primary = recoveryTransactionManager?.snapshot(PRIVATE_MESSAGES_TASK_ID)
-        if (pending.checkpointId.isNullOrBlank() || pending.reason.isNullOrBlank() ||
-            pending.routeId != messageListRecoveryRoute.routeId ||
-            (primary != null && (primary.routeId != pending.routeId ||
-                primary.checkpointId != pending.checkpointId ||
-                primary.runGeneration != pending.runGeneration))
-        ) {
-            pageRecoveryVerificationGate.reset(gate)
-            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_IDENTITY_WAIT]：私人消息检查点身份或运行代次不一致；保持原恢复门禁")
-            lastPageInspection = inspection
-            scheduleFullInspectionAfter(350L)
-            return true
-        }
-
-        // Verification is complete, but NO private ResumeCompleted is dispatched. The original
-        // manager lane and persisted cursor remain unresolved until the inbox is seen again.
-        messageListCheckpointVerifier.deferOwnership()
-        if (ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-            releaseTaskOwnership("已双快照验证收到招呼列表；保留私人消息检查点并安全让出操作权")
-        }
-        recoveryContext.clear()
-        recoveryTransaction.reset()
-        pageRecoveryVerificationGate.reset(gate)
-        startReceivedGreetingsTaskFromConfirmedPage()
-        if (receivedGreetingsTaskActive && ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
-            suspendedPrivateRecovery = pending
-            receivedGreetingsPageProbePending = false
-            unmatchedNavigationObservationPending = false
-            lastPageInspection = inspection
-            onLog(
-                "跨任务恢复[PRIVATE_TO_GREETINGS_TRANSFERRED]：目标列表双快照=true；" +
-                    "适配器确认=true；UI操作权=true；私人消息checkpointId=${pending.checkpointId}；" +
-                    "原恢复事务仍待重新验证，未标记完成"
-            )
-        } else {
-            // A failed task start must never consume the original checkpoint or expose private
-            // gestures without a fresh list proof. Return to the same pending recovery identity.
-            restoreSuspendedPrivateRecovery(pending)
-            sessionManagerState = SessionManagerState.PAUSED
-            lastPageInspection = inspection
-            scheduleFullInspectionAfter(350L)
-            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_ROLLBACK]：收到招呼启动未完成；已恢复原私人消息检查点门禁")
-        }
-        return true
-    }
-
-    /**
-     * Re-arm the original checkpoint on a confirmed return to the ordinary inbox. This does
-     * NOT resume the private task: the existing checkpoint verifier must still obtain its
-     * own two fresh list samples, Android READY and the unique UI lease.
-     */
-    private fun tryRearmSuspendedPrivateRecovery(
-        observation: ObservationResult,
-        inspection: ChatPageSnapshot,
-        matchedRouteId: String?
-    ): Boolean {
-        val suspended = suspendedPrivateRecovery ?: return false
-        if (!sessionRunStarted || recoveryContext.pending || receivedGreetingsTaskActive ||
-            !receivedGreetingsTaskCompletedAwaitingUserExit ||
-            matchedRouteId != messageListRecoveryRoute.routeId ||
-            inspection.packageName != targetPackage() ||
-            inspection.pageKind != ChatPageKind.CHAT_LIST ||
-            observation.status != ObservationStatus.CONFIRMED_PAGE
-        ) return false
-        if (suspended.runGeneration != currentRunGeneration()) {
-            onLog("跨任务恢复[PRIVATE_CHECKPOINT_STALE_RUN]：运行代次不一致；不恢复旧任务或复用窗口")
-            return true
-        }
-        val checkpoint = privateMessagesCheckpointRepository?.load() ?: messageListCheckpointForUnified
-        if (checkpoint == null ||
-            messageListCheckpointForUnified?.savedAtEpochMs != checkpoint.savedAtEpochMs
-        ) {
-            onLog("跨任务恢复[PRIVATE_CHECKPOINT_UNAVAILABLE]：原持久化检查点无法与当前缓存对齐；禁止恢复旧滚动")
-            scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
-            return true
-        }
-        if (!restoreSuspendedPrivateRecovery(suspended)) {
-            scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
-            return true
-        }
-        privateMessagesTraversalTaskExecutor.restore(checkpoint)
-        receivedGreetingsTaskFlow.acknowledgeCompletedTaskExit()
-        suspendedPrivateRecovery = null
-        sessionManagerState = SessionManagerState.PAUSED
-        pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
-        onLog(
-            "跨任务恢复[PRIVATE_CHECKPOINT_REARMED]：已返回普通消息路由；" +
-                "checkpointId=${suspended.checkpointId}；原游标已恢复；" +
-                "等待Android READY、双快照验证与UI操作权，尚未执行滚动"
-        )
-        return true
-    }
-
-    private fun restoreSuspendedPrivateRecovery(saved: RecoveryContext.Snapshot): Boolean {
-        val reason = saved.reason ?: return false
-        val checkpointId = saved.checkpointId ?: return false
-        val routeId = saved.routeId ?: return false
-        if (saved.taskId != PRIVATE_MESSAGES_TASK_ID ||
-            saved.runGeneration != currentRunGeneration() ||
-            routeId != messageListRecoveryRoute.routeId
-        ) return false
-        val manager = recoveryTransactionManager?.snapshot(PRIVATE_MESSAGES_TASK_ID)
-        if (manager != null &&
-            (manager.routeId != routeId || manager.checkpointId != checkpointId ||
-                manager.runGeneration != saved.runGeneration)
-        ) return false
-        val nextObservationGeneration = maxOf(
-            pageReadCoordinator.currentObservationGeneration(),
-            saved.observationGeneration,
-            manager?.observationGeneration ?: 0L
-        )
-        recoveryContext.request(
-            taskId = PRIVATE_MESSAGES_TASK_ID,
-            recoveryReason = reason,
-            routeId = routeId,
-            generation = saved.runGeneration,
-            recoveryCheckpointId = checkpointId,
-            pageObservationGeneration = nextObservationGeneration
-        )
-        if (saved.checkpointSaved) recoveryContext.markCheckpointSaved()
-        if (saved.checkpointLoaded) recoveryContext.markCheckpointLoaded()
-        recoveryTransaction.reset()
-        recoveryTransaction.activate(
-            RecoveryEventIdentity(
-                taskId = PRIVATE_MESSAGES_TASK_ID,
-                routeId = routeId,
-                runGeneration = saved.runGeneration,
-                checkpointId = checkpointId,
-                observationGeneration = nextObservationGeneration,
-                unknownReason = reason
-            )
-        )
-        recoveryTransaction.dispatch(RecoveryTransactionEvent.CheckpointLoaded(
-            RecoveryTransactionEvent.Source.PAGE_OBSERVATION
-        ))
-        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
-        messageListCheckpointVerifier.reset()
-        return true
-    }
-
     /** Applies a newly acquired page snapshot after ordinary debounce or verified user stability. */
     /** Consumes the semantic observation result; the snapshot remains evidence only. */
     private fun handleInspectionSnapshot(observation: ObservationResult) {
@@ -2034,6 +1814,226 @@ class AiReplyObservationRuntime(
         // business code intentionally does not receive or inspect the final sampled touch point.
         return sameNavigationAnchor && viewportProof &&
             (hasChangedNodeInInbox || hasExplicitListTargetInInbox)
+    }
+
+    /**
+     * Transfers only the UI task lease to a manually opened greetings list. The private-message
+     * checkpoint remains durable and the process manager's primary UNKNOWN transaction remains
+     * unresolved; neither is marked completed by this cross-task handoff.
+     *
+     * The target route MUST be independently matched, Android READY must precede BOTH fresh
+     * same-window samples, and the adapter's full list-container confirmation must still pass.
+     * Incomplete/stale evidence leaves the original private recovery in control.
+     */
+    private fun tryVerifiedPrivateRecoveryToGreetingsHandoff(
+        observation: ObservationResult,
+        inspection: ChatPageSnapshot,
+        matchedRouteId: String?,
+        observedGreetingFingerprint: String?
+    ): Boolean {
+        if (!recoveryContext.pending ||
+            recoveryContext.sourceTaskId != PRIVATE_MESSAGES_TASK_ID ||
+            messageListCheckpointForUnified == null ||
+            suspendedPrivateRecovery != null
+        ) return false
+        val gate = CROSS_TASK_GREETING_HANDOFF_GATE
+        if (!sessionRunStarted || !isAiReplyActive() ||
+            receivedGreetingsTaskActive || receivedGreetingsTaskCompletedAwaitingUserExit ||
+            matchedRouteId != receivedGreetingsRecoveryRoute.routeId ||
+            inspection.packageName != targetPackage() ||
+            inspection.pageKind != ChatPageKind.NON_CHAT ||
+            observation.status != ObservationStatus.CONFIRMED_PAGE ||
+            recoveryContext.runGeneration != currentRunGeneration() ||
+            observedGreetingFingerprint.isNullOrBlank() ||
+            !receivedGreetingsTaskFlow.supportsWorkflow()
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            return false
+        }
+        if (isConversationDraftPending()) {
+            pageRecoveryVerificationGate.reset(gate)
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_WAIT]：仍有未决草稿事务；仅保留原私人消息检查点")
+            scheduleFullInspectionAfter(350L)
+            lastPageInspection = inspection
+            return true
+        }
+        if (!ensureAndroidRecoveryReady(inspection, "CROSS_TASK_GREETINGS_OBSERVATION")) {
+            pageRecoveryVerificationGate.reset(gate)
+            lastPageInspection = inspection
+            return true
+        }
+        // This adapter call is read-only; it verifies the exact listview structure and
+        // maintains its own spaced-snapshot arrival confirmation.
+        val arrival = observeReceivedGreetingsPageForUnifiedValidation()
+        val currentFingerprint = runCatching { chatPagePort.receivedGreetingsRecoveryFingerprint() }.getOrNull()
+        if (arrival != ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED ||
+            currentFingerprint != observedGreetingFingerprint
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_VERIFYING]：列表观察=$arrival；等待适配器完整指纹及独立快照")
+            scheduleFullInspectionAfter(350L)
+            lastPageInspection = inspection
+            return true
+        }
+        val stableFingerprint = currentFingerprint ?: return true
+        if (!pageRecoveryVerificationGate.observe(gate, stableFingerprint)) {
+            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_VERIFYING]：第${pageRecoveryVerificationGate.stableSamples(gate)}/2次独立列表快照；私人消息检查点保留")
+            scheduleFullInspectionAfter(350L)
+            lastPageInspection = inspection
+            return true
+        }
+        val adapterConfirmed = receivedGreetingsTaskFlow.synchronizeRecoveryConfirmation()
+        val fingerprintUnchanged =
+            runCatching { chatPagePort.receivedGreetingsRecoveryFingerprint() }.getOrNull() == currentFingerprint
+        if (!adapterConfirmed || !fingerprintUnchanged ||
+            !ensureAndroidRecoveryReady(inspection, "CROSS_TASK_GREETINGS_OWNERSHIP")
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_ADAPTER_WAIT]：列表结构或Android执行资格未再次确认；不转交租约")
+            scheduleFullInspectionAfter(350L)
+            lastPageInspection = inspection
+            return true
+        }
+        val pending = recoveryContext.snapshot()
+        val primary = recoveryTransactionManager?.snapshot(PRIVATE_MESSAGES_TASK_ID)
+        if (pending.checkpointId.isNullOrBlank() || pending.reason.isNullOrBlank() ||
+            pending.routeId != messageListRecoveryRoute.routeId ||
+            (primary != null && (primary.routeId != pending.routeId ||
+                primary.checkpointId != pending.checkpointId ||
+                primary.runGeneration != pending.runGeneration))
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_IDENTITY_WAIT]：私人消息检查点身份或运行代次不一致；保持原恢复门禁")
+            lastPageInspection = inspection
+            scheduleFullInspectionAfter(350L)
+            return true
+        }
+
+        // Verification is complete, but NO private ResumeCompleted is dispatched. The original
+        // manager lane and persisted cursor remain unresolved until the inbox is seen again.
+        messageListCheckpointVerifier.deferOwnership()
+        if (ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            releaseTaskOwnership("已双快照验证收到招呼列表；保留私人消息检查点并安全让出操作权")
+        }
+        recoveryContext.clear()
+        recoveryTransaction.reset()
+        pageRecoveryVerificationGate.reset(gate)
+        startReceivedGreetingsTaskFromConfirmedPage()
+        if (receivedGreetingsTaskActive && ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
+            suspendedPrivateRecovery = pending
+            receivedGreetingsPageProbePending = false
+            unmatchedNavigationObservationPending = false
+            lastPageInspection = inspection
+            onLog(
+                "跨任务恢复[PRIVATE_TO_GREETINGS_TRANSFERRED]：目标列表双快照=true；" +
+                    "适配器确认=true；UI操作权=true；私人消息checkpointId=${pending.checkpointId}；" +
+                    "原恢复事务仍待重新验证，未标记完成"
+            )
+        } else {
+            // A failed task start must never consume the original checkpoint or expose private
+            // gestures without a fresh list proof. Return to the same pending recovery identity.
+            restoreSuspendedPrivateRecovery(pending)
+            sessionManagerState = SessionManagerState.PAUSED
+            lastPageInspection = inspection
+            scheduleFullInspectionAfter(350L)
+            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_ROLLBACK]：收到招呼启动未完成；已恢复原私人消息检查点门禁")
+        }
+        return true
+    }
+
+    /**
+     * Re-arm the original checkpoint on a confirmed return to the ordinary inbox. This does
+     * NOT resume the private task: the existing checkpoint verifier must still obtain its
+     * own two fresh list samples, Android READY and the unique UI lease.
+     */
+    private fun tryRearmSuspendedPrivateRecovery(
+        observation: ObservationResult,
+        inspection: ChatPageSnapshot,
+        matchedRouteId: String?
+    ): Boolean {
+        val suspended = suspendedPrivateRecovery ?: return false
+        if (!sessionRunStarted || recoveryContext.pending || receivedGreetingsTaskActive ||
+            !receivedGreetingsTaskCompletedAwaitingUserExit ||
+            matchedRouteId != messageListRecoveryRoute.routeId ||
+            inspection.packageName != targetPackage() ||
+            inspection.pageKind != ChatPageKind.CHAT_LIST ||
+            observation.status != ObservationStatus.CONFIRMED_PAGE
+        ) return false
+        if (suspended.runGeneration != currentRunGeneration()) {
+            onLog("跨任务恢复[PRIVATE_CHECKPOINT_STALE_RUN]：运行代次不一致；不恢复旧任务或复用窗口")
+            return true
+        }
+        val checkpoint = privateMessagesCheckpointRepository?.load() ?: messageListCheckpointForUnified
+        if (checkpoint == null ||
+            messageListCheckpointForUnified?.savedAtEpochMs != checkpoint.savedAtEpochMs
+        ) {
+            onLog("跨任务恢复[PRIVATE_CHECKPOINT_UNAVAILABLE]：原持久化检查点无法与当前缓存对齐；禁止恢复旧滚动")
+            scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
+            return true
+        }
+        if (!restoreSuspendedPrivateRecovery(suspended)) {
+            scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
+            return true
+        }
+        privateMessagesTraversalTaskExecutor.restore(checkpoint)
+        receivedGreetingsTaskFlow.acknowledgeCompletedTaskExit()
+        suspendedPrivateRecovery = null
+        sessionManagerState = SessionManagerState.PAUSED
+        pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
+        onLog(
+            "跨任务恢复[PRIVATE_CHECKPOINT_REARMED]：已返回普通消息路由；" +
+                "checkpointId=${suspended.checkpointId}；原游标已恢复；" +
+                "等待Android READY、双快照验证与UI操作权，尚未执行滚动"
+        )
+        return true
+    }
+
+    private fun restoreSuspendedPrivateRecovery(saved: RecoveryContext.Snapshot): Boolean {
+        val reason = saved.reason ?: return false
+        val checkpointId = saved.checkpointId ?: return false
+        val routeId = saved.routeId ?: return false
+        if (saved.taskId != PRIVATE_MESSAGES_TASK_ID ||
+            saved.runGeneration != currentRunGeneration() ||
+            routeId != messageListRecoveryRoute.routeId
+        ) return false
+        val manager = recoveryTransactionManager?.snapshot(PRIVATE_MESSAGES_TASK_ID)
+        if (manager != null &&
+            (manager.routeId != routeId || manager.checkpointId != checkpointId ||
+                manager.runGeneration != saved.runGeneration)
+        ) return false
+        val nextObservationGeneration = maxOf(
+            pageReadCoordinator.currentObservationGeneration(),
+            saved.observationGeneration,
+            manager?.observationGeneration ?: 0L
+        )
+        recoveryContext.request(
+            taskId = PRIVATE_MESSAGES_TASK_ID,
+            recoveryReason = reason,
+            routeId = routeId,
+            generation = saved.runGeneration,
+            recoveryCheckpointId = checkpointId,
+            pageObservationGeneration = nextObservationGeneration
+        )
+        if (saved.checkpointSaved) recoveryContext.markCheckpointSaved()
+        if (saved.checkpointLoaded) recoveryContext.markCheckpointLoaded()
+        recoveryTransaction.reset()
+        recoveryTransaction.activate(
+            RecoveryEventIdentity(
+                taskId = PRIVATE_MESSAGES_TASK_ID,
+                routeId = routeId,
+                runGeneration = saved.runGeneration,
+                checkpointId = checkpointId,
+                observationGeneration = nextObservationGeneration,
+                unknownReason = reason
+            )
+        )
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.CheckpointLoaded(
+            RecoveryTransactionEvent.Source.PAGE_OBSERVATION
+        ))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        messageListCheckpointVerifier.reset()
+        return true
     }
 
     /**
