@@ -11,6 +11,12 @@ import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
 import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
 import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.recovery.RecoveryScheduleSnapshot
+import com.freedom.features.recovery.RecoveryEventDispatcher
+import com.freedom.features.recovery.RecoveryEventIdentity
+import com.freedom.features.recovery.RecoveryTransactionEvent
+import com.freedom.features.recovery.RecoveryTransactionState
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
+import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -45,14 +51,18 @@ class ReceivedGreetingsCheckpointVerificationTest {
         inputFieldTarget = null
     )
 
-    private fun fixture(scheduleRepository: RecoveryScheduleRepository? = null): Pair<ReceivedGreetingsCheckpointVerification, FakeScheduler> {
+    private fun fixture(
+        scheduleRepository: RecoveryScheduleRepository? = null,
+        recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null
+    ): Pair<ReceivedGreetingsCheckpointVerification, FakeScheduler> {
         val scheduler = FakeScheduler()
         return ReceivedGreetingsCheckpointVerification(
             scheduler = scheduler,
             targetPackage = { "com.immomo.momo" },
             currentRunGeneration = { 8L },
             onReadOnlyObservation = { scheduler.observations++ },
-            scheduleRepository = scheduleRepository
+            scheduleRepository = scheduleRepository,
+            recoveryTransactionManager = recoveryTransactionManager
         ) to scheduler
     }
 
@@ -212,6 +222,44 @@ class ReceivedGreetingsCheckpointVerificationTest {
             RecoveryCheckpointVerificationResult.ResumeReady(ReceivedGreetingsTraversalStatus.SCANNING.name),
             verifier.sample(5L)
         )
+    }
+
+
+    @Test
+    fun sharedManagerAllowsChangedWindowFingerprintAndStageReverification() {
+        val manager = UnifiedRecoveryTransactionManager({ 8L })
+        val (verifier, _) = fixture(recoveryTransactionManager = manager)
+        val task = ReceivedGreetingsTaskController.TASK_ID
+        val checkpointId = "AI_REPLY_RECEIVED_GREETINGS:SERVICE_RECONNECT_CHECKPOINT"
+        val primary = RecoveryEventDispatcher(
+            UnifiedRecoveryTransactionStateMachine(), sharedManager = manager
+        )
+        primary.activate(RecoveryEventIdentity(task, task, 8L, checkpointId, 0L))
+        primary.dispatch(RecoveryTransactionEvent.UnknownPage("PAGE_ROUTE_CHANGED"))
+
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(1L, fingerprint = "A"))
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(2L, fingerprint = "B"))
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(
+            3L, fingerprint = "B", status = ReceivedGreetingsTraversalStatus.NAVIGATING
+        ))
+        assertEquals(
+            RecoveryCheckpointVerificationResult.ResumeReady(ReceivedGreetingsTraversalStatus.NAVIGATING.name),
+            verifier.sample(4L, fingerprint = "B", status = ReceivedGreetingsTraversalStatus.NAVIGATING)
+        )
+        assertEquals(RecoveryTransactionState.RECOVERING, manager.snapshot(task)?.state)
+        assertTrue(verifier.completeResume())
+        assertEquals(null, manager.snapshot(task, "AI_REPLY_RECEIVED_GREETINGS_CHECKPOINT"))
+    }
+
+    @Test
+    fun sharedManagerDeferResumeDoesNotReusePriorSamples() {
+        val manager = UnifiedRecoveryTransactionManager({ 8L })
+        val (verifier, _) = fixture(recoveryTransactionManager = manager)
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(1L))
+        assertTrue(verifier.sample(2L) is RecoveryCheckpointVerificationResult.ResumeReady)
+        verifier.deferResume()
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(3L))
+        assertTrue(verifier.sample(4L) is RecoveryCheckpointVerificationResult.ResumeReady)
     }
 
     @Test

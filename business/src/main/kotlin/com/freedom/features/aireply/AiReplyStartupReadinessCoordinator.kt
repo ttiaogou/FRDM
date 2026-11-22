@@ -6,6 +6,7 @@ import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.aireply.ports.MessageWorkAreaNavigationOutcome
 
 /**
  * Feature-owned startup readiness gate for the verified Message work area.
@@ -37,6 +38,8 @@ internal class AiReplyStartupReadinessCoordinator(
     private var generation = 0L
     private var retryCount = 0
     private var tapAttempts = 0
+    private var tapAttemptSequence = 0L
+    private var pendingTapAttemptId: Long? = null
     private var beforeTap: ChatPageSnapshot? = null
     private var stableSamples = 0
     private var lastStableSnapshot: ChatPageSnapshot? = null
@@ -57,6 +60,7 @@ internal class AiReplyStartupReadinessCoordinator(
         workAreaConfirmed = !sessionStarted
         retryCount = 0
         tapAttempts = 0
+        pendingTapAttemptId = null
         timedOut = false
     }
 
@@ -83,6 +87,7 @@ internal class AiReplyStartupReadinessCoordinator(
         task?.cancel()
         task = null
         generation += 1L
+        pendingTapAttemptId = null
         beforeTap = null
         stableSamples = 0
         lastStableSnapshot = null
@@ -94,6 +99,7 @@ internal class AiReplyStartupReadinessCoordinator(
         tapAttempts = 0
         timedOut = false
         workAreaConfirmed = false
+        pendingTapAttemptId = null
         beforeTap = null
         stableSamples = 0
         lastStableSnapshot = null
@@ -152,13 +158,27 @@ internal class AiReplyStartupReadinessCoordinator(
             return
         }
 
-        val submitted = runCatching { chatPagePort.ensureMessageWorkArea() }.getOrDefault(false)
+        val attemptId = ++tapAttemptSequence
+        var immediateOutcome: MessageWorkAreaNavigationOutcome? = null
+        var submissionReturned = false
+        val submitted = runCatching {
+            chatPagePort.ensureMessageWorkArea { outcome ->
+                if (submissionReturned) {
+                    onMessageTabGestureOutcome(expectedGeneration, attemptId, outcome)
+                } else {
+                    // Some gesture implementations complete synchronously during submission.
+                    immediateOutcome = outcome
+                }
+            }
+        }.getOrDefault(false)
+        submissionReturned = true
         if (!submitted) {
             scheduleRetry(expectedGeneration, "主界面已出现，但消息标签目标尚未通过适配器的双快照校验")
             return
         }
 
         tapAttempts++
+        pendingTapAttemptId = attemptId
         beforeTap = fresh
         onLog(
             "AI 启动导航[TAP_SUBMITTED]：已提交消息标签导航；" +
@@ -167,6 +187,36 @@ internal class AiReplyStartupReadinessCoordinator(
         task = scheduler.schedule(STARTUP_NAVIGATION_VERIFY_DELAY_MS) {
             task = null
             if (expectedGeneration == generation) verifyAfterTap(expectedGeneration)
+        }
+        immediateOutcome?.let { onMessageTabGestureOutcome(expectedGeneration, attemptId, it) }
+    }
+
+    private fun onMessageTabGestureOutcome(
+        expectedGeneration: Long,
+        attemptId: Long,
+        outcome: MessageWorkAreaNavigationOutcome
+    ) {
+        if (expectedGeneration != generation || pendingTapAttemptId != attemptId ||
+            workAreaConfirmed || timedOut || !initializationPending ||
+            !isSessionRunStarted() || !isAiReplyActive()
+        ) return
+        pendingTapAttemptId = null
+        when (outcome) {
+            MessageWorkAreaNavigationOutcome.COMPLETED -> Unit // Fresh page proof is still required.
+            MessageWorkAreaNavigationOutcome.UNCONFIRMED ->
+                onLog("AI 启动导航[GESTURE_UNCONFIRMED]：手势结果不确定；不退还点击额度，仅等待新快照确认")
+            MessageWorkAreaNavigationOutcome.DEFERRED_NOT_DISPATCHED -> {
+                // Android did not dispatch the tap. Do not consume the one allowed real tap.
+                // Never reuse the old target or coordinates; start from a fresh read.
+                tapAttempts = (tapAttempts - 1).coerceAtLeast(0)
+                beforeTap = null
+                stableSamples = 0
+                lastStableSnapshot = null
+                task?.cancel()
+                task = null
+                onLog("AI 启动导航[GESTURE_DEFERRED]：手势未派发；不消耗点击额度，重新取得页面证据")
+                scheduleRetry(expectedGeneration, "消息标签手势未派发；重新采集页面确认后再决定是否导航")
+            }
         }
     }
 

@@ -536,6 +536,13 @@ enum class ReceivedGreetingsPageArrivalStatus {
     NOT_TARGET
 }
 
+/** Gesture callback evidence is not page proof or a UI lease. */
+enum class MessageWorkAreaNavigationOutcome {
+    COMPLETED,
+    DEFERRED_NOT_DISPATCHED,
+    UNCONFIRMED
+}
+
 interface ChatPagePort {
     /** Semantic page-boundary check; concrete Activity identifiers stay in the adapter. */
     fun isReceivedGreetingsListActivity(activityClass: String): Boolean = false
@@ -550,6 +557,14 @@ interface ChatPagePort {
      * no-op keeps platform-neutral test adapters and unsupported social adapters compatible.
      */
     fun ensureMessageWorkArea(): Boolean = true
+
+    /**
+     * Optional completion signal for a submitted Message-tab gesture.
+     * The overload keeps existing adapters compatible; only a concrete adapter can report
+     * an actual dispatch outcome. A missing callback must never be assumed completed.
+     */
+    fun ensureMessageWorkArea(onGestureOutcome: (MessageWorkAreaNavigationOutcome) -> Unit): Boolean =
+        ensureMessageWorkArea()
 
     /**
      * True when the adapter exposes a stable Message-tab anchor and the runtime can verify the

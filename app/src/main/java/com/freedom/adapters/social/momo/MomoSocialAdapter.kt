@@ -48,6 +48,7 @@ import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatPageNodeEvidence
 import com.freedom.features.aireply.ports.ChatPagePort
+import com.freedom.features.aireply.ports.MessageWorkAreaNavigationOutcome
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
 import com.freedom.features.aireply.ports.ChatDraftInputPort
@@ -4361,7 +4362,11 @@ internal class MomoSocialAdapter(
      */
     override fun supportsVerifiedMessageWorkAreaNavigation(): Boolean = true
 
-    override fun ensureMessageWorkArea(): Boolean {
+    override fun ensureMessageWorkArea(): Boolean = ensureMessageWorkArea { }
+
+    override fun ensureMessageWorkArea(
+        onGestureOutcome: (MessageWorkAreaNavigationOutcome) -> Unit
+    ): Boolean {
         fun captureSnapshot(
             expectedWindow: WindowRef? = null,
             expectedWindowId: Int? = null
@@ -4458,6 +4463,13 @@ internal class MomoSocialAdapter(
             executionContext = executionContext
         )
         val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
+            onGestureOutcome(
+                when (result.status) {
+                    GestureExecutionStatus.COMPLETED -> MessageWorkAreaNavigationOutcome.COMPLETED
+                    GestureExecutionStatus.DEFERRED -> MessageWorkAreaNavigationOutcome.DEFERRED_NOT_DISPATCHED
+                    else -> MessageWorkAreaNavigationOutcome.UNCONFIRMED
+                }
+            )
             onLog(
                 if (result.status == GestureExecutionStatus.COMPLETED) {
                     "消息工作区域入口：消息标签手势完成；等待新鲜页面指纹确认"

@@ -47,6 +47,7 @@ import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.features.aireply.ports.ChatPageNodeEvidence
 import com.freedom.features.aireply.ports.ChatPagePort
+import com.freedom.features.aireply.ports.MessageWorkAreaNavigationOutcome
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatPageSnapshot
@@ -1266,6 +1267,67 @@ class AiReplyObservationRuntimeTest {
             listOf(GestureKind.SWIPE, GestureKind.SWIPE, GestureKind.SWIPE),
             gestures
         )
+    }
+
+
+    @Test
+    fun deferredMessageTabGestureDoesNotConsumeTapLimitOrAcceptOldCallback() {
+        val scheduler = FakeScheduler()
+        val feed = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.NON_CHAT,
+            scannedNodeCount = 60,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            screenBounds = ScreenRect(0, 0, 720, 1600),
+            sessionListNavigationTarget = testNavigationTarget(
+                "com.immomo.momo.maintab.MaintabActivity", generation = 5L
+            ),
+            windowGeneration = 5L
+        )
+        val port = FakeChatPort().apply {
+            page = feed
+            provideMessageTabPositionEvidence = true
+            captureMessageWorkAreaGestureOutcome = true
+        }
+        val logs = mutableListOf<String>()
+        val coordinator = AiReplyStartupReadinessCoordinator(
+            scheduler = scheduler,
+            chatPagePort = port,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            isSessionRunStarted = { true },
+            inspectFreshPageSnapshot = port::inspectChatPage,
+            isMessageViewportPositionedAgainstTab = { _, _, _ -> true },
+            hasRelevantMessageStructureDelta = { _, _, _, _ -> true },
+            onConfirmed = {},
+            onTimedOut = {},
+            onLog = logs::add
+        )
+        coordinator.resetForRun(sessionStarted = true)
+        coordinator.beginVerification()
+        assertEquals(1, port.messageWorkAreaEntryAttempts)
+        assertTrue(scheduler.hasPendingDelay(900L))
+
+        port.messageWorkAreaOutcomeCallbacks[0](MessageWorkAreaNavigationOutcome.DEFERRED_NOT_DISPATCHED)
+        assertTrue(logs.any { it.contains("GESTURE_DEFERRED") })
+        assertTrue(scheduler.hasPendingDelay(400L))
+        scheduler.runNextWithDelay(400L)
+        assertEquals("未派发的点击不应耗尽一次导航额度", 2, port.messageWorkAreaEntryAttempts)
+
+        // An old callback cannot invalidate the new attempt's pending confirmation.
+        port.messageWorkAreaOutcomeCallbacks[0](MessageWorkAreaNavigationOutcome.DEFERRED_NOT_DISPATCHED)
+        assertTrue(scheduler.hasPendingDelay(900L))
+        port.messageWorkAreaOutcomeCallbacks[1](MessageWorkAreaNavigationOutcome.UNCONFIRMED)
+        scheduler.runNextWithDelay(900L)
+        scheduler.runNextWithDelay(400L)
+        assertEquals("结果不确定的点击仍应保留一次点击上限", 2, port.messageWorkAreaEntryAttempts)
     }
 
     @Test
@@ -4418,6 +4480,8 @@ class AiReplyObservationRuntimeTest {
         var verifiedMessageWorkAreaNavigationSupported = false
         var messageWorkAreaEntryResult = true
         var messageWorkAreaEntryAttempts = 0
+        var captureMessageWorkAreaGestureOutcome = false
+        val messageWorkAreaOutcomeCallbacks = ArrayList<(MessageWorkAreaNavigationOutcome) -> Unit>()
         var pageAfterMessageWorkAreaEntry: ChatPageSnapshot? = null
         var resolvedTapBounds: ScreenRect? = null
         var resolvedTapBoundsSequence: List<ScreenRect?>? = null
@@ -4505,6 +4569,15 @@ class AiReplyObservationRuntimeTest {
             messageWorkAreaEntryAttempts++
             if (messageWorkAreaEntryResult) pageAfterMessageWorkAreaEntry?.let { page = it }
             return messageWorkAreaEntryResult
+        }
+        override fun ensureMessageWorkArea(
+            onGestureOutcome: (MessageWorkAreaNavigationOutcome) -> Unit
+        ): Boolean {
+            val accepted = ensureMessageWorkArea()
+            if (accepted && captureMessageWorkAreaGestureOutcome) {
+                messageWorkAreaOutcomeCallbacks += onGestureOutcome
+            }
+            return accepted
         }
         override fun supportsReceivedGreetingsIdleWorkflow(): Boolean = receivedGreetingsWorkflowEnabled
         override fun beginReceivedGreetingsNavigationTask() {

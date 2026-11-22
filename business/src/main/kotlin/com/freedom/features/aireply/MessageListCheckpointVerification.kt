@@ -5,6 +5,7 @@ import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
 import com.freedom.features.recovery.RecoveryCheckpointAdapterContext
+import com.freedom.features.recovery.RecoveryEventIdentity
 import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
 import com.freedom.features.recovery.RecoveryCheckpointVerificationCoordinator
 import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
@@ -71,6 +72,9 @@ internal class MessageListCheckpointVerification(
             pageFingerprint = pageFingerprint
         )
         if (verifier == null || binding != newBinding) {
+            // A fresh binding invalidates only this checkpoint's verification lane.
+            // The primary UNKNOWN transaction and durable business cursor remain owned elsewhere.
+            restartVerificationLane()
             // Never use an old viewport or contact name as a page fingerprint. The caller passes
             // the existing recoveryStructuralKey obtained from a fresh, route-matched read.
             val unified = adapter.adapt(
@@ -93,7 +97,7 @@ internal class MessageListCheckpointVerification(
             ).also { schedule = it }
             verifier = RecoveryCheckpointVerificationCoordinator(
                 transaction = CheckpointVerificationWiring.newDispatcher(
-                    onLog, recoveryTransactionManager, "AI_REPLY_PRIVATE_MESSAGES_CHECKPOINT"
+                    onLog, recoveryTransactionManager, VERIFICATION_LANE
                 ),
                 scheduler = observationSchedule,
                 onLog = onLog
@@ -127,6 +131,7 @@ internal class MessageListCheckpointVerification(
 
     /** On a denied task lease, require fresh verification again instead of reusing ResumeReady. */
     fun deferOwnership() {
+        restartVerificationLane()
         verifier = null
         binding = null
     }
@@ -144,11 +149,36 @@ internal class MessageListCheckpointVerification(
 
     /** Service boundaries invalidate all pending read-only callbacks and verification samples. */
     fun reset() {
+        restartVerificationLane()
         schedule?.suspendForServiceDisconnect()
         schedule = null
         verifier = null
         binding = null
         lastObservationGeneration = -1L
+    }
+
+
+    /**
+     * The old verifier's last sample belongs to a separate, non-primary lane.
+     * Retire that lane before a replacement emits CheckpointLoaded(generation=0),
+     * otherwise the shared manager rejects the replacement as an older observation.
+     */
+    private fun restartVerificationLane() {
+        val previous = binding ?: return
+        recoveryTransactionManager?.restartVerificationLane(
+            RecoveryEventIdentity(
+                taskId = PrivateMessagesTaskController.TASK_ID,
+                routeId = PrivateMessagesTaskController.TASK_ID,
+                runGeneration = previous.runGeneration,
+                checkpointId = previous.checkpointId,
+                observationGeneration = lastObservationGeneration.coerceAtLeast(0L)
+            ),
+            VERIFICATION_LANE
+        )
+    }
+
+    private companion object {
+        const val VERIFICATION_LANE = "AI_REPLY_PRIVATE_MESSAGES_CHECKPOINT"
     }
 
     fun hasActiveVerification(): Boolean = verifier != null

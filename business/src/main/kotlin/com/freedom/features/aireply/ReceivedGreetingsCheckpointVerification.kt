@@ -6,6 +6,7 @@ import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRecord
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.recovery.RecoveryCheckpointAdapterContext
+import com.freedom.features.recovery.RecoveryEventIdentity
 import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
 import com.freedom.features.recovery.RecoveryCheckpointVerificationCoordinator
 import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
@@ -73,6 +74,9 @@ internal class ReceivedGreetingsCheckpointVerification(
             pageFingerprint = pageFingerprint
         )
         if (verifier == null || binding != current) {
+            // A fresh binding invalidates only this checkpoint's verification lane.
+            // The primary UNKNOWN transaction and durable business cursor remain owned elsewhere.
+            restartVerificationLane()
             val unified = adapter.adapt(
                 checkpoint,
                 RecoveryCheckpointAdapterContext(
@@ -94,7 +98,7 @@ internal class ReceivedGreetingsCheckpointVerification(
             ).also { schedule = it }
             verifier = RecoveryCheckpointVerificationCoordinator(
                 transaction = CheckpointVerificationWiring.newDispatcher(
-                    onLog, recoveryTransactionManager, "AI_REPLY_RECEIVED_GREETINGS_CHECKPOINT"
+                    onLog, recoveryTransactionManager, VERIFICATION_LANE
                 ),
                 scheduler = readOnlySchedule,
                 onLog = onLog
@@ -127,6 +131,7 @@ internal class ReceivedGreetingsCheckpointVerification(
 
     /** 适配器二次确认或租约尚未通过时，不可复用已得到的两次采样凭证。 */
     fun deferResume() {
+        restartVerificationLane()
         verifier = null
         binding = null
     }
@@ -140,10 +145,35 @@ internal class ReceivedGreetingsCheckpointVerification(
         return true
     }
 
+
+    /**
+     * The old verifier's last sample belongs to a separate, non-primary lane.
+     * Retire that lane before a replacement emits CheckpointLoaded(generation=0),
+     * otherwise the shared manager rejects the replacement as an older observation.
+     */
+    private fun restartVerificationLane() {
+        val previous = binding ?: return
+        recoveryTransactionManager?.restartVerificationLane(
+            RecoveryEventIdentity(
+                taskId = ReceivedGreetingsTaskController.TASK_ID,
+                routeId = ReceivedGreetingsTaskController.TASK_ID,
+                runGeneration = previous.runGeneration,
+                checkpointId = previous.checkpointId,
+                observationGeneration = lastObservationGeneration.coerceAtLeast(0L)
+            ),
+            VERIFICATION_LANE
+        )
+    }
+
+    private companion object {
+        const val VERIFICATION_LANE = "AI_REPLY_RECEIVED_GREETINGS_CHECKPOINT"
+    }
+
     fun hasActiveVerification(): Boolean = verifier != null
 
     /** 服务中断时取消旧定时器；下次必须使用新鲜快照重新验证。 */
     fun reset() {
+        restartVerificationLane()
         schedule?.suspendForServiceDisconnect()
         schedule = null
         verifier = null
