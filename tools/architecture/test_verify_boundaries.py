@@ -413,6 +413,82 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         )
         self.assertTrue(any("P4" in x for x in guard.unified_ui_write_authorization_violations(changed)))
 
+    def test_ui_platform_write_guard_accepts_current_audited_outlets(self):
+        self.assertEqual(
+            guard.android_ui_mutation_bypass_violations(self.recovery_code), []
+        )
+
+    def test_ui_platform_write_guard_rejects_renamed_and_null_safe_receivers(self):
+        path = "app/src/main/java/com/freedom/adapters/social/momo/UnsafeWrite.kt"
+        bypasses = (
+            "liveNode.performAction(16)",
+            "liveNode?.performAction(16)",
+            "liveNode!!.performAction(16)",
+            "renamedService.performGlobalAction(1)",
+            "renamedService?.performGlobalAction(1)",
+            "otherDispatcher.dispatchGesture(gesture, callback)",
+        )
+        for snippet in bypasses:
+            with self.subTest(snippet=snippet):
+                changed = dict(self.recovery_code)
+                changed[path] = guard.mask_kotlin_non_code("fun bypass() = " + snippet)
+                self.assertTrue(
+                    any("Direct Android UI mutation bypass" in item
+                        for item in guard.android_ui_mutation_bypass_violations(changed)),
+                    snippet,
+                )
+
+    def test_ui_platform_write_guard_rejects_new_calls_inside_approved_owners(self):
+        gateway = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt"
+        dispatcher = (
+            "gesture/gesture-android/src/main/kotlin/com/freedom/adapters/accessibility/"
+            "android/AndroidGestureDispatcher.kt"
+        )
+        for path, snippet in (
+            (gateway, "node.performAction(16)"),
+            (gateway, "otherNode.performAction(16)"),
+            (gateway, "service.performGlobalAction(1)"),
+            (gateway, "otherService.performGlobalAction(1)"),
+            (gateway, "gestureDispatcher.dispatchGesture(spec, listener)"),
+            (gateway, "service.dispatchGesture(spec, callback)"),
+            (dispatcher, "service.dispatchGesture(spec, callback)"),
+            (dispatcher, "renamedService.dispatchGesture(spec, callback)"),
+        ):
+            with self.subTest(path=path, snippet=snippet):
+                changed = dict(self.recovery_code)
+                changed[path] += "\nfun bypass() = " + snippet + "\n"
+                self.assertTrue(
+                    guard.android_ui_mutation_bypass_violations(changed),
+                    f"Approved file must not gain another raw outlet: {path}: {snippet}",
+                )
+
+    def test_ui_platform_write_guard_rejects_expression_and_callable_reference_bypasses(self):
+        path = "app/src/main/java/com/freedom/adapters/social/momo/UnsafeWrite.kt"
+        for snippet in (
+            "fun bypass() = (findNode()).performAction(16)",
+            "fun bypass() = (getService()).performGlobalAction(1)",
+            "fun bypass() = node::performAction",
+            "fun bypass() = service::dispatchGesture",
+        ):
+            with self.subTest(snippet=snippet):
+                changed = dict(self.recovery_code)
+                changed[path] = guard.mask_kotlin_non_code(snippet)
+                self.assertTrue(
+                    guard.android_ui_mutation_bypass_violations(changed),
+                    snippet,
+                )
+
+    def test_ui_platform_write_guard_accepts_gateway_forwarding_and_ignores_non_code(self):
+        changed = dict(self.recovery_code)
+        changed["app/src/main/java/com/freedom/adapters/social/momo/Forward.kt"] = (
+            guard.mask_kotlin_non_code(
+                'fun navigate() = accessibilityGateway.performGlobalAction(action)\n'
+                '// unsafeNode.performAction(16)\n'
+                'val example = "service.performGlobalAction(1)"\n'
+            )
+        )
+        self.assertEqual(guard.android_ui_mutation_bypass_violations(changed), [])
+
     def test_p5_recovery_adapter_registry_accepts_all_existing_business_routes(self):
         self.assertEqual(
             guard.unified_recovery_adapter_registration_violations(self.recovery_code), []

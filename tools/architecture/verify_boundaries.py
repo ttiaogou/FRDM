@@ -1241,6 +1241,81 @@ def legacy_architecture_bypass_violations(code_by_path: dict[str, str]) -> list[
     return issues
 
 
+def android_ui_mutation_bypass_violations(code_by_path: dict[str, str]) -> list[str]:
+    """Reject direct Android accessibility writes outside their audited platform outlets.
+
+    Call-site ownership and exact existing counts are deliberately pinned; this is a
+    Kotlin lexical guard, not a substitute for runtime authorization tests. Inputs
+    are already stripped of comments and literals by inspect_project.
+    """
+    gateway = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt"
+    coordinator = (
+        "gesture/gesture-runtime/src/main/kotlin/com/freedom/application/gesture/"
+        "GestureExecutionCoordinator.kt"
+    )
+    dispatcher = (
+        "gesture/gesture-android/src/main/kotlin/com/freedom/adapters/accessibility/"
+        "android/AndroidGestureDispatcher.kt"
+    )
+    # Audited platform owners and call sites; do not allow another direct write
+    # merely because it was added inside an otherwise approved file.
+    approved_calls = {
+        (gateway, "node", "performAction"): 1,
+        (gateway, "service", "performGlobalAction"): 2,
+        (gateway, "gestureDispatcher", "dispatchGesture"): 2,
+        (coordinator, "dispatcher", "dispatchGesture"): 1,
+        (dispatcher, "service", "dispatchGesture"): 3,
+    }
+    call = re.compile(
+        r"\b(?P<receiver>[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)"
+        r"\s*(?:\?\.|!!\s*\.|\.)\s*"
+        r"(?P<method>performAction|performGlobalAction|dispatchGesture)\s*\("
+    )
+    obscured_receiver = re.compile(
+        r"\)\s*(?:\?\.|!!\s*\.|\.)\s*"
+        r"(?P<method>performAction|performGlobalAction|dispatchGesture)\s*\("
+    )
+    callable_reference = re.compile(r"::\s*(performAction|performGlobalAction|dispatchGesture)\b")
+    counts = {key: 0 for key in approved_calls}
+    issues: list[str] = []
+
+    for rel, code in sorted(code_by_path.items()):
+        if "/src/main/" not in rel or not rel.endswith(".kt"):
+            continue
+        for match in call.finditer(code):
+            receiver = re.sub(r"\s+", "", match.group("receiver"))
+            method = match.group("method")
+            key = (rel, receiver, method)
+            if key in counts:
+                counts[key] += 1
+            elif method == "performGlobalAction" and receiver == "accessibilityGateway":
+                # Calls through the shared gateway retain its existing runtime checks.
+                continue
+            else:
+                issues.append(
+                    f"Direct Android UI mutation bypass: {rel}: {receiver}.{method}"
+                )
+        # A parenthesized/cast result or a bound method reference must not evade
+        # the receiver matcher by changing the shape of the same Android call.
+        for match in obscured_receiver.finditer(code):
+            issues.append(
+                f"Direct Android UI mutation via expression receiver: {rel}: {match.group('method')}"
+            )
+        for match in callable_reference.finditer(code):
+            issues.append(
+                f"Direct Android UI mutation callable reference: {rel}: {match.group(1)}"
+            )
+
+    for (rel, receiver, method), expected in approved_calls.items():
+        actual = counts[(rel, receiver, method)]
+        if actual != expected:
+            issues.append(
+                f"Audited Android UI mutation outlet drift: {rel}: "
+                f"{receiver}.{method} expected={expected} actual={actual}"
+            )
+    return issues
+
+
 def unified_ui_write_authorization_violations(code_by_path: dict[str, str]) -> list[str]:
     """P4: every business-owned Android mutation must cross the exact lease gate."""
     issues: list[str] = []
@@ -1307,6 +1382,7 @@ def unified_ui_write_authorization_violations(code_by_path: dict[str, str]) -> l
             r"\bservice\.performGlobalAction\s*\(|\b(?:node|target)\.performAction\s*\(", code
         ):
             issues.append(f"P4 direct Android node/global mutation bypass: {rel}")
+    issues.extend(android_ui_mutation_bypass_violations(code_by_path))
     return issues
 
 
