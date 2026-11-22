@@ -82,18 +82,18 @@ internal class MessageListCheckpointVerification(
                     recoveryReason = recoveryReason
                 )
             )
-            val observationSchedule = schedule ?: CheckpointVerificationWiring.createScheduler(
+            val observationSchedule = schedule ?: RecoveryScheduler(
                 scheduler = scheduler,
-                onReadOnlyObservation = onReadOnlyObservation,
+                nowEpochMs = System::currentTimeMillis,
+                onReadOnlyObservation = { onReadOnlyObservation() },
                 onLog = onLog,
                 scheduleRepository = scheduleRepository
             ).also { schedule = it }
-            verifier = CheckpointVerificationWiring.restoreVerifier(
-                checkpoint = unified,
-                restoreSource = restoreSource,
-                schedule = observationSchedule,
+            verifier = RecoveryCheckpointVerificationCoordinator(
+                transaction = CheckpointVerificationWiring.newDispatcher(onLog),
+                scheduler = observationSchedule,
                 onLog = onLog
-            )
+            ).also { it.restore(unified, restoreSource) }
             binding = newBinding
         }
         return requireNotNull(verifier).observe(
