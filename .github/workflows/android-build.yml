@@ -28,6 +28,9 @@ jobs:
 
   arch-guard:
     name: Architecture and resource gate
+    # A same-repository P1 pull request is already checked by the P1 push run.
+    # Keep pull_request validation for other branches and fork contributions.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.head.ref != 'P1' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
