@@ -1695,6 +1695,77 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun openedPrivateSessionBuildsBindingForBothEventAndDelayedVerification() {
+        for (eventFirst in listOf(false, true)) {
+            val scheduler = FakeScheduler()
+            val candidate = sessionCandidate(completeBoundaryEvidence = true)
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                resolvedTapBounds = candidate.rowBounds
+                page = ChatPageSnapshot(
+                    packageName = "com.immomo.momo",
+                    activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                    pageKind = ChatPageKind.CHAT_LIST,
+                    scannedNodeCount = 80,
+                    editableInputCount = 0,
+                    messageListCount = 0,
+                    sendActionCount = 0,
+                    messageRelatedViewIdCount = 0,
+                    hasChatTab = true,
+                    messageListTarget = null,
+                    inputFieldTarget = null,
+                    chatListViewport = ScreenRect(0, 120, 720, 1480),
+                    chatListCandidates = listOf(candidate),
+                    windowGeneration = 1L
+                )
+            }
+            val logs = ArrayList<String>()
+            val gesture = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            }
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = gesture,
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L
+            )
+
+            runtime.scheduleInitialObservation()
+            runUntilLog(scheduler, logs, "AI Reply 启动准入[UNREAD_LOCKING]")
+            runUntil(scheduler, 40) { port.sessionTapResolutions > 0 }
+            if (eventFirst) {
+                scheduler.runNextWithDelay(0L)
+                runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED).copy(
+                    windowId = 1,
+                    pageGeneration = 1L
+                ))
+                scheduler.runNextWithDelay(300L)
+                assertTrue(logs.any { it.contains("聊天页顶部名称与目标会话匹配") })
+            } else {
+                runUntil(scheduler, 80) {
+                    logs.any { it.contains("页面跳转及聊天页顶部名称验证通过") }
+                }
+            }
+
+            assertEquals("eventFirst=$eventFirst", 1, logs.count {
+                it.contains("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定")
+            })
+            assertTrue("eventFirst=$eventFirst must read the opened chat", port.messageReads > 0)
+        }
+    }
+
+    @Test
     fun aiSessionManagerInspectsEachNewViewportBeforeContinuingUpward() {
         val scheduler = FakeScheduler()
         val bottomUnknown = sessionCandidate(

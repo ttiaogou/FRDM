@@ -592,6 +592,25 @@ class AiReplyObservationRuntime(
         }
     }
     private var currentSessionBinding: CurrentSessionBinding? = null
+    private fun establishCurrentSessionBinding(snapshot: ChatPageSnapshot) {
+        val selected = currentSessionCandidate
+        val chatWindowKey = currentSessionWindowKey
+        if (selected != null && chatWindowKey != null) {
+            currentSessionBinding = CurrentSessionBinding(
+                sourceWindowKey = listOf(
+                    selected.rowTarget.window.packageName,
+                    selected.rowTarget.window.windowId,
+                    selected.rowTarget.window.generation
+                ).joinToString("|"),
+                sourceRowPath = selected.rowTarget.path.childIndices.joinToString("."),
+                sourceRowBounds = selected.rowBounds,
+                sourceAvatarBounds = selected.avatarBounds,
+                chatWindowKey = chatWindowKey,
+                chatSurfaceKey = chatSurfaceKey(snapshot).orEmpty()
+            )
+            onLog("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定；昵称仅作辅助校验")
+        }
+    }
     private var identityCaptureSessionKey: String? = null
     private var identityCaptureStartedAtMs = 0L
     private var identityCaptureRetryCount = 0
@@ -1522,23 +1541,7 @@ class AiReplyObservationRuntime(
                     if (headerMatchMode != null) {
                         sessionManagerState = SessionManagerState.READING_SESSION
                         currentSessionWindowKey = windowSessionKey(inspection)
-                        val selected = currentSessionCandidate
-                        val chatWindowKey = currentSessionWindowKey
-                        if (selected != null && chatWindowKey != null) {
-                            currentSessionBinding = CurrentSessionBinding(
-                                sourceWindowKey = listOf(
-                                    selected.rowTarget.window.packageName,
-                                    selected.rowTarget.window.windowId,
-                                    selected.rowTarget.window.generation
-                                ).joinToString("|"),
-                                sourceRowPath = selected.rowTarget.path.childIndices.joinToString("."),
-                                sourceRowBounds = selected.rowBounds,
-                                sourceAvatarBounds = selected.avatarBounds,
-                                chatWindowKey = chatWindowKey,
-                                chatSurfaceKey = chatSurfaceKey(inspection).orEmpty()
-                            )
-                            onLog("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定；昵称仅作辅助校验")
-                        }
+                        establishCurrentSessionBinding(inspection)
                         onLog(
                             "AI 会话管理：聊天页顶部名称与目标会话匹配；匹配方式=${headerMatchMode.name}；" +
                                 "开始只读采集，不执行输入或发送"
@@ -4008,6 +4011,7 @@ class AiReplyObservationRuntime(
             }
             sessionManagerState = SessionManagerState.READING_SESSION
             currentSessionWindowKey = windowSessionKey(current)
+            establishCurrentSessionBinding(current)
             onLog(
                 "AI 会话管理：页面跳转及聊天页顶部名称验证通过；匹配方式=${headerMatchMode.name}；" +
                     "开始只读采集"
