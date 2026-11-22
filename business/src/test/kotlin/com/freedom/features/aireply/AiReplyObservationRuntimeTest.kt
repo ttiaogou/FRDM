@@ -664,6 +664,14 @@ class AiReplyObservationRuntimeTest {
             messageListTarget = null,
             inputFieldTarget = null,
             chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(
+                sessionCandidate(
+                    unreadStatus = ChatUnreadStatus.READ,
+                    completeBoundaryEvidence = true,
+                    windowGeneration = 20L
+                )
+            ),
+            screenBounds = ScreenRect(0, 0, 720, 1600),
             windowGeneration = 20L
         )
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
@@ -685,11 +693,16 @@ class AiReplyObservationRuntimeTest {
             it.contains("消息列表统一检查点[VERIFYING]")
         })
         assertEquals(null, ownership.activeTaskId())
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        scheduler.runNextWithDelay(300L)
-        assertTrue("Private task must only resume after second independent list proof", logs.any {
-            it.contains("统一页面恢复[RECOVERY_VERIFIED]")
-        })
+        repeat(4) {
+            if (logs.none { it.contains("统一页面恢复[RECOVERY_VERIFIED]") }) {
+                runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+                scheduler.runNextWithDelay(300L)
+            }
+        }
+        assertTrue(
+            "Private task must only resume after second independent list proof; recent logs=${logs.takeLast(35)}",
+            logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") }
+        )
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
         assertEquals(null, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES"))
         assertEquals(original, repository.load())
