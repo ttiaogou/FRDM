@@ -569,6 +569,7 @@ def inspect_project(root: Path) -> list[str]:
 
     # 12) The platform callback and checkpoint restore gates are mandatory boundaries.
     issues.extend(unified_accessibility_entry_violations(code_by_path))
+    issues.extend(unified_business_event_entry_violations(code_by_path))
     issues.extend(checkpoint_recovery_boundary_violations(code_by_path))
 
     # 13) Stage 4-C: removed manual handoff must stay removed; all three checkpoint
@@ -767,6 +768,56 @@ def architecture_authority_violations(code_by_path: dict[str, str]) -> list[str]
             f"P0 architecture authority legacy alias drift: "
             f"expected {P0_LEGACY_AUTHORITY_ALIASES}; found {aliases}"
         )
+    return issues
+
+
+
+def unified_business_event_entry_violations(code_by_path: dict[str, str]) -> list[str]:
+    """P1 production wiring: all business notifications cross one normalized entry."""
+    issues: list[str] = []
+    root_rel = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+    pipeline_rel = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt"
+    service_rel = "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt"
+    contract_rel = "core/src/main/kotlin/com/freedom/core/accessibility/api/UnifiedAccessibilityEntry.kt"
+    root = code_by_path.get(root_rel, "")
+    pipeline = code_by_path.get(pipeline_rel, "")
+    service = code_by_path.get(service_rel, "")
+    contract = code_by_path.get(contract_rel, "")
+    required = {
+        root_rel: (root, (
+            r"\bval\s+unifiedAccessibilityEntry\s*:\s*UnifiedAccessibilityEntry\b",
+            r"unifiedAccessibilityEntry\s*=\s*unifiedAccessibilityEntry",
+            r"\bUnifiedAccessibilityEvent\.TargetApplication\b",
+            r"\bUnifiedAccessibilityEvent\.GlobalTouch\b",
+            r"\bUnifiedAccessibilityEvent\.ActivityTransition\b",
+            r"\bUnifiedAccessibilityEvent\.NavigationObservation\b",
+        )),
+        pipeline_rel: (pipeline, (
+            r"\bprivate\s+val\s+unifiedAccessibilityEntry\s*:\s*UnifiedAccessibilityEntry\?",
+            r"\bunifiedAccessibilityEntry\.accept\s*\(\s*UnifiedAccessibilityEvent\.TargetApplication",
+            r"\bunifiedAccessibilityEntry\.accept\s*\(\s*UnifiedAccessibilityEvent\.GlobalTouch",
+            r"\bunifiedAccessibilityEntry\.accept\s*\(\s*UnifiedAccessibilityEvent\.ActivityTransition",
+        )),
+        service_rel: (service, (
+            r"\baccessibilityEventForwarder\.accept\s*\(\s*event\s*\)",
+            r"\bunifiedAccessibilityEntry\.accept\s*\(\s*UnifiedAccessibilityEvent\.NavigationObservation",
+        )),
+        contract_rel: (contract, (
+            r"\bsealed\s+interface\s+UnifiedAccessibilityEvent\b",
+            r"\bfun\s+accept\s*\(\s*event\s*:\s*UnifiedAccessibilityEvent\s*\)",
+        )),
+    }
+    for rel, (code, expressions) in required.items():
+        if not code:
+            issues.append(f"P1 unified entry source missing: {rel}")
+        for expression in expressions:
+            if not re.search(expression, code):
+                issues.append(f"P1 unified business entry wiring missing: {rel}: {expression}")
+    if re.search(r"\baiReplyObservationRuntime\.(?:onSelfNavigationAttached|onUnmatchedNavigationObserved)\s*\(", service):
+        issues.append(f"P1 window callback directly bypasses unified business entry: {service_rel}")
+    if re.search(r"\bdispatch(?:TargetApplicationEvent|GlobalTouchEvent|ActivityTransition)\s*=\s*"
+                 r"runSessionCoordinator::", root):
+        issues.append(f"P1 pipeline still binds direct business dispatch callbacks: {root_rel}")
     return issues
 
 
@@ -1076,6 +1127,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - Android dispatch: confined to AndroidGestureDispatcher")
     print(" - Recovery transaction: adapters cannot bypass it; state machine cannot depend on business page fields")
     print(" - P0 ownership baseline: authority declarations, construction sites, and legacy aliases pinned")
+    print(" - P1 accessibility: target/touch/Activity/navigation notifications use one business entry")
     print(" - Automatic recovery: legacy manual handoff forbidden; three checkpoint routes use shared verification")
     print(" - Recovery scheduler: bounded non-terminal backoff, touch reset, stale-callback and user-stop gates")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")

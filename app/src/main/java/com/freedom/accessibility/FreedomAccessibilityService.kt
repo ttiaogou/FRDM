@@ -16,6 +16,7 @@ import com.freedom.adapters.accessibility.diagnostics.LatestAccessibilityNodeDum
 import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
 import com.freedom.adapters.accessibility.android.NodeHierarchyOverlay
 import com.freedom.core.runtime.RunMode
+import com.freedom.core.accessibility.api.UnifiedAccessibilityEvent
 import com.freedom.core.accessibility.api.GlobalAccessibilityAction
 import com.freedom.core.accessibility.api.AccessibilityTreeLimits
 import com.freedom.core.accessibility.api.NodePath
@@ -67,7 +68,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     private val globalNodeLayoutVisualizationUseCase get() = dependencies.globalNodeLayoutVisualizationUseCase
     private val momoSocialAdapterDelegate get() = dependencies.momoSocialAdapterDelegate
     private val momoSocialAdapter get() = dependencies.momoSocialAdapter
-    private val aiReplyObservationRuntime get() = dependencies.aiReplyObservationRuntime
+    private val unifiedAccessibilityEntry get() = dependencies.unifiedAccessibilityEntry
     private val accountBrowseWorkflow get() = dependencies.accountBrowseWorkflow
     private val accountBrowseRuntimeAdapter get() = dependencies.accountBrowseRuntimeAdapter
     private val monitorSnapshotRepository get() = dependencies.monitorSnapshotRepository
@@ -491,8 +492,13 @@ class FreedomAccessibilityService : AccessibilityService() {
                 transitionAtUptimeMs = event.eventTime
             )
             val attachedSelfNavigation = inputOriginClassifier.takeAttachedSelfNavigation()
-            if (attachedSelfNavigation != null) aiReplyObservationRuntime.onSelfNavigationAttached(attachedSelfNavigation)
-            else aiReplyObservationRuntime.onUnmatchedNavigationObserved(event.className?.toString().orEmpty())
+            // Business-facing navigation attribution now crosses the same normalized entry.
+            unifiedAccessibilityEntry.accept(
+                UnifiedAccessibilityEvent.NavigationObservation(
+                    activityClass = event.className?.toString().orEmpty(),
+                    attachedSelfNavigation = attachedSelfNavigation
+                )
+            )
             pendingNavigationSourcePageGeneration = null
             pendingNavigationSourceAtUptimeMs = 0L
         }

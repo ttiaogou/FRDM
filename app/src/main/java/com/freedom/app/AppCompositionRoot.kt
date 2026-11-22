@@ -45,6 +45,8 @@ import com.freedom.application.ports.TaskLaunchParametersRepository
 import com.freedom.application.runtime.RunSessionCommandUseCase
 import com.freedom.application.runtime.RunGenerationClock
 import com.freedom.application.runtime.RunSessionCoordinator
+import com.freedom.core.accessibility.api.UnifiedAccessibilityEntry
+import com.freedom.core.accessibility.api.UnifiedAccessibilityEvent
 import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
 import com.freedom.core.accessibility.events.InputOriginClassifier
 import com.freedom.core.accessibility.events.TouchInteractionMonitor
@@ -628,14 +630,34 @@ internal class AccessibilityServiceDependencies internal constructor(
             generationClock = root.runGenerationClock
         )
     }
+    // Service-scoped platform-neutral routing gateway. Existing runtime dispatch order
+    // and AI self-navigation attribution are preserved, but never called from the Service.
+    val unifiedAccessibilityEntry: UnifiedAccessibilityEntry by lazy(LazyThreadSafetyMode.NONE) {
+        UnifiedAccessibilityEntry { notification ->
+            when (notification) {
+                is UnifiedAccessibilityEvent.TargetApplication ->
+                    runSessionCoordinator.dispatchTargetApplicationEvent(notification.event)
+                is UnifiedAccessibilityEvent.GlobalTouch ->
+                    runSessionCoordinator.dispatchGlobalTouchEvent(notification.event)
+                is UnifiedAccessibilityEvent.ActivityTransition ->
+                    runSessionCoordinator.dispatchActivityTransition(notification.activityClass)
+                is UnifiedAccessibilityEvent.NavigationObservation -> {
+                    val attached = notification.attachedSelfNavigation
+                    if (attached != null) aiReplyObservationRuntime.onSelfNavigationAttached(attached)
+                    else aiReplyObservationRuntime.onUnmatchedNavigationObserved(notification.activityClass)
+                }
+            }
+        }
+    }
     val accessibilityEventPipelineDelegate = lazy(LazyThreadSafetyMode.NONE) {
         AndroidAccessibilityEventPipeline(
             targetPackage = { monitorRepository.targetPackage() },
             freedomPackage = service.packageName,
             resolveAppLabel = appLabelResolver::resolve,
-            dispatchTargetApplicationEvent = runSessionCoordinator::dispatchTargetApplicationEvent,
-            dispatchGlobalTouchEvent = runSessionCoordinator::dispatchGlobalTouchEvent,
-            dispatchActivityTransition = runSessionCoordinator::dispatchActivityTransition,
+            // Legacy constructor callbacks are test-only seams; the runtime uses unifiedAccessibilityEntry.
+            dispatchTargetApplicationEvent = { error("Direct target event dispatch is forbidden in production") },
+            dispatchGlobalTouchEvent = { error("Direct touch event dispatch is forbidden in production") },
+            dispatchActivityTransition = { error("Direct Activity dispatch is forbidden in production") },
             interactionDiagnostics = runSessionCoordinator::interactionDiagnostics,
             handleManualInteractionFallback = runSessionCoordinator::handleManualInteractionFallback,
             updateAppPage = { appLabel, pageLabel -> monitorRepository.updateAppPage(appLabel, pageLabel) },
@@ -643,6 +665,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             currentActivityClass = windowContextTracker::currentActivityClass,
             updateCurrentActivityClass = windowContextTracker::updateActivityClass,
             onBrowseEventLogged = { monitorPreviewScheduler.scheduleBrowseScan() },
+            unifiedAccessibilityEntry = unifiedAccessibilityEntry,
             currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() },
             inputOriginClassifier = inputOriginClassifier,
             observeWindowStateEvent = windowContextTracker::observeWindowStateEvent,

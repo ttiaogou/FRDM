@@ -451,6 +451,85 @@ class AndroidAccessibilityEventPipelineTest {
         assertTrue(trace.indexOf("append-log") < trace.indexOf("manual-fallback"))
     }
 
+    @Test
+    fun unifiedEntryPreservesBrowsePreDedupAndAiPostDedupOrder() {
+        val trace = mutableListOf<String>()
+        val delivered = mutableListOf<com.freedom.core.accessibility.api.UnifiedAccessibilityEvent>()
+        val unified = com.freedom.core.accessibility.api.UnifiedAccessibilityEntry { notification ->
+            delivered += notification
+            trace += when (notification) {
+                is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.TargetApplication -> "unified-target"
+                is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.GlobalTouch -> "unified-touch"
+                is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.ActivityTransition -> "unified-activity"
+                is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.NavigationObservation -> "unified-navigation"
+            }
+        }
+        val pipeline = AndroidAccessibilityEventPipeline(
+            targetPackage = { TARGET_PACKAGE },
+            freedomPackage = FREEDOM_PACKAGE,
+            resolveAppLabel = { "Momo" },
+            dispatchTargetApplicationEvent = { error("legacy target dispatch must not be used") },
+            dispatchGlobalTouchEvent = { error("legacy touch dispatch must not be used") },
+            dispatchActivityTransition = { error("legacy activity dispatch must not be used") },
+            interactionDiagnostics = { _, _ -> emptyList() },
+            handleManualInteractionFallback = { trace += "manual-fallback" },
+            updateAppPage = { _, _ -> },
+            appendLog = { trace += "append-log" },
+            currentActivityClass = { "" },
+            updateCurrentActivityClass = {},
+            onBrowseEventLogged = {},
+            unifiedAccessibilityEntry = unified
+        )
+        val browse = event(AccessibilityEventType.VIEW_SCROLLED, TARGET_PACKAGE, "android.view.View")
+        pipeline.processNormalized(browse, AccessibilityEvent.TYPE_VIEW_SCROLLED, RunMode.ACCOUNT_BROWSE, 1000L)
+        pipeline.processNormalized(browse, AccessibilityEvent.TYPE_VIEW_SCROLLED, RunMode.ACCOUNT_BROWSE, 1100L)
+        assertEquals(2, delivered.filterIsInstance<com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.TargetApplication>().size)
+        assertEquals(1, trace.count { it == "append-log" })
+        assertTrue(trace.indexOf("unified-target") < trace.indexOf("append-log"))
+
+        trace.clear()
+        delivered.clear()
+        pipeline.resetDuplicateWindow()
+        val ai = event(AccessibilityEventType.VIEW_CLICKED, TARGET_PACKAGE, "android.view.View")
+        pipeline.processNormalized(ai, AccessibilityEvent.TYPE_VIEW_CLICKED, RunMode.AI_REPLY, 2000L)
+        pipeline.processNormalized(ai, AccessibilityEvent.TYPE_VIEW_CLICKED, RunMode.AI_REPLY, 2100L)
+        assertEquals(1, delivered.filterIsInstance<com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.TargetApplication>().size)
+        assertTrue(trace.indexOf("append-log") < trace.indexOf("unified-target"))
+    }
+
+    @Test
+    fun unifiedEntryReceivesBrowseTouchAndActivityBeforeAiTarget() {
+        val received = mutableListOf<com.freedom.core.accessibility.api.UnifiedAccessibilityEvent>()
+        val pipeline = AndroidAccessibilityEventPipeline(
+            targetPackage = { TARGET_PACKAGE },
+            freedomPackage = FREEDOM_PACKAGE,
+            resolveAppLabel = { "Momo" },
+            dispatchTargetApplicationEvent = { error("legacy target bypass") },
+            dispatchGlobalTouchEvent = { error("legacy touch bypass") },
+            dispatchActivityTransition = { error("legacy activity bypass") },
+            interactionDiagnostics = { _, _ -> emptyList() },
+            handleManualInteractionFallback = {},
+            updateAppPage = { _, _ -> },
+            appendLog = {},
+            currentActivityClass = { "" },
+            updateCurrentActivityClass = {},
+            onBrowseEventLogged = {},
+            unifiedAccessibilityEntry = com.freedom.core.accessibility.api.UnifiedAccessibilityEntry { received += it }
+        )
+        pipeline.processNormalized(
+            event(AccessibilityEventType.TOUCH_INTERACTION_START, ""),
+            AccessibilityEvent.TYPE_TOUCH_INTERACTION_START, RunMode.ACCOUNT_BROWSE, 1000L
+        )
+        assertTrue(received.first() is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.GlobalTouch)
+        received.clear()
+        pipeline.processNormalized(
+            event(AccessibilityEventType.WINDOW_STATE_CHANGED, TARGET_PACKAGE, ACTIVITY),
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.AI_REPLY, 2000L
+        )
+        assertTrue(received[0] is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.ActivityTransition)
+        assertTrue(received[1] is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.TargetApplication)
+    }
+
     private fun pipeline(
         trace: MutableList<String>,
         appendLog: (String) -> Unit = { trace += "append-log" },

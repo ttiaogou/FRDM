@@ -238,6 +238,34 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         self.assertTrue(any("RETRYABLE result" in item for item in violations))
 
 
+
+    def test_p1_business_entry_accepts_current_production_wiring(self):
+        self.assertEqual(guard.unified_business_event_entry_violations(self.recovery_code), [])
+
+    def test_p1_business_entry_rejects_service_window_bypass(self):
+        changed = dict(self.recovery_code)
+        service = "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt"
+        changed[service] += "\naiReplyObservationRuntime.onSelfNavigationAttached(transition)\n"
+        self.assertTrue(any("directly bypasses" in item
+                            for item in guard.unified_business_event_entry_violations(changed)))
+
+    def test_p1_business_entry_rejects_direct_pipeline_binding(self):
+        changed = dict(self.recovery_code)
+        root = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        changed[root] += "\ndispatchGlobalTouchEvent = runSessionCoordinator::dispatchGlobalTouchEvent,\n"
+        self.assertTrue(any("direct business dispatch" in item
+                            for item in guard.unified_business_event_entry_violations(changed)))
+
+    def test_p1_business_entry_rejects_missing_gateway_wiring(self):
+        changed = dict(self.recovery_code)
+        root = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        changed[root] = changed[root].replace(
+            "unifiedAccessibilityEntry = unifiedAccessibilityEntry,",
+            "missingGateway = null,"
+        )
+        self.assertTrue(any("wiring missing" in item
+                            for item in guard.unified_business_event_entry_violations(changed)))
+
     def test_p0_authority_guard_accepts_current_production_graph(self):
         self.assertEqual(guard.architecture_authority_violations(self.recovery_code), [])
 
