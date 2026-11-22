@@ -793,14 +793,26 @@ class ArchitectureBoundaryTest {
         assertFalse("Service must not apply event routing or log de-duplication directly", serviceText.contains("DefaultAccessibilityEventRoutePolicy") || serviceText.contains("shouldSuppressDuplicate"))
         assertTrue("Android pipeline must normalize before routing", pipelineText.indexOf("AndroidAccessibilityEventNormalizer.normalize(") < pipelineText.indexOf("routePolicy.route("))
         assertTrue("AI Reply routing must stamp the current page generation before source classification", pipelineText.contains("normalizedEvent.copy(pageGeneration = currentWindowGeneration())"))
-        assertTrue("Android pipeline must own target-event dispatch", pipelineText.contains("dispatchTargetApplicationEvent(normalizedEvent)"))
+        assertTrue(
+            "Android pipeline must dispatch target events exclusively through the unified entry",
+            pipelineText.contains("unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.TargetApplication(normalizedEvent))")
+        )
         assertTrue(
             "Android pipeline must attach the classified origin to global-touch events before dispatch",
             pipelineText.contains("eventForRouting.copy(inputOriginDecision = originDecision)")
         )
         assertTrue(
             "Android pipeline must own global-touch dispatch of the routed event",
-            pipelineText.contains("dispatchGlobalTouchEvent(routedTouchEvent)")
+            pipelineText.contains("unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.GlobalTouch(routedTouchEvent))")
+        )
+        assertTrue(
+            "Unified business event entry must be a non-null mandatory constructor dependency",
+            pipelineText.contains("private val unifiedAccessibilityEntry: UnifiedAccessibilityEntry,")
+        )
+        assertFalse(
+            "No legacy direct business dispatch callback may coexist with the unified entry",
+            listOf("dispatchTargetApplicationEvent", "dispatchGlobalTouchEvent",
+                "dispatchActivityTransition").any(pipelineText::contains)
         )
         assertTrue("Android pipeline must own route policy decisions", pipelineText.contains("routePolicy.route("))
         assertTrue("Composition root must construct the application run-command use case", compositionRootText.contains("RunSessionCommandUseCase("))

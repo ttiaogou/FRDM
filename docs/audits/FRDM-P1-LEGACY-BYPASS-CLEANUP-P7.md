@@ -54,6 +54,8 @@ Android AccessibilityEvent
 - `UnifiedRecoveryRouteRegistrationTest` 仍用旧 `unregisterFingerprintRoute` 取消恢复业务注册。P7 已禁止普通指纹接口删除恢复适配器，因此测试改用唯一的 typed `unregisterRecoveryAdapter`，仍断言业务注销成功、恢复路由不可匹配；Core 额外测试继续证明 raw 注销不能移除业务 route。
 - 在 P7 Python 门禁中增加对浏览检查点验证状态出口的正/负测试，防止“内部验证中，外部误报 ACTIVE”的安全回退。
 
+第二次完整 CI 的 Business 和先前所有架构检查均通过，App 模块 670 条单测中仅 `ArchitectureBoundaryTest.serviceIsOnlyTheAndroidEventCallbackForwarder` 一条失败：该测试仍断言管线调用 `dispatchTargetApplicationEvent(normalizedEvent)` 与 `dispatchGlobalTouchEvent(routedTouchEvent)`。这两个旧回调正是 P7 已移除的业务旁路；本次仅迁移这条既有架构测试，使其明确要求统一 `UnifiedAccessibilityEntry.accept(...)` 处理 TargetApplication 与 GlobalTouch，并增加非空统一入口及旧直接派发方法必须不存在的反向断言。**原断言目的——Service 只转发、Pipeline 负责有序归一化派发——继续且更严格地受到保护。**
+
 失败后未删除测试，也未降低安全断言或修改 CI 规则。最终成功与否须以补丁所在最终 SHA 的完整新 CI 为准。
 
 ## 与上一轮 P6 的关系、遗留
