@@ -4558,33 +4558,60 @@ internal class MomoSocialAdapter(
                         ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "DRAFT_CHANGED_BEFORE_SEND"
                     )
                 }
-                val sendNodes = SEND_CONTROL_VIEW_ID_SUFFIXES.flatMap { suffix ->
+                // Momo displays message_btn_sendtext only when the composer contains text.
+                // Absence is not proof of an empty composer: the verified input above is authoritative.
+                val sendCandidates = SEND_CONTROL_VIEW_ID_SUFFIXES.flatMap { suffix ->
                     root.findAccessibilityNodeInfosByViewId("$targetPackage:id/$suffix").orEmpty()
-                }.distinctBy { node ->
-                    "${node.viewIdResourceName}|${node.hashCode()}"
-                }.filter { node ->
-                    val label = (node.text?.toString().orEmpty() + " " + node.contentDescription?.toString().orEmpty()).lowercase()
-                    node.isVisibleToUser && node.isEnabled && node.isClickable &&
-                        (label.contains("发送") || label.contains("send"))
                 }
-                inputs.forEach { node -> runCatching { node.recycle() } }
-                if (sendNodes.isEmpty()) {
-                    sendNodes.forEach { node -> runCatching { node.recycle() } }
-                    return@withActiveTargetRoot ChatDraftInputResult(
-                        ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_FOUND"
-                    )
+                val composerParent = input.parent
+                val bounds = try {
+                    val sendNodes = try {
+                        sendCandidates.distinctBy { node ->
+                            "${node.viewIdResourceName}|${node.hashCode()}"
+                        }.filter { node ->
+                            val parent = if (node.viewIdResourceName == MomoSendControlEligibility.TEXT_SEND_VIEW_ID) {
+                                node.parent
+                            } else null
+                            try {
+                                val sharesEditorParent = parent != null && composerParent != null &&
+                                    parent == composerParent &&
+                                    parent.viewIdResourceName == MomoSendControlEligibility.EDITOR_LAYOUT_VIEW_ID
+                                val label = node.text?.toString().orEmpty() + " " +
+                                    node.contentDescription?.toString().orEmpty()
+                                MomoSendControlEligibility.accepts(
+                                    viewId = node.viewIdResourceName,
+                                    className = node.className?.toString(),
+                                    label = label,
+                                    visible = node.isVisibleToUser,
+                                    enabled = node.isEnabled,
+                                    clickable = node.isClickable,
+                                    sharesEditorParent = sharesEditorParent
+                                )
+                            } finally {
+                                runCatching { parent?.recycle() }
+                            }
+                        }
+                    } finally {
+                        runCatching { composerParent?.recycle() }
+                    }
+                    if (sendNodes.isEmpty()) {
+                        onLog("AI 发送按钮未确认：输入框草稿已逐字验证，但未发现符合条件的发送节点；不将按钮缺失判定为空输入")
+                        return@withActiveTargetRoot ChatDraftInputResult(
+                            ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_FOUND"
+                        )
+                    }
+                    if (sendNodes.size != 1) {
+                        return@withActiveTargetRoot ChatDraftInputResult(
+                            ChatDraftInputStatus.SEND_CONTROL_AMBIGUOUS, "SEND_CONTROL_AMBIGUOUS"
+                        )
+                    }
+                    val rect = Rect()
+                    sendNodes.single().getBoundsInScreen(rect)
+                    rect.toScreenRect()
+                } finally {
+                    inputs.forEach { node -> runCatching { node.recycle() } }
+                    sendCandidates.forEach { node -> runCatching { node.recycle() } }
                 }
-                if (sendNodes.size != 1) {
-                    sendNodes.forEach { node -> runCatching { node.recycle() } }
-                    return@withActiveTargetRoot ChatDraftInputResult(
-                        ChatDraftInputStatus.SEND_CONTROL_AMBIGUOUS, "SEND_CONTROL_AMBIGUOUS"
-                    )
-                }
-                val send = sendNodes.single()
-                val rect = Rect()
-                send.getBoundsInScreen(rect)
-                val bounds = rect.toScreenRect()
-                send.recycle()
                 if (bounds.isEmpty) {
                     return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_BOUNDS_INVALID"
@@ -6295,7 +6322,7 @@ internal class MomoSocialAdapter(
         private const val RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS = 90L
         private const val SEND_TAP_DURATION_MS = 90L
         private val SEND_CONTROL_VIEW_ID_SUFFIXES = setOf(
-            "send", "btn_send", "message_btn_send", "submit_message"
+            "send", "btn_send", "message_btn_send", "submit_message", "message_btn_sendtext"
         )
         private const val RECEIVED_GREETINGS_ENTRY_SEARCH_SCROLL_DURATION_MS = 520L
         private const val RECEIVED_GREETINGS_PRE_TAP_MAX_SNAPSHOT_AGE_MS = 750L
