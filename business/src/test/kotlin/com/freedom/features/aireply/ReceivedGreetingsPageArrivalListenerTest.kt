@@ -17,10 +17,8 @@ class ReceivedGreetingsPageArrivalListenerTest {
     fun confirmsOnlyAfterAdapterReportsStableListAndDoesNotNavigate() {
         val scheduler = FakeScheduler()
         var snapshotRequests = 0
-        var starts = 0
         val watcher = ReceivedGreetingsPageArrivalWatcher(
-            scheduler = scheduler,
-            onPageConfirmed = { starts++ },
+            scheduleReadOnlyObservation = { delayMs, callback -> scheduler.schedule(delayMs, callback) },
             onFallbackCheckRequested = {},
             onSnapshotRequested = { snapshotRequests++ },
             fallbackDelayMs = { 60_000L }
@@ -31,30 +29,25 @@ class ReceivedGreetingsPageArrivalListenerTest {
             watcher.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING)
         )
         assertEquals(0, snapshotRequests)
-        assertEquals(0, starts)
         assertEquals(1, scheduler.pendingCount())
         assertEquals(350L, scheduler.nextDelay())
 
         scheduler.runNext()
         assertEquals(1, snapshotRequests)
-        assertEquals(0, starts)
 
         assertEquals(
             ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED,
             watcher.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED)
         )
-        assertEquals(1, starts)
         assertEquals(0, scheduler.pendingCount())
     }
 
     @Test
     fun unrelatedAndIntermediatePagesScheduleOnlyOneLowFrequencyFallback() {
         val scheduler = FakeScheduler()
-        var starts = 0
         var fallbackRequests = 0
         val watcher = ReceivedGreetingsPageArrivalWatcher(
-            scheduler = scheduler,
-            onPageConfirmed = { starts++ },
+            scheduleReadOnlyObservation = { delayMs, callback -> scheduler.schedule(delayMs, callback) },
             onFallbackCheckRequested = { fallbackRequests++ },
             fallbackDelayMs = { 60_000L }
         )
@@ -65,7 +58,6 @@ class ReceivedGreetingsPageArrivalListenerTest {
         )
         assertEquals(1, scheduler.pendingCount())
         assertEquals(60_000L, scheduler.nextDelay())
-        assertEquals(0, starts)
 
         scheduler.runNext()
         assertEquals(1, fallbackRequests)
@@ -74,11 +66,9 @@ class ReceivedGreetingsPageArrivalListenerTest {
 
         watcher.onPageChangeEvent()
         assertEquals(0, scheduler.pendingCount())
-        assertEquals(0, starts)
 
         val transitionWatcher = ReceivedGreetingsPageArrivalWatcher(
-            scheduler = scheduler,
-            onPageConfirmed = { starts++ },
+            scheduleReadOnlyObservation = { delayMs, callback -> scheduler.schedule(delayMs, callback) },
             onFallbackCheckRequested = { fallbackRequests++ },
             fallbackDelayMs = { 60_000L }
         )
@@ -88,7 +78,6 @@ class ReceivedGreetingsPageArrivalListenerTest {
         )
         assertEquals(1, scheduler.pendingCount())
         assertEquals(60_000L, scheduler.nextDelay())
-        assertEquals(0, starts)
     }
 
     @Test
@@ -96,10 +85,8 @@ class ReceivedGreetingsPageArrivalListenerTest {
         val scheduler = FakeScheduler()
         var snapshotRequests = 0
         var fallbacks = 0
-        var starts = 0
         val watcher = ReceivedGreetingsPageArrivalWatcher(
-            scheduler = scheduler,
-            onPageConfirmed = { starts++ },
+            scheduleReadOnlyObservation = { delayMs, callback -> scheduler.schedule(delayMs, callback) },
             onFallbackCheckRequested = { fallbacks++ },
             onSnapshotRequested = { snapshotRequests++ },
             retryDelayMs = 350L,
@@ -115,7 +102,6 @@ class ReceivedGreetingsPageArrivalListenerTest {
         }
 
         assertEquals(8, snapshotRequests) // Initial sample plus eight requested fresh samples.
-        assertEquals(0, starts)
         assertEquals(1, scheduler.pendingCount())
         assertEquals(60_000L, scheduler.nextDelay())
 
@@ -133,10 +119,8 @@ class ReceivedGreetingsPageArrivalListenerTest {
     fun pageChangeCancelsFallbackAndRepeatedEventsDoNotCreateConcurrentRetries() {
         val scheduler = FakeScheduler()
         var snapshotRequests = 0
-        var starts = 0
         val watcher = ReceivedGreetingsPageArrivalWatcher(
-            scheduler = scheduler,
-            onPageConfirmed = { starts++ },
+            scheduleReadOnlyObservation = { delayMs, callback -> scheduler.schedule(delayMs, callback) },
             onFallbackCheckRequested = {},
             onSnapshotRequested = { snapshotRequests++ },
             fallbackDelayMs = { 60_000L }
@@ -167,21 +151,20 @@ class ReceivedGreetingsPageArrivalListenerTest {
 
         scheduler.runNext()
         assertEquals(1, snapshotRequests)
-        assertEquals(0, starts)
-        watcher.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED)
-        assertEquals(1, starts)
+        assertEquals(
+            ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED,
+            watcher.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED)
+        )
         assertEquals(0, scheduler.pendingCount())
     }
 
     @Test
     fun resetCancelsBothPendingTimersAndInvalidatesTheirCallbacks() {
         val scheduler = FakeScheduler()
-        var starts = 0
         var fallbackRequests = 0
         var snapshotRequests = 0
         val watcher = ReceivedGreetingsPageArrivalWatcher(
-            scheduler = scheduler,
-            onPageConfirmed = { starts++ },
+            scheduleReadOnlyObservation = { delayMs, callback -> scheduler.schedule(delayMs, callback) },
             onFallbackCheckRequested = { fallbackRequests++ },
             onSnapshotRequested = { snapshotRequests++ },
             fallbackDelayMs = { 60_000L }
@@ -194,13 +177,11 @@ class ReceivedGreetingsPageArrivalListenerTest {
         assertFalse(scheduler.hasPendingDelay(350L))
         scheduler.runCancelledCallbacks()
         assertEquals(0, snapshotRequests)
-        assertEquals(0, starts)
         assertEquals(0, fallbackRequests)
         assertEquals(0, scheduler.pendingCount())
 
         val fallbackWatcher = ReceivedGreetingsPageArrivalWatcher(
-            scheduler = scheduler,
-            onPageConfirmed = { starts++ },
+            scheduleReadOnlyObservation = { delayMs, callback -> scheduler.schedule(delayMs, callback) },
             onFallbackCheckRequested = { fallbackRequests++ },
             fallbackDelayMs = { 60_000L }
         )
@@ -210,18 +191,15 @@ class ReceivedGreetingsPageArrivalListenerTest {
         assertEquals(0, scheduler.pendingCount())
         scheduler.runCancelledCallbacks()
         assertEquals(0, fallbackRequests)
-        assertEquals(0, starts)
         assertEquals(0, scheduler.pendingCount())
     }
 
     @Test
     fun freshConfirmedSnapshotSupersedesPendingRetryWithoutDoubleConfirmation() {
         val scheduler = FakeScheduler()
-        var starts = 0
         var snapshotRequests = 0
         val watcher = ReceivedGreetingsPageArrivalWatcher(
-            scheduler = scheduler,
-            onPageConfirmed = { starts++ },
+            scheduleReadOnlyObservation = { delayMs, callback -> scheduler.schedule(delayMs, callback) },
             onFallbackCheckRequested = {},
             onSnapshotRequested = { snapshotRequests++ },
             fallbackDelayMs = { 60_000L }
@@ -233,10 +211,8 @@ class ReceivedGreetingsPageArrivalListenerTest {
             ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED,
             watcher.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED)
         )
-        assertEquals(1, starts)
         assertEquals(0, scheduler.pendingCount())
         scheduler.runCancelledCallbacks()
-        assertEquals(1, starts)
         assertEquals(0, snapshotRequests)
         assertEquals(0, scheduler.pendingCount())
     }

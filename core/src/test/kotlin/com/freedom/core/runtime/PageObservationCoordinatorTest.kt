@@ -176,6 +176,61 @@ class PageObservationCoordinatorTest {
         assertEquals(0, unrelated)
     }
 
+    @Test
+    fun modeIsolatedChannelsIgnoreEventsUntilTheirModeIsActive() {
+        val scheduler = FakeScheduler()
+        val coordinator = PageObservationCoordinator(scheduler)
+        var aiMode = false
+        var browseMode = true
+        var aiReads = 0
+        var browseReads = 0
+        coordinator.registerChannel(
+            channelId = "ai",
+            quietPeriodMs = 200L,
+            maxWaitMs = 800L,
+            onObservationRequested = { aiReads++ },
+            isEnabled = { aiMode }
+        )
+        coordinator.registerChannel(
+            channelId = "browse",
+            quietPeriodMs = 300L,
+            maxWaitMs = 800L,
+            onObservationRequested = { browseReads++ },
+            isEnabled = { browseMode }
+        )
+
+        coordinator.signal(AccessibilityEventType.WINDOW_CONTENT_CHANGED)
+        assertEquals(1, scheduler.pendingCount())
+        scheduler.runNextWithDelay(300L)
+        assertEquals(0, aiReads)
+        assertEquals(1, browseReads)
+
+        aiMode = true
+        browseMode = false
+        coordinator.signal(AccessibilityEventType.WINDOW_CONTENT_CHANGED)
+        assertEquals(1, scheduler.pendingCount())
+        scheduler.runNextWithDelay(200L)
+        assertEquals(1, aiReads)
+        assertEquals(1, browseReads)
+    }
+
+    @Test
+    fun explicitReadOnlyObservationUsesTheSameSchedulerAndCanBeCancelled() {
+        val scheduler = FakeScheduler()
+        val coordinator = PageObservationCoordinator(scheduler)
+        var observed = 0
+        val cancelled = coordinator.scheduleReadOnlyObservation(350L) { observed++ }
+        val ready = coordinator.scheduleReadOnlyObservation(500L) { observed++ }
+        assertEquals(2, scheduler.pendingCount())
+
+        cancelled.cancel()
+        assertEquals(1, scheduler.pendingCount())
+        scheduler.runNextWithDelay(500L)
+        assertEquals(1, observed)
+        ready.cancel()
+        assertEquals(0, scheduler.pendingCount())
+    }
+
     private class FakeScheduler : TaskScheduler {
         private data class Entry(
             val delay: Long,

@@ -87,7 +87,7 @@ class AiReplyObservationRuntime(
     /** Shared task/UI ownership; nullable only for isolated legacy unit fixtures. */
     private val taskCoordinator: TaskCoordinator? = null,
     private val currentRunGeneration: () -> Long = { 0L },
-    private val sharedPageObservationCoordinator: PageObservationCoordinator? = null,
+    private val sharedPageObservationCoordinator: PageObservationCoordinator,
     /** Prevents leaving the chat while a bounded model request/draft verification is in flight. */
     private val isConversationDraftPending: () -> Boolean = { false },
     /** A missing send button after verified draft input is a recoverable wait, not a deadline failure. */
@@ -244,20 +244,19 @@ class AiReplyObservationRuntime(
 
     private val pageObservationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
         MomoPageObservationCoordinator(
-            scheduler = scheduler,
+            sharedCoordinator = sharedPageObservationCoordinator,
             fullInspectionDebounceMs = fullInspectionDebounceMs,
             regionRefreshDebounceMs = regionRefreshDebounceMs,
             maxEventBurstInspectionWaitMs = MAX_EVENT_BURST_INSPECTION_WAIT_MS,
             runFullInspection = { runFullInspection() },
             runRegionRefresh = ::runRegionRefresh,
-            onReceivedGreetingsConfirmed = ::startReceivedGreetingsTaskFromConfirmedPage,
             onFallbackCheckRequested = ::requestReceivedGreetingsFallbackCheck,
             onSnapshotRequested = ::requestReceivedGreetingsSnapshot,
             fallbackDelayMs = {
                 chooseRandomInt(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS)
                     .coerceIn(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS) * 1_000L
             },
-            sharedCoordinator = sharedPageObservationCoordinator
+            isObservationActive = isAiReplyActive
         )
     }
     private var messageReadRetryTask: ScheduledTask? = null
@@ -372,9 +371,9 @@ class AiReplyObservationRuntime(
         }
     }
     init {
-        sharedPageObservationCoordinator?.registerFingerprintRoute(messageListRecoveryRoute.asRoute())
-        sharedPageObservationCoordinator?.registerFingerprintRoute(receivedGreetingsRecoveryRoute.asRoute())
-        sharedPageObservationCoordinator?.registerFingerprintRoute(chatDetailRecoveryRoute.asRoute())
+        sharedPageObservationCoordinator.registerFingerprintRoute(messageListRecoveryRoute.asRoute())
+        sharedPageObservationCoordinator.registerFingerprintRoute(receivedGreetingsRecoveryRoute.asRoute())
+        sharedPageObservationCoordinator.registerFingerprintRoute(chatDetailRecoveryRoute.asRoute())
         privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             messageListCheckpointRestored = true
@@ -936,7 +935,7 @@ class AiReplyObservationRuntime(
             }.getOrNull()
         )
         val matchedRouteId = if (pageFingerprint.packageName == targetPackage()) {
-            sharedPageObservationCoordinator?.matchFingerprint(pageFingerprint)
+            sharedPageObservationCoordinator.matchFingerprint(pageFingerprint)
                 ?: listOf(messageListRecoveryRoute, receivedGreetingsRecoveryRoute, chatDetailRecoveryRoute)
                     .firstOrNull { it.matches(pageFingerprint) }?.routeId
         } else null
@@ -1394,7 +1393,11 @@ class AiReplyObservationRuntime(
                 ReceivedGreetingsPageArrivalStatus.NOT_TARGET,
                 ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION,
                 ReceivedGreetingsPageArrivalStatus.UNKNOWN -> Unit
-                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> return
+                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
+                    // Observation supplies evidence; only the runtime may start a task.
+                    startReceivedGreetingsTaskFromConfirmedPage()
+                    return
+                }
                 ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE,
                 ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING -> {
                     pauseForReceivedGreetingsPageTransition(arrivalStatus)
@@ -4837,7 +4840,9 @@ class AiReplyObservationRuntime(
         pageObservationCoordinator.cancelRegionRefresh()
         pageInspectionTask?.cancel()
         pendingPageReadPurpose = purpose
-        pageInspectionTask = scheduler.schedule(delayMs) { runFullInspection() }
+        pageInspectionTask = sharedPageObservationCoordinator.scheduleReadOnlyObservation(delayMs) {
+            runFullInspection()
+        }
     }
 
     /**

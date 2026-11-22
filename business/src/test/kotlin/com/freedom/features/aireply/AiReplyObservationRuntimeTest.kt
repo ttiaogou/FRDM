@@ -17,6 +17,7 @@ import com.freedom.core.accessibility.events.InputOriginEvidence
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.TargetAppReadinessSnapshot
 import com.freedom.core.runtime.TargetAppReadinessStatus
@@ -144,6 +145,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -206,6 +208,7 @@ class AiReplyObservationRuntimeTest {
         val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -282,6 +285,7 @@ class AiReplyObservationRuntimeTest {
         val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -335,6 +339,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -440,6 +445,7 @@ class AiReplyObservationRuntimeTest {
         val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -527,6 +533,7 @@ class AiReplyObservationRuntimeTest {
         val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -611,6 +618,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -680,6 +688,7 @@ class AiReplyObservationRuntimeTest {
             val logs = ArrayList<String>()
             val runtime = AiReplyObservationRuntime(
                 scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
                 chatPagePort = port,
                 chatMessagePort = port,
                 chatSessionManagementPort = port,
@@ -725,6 +734,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -773,6 +783,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -875,6 +886,7 @@ class AiReplyObservationRuntimeTest {
         val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -928,6 +940,7 @@ class AiReplyObservationRuntimeTest {
         val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -980,6 +993,7 @@ class AiReplyObservationRuntimeTest {
         val submittedCommands = mutableListOf<GestureIntentRequest>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -1049,6 +1063,7 @@ class AiReplyObservationRuntimeTest {
         val submittedCommands = mutableListOf<GestureIntentRequest>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -1113,6 +1128,7 @@ class AiReplyObservationRuntimeTest {
         val submittedCommands = mutableListOf<GestureIntentRequest>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -1204,6 +1220,7 @@ class AiReplyObservationRuntimeTest {
         val gestures = mutableListOf<GestureKind>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -1442,6 +1459,7 @@ class AiReplyObservationRuntimeTest {
         var pendingGestureRequest: GestureIntentRequest? = null
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -1608,6 +1626,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -1675,6 +1694,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -1733,6 +1753,7 @@ class AiReplyObservationRuntimeTest {
             }
             val runtime = AiReplyObservationRuntime(
                 scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
                 chatPagePort = port,
                 chatMessagePort = port,
                 chatSessionManagementPort = port,
@@ -1822,6 +1843,7 @@ class AiReplyObservationRuntimeTest {
             }
             runtime = AiReplyObservationRuntime(
                 scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
                 chatPagePort = port,
                 chatMessagePort = port,
                 chatSessionManagementPort = port,
@@ -1922,6 +1944,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2017,6 +2040,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2106,6 +2130,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2165,6 +2190,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2237,6 +2263,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2314,6 +2341,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2383,6 +2411,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2439,6 +2468,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2518,6 +2548,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2591,6 +2622,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2651,6 +2683,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2724,6 +2757,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2799,6 +2833,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2870,6 +2905,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -2938,6 +2974,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3009,6 +3046,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3061,6 +3099,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3127,6 +3166,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3207,6 +3247,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3415,6 +3456,7 @@ class AiReplyObservationRuntimeTest {
         val port = FakeChatPort()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3442,6 +3484,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3473,6 +3516,7 @@ class AiReplyObservationRuntimeTest {
         val observed = ArrayList<ChatMessageBatch>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3508,6 +3552,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3548,6 +3593,7 @@ class AiReplyObservationRuntimeTest {
         val observed = ArrayList<ChatMessageBatch>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3586,6 +3632,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3617,6 +3664,7 @@ class AiReplyObservationRuntimeTest {
         val observed = ArrayList<ChatMessageBatch>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3888,6 +3936,7 @@ class AiReplyObservationRuntimeTest {
         var observed: ChatMessageBatch? = null
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -3938,6 +3987,7 @@ class AiReplyObservationRuntimeTest {
         val logs = mutableListOf<String>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -4008,6 +4058,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -4046,6 +4097,7 @@ class AiReplyObservationRuntimeTest {
         onLog: (String) -> Unit = {}
     ) = AiReplyObservationRuntime(
         scheduler = scheduler,
+        sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
         chatPagePort = port,
         chatMessagePort = port,
         chatSessionManagementPort = port,
@@ -4136,6 +4188,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,
@@ -4191,6 +4244,7 @@ class AiReplyObservationRuntimeTest {
         }
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
             chatMessagePort = port,
             chatSessionManagementPort = port,

@@ -1,5 +1,6 @@
 package com.freedom.features.aireply
 
+import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
@@ -45,12 +46,11 @@ class MomoPageObservationCoordinatorTest {
                 ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
             )
         )
-        var confirmed = 0
         var snapshotRequests = 0
         val coordinator = createCoordinator(
             scheduler = scheduler,
             statuses = statuses,
-            onConfirmed = { confirmed++ },
+
             onFallback = {},
             onSnapshotRequested = { snapshotRequests++ }
         )
@@ -71,8 +71,10 @@ class MomoPageObservationCoordinatorTest {
 
         scheduler.runNext()
         assertEquals(1, snapshotRequests)
-        coordinator.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED)
-        assertEquals(1, confirmed)
+        assertEquals(
+            ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED,
+            coordinator.onPageSnapshotAvailable(ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED)
+        )
         assertEquals(0, scheduler.pendingCount())
     }
 
@@ -151,18 +153,17 @@ class MomoPageObservationCoordinatorTest {
         statuses: ArrayDeque<ReceivedGreetingsPageArrivalStatus>,
         runFullInspection: () -> Unit = {},
         runRegionRefresh: () -> Unit = {},
-        onConfirmed: () -> Unit = {},
+
         onFallback: () -> Unit = {},
         onSnapshotRequested: () -> Unit = {},
         inspect: (() -> ReceivedGreetingsPageArrivalStatus)? = null
     ): MomoPageObservationCoordinator = MomoPageObservationCoordinator(
-        scheduler = scheduler,
+        sharedCoordinator = PageObservationCoordinator(scheduler),
         fullInspectionDebounceMs = 250L,
         regionRefreshDebounceMs = 450L,
         maxEventBurstInspectionWaitMs = 1_200L,
         runFullInspection = runFullInspection,
         runRegionRefresh = runRegionRefresh,
-        onReceivedGreetingsConfirmed = onConfirmed,
         onFallbackCheckRequested = onFallback,
         onSnapshotRequested = onSnapshotRequested,
         fallbackDelayMs = { 60_000L }

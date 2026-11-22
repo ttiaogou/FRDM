@@ -59,6 +59,12 @@ class AccountBrowseRuntime(
 
     fun scheduleStep(delayMs: Long) = stepScheduler.schedule(delayMs)
 
+    /** A page observer cannot decide phases or advance tasks; runtime owns that decision. */
+    fun onCoalescedPageObservation(eligiblePhases: Set<AccountBrowsePhase>, delayMs: Long) {
+        if (!isSessionEnabled() || isTouchActive() || phase !in eligiblePhases) return
+        scheduleStep(delayMs)
+    }
+
     fun cancelScheduledStep() = stepScheduler.cancel()
 
     /**

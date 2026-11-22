@@ -1,8 +1,7 @@
 package com.freedom.features.aireply
 
-import com.freedom.core.runtime.PageObservationCoordinator as SharedPageObservationCoordinator
+import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.PageObservationSubscription
-import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 
 /**
@@ -11,36 +10,36 @@ import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
  * recognition and stability confirmation are supplied by the unified AI Reply observation path.
  */
 internal class MomoPageObservationCoordinator(
-    scheduler: TaskScheduler,
+    sharedCoordinator: PageObservationCoordinator,
     fullInspectionDebounceMs: Long,
     regionRefreshDebounceMs: Long,
     maxEventBurstInspectionWaitMs: Long,
     runFullInspection: () -> Unit,
     runRegionRefresh: () -> Unit,
-    onReceivedGreetingsConfirmed: () -> Unit,
     onFallbackCheckRequested: () -> Unit,
     onSnapshotRequested: () -> Unit = {},
     retryDelayMs: Long = 350L,
     maxStabilityRetries: Int = 8,
     fallbackDelayMs: () -> Long,
-    sharedCoordinator: SharedPageObservationCoordinator? = null
+    isObservationActive: () -> Boolean = { true }
 ) {
-    private val observationCoordinator = sharedCoordinator ?: SharedPageObservationCoordinator(scheduler)
+    private val observationCoordinator = sharedCoordinator
     private val fullPageChannel: PageObservationSubscription = observationCoordinator.registerChannel(
         channelId = FULL_INSPECTION_CHANNEL,
         quietPeriodMs = fullInspectionDebounceMs,
         maxWaitMs = maxEventBurstInspectionWaitMs,
-        onObservationRequested = runFullInspection
+        onObservationRequested = runFullInspection,
+        isEnabled = isObservationActive
     )
     private val regionRefreshChannel: PageObservationSubscription = observationCoordinator.registerChannel(
         channelId = REGION_REFRESH_CHANNEL,
         quietPeriodMs = regionRefreshDebounceMs,
         maxWaitMs = maxEventBurstInspectionWaitMs,
-        onObservationRequested = runRegionRefresh
+        onObservationRequested = runRegionRefresh,
+        isEnabled = isObservationActive
     )
     private val receivedGreetingsWatcher = ReceivedGreetingsPageArrivalWatcher(
-        scheduler = scheduler,
-        onPageConfirmed = onReceivedGreetingsConfirmed,
+        scheduleReadOnlyObservation = observationCoordinator::scheduleReadOnlyObservation,
         onFallbackCheckRequested = onFallbackCheckRequested,
         onSnapshotRequested = onSnapshotRequested,
         retryDelayMs = retryDelayMs,

@@ -1,7 +1,7 @@
 package com.freedom.features.aireply
 
 import com.freedom.core.runtime.ScheduledTask
-import com.freedom.core.runtime.TaskScheduler
+
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 
 /**
@@ -12,8 +12,7 @@ import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
  * existing bounded retry cadence, and keeps the low-frequency idle watchdog armed.
  */
 internal class ReceivedGreetingsPageArrivalWatcher(
-    private val scheduler: TaskScheduler,
-    private val onPageConfirmed: () -> Unit,
+    private val scheduleReadOnlyObservation: (Long, () -> Unit) -> ScheduledTask,
     private val onFallbackCheckRequested: () -> Unit,
     private val onSnapshotRequested: () -> Unit = {},
     private val retryDelayMs: Long = 350L,
@@ -60,7 +59,6 @@ internal class ReceivedGreetingsPageArrivalWatcher(
         when (status) {
             ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
                 reset()
-                onPageConfirmed()
             }
             ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING -> {
                 if (stabilityRetryCount < maxStabilityRetries) {
@@ -84,7 +82,7 @@ internal class ReceivedGreetingsPageArrivalWatcher(
         if (retryTask != null) return
         stabilityRetryCount++
         val expectedGeneration = generation
-        retryTask = scheduler.schedule(retryDelayMs) retry@{
+        retryTask = scheduleReadOnlyObservation(retryDelayMs) retry@{
             if (expectedGeneration != generation) return@retry
             retryTask = null
             onSnapshotRequested()
@@ -96,7 +94,7 @@ internal class ReceivedGreetingsPageArrivalWatcher(
         val delayMs = fallbackDelayMs().coerceAtLeast(1L)
         val expectedGeneration = generation
         val expectedFallbackGeneration = ++fallbackGeneration
-        fallbackTask = scheduler.schedule(delayMs) fallback@{
+        fallbackTask = scheduleReadOnlyObservation(delayMs) fallback@{
             if (expectedGeneration != generation ||
                 expectedFallbackGeneration != fallbackGeneration
             ) return@fallback

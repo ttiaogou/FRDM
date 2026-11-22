@@ -66,7 +66,8 @@ class PageObservationCoordinator(
         quietPeriodMs: Long,
         maxWaitMs: Long,
         onObservationRequested: () -> Unit,
-        eventTypes: Set<AccessibilityEventType> = emptySet()
+        eventTypes: Set<AccessibilityEventType> = emptySet(),
+        isEnabled: () -> Boolean = { true }
     ): PageObservationSubscription {
         require(channelId.isNotBlank()) { "channelId must not be blank" }
         check(channelId !in channels) { "Page observation channel already registered: $channelId" }
@@ -78,7 +79,7 @@ class PageObservationCoordinator(
             task = onObservationRequested
         )
         lateinit var subscription: PageObservationSubscription
-        subscription = PageObservationSubscription(channelId, eventTypes, debouncer) {
+        subscription = PageObservationSubscription(channelId, eventTypes, isEnabled, debouncer) {
             unregister(channelId, subscription)
         }
         channels[channelId] = subscription
@@ -96,7 +97,17 @@ class PageObservationCoordinator(
     /** Cancels all channels for compatibility with a coordinator owned by one runtime. */
     fun reset() = resetAll()
 
-    /** Signals every channel interested in this normalized event. Only coalescing is performed. */
+    /**
+     * Schedules an explicit read-only page recheck (recovery, arrival stability or delayed
+     * inspection) via the same service-level observation scheduler as event channels.
+     * The owning business runtime still validates the returned evidence and makes decisions.
+     */
+    fun scheduleReadOnlyObservation(delayMillis: Long, onObservationRequested: () -> Unit): ScheduledTask {
+        require(delayMillis >= 0L) { "delayMillis cannot be negative" }
+        return scheduler.schedule(delayMillis, onObservationRequested)
+    }
+
+    /** Signals only enabled channels interested in this normalized event. */
     fun signal(eventType: AccessibilityEventType) {
         synchronized(this) {
             channels.values.toList()
@@ -137,6 +148,7 @@ class PageObservationCoordinator(
 class PageObservationSubscription internal constructor(
     val channelId: String,
     private val eventTypes: Set<AccessibilityEventType>,
+    private val isEnabled: () -> Boolean,
     private val debouncer: EventAssistedDebouncer,
     private val onClose: () -> Unit
 ) : AutoCloseable {
@@ -154,7 +166,7 @@ class PageObservationSubscription internal constructor(
     fun isPending(): Boolean = !closed && debouncer.isPending()
 
     internal fun accepts(eventType: AccessibilityEventType): Boolean =
-        eventTypes.isEmpty() || eventType in eventTypes
+        !closed && isEnabled() && (eventTypes.isEmpty() || eventType in eventTypes)
 
     override fun close() {
         if (closed) return

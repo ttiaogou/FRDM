@@ -58,7 +58,7 @@ internal class AndroidAccountBrowseWorkflow(
     private val monitorPageContext: () -> String,
     private val onLog: (String) -> Unit,
     private val onRequestScreenOff: () -> Boolean = { false },
-    private val pageObservationCoordinator: PageObservationCoordinator? = null,
+    private val pageObservationCoordinator: PageObservationCoordinator,
     private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null,
     private val recoveryScheduleRepository: RecoveryScheduleRepository? = null,
     private val currentRunGeneration: () -> Long = { 0L }
@@ -69,9 +69,8 @@ internal class AndroidAccountBrowseWorkflow(
     private val popupExecutor = AccountBrowsePopupExecutor()
     private val recoveryExecutor = AccountBrowseRecoveryExecutor()
 
-    private val observationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
-        pageObservationCoordinator ?: PageObservationCoordinator(taskScheduler)
-    }
+    // Injected once by the AccessibilityService composition root; no local fallback.
+    private val observationCoordinator = pageObservationCoordinator
     private val dynamicFeedRecoveryRoute = DynamicFeedRecoveryRouteAdapter(targetPackage) {
         accountBrowseRuntime.saveRecoveryCheckpoint()
     }
@@ -88,7 +87,8 @@ internal class AndroidAccountBrowseWorkflow(
                 AccessibilityEventType.VIEW_SELECTED,
                 AccessibilityEventType.VIEW_SCROLLED
             ),
-            onObservationRequested = ::onCoalescedPageObservationRequested
+            onObservationRequested = ::onCoalescedPageObservationRequested,
+            isEnabled = { isMonitoringRunning() && isBrowseModeActive() }
         )
     }
 
@@ -380,10 +380,12 @@ internal class AndroidAccountBrowseWorkflow(
     }
 
     private fun onCoalescedPageObservationRequested() {
-        if (!isMonitoringRunning() || !isBrowseModeActive() || accountBrowseSession.touchActive ||
-            accountBrowsePhase !in PAGE_OBSERVATION_PHASES
-        ) return
-        accountBrowseRuntime.scheduleStep(PAGE_STATE_POLL_MS)
+        // The observation channel only requests a wake-up. Runtime owns the phase,
+        // user-interaction and task-step decision.
+        accountBrowseRuntime.onCoalescedPageObservation(
+            PAGE_OBSERVATION_PHASES,
+            PAGE_STATE_POLL_MS
+        )
     }
 
     private fun isRecyclerViewClass(className: String): Boolean =

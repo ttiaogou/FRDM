@@ -266,6 +266,54 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         self.assertTrue(any("wiring missing" in item
                             for item in guard.unified_business_event_entry_violations(changed)))
 
+    def test_p2_observation_ownership_accepts_injected_production_paths(self):
+        self.assertEqual(guard.unified_page_observation_violations(self.recovery_code), [])
+
+    def test_p2_observation_guard_rejects_local_fallback_construction(self):
+        changed = dict(self.recovery_code)
+        momo = "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt"
+        changed[momo] += "\nval local = PageObservationCoordinator(scheduler)\n"
+        self.assertTrue(any("bypasses common scheduler" in item
+                            for item in guard.unified_page_observation_violations(changed)))
+        self.assertTrue(any("construction drift" in item
+                            for item in guard.architecture_authority_violations(changed)))
+
+    def test_p2_observation_guard_rejects_direct_greetings_task_start(self):
+        changed = dict(self.recovery_code)
+        momo = "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt"
+        changed[momo] += "\nonReceivedGreetingsConfirmed = ::startReceivedGreetingsTaskFromConfirmedPage\n"
+        self.assertTrue(any("bypasses common scheduler" in item
+                            for item in guard.unified_page_observation_violations(changed)))
+
+    def test_p2_observation_guard_rejects_legacy_timers_and_missing_runtime_wiring(self):
+        changed = dict(self.recovery_code)
+        runtime = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        changed[runtime] = changed[runtime].replace(
+            "pageInspectionTask = sharedPageObservationCoordinator.scheduleReadOnlyObservation",
+            "pageInspectionTask = scheduler.schedule"
+        )
+        self.assertTrue(any("bypasses common scheduler" in item
+                            for item in guard.unified_page_observation_violations(changed)))
+
+        changed = dict(self.recovery_code)
+        browse = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+        changed[browse] = changed[browse].replace(
+            "accountBrowseRuntime.onCoalescedPageObservation(",
+            "accountBrowseRuntime.scheduleStep("
+        )
+        self.assertTrue(any("missing required wiring" in item or "directly schedules a business step" in item
+                            for item in guard.unified_page_observation_violations(changed)))
+
+    def test_p2_observation_guard_rejects_disabled_mode_isolation(self):
+        changed = dict(self.recovery_code)
+        momo = "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt"
+        changed[momo] = changed[momo].replace(
+            "isEnabled = isObservationActive",
+            "isEnabled = { true }"
+        )
+        self.assertTrue(any("missing required wiring" in item
+                            for item in guard.unified_page_observation_violations(changed)))
+
     def test_p0_authority_guard_accepts_current_production_graph(self):
         self.assertEqual(guard.architecture_authority_violations(self.recovery_code), [])
 

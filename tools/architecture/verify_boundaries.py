@@ -563,6 +563,7 @@ def inspect_project(root: Path) -> list[str]:
 
     # P0: freeze single authority declarations and known construction routes.
     issues.extend(architecture_authority_violations(code_by_path))
+    issues.extend(unified_page_observation_violations(code_by_path))
 
     # 11) Final hard boundaries for the unified accessibility/recovery architecture.
     issues.extend(final_architecture_boundary_violations(code_by_path))
@@ -656,7 +657,6 @@ P0_AUTHORITY_CONSTRUCTIONS = {
     },
     "PageObservationCoordinator": {
         "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": 1,
-        "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt": 1,
     },
     "TaskCoordinator": {
         "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": 1,
@@ -686,12 +686,8 @@ P0_AUTHORITY_CONSTRUCTIONS = {
     },
 }
 
-# Temporary test-fixture fallback in MomoPageObservationCoordinator; production
-# injects the service-scoped shared coordinator from AppCompositionRoot.
-P0_LEGACY_AUTHORITY_ALIASES = {
-    ("business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt",
-     "PageObservationCoordinator", "SharedPageObservationCoordinator"): 1,
-}
+# P2 removed the last legacy page-coordinator alias and local construction fallback.
+P0_LEGACY_AUTHORITY_ALIASES = {}
 
 
 def architecture_authority_violations(code_by_path: dict[str, str]) -> list[str]:
@@ -770,6 +766,88 @@ def architecture_authority_violations(code_by_path: dict[str, str]) -> list[str]
         )
     return issues
 
+
+
+
+def unified_page_observation_violations(code_by_path: dict[str, str]) -> list[str]:
+    """P2: one injected scheduler, observations as evidence, task decisions in runtimes."""
+    issues: list[str] = []
+    required = {
+        "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": (
+            r"\bval\s+pageObservationCoordinator\s*:\s*PageObservationCoordinator\b",
+            r"\bsharedPageObservationCoordinator\s*=\s*pageObservationCoordinator\b",
+            r"\bpageObservationCoordinator\s*=\s*pageObservationCoordinator\b",
+        ),
+        "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt": (
+            r"\bprivate\s+val\s+sharedPageObservationCoordinator\s*:\s*PageObservationCoordinator\s*,",
+            r"\bsharedCoordinator\s*=\s*sharedPageObservationCoordinator\b",
+            r"\bisObservationActive\s*=\s*isAiReplyActive\b",
+            r"\bpageInspectionTask\s*=\s*sharedPageObservationCoordinator\.scheduleReadOnlyObservation\s*\(",
+            r"ReceivedGreetingsPageArrivalStatus\.LIST_CONFIRMED\s*->\s*\{\s*startReceivedGreetingsTaskFromConfirmedPage\s*\(",
+        ),
+        "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt": (
+            r"\bsharedCoordinator\s*:\s*PageObservationCoordinator\b",
+            r"\bisEnabled\s*=\s*isObservationActive\b",
+            r"\bscheduleReadOnlyObservation\s*=\s*observationCoordinator::scheduleReadOnlyObservation\b",
+        ),
+        "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsPageArrivalWatcher.kt": (
+            r"\bprivate\s+val\s+scheduleReadOnlyObservation\s*:\s*\(Long,\s*\(\)\s*->\s*Unit\)",
+            r"\bretryTask\s*=\s*scheduleReadOnlyObservation\s*\(",
+            r"\bfallbackTask\s*=\s*scheduleReadOnlyObservation\s*\(",
+        ),
+        "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt": (
+            r"\bprivate\s+val\s+pageObservationCoordinator\s*:\s*PageObservationCoordinator\s*,",
+            r"\bprivate\s+val\s+observationCoordinator\s*=\s*pageObservationCoordinator\b",
+            r"\bisEnabled\s*=\s*\{\s*isMonitoringRunning\(\)\s*&&\s*isBrowseModeActive\(\)\s*\}",
+            r"\baccountBrowseRuntime\.onCoalescedPageObservation\s*\(",
+        ),
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt": (
+            r"\bfun\s+onCoalescedPageObservation\s*\(",
+            r"\bphase\s+!in\s+eligiblePhases\b",
+            r"\bscheduleStep\s*\(\s*delayMs\s*\)",
+        ),
+        "core/src/main/kotlin/com/freedom/core/runtime/PageObservationCoordinator.kt": (
+            r"\bfun\s+scheduleReadOnlyObservation\s*\(",
+            r"\bisEnabled\s*:\s*\(\)\s*->\s*Boolean\b",
+            r"\bisEnabled\(\)\s*&&\s*\(eventTypes\.isEmpty\(\)",
+        ),
+    }
+    for rel, patterns in required.items():
+        code = code_by_path.get(rel, "")
+        for pattern in patterns:
+            if not re.search(pattern, code):
+                issues.append(f"P2 unified page observation missing required wiring: {rel}: {pattern}")
+    forbidden = {
+        "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt": (
+            r"\b(?:Shared)?PageObservationCoordinator\s*\(\s*scheduler\b",
+            r"\bonReceivedGreetingsConfirmed\b",
+            r"\bstartReceivedGreetingsTaskFromConfirmedPage\s*\(",
+        ),
+        "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsPageArrivalWatcher.kt": (
+            r"\bonPageConfirmed\b",
+            r"\bscheduler\.schedule\s*\(",
+        ),
+        "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt": (
+            r"\bPageObservationCoordinator\s*\(\s*taskScheduler\b",
+        ),
+        "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt": (
+            r"\bpageInspectionTask\s*=\s*scheduler\.schedule\s*\(",
+        ),
+    }
+    for rel, patterns in forbidden.items():
+        code = code_by_path.get(rel, "")
+        for pattern in patterns:
+            if re.search(pattern, code):
+                issues.append(f"P2 page observer bypasses common scheduler or task boundary: {rel}: {pattern}")
+    browse = code_by_path.get(
+        "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt", ""
+    )
+    if re.search(
+        r"private\s+fun\s+onCoalescedPageObservationRequested\s*\([^)]*\)\s*\{"
+        r"[^}]*\baccountBrowseRuntime\.scheduleStep\s*\(", browse
+    ):
+        issues.append("P2 page observer callback directly schedules a business step")
+    return issues
 
 
 def unified_business_event_entry_violations(code_by_path: dict[str, str]) -> list[str]:
@@ -1128,6 +1206,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - Recovery transaction: adapters cannot bypass it; state machine cannot depend on business page fields")
     print(" - P0 ownership baseline: authority declarations, construction sites, and legacy aliases pinned")
     print(" - P1 accessibility: target/touch/Activity/navigation notifications use one business entry")
+    print(" - P2 observation: one injected scheduler, mode-isolated channels, task decisions owned by runtimes")
     print(" - Automatic recovery: legacy manual handoff forbidden; three checkpoint routes use shared verification")
     print(" - Recovery scheduler: bounded non-terminal backoff, touch reset, stale-callback and user-stop gates")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")
