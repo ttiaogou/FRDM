@@ -154,6 +154,107 @@ class AccountBrowseManualRecoveryTest {
         assertEquals(RecoveryTransactionState.RECOVERING, runtime.recoveryState())
     }
 
+    /**
+     * The messages tab is a legitimate Momo page but NOT the dynamic-feed recovery route.
+     * Returning to the feed after a persisted browser checkpoint requires two independent
+     * confirmed feed observations, followed by the existing fresh-phase recheck.
+     */
+    @Test
+    fun messagesTabToDynamicFeedRequiresRouteProofAndTwoFreshSnapshotsBeforeBrowseStep() {
+        val store = FakeStore(savedCheckpoint())
+        var feedSteps = 0
+        val runtime = runtime(store, currentRunGeneration = { 41L }) { feedSteps++ }
+        assertTrue(runtime.beginCheckpointVerification())
+        val messagesTab = page(BrowsePageKind.HOME).copy(
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            fingerprint = "momo-messages-tab"
+        )
+        val dynamics = page().copy(
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            fingerprint = "momo-dynamic-feed-window-18"
+        )
+
+        assertFalse(runtime.observeDynamicFeedFingerprint(
+            messagesTab.fingerprint, messagesTab, routeVerified = false
+        ))
+        assertTrue(runtime.hasPendingCheckpointVerification())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        runtime.performStep()
+        assertEquals(0, feedSteps)
+        assertTrue(store.value != null)
+
+        assertFalse(runtime.observeDynamicFeedFingerprint(
+            dynamics.fingerprint, dynamics, routeVerified = true
+        ))
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        runtime.performStep()
+        assertEquals(0, feedSteps)
+
+        assertTrue(runtime.observeDynamicFeedFingerprint(
+            dynamics.fingerprint, dynamics, routeVerified = true
+        ))
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertFalse(runtime.hasPendingCheckpointVerification())
+        assertEquals(0, feedSteps)
+        // Restore completion is not the existing feed-phase recheck; that remains separate.
+        assertTrue(runtime.observeDynamicFeedFingerprint(
+            dynamics.fingerprint, dynamics, routeVerified = true
+        ))
+        runtime.performStep()
+        assertEquals(1, feedSteps)
+        assertEquals(AccountBrowsePhase.WAIT_FOR_FEED_STABLE, runtime.phase)
+    }
+
+    /**
+     * The dynamic-card detail return is not established by a BACK callback or a transient
+     * HOME frame. Only two matching current-feed position snapshots may permit restoration.
+     */
+    @Test
+    fun detailToDynamicsReturnRejectsHomeWrongPositionAndSingleFeedFrame() {
+        val decision = FeedReturnVerificationPolicy
+        var previous = ""
+        var samples = 0
+
+        fun observe(snapshot: String, isFeed: Boolean, positionMatches: Boolean): Boolean {
+            val result = FeedReturnStability.update(
+                previousSnapshot = previous,
+                previousSamples = samples,
+                currentSnapshot = snapshot,
+                isFeedPage = isFeed,
+                positionMatches = positionMatches,
+                requiredSamples = 2
+            )
+            previous = result.lastSnapshot
+            samples = result.stableSamples
+            return result.isStable
+        }
+
+        assertFalse(observe("detail-window", isFeed = false, positionMatches = false))
+        assertEquals(0, samples)
+        assertEquals(FeedReturnVerificationPolicy.Decision.PAUSE_NOT_FEED_PAGE,
+            decision.decide(true, false, false, false, deadlineReached = true))
+        assertEquals(FeedReturnVerificationPolicy.Decision.PAUSE_ROOT_UNAVAILABLE,
+            decision.decide(false, false, false, false, deadlineReached = true))
+
+        assertFalse(observe("feed-window-21-list-position-4", true, true))
+        assertEquals(FeedReturnVerificationPolicy.Decision.WAIT,
+            decision.decide(true, true, true, false, deadlineReached = false))
+        assertFalse(observe("feed-window-21-list-position-5", true, false))
+        assertEquals(0, samples)
+        assertFalse(observe("feed-window-21-list-position-4", true, true))
+        assertEquals(1, samples)
+        assertTrue(observe("feed-window-21-list-position-4", true, true))
+        assertEquals(2, samples)
+        assertEquals(FeedReturnVerificationPolicy.Decision.RESTORED,
+            decision.decide(true, true, true, true, deadlineReached = false))
+        // A new HOME frame after verification is not a reusable feed-return permission.
+        assertFalse(observe("messages-tab-window-22", false, false))
+        assertEquals(0, samples)
+        assertEquals(FeedReturnVerificationPolicy.Decision.WAIT,
+            decision.decide(true, false, false, false, deadlineReached = false))
+    }
+
     private class FakeStore(var value: AccountBrowseCheckpoint?) : AccountBrowseCheckpointRepository {
         override fun load(nowEpochMs: Long): AccountBrowseCheckpoint? = value
         override fun save(checkpoint: AccountBrowseCheckpoint) { value = checkpoint }

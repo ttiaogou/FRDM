@@ -15,6 +15,43 @@ import org.junit.Test
 /** P5: all existing business recovery routes use the same typed registration mechanism. */
 class UnifiedRecoveryRouteRegistrationTest {
     @Test
+    fun messagesDynamicFeedAndGreetingsRoutesStayModeScopedOnSameMainActivity() {
+        val scheduler = object : TaskScheduler {
+            override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask =
+                ScheduledTask { }
+        }
+        val coordinator = PageObservationCoordinator(scheduler)
+        val message = MessageListRecoveryRouteAdapter {}
+        val greetings = ReceivedGreetingsRecoveryRouteAdapter {}
+        val browse = DynamicFeedRecoveryRouteAdapter({ "com.immomo.momo" }) {}
+        coordinator.registerRecoveryAdapter(message)
+        coordinator.registerRecoveryAdapter(greetings)
+        coordinator.registerRecoveryAdapter(browse)
+
+        fun page(kind: String, fingerprint: String? = null, pkg: String = "com.immomo.momo") =
+            PageFingerprint(pkg, "com.immomo.momo.maintab.MaintabActivity", kind, fingerprint)
+        val aiTasks = setOf("AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS")
+        val browseTasks = setOf("ACCOUNT_BROWSE")
+
+        assertEquals(message.routeId,
+            coordinator.matchRecoveryAdapter(page("CHAT_LIST"), aiTasks)?.routeId)
+        assertNull(coordinator.matchRecoveryAdapter(page("CHAT_LIST"), browseTasks))
+        assertEquals(browse.routeId,
+            coordinator.matchRecoveryAdapter(page("DYNAMIC_FEED", "verified-feed-window"), browseTasks)?.routeId)
+        assertNull(coordinator.matchRecoveryAdapter(page("DYNAMIC_FEED", "verified-feed-window"), aiTasks))
+        assertNull(coordinator.matchRecoveryAdapter(page("DYNAMIC_FEED"), browseTasks))
+        assertNull(coordinator.matchRecoveryAdapter(
+            page("DYNAMIC_FEED", "verified-feed-window", pkg = "foreign.app"), browseTasks))
+        assertEquals(greetings.routeId,
+            coordinator.matchRecoveryAdapter(page("NON_CHAT", "verified-greetings-window"), aiTasks)?.routeId)
+        assertNull(coordinator.matchRecoveryAdapter(page("NON_CHAT", "verified-greetings-window"), browseTasks))
+
+        // A visually similar MainActivity is not proof that a route or mode changed.
+        assertNull(coordinator.matchRecoveryAdapter(page("NON_CHAT"), aiTasks))
+        assertNull(coordinator.matchRecoveryAdapter(page("NON_CHAT"), browseTasks))
+    }
+
+    @Test
     fun allFourBusinessAdaptersUseTheSameRegistryAndDoNotSaveOnMatching() {
         val scheduler = object : TaskScheduler {
             override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask =

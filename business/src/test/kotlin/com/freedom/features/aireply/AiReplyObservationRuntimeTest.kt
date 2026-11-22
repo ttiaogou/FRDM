@@ -720,6 +720,107 @@ class AiReplyObservationRuntimeTest {
         assertTrue(resumedCheckpoint.savedAtEpochMs >= original.savedAtEpochMs)
     }
 
+    /**
+     * Regression for the real-device message-tab -> dynamics -> message-tab path. AI Agent
+     * must treat the dynamic surface as NON_CHAT; a private checkpoint stays dormant there,
+     * and the return to the inbox must use two NEW same-window snapshots to resume.
+     * This fixture does not claim that AI Agent should itself run AccountBrowse.
+     */
+    @Test
+    fun dynamicsTabDoesNotResumePrivateCheckpointUntilFreshInboxReturn() {
+        val fixture = crossTaskRecoveryFixture()
+        val (runtime, scheduler, port, ownership, manager, repository, original, logs) = fixture
+        port.receivedGreetingsCheckpointFingerprint = null
+        port.manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+        port.page = port.page.copy(
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.NON_CHAT,
+            windowGeneration = 12L
+        )
+
+        runtime.scheduleInitialObservation()
+        val pending = manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")
+        assertTrue(pending != null)
+        scheduler.runNextWithDelay(0L)
+        assertTrue(logs.any { it.contains("消息列表统一检查点[ROUTE_WAIT]") })
+
+        // Scroll/change events from the dynamics tab never grant the AI private/greetings task.
+        repeat(2) {
+            runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN))
+            scheduler.runNextWithDelay(300L)
+        }
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertEquals(0, port.messageReads)
+        assertEquals(pending?.checkpointId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertEquals(original, repository.load())
+        assertFalse(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+
+        port.page = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(sessionCandidate(
+                unreadStatus = ChatUnreadStatus.READ,
+                completeBoundaryEvidence = true,
+                windowGeneration = 20L
+            )),
+            screenBounds = ScreenRect(0, 0, 720, 1600),
+            windowGeneration = 20L
+        )
+
+        // Actual navigation invalidates any earlier window stability proof.
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilLog(scheduler, logs, "消息列表统一检查点[VERIFYING]")
+        assertFalse(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertEquals(pending?.checkpointId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+
+        repeat(4) {
+            if (logs.none { it.contains("统一页面恢复[RECOVERY_VERIFIED]") }) {
+                runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
+                scheduler.runNextWithDelay(300L)
+            }
+        }
+        assertTrue("Message list must resume only after two fresh inbox samples; logs=${logs.takeLast(30)}",
+            logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        assertEquals(null, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES"))
+        assertEquals(original.attemptedSessionKeys, repository.load()?.attemptedSessionKeys)
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+    }
+
+    /** A stale or coincidental route fingerprint is not a confirmed greetings-list arrival. */
+    @Test
+    fun dynamicsPageCannotStealPendingPrivateCheckpointWithUnconfirmedGreetingsAppearance() {
+        val (runtime, scheduler, port, ownership, manager, repository, original, logs) =
+            crossTaskRecoveryFixture(arrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET)
+        port.page = port.page.copy(
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.NON_CHAT
+        )
+        // Mimic a stale positive route fingerprint: the independent list recognizer still
+        // denies the page, so even two repeated observations may not transfer UI ownership.
+        runtime.scheduleInitialObservation()
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        assertTrue(manager.snapshot("AI_REPLY_PRIVATE_MESSAGES") != null)
+        assertEquals(original, repository.load())
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertFalse(logs.any { it.contains("PRIVATE_TO_GREETINGS_TRANSFERRED") })
+    }
+
     @Test
     fun manuallyOpenedReceivedGreetingsListTakesPriorityOverMessageTabRecovery() {
         val scheduler = FakeScheduler()
