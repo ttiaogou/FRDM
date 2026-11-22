@@ -50,6 +50,10 @@ import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
+import com.freedom.features.aireply.ports.ContactIdentityCaptureOutcome
+import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
+import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
+import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatListUnreadDiagnostics
 import com.freedom.features.aireply.ports.ChatRegionSnapshot
@@ -1763,6 +1767,177 @@ class AiReplyObservationRuntimeTest {
             })
             assertTrue("eventFirst=$eventFirst must read the opened chat", port.messageReads > 0)
         }
+    }
+
+    @Test
+    fun failedOrUnboundIdentityUsesOnlyVerifiedCurrentWindowWithoutNameHistoryLookup() {
+        for (mode in listOf("FAILED", "UNBOUND", "UNSAFE_FRESH_PAGE")) {
+            val scheduler = FakeScheduler()
+            val candidate = sessionCandidate(completeBoundaryEvidence = true)
+            val verified = ContactRowIdentity(
+                snapshotId = "test-platform-id",
+                temporaryUserId = "test-temp",
+                contactId = "test-platform-user",
+                confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+            )
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                resolvedTapBounds = candidate.rowBounds
+                identityCaptureOutcomeOverride = if (mode == "FAILED") {
+                    ContactIdentityCaptureOutcome.failed(
+                        ContactIdentityCaptureRequestResult.NOT_SUPPORTED,
+                        "IDENTITY_CAPTURE_NOT_SUPPORTED"
+                    )
+                } else {
+                    ContactIdentityCaptureOutcome.completed(verified)
+                }
+                page = ChatPageSnapshot(
+                    packageName = "com.immomo.momo",
+                    activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                    pageKind = ChatPageKind.CHAT_LIST,
+                    scannedNodeCount = 80,
+                    editableInputCount = 0,
+                    messageListCount = 0,
+                    sendActionCount = 0,
+                    messageRelatedViewIdCount = 0,
+                    hasChatTab = true,
+                    messageListTarget = null,
+                    inputFieldTarget = null,
+                    chatListViewport = ScreenRect(0, 120, 720, 1480),
+                    chatListCandidates = listOf(candidate),
+                    windowGeneration = 1L
+                )
+            }
+            val logs = ArrayList<String>()
+            var draftCalls = 0
+            var historyLookups = 0
+            var passedIdentity: ContactRowIdentity? = verified
+            lateinit var runtime: AiReplyObservationRuntime
+            val gesture = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            }
+            runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = gesture,
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = { line ->
+                    logs.add(line)
+                    if (mode != "FAILED" && line.contains("AI 会话绑定：已建立")) {
+                        // Simulate the missing binding while keeping the verified row/navigation.
+                        AiReplyObservationRuntime::class.java.getDeclaredField("currentSessionBinding")
+                            .apply { isAccessible = true }.set(runtime, null)
+                        if (mode == "UNSAFE_FRESH_PAGE") {
+                            // Message-read callback sees a valid page, but the independent
+                            // fallback inspection sees a different conversation title.
+                            port.inspectionPages = List(port.fullInspections + 1) { port.page } +
+                                chatDetailSnapshot().copy(chatTitleText = "与Another Contact对话")
+                        }
+                    }
+                },
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L,
+                resolveConversationIdentity = { _, _ ->
+                    historyLookups++
+                    verified // A name-only historical match must never be consulted in fallback.
+                },
+                prepareDraftHistory = { _, _ -> historyLookups++ },
+                onDraftConversationObserved = { _, _, identity, _ ->
+                    draftCalls++
+                    passedIdentity = identity
+                    true
+                }
+            )
+            runtime.scheduleInitialObservation()
+            runUntilLog(scheduler, logs, "AI Reply 启动准入[UNREAD_LOCKING]")
+            runUntil(scheduler, 100) {
+                if (mode == "UNSAFE_FRESH_PAGE") logs.any {
+                    it.contains("CURRENT_TARGET_NOT_CONFIRMED")
+                } else draftCalls == 1
+            }
+            if (mode == "UNSAFE_FRESH_PAGE") {
+                assertEquals(0, draftCalls)
+                assertTrue(logs.any { it.contains("CURRENT_TARGET_NOT_CONFIRMED") })
+            } else {
+                assertEquals(1, draftCalls)
+                assertNull("mode=$mode must not bind an unconfirmed platform ID", passedIdentity)
+                assertEquals("mode=$mode must not load name-only history", 0, historyLookups)
+            }
+        }
+    }
+
+    @Test
+    fun retryLaterDoesNotDraftBeforeIdentityTimeoutThenFallsBackToCurrentWindow() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            identityCaptureOutcomeOverride = ContactIdentityCaptureOutcome.waiting(
+                ContactIdentityCaptureRequestResult.RETRY_LATER
+            )
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+        }
+        val logs = ArrayList<String>()
+        var draftCalls = 0
+        var historyLookups = 0
+        val gesture = object : TestGestureApi {
+            override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                return GestureSubmission.ACCEPTED
+            }
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = gesture,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            resolveConversationIdentity = { _, _ -> historyLookups++; null },
+            onDraftConversationObserved = { _, _, identity, _ ->
+                assertNull(identity)
+                draftCalls++
+                true
+            }
+        )
+        runtime.scheduleInitialObservation()
+        runUntilLog(scheduler, logs, "AI Reply 启动准入[UNREAD_LOCKING]")
+        runUntilLog(scheduler, logs, "AI 联系人身份采集中")
+        assertEquals(0, draftCalls)
+        scheduler.runNextWithDelay(15_000L) // No new page event: identity timeout still advances.
+        runUntil(scheduler, 100) { draftCalls == 1 }
+        assertEquals(0, historyLookups)
+        assertTrue(logs.any { it.contains("IDENTITY_CAPTURE_TIMEOUT") })
     }
 
     @Test
@@ -4161,6 +4336,7 @@ class AiReplyObservationRuntimeTest {
         var regionRefreshes = 0
         var lastRefreshInput: ChatPageSnapshot? = null
         var messageReads = 0
+        var identityCaptureOutcomeOverride: ContactIdentityCaptureOutcome? = null
         var lastMessageLimit = 0
         var lastMessagePage: ChatPageSnapshot? = null
         var messageContentQuality = MessageContentQuality.VERIFIED
@@ -4213,6 +4389,9 @@ class AiReplyObservationRuntimeTest {
         val resolvedTapCandidateNames = ArrayList<String?>()
 
         override fun beginSessionManagement(): String? = if (sessionRunEnabled) "test-run" else null
+        override fun observeContactIdentityCapture(candidate: ChatListCandidateSnapshot): ContactIdentityCaptureOutcome =
+            identityCaptureOutcomeOverride
+                ?: super<ChatSessionManagementPort>.observeContactIdentityCapture(candidate)
         override fun finishSessionManagement(): String? = "test-run.zip"
         override fun captureSessionListSample(snapshot: ChatPageSnapshot, onComplete: (String?) -> Unit) {
             sessionListSamples++

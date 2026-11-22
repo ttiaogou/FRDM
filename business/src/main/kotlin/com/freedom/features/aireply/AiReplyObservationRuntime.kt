@@ -615,6 +615,43 @@ class AiReplyObservationRuntime(
     private var identityCaptureStartedAtMs = 0L
     private var identityCaptureRetryCount = 0
     private var identityCaptureTerminalSessionKey: String? = null
+    private var identityCaptureTimeoutTask: ScheduledTask? = null
+
+    /**
+     * Identity capture may fail without invalidating the selected current chat. Before using
+     * only its visible messages, independently re-check the navigation source, task lease,
+     * selected row, header and a fresh live chat window; never infer identity from a name.
+     */
+    private fun isFreshCurrentTargetForIdentityFallback(snapshot: ChatPageSnapshot): Boolean {
+        if (!sessionRunStarted || receivedGreetingsTaskActive ||
+            sessionManagerState != SessionManagerState.READING_SESSION ||
+            !ownsTask(PRIVATE_MESSAGES_TASK_ID) || !isAiReplyActive()
+        ) return false
+        val candidate = currentSessionCandidate ?: return false
+        val selectedKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
+        val expected = expectedPrivateSessionDetailNavigation ?: return false
+        val sourceWindow = candidate.rowTarget.window
+        val sourceKey = listOf(
+            sourceWindow.packageName, sourceWindow.windowId, sourceWindow.generation
+        ).joinToString("|")
+        if (expected.sessionKey != selectedKey || currentSessionKey != selectedKey ||
+            expected.sourceWindowKey != sourceKey ||
+            chatSessionManagementPort.isSessionIdentityBlocked(selectedKey)
+        ) return false
+        if (snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            snapshot.packageName != targetPackage() ||
+            currentSessionHeaderMatchMode(snapshot) == null ||
+            windowSessionKey(snapshot) == null ||
+            currentSessionWindowKey != windowSessionKey(snapshot)
+        ) return false
+        val fresh = readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY) ?: return false
+        return fresh.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            fresh.packageName == targetPackage() &&
+            isExpectedPrivateSessionDetail(fresh) &&
+            currentSessionHeaderMatchMode(fresh) != null &&
+            currentSessionWindowKey == windowSessionKey(fresh) &&
+            hasSameWindowSession(snapshot, fresh)
+    }
 
 
     /**
@@ -1887,6 +1924,8 @@ class AiReplyObservationRuntime(
         identityCaptureStartedAtMs = 0L
         identityCaptureRetryCount = 0
         identityCaptureTerminalSessionKey = null
+        identityCaptureTimeoutTask?.cancel()
+        identityCaptureTimeoutTask = null
         snapshotRecoveryStartedAtMs = 0L
         receivedGreetingsQuietTask?.cancel()
         receivedGreetingsQuietTask = null
@@ -2556,11 +2595,43 @@ class AiReplyObservationRuntime(
                 identityCaptureStartedAtMs = System.currentTimeMillis()
                 identityCaptureRetryCount = 0
                 identityCaptureTerminalSessionKey = null
+                identityCaptureTimeoutTask?.cancel()
+                // The existing 15-second identity timeout must be observable even when the
+                // accessibility service receives no more events while capture is pending.
+                val timeoutSessionKey = identitySessionKey
+                val timeoutGeneration = sessionActionGeneration
+                identityCaptureTimeoutTask = scheduler.schedule(IDENTITY_CAPTURE_TIMEOUT_MS) {
+                    identityCaptureTimeoutTask = null
+                    if (sessionActionGeneration != timeoutGeneration || !isAiReplyActive() ||
+                        !sessionRunStarted || sessionManagerState != SessionManagerState.READING_SESSION ||
+                        currentSessionWindowKey != timeoutSessionKey ||
+                        identityCaptureTerminalSessionKey == timeoutSessionKey ||
+                        currentSessionCandidate?.contactIdentity?.let {
+                            it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                                !it.contactId.isNullOrBlank()
+                        } == true
+                    ) return@schedule
+                    val fresh = readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
+                    if (fresh == null || !isFreshCurrentTargetForIdentityFallback(fresh)) {
+                        onLog("AI 身份降级计时：当前页面不属于已复核目标聊天；不处理历史或草稿，等待安全恢复")
+                        return@schedule
+                    }
+                    identityCaptureTerminalSessionKey = timeoutSessionKey
+                    onLog("AI 联系人身份采集终态：IDENTITY_CAPTURE_TIMEOUT；定时检查已独立复核目标会话；仅当前窗口消息")
+                    readVisibleMessages(fresh)
+                }
                 onLog("AI 联系人身份采集事务：已为当前聊天窗口建立新事务；等待身份终态")
             }
             val currentIdentity = currentSessionCandidate?.contactIdentity
             val identityVerified = currentIdentity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
                 !currentIdentity.contactId.isNullOrBlank()
+            if (identityVerified && currentSessionBinding?.matchesRestoredChatSurface(snapshot) != true &&
+                identityCaptureTerminalSessionKey != identitySessionKey
+            ) {
+                identityCaptureTerminalSessionKey = identitySessionKey
+                onLog("AI 联系人身份降级[CURRENT_SESSION_BINDING_NOT_READY]：已有平台ID但聊天表面绑定未就绪；" +
+                    "不使用该ID关联历史，仅在当前目标会话独立复核通过后处理当前窗口消息")
+            }
             if (!identityVerified && identityCaptureTerminalSessionKey != identitySessionKey) {
                 identityCaptureRetryCount++
                 val identityElapsedMs = System.currentTimeMillis() - identityCaptureStartedAtMs
@@ -2619,21 +2690,35 @@ class AiReplyObservationRuntime(
                             verifiedIdentity.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
                             !verifiedIdentity.contactId.isNullOrBlank()
                         if (!sessionStillMatches) {
+                            val verifiedPlatformId = verifiedIdentity.confidence ==
+                                ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                                !verifiedIdentity.contactId.isNullOrBlank()
+                            if (candidate != null && !restoredSurfaceMatches &&
+                                auxiliaryHeaderMatches && verifiedPlatformId
+                            ) {
+                                identityCaptureTerminalSessionKey = identitySessionKey
+                                onLog(
+                                    "AI 联系人身份降级[CURRENT_SESSION_BINDING_NOT_READY]：" +
+                                        "已采集平台ID但当前会话绑定未就绪；不写回联系人、不加载历史；" +
+                                        "等待当前目标会话独立复核后仅使用当前窗口消息"
+                                )
+                            } else {
+                                onLog(
+                                    "AI 联系人身份绑定暂缓：CURRENT_SESSION_BINDING_NOT_READY；" +
+                                        "restoredChatSurface=$restoredSurfaceMatches；" +
+                                        "辅助标题匹配=$auxiliaryHeaderMatches；身份或目标证据不足，暂不生成草稿"
+                                )
+                                return
+                            }
+                        } else {
+                            candidate!!.contactIdentity = verifiedIdentity
+                            identityJustVerified = true
                             onLog(
-                                "AI 联系人身份绑定暂缓：CURRENT_SESSION_BINDING_NOT_READY；" +
-                                    "platformContactId已保留；" +
-                                    "restoredChatSurface=$restoredSurfaceMatches；" +
-                                    "辅助标题匹配=$auxiliaryHeaderMatches；等待原聊天页恢复后重试"
+                                "AI 联系人身份绑定完成：已写回当前私人会话候选；" +
+                                    "confidence=${verifiedIdentity.confidence.name}；" +
+                                    "身份已确认；继续加载对应联系人历史并提交模型"
                             )
-                            return
                         }
-                        candidate!!.contactIdentity = verifiedIdentity
-                        identityJustVerified = true
-                        onLog(
-                            "AI 联系人身份绑定完成：已写回当前私人会话候选；" +
-                                "confidence=${verifiedIdentity.confidence.name}；" +
-                                "身份已确认；继续加载对应联系人历史并提交模型"
-                        )
                     } else if (identityOutcome.awaiting) {
                         val elapsed = System.currentTimeMillis() - identityCaptureStartedAtMs
                         if (elapsed < IDENTITY_CAPTURE_TIMEOUT_MS) {
@@ -2651,17 +2736,36 @@ class AiReplyObservationRuntime(
                                 "降级当前窗口消息；不因身份失败阻断回复生成"
                         )
                     } else if (identityOutcome.failureReason != null) {
+                        if (identityOutcome.request == ContactIdentityCaptureRequestResult.REJECTED ||
+                            identityOutcome.failureReason == "IDENTITY_CONFLICT" ||
+                            identityOutcome.failureReason == "EXPLICIT_IDENTITY_CONFLICT"
+                        ) {
+                            onLog("AI 联系人身份采集拒绝[IDENTITY_CAPTURE_REJECTED]：可能存在身份冲突；" +
+                                "保留原安全门禁，不允许仅凭昵称生成草稿")
+                            return
+                        }
                         identityCaptureTerminalSessionKey = identitySessionKey
                         onLog("AI 联系人身份采集终态：${identityOutcome.failureReason}；" +
-                            "降级当前窗口消息；不因身份失败阻断回复生成")
+                            "待独立复核当前目标会话后降级当前窗口消息，不关联历史联系人")
                     }
                 }
                 }
             }
         }
         if (privateDetail && identityJustVerified) {
+            identityCaptureTimeoutTask?.cancel()
+            identityCaptureTimeoutTask = null
             onLog("AI OCR 消息读取：身份已确认并返回原聊天页；丢弃旧批次，重新触发当前会话 OCR")
             readVisibleMessages(snapshot)
+            return
+        }
+        val currentWindowOnlyFallback = privateDetail &&
+            currentSessionWindowKey != null &&
+            identityCaptureTerminalSessionKey == currentSessionWindowKey
+        if (currentWindowOnlyFallback && !isFreshCurrentTargetForIdentityFallback(snapshot)) {
+            onLog("AI 身份降级门禁[CURRENT_TARGET_NOT_CONFIRMED]：当前目标会话或新鲜窗口校验不足；" +
+                "不加载历史、不启动草稿；等待重新观察")
+            scheduleFullInspection()
             return
         }
         // The coordinator now delivers a structural batch first. OCR is deliberately deferred
@@ -2669,7 +2773,7 @@ class AiReplyObservationRuntime(
         // restored. The OCR callback re-enters this method with an OCR-complete batch.
         if ((privateDetail || greetingDetail) && !batch.ocrAttempted && batch.ocrTargets.isNotEmpty()) {
             if (privateDetail) {
-                val preOcrIdentity = runCatching {
+                val preOcrIdentity = if (currentWindowOnlyFallback) null else runCatching {
                     resolveConversationIdentity(currentSessionCandidate?.contactIdentity, snapshot.chatTitleText)
                 }.getOrNull()
                 if (preOcrIdentity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
@@ -2724,11 +2828,14 @@ class AiReplyObservationRuntime(
 
         val rowIdentity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()
             else currentSessionCandidate?.contactIdentity
-        val identity = runCatching { resolveConversationIdentity(rowIdentity, snapshot.chatTitleText) }
-            .getOrElse {
-                onLog("AI 历史联系人解析失败：CONTACT_HISTORY_LOOKUP_FAILED；exception=${it.javaClass.simpleName}")
-                rowIdentity
-            }
+        // A transient capture result or unbound platform ID must never be recovered by
+        // display-name lookup; the draft and sample callbacks receive no contact identity.
+        val identity = if (currentWindowOnlyFallback) null else runCatching {
+            resolveConversationIdentity(rowIdentity, snapshot.chatTitleText)
+        }.getOrElse {
+            onLog("AI 历史联系人解析失败：CONTACT_HISTORY_LOOKUP_FAILED；exception=${it.javaClass.simpleName}")
+            rowIdentity
+        }
         val draftHoldsPage = if (draftTargetConfirmed && draftAdmission.accepted) {
             runCatching { onDraftConversationObserved(batch, snapshot, identity, draftVisitToken) }.getOrElse {
                 onLog("AI 草稿入口异常：[DRAFT_CALLBACK_FAILED]；未执行发送")
