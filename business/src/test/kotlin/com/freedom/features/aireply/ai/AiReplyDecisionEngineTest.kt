@@ -106,7 +106,7 @@ class AiReplyDecisionEngineTest {
 
     @Test fun multiReplyInstructionUsesOnlySingleNewlines() {
         val instruction = AiReplyDecisionEngine.DEFAULT_SYSTEM_INSTRUCTION
-        assertTrue(instruction.contains("多条回复只能使用单个换行符分隔"))
+        assertTrue(instruction.contains("多条回复之间必须采用单一换行分隔"))
         assertTrue(instruction.contains("在 JSON 字符串中用 \\n 表示换行"))
         assertFalse(instruction.contains("<MSG>"))
     }
