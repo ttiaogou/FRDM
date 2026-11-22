@@ -18,6 +18,8 @@ class VisibleDraftFlowTest {
         var modelOutput = """{"action":"REPLY","reason":"OK","draft":"你好呀"}"""
         var calls = 0
         var fail = false
+        var emptyFailuresRemaining = 0
+        var emptyFinishReason: String? = "stop"
         var now = 0L
         val window = WindowRef("pkg", "activity", 7, 21)
         val snapshot = ChatPageSnapshot("pkg", "activity", ChatPageKind.CHAT_DETAIL_CANDIDATE,
@@ -60,6 +62,10 @@ class VisibleDraftFlowTest {
                 override fun generate(request: AiModelRequest): AiModelResult {
                     calls++
                     if (fail) error("simulated transport failure")
+                    if (emptyFailuresRemaining > 0) {
+                        emptyFailuresRemaining--
+                        throw AiModelEmptyOutputException("BLANK", emptyFinishReason, 10, 0)
+                    }
                     return AiModelResult(modelOutput, "fake", "fake", TokenUsage(10, 20), "stop")
                 }
             } }, backgroundExecutor = Executor { it.run() }, nowMillis = { now }, chooseRandomInt = { min, _ -> min },
@@ -92,6 +98,56 @@ class VisibleDraftFlowTest {
         assertTrue(log.contains("outputTokens=20"))
         assertFalse(log.contains("13800138000"))
         assertEquals("", f.text)
+    }
+
+    @Test fun emptyModelOutputRetriesExactlyOnceAfterValidatedDelayAndThenWritesDraft() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 1
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        assertEquals(1, f.calls)
+        assertTrue(f.coordinator.isPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertEquals("", f.text)
+        assertTrue(f.logs.any { it.contains("delayMs=30000") })
+        f.drain()
+        assertEquals(2, f.calls)
+        assertEquals("你好呀", f.text)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+    }
+
+    @Test fun repeatedEmptyOutputStopsAfterOneScheduledRetryWithoutSending() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 2
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(2, f.calls)
+        assertEquals("", f.text)
+        assertFalse(f.coordinator.isPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertEquals(1, f.logs.count { it.contains("AI 模型空输出有限恢复") })
+    }
+
+    @Test fun emptyOutputWithLengthFinishReasonDoesNotRetry() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 1
+        f.emptyFinishReason = "length"
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(1, f.calls)
+        assertFalse(f.coordinator.isPending)
+        assertEquals("", f.text)
+    }
+
+    @Test fun emptyOutputRetryDoesNotCallModelAfterComposerChangedOrReset() {
+        for (reset in listOf(false, true)) {
+            val f = Fixture()
+            f.emptyFailuresRemaining = 1
+            assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+            if (reset) f.coordinator.resetForRuntimeReset() else f.text = "用户输入"
+            f.drain()
+            assertEquals(1, f.calls)
+            assertEquals(if (reset) "" else "用户输入", f.text)
+        }
     }
 
     @Test fun transientModelFailureRetriesOnceAfterCooldown() {

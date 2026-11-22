@@ -135,7 +135,8 @@ class DeepSeekAiModelTransport(
             ?: throw AiModelHttpException("HTTP_RESPONSE_EMPTY_CHOICES")
         val message = firstChoice["message"] as? Map<*, *>
             ?: throw AiModelHttpException("HTTP_RESPONSE_MISSING_MESSAGE")
-        val content = message["content"] as? String
+        val contentValue = message["content"]
+        val content = contentValue as? String
         val usageMap = root["usage"] as? Map<*, *>
         val usage = usageMap?.let {
             val input = (it["prompt_tokens"] as? Number)?.toInt()
@@ -144,12 +145,29 @@ class DeepSeekAiModelTransport(
                 TokenUsage(input, output)
             } else null
         }
+        val finishReason = firstChoice["finish_reason"] as? String
+        if (content.isNullOrBlank()) {
+            val state = when {
+                !message.containsKey("content") -> "ABSENT"
+                contentValue == null -> "NULL"
+                contentValue !is String -> "NON_STRING"
+                else -> "BLANK"
+            }
+            throw AiModelHttpException(
+                "EMPTY_MODEL_OUTPUT",
+                retryable = state != "NON_STRING" && (finishReason == null || finishReason == "stop"),
+                responseContentState = state,
+                responseFinishReason = finishReason,
+                responseInputTokens = usage?.inputTokens,
+                responseOutputTokens = usage?.outputTokens
+            )
+        }
         return AiModelResult(
             text = content,
             provider = PROVIDER_NAME,
             model = (root["model"] as? String)?.takeIf(String::isNotBlank) ?: configuredModel,
             usage = usage,
-            finishReason = firstChoice["finish_reason"] as? String
+            finishReason = finishReason
         )
     }
 

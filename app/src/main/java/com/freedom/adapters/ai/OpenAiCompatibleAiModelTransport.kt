@@ -24,7 +24,11 @@ class AiModelHttpException(
     override val stage: AiModelCallStage = AiModelCallStage.MODEL_CALL,
     override val providerErrorCode: String? = null,
     override val providerErrorType: String? = null,
-    override val providerErrorParam: String? = null
+    override val providerErrorParam: String? = null,
+    override val responseContentState: String? = null,
+    override val responseFinishReason: String? = null,
+    override val responseInputTokens: Int? = null,
+    override val responseOutputTokens: Int? = null
 ) : IOException(safeCode, cause), com.freedom.features.aireply.ai.AiModelCallFailureDetails
 
 /** One trace per invocation: concurrent calls cannot overwrite each other's status or stage. */
@@ -66,7 +70,11 @@ internal class AiModelHttpCallTrace {
                 stage = stage,
                 providerErrorCode = providerErrorCode,
                 providerErrorType = providerErrorType,
-                providerErrorParam = providerErrorParam
+                providerErrorParam = providerErrorParam,
+                responseContentState = known?.responseContentState,
+                responseFinishReason = known?.responseFinishReason,
+                responseInputTokens = known?.responseInputTokens,
+                responseOutputTokens = known?.responseOutputTokens
             )
         }
 }

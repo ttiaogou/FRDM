@@ -61,6 +61,19 @@ data class TokenUsage(val inputTokens: Int, val outputTokens: Int) {
     init { require(inputTokens >= 0 && outputTokens >= 0) }
 }
 
+/** A valid transport response with no usable text. Retain only bounded technical fields. */
+class AiModelEmptyOutputException(
+    override val responseContentState: String,
+    override val responseFinishReason: String?,
+    override val responseInputTokens: Int? = null,
+    override val responseOutputTokens: Int? = null
+) : IllegalArgumentException("Model provider returned empty output"), AiModelCallFailureDetails {
+    override val safeCode = "EMPTY_MODEL_OUTPUT"
+    override val retryable = responseFinishReason == null || responseFinishReason == "stop"
+    override val httpStatus: Int? = null
+    override val stage = AiModelCallStage.MODEL_CALL
+}
+
 sealed interface AiModelFailure {
     data object NotConfigured : AiModelFailure
     data class Transport(val retryable: Boolean, val safeCode: String) : AiModelFailure
@@ -92,7 +105,14 @@ class TransportBackedAiModelProvider(
             conversation = AiModelDataRedactor.redactMessages(request.conversation)
         )
         val result = transport.execute(outboundRequest).getOrThrow()
-        require(result.isUsable) { "Model provider returned empty output" }
+        if (!result.isUsable) {
+            throw AiModelEmptyOutputException(
+                responseContentState = if (result.text == null) "NULL" else "BLANK",
+                responseFinishReason = result.finishReason,
+                responseInputTokens = result.usage?.inputTokens,
+                responseOutputTokens = result.usage?.outputTokens
+            )
+        }
         return result.copy(provider = providerName, model = modelName)
     }
 }

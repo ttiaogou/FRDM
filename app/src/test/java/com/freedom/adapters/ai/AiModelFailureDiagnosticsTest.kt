@@ -127,6 +127,49 @@ class AiModelFailureDiagnosticsTest {
     @Test fun emptyProviderOutputHasAnExplicitSafeCode() {
         val d = diagnostics(false) { FakeConnection(200, """{"choices":[{"message":{"content":""}}]}""") }
         assertEquals("EMPTY_MODEL_OUTPUT", d.safeCode)
+        assertEquals("BLANK", d.responseContentState)
+        assertEquals(true, d.retryable)
+        assertFalse(d.logFields().contains(privateText))
+    }
+
+    @Test fun deepSeekEmptyResponseRetainsStatusShapeFinishReasonAndTokenCounts() {
+        val response = """{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":31,"completion_tokens":0}}"""
+        val d = diagnostics(true) { FakeConnection(200, response) }
+        assertEquals("EMPTY_MODEL_OUTPUT", d.safeCode)
+        assertEquals(AiModelCallStage.RESPONSE_PARSE, d.stage)
+        assertEquals(200, d.httpStatus)
+        assertEquals("BLANK", d.responseContentState)
+        assertEquals("stop", d.responseFinishReason)
+        assertEquals(31, d.responseInputTokens)
+        assertEquals(0, d.responseOutputTokens)
+        assertEquals(true, d.retryable)
+        assertTrue(d.logFields().contains("finishReason=stop"))
+        assertFalse(d.logFields().contains(privateText))
+    }
+
+    @Test fun deepSeekMissingOrNullContentIsDiagnosedButInvalidTypeAndLengthDoNotRetry() {
+        for ((content, expected) in listOf(
+            "" to "ABSENT",
+            "\"content\":null," to "NULL",
+            "\"content\":{\"private\":\"$privateText\"}," to "NON_STRING"
+        )) {
+            val response = """{"choices":[{"message":{$content"role":"assistant"},"finish_reason":"stop"}]}"""
+            val d = diagnostics(true) { FakeConnection(200, response) }
+            assertEquals("EMPTY_MODEL_OUTPUT", d.safeCode)
+            assertEquals(expected, d.responseContentState)
+            assertEquals(expected != "NON_STRING", d.retryable)
+            assertFalse(d.logFields().contains(privateText))
+        }
+        val truncated = diagnostics(true) { FakeConnection(200, """{"choices":[{"message":{"content":""},"finish_reason":"length"}]}""") }
+        assertEquals(false, truncated.retryable)
+        assertEquals("length", truncated.responseFinishReason)
+    }
+
+    @Test fun unrecognizedProviderFinishReasonIsRedacted() {
+        val body = """{"choices":[{"message":{"content":""},"finish_reason":"$secret $privateText"}]}"""
+        val d = diagnostics(true) { FakeConnection(200, body) }
+        assertEquals("REDACTED", d.responseFinishReason)
+        assertFalse(d.logFields().contains(secret))
         assertFalse(d.logFields().contains(privateText))
     }
 

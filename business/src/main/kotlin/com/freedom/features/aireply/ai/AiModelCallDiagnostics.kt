@@ -15,6 +15,11 @@ interface AiModelCallFailureDetails {
     val providerErrorCode: String? get() = null
     val providerErrorType: String? get() = null
     val providerErrorParam: String? get() = null
+    /** Fixed technical metadata only; the provider response body is never retained. */
+    val responseContentState: String? get() = null
+    val responseFinishReason: String? get() = null
+    val responseInputTokens: Int? get() = null
+    val responseOutputTokens: Int? get() = null
 }
 
 data class AiModelCallDiagnostics(
@@ -26,13 +31,21 @@ data class AiModelCallDiagnostics(
     val causeTypes: List<String>,
     val providerErrorCode: String? = null,
     val providerErrorType: String? = null,
-    val providerErrorParam: String? = null
+    val providerErrorParam: String? = null,
+    val responseContentState: String? = null,
+    val responseFinishReason: String? = null,
+    val responseInputTokens: Int? = null,
+    val responseOutputTokens: Int? = null
 ) {
     fun logFields(): String = "safeCode=${safeToken(safeCode)}；failureStage=${stage.name}；" +
         "httpStatus=${httpStatus ?: "UNKNOWN"}；retryable=${retryable ?: "UNKNOWN"}；" +
         "exceptionType=${safeToken(exceptionType)}；causeTypes=${causeTypes.joinToString(",") { safeToken(it) }}；" +
         "providerErrorCode=${safeProviderError(providerErrorCode)}；" +
-        "providerErrorType=${safeProviderError(providerErrorType)}；providerErrorParam=${safeProviderParam(providerErrorParam)}"
+        "providerErrorType=${safeProviderError(providerErrorType)}；providerErrorParam=${safeProviderParam(providerErrorParam)}；" +
+        "responseContentState=${safeContentState(responseContentState)}；" +
+        "finishReason=${safeFinishReason(responseFinishReason)}；" +
+        "inputTokens=${responseInputTokens?.takeIf { it >= 0 } ?: "UNKNOWN"}；" +
+        "outputTokens=${responseOutputTokens?.takeIf { it >= 0 } ?: "UNKNOWN"}"
 
     companion object {
         private fun safeToken(value: String): String = value.takeIf {
@@ -61,6 +74,13 @@ data class AiModelCallDiagnostics(
             value in providerParams -> value
             else -> "REDACTED"
         }
+        private fun safeContentState(value: String?): String =
+            value?.takeIf { it in setOf("ABSENT", "NULL", "BLANK", "NON_STRING") } ?: "UNKNOWN"
+        private fun safeFinishReason(value: String?): String = when (value) {
+            null -> "UNKNOWN"
+            "stop", "length", "content_filter", "tool_calls", "function_call" -> value
+            else -> "REDACTED"
+        }
 
         fun from(failure: Throwable): AiModelCallDiagnostics {
             val details = failure as? AiModelCallFailureDetails
@@ -87,7 +107,11 @@ data class AiModelCallDiagnostics(
                 causeTypes = causes,
                 providerErrorCode = details?.providerErrorCode?.let(::safeProviderError),
                 providerErrorType = details?.providerErrorType?.let(::safeProviderError),
-                providerErrorParam = details?.providerErrorParam?.let(::safeProviderParam)
+                providerErrorParam = details?.providerErrorParam?.let(::safeProviderParam),
+                responseContentState = details?.responseContentState?.let(::safeContentState),
+                responseFinishReason = details?.responseFinishReason?.let(::safeFinishReason),
+                responseInputTokens = details?.responseInputTokens?.takeIf { it >= 0 },
+                responseOutputTokens = details?.responseOutputTokens?.takeIf { it >= 0 }
             )
         }
     }

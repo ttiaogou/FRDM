@@ -1,6 +1,7 @@
 package com.freedom.features.aireply.ai
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -52,8 +53,12 @@ class AiModelProviderTest {
         val provider = TransportBackedAiModelProvider("p", "m", object : AiModelTransport {
             override fun execute(request: AiModelRequest) = Result.success(AiModelResult(" ", "p", "m"))
         }, grantedConsent)
-        assertThrows(IllegalArgumentException::class.java) {
+        val failure = assertThrows(IllegalArgumentException::class.java) {
             provider.generate(AiModelRequest("instruction", listOf(AiModelMessage(AiModelMessage.Role.USER, "hello")), requestId = "r"))
         }
+        val diagnostic = AiModelCallDiagnostics.from(failure)
+        assertEquals("EMPTY_MODEL_OUTPUT", diagnostic.safeCode)
+        assertEquals("BLANK", diagnostic.responseContentState)
+        assertTrue(diagnostic.retryable == true)
     }
 }

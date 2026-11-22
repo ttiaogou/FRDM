@@ -280,7 +280,8 @@ class AiReplyDraftCoordinator(
         context: ConversationContext,
         target: ChatDraftInputTarget,
         requestGeneration: Long,
-        requestId: String
+        requestId: String,
+        emptyRetryAttempt: Int = 0
     ) {
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
             finish("AI_REPLY_STATE_CHANGED_BEFORE_REQUEST", requestGeneration)
@@ -342,6 +343,43 @@ class AiReplyDraftCoordinator(
                 "draftPresent=${!decision.draft.isNullOrBlank()}")
         }
         if (decision.reason == "MODEL_CALL_FAILED") {
+            val diagnostics = decision.callDiagnostics
+            if (diagnostics?.safeCode == "EMPTY_MODEL_OUTPUT" && diagnostics.retryable == true &&
+                emptyRetryAttempt < MAX_EMPTY_MODEL_RETRIES &&
+                isCurrentGeneration(requestGeneration) && isAiReplyActive()
+            ) {
+                onLog("AI 模型空输出有限恢复：requestId=$requestId；" +
+                    "attempt=${emptyRetryAttempt + 1}/$MAX_EMPTY_MODEL_RETRIES；" +
+                    "delayMs=$EMPTY_MODEL_RETRY_DELAY_MS；不写草稿、不执行发送")
+                val scheduled = runCatching {
+                    scheduler.schedule(EMPTY_MODEL_RETRY_DELAY_MS) {
+                        if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) return@schedule
+                        // A user may have switched chats or entered text during the delay.
+                        // Revalidate the exact live composer before sending another model request.
+                        val composerReady = runCatching { inputPort.verifyDraft(target, "") }
+                            .getOrNull()?.status == ChatDraftInputStatus.VERIFIED
+                        if (!composerReady) {
+                            onLog("AI 模型空输出恢复取消：原会话或空输入框已变化；不重试、不发送")
+                            finish("MODEL_EMPTY_RETRY_CONTEXT_CHANGED", requestGeneration)
+                            return@schedule
+                        }
+                        val accepted = runCatching {
+                            backgroundExecutor.execute {
+                                try {
+                                    generateOnBackground(
+                                        configuration, context, target, requestGeneration, requestId,
+                                        emptyRetryAttempt + 1
+                                    )
+                                } catch (_: Throwable) {
+                                    finish("DRAFT_GENERATION_FAILED", requestGeneration)
+                                }
+                            }
+                        }.isSuccess
+                        if (!accepted) finish("BACKGROUND_EXECUTOR_REJECTED", requestGeneration)
+                    }
+                }.isSuccess
+                if (scheduled) return
+            }
             finish("MODEL_DECISION_MODEL_CALL_FAILED", requestGeneration)
             return
         }
@@ -809,6 +847,8 @@ class AiReplyDraftCoordinator(
         private const val REPLY_TASK_REQUEST_TIMEOUT_MILLIS = 120_000L
         private const val SEND_CONFIRMATION_TIMEOUT_MILLIS = 8_000L
         private const val SEND_CONFIRMATION_MAX_CHECKS = 2
+        private const val MAX_EMPTY_MODEL_RETRIES = 1
+        private const val EMPTY_MODEL_RETRY_DELAY_MS = 30_000L
 
         private fun newDraftExecutor() = Executors.newSingleThreadExecutor(ThreadFactory { runnable ->
             Thread(runnable, "frdm-ai-model-request").apply { isDaemon = true }
