@@ -16,7 +16,7 @@
 - `TaskCoordinator.tryAcquire` 仍按原规则接受同代次幂等申请、拒绝旧代次、支持有效租约的原子 `transfer`；仅复用上述公共撤销逻辑。
 - `TaskCoordinator.activeTaskId()` 只报告当前仍有效的 `TaskLease`，避免上层把已撤销能力当成任务在运行。
 - `AppCompositionRoot` 为 `RunSessionCoordinator` 注入同一个 `root.taskCoordinator`；不创建第二套公共任务协调器。
-- `TaskExecutionController` 原有的独立测试模式保持兼容；真实生产组装必须注入共享实例。P3 静态门禁要求三个生产注入点共用相同对象、两种业务都通过共享 `TaskExecutionController`，禁止生产额外创建执行控制器、独立会话协调器或业务侧推进共享运行代次。
+- `TaskExecutionController` 原有的独立测试模式保持兼容；真实生产组装必须注入共享实例。P3 静态门禁要求四个生产注入点（手势、AI Reply、AccountBrowse、运行会话）共用相同对象、两种业务都通过共享 `TaskExecutionController`，禁止生产额外创建执行控制器、独立会话协调器或业务侧推进共享运行代次。
 - 本阶段不改变 `TaskExecutionController` 的租约申请/转移策略或业务的页面验证前置条件；不为任何失败或 UNKNOWN 直接授予操作权。
 
 ## 回归验证

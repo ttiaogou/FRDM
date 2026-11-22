@@ -905,8 +905,8 @@ def unified_task_lifecycle_violations(code_by_path: dict[str, str]) -> list[str]
                 issues.append(f"P3 task lifecycle unified wiring missing: {rel}: {pattern}")
 
     root = code_by_path.get(root_rel, "")
-    if len(re.findall(r"\btaskCoordinator\s*=\s*root\.taskCoordinator\b", root)) != 3:
-        issues.append("P3 all three production owners (AI, Browse, session) must share root.taskCoordinator")
+    if len(re.findall(r"\btaskCoordinator\s*=\s*root\.taskCoordinator\b", root)) != 4:
+        issues.append("P3 all four production consumers (gesture, AI, Browse, session) must share root.taskCoordinator")
 
     production = {
         rel: code for rel, code in code_by_path.items()

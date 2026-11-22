@@ -335,7 +335,7 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
             "taskCoordinator = null",
             1
         )
-        self.assertTrue(any("all three production owners" in item
+        self.assertTrue(any("all four production consumers" in item
                             for item in guard.unified_task_lifecycle_violations(changed)))
 
     def test_p3_rejects_stale_active_task_visibility_and_extra_execution_owner(self):
