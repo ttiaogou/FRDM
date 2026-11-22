@@ -561,6 +561,9 @@ def inspect_project(root: Path) -> list[str]:
     # 10) Shared recovery transaction is an architecture boundary, not a business-local utility.
     issues.extend(recovery_transaction_boundary_violations(code_by_path))
 
+    # P0: freeze single authority declarations and known construction routes.
+    issues.extend(architecture_authority_violations(code_by_path))
+
     # 11) Final hard boundaries for the unified accessibility/recovery architecture.
     issues.extend(final_architecture_boundary_violations(code_by_path))
 
@@ -624,6 +627,143 @@ def final_architecture_boundary_violations(code_by_path: dict[str, str]) -> list
     for rel, code in code_by_path.items():
         if retryable_cache_write.search(code):
             issues.append(f"RETRYABLE result is written to a permanent failure cache: {rel}")
+    return issues
+
+
+
+# P0 authority baseline: these are the current production owners, not a claim
+# that P1-P6 routing has already been migrated to the final single-entry design.
+# A migration must explicitly revise this inventory and its regression tests.
+P0_AUTHORITY_DECLARATIONS = {
+    "UnifiedAccessibilityEntry": "core/src/main/kotlin/com/freedom/core/accessibility/api/UnifiedAccessibilityEntry.kt",
+    "AndroidAccessibilityEventPipeline": "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventPipeline.kt",
+    "PageObservationCoordinator": "core/src/main/kotlin/com/freedom/core/runtime/PageObservationCoordinator.kt",
+    "TaskCoordinator": "core/src/main/kotlin/com/freedom/core/runtime/TaskCoordinator.kt",
+    "UiOperationOwnershipCoordinator": "core/src/main/kotlin/com/freedom/core/runtime/UiOperationOwnershipCoordinator.kt",
+    "UnifiedRecoveryTransactionStateMachine": "business/src/main/kotlin/com/freedom/features/recovery/RecoveryTransactionState.kt",
+    "RecoveryEventDispatcher": "business/src/main/kotlin/com/freedom/features/recovery/RecoveryEventDispatcher.kt",
+    "RecoveryScheduler": "business/src/main/kotlin/com/freedom/features/recovery/RecoveryScheduler.kt",
+    "RecoveryCheckpointVerificationCoordinator": "business/src/main/kotlin/com/freedom/features/recovery/RecoveryCheckpointVerificationCoordinator.kt",
+}
+
+# Exact counts prevent a new authority being silently created in an already-approved
+# owner file. Existing per-route recovery components are deliberately grandfathered
+# until P5/P6; they are not evidence of a single runtime recovery instance.
+P0_AUTHORITY_CONSTRUCTIONS = {
+    "AndroidAccessibilityEventPipeline": {
+        "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": 1,
+    },
+    "PageObservationCoordinator": {
+        "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": 1,
+    },
+    "TaskCoordinator": {
+        "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": 1,
+    },
+    "UiOperationOwnershipCoordinator": {
+        "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": 1,
+    },
+    "UnifiedRecoveryTransactionStateMachine": {
+        "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt": 1,
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 1,
+    },
+    "RecoveryEventDispatcher": {
+        "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt": 1,
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 1,
+    },
+    "RecoveryScheduler": {
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 1,
+        "business/src/main/kotlin/com/freedom/features/aireply/MessageListCheckpointVerification.kt": 1,
+        "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsCheckpointVerification.kt": 1,
+    },
+    "RecoveryCheckpointVerificationCoordinator": {
+        "business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt": 1,
+        "business/src/main/kotlin/com/freedom/features/aireply/MessageListCheckpointVerification.kt": 1,
+        "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsCheckpointVerification.kt": 1,
+    },
+}
+
+# Temporary test-fixture fallback in MomoPageObservationCoordinator; production
+# injects the service-scoped shared coordinator from AppCompositionRoot.
+P0_LEGACY_AUTHORITY_ALIASES = {
+    ("business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt",
+     "PageObservationCoordinator", "SharedPageObservationCoordinator"): 1,
+}
+
+
+def architecture_authority_violations(code_by_path: dict[str, str]) -> list[str]:
+    """Freeze architecture ownership while later stages migrate known legacy routes.
+
+    Source strings must already have Kotlin comments and literals masked by the caller.
+    This is a lexical CI guard, not a substitute for compiled call-graph tests.
+    """
+    production = {
+        rel: code for rel, code in code_by_path.items()
+        if "/src/main/" in rel and rel.endswith(".kt")
+    }
+    issues: list[str] = []
+    for name, expected in P0_AUTHORITY_DECLARATIONS.items():
+        declared = sorted(
+            rel for rel, code in production.items()
+            if re.search(rf"\b(?:class|interface)\s+{re.escape(name)}\b", code)
+        )
+        if declared != [expected]:
+            issues.append(
+                f"P0 architecture authority {name} must be declared exactly once "
+                f"at {expected}; found {declared}"
+            )
+
+        if name not in P0_AUTHORITY_CONSTRUCTIONS:
+            continue
+        constructed: dict[str, int] = {}
+        for rel, code in production.items():
+            # A class primary constructor declaration is not an invocation.
+            body = re.sub(
+                rf"\bclass\s+{re.escape(name)}\b(?=\s*\()", "", code
+            )
+            count = len(re.findall(rf"\b{re.escape(name)}\s*\(", body))
+            if count:
+                constructed[rel] = count
+        expected_constructions = P0_AUTHORITY_CONSTRUCTIONS[name]
+        if constructed != expected_constructions:
+            issues.append(
+                f"P0 architecture authority {name} construction drift: "
+                f"expected {expected_constructions}; found {constructed}"
+            )
+
+    aliases: dict[tuple[str, str, str], int] = {}
+    for rel, code in production.items():
+        for imported, alias in re.findall(
+            r"^\s*import\s+([A-Za-z_][A-Za-z_0-9.]*)\s+as\s+([A-Za-z_][A-Za-z_0-9]*)",
+            code,
+            re.MULTILINE,
+        ):
+            name = imported.rsplit(".", 1)[-1]
+            if name not in P0_AUTHORITY_DECLARATIONS:
+                continue
+            key = (rel, name, alias)
+            count = len(re.findall(rf"\b{re.escape(alias)}\s*\(", code))
+            aliases[key] = count
+            if key not in P0_LEGACY_AUTHORITY_ALIASES:
+                issues.append(f"P0 architecture authority alias bypass is forbidden: {rel}: {name} as {alias}")
+        if re.search(
+            r"^\s*(?:(?:public|internal|private)\s+)?typealias\s+\w+\s*=\s*"
+            r"(?:[A-Za-z_][A-Za-z_0-9]*\.)*"
+            r"(?:" + "|".join(map(re.escape, P0_AUTHORITY_DECLARATIONS)) + r")\b",
+            code,
+            re.MULTILINE,
+        ):
+            issues.append(f"P0 architecture authority typealias bypass is forbidden: {rel}")
+        if rel.startswith("core/src/main/") and re.search(
+            r"^\s*import\s+com\.freedom\.(?:features|adapters|application|data|ui)\.",
+            code,
+            re.MULTILINE,
+        ):
+            issues.append(f"P0 core cannot import an outer architecture/business layer: {rel}")
+    if aliases != P0_LEGACY_AUTHORITY_ALIASES:
+        issues.append(
+            f"P0 architecture authority legacy alias drift: "
+            f"expected {P0_LEGACY_AUTHORITY_ALIASES}; found {aliases}"
+        )
     return issues
 
 
@@ -932,6 +1072,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - GestureCommand/GestureSpec construction: compiler-owned")
     print(" - Android dispatch: confined to AndroidGestureDispatcher")
     print(" - Recovery transaction: adapters cannot bypass it; state machine cannot depend on business page fields")
+    print(" - P0 ownership baseline: authority declarations, construction sites, and legacy aliases pinned")
     print(" - Automatic recovery: legacy manual handoff forbidden; three checkpoint routes use shared verification")
     print(" - Recovery scheduler: bounded non-terminal backoff, touch reset, stale-callback and user-stop gates")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")

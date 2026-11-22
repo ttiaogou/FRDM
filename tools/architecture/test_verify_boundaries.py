@@ -237,6 +237,75 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         violations = guard.final_architecture_boundary_violations(code)
         self.assertTrue(any("RETRYABLE result" in item for item in violations))
 
+
+    def test_p0_authority_guard_accepts_current_production_graph(self):
+        self.assertEqual(guard.architecture_authority_violations(self.recovery_code), [])
+
+    def test_p0_authority_guard_rejects_duplicate_or_missing_declarations(self):
+        changed = dict(self.recovery_code)
+        changed["business/src/main/kotlin/com/freedom/features/bad/BadCoordinator.kt"] = \
+            "class TaskCoordinator()\n"
+        self.assertTrue(any("declared exactly once" in item and "TaskCoordinator" in item
+                            for item in guard.architecture_authority_violations(changed)))
+
+        changed = dict(self.recovery_code)
+        owner = guard.P0_AUTHORITY_DECLARATIONS["TaskCoordinator"]
+        changed.pop(owner)
+        self.assertTrue(any("declared exactly once" in item and "TaskCoordinator" in item
+                            for item in guard.architecture_authority_violations(changed)))
+
+    def test_p0_authority_guard_rejects_new_construction_and_extra_owner_instance(self):
+        changed = dict(self.recovery_code)
+        changed["business/src/main/kotlin/com/freedom/features/bad/NewTask.kt"] = \
+            "val unapproved = TaskCoordinator(ownership)\n"
+        self.assertTrue(any("construction drift" in item and "TaskCoordinator" in item
+                            for item in guard.architecture_authority_violations(changed)))
+
+        changed = dict(self.recovery_code)
+        owner = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        changed[owner] += "\nval unintended = UiOperationOwnershipCoordinator()\n"
+        self.assertTrue(any("construction drift" in item and "UiOperationOwnershipCoordinator" in item
+                            for item in guard.architecture_authority_violations(changed)))
+
+    def test_p0_authority_guard_freezes_per_route_recovery_owners(self):
+        changed = dict(self.recovery_code)
+        changed["business/src/main/kotlin/com/freedom/features/bad/OtherRecovery.kt"] = \
+            "val unapproved = UnifiedRecoveryTransactionStateMachine()\n"
+        self.assertTrue(any("construction drift" in item and "UnifiedRecoveryTransactionStateMachine" in item
+                            for item in guard.architecture_authority_violations(changed)))
+
+    def test_p0_authority_guard_rejects_alias_and_typealias_bypasses(self):
+        changed = dict(self.recovery_code)
+        changed["business/src/main/kotlin/com/freedom/features/bad/OtherObserver.kt"] = (
+            "import com.freedom.core.runtime.PageObservationCoordinator as Observer\n"
+            "val local = Observer(scheduler)\n"
+        )
+        self.assertTrue(any("alias bypass" in item
+                            for item in guard.architecture_authority_violations(changed)))
+
+        changed = dict(self.recovery_code)
+        changed["business/src/main/kotlin/com/freedom/features/bad/OtherObserver.kt"] = \
+            "typealias Shadow = com.freedom.core.runtime.TaskCoordinator\n"
+        self.assertTrue(any("typealias bypass" in item
+                            for item in guard.architecture_authority_violations(changed)))
+
+    def test_p0_authority_guard_protects_core_dependency_direction(self):
+        changed = dict(self.recovery_code)
+        changed["core/src/main/kotlin/com/freedom/core/runtime/Bad.kt"] = \
+            "import com.freedom.features.aireply.AiReplyObservationRuntime\n"
+        self.assertTrue(any("core cannot import" in item
+                            for item in guard.architecture_authority_violations(changed)))
+
+    def test_p0_authority_guard_ignores_comments_and_literals(self):
+        changed = dict(self.recovery_code)
+        changed["business/src/main/kotlin/com/freedom/features/bad/Documentation.kt"] = \
+            guard.mask_kotlin_non_code(
+                '// TaskCoordinator() is documentation\n'
+                'val help = "UiOperationOwnershipCoordinator()"\n'
+                '/* class RecoveryScheduler() */\n'
+            )
+        self.assertEqual(guard.architecture_authority_violations(changed), [])
+
     def test_unified_accessibility_entry_requires_single_forwarding_callback(self):
         valid = {
             "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt":
