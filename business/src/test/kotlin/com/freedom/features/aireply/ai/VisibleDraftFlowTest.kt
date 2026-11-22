@@ -9,7 +9,11 @@ import org.junit.Test
 import java.util.concurrent.Executor
 
 class VisibleDraftFlowTest {
-    private class Fixture(private val sendPort: ChatDraftSendPort? = null) {
+    private class Fixture(
+        private val sendPort: ChatDraftSendPort? = null,
+        private val segmentRepository: ReplySegmentTaskRepository? = null,
+        private val taskRepository: ReplyTaskRepository? = null
+    ) {
         val tasks = mutableListOf<() -> Unit>()
         var active = true
         var consent = true
@@ -69,8 +73,42 @@ class VisibleDraftFlowTest {
                     return AiModelResult(modelOutput, "fake", "fake", TokenUsage(10, 20), "stop")
                 }
             } }, backgroundExecutor = Executor { it.run() }, nowMillis = { now }, chooseRandomInt = { min, _ -> min },
-            sendPort = sendPort)
+            sendPort = sendPort,
+            replySegmentTaskRepository = segmentRepository,
+            replyTaskRepository = taskRepository)
         fun drain() { while (tasks.isNotEmpty()) tasks.removeAt(0).invoke() }
+        fun step() { assertTrue("Expected a scheduled task", tasks.isNotEmpty()); tasks.removeAt(0).invoke() }
+    }
+
+    private class SegmentLedger : ReplySegmentTaskRepository {
+        val records = linkedMapOf<String, ReplySegmentTaskRecord>()
+        override fun find(taskId: String) = records[taskId]
+        override fun findByRequest(requestId: String) = records.values.filter { it.requestId == requestId }
+        override fun findByConversation(conversationKey: String) = records.values.filter { it.conversationKey == conversationKey }
+        override fun save(record: ReplySegmentTaskRecord) { records[record.taskId] = record }
+        override fun update(record: ReplySegmentTaskRecord): Boolean {
+            val before = records[record.taskId] ?: return false
+            if (!ReplySegmentTaskTransitions.isAllowed(before.status, record.status)) return false
+            records[record.taskId] = record
+            return true
+        }
+    }
+
+    private class TaskLedger : ReplyTaskRepository {
+        val records = linkedMapOf<String, ReplyTaskRecord>()
+        override fun find(requestKey: String) = records[requestKey]
+        override fun save(record: ReplyTaskRecord) { records[record.requestKey] = record }
+        override fun tryClaim(record: ReplyTaskRecord, requestTimeoutMillis: Long): Boolean {
+            if (record.requestKey in records) return false
+            records[record.requestKey] = record
+            return true
+        }
+        override fun updateStatus(requestKey: String, requestId: String, status: ReplyTaskStatus, updatedAtMillis: Long): Boolean {
+            val before = records[requestKey] ?: return false
+            if (before.requestId != requestId || !ReplyTaskStatusTransitions.isAllowed(before.status, status)) return false
+            records[requestKey] = before.copy(status = status, updatedAtMillis = updatedAtMillis)
+            return true
+        }
     }
 
     @Test fun ocrRecognitionToInputWithoutPlatformIdentityOrPreapproval() {
@@ -184,6 +222,163 @@ class VisibleDraftFlowTest {
         f.consent = false
         assertFalse(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
         assertEquals(0, f.calls)
+    }
+
+    @Test fun buttonNotReadyKeepsOriginalMessageAndRecoversWithoutAnotherModelCall() {
+        var attempts = 0
+        var buttonReady = false
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                attempts++
+                return if (!buttonReady) ChatDraftInputResult(ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_READY")
+                else ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        repeat(8) { if (attempts == 0) f.step() }
+        assertEquals(1, attempts)
+        assertEquals(1, f.calls)
+        assertEquals("你好呀", f.text)
+        assertTrue(f.coordinator.isSendControlRecoveryPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertTrue(f.coordinator.isPending)
+        assertEquals(ReplySegmentTaskStatus.PENDING_SEND, segments.records.values.single().status)
+        assertEquals(ReplyTaskStatus.PENDING_SEND, tasks.records.values.single().status)
+
+        // A new verified observation rebinds the pending segment, without regenerating the model.
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        assertEquals(1, f.calls)
+        buttonReady = true
+        f.step()
+        assertEquals(2, attempts)
+        assertFalse(f.coordinator.isSendControlRecoveryPending)
+        assertFalse(f.coordinator.isPending)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.single().status)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertEquals("你好呀", f.text)
+    }
+
+    @Test fun changedComposerIsNeverOverwrittenOrSentDuringPendingRecovery() {
+        var attempts = 0
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                attempts++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_READY")
+            }
+        })
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        repeat(8) { if (attempts == 0) f.step() }
+        assertEquals(1, attempts)
+        f.text = "人工修改"
+        f.step()
+        assertEquals(1, attempts)
+        assertEquals("人工修改", f.text)
+        assertTrue(f.coordinator.isSendControlRecoveryPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        f.coordinator.resetForRuntimeReset()
+        f.step()
+        assertEquals(1, attempts)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+    }
+
+    @Test fun persistentPendingSendRestoresExactDraftWithoutModelRegeneration() {
+        var firstAttempts = 0
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                firstAttempts++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_READY")
+            }
+        }, segments, tasks)
+        assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+        repeat(8) { if (firstAttempts == 0) first.step() }
+        assertEquals(1, firstAttempts)
+        assertEquals(ReplySegmentTaskStatus.PENDING_SEND, segments.records.values.single().status)
+        first.coordinator.resetForRuntimeReset()
+
+        var resumedAttempts = 0
+        val second = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                resumedAttempts++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        second.text = "你好呀"
+        assertTrue(second.coordinator.generateVisibleDraft(second.batch, second.snapshot))
+        assertEquals(0, second.calls)
+        assertTrue(second.coordinator.isSendControlRecoveryPending)
+        second.step()
+        assertEquals(1, resumedAttempts)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.single().status)
+        assertTrue(second.coordinator.isConversationReturnBlocked)
+    }
+
+    @Test fun secondMessageButtonPendingNeverReplaysTheFirstConfirmedMessage() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val sentTexts = mutableListOf<String>()
+        var secondReady = false
+        lateinit var f: Fixture
+        f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                if (expectedText == "第二" && !secondReady) {
+                    return ChatDraftInputResult(ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_READY")
+                }
+                sentTexts += expectedText
+                f.text = ""
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"第一\n第二"}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        repeat(8) { if (sentTexts.isEmpty()) f.step() }
+        assertEquals(listOf("第一"), sentTexts)
+        val firstOutgoing = ChatMessage("own-first", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "第一", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val afterFirst = f.batch.copy(messages = listOf(firstOutgoing), capturedAtMillis = f.now + 1L)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendResult(afterFirst, f.snapshot))
+        repeat(8) { if (!f.coordinator.isSendControlRecoveryPending) f.step() }
+        assertTrue(f.coordinator.isSendControlRecoveryPending)
+        assertEquals(listOf("第一"), sentTexts)
+        assertEquals(ReplySegmentTaskStatus.SENT, segments.records.values.first().status)
+        assertEquals(ReplySegmentTaskStatus.PENDING_SEND, segments.records.values.last().status)
+        secondReady = true
+        f.step()
+        assertEquals(listOf("第一", "第二"), sentTexts)
+    }
+
+    @Test fun unknownSendOutcomeIsNeverResubmittedByPendingRecovery() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        var firstAttempts = 0
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                firstAttempts++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_READY")
+            }
+        }, segments, tasks)
+        assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+        repeat(8) { if (firstAttempts == 0) first.step() }
+        val record = segments.records.values.single()
+        assertTrue(segments.update(record.copy(status = ReplySegmentTaskStatus.SENDING)))
+        first.coordinator.resetForRuntimeReset()
+
+        var attempted = false
+        val second = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                attempted = true
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        second.text = "你好呀"
+        second.coordinator.generateVisibleDraft(second.batch, second.snapshot)
+        assertFalse(second.coordinator.isSendControlRecoveryPending)
+        assertFalse(attempted)
     }
 
     @Test fun returnGateStaysClosedAfterModelFailureAndResetsOnRuntimeReset() {

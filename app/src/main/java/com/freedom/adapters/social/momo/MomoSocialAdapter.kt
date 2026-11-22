@@ -4553,6 +4553,10 @@ internal class MomoSocialAdapter(
                 val input = writableInputs.single()
                 val inputText = draftInputText(input)
                 if (inputText != expectedText) {
+                    val state = MomoSendControlEligibility.observeComposer(
+                        inputText, expectedText, input.isShowingHintText, eligibleButtonCount = 0
+                    )
+                    onLog("AI 输入状态观察：state=${state.name}；inputMatched=false；不覆盖当前输入")
                     inputs.forEach { node -> runCatching { node.recycle() } }
                     return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "DRAFT_CHANGED_BEFORE_SEND"
@@ -4594,10 +4598,14 @@ internal class MomoSocialAdapter(
                     } finally {
                         runCatching { composerParent?.recycle() }
                     }
+                    val observedState = MomoSendControlEligibility.observeComposer(
+                        inputText, expectedText, input.isShowingHintText, sendNodes.size
+                    )
+                    onLog("AI 输入状态观察：state=${observedState.name}；inputMatched=true；" +
+                        "validSendControls=${sendNodes.size}；不记录输入正文")
                     if (sendNodes.isEmpty()) {
-                        onLog("AI 发送按钮未确认：输入框草稿已逐字验证，但未发现符合条件的发送节点；不将按钮缺失判定为空输入")
                         return@withActiveTargetRoot ChatDraftInputResult(
-                            ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_FOUND"
+                            ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_READY"
                         )
                     }
                     if (sendNodes.size != 1) {

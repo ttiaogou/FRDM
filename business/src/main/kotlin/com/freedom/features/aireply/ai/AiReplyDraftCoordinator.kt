@@ -68,6 +68,20 @@ class AiReplyDraftCoordinator(
     private var sendConfirmationChecks = 0
     private var lastConfirmedSendId: String? = null
     private var activeMessageSegments: List<String> = emptyList()
+    /** An observed missing button means no gesture was submitted; preserve exactly this segment. */
+    private var pendingSendControl: PendingSendControl? = null
+    private var sendControlRetryScheduled = false
+    private var sendControlRetryTicket = 0L
+
+    private data class PendingSendControl(
+        val messageKey: String,
+        val requestId: String,
+        val segmentIndex: Int,
+        val message: String,
+        val target: ChatDraftInputTarget,
+        val requestGeneration: Long,
+        val observations: Int = 0
+    )
 
     private data class PendingSendConfirmation(
         val sendAttemptId: String,
@@ -86,6 +100,8 @@ class AiReplyDraftCoordinator(
 
     val isPending: Boolean get() = pending.get()
     val isAwaitingUserSend: Boolean get() = awaitingUserSend.get()
+    /** For the existing page-return gate: waiting on an unsubmitted button is not task completion. */
+    val isSendControlRecoveryPending: Boolean get() = synchronized(lock) { pendingSendControl != null }
     val isConversationReturnBlocked: Boolean get() = synchronized(lock) {
         pending.get() || awaitingUserSend.get() ||
             pendingSendConfirmation != null || replyAwaitingConfirmedSend
@@ -116,6 +132,9 @@ class AiReplyDraftCoordinator(
             sendConfirmationChecks = 0
             lastConfirmedSendId = null
             activeMessageSegments = emptyList()
+            pendingSendControl = null
+            sendControlRetryScheduled = false
+            sendControlRetryTicket++
         }
     }
 
@@ -193,6 +212,76 @@ class AiReplyDraftCoordinator(
         // Window generation is a stale-callback guard, not a new model task identity.
         val dedupeConversationKey = conversationIdentity
         val dedupeKey = fingerprint("$contactId|$dedupeConversationKey|${latestIncoming.stableLogicalMessageId}|${latestIncoming.effectiveContentRevision}")
+        // A fresh verified chat observation may rebind a pending, unsubmitted send to a new
+        // window generation. Do not regenerate the model response or rewrite the composer.
+        val awaitingControl = synchronized(lock) { pendingSendControl }
+        if (awaitingControl != null) {
+            if (awaitingControl.messageKey != dedupeKey) return reject("SEND_CONTROL_PENDING_OTHER_CONVERSATION")
+            val verified = runCatching { inputPort.verifyDraft(target, awaitingControl.message) }
+                .getOrNull()?.status == ChatDraftInputStatus.VERIFIED
+            if (verified) {
+                synchronized(lock) {
+                    if (pendingSendControl?.requestId == awaitingControl.requestId) {
+                        pendingSendControl = pendingSendControl?.copy(target = target)
+                    }
+                }
+                onLog("AI 待发送节点观察：原草稿仍在当前会话；更新窗口证据，等待安全重定位发送按钮")
+                schedulePendingSendControlRetry()
+            } else {
+                onLog("AI 待发送节点观察：当前草稿未确认；保留原消息段，不覆盖输入、不执行发送")
+            }
+            return true
+        }
+        // After service/process recovery, only PENDING_SEND means the previous gesture had
+        // not yet been dispatched. SENDING/UNKNOWN/SENT_UNCONFIRMED are never retried here.
+        val savedPending = replySegmentTaskRepository?.findByConversation(dedupeConversationKey)
+            ?.groupBy { it.requestId }
+            ?.values
+            ?.mapNotNull { records ->
+                val sorted = records.sortedBy { it.segmentIndex }
+                val pendingRecords = sorted.filter { it.status == ReplySegmentTaskStatus.PENDING_SEND }
+                val pendingRecord = pendingRecords.singleOrNull() ?: return@mapNotNull null
+                if (sorted.size != pendingRecord.segmentCount ||
+                    sorted.indices.any { sorted[it].segmentIndex != it } ||
+                    sorted.take(pendingRecord.segmentIndex).any { it.status != ReplySegmentTaskStatus.SENT } ||
+                    sorted.any { it.status in setOf(ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) } ||
+                    sorted.any { it.segmentContent.isBlank() || fingerprint(it.segmentContent) != it.segmentContentHash }
+                ) return@mapNotNull null
+                val owner = replyTaskRepository?.find(dedupeKey)
+                if (owner?.requestId != pendingRecord.requestId) return@mapNotNull null
+                if (pendingRecord.segmentIndex == 0 && owner?.status != ReplyTaskStatus.PENDING_SEND) return@mapNotNull null
+                if (batch.messages.any {
+                        it.direction == ChatMessageDirection.OUTGOING &&
+                            it.contentQuality == MessageContentQuality.VERIFIED &&
+                            fingerprint(it.content.orEmpty()) == pendingRecord.segmentContentHash
+                    }
+                ) return@mapNotNull null
+                sorted
+            }?.maxByOrNull { it.first().createdAt }
+        if (savedPending != null) {
+            val current = savedPending.single { it.status == ReplySegmentTaskStatus.PENDING_SEND }
+            val composerVerified = runCatching { inputPort.verifyDraft(target, current.segmentContent) }
+                .getOrNull()?.status == ChatDraftInputStatus.VERIFIED
+            if (!composerVerified) return reject("PENDING_SEND_RESTORE_REQUIRES_VERIFIED_COMPOSER")
+            synchronized(lock) {
+                if (pendingSendConfirmation != null || pending.get()) return reject("SEND_TRANSACTION_ALREADY_ACTIVE")
+                activeMessageKey = dedupeKey
+                activeRequestId = current.requestId
+                activeExistingOutgoingKeys = batch.messages.filter { it.direction == ChatMessageDirection.OUTGOING }
+                    .mapTo(LinkedHashSet()) { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
+                activeMessageSegments = savedPending.map { it.segmentContent }
+                replyAwaitingConfirmedSend = true
+                pending.set(true)
+                pendingSendControl = PendingSendControl(
+                    dedupeKey, current.requestId, current.segmentIndex, current.segmentContent,
+                    target, generation.get()
+                )
+            }
+            onLog("AI 待发送事务恢复[PENDING_SEND]：requestId=${current.requestId.take(12)}；" +
+                "segmentIndex=${current.segmentIndex}；草稿已复核；不生成新草稿、不重发已确认段")
+            schedulePendingSendControlRetry()
+            return true
+        }
         val recovered = replySegmentTaskRepository?.findByConversation(dedupeConversationKey)
             ?.filter { it.status in setOf(ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) && it.segmentContent.isNotBlank() }
             ?.groupBy { it.requestId }
@@ -471,14 +560,45 @@ class AiReplyDraftCoordinator(
     }
 
     private fun sendMessageSegment(target: ChatDraftInputTarget, message: String, segmentIndex: Int, requestGeneration: Long) {
-        if (!hasActiveTaskOwner()) return
+        if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || !hasActiveTaskOwner()) return
+        if (synchronized(lock) { pendingSendConfirmation != null }) return
         updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.PENDING_SEND)
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
+        // Keep the durable SENDING-before-gesture safety marker. Only an explicit
+        // SEND_CONTROL_NOT_READY result may roll it back; no gesture was dispatched.
         updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.SENDING)
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
         val sent = runCatching { sendPort?.sendDraft(target, message) ?: ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_UNAVAILABLE") }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_EXCEPTION") }
-        if (sent.status != ChatDraftInputStatus.SEND_SUBMITTED) { updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.FAILED_RETRYABLE); updateTaskStatus(ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration); finish("DRAFT_SEND_${sent.reasonCode}", requestGeneration); return }
+        if (sent.status == ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND &&
+            sent.reasonCode == "SEND_CONTROL_NOT_READY"
+        ) {
+            // The adapter verified the exact composer text, but no eligible send control
+            // existed. It therefore did NOT submit a gesture. Never terminate this task.
+            updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.PENDING_SEND)
+            if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
+            synchronized(lock) {
+                val old = pendingSendControl?.takeIf {
+                    it.requestId == activeRequestId && it.segmentIndex == segmentIndex
+                }
+                pendingSendControl = PendingSendControl(
+                    activeMessageKey.orEmpty(), activeRequestId.orEmpty(), segmentIndex, message,
+                    target, requestGeneration, (old?.observations ?: 0) + 1
+                )
+                pending.set(true)
+            }
+            onLog("AI 待发送事务[BUTTON_PENDING]：segmentIndex=$segmentIndex；" +
+                "草稿已验证、手势未提交；保留 PENDING_SEND 并等待新鲜节点")
+            schedulePendingSendControlRetry()
+            return
+        }
+        if (sent.status != ChatDraftInputStatus.SEND_SUBMITTED) {
+            updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.FAILED_RETRYABLE)
+            updateTaskStatus(ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
+            finish("DRAFT_SEND_${sent.reasonCode}", requestGeneration)
+            return
+        }
+        synchronized(lock) { pendingSendControl = null }
         val submittedAt = nowMillis()
         synchronized(lock) {
             pendingSendConfirmation = PendingSendConfirmation(UUID.randomUUID().toString(), activeRequestId.orEmpty(), target.conversationIdentityKey, segmentIndex, activeMessageSegments.size, fingerprint(message), submittedAt, submittedAt + SEND_CONFIRMATION_TIMEOUT_MILLIS, requestGeneration, target, message, activeExistingOutgoingKeys)
@@ -487,6 +607,62 @@ class AiReplyDraftCoordinator(
         updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.SENT_UNCONFIRMED)
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENT_UNCONFIRMED, requestGeneration)
         pending.set(false)
+    }
+
+    private fun schedulePendingSendControlRetry() {
+        val scheduled = synchronized(lock) {
+            if (sendControlRetryScheduled || pendingSendControl == null) null
+            else {
+                sendControlRetryScheduled = true
+                pendingSendControl!! to ++sendControlRetryTicket
+            }
+        } ?: return
+        val (current, ticket) = scheduled
+        // Bounded frequency, not a terminal attempt budget: UI readiness may be delayed.
+        val delayMs = when {
+            current.observations <= 2 -> 1_000L
+            current.observations <= 4 -> 2_000L
+            current.observations <= 8 -> 5_000L
+            else -> 30_000L
+        }
+        val accepted = runCatching {
+            scheduler.schedule(delayMs) {
+                val pendingControl = synchronized(lock) {
+                    if (ticket != sendControlRetryTicket) null
+                    else {
+                        sendControlRetryScheduled = false
+                        pendingSendControl
+                    }
+                } ?: return@schedule
+                if (!isCurrentGeneration(pendingControl.requestGeneration) || !isAiReplyActive()) return@schedule
+                if (synchronized(lock) {
+                        pendingSendConfirmation != null || activeRequestId != pendingControl.requestId
+                    }
+                ) return@schedule
+                val verified = runCatching { inputPort.verifyDraft(pendingControl.target, pendingControl.message) }
+                    .getOrNull()?.status == ChatDraftInputStatus.VERIFIED
+                if (!verified) {
+                    synchronized(lock) {
+                        if (pendingSendControl?.requestId == pendingControl.requestId) {
+                            pendingSendControl = pendingControl.copy(observations = pendingControl.observations + 1)
+                        }
+                    }
+                    onLog("AI 待发送事务[COMPOSER_NOT_READY]：草稿或窗口尚未再次确认；保留当前段，不覆盖、不发送")
+                    schedulePendingSendControlRetry()
+                    return@schedule
+                }
+                sendMessageSegment(
+                    pendingControl.target, pendingControl.message, pendingControl.segmentIndex,
+                    pendingControl.requestGeneration
+                )
+            }
+        }.isSuccess
+        if (!accepted) {
+            synchronized(lock) {
+                if (ticket == sendControlRetryTicket) sendControlRetryScheduled = false
+            }
+            onLog("AI 待发送事务[SCHEDULER_UNAVAILABLE]：保留 PENDING_SEND，等待下一次聊天观察")
+        }
     }
 
     private fun updateSegmentStatus(requestGeneration: Long, segmentIndex: Int, status: ReplySegmentTaskStatus, sentAt: Long? = null, confirmationId: String? = null) {
@@ -798,6 +974,9 @@ class AiReplyDraftCoordinator(
         synchronized(lock) {
             if (!isCurrentGeneration(requestGeneration)) return
             pending.set(false)
+            pendingSendControl = null
+            sendControlRetryScheduled = false
+            sendControlRetryTicket++
             val key = activeMessageKey
             activeMessageKey = null
             activeRequestId = null

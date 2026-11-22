@@ -66,7 +66,9 @@ object ReplyTaskStatusTransitions {
             ReplyTaskStatus.FAILED_RETRYABLE,
             ReplyTaskStatus.FAILED_FINAL
         ),
+        // PENDING_SEND rollback is only used when the send control was absent before gesture dispatch.
         ReplyTaskStatus.SENDING to setOf(
+            ReplyTaskStatus.PENDING_SEND,
             ReplyTaskStatus.SENT_UNCONFIRMED,
             ReplyTaskStatus.SENT,
             ReplyTaskStatus.UNKNOWN,

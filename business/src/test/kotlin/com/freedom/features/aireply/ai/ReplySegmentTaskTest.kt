@@ -23,6 +23,14 @@ class ReplySegmentTaskTest {
     }
 
     @Test
+    fun sendingCanReturnToPendingOnlyForExplicitlyUnsubmittedGestureHandling() {
+        assertTrue(ReplySegmentTaskTransitions.isAllowed(
+            ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.PENDING_SEND))
+        assertTrue(!ReplySegmentTaskTransitions.isAllowed(
+            ReplySegmentTaskStatus.SENT_UNCONFIRMED, ReplySegmentTaskStatus.PENDING_SEND))
+    }
+
+    @Test
     fun repositoryPersistsAndGuardsIndependentState() {
         val file = File.createTempFile("reply-segments", ".tsv").apply { delete() }
         try {

@@ -17,6 +17,21 @@ class MomoSendControlEligibilityTest {
         viewId, className, label, visible, enabled, clickable, sharesEditorParent
     )
 
+    @Test fun composerObservationClassifiesEmptyReadyPendingAndChangedWithoutUsingButtonAsEmptyProof() {
+        assertEquals(MomoComposerSendState.EMPTY_CONFIRMED,
+            MomoSendControlEligibility.observeComposer("", "草稿", false, 0))
+        assertEquals(MomoComposerSendState.EMPTY_CONFIRMED,
+            MomoSendControlEligibility.observeComposer("请输入消息...", "草稿", true, 0))
+        assertEquals(MomoComposerSendState.TEXT_PRESENT_SEND_READY,
+            MomoSendControlEligibility.observeComposer("草稿", "草稿", false, 1))
+        assertEquals(MomoComposerSendState.TEXT_PRESENT_BUTTON_PENDING,
+            MomoSendControlEligibility.observeComposer("草稿", "草稿", false, 0))
+        assertEquals(MomoComposerSendState.INPUT_CHANGED,
+            MomoSendControlEligibility.observeComposer("人工修改", "草稿", false, 1))
+        assertEquals(MomoComposerSendState.INPUT_STATE_UNKNOWN,
+            MomoSendControlEligibility.observeComposer("草稿", "草稿", false, 2))
+    }
+
     @Test fun exactSendButtonInCurrentComposerIsAccepted() {
         assertTrue(accepts())
         assertTrue(accepts(label = ""))

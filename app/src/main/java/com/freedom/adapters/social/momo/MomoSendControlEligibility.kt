@@ -1,7 +1,25 @@
 package com.freedom.adapters.social.momo
 
 /** Exact Momo text-send evidence, separate from legacy label-based send controls. */
+internal enum class MomoComposerSendState {
+    EMPTY_CONFIRMED, TEXT_PRESENT_SEND_READY, TEXT_PRESENT_BUTTON_PENDING, INPUT_CHANGED, INPUT_STATE_UNKNOWN
+}
+
 internal object MomoSendControlEligibility {
+    /** Observation only: absence of the button never proves that an already verified draft is empty. */
+    fun observeComposer(
+        actualText: String,
+        expectedText: String,
+        showingHint: Boolean,
+        eligibleButtonCount: Int
+    ): MomoComposerSendState = when {
+        showingHint || actualText.isBlank() -> MomoComposerSendState.EMPTY_CONFIRMED
+        actualText != expectedText -> MomoComposerSendState.INPUT_CHANGED
+        eligibleButtonCount == 1 -> MomoComposerSendState.TEXT_PRESENT_SEND_READY
+        eligibleButtonCount == 0 -> MomoComposerSendState.TEXT_PRESENT_BUTTON_PENDING
+        else -> MomoComposerSendState.INPUT_STATE_UNKNOWN
+    }
+
     const val TEXT_SEND_VIEW_ID = "com.immomo.momo:id/message_btn_sendtext"
     const val EDITOR_LAYOUT_VIEW_ID = "com.immomo.momo:id/editor_layout"
 

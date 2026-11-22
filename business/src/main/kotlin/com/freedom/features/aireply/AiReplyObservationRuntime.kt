@@ -90,6 +90,8 @@ class AiReplyObservationRuntime(
     private val sharedPageObservationCoordinator: PageObservationCoordinator? = null,
     /** Prevents leaving the chat while a bounded model request/draft verification is in flight. */
     private val isConversationDraftPending: () -> Boolean = { false },
+    /** A missing send button after verified draft input is a recoverable wait, not a deadline failure. */
+    private val isSendControlRecoveryPending: () -> Boolean = { false },
     /** Current-window draft callback; true reserves the page for generation/review. */
     private val resolveConversationIdentity: (ContactRowIdentity?, String?) -> ContactRowIdentity? = { identity, _ -> identity },
     /** Loads verified draft history after identity restoration and before OCR starts. */
@@ -4195,7 +4197,9 @@ class AiReplyObservationRuntime(
         }
         val draftPending = runCatching { isConversationDraftPending() }.getOrDefault(true)
         if (draftPending) {
-            if (draftPendingWaitedMs >= MAX_DRAFT_PENDING_WAIT_MS) {
+            if (draftPendingWaitedMs >= MAX_DRAFT_PENDING_WAIT_MS &&
+                !runCatching { isSendControlRecoveryPending() }.getOrDefault(false)
+            ) {
                 sessionTransitionTask?.cancel()
                 sessionTransitionTask = null
                 sessionManagerState = SessionManagerState.PAUSED

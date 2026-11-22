@@ -51,7 +51,8 @@ object ReplySegmentTaskTransitions {
         ReplySegmentTaskStatus.CREATED to setOf(ReplySegmentTaskStatus.DRAFT_APPLIED, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.DRAFT_APPLIED to setOf(ReplySegmentTaskStatus.PENDING_SEND, ReplySegmentTaskStatus.FAILED_RETRYABLE, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.PENDING_SEND to setOf(ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.FAILED_RETRYABLE, ReplySegmentTaskStatus.FAILED_FINAL),
-        ReplySegmentTaskStatus.SENDING to setOf(ReplySegmentTaskStatus.SENT_UNCONFIRMED, ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.FAILED_RETRYABLE, ReplySegmentTaskStatus.FAILED_FINAL),
+        // Return to PENDING_SEND only after the adapter explicitly confirms NO gesture was submitted.
+        ReplySegmentTaskStatus.SENDING to setOf(ReplySegmentTaskStatus.PENDING_SEND, ReplySegmentTaskStatus.SENT_UNCONFIRMED, ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.FAILED_RETRYABLE, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.SENT_UNCONFIRMED to setOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.FAILED_FINAL),
         ReplySegmentTaskStatus.UNKNOWN to setOf(ReplySegmentTaskStatus.DRAFT_APPLIED, ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.FAILED_RETRYABLE),
         ReplySegmentTaskStatus.FAILED_RETRYABLE to setOf(ReplySegmentTaskStatus.CREATED),
