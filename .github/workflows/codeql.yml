@@ -1,7 +1,7 @@
-# CodeQL analysis has been consolidated into .github/workflows/android-build.yml.
+# CodeQL analysis is owned by the dedicated codeql job in .github/workflows/android-build.yml.
 # This reusable-workflow stub is retained to preserve the original project path.
-# Do not add push, pull_request, or schedule triggers here; the main CI job performs
-# CodeQL initialization, the single Gradle build, and analysis in one runner job.
+# Do not add push, pull_request, or schedule triggers here; the main CI workflow performs
+# CodeQL initialization, a traced Java/Kotlin compilation, and analysis in its own runner job.
 name: CodeQL Security Analysis (consolidated)
 
 on:
