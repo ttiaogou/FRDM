@@ -1083,6 +1083,10 @@ class AiReplyObservationRuntime(
         if (recoveryContext.pending) {
             val targetRoute = matchedRouteId
             if (targetRoute == null) recoveryContext.invalidateFingerprint()
+            val privateDetailRecovery =
+                recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+                    recoveryContext.routeId == chatDetailRecoveryRoute.routeId &&
+                    !receivedGreetingsTaskActive
             val loadedMessageCheckpoint = messageListCheckpointForUnified
             val sharedMessageListRecovery =
                 recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
@@ -1104,6 +1108,19 @@ class AiReplyObservationRuntime(
                 if (!receivedGreetingsCheckpointVerifier.hasActiveVerification()) {
                     scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
                 }
+                lastPageInspection = inspection
+                return
+            }
+            if (privateDetailRecovery &&
+                (targetRoute != chatDetailRecoveryRoute.routeId ||
+                    observation.status != ObservationStatus.CONFIRMED_PAGE ||
+                    recoveryContext.runGeneration != currentRunGeneration() ||
+                    !isVerifiedRecoveredPrivateDetail(inspection))
+            ) {
+                recoveryContext.invalidateFingerprint()
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 聊天详情恢复[ROUTE_WAIT]：当前页面未独立确认原目标聊天；继续只读复核")
+                scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
                 lastPageInspection = inspection
                 return
             }
@@ -1288,6 +1305,22 @@ class AiReplyObservationRuntime(
                     pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
                 }
             }
+            if (privateDetailRecovery) {
+                val freshWindowKey = windowSessionKey(inspection)
+                if (freshWindowKey == null ||
+                    (freshWindowKey != currentSessionWindowKey &&
+                        !runCatching {
+                            chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()
+                        }.getOrDefault(false))
+                ) {
+                    recoveryContext.invalidateFingerprint()
+                    sessionManagerState = SessionManagerState.PAUSED
+                    onLog("AI 聊天详情恢复[WINDOW_REBIND_WAIT]：窗口发生变化且身份返回证据未确认；保持检查点")
+                    scheduleFullInspectionAfter(350L)
+                    lastPageInspection = inspection
+                    return
+                }
+            }
             recoveryContext.markUiOwnershipTransferred()
             val completedRecoveryIdentity = recoveryTransaction.currentIdentity()
             val sourceTaskId = recoveryContext.sourceTaskId
@@ -1323,7 +1356,15 @@ class AiReplyObservationRuntime(
             if (targetRoute == chatDetailRecoveryRoute.routeId) {
                 sessionManagerState = SessionManagerState.READING_SESSION
                 lastPageInspection = inspection
-                onLog("AI 发送恢复[RECOVERY_VERIFIED]：聊天详情页已连续双快照确认；重新读取消息，仅核验既有发送，不重发")
+                if (privateDetailRecovery) {
+                    currentSessionWindowKey = windowSessionKey(inspection)
+                    // Consume a same-window return signal too, so the ordinary observer
+                    // cannot process the already-verified return a second time.
+                    chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()
+                    onLog("AI 聊天详情恢复[RECOVERY_VERIFIED]：原目标聊天与新窗口已复核；继续只读消息采集")
+                } else {
+                    onLog("AI 发送恢复[RECOVERY_VERIFIED]：聊天详情页已连续双快照确认；重新读取消息，仅核验既有发送，不重发")
+                }
                 readVisibleMessages(inspection)
             } else if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
@@ -2288,27 +2329,78 @@ class AiReplyObservationRuntime(
         )
     }
 
+    /**
+     * A private chat may briefly lose its snapshot while the adapter returns from a verified
+     * identity profile. The active task's primary recovery route is the inbox, but the
+     * in-flight chat is a subpage. This anchor selects a destination only; it never grants
+     * permission to read or send before fresh detail evidence and the UI lease are verified.
+     */
+    private fun hasBoundPrivateDetailRecoverySession(): Boolean {
+        if (!sessionRunStarted || receivedGreetingsTaskActive || !isAiReplyActive() ||
+            !ownsTask(PRIVATE_MESSAGES_TASK_ID)
+        ) return false
+        val candidate = currentSessionCandidate ?: return false
+        val expected = expectedPrivateSessionDetailNavigation ?: return false
+        val binding = currentSessionBinding ?: return false
+        val chatWindowKey = currentSessionWindowKey ?: return false
+        val selectedKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
+        val sourceWindow = candidate.rowTarget.window
+        val sourceKey = listOf(
+            sourceWindow.packageName, sourceWindow.windowId, sourceWindow.generation
+        ).joinToString("|")
+        return currentSessionKey == selectedKey &&
+            expected.sessionKey == selectedKey &&
+            expected.sourceWindowKey == sourceKey &&
+            binding.sourceWindowKey == sourceKey &&
+            binding.chatWindowKey == chatWindowKey &&
+            !chatSessionManagementPort.isSessionIdentityBlocked(selectedKey)
+    }
+
+    /** Recheck the actual detail surface independently of the saved source-row evidence. */
+    private fun isVerifiedRecoveredPrivateDetail(snapshot: ChatPageSnapshot): Boolean =
+        hasBoundPrivateDetailRecoverySession() &&
+            snapshot.packageName == targetPackage() &&
+            snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            isExpectedPrivateSessionDetail(snapshot) &&
+            currentSessionHeaderMatchMode(snapshot) != null &&
+            windowSessionKey(snapshot) != null
+
     /** Single pause/checkpoint entry used by page-route changes and UNKNOWN observations. */
     private fun requestUnifiedPauseAndCheckpoint(taskId: String, reason: String): Boolean {
         if (recoveryContext.pending) return false
-        val route = recoveryRouteForTask(taskId) ?: return false
+        // Only an already-bound, actively read private conversation may select its detail
+        // subroute for a transient missing snapshot. Service/restart and inbox checkpoints
+        // continue using the original primary message-list verifier.
+        val recoverCurrentChatDetail = taskId == PRIVATE_MESSAGES_TASK_ID &&
+            reason == "EMPTY_SNAPSHOT" &&
+            sessionManagerState == SessionManagerState.READING_SESSION &&
+            hasBoundPrivateDetailRecoverySession()
+        val route = if (recoverCurrentChatDetail) chatDetailRecoveryRoute
+            else (recoveryRouteForTask(taskId) ?: return false)
         route.saveCheckpoint()
         if (taskId == PRIVATE_MESSAGES_TASK_ID) {
             messageListCheckpointVerifier.reset()
-            messageListCheckpointForUnified = privateMessagesCheckpointRepository?.load()
+            messageListCheckpointForUnified = if (recoverCurrentChatDetail) null
+                else privateMessagesCheckpointRepository?.load()
             messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION
+            if (recoverCurrentChatDetail) {
+                onLog("AI 聊天详情恢复[ROUTE_SELECTED]：保留当前会话检查点；等待独立的新鲜详情页验证")
+            }
         } else if (taskId == RECEIVED_GREETINGS_TASK_ID) {
             receivedGreetingsCheckpointVerifier.reset()
             receivedGreetingsCheckpointForUnified = receivedGreetingsCheckpointRepository?.load()
             receivedGreetingsCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION
         }
         val savedAtEpochMs = when (taskId) {
-            PRIVATE_MESSAGES_TASK_ID -> messageListCheckpointForUnified?.savedAtEpochMs
+            PRIVATE_MESSAGES_TASK_ID -> if (recoverCurrentChatDetail)
+                privateMessagesCheckpointRepository?.load()?.savedAtEpochMs
+                else messageListCheckpointForUnified?.savedAtEpochMs
             RECEIVED_GREETINGS_TASK_ID -> receivedGreetingsCheckpointForUnified?.savedAtEpochMs
             else -> null
         }
         activateRecoveryIdentity(
-            taskId, reason, durableRecoveryCheckpointId(taskId, savedAtEpochMs, reason)
+            taskId, reason, durableRecoveryCheckpointId(taskId, savedAtEpochMs, reason),
+            routeId = route.routeId
         )
         recoveryContext.markCheckpointSaved()
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
