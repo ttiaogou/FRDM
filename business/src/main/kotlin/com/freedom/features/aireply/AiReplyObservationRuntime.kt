@@ -195,8 +195,7 @@ class AiReplyObservationRuntime(
         onLog = onLog
     )
     private val privateMessagesTaskController = PrivateMessagesTaskController(
-        ownership = taskOwnership,
-        chooseRandomInt = chooseRandomInt
+        ownership = taskOwnership
     )
     private val receivedGreetingsTaskFlow = ReceivedGreetingsTaskFlowController(
         ownership = taskOwnership,
@@ -213,10 +212,6 @@ class AiReplyObservationRuntime(
             ownsTask = { canPerformPrivateMessagesUiAction() }
         )
     }
-    private val normalCompletedObservationCount: Int
-        get() = privateMessagesTaskController.completedObservationCount
-    private val normalInboxTaskTargetCount: Int
-        get() = privateMessagesTaskController.targetObservationCount
     private val receivedGreetingsTaskActive: Boolean
         get() = receivedGreetingsTaskFlow.isActive
     private val receivedGreetingsTaskCompletedAwaitingUserExit: Boolean
@@ -1521,7 +1516,6 @@ class AiReplyObservationRuntime(
                         }
                         receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
                         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
-                        privateMessagesTaskController.resetQuota()
                         // The greeting branch returned to the already-established inbox context.
                         // Preserve the existing traversal memory; only the open conversation and
                         // stale viewport baseline are invalid after returning from another page.
@@ -1936,7 +1930,6 @@ class AiReplyObservationRuntime(
         lastMessageFingerprint = ""
         contactMessageLedger.clearAll()
         pendingInterceptionContactKeys.clear()
-        privateMessagesTaskController.resetQuota()
         receivedGreetingsTaskFlow.reset()
         receivedGreetingsRecoveryRetryAttempt = 0
         receivedGreetingsPageProbePending = false
@@ -2216,7 +2209,6 @@ class AiReplyObservationRuntime(
             onLog("AI Reply 启动暂停：私人消息任务未取得唯一 UI 操作权；不会执行自动滚动或打开会话")
         }
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
-        privateMessagesTaskController.resetQuota()
         receivedGreetingsTaskFlow.reset()
         receivedGreetingsRecoveryRetryAttempt = 0
         privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
@@ -2533,7 +2525,6 @@ class AiReplyObservationRuntime(
                         return
                     }
                     recordSuccessfulSend(sendConfirmationId)
-                    privateMessagesTaskController.recordSuccessfulObservation()
                     privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
                     privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
                     privateMessagesTraversalTaskExecutor.checkpointNextCursorKey = currentSessionKey
@@ -2548,7 +2539,7 @@ class AiReplyObservationRuntime(
                         false
                     }
                     if (!checkpointWritten) return
-                    onLog("AI 发送成功记录：已记录一次发送成功和一次本轮成功处理")
+                    onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
                 }
                 if (!currentSessionSendConfirmed || !currentSessionReadCaptured) {
                     sessionManagerState = SessionManagerState.PAUSED
@@ -3199,16 +3190,8 @@ class AiReplyObservationRuntime(
             // The current session may move or change unread state when it is opened/read.
             // That is an expected return mutation, not an unsolicited viewport movement.
             allowExpectedSessionReturnViewportChange = true
-            if (observationCompleted && !sendAlreadyRecorded) {
-                val completedObservations = privateMessagesTaskController.recordSuccessfulObservation()
-                onLog("AI Reply 模拟回复计数：已成功读取并保存的不同私人聊天=$completedObservations/$normalInboxTaskTargetCount；仅模拟计数，未发送消息")
-                if (privateMessagesTaskController.quotaReached()) {
-                    onLog("AI Reply 私人消息任务达到本轮随机目标；暂停私聊扫描，切换收到的招呼任务")
-                    startReceivedGreetingsTask("私人消息成功归档计数达到随机目标 $normalInboxTaskTargetCount")
-                    return
-                }
-            } else if (observationCompleted && sendAlreadyRecorded) {
-                onLog("AI Reply 发送处理计数：本次会话已在发送成功确认时记录；返回列表阶段不重复计数")
+            if (observationCompleted && sendAlreadyRecorded) {
+                onLog("AI Reply 发送处理：本次会话的实际发送成功记录已完成；返回列表阶段不重复记录")
             }
         }
 
@@ -3645,16 +3628,15 @@ class AiReplyObservationRuntime(
     }
 
     /**
-     * Hand off from the private-message task either after its randomized archive quota is met,
-     * after the first successful upward swipe confirms no unread rows, or after a full unread scan.
+     * Hand off only after the first successful upward swipe confirms no unread rows,
+     * or after a complete bottom-to-top unread scan. A fixed/random count is not evidence of completion.
      * The adapter owns Momo-specific navigation and the bounded read-only traversal.
      */
     private fun startReceivedGreetingsTask(reason: String) {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
         val noUnreadFastPath = privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted && privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.isEmpty() &&
             !privateMessagesTraversalTaskExecutor.normalInboxHadUnread && !privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown
-        val quotaReached = privateMessagesTaskController.quotaReached()
-        if ((!noUnreadFastPath && !quotaReached &&
+        if ((!noUnreadFastPath &&
                 (privateMessagesTraversalTaskExecutor.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP || !privateMessagesTraversalTaskExecutor.atTop)) ||
             privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown
         ) {
@@ -3682,7 +3664,7 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
         onLog(
             "AI Reply：切换收到的招呼只读 OCR 任务；原因=$reason；" +
-                "私人聊天成功归档数=$normalCompletedObservationCount/$normalInboxTaskTargetCount；" +
+                "普通消息列表已通过无未读准入或完成扫描；" +
                 "普通聊天会话点击次数=$ordinarySessionClickCount；头像身份与详情 OCR 不触发回复"
         )
         val accepted = receivedGreetingsTaskFlow.performInitialIdleStep()

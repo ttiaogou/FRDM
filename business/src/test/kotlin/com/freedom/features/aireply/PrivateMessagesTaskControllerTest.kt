@@ -9,54 +9,49 @@ import org.junit.Test
 
 class PrivateMessagesTaskControllerTest {
     @Test
-    fun quotaCountsOnlyExplicitlyRecordedSuccessfulObservations() {
+    fun privateMessageTaskRequiresAnExplicitLeaseAndCanReleaseIt() {
+        val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
         val controller = PrivateMessagesTaskController(
             ownership = AiReplyTaskOwnership(
-                coordinator = TaskCoordinator(UiOperationOwnershipCoordinator()),
+                coordinator = coordinator,
                 currentRunGeneration = { 4L },
                 onLog = {}
-            ),
-            chooseRandomInt = { minimum, maximum ->
-                assertEquals(5, minimum)
-                assertEquals(11, maximum)
-                6
-            }
+            )
         )
-
-        controller.resetQuota()
-
-        assertEquals(0, controller.completedObservationCount)
-        assertEquals(6, controller.targetObservationCount)
-        repeat(5) { controller.recordSuccessfulObservation() }
-        assertFalse(controller.quotaReached())
-        assertEquals(6, controller.recordSuccessfulObservation())
-        assertTrue(controller.quotaReached())
+        controller.beginRun(4L)
+        assertFalse(controller.ownsTask())
+        assertTrue(controller.claimOwnership("start private-message task"))
+        assertEquals(PrivateMessagesTaskController.TASK_ID, coordinator.activeTaskId())
+        assertTrue(controller.ownsTask())
+        assertTrue(controller.releaseOwnership("finish private-message task"))
+        assertFalse(controller.ownsTask())
     }
 
     @Test
-    fun eachNewPrivateMessageCycleResetsCountAndChoosesANewBoundedTarget() {
-        val selectedTargets = ArrayDeque(listOf(5, 11))
-        val controller = PrivateMessagesTaskController(
-            ownership = AiReplyTaskOwnership(null, { 2L }, {}),
-            chooseRandomInt = { _, _ -> selectedTargets.removeFirst() }
+    fun staleRunCannotReuseOrClaimPrivateMessageTaskLease() {
+        var generation = 2L
+        val ownership = AiReplyTaskOwnership(
+            TaskCoordinator(UiOperationOwnershipCoordinator()),
+            { generation }, {}
         )
+        val controller = PrivateMessagesTaskController(ownership)
+        controller.beginRun(2L)
+        assertTrue(controller.claimOwnership("old private-message run"))
+        assertTrue(controller.ownsTask())
 
-        controller.resetQuota()
-        repeat(5) { controller.recordSuccessfulObservation() }
-        assertTrue(controller.quotaReached())
-
-        controller.resetQuota()
-
-        assertEquals(0, controller.completedObservationCount)
-        assertEquals(11, controller.targetObservationCount)
-        assertFalse(controller.quotaReached())
+        generation = 3L
+        assertFalse(controller.ownsTask())
+        assertFalse(controller.claimOwnership("stale run must not regain UI lease"))
+        controller.beginRun(3L)
+        assertTrue(controller.claimOwnership("new private-message run"))
+        assertTrue(controller.ownsTask())
     }
 
     @Test
     fun privateMessagesTaskOwnsItsTaskLeaseAndCanTransferItToAnotherAiTask() {
         val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
         val ownership = AiReplyTaskOwnership(coordinator, { 9L }, {})
-        val privateTask = PrivateMessagesTaskController(ownership) { _, _ -> 8 }
+        val privateTask = PrivateMessagesTaskController(ownership)
         val greetingsTask = ReceivedGreetingsTaskController(ownership)
         privateTask.beginRun(9L)
 
