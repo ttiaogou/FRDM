@@ -263,7 +263,7 @@ class VisibleDraftFlowTest {
         assertEquals("人工输入", f.text)
         f.text = ""
         val outgoing = ChatMessage("new-outgoing", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
-            "已发送", ScreenRect(0, 35, 100, 55), DirectionEvidence.LAYOUT_ID_AND_HIERARCHY,
+            "已发送", ScreenRect(0, 0, 100, 9), DirectionEvidence.LAYOUT_ID_AND_HIERARCHY,
             MessageContentQuality.VERIFIED)
         assertFalse(f.coordinator.generateVisibleDraft(f.batch.copy(
             messages = f.batch.messages + outgoing, capturedAtMillis = 3L
