@@ -1021,7 +1021,7 @@ class VisibleDraftFlowTest {
             override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
                 ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
         }, segments, tasks)
-        val initial = first.batch.copy(messages = listOf(old) + first.batch.messages)
+        val initial = first.batch.copy(messages = first.batch.messages + listOf(old))
         assertTrue(first.coordinator.generateVisibleDraft(initial, first.snapshot))
         first.drain()
         assertTrue(segments.records.values.single().preSendOutgoingKeyHashes.isNotEmpty())
@@ -1119,6 +1119,29 @@ class VisibleDraftFlowTest {
         assertTrue(last.finalSendConfirmationId?.isNotBlank() == true)
         assertEquals(listOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.SENT),
             segments.records.values.map { it.status })
+    }
+
+    @Test fun failedDurablePreSendEvidenceNeverDispatchesSendGesture() {
+        val stored = SegmentLedger()
+        val rejectEvidence = object : ReplySegmentTaskRepository by stored {
+            override fun update(record: ReplySegmentTaskRecord): Boolean {
+                if (record.status == ReplySegmentTaskStatus.SENDING &&
+                    record.sendAttemptStartedAt != null) return false
+                return stored.update(record)
+            }
+        }
+        var sends = 0
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sends++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, rejectEvidence, TaskLedger())
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(0, sends)
+        assertEquals(ReplySegmentTaskStatus.PENDING_SEND, stored.records.values.single().status)
+        assertTrue(f.logs.any { it.contains("SEND_PRECHECKPOINT_NOT_DURABLE") || it.contains("NOT_DURABLE") })
     }
 
 }

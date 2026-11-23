@@ -682,8 +682,8 @@ class AiReplyDraftCoordinator(
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
         // 保留手势提交前持久化的 SENDING 安全标记；只有明确返回
         // SEND_CONTROL_NOT_READY 且确认未派发手势时，才允许回退此状态。
-        updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.SENDING)
-        if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
+        // Persist SENDING and its pre-send evidence in the SAME durable update.
+        // A crash must not leave a bare SENDING record without its recovery proof.
         // Persist the pre-send snapshot BEFORE invoking the gesture port. The absence of
         // an outgoing bubble after a restart must not permit replay or text-only proof.
         val sendEvidenceSaved = replySegmentTaskRepository?.let { repository ->
@@ -701,7 +701,7 @@ class AiReplyDraftCoordinator(
                     sendRequestKey = requestKey
                 )
                 requestId.isNotBlank() && requestKey.isNotBlank() &&
-                    record?.status == ReplySegmentTaskStatus.SENDING &&
+                    record?.status == ReplySegmentTaskStatus.PENDING_SEND &&
                     evidence != null && repository.update(evidence) &&
                     repository.find(id) == evidence
             }.getOrDefault(false)
@@ -711,6 +711,7 @@ class AiReplyDraftCoordinator(
             finish("SEND_PRECHECKPOINT_NOT_DURABLE", requestGeneration)
             return
         }
+        if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
         val sent = runCatching { sendPort?.sendDraft(target, message) ?: ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_UNAVAILABLE") }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_EXCEPTION") }
         if (sent.status == ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND &&
@@ -1077,7 +1078,10 @@ class AiReplyDraftCoordinator(
             } &&
             replyTaskRepository?.find(requestKey)?.let {
                 it.requestId == candidate.requestId && it.conversationKey == conversationKey &&
-                    it.status in setOf(ReplyTaskStatus.SENDING, ReplyTaskStatus.SENT_UNCONFIRMED, ReplyTaskStatus.UNKNOWN)
+                    it.status in setOf(
+                        ReplyTaskStatus.PENDING_SEND, ReplyTaskStatus.SENDING,
+                        ReplyTaskStatus.SENT_UNCONFIRMED, ReplyTaskStatus.UNKNOWN
+                    )
             } == true &&
             isAiReplyActive()
         if (!valid || candidate == null || segments == null || targetNode == null ||
