@@ -347,6 +347,7 @@ internal class MomoSocialAdapter(
     private var sayHiPendingVerifiedReturnRow: String? = null
     @Volatile private var sayHiProfileReadAttempts: Int = 0
     @Volatile private var sayHiProfileScrollAttempted: Boolean = false
+    private val sayHiProfileDeferredRetryGate = MomoSayHiProfileDeferredRetryGate()
     @Volatile private var sayHiProfileScrollFailed: Boolean = false
     @Volatile private var sayHiProfileScrollInFlight: Boolean = false
     @Volatile private var sayHiProfileScrollWindowId: Int = -1
@@ -2476,6 +2477,7 @@ internal class MomoSocialAdapter(
         clearSayHiRowTapEvidence()
         sayHiProfileReadAttempts = 0
         sayHiProfileScrollAttempted = false
+        sayHiProfileDeferredRetryGate.reset()
         sayHiProfileScrollFailed = false
         sayHiProfileScrollInFlight = false
         sayHiProfileScrollWindowId = -1
@@ -3149,6 +3151,11 @@ internal class MomoSocialAdapter(
         }
 
         if (!sayHiProfileScrollAttempted) {
+            // The full fresh profile fingerprint and active window were verified above.
+            // A deferred swipe must not be resubmitted on every identical observation.
+            if (!sayHiProfileDeferredRetryGate.mayAttempt(tree.window, SystemClock.uptimeMillis())) {
+                return true
+            }
             onLog(
                 "收到招呼头像身份采集[INITIAL_SCAN]：资料页首次完整节点扫描未取得唯一用户 ID；" +
                     "status=${readout.status}；准备执行且仅执行一次纵向向上滑动"
@@ -3245,6 +3252,7 @@ internal class MomoSocialAdapter(
                 sayHiProfileScrollInFlight = false
                 sayHiProfileScrollRequestId = null
                 if (result.status == GestureExecutionStatus.COMPLETED) {
+                    sayHiProfileDeferredRetryGate.reset()
                     sayHiProfileScrollFailed = false
                     sayHiProfileScrollSettledAtMs = System.currentTimeMillis()
                     sayHiProfileReadAttempts = 0
@@ -3252,6 +3260,9 @@ internal class MomoSocialAdapter(
                     sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
                     onLog("收到招呼身份采集[PROFILE_SCROLL_COMPLETED]：单次向上滑动完成；等待新鲜资料页快照后重新提取 ID")
                 } else if (result.status == GestureExecutionStatus.DEFERRED) {
+                    sayHiProfileDeferredRetryGate.onDeferred(
+                        request.id, tree.window, SystemClock.uptimeMillis()
+                    )
                     sayHiProfileScrollFailed = false
                     sayHiProfileScrollAttempted = false
                     sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
@@ -3275,6 +3286,7 @@ internal class MomoSocialAdapter(
             return true
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+            sayHiProfileDeferredRetryGate.onDeferred(request.id, tree.window, SystemClock.uptimeMillis())
             sayHiGestureInFlight = false
             sayHiProfileScrollInFlight = false
             sayHiProfileScrollRequestId = null
@@ -3296,16 +3308,8 @@ internal class MomoSocialAdapter(
     }
 
     /** Current Momo builds render this profile surface inside MaintabActivity. */
-    private fun isSayHiProfileTree(tree: AccessibilityTreeSnapshot): Boolean {
-        val ids = tree.nodes.asSequence().map { it.viewId.substringAfterLast('/') }.toSet()
-        return setOf(
-            "root_layout",
-            "personal_profile_name",
-            "toolbar_id",
-            "tabs",
-            "pagertabcontent"
-        ).all(ids::contains)
-    }
+    private fun isSayHiProfileTree(tree: AccessibilityTreeSnapshot): Boolean =
+        MomoSayHiProfileScrollPolicy.matchesProfileSurface(tree.nodes.map { it.viewId })
 
     private fun isSayHiProfileSurfacePresent(): Boolean {
         val tree = runCatching {
@@ -3735,6 +3739,7 @@ internal class MomoSocialAdapter(
         sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
         sayHiProfileReadAttempts = 0
         sayHiProfileScrollAttempted = false
+        sayHiProfileDeferredRetryGate.reset()
         sayHiProfileScrollFailed = false
         sayHiProfileScrollInFlight = false
         sayHiProfileScrollWindowId = -1
