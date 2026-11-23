@@ -691,7 +691,81 @@ class AiReplyObservationRuntime(
         }
     }
 
-    /** Shared chat-window and exact-title checks mirror the private-message binding gate. */
+    /**
+     * One source of truth for an initial greeting detail admission and subsequent binding
+     * checks. The adapter has already verified row-tap feedback and the chat fingerprint;
+     * business binds only verified identity, exact chat window, and current task ownership.
+     */
+    private data class GreetingChatEvidence(
+        val rowKeyHash: String,
+        val contactId: String,
+        val normalizedDisplayName: String,
+        val chatTitleKey: String,
+        val windowSessionKey: String,
+        val taskLease: TaskLease?
+    )
+
+    private sealed interface GreetingChatAdmission {
+        data class Ready(val evidence: GreetingChatEvidence) : GreetingChatAdmission
+        data class Rejected(val reason: String) : GreetingChatAdmission
+    }
+
+    private fun inspectGreetingChatAdmission(
+        snapshot: ChatPageSnapshot,
+        requireDetailReady: Boolean
+    ): GreetingChatAdmission {
+        if (!sessionRunStarted || !isAiReplyActive()) return GreetingChatAdmission.Rejected("RUN_NOT_ACTIVE")
+        if (!receivedGreetingsTaskActive || !ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
+            return GreetingChatAdmission.Rejected("TASK_NOT_OWNED")
+        }
+        if (recoveryContext.pending) return GreetingChatAdmission.Rejected("RECOVERY_PENDING")
+        // DETAIL_READY is required to create a binding, not on later asynchronous callbacks:
+        // the adapter can temporarily report NAVIGATING while OCR is in flight.
+        if (requireDetailReady &&
+            receivedGreetingsTaskFlow.traversalStatus() != ReceivedGreetingsTraversalStatus.DETAIL_READY
+        ) return GreetingChatAdmission.Rejected("DETAIL_NOT_VERIFIED")
+
+        val rowHash = receivedGreetingsTaskFlow.currentRowKeyHash()
+            ?.takeIf(String::isNotBlank)
+            ?: return GreetingChatAdmission.Rejected("SOURCE_ROW_NOT_BOUND")
+        val identity = receivedGreetingsTaskFlow.currentContactIdentity()
+        val contactId = identity?.contactId?.takeIf(String::isNotBlank)
+        if (identity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED || contactId == null) {
+            return GreetingChatAdmission.Rejected("PLATFORM_ID_NOT_VERIFIED")
+        }
+        val displayName = receivedGreetingsTaskFlow.currentDisplayName()
+        if (ChatSessionManagementPolicy.matchChatHeader(displayName, snapshot.chatTitleText) == null) {
+            return GreetingChatAdmission.Rejected("CHAT_HEADER_MISMATCH")
+        }
+        val sessionKey = windowSessionKey(snapshot)
+        val titleKey = snapshot.conversationIdentityKey()
+        if (snapshot.packageName != targetPackage() ||
+            snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            sessionKey == null || titleKey == null
+        ) return GreetingChatAdmission.Rejected("CHAT_WINDOW_NOT_VERIFIED")
+
+        val lease = taskCoordinator?.currentLease()
+        if (taskCoordinator != null &&
+            (lease == null || lease.taskId != RECEIVED_GREETINGS_TASK_ID ||
+                lease.runGeneration != currentRunGeneration())
+        ) return GreetingChatAdmission.Rejected("TASK_LEASE_CHANGED")
+
+        return GreetingChatAdmission.Ready(
+            GreetingChatEvidence(
+                rowKeyHash = rowHash,
+                contactId = contactId,
+                normalizedDisplayName = ChatSessionManagementPolicy.normalizeSessionTitle(displayName),
+                chatTitleKey = titleKey,
+                windowSessionKey = sessionKey,
+                taskLease = lease
+            )
+        )
+    }
+
+    /**
+     * Revalidates the already captured binding at every asynchronous boundary. An OCR
+     * callback, send proof or draft must never authorize a new binding or a new task lease.
+     */
     private fun greetingBindingRejectReason(
         snapshot: ChatPageSnapshot,
         expected: GreetingChatBinding? = greetingChatBinding
@@ -702,80 +776,55 @@ class AiReplyObservationRuntime(
         if (recoveryContext.pending) return "RECOVERY_PENDING"
         if (binding !== greetingChatBinding || binding.visitToken != draftVisitToken) return "READ_GENERATION_CHANGED"
         if (binding.runGeneration != currentRunGeneration()) return "RUN_GENERATION_CHANGED"
-        val lease = taskCoordinator?.currentLease()
-        if (taskCoordinator != null &&
-            (binding.taskLease == null || lease != binding.taskLease ||
-                lease?.taskId != RECEIVED_GREETINGS_TASK_ID || lease?.runGeneration != binding.runGeneration)
-        ) return "TASK_LEASE_CHANGED"
-        val rowHash = receivedGreetingsTaskFlow.currentRowKeyHash()
-        if (rowHash.isNullOrBlank() || rowHash != binding.rowKeyHash) return "GREETING_ROW_CHANGED"
-        val identity = receivedGreetingsTaskFlow.currentContactIdentity()
-        if (identity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED ||
-            identity.contactId.isNullOrBlank() || identity.contactId != binding.contactId
-        ) return "CONTACT_ID_CHANGED"
-        val displayName = receivedGreetingsTaskFlow.currentDisplayName()
-        if (ChatSessionManagementPolicy.normalizeSessionTitle(displayName) != binding.normalizedDisplayName ||
-            ChatSessionManagementPolicy.matchChatHeader(displayName, snapshot.chatTitleText) == null
-        ) return "CHAT_HEADER_MISMATCH"
-        if (snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
-            snapshot.packageName != targetPackage() ||
-            snapshot.conversationIdentityKey() != binding.chatTitleKey ||
-            windowSessionKey(snapshot) != binding.windowSessionKey
-        ) return "CHAT_WINDOW_OR_SESSION_CHANGED"
-        return null
+
+        return when (val admission = inspectGreetingChatAdmission(snapshot, requireDetailReady = false)) {
+            is GreetingChatAdmission.Rejected -> when (admission.reason) {
+                "SOURCE_ROW_NOT_BOUND" -> "GREETING_ROW_CHANGED"
+                "PLATFORM_ID_NOT_VERIFIED" -> "CONTACT_ID_CHANGED"
+                "CHAT_WINDOW_NOT_VERIFIED" -> "CHAT_WINDOW_OR_SESSION_CHANGED"
+                else -> admission.reason
+            }
+            is GreetingChatAdmission.Ready -> {
+                val evidence = admission.evidence
+                when {
+                    taskCoordinator != null &&
+                        (binding.taskLease == null || binding.taskLease != evidence.taskLease) ->
+                        "TASK_LEASE_CHANGED"
+                    evidence.rowKeyHash != binding.rowKeyHash -> "GREETING_ROW_CHANGED"
+                    evidence.contactId != binding.contactId -> "CONTACT_ID_CHANGED"
+                    evidence.normalizedDisplayName != binding.normalizedDisplayName -> "CHAT_HEADER_MISMATCH"
+                    evidence.chatTitleKey != binding.chatTitleKey ||
+                        evidence.windowSessionKey != binding.windowSessionKey -> "CHAT_WINDOW_OR_SESSION_CHANGED"
+                    else -> null
+                }
+            }
+        }
     }
 
-    /** Establishes the source/contact/chat transaction before any structure/OCR read begins. */
+    /** The only admission-and-bind entry for a newly verified received-greeting chat. */
     private fun ensureGreetingChatBinding(snapshot: ChatPageSnapshot): Boolean {
         if (greetingBindingRejectReason(snapshot) == null) return true
-        if (!sessionRunStarted || !isAiReplyActive() || !receivedGreetingsTaskActive ||
-            !ownsTask(RECEIVED_GREETINGS_TASK_ID) || recoveryContext.pending
-        ) {
-            onLog("GREETING_CHAT_BINDING_REJECTED reason=TASK_OR_RECOVERY_NOT_READY")
+        val admission = inspectGreetingChatAdmission(snapshot, requireDetailReady = true)
+        if (admission is GreetingChatAdmission.Rejected) {
+            onLog("GREETING_CHAT_BINDING_REJECTED reason=${admission.reason}")
             return false
         }
-        if (receivedGreetingsTaskFlow.traversalStatus() != ReceivedGreetingsTraversalStatus.DETAIL_READY) {
-            onLog("GREETING_CHAT_BINDING_REJECTED reason=DETAIL_NOT_VERIFIED")
-            return false
-        }
-        val rowHash = receivedGreetingsTaskFlow.currentRowKeyHash()
-        val identity = receivedGreetingsTaskFlow.currentContactIdentity()
-        val displayName = receivedGreetingsTaskFlow.currentDisplayName()
-        val sessionKey = windowSessionKey(snapshot)
-        val titleKey = snapshot.conversationIdentityKey()
-        val lease = taskCoordinator?.currentLease()
-        val reason = when {
-            rowHash.isNullOrBlank() -> "SOURCE_ROW_NOT_BOUND"
-            identity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED ||
-                identity.contactId.isNullOrBlank() -> "PLATFORM_ID_NOT_VERIFIED"
-            ChatSessionManagementPolicy.matchChatHeader(displayName, snapshot.chatTitleText) == null ->
-                "CHAT_HEADER_MISMATCH"
-            snapshot.packageName != targetPackage() || snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
-                sessionKey == null || titleKey == null -> "CHAT_WINDOW_NOT_VERIFIED"
-            taskCoordinator != null && (lease == null || lease.taskId != RECEIVED_GREETINGS_TASK_ID ||
-                lease.runGeneration != currentRunGeneration()) -> "TASK_LEASE_CHANGED"
-            else -> null
-        }
-        if (reason != null) {
-            onLog("GREETING_CHAT_BINDING_REJECTED reason=$reason")
-            return false
-        }
-        // A new row, identity, window or task lease invalidates callbacks from the previous
-        // greeting. Never let a late OCR result borrow the new selection's authorization.
+        val evidence = (admission as GreetingChatAdmission.Ready).evidence
+        // A new row, identity, window or task lease invalidates old asynchronous reads.
         if (greetingChatBinding != null) invalidatePendingMessageRead()
         confirmedGreetingSend = null
         greetingChatBinding = GreetingChatBinding(
-            rowKeyHash = requireNotNull(rowHash),
-            contactId = requireNotNull(identity?.contactId),
-            normalizedDisplayName = ChatSessionManagementPolicy.normalizeSessionTitle(displayName),
-            chatTitleKey = requireNotNull(titleKey),
-            windowSessionKey = requireNotNull(sessionKey),
+            rowKeyHash = evidence.rowKeyHash,
+            contactId = evidence.contactId,
+            normalizedDisplayName = evidence.normalizedDisplayName,
+            chatTitleKey = evidence.chatTitleKey,
+            windowSessionKey = evidence.windowSessionKey,
             runGeneration = currentRunGeneration(),
             visitToken = draftVisitToken,
-            taskLease = lease
+            taskLease = evidence.taskLease
         )
-        onLog("GREETING_CHAT_BINDING_CREATED rowHash=${rowHash.take(12)}; idVerified=true; " +
-            "windowBound=true; taskLeaseBound=${lease != null}; historyLookup=false")
+        onLog("GREETING_CHAT_BINDING_CREATED rowHash=${evidence.rowKeyHash.take(12)}; idVerified=true; " +
+            "windowBound=true; taskLeaseBound=${evidence.taskLease != null}; historyLookup=false")
         return true
     }
 
@@ -1924,18 +1973,9 @@ class AiReplyObservationRuntime(
             }
             ChatPageKind.CHAT_DETAIL_CANDIDATE -> {
                 if (sessionRunStarted && receivedGreetingsTaskActive) {
-                    val detailStatus = runCatching { receivedGreetingsTaskFlow.traversalStatus() }
-                        .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
-                    if (detailStatus == ReceivedGreetingsTraversalStatus.DETAIL_READY) {
-                        // The avatar/profile identity and current chat are bound before OCR.
-                        // Failed binding stays on the verified page without guessing a contact.
-                        if (ensureGreetingChatBinding(inspection)) readVisibleMessages(inspection)
-                        else scheduleReceivedGreetingsRecoveryRetry("收到招呼目标聊天绑定未确认；等待同一联系人新鲜页面证据")
-                    } else {
-                        scheduleReceivedGreetingsRecoveryRetry(
-                            "收到招呼聊天页三节点指纹尚未确认；继续获取新鲜快照，不启动 OCR"
-                        )
-                    }
+                    // The flow decision already selected the verified detail branch. Admit
+                    // and bind only once at the message-read entry; it owns the full proof.
+                    readVisibleMessages(inspection)
                     return
                 }
                 if (currentSessionKey != null && sessionManagerState == SessionManagerState.OPENING_SESSION) {
@@ -3139,22 +3179,25 @@ class AiReplyObservationRuntime(
             return
         }
         if (sessionRunStarted) {
-            val requiredTask = if (receivedGreetingsTaskActive) {
-                RECEIVED_GREETINGS_TASK_ID
+            if (receivedGreetingsTaskActive) {
+                // The authoritative entry includes task ownership, profile identity, header,
+                // window and the one-time adapter DETAIL_READY proof before any OCR starts.
+                if (!ensureGreetingChatBinding(snapshot)) {
+                    onLog("GREETING_CHAT_READ_DEFERRED reason=CHAT_BINDING_NOT_VERIFIED")
+                    scheduleReceivedGreetingsRecoveryRetry(
+                        "收到招呼聊天页或会话绑定未就绪；等待同一联系人新鲜页面证据"
+                    )
+                    return
+                }
             } else {
-                PRIVATE_MESSAGES_TASK_ID
-            }
-            if (!ownsTask(requiredTask)) {
-                onLog("消息详情读取被阻止：当前任务未持有 UI 操作权；task=$requiredTask")
-                return
-            }
-            if (receivedGreetingsTaskActive && !ensureGreetingChatBinding(snapshot)) {
-                onLog("GREETING_CHAT_READ_DEFERRED reason=CHAT_BINDING_NOT_VERIFIED")
-                return
-            }
-            if (!receivedGreetingsTaskActive && greetingChatBinding != null) {
-                // Private-message reads must not inherit a previous greeting OCR transaction.
-                invalidatePendingMessageRead()
+                if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+                    onLog("消息详情读取被阻止：当前任务未持有 UI 操作权；task=$PRIVATE_MESSAGES_TASK_ID")
+                    return
+                }
+                if (greetingChatBinding != null) {
+                    // Private-message reads must not inherit a previous greeting OCR transaction.
+                    invalidatePendingMessageRead()
+                }
             }
         }
         messageReadCoordinator.request(snapshot)
@@ -3162,8 +3205,8 @@ class AiReplyObservationRuntime(
 
     /**
      * Revalidates the active page/window/session before any message batch reaches business
-     * callbacks or sample persistence. The received-greetings detail path intentionally has a
-     * narrower read-only contract because it does not own a private-message session key.
+     * callbacks or sample persistence. Received greetings is source-bound to the verified
+     * greeting row instead of a private-message session checkpoint.
      */
     private fun isMessageReadResultCurrent(
         snapshot: ChatPageSnapshot,
@@ -3417,6 +3460,9 @@ class AiReplyObservationRuntime(
             return
         }
         if (handleSendConfirmationResult(onSendConfirmation(batch, snapshot), batch, snapshot)) return
+        // Recheck after the send-confirmation callback: it is a separate external
+        // boundary and may have changed the current task or binding. OCR callbacks also
+        // revalidate against an independently acquired live chat snapshot.
         val greetingDetail = sessionRunStarted && receivedGreetingsTaskActive &&
             greetingBindingRejectReason(snapshot) == null
         val privateDetail = sessionRunStarted && !receivedGreetingsTaskActive && currentSessionCandidate != null &&

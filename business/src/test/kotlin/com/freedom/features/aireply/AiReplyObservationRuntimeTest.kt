@@ -3847,6 +3847,72 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun greetingSingleAdmissionRejectsIncompleteProofBeforeAnyMessageRead() {
+        for (scenario in listOf("DETAIL_NOT_READY", "IDENTITY_UNVERIFIED", "SOURCE_ROW_MISSING",
+            "HEADER_MISMATCH", "WINDOW_MISMATCH")
+        ) {
+            val scheduler = FakeScheduler()
+            val logs = ArrayList<String>()
+            val port = greetingDraftTestPort()
+            when (scenario) {
+                "DETAIL_NOT_READY" ->
+                    port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.NAVIGATING
+                "IDENTITY_UNVERIFIED" ->
+                    port.receivedGreetingsContactIdentity =
+                        requireNotNull(port.receivedGreetingsContactIdentity).copy(
+                            confidence = ContactIdentityConfidence.UNRESOLVED
+                        )
+                "SOURCE_ROW_MISSING" -> port.receivedGreetingsRowKeyHash = null
+                "HEADER_MISMATCH" -> port.page = port.page.copy(chatTitleText = "Other chat")
+                "WINDOW_MISMATCH" -> port.page = port.page.copy(packageName = "foreign.package")
+            }
+            var drafts = 0
+            val runtime = greetingRuntimeFixture(
+                scheduler, port, logs, greetingDraft = { drafts++; true }
+            )
+            activateGreetingTestFlow(runtime)
+            readGreetingTestMessages(runtime, port.page)
+            assertEquals("scenario=$scenario", 0, port.messageReads)
+            assertEquals("scenario=$scenario", 0, port.ocrAsyncReadRequests)
+            assertEquals("scenario=$scenario", 0, port.persistedChatSamples)
+            assertEquals("scenario=$scenario", 0, drafts)
+            assertFalse("scenario=$scenario", logs.any { it.contains("GREETING_CHAT_BINDING_CREATED") })
+            assertTrue("scenario=$scenario logs=$logs", logs.any { it.contains("GREETING_CHAT_BINDING_REJECTED") })
+        }
+    }
+
+    @Test
+    fun greetingDetailBindingIsEstablishedOnceBeforeOcrAndReusedForSameWindow() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort().apply { deferNextOcrRead = true }
+        var drafts = 0
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs, greetingDraft = { drafts++; true }
+        )
+        activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        assertEquals(1, port.ocrAsyncReadRequests)
+        assertEquals(1, logs.count { it.contains("GREETING_CHAT_BINDING_CREATED") })
+
+        // Re-entry from a fresh observer must keep the exact same binding. An adapter
+        // status change does not grant a new conversation or invalidate a verified OCR.
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.NAVIGATING
+        val ensureBinding = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+            "ensureGreetingChatBinding", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        assertTrue(ensureBinding.invoke(runtime, port.page) as Boolean)
+        assertEquals(1, port.ocrAsyncReadRequests)
+        assertEquals(1, logs.count { it.contains("GREETING_CHAT_BINDING_CREATED") })
+        assertFalse(logs.any { it.contains("GREETING_CHAT_BINDING_REJECTED") })
+        port.completeDeferredOcrRead()
+        runUntil(scheduler, 40) { drafts == 1 }
+        assertEquals(1, drafts)
+        assertEquals(1, port.persistedChatSamples)
+        assertTrue(logs.any { it.contains("GREETING_CHAT_OCR_REVALIDATED") })
+    }
+
+    @Test
     fun receivedGreetingBindsBeforeOcrAndKeepsSameChatWhenDetailStatusTemporarilyChanges() {
         val scheduler = FakeScheduler()
         val logs = ArrayList<String>()
