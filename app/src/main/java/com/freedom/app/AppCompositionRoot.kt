@@ -429,7 +429,7 @@ internal class AccessibilityServiceDependencies internal constructor(
         )
     }
     val momoSocialAdapter: MomoSocialAdapter by momoSocialAdapterDelegate
-    private val aiReplyDraftCoordinatorDelegate = lazy(LazyThreadSafetyMode.NONE) {
+    private val aiReplyDraftCoordinatorDelegate: Lazy<AiReplyDraftCoordinator> = lazy(LazyThreadSafetyMode.NONE) {
         AiReplyDraftCoordinator(
             configurationRepository = root.aiModelConfigurationRepository,
             cloudConsent = root.aiModelCloudConsent,
@@ -469,8 +469,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             }
         )
     }
-    val aiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate
-    val aiReplyObservationRuntime by lazy(LazyThreadSafetyMode.NONE) {
+    val aiReplyDraftCoordinator: AiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate
+    val aiReplyObservationRuntime: AiReplyObservationRuntime by lazy(LazyThreadSafetyMode.NONE) {
         // The history preloaded before OCR is consumed by the later draft callback. Keeping this
         // cache at the single runtime composition boundary avoids reading the same repository
         // rows again after OCR completes.
