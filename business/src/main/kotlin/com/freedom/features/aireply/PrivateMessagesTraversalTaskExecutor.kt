@@ -104,7 +104,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
         runGeneration = checkpointRunGeneration,
         lastSuccessfulTaskId = checkpointLastSuccessfulTaskId,
         nextCursorKey = checkpointNextCursorKey,
-        traversalDirection = checkpointTraversalDirection
+        traversalDirection = checkpointTraversalDirection,
+        unresolvedUnknownUnreadKeys = unresolvedUnknownUnreadKeys.toSet(),
+        unknownUnreadViewportKeys = unknownUnreadViewportKeys.toList()
     )
 
     fun restore(checkpoint: PrivateMessagesTraversalCheckpoint) {
@@ -142,6 +144,16 @@ internal class PrivateMessagesTraversalTaskExecutor {
         lockedUnreadSetFinalized = checkpoint.lockedUnreadSetFinalized
         normalInboxHadUnread = checkpoint.normalInboxHadUnread
         normalInboxUnreadStateUnknown = checkpoint.normalInboxUnreadStateUnknown
+        unresolvedUnknownUnreadKeys.clear()
+        unresolvedUnknownUnreadKeys += checkpoint.unresolvedUnknownUnreadKeys
+        unknownUnreadViewportKeys.clear()
+        unknownUnreadViewportKeys += checkpoint.unknownUnreadViewportKeys
+        // v1 checkpoints have only a boolean blocker. Keep the pre-existing visible-row
+        // anchor so fresh evidence from another viewport cannot silently clear that state.
+        legacyUnknownUnreadViewportKeys =
+            if (normalInboxUnreadStateUnknown && unresolvedUnknownUnreadKeys.isEmpty()) {
+                checkpoint.lastStableVisibleKeys.takeIf { it.isNotEmpty() }?.toList()
+            } else null
         resumeSessionKey = checkpoint.resumeSessionKey
         resumeSessionName = checkpoint.resumeSessionName
         checkpointRunGeneration = checkpoint.runGeneration
@@ -310,6 +322,10 @@ internal class PrivateMessagesTraversalTaskExecutor {
 
     var normalInboxHadUnread: Boolean = false
     var normalInboxUnreadStateUnknown: Boolean = false
+    /** Keys are already SHA-256 opaque traversal hints, not user IDs or message text. */
+    val unresolvedUnknownUnreadKeys: MutableSet<String> = LinkedHashSet()
+    val unknownUnreadViewportKeys: MutableList<String> = ArrayList()
+    private var legacyUnknownUnreadViewportKeys: List<String>? = null
     var resumeSessionKey: String? = null
     var resumeSessionName: String? = null
     var sessionListStabilityRetryCount: Int = 0
@@ -494,7 +510,12 @@ internal class PrivateMessagesTraversalTaskExecutor {
         if (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM) {
             if (!lockedUnreadSetFinalized) {
                 normalInboxHadUnread = evidence.hasUnread
-                normalInboxUnreadStateUnknown = evidence.hasUnknown
+                // A clean *different* viewport must not erase an unresolved historic UNKNOWN.
+                // The admission gate below owns revalidation of saved blocked identities.
+                if (evidence.hasUnknown) normalInboxUnreadStateUnknown = true
+                else if (unresolvedUnknownUnreadKeys.isEmpty() &&
+                    legacyUnknownUnreadViewportKeys == null
+                ) normalInboxUnreadStateUnknown = false
             } else if (evidence.hasUnknown) {
                 normalInboxUnreadStateUnknown = true
             }
@@ -516,10 +537,46 @@ internal class PrivateMessagesTraversalTaskExecutor {
             lockedUnreadSessionKeys += viewportUnread.map(ChatSessionManagementPolicy::stableSessionKey)
             normalInboxHadUnread = lockedUnreadSessionKeys.isNotEmpty()
         }
-        if (snapshot.chatListCandidates.any {
-                ChatSessionManagementPolicy.isEligible(it) && it.unreadStatus == ChatUnreadStatus.UNKNOWN
+        val currentUnknown = snapshot.chatListCandidates.filter {
+            ChatSessionManagementPolicy.isEligible(it) && it.unreadStatus == ChatUnreadStatus.UNKNOWN
+        }
+        if (currentUnknown.isNotEmpty()) {
+            if (unresolvedUnknownUnreadKeys.isEmpty()) {
+                unknownUnreadViewportKeys.clear()
+                unknownUnreadViewportKeys += visibleSessionKeys(snapshot)
             }
-        ) normalInboxUnreadStateUnknown = true
+            unresolvedUnknownUnreadKeys += currentUnknown.map(ChatSessionManagementPolicy::stableSessionKey)
+            legacyUnknownUnreadViewportKeys = null
+            normalInboxUnreadStateUnknown = true
+        } else if (normalInboxUnreadStateUnknown && !snapshot.chatListExtractionTruncated &&
+            snapshot.chatListViewport != null
+        ) {
+            // A clean *different* viewport does not resolve an old UNKNOWN. Only an exact
+            // re-observation of the blocked identities and their original geometry may release
+            // the latch; each formerly UNKNOWN eligible row must now explicitly say READ/UNREAD.
+            val visibleKeys = visibleSessionKeys(snapshot)
+            val knownAnchor = unknownUnreadViewportKeys.ifEmpty { legacyUnknownUnreadViewportKeys.orEmpty() }
+            val sameBlockedViewport = knownAnchor.isNotEmpty() && knownAnchor == visibleKeys
+            val eligibleRows = snapshot.chatListCandidates.filter {
+                ChatSessionManagementPolicy.isEligible(it) &&
+                    ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
+            }
+            val blockersNowExplicit = unresolvedUnknownUnreadKeys.isNotEmpty() &&
+                unresolvedUnknownUnreadKeys.all { key ->
+                    val matches = eligibleRows.filter { ChatSessionManagementPolicy.stableSessionKey(it) == key }
+                    matches.size == 1 && matches.single().unreadStatus != ChatUnreadStatus.UNKNOWN
+                }
+            // Legacy checkpoints did not persist the unknown row keys. They can be reconciled
+            // only on the exact old viewport after its current eligible UNKNOWN count reaches 0.
+            val legacyRevalidated = unresolvedUnknownUnreadKeys.isEmpty() &&
+                legacyUnknownUnreadViewportKeys != null
+            if (sameBlockedViewport && (blockersNowExplicit || legacyRevalidated)) {
+                normalInboxUnreadStateUnknown = false
+                unresolvedUnknownUnreadKeys.clear()
+                unknownUnreadViewportKeys.clear()
+                legacyUnknownUnreadViewportKeys = null
+            }
+        }
 
         if (normalInboxUnreadStateUnknown) {
             resetUnreadBoundaryObservation()
@@ -659,6 +716,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
         resetUnreadBoundaryObservation()
         normalInboxHadUnread = false
         normalInboxUnreadStateUnknown = false
+        unresolvedUnknownUnreadKeys.clear()
+        unknownUnreadViewportKeys.clear()
+        legacyUnknownUnreadViewportKeys = null
         sessionListStabilityRetryCount = 0
         sessionActionCount = 0
         noProgressScrollCount = 0
@@ -698,6 +758,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
         resumeSessionName = null
         normalInboxHadUnread = false
         normalInboxUnreadStateUnknown = false
+        unresolvedUnknownUnreadKeys.clear()
+        unknownUnreadViewportKeys.clear()
+        legacyUnknownUnreadViewportKeys = null
     }
 
     /**

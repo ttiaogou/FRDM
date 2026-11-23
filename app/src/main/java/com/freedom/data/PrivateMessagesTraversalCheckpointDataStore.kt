@@ -32,7 +32,9 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
                 json.optLong("runGeneration", 0L),
                 json.optString("lastSuccessfulTaskId").takeIf(String::isNotBlank),
                 json.optString("nextCursorKey").takeIf(String::isNotBlank),
-                json.optString("traversalDirection", "BOTTOM_TO_TOP")
+                json.optString("traversalDirection", "BOTTOM_TO_TOP"),
+                json.readSet("unresolvedUnknownUnreadKeys"),
+                json.readList("unknownUnreadViewportKeys")
             )
         }.getOrElse { clear(); null }
     }
@@ -57,6 +59,8 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
             .put("lastSuccessfulTaskId", checkpoint.lastSuccessfulTaskId.orEmpty())
             .put("nextCursorKey", checkpoint.nextCursorKey.orEmpty())
             .put("traversalDirection", checkpoint.traversalDirection)
+            .put("unresolvedUnknownUnreadKeys", JSONArray(checkpoint.unresolvedUnknownUnreadKeys.toList().takeLast(MAX_KEYS)))
+            .put("unknownUnreadViewportKeys", JSONArray(checkpoint.unknownUnreadViewportKeys.takeLast(MAX_KEYS)))
         preferences.edit().putString(KEY, json.toString()).apply()
     }
 

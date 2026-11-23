@@ -3624,6 +3624,7 @@ class AiReplyObservationRuntime(
         }
         // The pre-positioning and top-confirmation snapshots are not admission evidence.
         // Start accumulating unread state only after the successful first upward gate swipe.
+        val hadUnknownUnreadBeforeFreshSnapshot = privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown
         if (privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted || receivedGreetingsTaskActive) {
             privateMessagesTraversalTaskExecutor.recordViewportUnreadEvidence(
                 snapshot,
@@ -3664,6 +3665,12 @@ class AiReplyObservationRuntime(
             allowExpectedSessionReturnViewportChange = allowExpectedSessionReturnViewportChange
         )
         privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+        if (hadUnknownUnreadBeforeFreshSnapshot &&
+            !privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown &&
+            listEvaluation.unreadAdmissionDecision != PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
+        ) {
+            onLog("AI Reply 未读UNKNOWN[REVALIDATED]：原阻断视口已重新确认；未读状态按最新合格会话证据重新准入；未放宽页面、身份或操作权门禁")
+        }
         val snapshotAmbiguousKeys = listEvaluation.snapshotAmbiguousKeys
         val newlyAmbiguousKeys = listEvaluation.newlyAmbiguousKeys
         if (newlyAmbiguousKeys.isNotEmpty()) {

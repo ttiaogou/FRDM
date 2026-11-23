@@ -43,6 +43,23 @@ class PrivateMessagesCheckpointRecoveryTest {
     }
 
     @Test
+    fun restoreKeepsOpaqueUnknownBlockersWithoutReusingUiHandles() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            normalInboxUnreadStateUnknown = true
+            unresolvedUnknownUnreadKeys += "opaque-unknown-row"
+            unknownUnreadViewportKeys += "opaque-row@0,100,720,240"
+        }
+        val snapshot = executor.checkpoint()
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(snapshot) }
+
+        assertEquals(setOf("opaque-unknown-row"), restored.unresolvedUnknownUnreadKeys)
+        assertEquals(listOf("opaque-row@0,100,720,240"), restored.unknownUnreadViewportKeys)
+        assertTrue(restored.normalInboxUnreadStateUnknown)
+        assertEquals(snapshot.unresolvedUnknownUnreadKeys, restored.checkpoint().unresolvedUnknownUnreadKeys)
+        assertEquals(snapshot.unknownUnreadViewportKeys, restored.checkpoint().unknownUnreadViewportKeys)
+    }
+
+    @Test
     fun emptyRestoredViewportDoesNotBlockInitialRecovery() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val checkpoint = PrivateMessagesTraversalCheckpoint(

@@ -21,7 +21,11 @@ data class PrivateMessagesTraversalCheckpoint(
     val runGeneration: Long = 0L,
     val lastSuccessfulTaskId: String? = null,
     val nextCursorKey: String? = null,
-    val traversalDirection: String = "BOTTOM_TO_TOP"
+    val traversalDirection: String = "BOTTOM_TO_TOP",
+    /** Opaque keys of still-unresolved, previously eligible UNKNOWN private rows. */
+    val unresolvedUnknownUnreadKeys: Set<String> = emptySet(),
+    /** Identity + geometry of the viewport that originally produced the UNKNOWN block. */
+    val unknownUnreadViewportKeys: List<String> = emptyList()
 )
 
 interface PrivateMessagesTraversalCheckpointRepository {
