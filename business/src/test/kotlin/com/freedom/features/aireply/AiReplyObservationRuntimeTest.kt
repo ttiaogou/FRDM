@@ -2811,10 +2811,12 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L,
             isSendConfirmationPending = { pendingSend },
             onSendTransaction = { _, _ ->
-                confirmationCalls++
-                com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                // A real coordinator has no pending transaction before the send is submitted.
+                val result = if (pendingSend) {
+                    confirmationCalls++
                     com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
-                )
+                } else com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+                com.freedom.features.aireply.ai.ReplySendTransactionOutcome(result)
             }
         )
         runtime.scheduleInitialObservation()
