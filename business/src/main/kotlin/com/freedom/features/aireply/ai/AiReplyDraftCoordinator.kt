@@ -67,6 +67,8 @@ class AiReplyDraftCoordinator(
     private var activeRequestId: String? = null
     private var activeExistingOutgoingKeys: Set<String> = emptySet()
     private var pendingSendConfirmation: PendingSendConfirmation? = null
+    /** A confirmed segment must obtain a fresh chat/composer observation before the next one starts. */
+    private var pendingNextMessageSegment: PendingNextMessageSegment? = null
     // 回复尝试应保留当前聊天页，直到新发出的消息得到确认。
     // 清除模型或输入的 pending 标志不代表消息发送成功。
     private var replyAwaitingConfirmedSend = false
@@ -86,6 +88,14 @@ class AiReplyDraftCoordinator(
         val target: ChatDraftInputTarget,
         val requestGeneration: Long,
         val observations: Int = 0
+    )
+
+    private data class PendingNextMessageSegment(
+        val requestId: String,
+        val segmentIndex: Int,
+        val requestGeneration: Long,
+        val confirmedObservationAtMillis: Long,
+        val previousTarget: ChatDraftInputTarget
     )
 
     private data class PendingSendConfirmation(
@@ -114,7 +124,9 @@ class AiReplyDraftCoordinator(
     /** 对现有页面返回门禁而言，等待尚未提交的发送按钮不等于任务完成。 */
     val isSendControlRecoveryPending: Boolean get() = synchronized(lock) { pendingSendControl != null }
     /** A submitted send requires fresh read-only confirmation; draft generation alone does not. */
-    val isSendConfirmationPending: Boolean get() = synchronized(lock) { pendingSendConfirmation != null }
+    val isSendConfirmationPending: Boolean get() = synchronized(lock) {
+        pendingSendConfirmation != null || pendingNextMessageSegment != null
+    }
     val isConversationReturnBlocked: Boolean get() = synchronized(lock) {
         pending.get() || awaitingUserSend.get() ||
             pendingSendConfirmation != null || replyAwaitingConfirmedSend
@@ -143,6 +155,7 @@ class AiReplyDraftCoordinator(
             activeRequestId = null
             activeExistingOutgoingKeys = emptySet()
             pendingSendConfirmation = null
+            pendingNextMessageSegment = null
             replyAwaitingConfirmedSend = false
             sendConfirmationChecks = 0
             lastConfirmedSendId = null
@@ -963,7 +976,11 @@ class AiReplyDraftCoordinator(
     }
 
     fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): SendConfirmationResult {
-        val pending = synchronized(lock) { pendingSendConfirmation } ?: return SendConfirmationResult.NOT_PENDING
+        val pending = synchronized(lock) { pendingSendConfirmation }
+        if (pending == null) {
+            val next = synchronized(lock) { pendingNextMessageSegment } ?: return SendConfirmationResult.NOT_PENDING
+            return resumeConfirmedNextMessageSegment(batch, snapshot, next)
+        }
         if (generation.get() != pending.requestGeneration) {
             onLog("AI 发送结果核验：UNKNOWN；运行代次已失效；禁止重发")
             updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)
@@ -1001,10 +1018,19 @@ class AiReplyDraftCoordinator(
                 synchronized(lock) {
                     pendingSendConfirmation = null
                     awaitingUserSend.set(false)
+                    // A later segment with identical text must never match this earlier bubble.
+                    activeExistingOutgoingKeys = activeExistingOutgoingKeys +
+                        messageKey(matched.stableLogicalMessageId, matched.effectiveContentRevision)
+                    if (nextIndex < activeMessageSegments.size) {
+                        pendingNextMessageSegment = PendingNextMessageSegment(
+                            pending.requestId, nextIndex, pending.requestGeneration,
+                            batch.capturedAtMillis, pending.target
+                        )
+                    }
                 }
                 if (nextIndex < activeMessageSegments.size) {
-                    onLog("AI 消息段顺序推进：segmentIndex=${pending.segmentIndex} 已确认；启动 segmentIndex=$nextIndex")
-                    scheduler.schedule(0L) { writeMessageSegment(pending.target, nextIndex, pending.requestGeneration) }
+                    onLog("AI 消息段顺序推进[AWAITING_FRESH_CHAT]：segmentIndex=${pending.segmentIndex} 已确认；" +
+                        "等待新鲜聊天与空输入框复核后启动 segmentIndex=$nextIndex")
                     return SendConfirmationResult.WAITING
                 }
                 val allSegmentsSent = replySegmentTaskRepository?.findByRequest(pending.requestId)
@@ -1025,6 +1051,7 @@ class AiReplyDraftCoordinator(
                 }
                 return SendConfirmationResult.CONFIRMED
             }
+            onLog("AI 发送结果核验[SEGMENT_PERSIST_REJECTED]：消息段状态持久化未确认；禁止推进下一条")
             return SendConfirmationResult.UNKNOWN
         }
         val checks = synchronized(lock) { ++sendConfirmationChecks }
@@ -1038,9 +1065,102 @@ class AiReplyDraftCoordinator(
         return SendConfirmationResult.WAITING
     }
 
+    /**
+     * A previous SENT confirmation authorizes only a read-only look for the next composer.
+     * No old input node or scheduled gesture is reused across independently sent messages.
+     */
+    private fun resumeConfirmedNextMessageSegment(
+        batch: ChatMessageBatch,
+        snapshot: ChatPageSnapshot,
+        next: PendingNextMessageSegment
+    ): SendConfirmationResult {
+        if (!isCurrentGeneration(next.requestGeneration) || !isAiReplyActive() ||
+            !hasActiveTaskOwner() || synchronized(lock) { activeRequestId != next.requestId }
+        ) {
+            onLog("AI 消息段推进[STALE_REQUEST]：发送任务或运行代次已变化；不提交后续消息")
+            return SendConfirmationResult.UNKNOWN
+        }
+        val targetBefore = next.previousTarget
+        val currentInput = snapshot.inputFieldTarget
+        val currentWindowIdentity = snapshot.windowIdentityKey()
+        val sameChat = snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            snapshot.packageName == targetBefore.packageName &&
+            snapshot.activityClass == targetBefore.activityClass &&
+            snapshot.conversationIdentityKey() == targetBefore.conversationIdentityKey &&
+            normalizeTitle(snapshot.chatTitleText) == normalizeTitle(targetBefore.expectedChatTitle) &&
+            currentWindowIdentity == targetBefore.windowIdentityKey &&
+            batch.windowSessionKey == targetBefore.windowSessionKey &&
+            batch.capturedAtMillis > next.confirmedObservationAtMillis &&
+            currentInput != null &&
+            currentInput.window == targetBefore.nodeTarget.window
+        if (!sameChat || currentInput == null || currentWindowIdentity == null) {
+            onLog("AI 消息段推进[CHAT_REVALIDATION_WAIT]：尚无发送确认后的同窗口新鲜聊天与输入框证据；不发送")
+            return SendConfirmationResult.WAITING
+        }
+        val target = targetBefore.copy(windowIdentityKey = currentWindowIdentity, nodeTarget = currentInput)
+        val repo = replySegmentTaskRepository
+        if (repo != null) {
+            val records = repo.findByRequest(next.requestId).sortedBy { it.segmentIndex }
+            val segment = records.getOrNull(next.segmentIndex)
+            val valid = records.size == activeMessageSegments.size &&
+                records.indices.all { records[it].segmentIndex == it && records[it].requestId == next.requestId } &&
+                records.take(next.segmentIndex).all { it.status == ReplySegmentTaskStatus.SENT } &&
+                segment?.status == ReplySegmentTaskStatus.CREATED &&
+                segment?.segmentContentHash == activeMessageSegments.getOrNull(next.segmentIndex)?.let(::fingerprint)
+            if (!valid) {
+                onLog("AI 消息段推进[CHECKPOINT_CONFLICT]：持久化队列与待发送段不一致；禁止下一条发送")
+                return SendConfirmationResult.UNKNOWN
+            }
+        }
+        if (runCatching { inputPort.verifyDraft(target, "") }.getOrNull()?.status != ChatDraftInputStatus.VERIFIED) {
+            onLog("AI 消息段推进[COMPOSER_NOT_READY]：新输入框不为空或无法确认；不覆盖、不发送")
+            return SendConfirmationResult.WAITING
+        }
+        val reserved = synchronized(lock) {
+            if (pendingNextMessageSegment != next || pendingSendConfirmation != null ||
+                activeRequestId != next.requestId || !isCurrentGeneration(next.requestGeneration)) false
+            else {
+                pendingNextMessageSegment = null
+                pending.set(true)
+                true
+            }
+        }
+        if (!reserved) return SendConfirmationResult.WAITING
+        val scheduled = runCatching {
+            scheduler.schedule(0L) {
+                if (!isCurrentGeneration(next.requestGeneration) || !isAiReplyActive() || !hasActiveTaskOwner()) return@schedule
+                writeMessageSegment(target, next.segmentIndex, next.requestGeneration)
+            }
+        }.isSuccess
+        if (!scheduled) {
+            synchronized(lock) {
+                if (activeRequestId == next.requestId && isCurrentGeneration(next.requestGeneration)) {
+                    pendingNextMessageSegment = next
+                    pending.set(false)
+                }
+            }
+            onLog("AI 消息段推进[SCHEDULER_UNAVAILABLE]：保留未发送段，等待后续聊天观察")
+            return SendConfirmationResult.WAITING
+        }
+        onLog("AI 消息段推进[NEXT_SEGMENT_STARTED]：segmentIndex=${next.segmentIndex}；" +
+            "新鲜页面和空输入框已验证，按既有 DraftSegments 节奏输入")
+        return SendConfirmationResult.WAITING
+    }
+
+    /** A repository rejection is not a confirmed send and must never advance the queue. */
     private fun updateSegmentStatusAndContinue(pending: PendingSendConfirmation, confirmationId: String): Boolean {
-        updateSegmentStatus(pending.requestGeneration, pending.segmentIndex, ReplySegmentTaskStatus.SENT, nowMillis(), confirmationId)
-        return true
+        if (!isCurrentGeneration(pending.requestGeneration)) return false
+        val repo = replySegmentTaskRepository ?: return true
+        val record = repo.find("${pending.requestId}:segment:${pending.segmentIndex}") ?: return false
+        if (record.requestId != pending.requestId || record.segmentIndex != pending.segmentIndex ||
+            record.segmentContentHash != pending.segmentContentHash
+        ) return false
+        if (record.status == ReplySegmentTaskStatus.SENT) return record.confirmationId == confirmationId
+        if (record.status != ReplySegmentTaskStatus.SENT_UNCONFIRMED) return false
+        if (!repo.update(record.copy(status = ReplySegmentTaskStatus.SENT,
+                sentAt = nowMillis(), confirmationId = confirmationId))) return false
+        val saved = repo.find(record.taskId)
+        return saved?.status == ReplySegmentTaskStatus.SENT && saved.confirmationId == confirmationId
     }
 
     fun consumeConfirmedSendId(): String? = synchronized(lock) {

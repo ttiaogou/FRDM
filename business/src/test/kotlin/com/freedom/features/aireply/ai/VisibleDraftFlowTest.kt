@@ -18,6 +18,7 @@ class VisibleDraftFlowTest {
         var active = true
         var consent = true
         var text = ""
+        val inputWriteTargets = mutableListOf<ChatDraftInputTarget>()
         val logs = mutableListOf<String>()
         var modelOutput = """{"action":"REPLY","reason":"OK","draft":"你好呀"}"""
         var calls = 0
@@ -54,6 +55,7 @@ class VisibleDraftFlowTest {
                         focusRejectionsRemaining--
                         return ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "INPUT_FOCUS_REJECTED")
                     }
+                    this@Fixture.inputWriteTargets.add(target)
                     this@Fixture.text = text
                     return ChatDraftInputResult(ChatDraftInputStatus.WRITTEN)
                 }
@@ -445,14 +447,159 @@ class VisibleDraftFlowTest {
         val afterFirst = f.batch.copy(messages = listOf(firstOutgoing), capturedAtMillis = f.now + 1L)
         assertEquals(SendConfirmationResult.WAITING,
             f.coordinator.confirmSendResult(afterFirst, f.snapshot))
+        assertEquals(listOf("第一"), sentTexts)
+        assertTrue(f.coordinator.isSendConfirmationPending)
+        assertEquals(ReplySegmentTaskStatus.CREATED, segments.records.values.last().status)
+        // The original confirmation batch must never authorize another input.
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendResult(afterFirst, f.snapshot))
+        assertTrue(f.tasks.isEmpty())
+        val fresh = f.snapshot.copy(inputFieldTarget = NodeTarget(f.window, NodePath(listOf(88))))
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendResult(afterFirst.copy(capturedAtMillis = f.now + 2L), fresh))
         repeat(8) { if (!f.coordinator.isSendControlRecoveryPending) f.step() }
         assertTrue(f.coordinator.isSendControlRecoveryPending)
         assertEquals(listOf("第一"), sentTexts)
         assertEquals(ReplySegmentTaskStatus.SENT, segments.records.values.first().status)
         assertEquals(ReplySegmentTaskStatus.PENDING_SEND, segments.records.values.last().status)
+        assertEquals(fresh.inputFieldTarget, f.inputWriteTargets.last().nodeTarget)
         secondReady = true
         f.step()
         assertEquals(listOf("第一", "第二"), sentTexts)
+    }
+
+    @Test fun identicalMessageSegmentsNeedTwoDistinctConfirmedOutgoingBubbles() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val sentTexts = mutableListOf<String>()
+        lateinit var f: Fixture
+        f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sentTexts += expectedText
+                f.text = ""
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"一样\n一样"}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(listOf("一样"), sentTexts)
+        val first = ChatMessage("own-one", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "一样", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val afterFirst = f.batch.copy(messages = listOf(first), capturedAtMillis = 2L)
+        assertEquals(SendConfirmationResult.WAITING, f.coordinator.confirmSendResult(afterFirst, f.snapshot))
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertEquals(ReplySegmentTaskStatus.CREATED, segments.records.values.last().status)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendResult(afterFirst.copy(capturedAtMillis = 3L), f.snapshot))
+        f.drain()
+        assertEquals(listOf("一样", "一样"), sentTexts)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.last().status)
+        // The first bubble is already in the sent-message baseline, even with identical text.
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendResult(afterFirst.copy(capturedAtMillis = 4L), f.snapshot))
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        val second = first.copy(id = "own-two")
+        assertEquals(SendConfirmationResult.CONFIRMED,
+            f.coordinator.confirmSendResult(afterFirst.copy(messages = listOf(first, second), capturedAtMillis = 5L), f.snapshot))
+        assertEquals(listOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.SENT),
+            segments.records.values.map { it.status })
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+        assertEquals(1, f.calls)
+    }
+
+    @Test fun nextMessageWaitsForVerifiedEmptyComposerAndCorrectChatAndResetCancelsIt() {
+        val segments = SegmentLedger()
+        lateinit var f: Fixture
+        val sentTexts = mutableListOf<String>()
+        f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sentTexts += expectedText
+                f.text = ""
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, TaskLedger())
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"一号\n二号"}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val first = ChatMessage("first", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "一号", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val afterFirst = f.batch.copy(messages = listOf(first), capturedAtMillis = 2L)
+        assertEquals(SendConfirmationResult.WAITING, f.coordinator.confirmSendResult(afterFirst, f.snapshot))
+        f.text = "人工草稿"
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendResult(afterFirst.copy(capturedAtMillis = 3L), f.snapshot))
+        assertEquals(listOf("一号"), sentTexts)
+        f.text = ""
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendResult(afterFirst.copy(capturedAtMillis = 4L),
+                f.snapshot.copy(chatTitleText = "另一个聊天")))
+        assertEquals(listOf("一号"), sentTexts)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendResult(afterFirst.copy(capturedAtMillis = 5L), f.snapshot))
+        f.coordinator.resetForRuntimeReset()
+        f.drain()
+        assertEquals(listOf("一号"), sentTexts)
+        assertEquals(ReplySegmentTaskStatus.CREATED, segments.records.values.last().status)
+    }
+
+    @Test fun unknownFirstMessageCannotStartLaterSegments() {
+        val sentTexts = mutableListOf<String>()
+        lateinit var f: Fixture
+        f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sentTexts += expectedText
+                f.text = ""
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, SegmentLedger(), TaskLedger())
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"先发\n再发"}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val after = f.batch.copy(capturedAtMillis = 2L)
+        assertEquals(SendConfirmationResult.WAITING, f.coordinator.confirmSendResult(after, f.snapshot))
+        assertEquals(SendConfirmationResult.UNKNOWN, f.coordinator.confirmSendResult(after, f.snapshot))
+        assertTrue(f.coordinator.isSendConfirmationPending)
+        assertEquals(listOf("先发"), sentTexts)
+        assertEquals(1, f.calls)
+    }
+
+    @Test fun rejectedSegmentPersistenceNeverAdvancesNextMessage() {
+        val ledger = object : ReplySegmentTaskRepository {
+            private val records = linkedMapOf<String, ReplySegmentTaskRecord>()
+            override fun find(taskId: String) = records[taskId]
+            override fun findByRequest(requestId: String) = records.values.filter { it.requestId == requestId }
+            override fun findByConversation(conversationKey: String) = records.values.filter { it.conversationKey == conversationKey }
+            override fun save(record: ReplySegmentTaskRecord) { records[record.taskId] = record }
+            override fun update(record: ReplySegmentTaskRecord): Boolean {
+                if (record.status == ReplySegmentTaskStatus.SENT) return false
+                val current = records[record.taskId] ?: return false
+                if (!ReplySegmentTaskTransitions.isAllowed(current.status, record.status)) return false
+                records[record.taskId] = record
+                return true
+            }
+        }
+        val sentTexts = mutableListOf<String>()
+        lateinit var f: Fixture
+        f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sentTexts += expectedText
+                f.text = ""
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, ledger, TaskLedger())
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"第一\n第二"}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val outgoing = ChatMessage("own", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "第一", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        assertEquals(SendConfirmationResult.UNKNOWN,
+            f.coordinator.confirmSendResult(f.batch.copy(messages = listOf(outgoing), capturedAtMillis = 2L), f.snapshot))
+        f.drain()
+        assertEquals(listOf("第一"), sentTexts)
     }
 
     @Test fun unknownSendOutcomeIsNeverResubmittedByPendingRecovery() {
