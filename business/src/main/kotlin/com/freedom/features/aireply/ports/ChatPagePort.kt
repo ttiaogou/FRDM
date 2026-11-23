@@ -653,7 +653,10 @@ interface ChatPagePort {
     /** Identity parsing result for the currently selected greeting; contains no raw platform ID. */
     fun receivedGreetingsCurrentIdentityStatus(): String? = null
 
-    /** Completes one OCR-only greeting-detail read and returns to the confirmed greeting list. */
+    /** Durably records the final confirmed greeting send before a safe BACK is permitted. */
+    fun persistReceivedGreetingConfirmedSend(confirmationId: String): Boolean = false
+
+    /** Requests a safe BACK after confirmed sending; list return must be independently verified. */
     fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean = false
 
     /** Returns from a confirmed received-greetings page so ordinary chat can regain priority. */

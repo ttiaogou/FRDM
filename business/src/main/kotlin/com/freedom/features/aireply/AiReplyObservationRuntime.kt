@@ -630,7 +630,8 @@ class AiReplyObservationRuntime(
     private data class ConfirmedGreetingSend(
         val binding: GreetingChatBinding,
         val confirmationId: String,
-        var finalSampleSaved: Boolean = false
+        var finalSampleSaved: Boolean = false,
+        var sendJournalSaved: Boolean = false
     )
     private var confirmedGreetingSend: ConfirmedGreetingSend? = null
 
@@ -645,6 +646,21 @@ class AiReplyObservationRuntime(
         if (reason != null || batch.windowSessionKey != confirmed.binding.windowSessionKey) {
             onLog("GREETING_SEND_RETURN_BLOCKED reason=${reason ?: "MESSAGE_WINDOW_MISMATCH"}")
             return
+        }
+        if (!confirmed.sendJournalSaved) {
+            val recorded = runCatching {
+                chatPagePort.persistReceivedGreetingConfirmedSend(confirmed.confirmationId)
+            }.getOrDefault(false)
+            if (!recorded) {
+                onLog("GREETING_SEND_RETURN_BLOCKED reason=SEND_FACT_NOT_PERSISTED")
+                scheduleReceivedGreetingsRecoveryRetry(
+                    "收到招呼回复已确认但发送事实持久化失败；保留本次事务，不返回、不重复发送"
+                )
+                return
+            }
+            confirmed.sendJournalSaved = true
+            recordSuccessfulSend(confirmed.confirmationId)
+            onLog("GREETING_SEND_FACT_PERSISTED：已确认发送事实落盘；尚未确认安全返回")
         }
         if (!confirmed.finalSampleSaved) {
             val sampleIndex = runCatching {
@@ -666,7 +682,7 @@ class AiReplyObservationRuntime(
             receivedGreetingsTaskFlow.completeDetailInspection(true)
         }.getOrDefault(false)
         if (returned) {
-            onLog("GREETING_SEND_COMPLETED：发送已确认，最终聊天已保存；已提交原有安全返回事务")
+            onLog("GREETING_RETURN_BACK_ACCEPTED：发送事实及最终聊天已保存；BACK 已提交但仍等待列表双快照确认")
             invalidatePendingMessageRead()
             scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
         } else {
@@ -3312,9 +3328,8 @@ class AiReplyObservationRuntime(
                         onLog("GREETING_SEND_RETURN_BLOCKED reason=CONFIRMATION_ID_MISSING")
                         return true
                     }
-                    recordSuccessfulSend(sendId)
                     confirmedGreetingSend = ConfirmedGreetingSend(bound, sendId)
-                    onLog("GREETING_SEND_CONFIRMED：已核验最终消息段，记录本次联系人发送结果；准备安全返回")
+                    onLog("GREETING_SEND_CONFIRMED：最终消息段已核验；先持久化发送事实再申请安全 BACK")
                     completeConfirmedGreetingSend(batch, snapshot)
                     return true
                 }

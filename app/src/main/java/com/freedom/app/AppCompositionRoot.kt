@@ -78,6 +78,8 @@ import com.freedom.data.database.LocalReplySegmentTaskRepository
 import com.freedom.features.aireply.ai.ReplyTaskRepository
 import com.freedom.features.aireply.ai.ReplySegmentTaskRepository
 import com.freedom.data.social.momo.MomoSayHiTraversalCheckpointDataStore
+import com.freedom.data.social.momo.ReceivedGreetingsSendReturnDataStore
+import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnRepository
 import com.freedom.data.PrivateMessagesTraversalCheckpointDataStore
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
 import com.freedom.features.aireply.domain.contact.ContactMessageLedgerRepository
@@ -152,6 +154,9 @@ class AppCompositionRoot(context: Context) {
     }
     val sayHiTraversalCheckpointRepository: MomoSayHiTraversalCheckpointRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MomoSayHiTraversalCheckpointDataStore(appContext)
+    }
+    val receivedGreetingsSendReturnRepository: ReceivedGreetingsSendReturnRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ReceivedGreetingsSendReturnDataStore(appContext)
     }
     val privateMessagesCheckpointRepository: PrivateMessagesTraversalCheckpointRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         PrivateMessagesTraversalCheckpointDataStore(appContext)
@@ -404,6 +409,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             conversationRepository = root.conversationRepository,
             diagnostics = diagnostics,
             sayHiTraversalCheckpointRepository = root.sayHiTraversalCheckpointRepository,
+            receivedGreetingsSendReturnRepository = root.receivedGreetingsSendReturnRepository,
             ocrReviewRepository = root.ocrReviewRepository,
             sampleArchivePort = root.sampleArchivePort,
             registerSelfNavigation = { targetActivityClass ->

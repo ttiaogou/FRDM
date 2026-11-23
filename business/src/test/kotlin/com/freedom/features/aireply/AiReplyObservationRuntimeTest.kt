@@ -4141,7 +4141,8 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.greetingDetailSuccessfulCompletions)
         assertEquals(0, port.navigateBackCalls) // Never use the private-message return.
         assertTrue(logs.any { it.contains("GREETING_SEND_CONFIRMED") })
-        assertTrue(logs.any { it.contains("GREETING_SEND_COMPLETED") })
+        assertTrue(logs.any { it.contains("GREETING_RETURN_BACK_ACCEPTED") })
+        assertEquals(1, port.greetingSendJournalWrites)
         // The completed transaction invalidates the source binding. Old callbacks cannot
         // archive a third time or initiate a second BACK.
         handleGreetingTestBatch(runtime, confirmedBatch, port.page)
@@ -4212,6 +4213,35 @@ class AiReplyObservationRuntimeTest {
         assertEquals(2, port.persistedChatSamples) // Reuse archived final sample.
         assertEquals(1, sendIdReads) // Never consume a second send proof.
         assertTrue(logs.any { it.contains("GREETING_SEND_RETURN_BLOCKED reason=SAFE_BACK_NOT_CONFIRMED") })
+    }
+
+    @Test
+    fun greetingCannotRequestBackUntilConfirmedSendIsDurablyRecorded() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort().apply { greetingSendJournalAccepted = false }
+        var outcome = com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+        var consumed = 0
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs, greetingDraft = { true },
+            sendConfirmation = { outcome },
+            consumeSendId = { consumed++; "confirmed-send-id" }
+        )
+        activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        runUntil(scheduler, 50) { port.persistedChatSamples == 1 }
+        outcome = com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED
+        val batch = requireNotNull(port.lastPersistedBatch)
+        handleGreetingTestBatch(runtime, batch, port.page)
+        assertEquals(0, port.greetingDetailCompletionCalls)
+        assertEquals(1, port.persistedChatSamples)
+        assertTrue(logs.any { it.contains("SEND_FACT_NOT_PERSISTED") })
+        port.greetingSendJournalAccepted = true
+        handleGreetingTestBatch(runtime, batch, port.page)
+        assertEquals(1, port.greetingDetailCompletionCalls)
+        assertEquals(2, port.persistedChatSamples)
+        assertEquals(1, consumed)
+        assertEquals(2, port.greetingSendJournalWrites)
     }
 
     private fun greetingDraftTestPort(): FakeChatPort {
@@ -6030,6 +6060,8 @@ class AiReplyObservationRuntimeTest {
         var greetingDetailCompletionCalls = 0
         var greetingDetailSuccessfulCompletions = 0
         var greetingDetailReturnAccepted = true
+        var greetingSendJournalAccepted = true
+        var greetingSendJournalWrites = 0
         var receivedGreetingsTraversalStatusValue: ReceivedGreetingsTraversalStatus =
             ReceivedGreetingsTraversalStatus.UNKNOWN
         var receivedGreetingsContactIdentity: ContactRowIdentity? = null
@@ -6135,6 +6167,10 @@ class AiReplyObservationRuntimeTest {
             receivedGreetingsContactIdentity
         override fun receivedGreetingsCurrentRowKeyHash(): String? = receivedGreetingsRowKeyHash
         override fun receivedGreetingsCurrentDisplayName(): String? = receivedGreetingsDisplayName
+        override fun persistReceivedGreetingConfirmedSend(confirmationId: String): Boolean {
+            greetingSendJournalWrites++
+            return greetingSendJournalAccepted && confirmationId.isNotBlank()
+        }
         override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean {
             greetingDetailCompletionCalls++
             if (!greetingDetailReturnAccepted) return false
