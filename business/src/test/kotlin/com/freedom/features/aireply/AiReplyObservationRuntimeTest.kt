@@ -4041,6 +4041,80 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun sendConfirmationReadDeferredExplainsPageAndTaskLeaseWithoutChangingGate() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort()
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs, greetingDraft = { false },
+            sendConfirmationPending = { true }
+        )
+        val method = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+            "sendConfirmationReadDeferredReason", ChatPageSnapshot::class.java, java.lang.Boolean.TYPE
+        ).apply { isAccessible = true }
+        assertEquals("PAGE_NOT_CONFIRMED", method.invoke(runtime, port.page, false))
+        assertEquals("RUN_NOT_STARTED", method.invoke(runtime, port.page, true))
+        val flow = activateGreetingTestFlow(runtime)
+        assertEquals("GREETING_BINDING_MISSING", method.invoke(runtime, port.page, true))
+        readGreetingTestMessages(runtime, port.page)
+        assertTrue(flow.isActive)
+        assertEquals("GREETING_CHAT_HEADER_MISMATCH",
+            method.invoke(runtime, port.page.copy(chatTitleText = "Other chat"), true))
+        assertTrue(flow.releaseOwnership("diagnostic lease test"))
+        assertEquals("TASK_LEASE_NOT_HELD", method.invoke(runtime, port.page, true))
+    }
+
+    @Test
+    fun sendConfirmationOcrRejectedLogsPreciseBindingReasonAndPreservesSendGate() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort().apply { deferNextOcrRead = true }
+        var confirmationCalls = 0
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs, greetingDraft = { false },
+            sendConfirmation = {
+                confirmationCalls++
+                com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+            },
+            sendConfirmationPending = { true }
+        )
+        activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        assertEquals(1, port.ocrAsyncReadRequests)
+        port.page = port.page.copy(chatTitleText = "Other chat")
+        port.completeDeferredOcrRead()
+        runUntil(scheduler, 30) { logs.any { it.contains("AI 发送确认[OCR_REJECTED]") } }
+        assertTrue(logs.any {
+            it.contains("AI 发送确认[OCR_REJECTED] reason=GREETING_CHAT_HEADER_MISMATCH")
+        })
+        assertEquals(0, confirmationCalls)
+        assertEquals(0, port.greetingDetailCompletionCalls)
+        assertEquals(0, port.navigateBackCalls)
+    }
+
+    @Test
+    fun sendConfirmationOcrBatchDiagnosticsDistinguishWindowGenerationAndBatchKey() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort()
+        val runtime = greetingRuntimeFixture(scheduler, port, logs, greetingDraft = { false })
+        val method = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+            "sendConfirmationMessageBatchRejectionReason",
+            ChatPageSnapshot::class.java, ChatMessageBatch::class.java, ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        val source = port.page
+        val batch = port.readRecentMessages(source, 10)
+        assertEquals("OCR_BATCH_WINDOW_MISMATCH",
+            method.invoke(runtime, source, batch.copy(windowSessionKey = "different"), source))
+        val changedInput = requireNotNull(source.inputFieldTarget).copy(
+            window = requireNotNull(source.inputFieldTarget).window.copy(generation = 200L)
+        )
+        val changedPage = source.copy(inputFieldTarget = changedInput)
+        assertEquals("WINDOW_IDENTITY_CHANGED",
+            method.invoke(runtime, source, batch, changedPage))
+    }
+
+    @Test
     fun greetingConfirmedSendArchivesFinalChatAndUsesOnlyGreetingSafeReturn() {
         val scheduler = FakeScheduler()
         val logs = ArrayList<String>()

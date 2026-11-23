@@ -1621,7 +1621,10 @@ class AiReplyObservationRuntime(
                 onLog("AI 发送确认[READ_ONLY_RECHECK]：当前目标聊天与任务租约已验证；重新读取消息，不发送")
                 readVisibleMessages(inspection)
             } else {
-                onLog("AI 发送确认[READ_DEFERRED]：聊天页面或任务租约未验证；保留发送检查点，不重发")
+                val reason = sendConfirmationReadDeferredReason(
+                    inspection, observation.status == ObservationStatus.CONFIRMED_PAGE
+                )
+                onLog("AI 发送确认[READ_DEFERRED] reason=$reason；聊天页面或任务租约未验证；保留发送检查点，不重发")
             }
             return
         }
@@ -3166,6 +3169,79 @@ class AiReplyObservationRuntime(
     }
 
     /**
+     * Diagnostics only: explain the existing read-only send-proof gates without changing
+     * their truth value, ordering, retries, task ownership or recovery route.
+     * Codes contain no raw contact, title, window key or message text.
+     */
+    private fun sendConfirmationReadDeferredReason(
+        snapshot: ChatPageSnapshot,
+        pageConfirmed: Boolean
+    ): String {
+        if (!pageConfirmed) return "PAGE_NOT_CONFIRMED"
+        if (!sessionRunStarted) return "RUN_NOT_STARTED"
+        if (receivedGreetingsTaskActive) {
+            if (!ownsTask(RECEIVED_GREETINGS_TASK_ID)) return "TASK_LEASE_NOT_HELD"
+            return greetingBindingRejectReason(snapshot)?.let { "GREETING_$it" }
+                ?: "GREETING_DETAIL_NOT_VERIFIED"
+        }
+        if (sessionManagerState != SessionManagerState.READING_SESSION) return "SESSION_STATE_NOT_READING"
+        if (recoveryContext.pending) return "RECOVERY_PENDING"
+        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) return "TASK_LEASE_NOT_HELD"
+        return privateSendConfirmationDetailReason(snapshot)
+    }
+
+    private fun privateSendConfirmationDetailReason(snapshot: ChatPageSnapshot): String {
+        if (snapshot.packageName != targetPackage()) return "TARGET_PACKAGE_MISMATCH"
+        if (snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE) return "CHAT_DETAIL_NOT_CONFIRMED"
+        val windowKey = windowSessionKey(snapshot) ?: return "WINDOW_SESSION_UNAVAILABLE"
+        if (currentSessionWindowKey != null && currentSessionWindowKey != windowKey) {
+            return "CHAT_WINDOW_SESSION_MISMATCH"
+        }
+        if (!hasBoundPrivateDetailRecoverySession()) return "SOURCE_CHAT_BINDING_NOT_VERIFIED"
+        if (!isExpectedPrivateSessionDetail(snapshot)) return "CHAT_SESSION_IDENTITY_MISMATCH"
+        if (currentSessionHeaderMatchMode(snapshot) == null) return "CHAT_HEADER_MISMATCH"
+        return "CHAT_DETAIL_NOT_VERIFIED"
+    }
+
+    private fun sendConfirmationOcrRejectionReason(
+        source: ChatPageSnapshot,
+        batch: ChatMessageBatch,
+        fresh: ChatPageSnapshot?,
+        expectedGreetingBinding: GreetingChatBinding?
+    ): String {
+        if (fresh == null) return "FRESH_PAGE_UNAVAILABLE"
+        if (receivedGreetingsTaskActive) {
+            if (expectedGreetingBinding == null) return "GREETING_BINDING_MISSING"
+            if (!ownsTask(RECEIVED_GREETINGS_TASK_ID)) return "TASK_LEASE_NOT_HELD"
+            val bindingReason = greetingBindingRejectReason(fresh, expectedGreetingBinding)
+            if (bindingReason != null) return "GREETING_$bindingReason"
+        } else {
+            if (sessionManagerState != SessionManagerState.READING_SESSION) return "SESSION_STATE_NOT_READING"
+            if (recoveryContext.pending) return "RECOVERY_PENDING"
+            if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) return "TASK_LEASE_NOT_HELD"
+            if (!isVerifiedRecoveredPrivateDetail(fresh)) return privateSendConfirmationDetailReason(fresh)
+        }
+        return sendConfirmationMessageBatchRejectionReason(source, batch, fresh)
+    }
+
+    private fun sendConfirmationMessageBatchRejectionReason(
+        source: ChatPageSnapshot,
+        batch: ChatMessageBatch,
+        fresh: ChatPageSnapshot
+    ): String {
+        if (fresh.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE) return "FRESH_CHAT_DETAIL_NOT_CONFIRMED"
+        if (fresh.packageName != source.packageName) return "FRESH_PACKAGE_MISMATCH"
+        if (!fresh.hasSameWindowIdentity(source)) return "WINDOW_IDENTITY_CHANGED"
+        if (!hasSameWindowSession(source, fresh)) return "WINDOW_GENERATION_OR_SESSION_CHANGED"
+        val sourceWindowKey = windowSessionKey(source) ?: return "SOURCE_WINDOW_SESSION_UNAVAILABLE"
+        if (!receivedGreetingsTaskActive && greetingChatBinding == null &&
+            currentSessionWindowKey != null && currentSessionWindowKey != sourceWindowKey
+        ) return "ACTIVE_WINDOW_BINDING_MISMATCH"
+        if (batch.windowSessionKey != sourceWindowKey) return "OCR_BATCH_WINDOW_MISMATCH"
+        return "GATE_REJECTED_UNCLASSIFIED"
+    }
+
+    /**
      * A structural batch cannot prove the text of a newly sent bubble. Read OCR under a fresh
      * same-conversation and same-task check before giving it to the unchanged send matcher.
      */
@@ -3193,7 +3269,10 @@ class AiReplyObservationRuntime(
                     if (!boundDetail || fresh == null ||
                         !isMessageReadResultCurrent(snapshot, ocrBatch, fresh)
                     ) {
-                        onLog("AI 发送确认[OCR_REJECTED]：新鲜页面、身份或消息批次不匹配；保留待核验发送")
+                        val reason = sendConfirmationOcrRejectionReason(
+                            snapshot, ocrBatch, fresh, greetingBinding
+                        )
+                        onLog("AI 发送确认[OCR_REJECTED] reason=$reason；新鲜页面、身份或消息批次不匹配；保留待核验发送")
                         if (!recoveryContext.pending) scheduleFullInspectionAfter(SEND_CONFIRMATION_RECHECK_DELAY_MS)
                         return@sendOcr
                     }
