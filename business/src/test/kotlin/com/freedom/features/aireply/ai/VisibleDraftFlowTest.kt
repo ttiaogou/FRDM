@@ -17,6 +17,7 @@ class VisibleDraftFlowTest {
         val tasks = mutableListOf<() -> Unit>()
         val scheduledDelays = mutableListOf<Long>()
         val requests = mutableListOf<AiModelRequest>()
+        val decisionRequests = mutableListOf<ModelDecisionRequest>()
         var configuredProvider = AiModelServiceProvider.DEEPSEEK
         var active = true
         var consent = true
@@ -75,7 +76,7 @@ class VisibleDraftFlowTest {
                 }
             },
             isAiReplyActive = { active }, onLog = { logs.add(it) },
-            createProvider = { object : AiModelProvider {
+            createGateway = { EngineBackedAiDecisionGateway(object : AiModelProvider {
                 override fun generate(request: AiModelRequest): AiModelResult {
                     calls++
                     requests.add(request)
@@ -85,6 +86,13 @@ class VisibleDraftFlowTest {
                         throw AiModelEmptyOutputException("BLANK", emptyFinishReason, 10, 0)
                     }
                     return AiModelResult(modelOutput, "fake", "fake", TokenUsage(10, 20), "stop")
+                }
+            }, AiModelCloudConsent { consent }).let { gateway ->
+                object : AiDecisionGateway {
+                    override fun decide(request: ModelDecisionRequest): ModelDecisionOutcome {
+                        decisionRequests.add(request)
+                        return gateway.decide(request)
+                    }
                 }
             } }, backgroundExecutor = Executor { it.run() }, nowMillis = { now }, chooseRandomInt = { min, _ -> min },
             sendPort = sendPort,
@@ -125,6 +133,47 @@ class VisibleDraftFlowTest {
             records[requestKey] = before.copy(status = status, updatedAtMillis = updatedAtMillis)
             return true
         }
+    }
+
+    @Test fun greetingAndPrivateUseTheSameGatewayWithDistinctTaskIdentities() {
+        val greeting = Fixture()
+        assertTrue(greeting.coordinator.generateVisibleDraft(
+            greeting.batch, greeting.snapshot, taskId = AiDecisionTaskIds.RECEIVED_GREETINGS
+        ))
+        assertEquals(1, greeting.decisionRequests.size)
+        assertEquals(AiDecisionTaskIds.RECEIVED_GREETINGS, greeting.decisionRequests.single().taskId)
+        assertEquals(ModelContextScope.CURRENT_WINDOW_ONLY,
+            greeting.decisionRequests.single().constraints.contextScope)
+
+        val privateReply = Fixture()
+        assertTrue(privateReply.coordinator.generateVisibleDraft(
+            privateReply.batch, privateReply.snapshot, taskId = AiDecisionTaskIds.PRIVATE_MESSAGES
+        ))
+        assertEquals(1, privateReply.decisionRequests.size)
+        assertEquals(AiDecisionTaskIds.PRIVATE_MESSAGES, privateReply.decisionRequests.single().taskId)
+        assertEquals(ModelContextScope.CURRENT_WINDOW_ONLY,
+            privateReply.decisionRequests.single().constraints.contextScope)
+        assertEquals(greeting.decisionRequests.single().outputContract,
+            privateReply.decisionRequests.single().outputContract)
+    }
+
+    @Test fun deepSeekEmptyOutputRetryKeepsTheOriginalTaskIdentityAndStrictParsing() {
+        val greeting = Fixture()
+        greeting.emptyFailuresRemaining = 3
+        assertTrue(greeting.coordinator.generateVisibleDraft(
+            greeting.batch, greeting.snapshot, taskId = AiDecisionTaskIds.RECEIVED_GREETINGS
+        ))
+        greeting.drain()
+        assertEquals(3, greeting.calls)
+        assertEquals(3, greeting.decisionRequests.size)
+        assertTrue(greeting.decisionRequests.all { it.taskId == AiDecisionTaskIds.RECEIVED_GREETINGS })
+        assertEquals(
+            listOf(ModelResponseMode.STRICT_JSON, ModelResponseMode.STRICT_JSON,
+                ModelResponseMode.PROMPT_ONLY_JSON),
+            greeting.decisionRequests.map { it.responseMode }
+        )
+        assertTrue(greeting.decisionRequests.all { it.outputContract == AiReplyModelContracts.currentOutput() })
+        assertEquals("", greeting.text)
     }
 
     @Test fun ocrRecognitionToInputWithoutPlatformIdentityOrPreapproval() {

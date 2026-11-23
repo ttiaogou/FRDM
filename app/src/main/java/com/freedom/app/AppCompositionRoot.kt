@@ -31,6 +31,8 @@ import com.freedom.adapters.runtime.android.AiReplyModeRuntimeAdapter
 import com.freedom.adapters.runtime.android.HandlerTaskScheduler
 import com.freedom.adapters.social.momo.MomoAppDescriptor
 import com.freedom.features.aireply.ai.AiReplyDraftCoordinator
+import com.freedom.features.aireply.ai.AiDecisionTaskIds
+import com.freedom.features.aireply.ai.EngineBackedAiDecisionGateway
 import com.freedom.features.aireply.ai.TransportBackedAiModelProvider
 import com.freedom.adapters.social.momo.MomoSocialAdapter
 import com.freedom.application.ports.AiModelCloudConsentSettings
@@ -441,7 +443,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                 monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
             },
             onLog = addLog,
-            createProvider = { configuration ->
+            createGateway = { configuration ->
                 val transport = when (configuration.provider) {
                     AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration)
                     AiModelServiceProvider.OPENAI,
@@ -452,10 +454,13 @@ internal class AccessibilityServiceDependencies internal constructor(
                     AiModelServiceProvider.OPENAI -> "openai"
                     AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport.PROVIDER_NAME
                 }
-                TransportBackedAiModelProvider(
-                    providerName = providerName,
-                    modelName = configuration.modelName,
-                    transport = transport,
+                EngineBackedAiDecisionGateway(
+                    modelProvider = TransportBackedAiModelProvider(
+                        providerName = providerName,
+                        modelName = configuration.modelName,
+                        transport = transport,
+                        cloudConsent = root.aiModelCloudConsent
+                    ),
                     cloudConsent = root.aiModelCloudConsent
                 )
             },
@@ -550,7 +555,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                     batch,
                     snapshot,
                     visitToken = visitToken,
-                    history = history
+                    history = history,
+                    taskId = AiDecisionTaskIds.PRIVATE_MESSAGES
                 )
             },
             onGreetingDraftConversationObserved = { batch, snapshot, _, visitToken ->
@@ -565,7 +571,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                     batch,
                     snapshot,
                     visitToken = visitToken,
-                    history = null
+                    history = null,
+                    taskId = AiDecisionTaskIds.RECEIVED_GREETINGS
                 )
             },
             onSendTransaction = { batch, snapshot ->

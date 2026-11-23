@@ -73,3 +73,18 @@ data class ModelDecisionRequest(
  * A transport failure is never a model WAIT decision.
  */
 typealias ModelDecisionOutcome = AiReplyEvaluation
+
+/** Stable task IDs currently owned by the corresponding business task controllers. */
+object AiDecisionTaskIds {
+    const val RECEIVED_GREETINGS = "AI_REPLY_RECEIVED_GREETINGS"
+    const val PRIVATE_MESSAGES = "AI_REPLY_PRIVATE_MESSAGES"
+}
+
+/** Exact existing decision schema: the Gateway must not invent a second protocol. */
+object AiReplyModelContracts {
+    private const val EXISTING_MAX_DRAFT_CHARS = 2_000
+    fun currentOutput(): ModelOutputContract = ModelOutputContract(
+        name = "ai_reply_decision",
+        jsonSchema = AiReplyDecisionJsonParser.schema(EXISTING_MAX_DRAFT_CHARS)
+    )
+}

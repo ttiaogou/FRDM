@@ -74,7 +74,7 @@ class AiReplyDraftCoordinator(
     private val scheduler: TaskScheduler,
     private val isAiReplyActive: () -> Boolean,
     private val onLog: (String) -> Unit,
-    private val createProvider: (AiModelConfiguration) -> AiModelProvider,
+    private val createGateway: (AiModelConfiguration) -> AiDecisionGateway,
     private val backgroundExecutor: Executor = newDraftExecutor(),
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val chooseRandomInt: (Int, Int) -> Int = { min, max ->
@@ -226,10 +226,16 @@ class AiReplyDraftCoordinator(
     /** 无生成前确认；合并已解析联系人历史与当前窗口消息。 */
     fun generateVisibleDraft(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
                              visitToken: String = batch.windowSessionKey.orEmpty(),
-                             history: VerifiedDraftHistory? = null): Boolean {
+                             history: VerifiedDraftHistory? = null,
+                             taskId: String = AiDecisionTaskIds.PRIVATE_MESSAGES): Boolean {
         val visible = VisibleDraftContext.build(batch, visitToken) ?: return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
         val context = DraftHistoryMerger.merge(visible, batch, history)
-        return generateAndFill(batch, null, snapshot, context, visitToken)
+        val contextScope = if (context.messages.size > visible.messages.size) {
+            ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW
+        } else {
+            ModelContextScope.CURRENT_WINDOW_ONLY
+        }
+        return generateAndFill(batch, null, snapshot, context, visitToken, taskId, contextScope)
     }
 
     /** 仅在平台身份和当前聊天标题均已验证后调用。 */
@@ -238,7 +244,13 @@ class AiReplyDraftCoordinator(
         identity: ContactRowIdentity?,
         snapshot: ChatPageSnapshot,
         context: ConversationContext,
-        visitToken: String = batch.windowSessionKey.orEmpty()
+        visitToken: String = batch.windowSessionKey.orEmpty(),
+        taskId: String = AiDecisionTaskIds.PRIVATE_MESSAGES,
+        contextScope: ModelContextScope = if (context.currentWindowDraft) {
+            ModelContextScope.CURRENT_WINDOW_ONLY
+        } else {
+            ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW
+        }
     ): Boolean {
         val localDraft = context.currentWindowDraft
         val contactId = if (localDraft) VisibleDraftContext.build(batch, visitToken)?.contactId ?: return reject("CHAT_WINDOW_UNAVAILABLE")
@@ -435,7 +447,7 @@ class AiReplyDraftCoordinator(
         val accepted = runCatching {
             backgroundExecutor.execute {
                 try {
-                    generateOnBackground(configuration, context, target, requestGeneration, requestId)
+                    generateOnBackground(configuration, context, target, requestGeneration, requestId, taskId, contextScope)
                 } catch (_: Throwable) {
                     onLog("AI 回复草稿生成失败：[DRAFT_GENERATION_FAILED]")
                     finish("DRAFT_GENERATION_FAILED", requestGeneration)
@@ -456,6 +468,8 @@ class AiReplyDraftCoordinator(
         target: ChatDraftInputTarget,
         requestGeneration: Long,
         requestId: String,
+        taskId: String,
+        contextScope: ModelContextScope,
         emptyRetryAttempt: Int = 0
     ) {
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
@@ -475,18 +489,23 @@ class AiReplyDraftCoordinator(
                 "emptyRetryAttempt=$emptyRetryAttempt；responseMode=$responseMode"
         )
         val evaluation = try {
-            val provider = createProvider(configuration)
-            AiReplyDecisionEngine(
-                modelProvider = provider,
-                cloudConsent = cloudConsent
-            ).decide(
-                AiReplyDecisionInput(
-                    context = context,
-                    contactIdentityVerified = !context.currentWindowDraft,
-                    cooldownActive = false,
+            createGateway(configuration).decide(
+                ModelDecisionRequest(
+                    taskId = taskId,
                     requestId = requestId,
-                    personalization = personalizationRepository.load(),
-                    promptOnlyJsonSchema = promptOnlyJsonSchema
+                    context = context,
+                    constraints = ModelDecisionConstraints(
+                        contextScope = contextScope,
+                        contactIdentityVerified = !context.currentWindowDraft,
+                        cooldownActive = false,
+                        personalization = personalizationRepository.load()
+                    ),
+                    outputContract = AiReplyModelContracts.currentOutput(),
+                    responseMode = if (promptOnlyJsonSchema) {
+                        ModelResponseMode.PROMPT_ONLY_JSON
+                    } else {
+                        ModelResponseMode.STRICT_JSON
+                    }
                 )
             )
         } catch (error: Throwable) {
@@ -542,7 +561,7 @@ class AiReplyDraftCoordinator(
                                     try {
                                         generateOnBackground(
                                             configuration, context, target, requestGeneration, requestId,
-                                            emptyRetryAttempt + 1
+                                            taskId, contextScope, emptyRetryAttempt + 1
                                         )
                                     } catch (_: Throwable) {
                                         finish("DRAFT_GENERATION_FAILED", requestGeneration)
