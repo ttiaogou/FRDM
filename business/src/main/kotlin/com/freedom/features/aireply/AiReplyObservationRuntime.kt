@@ -578,6 +578,9 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsQuietTask: ScheduledTask? = null
     private var receivedGreetingsQuietGeneration = 0L
     private val pageRecoveryVerificationGate = PageRecoveryVerificationGate()
+    /** Limits repeated handoff lease churn while the original private checkpoint stays pending. */
+    private val crossTaskGreetingsHandoffRetryGate = CrossTaskGreetingsHandoffRetryGate()
+    private var crossTaskGreetingsHandoffRetryTask: ScheduledTask? = null
     private var receivedGreetingsRecoveryVerificationPending = false
     private var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
     private var receivedGreetingsRecoveryRetryAttempt = 0
@@ -2328,6 +2331,25 @@ class AiReplyObservationRuntime(
             pageRecoveryVerificationGate.reset(gate)
             return false
         }
+        // Evidence identity is tied to the original private checkpoint, the current run,
+        // and the adapter-scoped destination fingerprint. A new route/window resets the
+        // retry throttle but must earn two NEW page samples before lease transfer.
+        val handoffEvidenceKey = listOf(
+            recoveryContext.checkpointId.orEmpty(),
+            recoveryContext.runGeneration.toString(),
+            observedGreetingFingerprint
+        ).joinToString("|")
+        if (crossTaskGreetingsHandoffRetryGate.evidenceChanged(handoffEvidenceKey)) {
+            crossTaskGreetingsHandoffRetryTask?.cancel()
+            crossTaskGreetingsHandoffRetryTask = null
+            crossTaskGreetingsHandoffRetryGate.reset()
+            pageRecoveryVerificationGate.reset(gate)
+            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_EVIDENCE_CHANGED]：目标页面或检查点身份已变化；重新从第一份稳定快照验证")
+        }
+        if (crossTaskGreetingsHandoffRetryGate.isWaitingOn(handoffEvidenceKey)) {
+            lastPageInspection = inspection
+            return true
+        }
         if (isConversationDraftPending()) {
             pageRecoveryVerificationGate.reset(gate)
             sessionManagerState = SessionManagerState.PAUSED
@@ -2364,11 +2386,22 @@ class AiReplyObservationRuntime(
         val adapterConfirmed = receivedGreetingsTaskFlow.synchronizeRecoveryConfirmation()
         val fingerprintUnchanged =
             runCatching { chatPagePort.receivedGreetingsRecoveryFingerprint() }.getOrNull() == currentFingerprint
-        if (!adapterConfirmed || !fingerprintUnchanged ||
+        if (!adapterConfirmed) {
+            // Admission preflight now checks the SAME adapter-owned transient gates as
+            // beginFromConfirmedList. Never release the private lease while they block.
+            pageRecoveryVerificationGate.reset(gate)
+            sessionManagerState = SessionManagerState.PAUSED
+            lastPageInspection = inspection
+            scheduleCrossTaskGreetingsHandoffReadOnlyRetry(
+                handoffEvidenceKey, "ADAPTER_ADMISSION_NOT_READY"
+            )
+            return true
+        }
+        if (!fingerprintUnchanged ||
             !ensureAndroidRecoveryReady(inspection, "CROSS_TASK_GREETINGS_OWNERSHIP")
         ) {
             pageRecoveryVerificationGate.reset(gate)
-            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_ADAPTER_WAIT]：列表结构或Android执行资格未再次确认；不转交租约")
+            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_ADAPTER_WAIT]：列表窗口指纹或Android执行资格再次变化；不转交租约")
             scheduleFullInspectionAfter(350L)
             lastPageInspection = inspection
             return true
@@ -2402,6 +2435,7 @@ class AiReplyObservationRuntime(
         )
         if (receivedGreetingsTaskActive && ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
             suspendedPrivateRecovery = pending
+            resetCrossTaskGreetingsHandoffRetry()
             receivedGreetingsPageProbePending = false
             unmatchedNavigationObservationPending = false
             lastPageInspection = inspection
@@ -2413,13 +2447,57 @@ class AiReplyObservationRuntime(
         } else {
             // A failed task start must never consume the original checkpoint or expose private
             // gestures without a fresh list proof. Return to the same pending recovery identity.
-            restoreSuspendedPrivateRecovery(pending)
+            val privateRecoveryRestored = restoreSuspendedPrivateRecovery(pending)
             sessionManagerState = SessionManagerState.PAUSED
             lastPageInspection = inspection
-            scheduleFullInspectionAfter(350L)
-            onLog("跨任务恢复[PRIVATE_TO_GREETINGS_ROLLBACK]：收到招呼启动未完成；已恢复原私人消息检查点门禁")
+            pageRecoveryVerificationGate.reset(gate)
+            if (privateRecoveryRestored) {
+                scheduleCrossTaskGreetingsHandoffReadOnlyRetry(
+                    handoffEvidenceKey, "GREETING_START_FAILED"
+                )
+            } else {
+                // Keep the original persistent checkpoint; never force a different task to
+                // run without the matching private recovery identity being restored.
+                onLog("跨任务恢复[PRIVATE_RECOVERY_RESTORE_REJECTED]：原私人消息检查点仍保留；禁止无凭证恢复")
+                scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
+            }
+            onLog(
+                "跨任务恢复[PRIVATE_TO_GREETINGS_ROLLBACK]：收到招呼启动未完成；" +
+                    "privateRecoveryRestored=$privateRecoveryRestored；原私人消息检查点未标记完成"
+            )
         }
         return true
+    }
+
+    /**
+     * Failed cross-task admission waits for the shared recovery cadence. Its timer can
+     * only request a new read-only page sample, never re-claim an operation lease.
+     */
+    private fun scheduleCrossTaskGreetingsHandoffReadOnlyRetry(evidenceKey: String, reason: String) {
+        val retry = crossTaskGreetingsHandoffRetryGate.onAdmissionBlocked(evidenceKey)
+        crossTaskGreetingsHandoffRetryTask?.cancel()
+        val generation = currentRunGeneration()
+        crossTaskGreetingsHandoffRetryTask = scheduler.schedule(retry.delayMs) {
+            crossTaskGreetingsHandoffRetryTask = null
+            if (!crossTaskGreetingsHandoffRetryGate.onReadOnlyRetryDue(evidenceKey)) return@schedule
+            if (generation != currentRunGeneration() || !isAiReplyActive() || !sessionRunStarted ||
+                !recoveryContext.pending ||
+                recoveryContext.sourceTaskId != PRIVATE_MESSAGES_TASK_ID ||
+                messageListCheckpointForUnified == null
+            ) return@schedule
+            scheduleFullInspectionAfter(0L)
+        }
+        onLog(
+            "跨任务恢复[PRIVATE_TO_GREETINGS_READ_ONLY_WAIT]：" +
+                "reason=$reason;attempt=${retry.attempt};delayMs=${retry.delayMs}；" +
+                "保留原私人消息检查点与操作权；同一页面证据未变化前不重复执行交接"
+        )
+    }
+
+    private fun resetCrossTaskGreetingsHandoffRetry() {
+        crossTaskGreetingsHandoffRetryTask?.cancel()
+        crossTaskGreetingsHandoffRetryTask = null
+        crossTaskGreetingsHandoffRetryGate.reset()
     }
 
     /**
@@ -2641,6 +2719,7 @@ class AiReplyObservationRuntime(
         )
         pageInspectionTask?.cancel()
         regionRefreshTask?.cancel()
+        resetCrossTaskGreetingsHandoffRetry()
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
         pageObservationCoordinator.reset()
@@ -3007,6 +3086,7 @@ class AiReplyObservationRuntime(
     }
 
     fun scheduleInitialObservation() {
+        resetCrossTaskGreetingsHandoffRetry()
         val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
         if (failure != null) {
             sessionRunStarted = false
