@@ -74,6 +74,9 @@ import com.freedom.application.ports.OcrReviewRepository
 import com.freedom.application.ports.SessionSampleArchivePort
 import com.freedom.features.conversation.ports.ConversationRepository
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
+import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnJournal
+import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnPhase
+import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnRepository
 
 /**
  * Android-side Momo adapter. It owns app-specific inspectors and controllers and exposes
@@ -96,6 +99,7 @@ internal class MomoSocialAdapter(
     private val conversationRepository: ConversationRepository,
     private val diagnostics: RunDiagnosticsPort,
     private val sayHiTraversalCheckpointRepository: MomoSayHiTraversalCheckpointRepository,
+    private val receivedGreetingsSendReturnRepository: ReceivedGreetingsSendReturnRepository,
     private val ocrReviewRepository: OcrReviewRepository,
     private val sampleArchivePort: SessionSampleArchivePort,
     /** Registers the imminent profile-to-chat return in the unified navigation provenance layer. */
@@ -328,6 +332,8 @@ internal class MomoSocialAdapter(
     @Volatile private var receivedGreetingsEntrySearchGestureInFlight: Boolean = false
     @Volatile private var receivedGreetingsEntrySearchWindowIdentity: String = ""
     @Volatile private var sayHiReadOnlyStage: SayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
+    /** Business-visible read-only wait; never a permission to click or mark a row complete. */
+    @Volatile private var sayHiDeferredSafeEvidenceOnlyWait = false
     @Volatile private var sayHiSelectedGreeting: SayHiSelectedGreeting? = null
     @Volatile private var sayHiSelectedContactIdentity: ContactRowIdentity? = null
     @Volatile private var sayHiSelectedIdentityStatus: MomoSayHiPlatformIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
@@ -336,6 +342,9 @@ internal class MomoSocialAdapter(
     @Volatile private var sayHiDetailBackRecoveryAttempted: Boolean = false
     @Volatile private var sayHiDetailBackSourceWindow: WindowRef? = null
     private val sayHiDetailBackReturnConfirmation = MomoSayHiListReturnConfirmationPolicy()
+    private val sayHiRestoredReturnConfirmation = MomoSayHiListReturnConfirmationPolicy()
+    private val sayHiSendReturnJournal = ReceivedGreetingsSendReturnJournal(receivedGreetingsSendReturnRepository)
+    private var sayHiPendingVerifiedReturnRow: String? = null
     @Volatile private var sayHiProfileReadAttempts: Int = 0
     @Volatile private var sayHiProfileScrollAttempted: Boolean = false
     @Volatile private var sayHiProfileScrollFailed: Boolean = false
@@ -1030,7 +1039,21 @@ internal class MomoSocialAdapter(
             sayHiGestureInFlight || sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE ||
             receivedGreetingsEntrySearchGestureInFlight
         ) {
-            onLog("收到的招呼人工入口接管[REJECTED]：当前列表、窗口或只读阶段未通过重新验证；保持页面不动")
+            // Diagnostic-only second sampling: the original short-circuit guard above is unchanged.
+            // An all-ready sample means the admission state changed between rejection and logging.
+            val admissionDiagnostic = MomoReceivedGreetingsAdmissionDiagnostic(
+                listConfirmed = sayHiNavigationFlowController.isReceivedListConfirmed(),
+                listStructureVisible = runCatching { isReceivedGreetingsListStructureVisible() }.getOrDefault(false),
+                windowTargetPresent = confirmedTarget != null,
+                windowCurrent = runCatching {
+                    confirmedTarget?.let { accessibilityGateway.isWindowCurrent(it.window) } == true
+                }.getOrDefault(false),
+                sayHiGestureInFlight = sayHiGestureInFlight,
+                readOnlyStage = sayHiReadOnlyStage.name,
+                entrySearchGestureInFlight = receivedGreetingsEntrySearchGestureInFlight
+            )
+            onLog("收到的招呼人工入口接管[REJECTED]：" +
+                admissionDiagnostic.toLogFields() + "；保持页面不动")
             return false
         }
 
@@ -1045,7 +1068,7 @@ internal class MomoSocialAdapter(
         sayHiStableCandidateKey = ""
         sayHiStableCandidateTarget = null
         sayHiStableCandidateWindow = null
-        onLog("收到的招呼人工入口接管[ACCEPTED]：复核当前活动窗口和已确认 listview；从当前列表启动只读遍历，不执行入口导航")
+        onLog("收到的招呼人工入口接管[ACCEPTED]：复核当前活动窗口和已确认 listview；从当前列表启动会话遍历，不执行入口导航")
         return true
     }
 
@@ -1290,12 +1313,37 @@ internal class MomoSocialAdapter(
                 val nowUptimeMs = SystemClock.uptimeMillis()
                 val listWindowIdentity = receivedGreetingsListWindowIdentity()
                 if (sayHiDetailBackReturnConfirmation.observe(listWindowIdentity, nowUptimeMs)) {
+                    val pendingRow = sayHiPendingVerifiedReturnRow
+                    if (pendingRow != null) {
+                        val proof = runCatching { sayHiSendReturnJournal.findByRow(pendingRow) }.getOrNull()
+                        if (proof == null || !runCatching {
+                                sayHiSendReturnJournal.confirmVerifiedReturn(proof.rowKeyHash, proof.contactIdHash)
+                            }.getOrDefault(false)
+                        ) {
+                            onLog("GREETING_RETURN_CONFIRMATION_DEFERRED reason=RETURN_FACT_PERSIST_FAILED")
+                            return true
+                        }
+                        // Cursor progress is a consequence of persisted RETURN_VERIFIED, never
+                        // of a BACK gesture callback. The verified source row need not remain unread.
+                        sayHiTraversalState.markProcessedRow(proof.rowKeyHash)
+                        sayHiTraversalState.markProcessedContactHash(proof.contactIdHash)
+                        clearSayHiRowDeferral(proof.rowKeyHash)
+                        sayHiPendingVerifiedReturnRow = null
+                        onLog("GREETING_RETURN_VERIFIED：已通过原列表双快照，独立持久化返回事实并推进游标")
+                    }
+                    if (sayHiUnverifiedDetailReturnPending) {
+                        sayHiSelectedGreeting?.let {
+                            deferSayHiRow(it.rowKey, "CLICK_FEEDBACK_UNVERIFIED_AFTER_DETAIL")
+                        }
+                        sayHiUnverifiedDetailReturnPending = false
+                        onLog("收到招呼单用户隔离：点击来源未核验，仅延期原行；不标记已发送")
+                    }
                     onLog(
                         "收到招呼详情页返回确认：NewSayHiSessionListActivity、当前活动窗口和可见 listview " +
                             "已由连续 ${sayHiDetailBackReturnConfirmation.stableSampleCount} 份新鲜快照确认；" +
                             "window=$listWindowIdentity"
                     )
-                    resetSayHiDetailBackReturnTracking()
+                    clearSayHiSelectedGreeting()
                     return inspectSayHiPageAndAutonomousBrowse(
                         allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
                     )
@@ -2097,16 +2145,9 @@ internal class MomoSocialAdapter(
         ) return true
 
         if (sayHiReadOnlyStage == SayHiReadOnlyStage.DETAIL_BACK_PENDING) {
-            // Only a successfully archived detail inspection marks the row processed before
-            // BACK. Unverified source clicks remain isolated/deferred after a safe return.
-            if (sayHiUnverifiedDetailReturnPending) {
-                sayHiSelectedGreeting?.let {
-                    deferSayHiRow(it.rowKey, "CLICK_FEEDBACK_UNVERIFIED_AFTER_DETAIL")
-                }
-                sayHiUnverifiedDetailReturnPending = false
-                onLog("收到招呼单用户隔离：聊天页结构已确认但原点击事件未核验；安全返回列表后仅延期本用户，继续其余遍历")
-            }
-            clearSayHiSelectedGreeting()
+            // A visible list is not yet a verified return: preserve selected source and
+            // confirmed-send proof until the original two-snapshot return gate finishes.
+            return true
         }
 
         if (sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_BACK_PENDING) {
@@ -2170,13 +2211,21 @@ internal class MomoSocialAdapter(
                 clearSayHiSelectedGreeting()
                 return false
             }
-            if (sayHiTraversalState.isProcessedContactHash(
-                    MomoSayHiIdentityFingerprintPolicy.contactIdHash(resolvedContactId)
-                )) {
-                sayHiTraversalState.markProcessedRow(selected.rowKey)
-                clearSayHiRowDeferral(selected.rowKey)
-                persistSayHiTraversalCheckpoint()
-                onLog("收到招呼只读采集：头像身份对应的联系人本轮已完成 OCR；跳过重复会话，不重复打开")
+            val contactHash = MomoSayHiIdentityFingerprintPolicy.contactIdHash(resolvedContactId)
+            val priorSendRecords = runCatching { receivedGreetingsSendReturnRepository.loadAll() }.getOrElse {
+                onLog("GREETING_JOURNAL_UNAVAILABLE：资料页已验证，但去重凭证不可读；禁止进入聊天")
+                return true
+            }
+            val priorSend = priorSendRecords.firstOrNull { it.contactIdHash == contactHash }
+            if (sayHiTraversalState.isProcessedContactHash(contactHash) || priorSend != null) {
+                if (priorSend == null || priorSend.phase == ReceivedGreetingsSendReturnPhase.RETURN_VERIFIED) {
+                    sayHiTraversalState.markProcessedRow(selected.rowKey)
+                    clearSayHiRowDeferral(selected.rowKey)
+                    persistSayHiTraversalCheckpoint()
+                } else {
+                    deferSayHiRow(selected.rowKey, "CONFIRMED_SEND_AWAITING_RETURN")
+                }
+                onLog("收到招呼任务：已验证联系人具有已确认发送记录；跳过重复会话，不重新输入或发送")
                 clearSayHiSelectedGreeting()
                 return false
             }
@@ -2212,16 +2261,58 @@ internal class MomoSocialAdapter(
         }
 
         if (sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE) return true
+
+        // Durable sent proof outlives the expiring traversal checkpoint. An unread row
+        // with a confirmed send is not eligible for another draft, even after restart.
+        val sendRecords = runCatching { receivedGreetingsSendReturnRepository.loadAll() }.getOrElse {
+            onLog("GREETING_JOURNAL_UNAVAILABLE：发送去重凭证不可读取；停止招呼遍历以避免重复发送")
+            return true
+        }
+        val pendingReturns = sendRecords.filter { it.phase == ReceivedGreetingsSendReturnPhase.SEND_CONFIRMED }
+        if (pendingReturns.isNotEmpty()) {
+            if (!isReceivedGreetingsListConfirmed() || !accessibilityGateway.isWindowCurrent(tree.window) ||
+                !sayHiRestoredReturnConfirmation.observe(receivedGreetingsListWindowIdentity(), SystemClock.uptimeMillis())
+            ) {
+                scheduleSayHiListSnapshotInspection(
+                    delayMs = 650L, reason = "GREETING_RESTORED_SEND_PENDING_LIST_RETURN", retry = false
+                )
+                return true
+            }
+            // Fresh, current, consecutively stable list evidence repairs a RETURN_PENDING
+            // checkpoint from an interrupted process without submitting a second BACK.
+            for (record in pendingReturns) {
+                if (!runCatching {
+                        sayHiSendReturnJournal.confirmVerifiedReturn(record.rowKeyHash, record.contactIdHash)
+                    }.getOrDefault(false)
+                ) {
+                    onLog("GREETING_RESTORED_RETURN_BLOCKED reason=RETURN_FACT_PERSIST_FAILED")
+                    return true
+                }
+                sayHiTraversalState.markProcessedRow(record.rowKeyHash)
+                sayHiTraversalState.markProcessedContactHash(record.contactIdHash)
+                clearSayHiRowDeferral(record.rowKeyHash)
+            }
+            sayHiRestoredReturnConfirmation.reset()
+            onLog("GREETING_RESTORED_RETURN_VERIFIED：已发送联系人经列表双快照完成返回；未重复发送、已补写游标")
+            return true
+        }
+        val confirmedRows = sendRecords.mapTo(HashSet<String>()) { it.rowKeyHash }
         val candidates = inspection.listRows.filter { row ->
             row.unread.status == EvidenceStatus.CONFIRMED && row.unread.value == true
         }
         val unprocessedCandidates = candidates.filter { row ->
             val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
-            !sayHiTraversalState.isProcessedRow(key) && !sayHiTraversalState.isDeferredRow(key)
+            key !in confirmedRows && !sayHiTraversalState.isProcessedRow(key) && !sayHiTraversalState.isDeferredRow(key)
         }
+        // Read-only recovery probe: the old finite click budget is never reset just
+        // because a timer fired. Inspect a NEW unique and independently safe row target.
+        // The traversal ledger requires TWO fresh, equal changed-evidence snapshots.
+        val exhaustedProbePending = inspectExhaustedSayHiSafeTargetEvidence(
+            tree, inspection, candidates, confirmedRows
+        )
         val deferredRetryCandidates = candidates.filter { row ->
             val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
-            sayHiTraversalState.isDeferredRetryDue(key, System.currentTimeMillis())
+            key !in confirmedRows && sayHiTraversalState.isDeferredRetryDue(key, System.currentTimeMillis())
         }
         // New users are isolated from one user's transient failures. Deferred users get a
         // bounded retry opportunity only after currently visible fresh candidates are handled.
@@ -2229,8 +2320,10 @@ internal class MomoSocialAdapter(
             sayHiStableCandidateKey = ""
             sayHiStableCandidateTarget = null
             sayHiStableCandidateWindow = null
-            return false
+            // Do not scroll away while the second safe-evidence observation is pending.
+            return exhaustedProbePending
         }
+        sayHiDeferredSafeEvidenceOnlyWait = false
         val key = MomoSayHiIdentityFingerprintPolicy.rowKey(candidate)
         if (inspection.listRows.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1) {
             deferSayHiRow(key, "ROW_NOT_SAFELY_ACTIONABLE")
@@ -2442,7 +2535,7 @@ internal class MomoSocialAdapter(
             clearSayHiSelectedGreeting()
             onLog("收到招呼头像导航未提交：统一手势协调器拒绝；submission=$submission")
         } else {
-            onLog("收到招呼只读采集：已提交 userlist_item_iv_face 的独立头像点击；后续仅读取身份与消息，不回复")
+            onLog("收到招呼身份采集：已提交 userlist_item_iv_face 独立头像点击；后续进入已验证聊天事务")
         }
         return true
     }
@@ -2478,7 +2571,8 @@ internal class MomoSocialAdapter(
             sayHiGestureInFlight = false
             deferSayHiRow(
                 selected.rowKey,
-                "$SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX:$revalidationFailure"
+                "$SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX:$revalidationFailure",
+                failureEvidenceHash = sayHiSafeTargetEvidenceHash(tree, row, target)
             )
             onLog(
                 "收到招呼整行点击取消：安全区域二次校验失败；reason=$revalidationFailure；" +
@@ -2526,7 +2620,7 @@ internal class MomoSocialAdapter(
                 durationMs = RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS,
                 feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
             ),
-            description = "陌陌收到招呼用户行安全区域进入详情（只读 OCR）",
+            description = "陌陌收到招呼用户行安全区域进入聊天详情",
             executionContext = executionContext
         )
         val submission = runCatching {
@@ -2628,7 +2722,7 @@ internal class MomoSocialAdapter(
                 onLog("收到招呼详情导航未提交：统一手势协调器拒绝；submission=$submission")
             }
         } else {
-            onLog("收到招呼只读采集：头像身份步骤已完成；已提交第二阶段用户行安全区域点击；头像区域保留为候选，仅排除 VIP/SVIP、财富等级及独立行内功能控件；若命中头像并进入资料页则复用安全 BACK；明确禁止输入和发送")
+            onLog("收到招呼会话导航：头像身份步骤已完成；已提交第二阶段用户行安全区域点击；头像区域保留为候选，仅排除 VIP/SVIP、财富等级及独立行内功能控件；若命中头像并进入资料页则复用安全 BACK；进入聊天后由统一授权执行回复")
         }
         return true
     }
@@ -2754,8 +2848,107 @@ internal class MomoSocialAdapter(
         sayHiRowTapHitReason = ""
     }
 
-    private fun deferSayHiRow(rowKey: String, reason: String) {
-        val result = sayHiTraversalState.deferRow(rowKey, reason, System.currentTimeMillis())
+
+    /**
+     * A diagnostic hash of the CURRENT row's safe geometry and existing structural
+     * fingerprint. No unredacted name, chat content, node handle, or click coordinate
+     * survives beyond the current evidence check.
+     */
+    private fun sayHiSafeTargetEvidenceHash(
+        tree: AccessibilityTreeSnapshot, row: MomoSayHiListRow, target: MomoSayHiTapTarget
+    ): String {
+        val evidence = listOf(
+            MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree),
+            row.bounds.toString(), row.rowPath.joinToString("/"),
+            target.path.childIndices.joinToString("/"),
+            target.targetBounds.toString(), target.preferredBounds.toString(),
+            target.excludedBounds.joinToString("|") { it.toString() }
+        ).joinToString("\u0000")
+        return java.security.MessageDigest.getInstance("SHA-256")
+            .digest(evidence.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Never rearm an exhausted row from a timestamp or a mere changed list position.
+     * A current complete list, unique row, safe recomputed target, active window and
+     * two strictly fresh snapshots are all required; this method NEVER clicks.
+     */
+    private fun inspectExhaustedSayHiSafeTargetEvidence(
+        tree: AccessibilityTreeSnapshot,
+        inspection: MomoSayHiPageInspection,
+        candidates: List<MomoSayHiListRow>,
+        confirmedRows: Set<String>
+    ): Boolean {
+        if (!sayHiTraversalState.hasExhaustedSafeTargetRows ||
+            inspection.kind != MomoSayHiPageKind.RECEIVED_GREETINGS_LIST ||
+            !sayHiNavigationFlowController.isReceivedListConfirmed() ||
+            !accessibilityGateway.isWindowCurrent(tree.window) ||
+            sayHiGestureInFlight || sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE
+        ) return false
+        val index = NodeTreeIndex(tree)
+        val now = System.currentTimeMillis()
+        var verificationScheduled = false
+        for (row in candidates) {
+            val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
+            if (key in confirmedRows || !sayHiTraversalState.isDeferredRow(key) ||
+                sayHiTraversalState.shouldRetryDeferredRow(key) ||
+                candidates.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1
+            ) continue
+            val namePath = row.namePath ?: continue
+            val target = MomoSayHiAvatarTargetPolicy.resolveRowTarget(
+                index, NodePath(row.rowPath), namePath
+            ) ?: continue
+            if (sayHiTapReadiness(tree, target) != MomoSayHiTapReadiness.READY) continue
+            val selected = SayHiSelectedGreeting(
+                rowKey = key,
+                displayName = row.displayName.value.orEmpty(),
+                greetingText = row.greetingText.value,
+                timestampText = row.timestampText.value,
+                sourceWindow = tree.window,
+                sourceStructureFingerprint =
+                    MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree)
+            )
+            if (revalidateSayHiRowTarget(tree, row, target, selected) != null) continue
+            val evidenceHash = sayHiSafeTargetEvidenceHash(tree, row, target)
+            val result = sayHiTraversalState.observeExhaustedSafeTargetEvidence(
+                rowKey = key,
+                evidenceHash = evidenceHash,
+                windowKey = sayHiWindowStabilityKey(tree.window),
+                capturedAtEpochMs = tree.capturedAtEpochMs,
+                nowEpochMs = now
+            )
+            when (result) {
+                MomoSayHiTraversalState.SafeEvidenceRecovery.BASELINE_RECORDED ->
+                    onLog("GREETING_DEFERRED_RECOVERY_BASELINE：历史断点缺少失败场景证据；只记录安全基线，不恢复点击额度")
+                MomoSayHiTraversalState.SafeEvidenceRecovery.WAIT_SECOND_SNAPSHOT -> {
+                    onLog("GREETING_DEFERRED_RECOVERY_VERIFYING：新的安全区域证据待第二份新鲜快照确认；未派发手势")
+                    verificationScheduled = true
+                }
+                MomoSayHiTraversalState.SafeEvidenceRecovery.REARMED -> {
+                    sayHiDeferredSafeEvidenceOnlyWait = false
+                    onLog("GREETING_DEFERRED_RECOVERY_REARMED：行身份、窗口及变更后的安全区域已双快照确认；恢复有限点击预算，不计入成功")
+                    verificationScheduled = true
+                }
+                MomoSayHiTraversalState.SafeEvidenceRecovery.NOT_READY -> Unit
+            }
+        }
+        if (verificationScheduled) {
+            scheduleSayHiListSnapshotInspection(
+                delayMs = 1_500L,
+                reason = "DEFERRED_SAFE_TARGET_READ_ONLY_PROOF",
+                retry = false
+            )
+        }
+        return verificationScheduled
+    }
+
+    private fun deferSayHiRow(
+        rowKey: String, reason: String, failureEvidenceHash: String? = null
+    ) {
+        val result = sayHiTraversalState.deferRow(
+            rowKey, reason, System.currentTimeMillis(), failureEvidenceHash
+        )
         onLog(
             "收到招呼单用户隔离[DEFERRED]：rowKeyHash=$rowKey；reason=$reason；" +
                 "cooldown=${result.delayMs}ms；backoffStage=${result.backoffStage}；" +
@@ -3586,11 +3779,59 @@ internal class MomoSocialAdapter(
 
     override fun receivedGreetingsCurrentIdentityStatus(): String? = sayHiSelectedIdentityStatus.name
 
-    override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean {
+    override fun persistReceivedGreetingConfirmedSend(confirmationId: String): Boolean {
+        if (confirmationId.isBlank() ||
+            sayHiReadOnlyStage != SayHiReadOnlyStage.WAITING_DETAIL ||
+            sayHiRowTapFeedbackState != SayHiRowTapFeedbackState.VERIFIED
+        ) return false
+        val selected = sayHiSelectedGreeting ?: return false
+        val verifiedId = selectedContactId()?.takeIf {
+            sayHiSelectedIdentityStatus == MomoSayHiPlatformIdentityStatus.CONFIRMED &&
+                sayHiSelectedContactIdentity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        } ?: return false
+        val saved = runCatching {
+            sayHiSendReturnJournal.recordConfirmedSend(
+                selected.rowKey,
+                MomoSayHiIdentityFingerprintPolicy.contactIdHash(verifiedId),
+                MomoSayHiIdentityFingerprintPolicy.contactIdHash(confirmationId)
+            )
+        }.getOrDefault(false)
+        onLog(
+            if (saved) "GREETING_SEND_FACT_PERSISTED：发送证明已与原始招呼行及平台身份哈希绑定"
+            else "GREETING_SEND_FACT_REJECTED：发送确认未可靠落盘；禁止推进返回"
+        )
+        return saved
+    }
+
+    override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean =
+        completeReceivedGreetingDetailInspectionInternal(success, "DETAIL_SAMPLE_ARCHIVE_FAILED")
+
+    override fun deferReceivedGreetingAfterModelFailure(): Boolean {
+        val selected = sayHiSelectedGreeting ?: return false
+        // Never allow an unconfirmed model failure to overwrite an existing send fact.
+        val priorSend = runCatching { sayHiSendReturnJournal.findByRow(selected.rowKey) }.getOrNull()
+        if (priorSend?.phase == ReceivedGreetingsSendReturnPhase.SEND_CONFIRMED) return false
+        return completeReceivedGreetingDetailInspectionInternal(false, "DRAFT_MODEL_FAILURE")
+    }
+
+    private fun completeReceivedGreetingDetailInspectionInternal(
+        success: Boolean, failureReason: String
+    ): Boolean {
         if (sayHiReadOnlyStage != SayHiReadOnlyStage.WAITING_DETAIL ||
             sayHiRowTapFeedbackState != SayHiRowTapFeedbackState.VERIFIED
         ) return false
         val selected = sayHiSelectedGreeting ?: return false
+        if (success) {
+            val contactHash = selectedContactId()
+                ?.let(MomoSayHiIdentityFingerprintPolicy::contactIdHash) ?: return false
+            val proof = runCatching { sayHiSendReturnJournal.findByRow(selected.rowKey) }.getOrNull()
+            if (proof == null || proof.contactIdHash != contactHash ||
+                proof.phase != ReceivedGreetingsSendReturnPhase.SEND_CONFIRMED
+            ) {
+                onLog("GREETING_RETURN_BLOCKED reason=SEND_FACT_NOT_VERIFIED")
+                return false
+            }
+        }
         val confirmedDetail = inspectCurrentChatDetailFingerprint()
         if (confirmedDetail == null || sayHiGestureInFlight) {
             onLog("收到招呼详情采集完成回退准入拒绝：当前活动窗口未通过统一聊天详情页指纹或仍有手势执行")
@@ -3598,35 +3839,31 @@ internal class MomoSocialAdapter(
         }
         var dispatchedBackWindow: WindowRef? = null
         val accepted = requestChatActivityBack(
-            reason = "收到招呼只读详情采集完成",
+            reason = if (success) "收到招呼发送确认后返回列表" else "收到招呼未发送延期后安全返回列表",
             expectedWindow = confirmedDetail.first,
             onSubmitted = { window -> dispatchedBackWindow = window }
         )
         if (accepted) {
             if (success) {
-                sayHiTraversalState.markProcessedRow(selected.rowKey)
-                selectedContactId()?.let { contactId ->
-                    sayHiTraversalState.markProcessedContactHash(
-                        MomoSayHiIdentityFingerprintPolicy.contactIdHash(contactId)
-                    )
-                }
-                clearSayHiRowDeferral(selected.rowKey)
+                // A gesture accepted by Android does not prove navigation completed.
+                // The source row stays unprocessed until the list double snapshot succeeds.
+                sayHiPendingVerifiedReturnRow = selected.rowKey
             } else {
-                // A safe BACK only closes the detail page. It is not proof that the OCR sample
-                // was archived, so keep this row eligible for the existing bounded retry flow.
-                deferSayHiRow(selected.rowKey, "DETAIL_SAMPLE_ARCHIVE_FAILED")
+                // A safe BACK only closes the detail page; it never proves a reply was sent.
+                // Retain the existing deferral behavior for incomplete transactions.
+                deferSayHiRow(selected.rowKey, failureReason)
             }
             sayHiReadOnlyStage = SayHiReadOnlyStage.DETAIL_BACK_PENDING
             sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
             resetSayHiDetailBackReturnTracking()
             sayHiDetailBackSourceWindow = dispatchedBackWindow
             onLog(
-                "收到招呼只读 OCR 完成：样本状态=${if (success) "已保存，已记录处理" else "读取/归档未成功，已延期且不标记完成"}；" +
+                "收到招呼安全 BACK 已提交：本次聊天记录=${if (success) "已保存，待列表验证后记为已处理" else "未发送完成，已延期且不标记成功"}；" +
                     "ChatActivity 已通过窗口/弹层安全检查派发 VERIFIED_NAVIGATION_BACK；" +
-                    "等待 NewSayHiSessionListActivity 与 listview 容器双重确认；本流程未调用 AI 输入回调、输入框或发送控件"
+                    "等待 NewSayHiSessionListActivity 与 listview 容器双重确认；发送成功已由上层独立核验"
             )
         } else {
-            onLog("收到招呼只读 OCR 完成，但 ChatActivity 未通过安全 BACK 检查或系统拒绝返回；暂停后续用户处理")
+            onLog("收到招呼发送后返回暂未通过 ChatActivity 安全 BACK 检查；保持原会话等待复核")
         }
         return accepted
     }
@@ -3647,6 +3884,11 @@ internal class MomoSocialAdapter(
         // destination from the Activity event or an already-consumed gesture callback.
         return isSayHiProfileSurfacePresent()
     }
+
+    override fun isReceivedGreetingsWaitingForSafeTargetEvidence(): Boolean =
+        sayHiDeferredSafeEvidenceOnlyWait && sayHiTraversalState.hasExhaustedSafeTargetRows &&
+            !sayHiTraversalState.hasRetryableDeferredRows() &&
+            sayHiReadOnlyStage == SayHiReadOnlyStage.IDLE
 
     override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus {
         val currentActivity = activityClass()
@@ -4038,6 +4280,38 @@ internal class MomoSocialAdapter(
                 )
             }
         }
+        // Recovery polls are intentionally read-only. The snapshot coordinator calls
+        // this path with allowAutonomousScroll=false: it must still examine exhausted
+        // rows and arrange the next read; no gesture is ever issued by the probe.
+        if (!allowAutonomousScroll &&
+            result.kind == MomoSayHiPageKind.RECEIVED_GREETINGS_LIST &&
+            sayHiNavigationFlowController.isReceivedListConfirmed() &&
+            !result.truncated && !result.queryBudgetExceeded && !tree.truncated &&
+            result.containerFound && result.containerMatchCountExact &&
+            !result.containerAmbiguous && sayHiTraversalState.hasExhaustedSafeTargetRows &&
+            sayHiReadOnlyStage == SayHiReadOnlyStage.IDLE &&
+            !sayHiGestureInFlight && accessibilityGateway.isWindowCurrent(tree.window)
+        ) {
+            val provenSends = runCatching {
+                receivedGreetingsSendReturnRepository.loadAll()
+            }.getOrNull()
+            if (provenSends != null) {
+                val pendingProof = inspectExhaustedSayHiSafeTargetEvidence(
+                    tree, result,
+                    result.listRows.filter { it.unread.status == EvidenceStatus.CONFIRMED && it.unread.value == true },
+                    provenSends.mapTo(HashSet()) { it.rowKeyHash }
+                )
+                if (!pendingProof) {
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = 30_000L,
+                        reason = "DEFERRED_SAFE_TARGET_READ_ONLY_POLL",
+                        retry = false
+                    )
+                }
+            } else {
+                onLog("GREETING_DEFERRED_RECOVERY_JOURNAL_UNAVAILABLE：保留安全点击失败断点，不重试点击")
+            }
+        }
         var greetingRowActionHandled = false
         if (allowAutonomousScroll && result.kind == MomoSayHiPageKind.RECEIVED_GREETINGS_LIST &&
             sayHiNavigationFlowController.isReceivedListConfirmed()
@@ -4104,7 +4378,7 @@ internal class MomoSocialAdapter(
         val onlineStatus = profile?.online?.status?.name ?: "N/A"
         val biographyStatus = profile?.biography?.status?.name ?: "N/A"
         onLog(
-            "陌陌收到招呼只读采集：页面=${result.kind}；Activity=${result.activityClass}; " +
+            "陌陌收到招呼任务观察：页面=${result.kind}；Activity=${result.activityClass}; " +
                 "顶部推荐头像已排除=${result.excludedRecommendationCardCount}；下方纵向招呼行=${result.listRows.size}； " +
                 "扫描节点=${result.nodeCount}；可见节点=${result.visibleNodeCount}；" +
                 "容器命中=${result.containerFound}；容器候选=${result.containerMatchCount}；" +
@@ -4182,7 +4456,13 @@ internal class MomoSocialAdapter(
                     onLog("收到招呼自主浏览暂未完成：已确认当前 listview 不可滚动，但仍有 ${sayHiTraversalState.deferredRowCount} 个用户待恢复；保留断点并等待回访，不报告完成")
                     scheduleSayHiListSnapshotInspection(2_000L, "DEFERRED_ROWS_WAIT_FOR_FRESH_LIST", retry = false)
                 } else {
-                    onLog("收到招呼自主浏览暂停：${sayHiTraversalState.deferredRowCount} 个用户的安全点击区域已达到有限复核上限；保留断点，不再自动重试、不报告完成")
+                    sayHiDeferredSafeEvidenceOnlyWait = true
+                    onLog("收到招呼安全点击已耗尽[READ_ONLY_WAIT]：${sayHiTraversalState.deferredRowCount} 个用户等待新的稳定安全区域证据；不直接重试点击、不报告完成")
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = 30_000L,
+                        reason = "DEFERRED_SAFE_TARGET_READ_ONLY_POLL",
+                        retry = false
+                    )
                 }
                 return
             }
@@ -4191,7 +4471,13 @@ internal class MomoSocialAdapter(
         }
         if (sayHiAutonomousBrowseController.isFinished() && sayHiTraversalState.hasDeferredRows) {
             if (!hasRetryableSayHiDeferredRows()) {
-                onLog("收到招呼自主浏览暂停：待恢复用户均已达到安全点击区域复核上限；保留断点，不再启动自动回访、不报告完成")
+                sayHiDeferredSafeEvidenceOnlyWait = true
+                onLog("收到招呼安全点击已耗尽[READ_ONLY_WAIT]：保留延期行和失败证据；30秒后观察页面变化，不直接清空失败次数")
+                scheduleSayHiListSnapshotInspection(
+                    delayMs = 30_000L,
+                    reason = "DEFERRED_SAFE_TARGET_READ_ONLY_POLL",
+                    retry = false
+                )
                 return
             }
             when {
@@ -4229,6 +4515,9 @@ internal class MomoSocialAdapter(
             }
         }
         val now = System.currentTimeMillis()
+        if (!sayHiAutonomousBrowseController.isFinished() || hasRetryableSayHiDeferredRows()) {
+            sayHiDeferredSafeEvidenceOnlyWait = false
+        }
         if (!sayHiAutonomousBrowseController.shouldScroll(signature, now, list.scrollable)) {
             if (sayHiAutonomousBrowseController.isFinished()) {
                 if (!sayHiTraversalState.hasDeferredRows) {

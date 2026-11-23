@@ -63,7 +63,7 @@ enum class AiModelServiceProvider(
 
 /**
  * 用户为所选云端模型服务商配置的参数。
- * toString() 不包含 API Key，避免日志意外泄露。
+ * toString() 不包含 API Key、原始模型名称或接口地址，避免日志意外泄露。
  */
 data class AiModelConfiguration(
     val apiBaseUrl: String = AiModelServiceProvider.DEEPSEEK.defaultBaseUrl,
@@ -120,7 +120,8 @@ data class AiModelConfiguration(
     override fun toString(): String =
         "AiModelConfiguration(provider=${provider.storageKey}, " +
             "apiBaseUrl=${if (apiBaseUrl.isBlank()) "[EMPTY]" else "[CONFIGURED]"}, " +
-            "modelName=$modelName, apiKey=[REDACTED], temperature=$temperature, " +
+            "modelName=${if (modelName.isBlank()) "[EMPTY]" else "[CONFIGURED]"}, " +
+            "apiKey=[REDACTED], temperature=$temperature, " +
             "maxOutputTokens=$maxOutputTokens, requestTimeoutMillis=$requestTimeoutMillis)"
 
     companion object {

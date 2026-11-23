@@ -1,6 +1,11 @@
 package com.freedom.features.aireply.ai
 
 /** 仅记录技术故障元数据，禁止保留异常消息、URL、响应正文或凭据。 */
+/** Classification is diagnostic only and must never control retry or sending. */
+enum class AiModelOutputCategory {
+    VALID_DECISION, EMPTY_MODEL_OUTPUT, MODEL_OUTPUT_INVALID, MODEL_CALL_FAILED, LOCAL_PRECHECK_BLOCKED
+}
+
 enum class AiModelCallStage {
     MODEL_CALL, CONFIGURATION, ENDPOINT, REQUEST_ENCODING, CONNECTION_OPEN,
     CONNECTION_SETUP, REQUEST_WRITE, RESPONSE_STATUS, RESPONSE_READ, RESPONSE_PARSE
@@ -76,7 +81,7 @@ data class AiModelCallDiagnostics(
         }
         private fun safeContentState(value: String?): String =
             value?.takeIf { it in setOf("ABSENT", "NULL", "BLANK", "NON_STRING") } ?: "UNKNOWN"
-        private fun safeFinishReason(value: String?): String = when (value) {
+        fun safeFinishReason(value: String?): String = when (value) {
             null -> "UNKNOWN"
             "stop", "length", "content_filter", "tool_calls", "function_call" -> value
             else -> "REDACTED"

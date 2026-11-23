@@ -100,12 +100,19 @@ internal class ReceivedGreetingsTaskExecutor(
     fun observePageReadOnly(): Boolean =
         runCatching { pagePort.observeReceivedGreetingsPage() }.getOrDefault(false)
 
+    fun isWaitingForSafeTargetEvidence(): Boolean =
+        runCatching { pagePort.isReceivedGreetingsWaitingForSafeTargetEvidence() }.getOrDefault(false)
+
     fun traversalStatus(): ReceivedGreetingsTraversalStatus =
         runCatching { pagePort.receivedGreetingsTraversalStatus() }
             .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
 
     fun currentDisplayName(): String? = runCatching {
         pagePort.receivedGreetingsCurrentDisplayName()
+    }.getOrNull()
+
+    fun currentRowKeyHash(): String? = runCatching {
+        pagePort.receivedGreetingsCurrentRowKeyHash()
     }.getOrNull()
 
     fun currentContactIdentity(): ContactRowIdentity? = runCatching {
@@ -144,6 +151,12 @@ internal class ReceivedGreetingsTaskExecutor(
     fun synchronizeRecoveryConfirmation(): Boolean =
         runCatching { pagePort.synchronizeReceivedGreetingsRecoveryConfirmation() }
             .getOrDefault(false)
+
+    /** Keeps the current greeting unprocessed; only the adapter may safely submit BACK. */
+    fun deferAfterModelFailure(): Boolean {
+        if (!ownsTask()) return false
+        return runCatching { pagePort.deferReceivedGreetingAfterModelFailure() }.getOrDefault(false)
+    }
 
     /** Returns from a verified greetings boundary only when this task still owns UI operations. */
     fun returnForPriorityCheck(): Boolean {

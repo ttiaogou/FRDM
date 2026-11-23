@@ -31,6 +31,10 @@ import com.freedom.adapters.runtime.android.AiReplyModeRuntimeAdapter
 import com.freedom.adapters.runtime.android.HandlerTaskScheduler
 import com.freedom.adapters.social.momo.MomoAppDescriptor
 import com.freedom.features.aireply.ai.AiReplyDraftCoordinator
+import com.freedom.features.aireply.ai.AiDecisionTaskIds
+import com.freedom.features.aireply.ai.EngineBackedAiDecisionGateway
+import com.freedom.features.aireply.policy.AiReplyPolicyRegistry
+import com.freedom.features.aireply.policy.PolicyRegistry
 import com.freedom.features.aireply.ai.TransportBackedAiModelProvider
 import com.freedom.adapters.social.momo.MomoSocialAdapter
 import com.freedom.application.ports.AiModelCloudConsentSettings
@@ -78,6 +82,8 @@ import com.freedom.data.database.LocalReplySegmentTaskRepository
 import com.freedom.features.aireply.ai.ReplyTaskRepository
 import com.freedom.features.aireply.ai.ReplySegmentTaskRepository
 import com.freedom.data.social.momo.MomoSayHiTraversalCheckpointDataStore
+import com.freedom.data.social.momo.ReceivedGreetingsSendReturnDataStore
+import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnRepository
 import com.freedom.data.PrivateMessagesTraversalCheckpointDataStore
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
 import com.freedom.features.aireply.domain.contact.ContactMessageLedgerRepository
@@ -134,6 +140,8 @@ class AppCompositionRoot(context: Context) {
     val aiReplyPersonalizationRepository: AiReplyPersonalizationRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         AiReplyPersonalizationStore(appContext)
     }
+    /** Application-owned immutable policy registry, shared with the service-scoped draft flow. */
+    val aiReplyPolicyRegistry: PolicyRegistry = AiReplyPolicyRegistry
     val ocrReviewRepository: OcrReviewRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OcrReviewStore(appContext)
     }
@@ -152,6 +160,9 @@ class AppCompositionRoot(context: Context) {
     }
     val sayHiTraversalCheckpointRepository: MomoSayHiTraversalCheckpointRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MomoSayHiTraversalCheckpointDataStore(appContext)
+    }
+    val receivedGreetingsSendReturnRepository: ReceivedGreetingsSendReturnRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ReceivedGreetingsSendReturnDataStore(appContext)
     }
     val privateMessagesCheckpointRepository: PrivateMessagesTraversalCheckpointRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         PrivateMessagesTraversalCheckpointDataStore(appContext)
@@ -404,6 +415,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             conversationRepository = root.conversationRepository,
             diagnostics = diagnostics,
             sayHiTraversalCheckpointRepository = root.sayHiTraversalCheckpointRepository,
+            receivedGreetingsSendReturnRepository = root.receivedGreetingsSendReturnRepository,
             ocrReviewRepository = root.ocrReviewRepository,
             sampleArchivePort = root.sampleArchivePort,
             registerSelfNavigation = { targetActivityClass ->
@@ -423,7 +435,7 @@ internal class AccessibilityServiceDependencies internal constructor(
         )
     }
     val momoSocialAdapter: MomoSocialAdapter by momoSocialAdapterDelegate
-    private val aiReplyDraftCoordinatorDelegate = lazy(LazyThreadSafetyMode.NONE) {
+    private val aiReplyDraftCoordinatorDelegate: Lazy<AiReplyDraftCoordinator> = lazy(LazyThreadSafetyMode.NONE) {
         AiReplyDraftCoordinator(
             configurationRepository = root.aiModelConfigurationRepository,
             cloudConsent = root.aiModelCloudConsent,
@@ -435,7 +447,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                 monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
             },
             onLog = addLog,
-            createProvider = { configuration ->
+            createGateway = { configuration ->
                 val transport = when (configuration.provider) {
                     AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration)
                     AiModelServiceProvider.OPENAI,
@@ -446,20 +458,29 @@ internal class AccessibilityServiceDependencies internal constructor(
                     AiModelServiceProvider.OPENAI -> "openai"
                     AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport.PROVIDER_NAME
                 }
-                TransportBackedAiModelProvider(
-                    providerName = providerName,
-                    modelName = configuration.modelName,
-                    transport = transport,
+                EngineBackedAiDecisionGateway(
+                    modelProvider = TransportBackedAiModelProvider(
+                        providerName = providerName,
+                        modelName = configuration.modelName,
+                        transport = transport,
+                        cloudConsent = root.aiModelCloudConsent
+                    ),
                     cloudConsent = root.aiModelCloudConsent
                 )
             },
             replyTaskRepository = root.replyTaskRepository,
             replySegmentTaskRepository = root.replySegmentTaskRepository,
-            captureTaskLease = { root.taskCoordinator.currentLease() }
+            policyRegistry = root.aiReplyPolicyRegistry,
+            captureTaskLease = { root.taskCoordinator.currentLease() },
+            onPreSendModelFailure = { failure ->
+                // This callback is dispatched asynchronously onto the runtime scheduler.
+                // It cannot grant a new task lease or authorize a stale greeting BACK.
+                aiReplyObservationRuntime.onPreSendModelFailure(failure)
+            }
         )
     }
-    val aiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate
-    val aiReplyObservationRuntime by lazy(LazyThreadSafetyMode.NONE) {
+    val aiReplyDraftCoordinator: AiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate
+    val aiReplyObservationRuntime: AiReplyObservationRuntime by lazy(LazyThreadSafetyMode.NONE) {
         // The history preloaded before OCR is consumed by the later draft callback. Keeping this
         // cache at the single runtime composition boundary avoids reading the same repository
         // rows again after OCR completes.
@@ -485,10 +506,10 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             prepareDraftHistory = { identity, snapshot ->
                 preparedDraftHistory = null
-                val verifiedIdentity = identity?.takeIf {
-                    it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
-                        !it.contactId.isNullOrBlank()
+                val privatePolicy = requireNotNull(root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.PRIVATE_MESSAGES)) {
+                    "Private messages policy is not registered"
                 }
+                val verifiedIdentity = privatePolicy.contextPolicy().verifiedHistoryIdentity(identity)
                 if (verifiedIdentity != null) {
                     val history = com.freedom.features.conversation.domain.contact.ContactHistoryResolver(
                         root.conversationRepository
@@ -504,10 +525,10 @@ internal class AccessibilityServiceDependencies internal constructor(
                 }
             },
             onDraftConversationObserved = { batch, snapshot, identity, visitToken ->
-                val verifiedIdentity = identity?.takeIf {
-                    it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
-                        !it.contactId.isNullOrBlank()
+                val privatePolicy = requireNotNull(root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.PRIVATE_MESSAGES)) {
+                    "Private messages policy is not registered"
                 }
+                val verifiedIdentity = privatePolicy.contextPolicy().verifiedHistoryIdentity(identity)
                 val history = if (verifiedIdentity != null) {
                     preparedDraftHistory?.also {
                         preparedDraftHistory = null
@@ -539,14 +560,37 @@ internal class AccessibilityServiceDependencies internal constructor(
                     batch,
                     snapshot,
                     visitToken = visitToken,
-                    history = history
+                    history = privatePolicy.contextPolicy().selectHistory(history),
+                    taskId = privatePolicy.taskId
                 )
             },
-            onSendConfirmation = { batch, snapshot ->
-                aiReplyDraftCoordinator.confirmSendResult(batch, snapshot)
+            onGreetingDraftConversationObserved = { batch, snapshot, _, visitToken ->
+                // Greeting contacts are new conversations: use the verified current-window OCR
+                // only. Never reuse a private-chat preload or query stored contact history.
+                preparedDraftHistory = null
+                val greetingPolicy = requireNotNull(root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.RECEIVED_GREETINGS)) {
+                    "Received greetings policy is not registered"
+                }
+                addLog(
+                    "收到招呼草稿上下文[CURRENT_WINDOW_ONLY]：仅使用本次聊天消息=${batch.messages.size}条；" +
+                        "未读取历史记录；本次聊天采集仍由收到招呼任务保存"
+                )
+                aiReplyDraftCoordinator.generateVisibleDraft(
+                    batch,
+                    snapshot,
+                    visitToken = visitToken,
+                    history = greetingPolicy.contextPolicy().selectHistory(null),
+                    taskId = greetingPolicy.taskId
+                )
             },
-            onConfirmedSendId = {
-                aiReplyDraftCoordinator.consumeConfirmedSendId()
+            onSendTransaction = { batch, snapshot ->
+                aiReplyDraftCoordinator.confirmSendTransaction(batch, snapshot)
+            },
+            verifyGreetingPreSendModelFailure = { failure, snapshot ->
+                aiReplyDraftCoordinator.verifyGreetingPreSendFailure(failure, snapshot)
+            },
+            onGreetingModelFailureDeferred = { failure ->
+                aiReplyDraftCoordinator.releaseDeferredGreetingModelFailure(failure)
             },
             onVerifiedConversationObserved = { batch, identity, snapshot ->
                 val verifiedIdentity = identity?.takeIf {
@@ -578,6 +622,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
+            isSendConfirmationPending = { aiReplyDraftCoordinator.isSendConfirmationPending },
             isSendControlRecoveryPending = { aiReplyDraftCoordinator.isSendControlRecoveryPending },
             onDraftRuntimeReset = {
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {

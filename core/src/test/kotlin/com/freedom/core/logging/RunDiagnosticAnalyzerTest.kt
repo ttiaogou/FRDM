@@ -323,6 +323,53 @@ class RunDiagnosticAnalyzerTest {
         assertTrue(report.issues.any { it.code == "NAVIGATION_PAUSED_AFTER_WAIT_TIMEOUT" && it.level == RunLogLevel.WARN })
     }
 
+
+    @Test
+    fun legacyIdentityObserveWaitingErrorIsRemovedFromErrorAndWarningCounts() {
+        val waitingText = "AI 联系人身份采集[OBSERVE_WAITING]：事务仍在进行；不返回失败原因"
+        val legacy = RunLogBudgetPolicy.toEvent(waitingText, "RUN_LEGACY_WAIT", 1, 1, 1)
+            .copy(level = RunLogLevel.ERROR, category = RunLogCategory.ERROR, result = "FAILED_OR_EXCEPTION")
+        val report = RunDiagnosticAnalyzer.analyze(
+            runId = "RUN_LEGACY_WAIT",
+            result = "STOPPED",
+            startedAtEpochMs = 0,
+            finishedAtEpochMs = 3,
+            events = listOf(legacy),
+            counters = RunDiagnosticCounters(acceptedEvents = 1, writtenEvents = 1, errorEvents = 1)
+        )
+        assertEquals(0L, report.counters.errorEvents)
+        assertEquals(0L, report.counters.warningEvents)
+        assertTrue(report.issues.none { it.code == "RUNTIME_ERRORS_PRESENT" })
+        assertTrue(report.issues.none { it.code == "RUNTIME_WARNINGS_PRESENT" })
+    }
+
+    @Test
+    fun identityWaitClassificationKeepsActualErrorsAndQualityWarnings() {
+        val waitingText = "AI 联系人身份采集[OBSERVE_WAITING]：事务仍在进行；不返回失败原因"
+        val legacy = RunLogBudgetPolicy.toEvent(waitingText, "RUN_MIXED", 1, 1, 1)
+            .copy(level = RunLogLevel.ERROR, category = RunLogCategory.ERROR, result = "FAILED_OR_EXCEPTION")
+        val exception = RunLogBudgetPolicy.toEvent(
+            "$waitingText；读取失败：IllegalStateException", "RUN_MIXED", 2, 2, 2
+        )
+        val warning = RunLogBudgetPolicy.toEvent(
+            "AI 模式消息读取：状态=OCR_PARTIAL；OCR失败区域=1", "RUN_MIXED", 3, 3, 3
+        )
+        val explicit = legacy.copy(sequence = 4, errorType = "IllegalStateException")
+        assertTrue(RunDiagnosticAnalyzer.isRuntimeFailureEvent(explicit))
+        val report = RunDiagnosticAnalyzer.analyze(
+            runId = "RUN_MIXED",
+            result = "STOPPED",
+            startedAtEpochMs = 0,
+            finishedAtEpochMs = 5,
+            events = listOf(legacy, exception, warning),
+            counters = RunDiagnosticCounters(acceptedEvents = 3, writtenEvents = 3, errorEvents = 2, warningEvents = 1)
+        )
+        assertEquals(1L, report.counters.errorEvents)
+        assertEquals(1L, report.counters.warningEvents)
+        assertEquals(listOf(2L), report.issues.first { it.code == "RUNTIME_ERRORS_PRESENT" }.evidenceSequences)
+        assertTrue(report.issues.any { it.code == "OCR_PARTIAL_READ" })
+    }
+
     @Test
     fun zeroDirectionUnknownSummaryDoesNotCreateFalseDirectionIssue() {
         val warningSummary = event(

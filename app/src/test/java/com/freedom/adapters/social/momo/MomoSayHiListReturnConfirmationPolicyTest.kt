@@ -46,4 +46,40 @@ class MomoSayHiListReturnConfirmationPolicyTest {
         assertEquals(1, policy.stableSampleCount)
         assertTrue(policy.observe("list:window-7:generation-12", 1_800L))
     }
+
+    @Test
+    fun durableSendAndVerifiedReturnRemainSeparateAcrossInterruptedBack() {
+        val storage = object : com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnRepository {
+            val saved = LinkedHashMap<String, com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnRecord>()
+            override fun loadAll() = saved.values.toList()
+            override fun save(
+                record: com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnRecord
+            ): Boolean {
+                saved[record.rowKeyHash] = record
+                return true
+            }
+        }
+        val journal = com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnJournal(storage)
+        assertTrue(journal.recordConfirmedSend("row-hash", "contact-hash", "send-hash"))
+
+        val afterProcessRestart = com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnJournal(storage)
+        val returnCheck = MomoSayHiListReturnConfirmationPolicy()
+        assertEquals(
+            com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnPhase.SEND_CONFIRMED,
+            afterProcessRestart.findByRow("row-hash")?.phase
+        )
+        assertFalse(returnCheck.observe("list:window-7:gen-12", 1_000L))
+        assertEquals(1, afterProcessRestart.pendingReturns().size)
+        assertFalse(returnCheck.observe("list:window-8:gen-12", 1_800L))
+        assertEquals(1, afterProcessRestart.pendingReturns().size)
+        assertTrue(returnCheck.observe("list:window-8:gen-12", 2_400L))
+        assertTrue(afterProcessRestart.confirmVerifiedReturn("row-hash", "contact-hash"))
+        assertEquals(
+            com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnPhase.RETURN_VERIFIED,
+            journal.findByRow("row-hash")?.phase
+        )
+        assertTrue(afterProcessRestart.pendingReturns().isEmpty())
+        assertTrue(afterProcessRestart.hasConfirmedSendForContact("contact-hash"))
+    }
+
 }

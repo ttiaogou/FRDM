@@ -56,6 +56,31 @@ class AiReplyDecisionEngineTest {
         assertTrue(responseFormat.schema.contains("REPLY"))
     }
 
+    @Test fun promptOnlyJsonRecoveryPreservesSchemaAndStrictLocalParsing() {
+        val provider = FakeProvider(replyJson("你好"))
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "prompt-only",
+                promptOnlyJsonSchema = true)
+        )
+        assertEquals(AiReplyAction.REPLY, model(result).action)
+        val request = provider.lastRequest!!
+        assertEquals(AiModelResponseFormat.PlainText, request.responseFormat)
+        assertTrue(request.systemInstruction.contains("请严格匹配以下 JSON Schema"))
+        assertTrue(request.systemInstruction.contains("\"reasonDetail\""))
+        assertTrue(request.systemInstruction.contains("additionalProperties"))
+        assertTrue(request.systemInstruction.contains("如果对方直接询问你是否为人工智能，必须如实回答"))
+    }
+
+    @Test fun promptOnlyJsonRecoveryRejectsNonJsonAndDoesNotTurnItIntoDraft() {
+        val provider = FakeProvider("你好")
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "prompt-only-bad",
+                promptOnlyJsonSchema = true)
+        )
+        assertEquals(AiReplyExecutionStatus.MODEL_OUTPUT_INVALID, execution(result).status)
+        assertEquals(AiModelResponseFormat.PlainText, provider.lastRequest?.responseFormat)
+    }
+
     @Test fun defaultPersonalizationUsesDailyChatGenerationPresets() {
         val provider = FakeProvider(replyJson("收到"))
         AiReplyDecisionEngine(provider, grantedConsent).decide(
@@ -232,6 +257,42 @@ class AiReplyDecisionEngineTest {
         assertEquals("你说的是哪件事呀？", model(outcome).draft)
         assertTrue(provider.lastRequest!!.systemInstruction.contains("语义模糊"))
         assertTrue(provider.lastRequest!!.systemInstruction.contains("低承诺"))
+    }
+
+    @Test fun parserDiagnosticReasonsDoNotChangeValidationOrDraft() {
+        val cases = listOf(
+            "not-json" to AiReplyOutputInvalidReason.JSON_SYNTAX_INVALID,
+            """{"action":"REPLY","reason":"OK"}""" to AiReplyOutputInvalidReason.JSON_REQUIRED_FIELD_MISSING,
+            """{"action":"REPLY","reason":"OK","draft":"hi","extra":"value"}""" to AiReplyOutputInvalidReason.JSON_SCHEMA_MISMATCH,
+            """{"action":"UNKNOWN","reason":"OK","draft":"hi"}""" to AiReplyOutputInvalidReason.JSON_ACTION_INVALID,
+            """{"action":"REPLY","reason":"invalid reason","draft":"hi"}""" to AiReplyOutputInvalidReason.JSON_REASON_INVALID,
+            """{"action":"REPLY","reason":"OK","draft":null}""" to AiReplyOutputInvalidReason.JSON_DRAFT_EMPTY,
+            """{"action":"REPLY","reason":"OK","draft":" hello "}""" to AiReplyOutputInvalidReason.JSON_DRAFT_INVALID,
+            """{"action":"WAIT","reason":"OK","reasonDetail":"","draft":null}""" to AiReplyOutputInvalidReason.JSON_REASON_DETAIL_INVALID
+        )
+        for ((output, expected) in cases) {
+            val rejected = execution(AiReplyDecisionEngine(FakeProvider(output), grantedConsent).decide(
+                AiReplyDecisionInput(context(), true, requestId = "invalid-output")))
+            assertEquals(AiReplyExecutionStatus.MODEL_OUTPUT_INVALID, rejected.status)
+            assertEquals(expected, rejected.outputInvalidReason)
+            assertEquals("PRESENT", rejected.outputContentState)
+        }
+        val tooLong = AiReplyDecisionEngine(FakeProvider(replyJson("12345")), grantedConsent, maxDraftChars = 4)
+            .decide(AiReplyDecisionInput(context(), true, requestId = "too-long"))
+        assertEquals(AiReplyOutputInvalidReason.JSON_DRAFT_TOO_LONG, execution(tooLong).outputInvalidReason)
+
+        // Preserve existing compatibility: reasonDetail may be absent in locally accepted responses.
+        val accepted = AiReplyDecisionEngine(FakeProvider(replyJson("你好")), grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "legacy-detail"))
+        assertEquals(AiReplyAction.REPLY, model(accepted).action)
+        assertNull(model(accepted).reasonDetail)
+    }
+
+    @Test fun directProviderBlankOutputRetainsEmptyStatusAndAddsContentState() {
+        val rejected = execution(AiReplyDecisionEngine(FakeProvider("  "), grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "direct-empty")))
+        assertEquals(AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT, rejected.status)
+        assertEquals("BLANK", rejected.outputContentState)
     }
 
     private fun model(result: AiReplyEvaluation): AiReplyDecision =

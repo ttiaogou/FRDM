@@ -52,6 +52,52 @@ class LocalReplyTaskRepositoryTest {
     }
 
     @Test
+    fun modelOnlyRetryableFailureCanBeReclaimedAfterRepositoryReopen() {
+        val file = File.createTempFile("reply-task", ".tsv")
+        file.delete()
+        try {
+            val originalOwner = LocalReplyTaskRepository(file) { 10_000L }
+            val task = record("model-empty-request", "first-owner", 1_000L)
+            assertTrue(originalOwner.tryClaim(task, 120_000L))
+            assertTrue(originalOwner.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.FAILED_RETRYABLE, 2_000L))
+
+            val reopened = LocalReplyTaskRepository(file) { 10_000L }
+            assertTrue(reopened.tryClaim(task.copy(requestId = "second-owner", updatedAtMillis = 3_000L), 120_000L))
+            assertEquals(ReplyTaskStatus.REQUESTED, originalOwner.find(task.requestKey)?.status)
+            assertFalse(originalOwner.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.MODEL_COMPLETED, 4_000L))
+            assertTrue(reopened.updateStatus(task.requestKey, "second-owner", ReplyTaskStatus.MODEL_COMPLETED, 4_000L))
+        } finally {
+            file.delete()
+            File(file.parentFile, "${file.name}.lock").delete()
+        }
+    }
+
+    @Test
+    fun uncertainSendUnknownCannotBeReclaimedAfterReopenOrByAnotherOwner() {
+        val file = File.createTempFile("reply-task", ".tsv")
+        file.delete()
+        try {
+            val first = LocalReplyTaskRepository(file) { 10_000L }
+            val task = record("unknown-sent-request", "original-owner", 1_000L)
+            assertTrue(first.tryClaim(task, 120_000L))
+            assertTrue(first.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.MODEL_COMPLETED, 1_100L))
+            assertTrue(first.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.DRAFT_APPLIED, 1_200L))
+            assertTrue(first.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.PENDING_SEND, 1_300L))
+            assertTrue(first.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.SENDING, 1_400L))
+            assertTrue(first.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.UNKNOWN, 1_500L))
+
+            val reopened = LocalReplyTaskRepository(file) { 300_000L }
+            assertEquals(ReplyTaskStatus.UNKNOWN, reopened.find(task.requestKey)?.status)
+            assertFalse(reopened.tryClaim(task.copy(requestId = "another-owner", updatedAtMillis = 300_000L), 120_000L))
+            assertFalse(reopened.updateStatus(task.requestKey, "another-owner", ReplyTaskStatus.FAILED_RETRYABLE, 300_001L))
+            assertEquals(ReplyTaskStatus.UNKNOWN, first.find(task.requestKey)?.status)
+        } finally {
+            file.delete()
+            File(file.parentFile, "${file.name}.lock").delete()
+        }
+    }
+
+    @Test
     fun durableRecordPreservesMemoryBufferIdentityAndRejectsIllegalTransition() {
         val file = File.createTempFile("reply-task", ".tsv")
         file.delete()
@@ -76,6 +122,63 @@ class LocalReplyTaskRepositoryTest {
         } finally {
             file.delete()
             File(file.parentFile, "${file.name}.lock").delete()
+        }
+    }
+
+
+    @Test
+    fun sendEvidenceSurvivesSegmentLedgerReopenAndUnknownTransition() {
+        val file = File.createTempFile("reply-segments", ".tsv")
+        file.delete()
+        try {
+            val repository = LocalReplySegmentTaskRepository(file)
+            val created = com.freedom.features.aireply.ai.ReplySegmentTaskRecord(
+                taskId = "request:segment:0", requestId = "request",
+                conversationKey = "conversation", segmentIndex = 0, segmentCount = 1,
+                segmentContentHash = "content-hash", segmentContent = "你好",
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.CREATED,
+                createdAt = 1L
+            )
+            repository.save(created)
+            assertTrue(repository.update(created.copy(
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.DRAFT_APPLIED)))
+            assertTrue(repository.update(created.copy(
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.PENDING_SEND)))
+            val proof = created.copy(
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.SENDING,
+                sendAttemptStartedAt = 2L, sendWindowSessionKey = "pkg|21|7|conversation=conversation",
+                sendChatTitleHash = "title-hash", preSendOutgoingKeyHashes = setOf("one", "two"),
+                sendRequestKey = "request-key"
+            )
+            assertTrue(repository.update(proof))
+            val reopened = LocalReplySegmentTaskRepository(file)
+            assertEquals(proof, reopened.find(proof.taskId))
+            assertTrue(reopened.update(proof.copy(
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.UNKNOWN)))
+            assertEquals(com.freedom.features.aireply.ai.ReplySegmentTaskStatus.UNKNOWN,
+                LocalReplySegmentTaskRepository(file).find(proof.taskId)?.status)
+            assertEquals(setOf("one", "two"),
+                LocalReplySegmentTaskRepository(file).find(proof.taskId)?.preSendOutgoingKeyHashes)
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun legacySegmentRowsWithoutSendProofRemainReadableAndUnproven() {
+        val file = File.createTempFile("reply-segments-legacy", ".tsv")
+        try {
+            fun encoded(value: String) = java.util.Base64.getUrlEncoder().encodeToString(value.toByteArray())
+            file.writeText(listOf(encoded("old:segment:0"), encoded("old"), encoded("conversation"),
+                "0", "1", "content-hash", "UNKNOWN", "1", "", encoded(""),
+                encoded("你好"), "v2").joinToString("\t"))
+            val original = LocalReplySegmentTaskRepository(file).find("old:segment:0")
+            assertEquals(com.freedom.features.aireply.ai.ReplySegmentTaskStatus.UNKNOWN, original?.status)
+            assertNull(original?.sendAttemptStartedAt)
+            assertNull(original?.sendWindowSessionKey)
+            assertTrue(original?.preSendOutgoingKeyHashes?.isEmpty() == true)
+        } finally {
+            file.delete()
         }
     }
 

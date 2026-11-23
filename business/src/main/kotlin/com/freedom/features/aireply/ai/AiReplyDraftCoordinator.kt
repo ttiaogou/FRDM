@@ -10,6 +10,9 @@ import com.freedom.features.aireply.ports.ChatDraftInputStatus
 import com.freedom.features.aireply.ports.ChatDraftInputTarget
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.aireply.policy.AiReplyPolicyRegistry
+import com.freedom.features.aireply.policy.PolicyRegistry
+import com.freedom.features.aireply.policy.TaskPolicy
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import com.freedom.core.runtime.TaskScheduler
@@ -24,11 +27,93 @@ import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * Shared, safe model/send event contract for both registered AI reply businesses.
+ * Diagnostics only: no conversation text, raw transport responses, page fingerprints or UI capabilities.
+ * Fixed fields allow model and send events to be joined without changing persistence contracts.
+ */
+internal object AiReplyTraceContract {
+    fun format(
+        component: String,
+        requestId: String,
+        taskId: String?,
+        generation: Long,
+        eventType: String,
+        attemptIndex: Int? = null,
+        retryState: String? = null,
+        reasonCode: String? = null,
+        delayMs: Long? = null,
+        responseMode: String? = null,
+        outcomeCategory: String? = null,
+        segmentIndex: Int? = null,
+        segmentCount: Int? = null,
+        sendAttemptId: String? = null,
+        sendConfirmationId: String? = null,
+        sendStatus: String? = null,
+        finalState: String? = null,
+        sendAttemptOrigin: String? = null
+    ): String {
+        // Never serialize arbitrary provider, adapter or persisted identifier text.
+        fun safe(value: String?): String = value?.takeIf {
+            it.length in 1..128 && it.all { char ->
+                char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' ||
+                    char == '_' || char == '-' || char == '.' || char == ':'
+            }
+        } ?: "UNKNOWN"
+        val safeTask = taskId?.takeIf {
+            it == AiDecisionTaskIds.PRIVATE_MESSAGES ||
+                it == AiDecisionTaskIds.RECEIVED_GREETINGS
+        } ?: "UNKNOWN"
+        val prefix = if (component == "MODEL") "AI 模型生命周期：" else "AI 消息发送链路："
+        return prefix +
+            "component=${safe(component)}；requestId=${safe(requestId)}；taskId=$safeTask；" +
+            "generation=$generation；eventType=${safe(eventType)}；" +
+            "attemptIndex=${attemptIndex ?: "NONE"}；retryState=${safe(retryState)}；" +
+            "reasonCode=${safe(reasonCode)}；delayMs=${delayMs ?: "NONE"}；" +
+            "responseMode=${safe(responseMode)}；outcomeCategory=${safe(outcomeCategory)}；" +
+            "segmentIndex=${segmentIndex ?: "NONE"}；segmentCount=${segmentCount ?: "NONE"}；" +
+            "sendAttemptId=${safe(sendAttemptId)}；sendConfirmationId=${safe(sendConfirmationId)}；" +
+            "sendStatus=${safe(sendStatus)}；sendAttemptOrigin=${safe(sendAttemptOrigin)}；" +
+            "finalState=${safe(finalState)}"
+    }
+}
+
 enum class SendConfirmationResult {
     NOT_PENDING,
     WAITING,
     CONFIRMED,
     UNKNOWN
+}
+
+/**
+ * Single business handoff for a multi-message send transaction. WAITING covers both a
+ * segment awaiting OCR confirmation and an already confirmed segment awaiting a freshly
+ * verified empty composer. Only the final fully confirmed message queue supplies a receipt.
+ * The existing per-segment matcher, delays and safety gates are deliberately unchanged.
+ */
+/** Technical model failure before any input/send. This is not a model WAIT or a sent result. */
+data class AiReplyPreSendModelFailure(
+    val requestId: String,
+    val requestKey: String,
+    val conversationKey: String,
+    val windowSessionKey: String,
+    val visitToken: String,
+    val taskLease: TaskLease?,
+    val reasonCode: String,
+    val attempts: Int,
+    val retryDelayMs: Long,
+    val readyToDefer: Boolean
+)
+
+data class ReplySendTransactionOutcome(
+    val status: SendConfirmationResult,
+    val finalSendConfirmationId: String? = null
+) {
+    init {
+        require(status == SendConfirmationResult.CONFIRMED || finalSendConfirmationId == null) {
+            "A partial or unknown send must not carry a final confirmation ID"
+        }
+    }
 }
 
 /**
@@ -43,7 +128,7 @@ class AiReplyDraftCoordinator(
     private val scheduler: TaskScheduler,
     private val isAiReplyActive: () -> Boolean,
     private val onLog: (String) -> Unit,
-    private val createProvider: (AiModelConfiguration) -> AiModelProvider,
+    private val createGateway: (AiModelConfiguration) -> AiDecisionGateway,
     private val backgroundExecutor: Executor = newDraftExecutor(),
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val chooseRandomInt: (Int, Int) -> Int = { min, max ->
@@ -52,7 +137,11 @@ class AiReplyDraftCoordinator(
     private val replyTaskRepository: ReplyTaskRepository? = null,
     private val sendPort: ChatDraftSendPort? = null,
     private val replySegmentTaskRepository: ReplySegmentTaskRepository? = null,
-    private val captureTaskLease: () -> TaskLease? = { null }
+    private val captureTaskLease: () -> TaskLease? = { null },
+    /** Delivered after a durable, no-send technical failure to the task-specific runtime. */
+    private val onPreSendModelFailure: (AiReplyPreSendModelFailure) -> Unit = {},
+    /** Same immutable registry used by the composition root; never grants UI ownership. */
+    private val policyRegistry: PolicyRegistry = AiReplyPolicyRegistry
 ) {
     private val pending = AtomicBoolean(false)
     private val awaitingUserSend = AtomicBoolean(false)
@@ -62,11 +151,112 @@ class AiReplyDraftCoordinator(
     private val failedRequests = linkedMapOf<String, Pair<Int, Long>>()
     /** Only a first-chunk focus rejection with a freshly re-read empty composer can be retried. */
     private val verifiedEmptyInputRetries = linkedMapOf<String, VerifiedEmptyInputRetry>()
+
+    /** Diagnostic-only trace. Never consulted by model decisions, send gates or retry scheduling. */
+    private data class ModelLifecycleTrace(
+        val requestId: String,
+        val taskId: String,
+        val requestGeneration: Long,
+        var attemptIndex: Int = -1,
+        var scheduledRetries: Int = 0,
+        var retryPending: Boolean = false,
+        var lastOutcomeCategory: String = "UNKNOWN",
+        var terminalLogged: Boolean = false
+    )
+
+    private var modelLifecycleTrace: ModelLifecycleTrace? = null
+    /** Diagnostic-only de-duplication, never used to advance a send or release a gate. */
+    private val emittedSendTraceKeys = LinkedHashSet<String>()
+
+    private fun lifecycleRecord(
+        trace: ModelLifecycleTrace,
+        eventType: String,
+        retryState: String = "NONE",
+        reasonCode: String = "NONE",
+        delayMs: Long? = null,
+        responseMode: String = "UNKNOWN",
+        finalState: String? = null
+    ): String = AiReplyTraceContract.format(
+        component = "MODEL", requestId = trace.requestId, taskId = trace.taskId,
+        generation = trace.requestGeneration, eventType = eventType,
+        attemptIndex = trace.attemptIndex, retryState = retryState, reasonCode = reasonCode,
+        delayMs = delayMs, responseMode = responseMode,
+        outcomeCategory = trace.lastOutcomeCategory, finalState = finalState
+    )
+
+    /** Emits fixed diagnostic codes only; model output and exception messages never enter this log. */
+    private fun recordModelLifecycle(
+        requestId: String,
+        requestGeneration: Long,
+        eventType: String,
+        attemptIndex: Int,
+        retryState: String = "NONE",
+        reasonCode: String = "NONE",
+        delayMs: Long? = null,
+        responseMode: String = "UNKNOWN",
+        outcomeCategory: String = "UNKNOWN"
+    ) {
+        val log = synchronized(lock) {
+            val trace = modelLifecycleTrace?.takeIf {
+                it.requestId == requestId && it.requestGeneration == requestGeneration && !it.terminalLogged
+            } ?: return@synchronized null
+            when (eventType) {
+                "MODEL_ATTEMPT_STARTED" -> trace.attemptIndex = attemptIndex
+                "MODEL_ATTEMPT_FINISHED" -> trace.lastOutcomeCategory = outcomeCategory
+                "MODEL_RETRY_SCHEDULED" -> {
+                    trace.retryPending = true
+                    trace.scheduledRetries++
+                }
+                "MODEL_RETRY_EXECUTING", "MODEL_RETRY_CANCELLED" -> trace.retryPending = false
+            }
+            lifecycleRecord(trace, eventType, retryState, reasonCode, delayMs, responseMode)
+        }
+        // Diagnostics must never cause a model decision or UI action to fail.
+        log?.let { runCatching { onLog(it) } }
+    }
+
+    private fun terminalLifecycleRecord(
+        trace: ModelLifecycleTrace,
+        finalState: String,
+        reasonCode: String,
+        retryState: String = when {
+            finalState == "SUCCEEDED" -> "SUCCEEDED"
+            finalState == "CANCELLED" -> "CANCELLED_GENERATION_CHANGED"
+            trace.lastOutcomeCategory == "EMPTY_MODEL_OUTPUT" &&
+                trace.scheduledRetries == MAX_EMPTY_MODEL_RETRIES -> "EXHAUSTED"
+            else -> "NONE"
+        }
+    ): String = lifecycleRecord(
+        trace, "MODEL_REQUEST_FINISHED", retryState, reasonCode, finalState = finalState
+    )
+
+    /** Exactly one model-generation terminal event, separate from later send confirmation. */
+    private fun completeModelLifecycle(
+        requestId: String,
+        requestGeneration: Long,
+        finalState: String,
+        reasonCode: String,
+        retryState: String? = null
+    ) {
+        val log = synchronized(lock) {
+            val trace = modelLifecycleTrace?.takeIf {
+                it.requestId == requestId && it.requestGeneration == requestGeneration && !it.terminalLogged
+            } ?: return@synchronized null
+            trace.terminalLogged = true
+            if (retryState == null) terminalLifecycleRecord(trace, finalState, reasonCode)
+            else terminalLifecycleRecord(trace, finalState, reasonCode, retryState)
+        }
+        log?.let { runCatching { onLog(it) } }
+    }
     private var activeInputObservationAtMillis = 0L
     private var activeMessageKey: String? = null
     private var activeRequestId: String? = null
+    private var activeDraftTarget: ChatDraftInputTarget? = null
+    private var activeDraftVisitToken: String? = null
     private var activeExistingOutgoingKeys: Set<String> = emptySet()
     private var pendingSendConfirmation: PendingSendConfirmation? = null
+    /** A confirmed segment must obtain a fresh chat/composer observation before the next one starts. */
+    private var pendingNextMessageSegment: PendingNextMessageSegment? = null
     // 回复尝试应保留当前聊天页，直到新发出的消息得到确认。
     // 清除模型或输入的 pending 标志不代表消息发送成功。
     private var replyAwaitingConfirmedSend = false
@@ -88,6 +278,14 @@ class AiReplyDraftCoordinator(
         val observations: Int = 0
     )
 
+    private data class PendingNextMessageSegment(
+        val requestId: String,
+        val segmentIndex: Int,
+        val requestGeneration: Long,
+        val confirmedObservationAtMillis: Long,
+        val previousTarget: ChatDraftInputTarget
+    )
+
     private data class PendingSendConfirmation(
         val sendAttemptId: String,
         val requestId: String,
@@ -100,8 +298,74 @@ class AiReplyDraftCoordinator(
         val requestGeneration: Long,
         val target: ChatDraftInputTarget,
         val draft: String,
-        val existingOutgoingKeys: Set<String>
+        val existingOutgoingKeys: Set<String>,
+        /** Hashed identities of outgoing bubbles visible before the original send. */
+        val previousOutgoingKeyHashes: Set<String> = emptySet(),
+        val recoveredFromLedger: Boolean = false
     )
+
+    /**
+     * One event contract across private messages and received greetings.
+     * An unpersisted or recovered business origin is UNKNOWN, never guessed.
+     */
+    private fun recordSendTrace(
+        eventType: String,
+        requestId: String,
+        requestGeneration: Long,
+        segmentIndex: Int?,
+        segmentCount: Int?,
+        sendAttemptId: String? = null,
+        sendConfirmationId: String? = null,
+        sendStatus: String = "UNKNOWN",
+        reasonCode: String = "NONE",
+        recoveredFromLedger: Boolean = false
+    ) {
+        val log = synchronized(lock) {
+            val terminal = eventType in setOf(
+                "MESSAGE_SEND_CONFIRMED", "MESSAGE_SEND_UNCERTAIN", "MESSAGE_SEND_COMPLETED"
+            )
+            val key = "$requestId|$requestGeneration|$segmentIndex|${sendAttemptId.orEmpty()}|$eventType"
+            if (terminal && !emittedSendTraceKeys.add(key)) return@synchronized null
+            while (emittedSendTraceKeys.size > MAX_PROCESSED_KEYS) {
+                emittedSendTraceKeys.remove(emittedSendTraceKeys.first())
+            }
+            val taskId = modelLifecycleTrace?.takeIf {
+                it.requestId == requestId && it.requestGeneration == requestGeneration
+            }?.taskId
+            AiReplyTraceContract.format(
+                component = "SEND", requestId = requestId, taskId = taskId,
+                generation = requestGeneration, eventType = eventType,
+                segmentIndex = segmentIndex, segmentCount = segmentCount,
+                sendAttemptId = sendAttemptId, sendConfirmationId = sendConfirmationId,
+                sendStatus = sendStatus, reasonCode = reasonCode,
+                sendAttemptOrigin = if (recoveredFromLedger) "RECOVERED_SYNTHETIC" else "ORIGINAL"
+            )
+        }
+        // Logging is observational only: callback failure cannot affect send state.
+        log?.let { runCatching { onLog(it) } }
+    }
+
+    private fun recordSendTrace(
+        eventType: String,
+        pending: PendingSendConfirmation,
+        sendStatus: String,
+        reasonCode: String = "NONE",
+        sendConfirmationId: String? = null
+    ) = recordSendTrace(
+        eventType, pending.requestId, pending.requestGeneration,
+        pending.segmentIndex, pending.segmentCount,
+        pending.sendAttemptId, sendConfirmationId,
+        sendStatus, reasonCode, pending.recoveredFromLedger
+    )
+
+    private data class ReadOnlyRecoveredMatch(
+        val requestId: String,
+        val segmentIndex: Int,
+        val messageKey: String,
+        val observedAtMillis: Long
+    )
+
+    private var readOnlyRecoveredMatch: ReadOnlyRecoveredMatch? = null
 
     private data class VerifiedEmptyInputRetry(
         val windowSessionKey: String,
@@ -113,6 +377,10 @@ class AiReplyDraftCoordinator(
     val isAwaitingUserSend: Boolean get() = awaitingUserSend.get()
     /** 对现有页面返回门禁而言，等待尚未提交的发送按钮不等于任务完成。 */
     val isSendControlRecoveryPending: Boolean get() = synchronized(lock) { pendingSendControl != null }
+    /** A submitted send requires fresh read-only confirmation; draft generation alone does not. */
+    val isSendConfirmationPending: Boolean get() = synchronized(lock) {
+        pendingSendConfirmation != null || pendingNextMessageSegment != null
+    }
     val isConversationReturnBlocked: Boolean get() = synchronized(lock) {
         pending.get() || awaitingUserSend.get() ||
             pendingSendConfirmation != null || replyAwaitingConfirmedSend
@@ -120,7 +388,18 @@ class AiReplyDraftCoordinator(
 
     /** AI 回复运行环境停止或重建时，使迟到的回调失效。 */
     fun resetForRuntimeReset() {
+        var cancelledModelLogs: List<String> = emptyList()
         synchronized(lock) {
+            modelLifecycleTrace?.takeIf { !it.terminalLogged }?.let { trace ->
+                trace.terminalLogged = true
+                cancelledModelLogs = (if (trace.retryPending) listOf(
+                    lifecycleRecord(trace, "MODEL_RETRY_CANCELLED", "CANCELLED_GENERATION_CHANGED", "RUNTIME_RESET")
+                ) else emptyList()) + terminalLifecycleRecord(
+                    trace, "CANCELLED", "RUNTIME_RESET", "CANCELLED_GENERATION_CHANGED"
+                )
+            }
+            modelLifecycleTrace = null
+            emittedSendTraceKeys.clear()
             pendingSendConfirmation?.let { pendingConfirmation ->
                 val requestId = activeRequestId
                 val repository = replySegmentTaskRepository
@@ -139,8 +418,12 @@ class AiReplyDraftCoordinator(
             activeInputObservationAtMillis = 0L
             activeMessageKey = null
             activeRequestId = null
+            activeDraftTarget = null
+            activeDraftVisitToken = null
             activeExistingOutgoingKeys = emptySet()
             pendingSendConfirmation = null
+            pendingNextMessageSegment = null
+            readOnlyRecoveredMatch = null
             replyAwaitingConfirmedSend = false
             sendConfirmationChecks = 0
             lastConfirmedSendId = null
@@ -149,6 +432,7 @@ class AiReplyDraftCoordinator(
             sendControlRetryScheduled = false
             sendControlRetryTicket++
         }
+        cancelledModelLogs.forEach { runCatching { onLog(it) } }
     }
 
     fun startupFailure(): String? {
@@ -161,10 +445,18 @@ class AiReplyDraftCoordinator(
     /** 无生成前确认；合并已解析联系人历史与当前窗口消息。 */
     fun generateVisibleDraft(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
                              visitToken: String = batch.windowSessionKey.orEmpty(),
-                             history: VerifiedDraftHistory? = null): Boolean {
+                             history: VerifiedDraftHistory? = null,
+                             taskId: String = AiDecisionTaskIds.PRIVATE_MESSAGES): Boolean {
+        val policy = policyRegistry.resolve(taskId)?.takeIf { it.taskId == taskId }
+            ?: return reject("AI_TASK_POLICY_NOT_REGISTERED")
         val visible = VisibleDraftContext.build(batch, visitToken) ?: return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
-        val context = DraftHistoryMerger.merge(visible, batch, history)
-        return generateAndFill(batch, null, snapshot, context, visitToken)
+        val context = DraftHistoryMerger.merge(visible, batch, policy.contextPolicy().selectHistory(history))
+        val contextScope = if (context.messages.size > visible.messages.size) {
+            ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW
+        } else {
+            ModelContextScope.CURRENT_WINDOW_ONLY
+        }
+        return generateAndFill(batch, null, snapshot, context, visitToken, taskId, contextScope)
     }
 
     /** 仅在平台身份和当前聊天标题均已验证后调用。 */
@@ -173,8 +465,23 @@ class AiReplyDraftCoordinator(
         identity: ContactRowIdentity?,
         snapshot: ChatPageSnapshot,
         context: ConversationContext,
-        visitToken: String = batch.windowSessionKey.orEmpty()
+        visitToken: String = batch.windowSessionKey.orEmpty(),
+        taskId: String = AiDecisionTaskIds.PRIVATE_MESSAGES,
+        contextScope: ModelContextScope = if (context.currentWindowDraft) {
+            ModelContextScope.CURRENT_WINDOW_ONLY
+        } else {
+            ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW
+        }
     ): Boolean {
+        val policy = policyRegistry.resolve(taskId)?.takeIf { it.taskId == taskId }
+            ?: return reject("AI_TASK_POLICY_NOT_REGISTERED")
+        // A greeting must remain current-window-only even if a caller supplies history
+        // directly through generateAndFill instead of generateVisibleDraft.
+        if (policy.contextPolicy().scope == ModelContextScope.CURRENT_WINDOW_ONLY) {
+            if (contextScope != ModelContextScope.CURRENT_WINDOW_ONLY || !context.currentWindowDraft ||
+                context.messages != VisibleDraftContext.build(batch, visitToken)?.messages
+            ) return reject("AI_TASK_POLICY_CONTEXT_MISMATCH")
+        }
         val localDraft = context.currentWindowDraft
         val contactId = if (localDraft) VisibleDraftContext.build(batch, visitToken)?.contactId ?: return reject("CHAT_WINDOW_UNAVAILABLE")
             else identity?.contactId?.takeIf(String::isNotBlank) ?: return reject("CONTACT_ID_MISSING")
@@ -296,30 +603,15 @@ class AiReplyDraftCoordinator(
             schedulePendingSendControlRetry()
             return true
         }
-        val recovered = replySegmentTaskRepository?.findByConversation(dedupeConversationKey)
-            ?.filter { it.status in setOf(ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) && it.segmentContent.isNotBlank() }
-            ?.groupBy { it.requestId }
-            ?.maxByOrNull { it.value.maxOf { record -> record.segmentIndex } }
-        if (recovered != null) {
-            val records = recovered.value.sortedBy { it.segmentIndex }
-            val current = records.firstOrNull { it.status == ReplySegmentTaskStatus.UNKNOWN } ?: return reject("RECOVERY_NO_UNKNOWN_SEGMENT")
-            val currentHashAlreadyVisible = batch.messages.any {
-                it.direction == ChatMessageDirection.OUTGOING && fingerprint(it.content.orEmpty()) == current.segmentContentHash
-            }
-            if (currentHashAlreadyVisible) return reject("RECOVERY_REQUIRES_OBSERVED_SEND_CONFIRMATION")
-            val requestGeneration = synchronized(lock) {
-                activeMessageKey = dedupeKey
-                replyAwaitingConfirmedSend = true
-                activeRequestId = current.requestId
-                activeExistingOutgoingKeys = batch.messages.filter { it.direction == ChatMessageDirection.OUTGOING }
-                    .mapTo(LinkedHashSet()) { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
-                activeMessageSegments = records.map { it.segmentContent }
-                pending.set(true)
-                generation.get()
-            }
-            onLog("AI 段任务恢复：requestId=${current.requestId.take(12)}；segmentIndex=${current.segmentIndex}；禁止从 segment 0 重发")
-            writeMessageSegment(target, current.segmentIndex, requestGeneration)
-            return true
+        // UNKNOWN and SENT_UNCONFIRMED may already have reached the platform. A missing
+        // outgoing bubble is not proof the send gesture was never submitted.
+        // Resume only by read-only send verification; never recreate draft chunks here.
+        val uncertainSend = replySegmentTaskRepository?.findByConversation(dedupeConversationKey)
+            ?.firstOrNull { it.status in setOf(ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) }
+        if (uncertainSend != null) {
+            onLog("AI 段任务恢复[READ_ONLY_REQUIRED]：requestId=${uncertainSend.requestId.take(12)}；" +
+                "segmentIndex=${uncertainSend.segmentIndex}；status=${uncertainSend.status.name}；禁止重新输入或发送")
+            return reject("RECOVERY_UNCERTAIN_SEND_REQUIRES_READ_ONLY_CONFIRMATION")
         }
         // A failed first focus action never submitted a send gesture. Even so, do not retry
         // until a later message observation confirms the same chat, unchanged outgoing
@@ -364,6 +656,11 @@ class AiReplyDraftCoordinator(
             activeMessageKey = dedupeKey
             replyAwaitingConfirmedSend = true
             activeRequestId = requestId
+            activeDraftTarget = target
+            activeDraftVisitToken = visitToken
+            // Old successful requests may have retained their in-memory segment list.
+            // Starting a new model request must not inherit that prior queue.
+            activeMessageSegments = emptyList()
             activeInputObservationAtMillis = batch.capturedAtMillis
             verifiedEmptyInputRetries.remove(dedupeKey)
             activeExistingOutgoingKeys = batch.messages
@@ -375,14 +672,17 @@ class AiReplyDraftCoordinator(
                 processedMessageKeys.remove(oldest)
             }
             pending.set(true)
-            generation.get()
+            generation.get().also { requestGeneration ->
+                modelLifecycleTrace = ModelLifecycleTrace(requestId, policy.taskId, requestGeneration)
+            }
         }
         val accepted = runCatching {
             backgroundExecutor.execute {
                 try {
-                    generateOnBackground(configuration, context, target, requestGeneration, requestId)
-                } catch (_: Throwable) {
-                    onLog("AI 回复草稿生成失败：[DRAFT_GENERATION_FAILED]")
+                    generateOnBackground(configuration, context, target, requestGeneration, requestId, policy, contextScope)
+                } catch (error: Throwable) {
+                    onLog("AI 回复草稿生成失败：[DRAFT_GENERATION_FAILED]；requestId=$requestId；" +
+                        "taskId=${policy.taskId}；exceptionType=${error.javaClass.simpleName}")
                     finish("DRAFT_GENERATION_FAILED", requestGeneration)
                 }
             }
@@ -401,6 +701,8 @@ class AiReplyDraftCoordinator(
         target: ChatDraftInputTarget,
         requestGeneration: Long,
         requestId: String,
+        policy: TaskPolicy,
+        contextScope: ModelContextScope,
         emptyRetryAttempt: Int = 0
     ) {
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
@@ -408,27 +710,47 @@ class AiReplyDraftCoordinator(
             return
         }
         val callStartedAt = nowMillis()
+        // Only the final DeepSeek empty-output retry changes the transport response mode.
+        val promptOnlyJsonSchema = configuration.provider == AiModelServiceProvider.DEEPSEEK &&
+            emptyRetryAttempt == MAX_EMPTY_MODEL_RETRIES
+        val responseMode = if (promptOnlyJsonSchema) "PROMPT_ONLY_JSON" else "STRICT_JSON"
+        recordModelLifecycle(
+            requestId, requestGeneration, "MODEL_ATTEMPT_STARTED", emptyRetryAttempt,
+            responseMode = responseMode
+        )
         onLog(
             "AI 模型调用开始：requestId=$requestId；" +
                 "provider=${configuration.provider.name}；" +
-                "model=${configuration.modelName}；" +
-                "contextMessages=${context.messages.size}"
+                "modelHash=${diagnosticHash(configuration.modelName)}；" +
+                "contextMessages=${context.messages.size}；" +
+                "emptyRetryAttempt=$emptyRetryAttempt；responseMode=$responseMode"
         )
         val evaluation = try {
-            val provider = createProvider(configuration)
-            AiReplyDecisionEngine(
-                modelProvider = provider,
-                cloudConsent = cloudConsent
-            ).decide(
-                AiReplyDecisionInput(
-                    context = context,
-                    contactIdentityVerified = !context.currentWindowDraft,
-                    cooldownActive = false,
+            createGateway(configuration).decide(
+                ModelDecisionRequest(
+                    taskId = policy.taskId,
                     requestId = requestId,
-                    personalization = personalizationRepository.load()
+                    context = context,
+                    constraints = ModelDecisionConstraints(
+                        contextScope = contextScope,
+                        contactIdentityVerified = !context.currentWindowDraft,
+                        cooldownActive = false,
+                        personalization = personalizationRepository.load()
+                    ),
+                    outputContract = policy.modelContract(),
+                    responseMode = if (promptOnlyJsonSchema) {
+                        ModelResponseMode.PROMPT_ONLY_JSON
+                    } else {
+                        ModelResponseMode.STRICT_JSON
+                    }
                 )
             )
         } catch (error: Throwable) {
+            recordModelLifecycle(
+                requestId, requestGeneration, "MODEL_ATTEMPT_FINISHED", emptyRetryAttempt,
+                reasonCode = "DECIDE_EXCEPTION", responseMode = responseMode,
+                outcomeCategory = "MODEL_CALL_FAILED"
+            )
             onLog(
                 "AI 模型调用异常：requestId=$requestId；" +
                     "stage=DECIDE；" +
@@ -440,6 +762,32 @@ class AiReplyDraftCoordinator(
         fun safeLog(value: String?): String = AiModelDataRedactor.redact(value.orEmpty())
             .replace(Regex("[\\r\\n\\t\\p{Cntrl}]"), " ").take(1_000)
         if (evaluation is AiReplyEvaluation.Execution) {
+            val outcomeCategory = when {
+                evaluation.status == AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT ||
+                    evaluation.callDiagnostics?.safeCode == "EMPTY_MODEL_OUTPUT" ->
+                    AiModelOutputCategory.EMPTY_MODEL_OUTPUT
+                evaluation.status == AiReplyExecutionStatus.MODEL_OUTPUT_INVALID ->
+                    AiModelOutputCategory.MODEL_OUTPUT_INVALID
+                evaluation.status == AiReplyExecutionStatus.MODEL_CALL_FAILED ->
+                    AiModelOutputCategory.MODEL_CALL_FAILED
+                else -> AiModelOutputCategory.LOCAL_PRECHECK_BLOCKED
+            }
+            val safeCode = evaluation.outputInvalidReason?.name
+                ?: evaluation.callDiagnostics?.safeCode ?: evaluation.status.reasonCode
+            val contentState = evaluation.outputContentState
+                ?: evaluation.callDiagnostics?.responseContentState ?: "UNKNOWN"
+            recordModelLifecycle(
+                requestId, requestGeneration, "MODEL_ATTEMPT_FINISHED", emptyRetryAttempt,
+                reasonCode = outcomeCategory.name, responseMode = responseMode,
+                outcomeCategory = outcomeCategory.name
+            )
+            onLog("AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
+                "generation=$requestGeneration；outcomeCategory=${outcomeCategory.name}；" +
+                "safeCode=${safeLog(safeCode)}；contentState=${safeLog(contentState)}；" +
+                "executionState=${evaluation.status.name}；" +
+                "provider=${safeLog(evaluation.provider ?: configuration.provider.name)}；" +
+                "modelHash=${diagnosticHash(evaluation.model ?: configuration.modelName)}；" +
+                "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；draftPresent=false")
             // A local gate, transport failure or invalid protocol is never a model WAIT.
             onLog(
                 "AI 程序执行状态：requestId=$requestId；executionState=${evaluation.status.name}；" +
@@ -447,7 +795,7 @@ class AiReplyDraftCoordinator(
             )
             evaluation.callDiagnostics?.let { diagnostics ->
                 onLog("AI 模型调用失败：requestId=${safeLog(requestId)}；" +
-                    "provider=${safeLog(configuration.provider.name)}；model=${safeLog(configuration.modelName)}；" +
+                    "provider=${safeLog(configuration.provider.name)}；modelHash=${diagnosticHash(configuration.modelName)}；" +
                     "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；${diagnostics.logFields()}")
             }
             if (evaluation.status == AiReplyExecutionStatus.MODEL_CALL_FAILED) {
@@ -456,27 +804,55 @@ class AiReplyDraftCoordinator(
                     emptyRetryAttempt < MAX_EMPTY_MODEL_RETRIES &&
                     isCurrentGeneration(requestGeneration) && isAiReplyActive()
                 ) {
+                    val retryDelayMs = if (emptyRetryAttempt == 0) FIRST_EMPTY_MODEL_RETRY_DELAY_MS
+                        else SECOND_EMPTY_MODEL_RETRY_DELAY_MS
+                    val nextMode = if (configuration.provider == AiModelServiceProvider.DEEPSEEK &&
+                        emptyRetryAttempt + 1 == MAX_EMPTY_MODEL_RETRIES
+                    ) "PROMPT_ONLY_JSON" else "STRICT_JSON"
                     onLog("AI 模型空输出有限恢复：requestId=$requestId；" +
                         "attempt=${emptyRetryAttempt + 1}/$MAX_EMPTY_MODEL_RETRIES；" +
-                        "delayMs=$EMPTY_MODEL_RETRY_DELAY_MS；不写草稿、不执行发送")
+                        "delayMs=$retryDelayMs；responseMode=$nextMode；不写草稿、不执行发送")
                     val scheduled = runCatching {
-                        scheduler.schedule(EMPTY_MODEL_RETRY_DELAY_MS) {
-                            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) return@schedule
+                        scheduler.schedule(retryDelayMs) {
+                            if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) {
+                                val retryState = if (!isCurrentGeneration(requestGeneration)) {
+                                    "CANCELLED_GENERATION_CHANGED"
+                                } else "CANCELLED_RUNTIME_INACTIVE"
+                                recordModelLifecycle(
+                                    requestId, requestGeneration, "MODEL_RETRY_CANCELLED",
+                                    emptyRetryAttempt + 1, retryState, "RETRY_GATE_CHANGED",
+                                    responseMode = nextMode
+                                )
+                                completeModelLifecycle(
+                                    requestId, requestGeneration, "CANCELLED", "RETRY_GATE_CHANGED", retryState
+                                )
+                                return@schedule
+                            }
                             // 等待期间用户可能切换了会话或自行输入文字。
                             // 再次发送模型请求前，必须重新验证当前真实输入框。
                             val composerReady = runCatching { inputPort.verifyDraft(target, "") }
                                 .getOrNull()?.status == ChatDraftInputStatus.VERIFIED
                             if (!composerReady) {
+                                recordModelLifecycle(
+                                    requestId, requestGeneration, "MODEL_RETRY_CANCELLED",
+                                    emptyRetryAttempt + 1, "CANCELLED_CONTEXT_CHANGED",
+                                    "COMPOSER_NOT_VERIFIED", responseMode = nextMode
+                                )
                                 onLog("AI 模型空输出恢复取消：原会话或空输入框已变化；不重试、不发送")
                                 finish("MODEL_EMPTY_RETRY_CONTEXT_CHANGED", requestGeneration)
                                 return@schedule
                             }
+                            recordModelLifecycle(
+                                requestId, requestGeneration, "MODEL_RETRY_EXECUTING",
+                                emptyRetryAttempt + 1, "EXECUTING", "COMPOSER_VERIFIED",
+                                responseMode = nextMode
+                            )
                             val accepted = runCatching {
                                 backgroundExecutor.execute {
                                     try {
                                         generateOnBackground(
                                             configuration, context, target, requestGeneration, requestId,
-                                            emptyRetryAttempt + 1
+                                            policy, contextScope, emptyRetryAttempt + 1
                                         )
                                     } catch (_: Throwable) {
                                         finish("DRAFT_GENERATION_FAILED", requestGeneration)
@@ -486,7 +862,19 @@ class AiReplyDraftCoordinator(
                             if (!accepted) finish("BACKGROUND_EXECUTOR_REJECTED", requestGeneration)
                         }
                     }.isSuccess
-                    if (scheduled) return
+                    if (scheduled) {
+                        recordModelLifecycle(
+                            requestId, requestGeneration, "MODEL_RETRY_SCHEDULED",
+                            emptyRetryAttempt + 1, "SCHEDULED", "EMPTY_MODEL_OUTPUT",
+                            retryDelayMs, nextMode
+                        )
+                        return
+                    }
+                    recordModelLifecycle(
+                        requestId, requestGeneration, "MODEL_RETRY_SCHEDULE_FAILED",
+                        emptyRetryAttempt + 1, reasonCode = "SCHEDULER_UNAVAILABLE",
+                        responseMode = nextMode
+                    )
                 }
                 finish("MODEL_DECISION_MODEL_CALL_FAILED", requestGeneration)
                 return
@@ -497,35 +885,57 @@ class AiReplyDraftCoordinator(
                     "MODEL_DECISION_${evaluation.status.reasonCode}"
                 else -> "EXECUTION_${evaluation.status.reasonCode}"
             }
-            // Retain the existing persisted MODEL_COMPLETED transition only for a model
-            // response that arrived but was empty or failed schema validation.
-            if (evaluation.status == AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT ||
-                evaluation.status == AiReplyExecutionStatus.MODEL_OUTPUT_INVALID
-            ) updateTaskStatus(ReplyTaskStatus.MODEL_COMPLETED, requestGeneration)
+            // No valid decision or draft exists: do not persist MODEL_COMPLETED.
+            // finish() records a retryable, pre-send terminal failure instead.
             finish(finishCode, requestGeneration)
             return
         }
         val decision = (evaluation as AiReplyEvaluation.Model).decision
+        recordModelLifecycle(
+            requestId, requestGeneration, "MODEL_ATTEMPT_FINISHED", emptyRetryAttempt,
+            reasonCode = "VALID_DECISION", responseMode = responseMode,
+            outcomeCategory = "VALID_DECISION"
+        )
+        val draftPresent = !decision.draft.isNullOrBlank()
+        val draftLength = decision.draft?.codePointCount(0, decision.draft.length) ?: 0
+        val messageCount = if (draftPresent) ReplyMessageSegments.parse(decision.draft!!).messages.size else 0
+        onLog("AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
+            "generation=$requestGeneration；outcomeCategory=VALID_DECISION；" +
+            "safeCode=MODEL_DECISION_${decision.action.name}；contentState=PRESENT；" +
+            "action=${decision.action.name}；reasonHash=${diagnosticHash(decision.reason)}；" +
+            "provider=${safeLog(decision.provider)}；modelHash=${diagnosticHash(decision.model)}；" +
+            "finishReason=${AiModelCallDiagnostics.safeFinishReason(decision.finishReason)}；" +
+            "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；" +
+            "inputTokens=${decision.usage?.inputTokens ?: "UNKNOWN"}；" +
+            "outputTokens=${decision.usage?.outputTokens ?: "UNKNOWN"}；" +
+            "draftPresent=$draftPresent；draftLength=$draftLength；messageCount=$messageCount；" +
+            "reasonDetailPresent=${!decision.reasonDetail.isNullOrBlank()}；" +
+            "reasonDetailLength=${decision.reasonDetail?.length ?: 0}")
         onLog(
             "AI 模型调用完成：requestId=$requestId；" +
                 "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；" +
                 "action=${decision.action.name}；" +
-                "reason=${decision.reason}；" +
+                "reasonHash=${diagnosticHash(decision.reason)}；" +
                 "draftPresent=${!decision.draft.isNullOrBlank()}"
         )
-        if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
-            onLog("AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
-                "reason=${safeLog(decision.reason)}；reasonDetail=${safeLog(decision.reasonDetail ?: "模型未提供详细解释；请核查模型响应协议")}；" +
-                "provider=${safeLog(decision.provider)}；model=${safeLog(decision.model)}；" +
-                "finishReason=${safeLog(decision.finishReason)}；contextMessages=${context.messages.size}；" +
-                "inputTokens=${decision.usage?.inputTokens}；outputTokens=${decision.usage?.outputTokens}；" +
-                "draftPresent=${!decision.draft.isNullOrBlank()}")
-        }
+        onLog("AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
+            "reasonHash=${diagnosticHash(decision.reason)}；" +
+            "reasonDetailPresent=${!decision.reasonDetail.isNullOrBlank()}；" +
+            "reasonDetailLength=${decision.reasonDetail?.length ?: 0}；" +
+            "provider=${safeLog(decision.provider)}；modelHash=${diagnosticHash(decision.model)}；" +
+            "finishReason=${AiModelCallDiagnostics.safeFinishReason(decision.finishReason)}；" +
+            "contextMessages=${context.messages.size}；" +
+            "inputTokens=${decision.usage?.inputTokens ?: "UNKNOWN"}；" +
+            "outputTokens=${decision.usage?.outputTokens ?: "UNKNOWN"}；" +
+            "draftPresent=$draftPresent；draftLength=$draftLength；messageCount=$messageCount")
+        completeModelLifecycle(
+            requestId, requestGeneration, "SUCCEEDED", "MODEL_DECISION_${decision.action.name}"
+        )
         updateTaskStatus(ReplyTaskStatus.MODEL_COMPLETED, requestGeneration)
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
             onLog(
                 "AI 草稿状态：MODEL_DID_NOT_RETURN_DRAFT；模型未返回可用草稿；" +
-                    "中文原因=${safeLog(decision.reasonDetail ?: decision.reason)}；" +
+                    "reasonHash=${diagnosticHash(decision.reason)}；reasonDetailPresent=${!decision.reasonDetail.isNullOrBlank()}；" +
                     "action=${decision.action.name}；draftPresent=${!decision.draft.isNullOrBlank()}"
             )
             // Never interpret an untrusted model reason as a technical retry code.
@@ -576,7 +986,7 @@ class AiReplyDraftCoordinator(
                 onLog("AI 消息段任务持久化失败：requestId=$requestId；segmentIndex=${record.segmentIndex}；error=${error.javaClass.simpleName}")
             }
         }
-        onLog("AI 消息段任务已建立：requestId=$requestId；conversationKey=$conversationKey；segmentCount=${records.size}；输入片段仍由 DraftSegments 独立处理")
+        onLog("AI 消息段任务已建立：requestId=$requestId；conversationKeyHash=${diagnosticHash(conversationKey)}；segmentCount=${records.size}；输入片段仍由 DraftSegments 独立处理")
     }
 
     private fun writeMessageSegment(target: ChatDraftInputTarget, segmentIndex: Int, requestGeneration: Long) {
@@ -644,7 +1054,35 @@ class AiReplyDraftCoordinator(
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
         // 保留手势提交前持久化的 SENDING 安全标记；只有明确返回
         // SEND_CONTROL_NOT_READY 且确认未派发手势时，才允许回退此状态。
-        updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.SENDING)
+        // Persist SENDING and its pre-send evidence in the SAME durable update.
+        // A crash must not leave a bare SENDING record without its recovery proof.
+        // Persist the pre-send snapshot BEFORE invoking the gesture port. The absence of
+        // an outgoing bubble after a restart must not permit replay or text-only proof.
+        val sendEvidenceSaved = replySegmentTaskRepository?.let { repository ->
+            runCatching {
+                val requestId = synchronized(lock) { activeRequestId }.orEmpty()
+                val requestKey = synchronized(lock) { activeMessageKey }.orEmpty()
+                val id = "$requestId:segment:$segmentIndex"
+                val record = repository.find(id)
+                val evidence = record?.copy(
+                    status = ReplySegmentTaskStatus.SENDING,
+                    sendAttemptStartedAt = nowMillis(),
+                    sendWindowSessionKey = target.windowSessionKey,
+                    sendChatTitleHash = fingerprint(normalizeTitle(target.expectedChatTitle)),
+                    preSendOutgoingKeyHashes = synchronized(lock) { activeExistingOutgoingKeys.mapTo(LinkedHashSet()) { fingerprint(it) } },
+                    sendRequestKey = requestKey
+                )
+                requestId.isNotBlank() && requestKey.isNotBlank() &&
+                    record?.status == ReplySegmentTaskStatus.PENDING_SEND &&
+                    evidence != null && repository.update(evidence) &&
+                    repository.find(id) == evidence
+            }.getOrDefault(false)
+        } ?: true
+        if (!sendEvidenceSaved) {
+            onLog("AI 发送前检查点[NOT_DURABLE]：无法确认证据已持久化；禁止提交发送")
+            finish("SEND_PRECHECKPOINT_NOT_DURABLE", requestGeneration)
+            return
+        }
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
         val sent = runCatching { sendPort?.sendDraft(target, message) ?: ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_UNAVAILABLE") }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_EXCEPTION") }
@@ -665,12 +1103,22 @@ class AiReplyDraftCoordinator(
                 )
                 pending.set(true)
             }
+            recordSendTrace(
+                "MESSAGE_SEND_DEFERRED", synchronized(lock) { activeRequestId }.orEmpty(),
+                requestGeneration, segmentIndex, activeMessageSegments.size,
+                sendStatus = "NOT_SUBMITTED", reasonCode = "SEND_CONTROL_NOT_READY"
+            )
             onLog("AI 待发送事务[BUTTON_PENDING]：segmentIndex=$segmentIndex；" +
                 "草稿已验证、手势未提交；保留 PENDING_SEND 并等待新鲜节点")
             schedulePendingSendControlRetry()
             return
         }
         if (sent.status != ChatDraftInputStatus.SEND_SUBMITTED) {
+            recordSendTrace(
+                "MESSAGE_SEND_REJECTED", synchronized(lock) { activeRequestId }.orEmpty(),
+                requestGeneration, segmentIndex, activeMessageSegments.size,
+                sendStatus = "NOT_SUBMITTED", reasonCode = sent.status.name
+            )
             updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.FAILED_RETRYABLE)
             updateTaskStatus(ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
             finish("DRAFT_SEND_${sent.reasonCode}", requestGeneration)
@@ -685,6 +1133,9 @@ class AiReplyDraftCoordinator(
         updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.SENT_UNCONFIRMED)
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENT_UNCONFIRMED, requestGeneration)
         pending.set(false)
+        synchronized(lock) { pendingSendConfirmation }?.let {
+            recordSendTrace("MESSAGE_SEND_SUBMITTED", it, "SENT_UNCONFIRMED")
+        }
     }
 
     private fun schedulePendingSendControlRetry() {
@@ -921,6 +1372,9 @@ class AiReplyDraftCoordinator(
                     )
                     sendConfirmationChecks = 0
                 }
+                synchronized(lock) { pendingSendConfirmation }?.let {
+                    recordSendTrace("MESSAGE_SEND_SUBMITTED", it, "SENT_UNCONFIRMED")
+                }
                 onLog("AI 回复状态：SENT_UNCONFIRMED；发送按钮手势已被接受；" +
                     "不代表 Momo 已产生己方消息；等待后续结果核验；" +
                     "sendAttemptId=${sendAttemptId.take(12)}；requestId=${activeRequestId?.take(12)}")
@@ -941,6 +1395,11 @@ class AiReplyDraftCoordinator(
                 )
                 val failureStatus = if (finalFailure) ReplyTaskStatus.FAILED_FINAL else ReplyTaskStatus.FAILED_RETRYABLE
                 updateTaskStatus(failureStatus, requestGeneration)
+                recordSendTrace(
+                    "MESSAGE_SEND_REJECTED", synchronized(lock) { activeRequestId }.orEmpty(),
+                    requestGeneration, segmentIndex, segments.size,
+                    sendStatus = "NOT_SUBMITTED", reasonCode = sent.status.name
+                )
                 onLog("AI 回复状态：发送手势未提交；status=${failureStatus.name}；reason=${sent.reasonCode}")
                 finish("DRAFT_SEND_${sent.reasonCode}", requestGeneration)
             }
@@ -960,9 +1419,137 @@ class AiReplyDraftCoordinator(
         activeMessageKey != null && activeRequestId != null
     }
 
+    /**
+     * Rehydrate only an uncertain, already-attempted send. Never recreate input chunks
+     * or invoke the send port during recovery. Legacy records without a pre-send
+     * baseline remain unresolved rather than accepting a same-text historical bubble.
+     */
+    private fun restoreUncertainSendConfirmation(
+        batch: ChatMessageBatch, snapshot: ChatPageSnapshot
+    ): SendConfirmationResult {
+        val conversationKey = snapshot.conversationIdentityKey() ?: return SendConfirmationResult.NOT_PENDING
+        val repository = replySegmentTaskRepository ?: return SendConfirmationResult.NOT_PENDING
+        val all = runCatching { repository.findByConversation(conversationKey) }.getOrNull()
+            ?: return SendConfirmationResult.UNKNOWN
+        val uncertain = all.filter {
+            it.status in setOf(
+                ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.SENT_UNCONFIRMED,
+                ReplySegmentTaskStatus.UNKNOWN
+            )
+        }
+        if (uncertain.isEmpty()) return SendConfirmationResult.NOT_PENDING
+        synchronized(lock) { replyAwaitingConfirmedSend = true }
+        val candidate = uncertain.singleOrNull()
+        val segments = candidate?.let { current ->
+            all.filter { it.requestId == current.requestId }.sortedBy { it.segmentIndex }
+        }
+        val startedAt = candidate?.sendAttemptStartedAt
+        val requestKey = candidate?.sendRequestKey
+        val targetNode = snapshot.inputFieldTarget
+        val windowIdentity = snapshot.windowIdentityKey()
+        val session = targetNode?.window
+        val currentWindowKey = if (session == null) null
+            else "${session.packageName}|${session.windowId}|${session.generation}|conversation=$conversationKey"
+        val valid = candidate != null && segments != null && startedAt != null &&
+            !requestKey.isNullOrBlank() && candidate.sendChatTitleHash != null &&
+            candidate.sendWindowSessionKey?.endsWith("|conversation=$conversationKey") == true &&
+            snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            snapshot.packageName.isNotBlank() && targetNode != null &&
+            windowIdentity != null && batch.windowSessionKey == currentWindowKey &&
+            batch.capturedAtMillis > startedAt &&
+            fingerprint(normalizeTitle(snapshot.chatTitleText)) == candidate.sendChatTitleHash &&
+            segments.size == candidate.segmentCount &&
+            segments.indices.all { index ->
+                val record = segments[index]
+                record.segmentIndex == index && record.segmentCount == candidate.segmentCount &&
+                    record.segmentContent.isNotBlank() && fingerprint(record.segmentContent) == record.segmentContentHash &&
+                    (when {
+                        index < candidate.segmentIndex -> record.status == ReplySegmentTaskStatus.SENT
+                        index == candidate.segmentIndex -> record.status == candidate.status
+                        else -> record.status == ReplySegmentTaskStatus.CREATED
+                    })
+            } &&
+            replyTaskRepository?.find(requestKey)?.let {
+                it.requestId == candidate.requestId && it.conversationKey == conversationKey &&
+                    it.status in setOf(
+                        ReplyTaskStatus.PENDING_SEND, ReplyTaskStatus.SENDING,
+                        ReplyTaskStatus.SENT_UNCONFIRMED, ReplyTaskStatus.UNKNOWN
+                    )
+            } == true &&
+            isAiReplyActive()
+        if (!valid || candidate == null || segments == null || targetNode == null ||
+            windowIdentity == null || currentWindowKey == null || requestKey == null || startedAt == null
+        ) {
+            candidate?.let {
+                recordSendTrace(
+                    "MESSAGE_SEND_UNCERTAIN", it.requestId, generation.get(),
+                    it.segmentIndex, it.segmentCount, sendStatus = "UNKNOWN",
+                    reasonCode = "RECOVERY_EVIDENCE_INSUFFICIENT", recoveredFromLedger = true
+                )
+            }
+            onLog("AI 发送只读恢复[UNRESOLVED_EVIDENCE]：原发送基线、身份、持久化队列或新鲜页面证据不足；禁止重发")
+            return SendConfirmationResult.UNKNOWN
+        }
+        val target = ChatDraftInputTarget(
+            packageName = snapshot.packageName,
+            activityClass = snapshot.activityClass,
+            windowIdentityKey = windowIdentity,
+            conversationIdentityKey = conversationKey,
+            windowSessionKey = currentWindowKey,
+            nodeTarget = targetNode,
+            expectedChatTitle = snapshot.chatTitleText,
+            taskLease = captureTaskLease()
+        )
+        synchronized(lock) {
+            if (pendingSendConfirmation != null || pendingNextMessageSegment != null ||
+                pending.get() || awaitingUserSend.get()
+            ) return SendConfirmationResult.WAITING
+            activeRequestId = candidate.requestId
+            activeMessageKey = requestKey
+            activeMessageSegments = segments.map { it.segmentContent }
+            activeExistingOutgoingKeys = emptySet()
+            replyAwaitingConfirmedSend = true
+            readOnlyRecoveredMatch = null
+            pendingSendConfirmation = PendingSendConfirmation(
+                sendAttemptId = fingerprint("${candidate.requestId}|${candidate.segmentIndex}|READ_ONLY"),
+                requestId = candidate.requestId,
+                conversationKey = conversationKey,
+                segmentIndex = candidate.segmentIndex,
+                segmentCount = candidate.segmentCount,
+                segmentContentHash = candidate.segmentContentHash,
+                submittedAt = startedAt,
+                confirmationDeadline = nowMillis() + SEND_CONFIRMATION_TIMEOUT_MILLIS,
+                requestGeneration = generation.get(),
+                target = target,
+                draft = candidate.segmentContent,
+                existingOutgoingKeys = emptySet(),
+                previousOutgoingKeyHashes = candidate.preSendOutgoingKeyHashes,
+                recoveredFromLedger = true
+            )
+            sendConfirmationChecks = 0
+        }
+        synchronized(lock) { pendingSendConfirmation }?.let {
+            recordSendTrace(
+                "MESSAGE_SEND_REHYDRATED", it, "WAITING",
+                reasonCode = "READ_ONLY_RECOVERY"
+            )
+        }
+        onLog("AI 发送只读恢复[REHYDRATED]：requestId=${candidate.requestId.take(12)}；" +
+            "segmentIndex=${candidate.segmentIndex}；仅核验新鲜己方气泡，不重新输入或发送")
+        return SendConfirmationResult.WAITING
+    }
+
     fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): SendConfirmationResult {
-        val pending = synchronized(lock) { pendingSendConfirmation } ?: return SendConfirmationResult.NOT_PENDING
+        val pending = synchronized(lock) { pendingSendConfirmation }
+        if (pending == null) {
+            val next = synchronized(lock) { pendingNextMessageSegment }
+            if (next != null) return resumeConfirmedNextMessageSegment(batch, snapshot, next)
+            return restoreUncertainSendConfirmation(batch, snapshot)
+        }
         if (generation.get() != pending.requestGeneration) {
+            recordSendTrace(
+                "MESSAGE_SEND_UNCERTAIN", pending, "UNKNOWN", "GENERATION_CHANGED"
+            )
             onLog("AI 发送结果核验：UNKNOWN；运行代次已失效；禁止重发")
             updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)
             updateSegmentStatus(pending.requestGeneration, pending.segmentIndex, ReplySegmentTaskStatus.UNKNOWN)
@@ -974,8 +1561,14 @@ class AiReplyDraftCoordinator(
             normalizeTitle(snapshot.chatTitleText) == normalizeTitle(pending.target.expectedChatTitle) &&
             batch.capturedAtMillis >= pending.submittedAt
         if (!observationMatches) {
+            // A reconstructed send requires consecutive, independently fresh proof.
+            // A wrong page/window observation invalidates the first proof candidate.
+            if (pending.recoveredFromLedger) synchronized(lock) { readOnlyRecoveredMatch = null }
             val checks = synchronized(lock) { ++sendConfirmationChecks }
             if (checks >= SEND_CONFIRMATION_MAX_CHECKS) {
+                recordSendTrace(
+                    "MESSAGE_SEND_UNCERTAIN", pending, "UNKNOWN", "CHAT_OBSERVATION_MISMATCH"
+                )
                 onLog("AI 发送结果核验：UNKNOWN；窗口、会话标题或时间条件连续不匹配；禁止重发")
                 updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)
                 updateSegmentStatus(pending.requestGeneration, pending.segmentIndex, ReplySegmentTaskStatus.UNKNOWN)
@@ -984,25 +1577,62 @@ class AiReplyDraftCoordinator(
             onLog("AI 发送结果核验：WAITING；当前批次不属于发送后的稳定聊天观察；检查次数=$checks")
             return SendConfirmationResult.WAITING
         }
-        val matched = batch.messages.firstOrNull { message ->
+        val eligibleMatches = batch.messages.filter { message ->
             message.direction == ChatMessageDirection.OUTGOING &&
                 message.contentQuality == MessageContentQuality.VERIFIED &&
                 fingerprint(message.content.orEmpty()) == pending.segmentContentHash &&
-                messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys
+                messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys &&
+                fingerprint(messageKey(message.stableLogicalMessageId, message.effectiveContentRevision)) !in pending.previousOutgoingKeyHashes
         }
+        // A reconstructed transaction needs a single, stable bubble on two fresh reads;
+        // a matching string on one OCR pass is never sufficient proof.
+        val matched = if (pending.recoveredFromLedger) eligibleMatches.singleOrNull() else eligibleMatches.firstOrNull()
         if (matched != null) {
+            if (pending.recoveredFromLedger) {
+                val matchKey = messageKey(matched.stableLogicalMessageId, matched.effectiveContentRevision)
+                val prior = synchronized(lock) { readOnlyRecoveredMatch }
+                if (prior == null || prior.requestId != pending.requestId ||
+                    prior.segmentIndex != pending.segmentIndex ||
+                    prior.messageKey != matchKey || batch.capturedAtMillis <= prior.observedAtMillis
+                ) {
+                    synchronized(lock) {
+                        readOnlyRecoveredMatch = ReadOnlyRecoveredMatch(
+                            pending.requestId, pending.segmentIndex, matchKey, batch.capturedAtMillis
+                        )
+                    }
+                    onLog("AI 发送只读恢复[CANDIDATE_SEEN]：等待第二次新鲜同一消息确认；禁止重发")
+                    return SendConfirmationResult.WAITING
+                }
+            }
             val confirmationId = fingerprint("${pending.requestId}|${pending.segmentIndex}|${pending.segmentContentHash}|${matched.stableLogicalMessageId}|${matched.effectiveContentRevision}")
             if (updateSegmentStatusAndContinue(pending, confirmationId)) {
+                recordSendTrace(
+                    "MESSAGE_SEND_CONFIRMED", pending, "CONFIRMED",
+                    sendConfirmationId = confirmationId
+                )
                 onLog("AI 发送结果核验：SENT；sendConfirmationId=${confirmationId.take(12)}；" +
                     "sendAttemptId=${pending.sendAttemptId.take(12)}")
                 val nextIndex = pending.segmentIndex + 1
                 synchronized(lock) {
                     pendingSendConfirmation = null
                     awaitingUserSend.set(false)
+                    // A later segment with identical text must never match this earlier bubble.
+                    activeExistingOutgoingKeys = if (pending.recoveredFromLedger) {
+                        batch.messages.filter { it.direction == ChatMessageDirection.OUTGOING }
+                            .mapTo(LinkedHashSet()) { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
+                    } else activeExistingOutgoingKeys +
+                        messageKey(matched.stableLogicalMessageId, matched.effectiveContentRevision)
+                    readOnlyRecoveredMatch = null
+                    if (nextIndex < activeMessageSegments.size) {
+                        pendingNextMessageSegment = PendingNextMessageSegment(
+                            pending.requestId, nextIndex, pending.requestGeneration,
+                            batch.capturedAtMillis, pending.target
+                        )
+                    }
                 }
                 if (nextIndex < activeMessageSegments.size) {
-                    onLog("AI 消息段顺序推进：segmentIndex=${pending.segmentIndex} 已确认；启动 segmentIndex=$nextIndex")
-                    scheduler.schedule(0L) { writeMessageSegment(pending.target, nextIndex, pending.requestGeneration) }
+                    onLog("AI 消息段顺序推进[AWAITING_FRESH_CHAT]：segmentIndex=${pending.segmentIndex} 已确认；" +
+                        "等待新鲜聊天与空输入框复核后启动 segmentIndex=$nextIndex")
                     return SendConfirmationResult.WAITING
                 }
                 val allSegmentsSent = replySegmentTaskRepository?.findByRequest(pending.requestId)
@@ -1015,6 +1645,10 @@ class AiReplyDraftCoordinator(
                 }
                 lastConfirmedSendId = confirmationId
                 updateTaskStatus(ReplyTaskStatus.SENT, pending.requestGeneration)
+                recordSendTrace(
+                    "MESSAGE_SEND_COMPLETED", pending, "CONFIRMED",
+                    reasonCode = "ALL_SEGMENTS_CONFIRMED", sendConfirmationId = confirmationId
+                )
                 synchronized(lock) {
                     activeMessageKey = null
                     activeRequestId = null
@@ -1023,12 +1657,22 @@ class AiReplyDraftCoordinator(
                 }
                 return SendConfirmationResult.CONFIRMED
             }
+            recordSendTrace(
+                "MESSAGE_SEND_UNCERTAIN", pending, "UNKNOWN", "SEGMENT_PERSIST_REJECTED"
+            )
+            onLog("AI 发送结果核验[SEGMENT_PERSIST_REJECTED]：消息段状态持久化未确认；禁止推进下一条")
             return SendConfirmationResult.UNKNOWN
         }
+        // An OCR miss, ambiguous match or changed bubble breaks the consecutive-read
+        // chain. It is not a failed send and must never reopen the send port.
+        if (pending.recoveredFromLedger) synchronized(lock) { readOnlyRecoveredMatch = null }
         val checks = synchronized(lock) { ++sendConfirmationChecks }
         if (checks >= SEND_CONFIRMATION_MAX_CHECKS || nowMillis() >= pending.confirmationDeadline) {
             updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)
             updateSegmentStatus(pending.requestGeneration, pending.segmentIndex, ReplySegmentTaskStatus.UNKNOWN)
+            recordSendTrace(
+                "MESSAGE_SEND_UNCERTAIN", pending, "UNKNOWN", "CONFIRMATION_EVIDENCE_UNAVAILABLE"
+            )
             onLog("AI 发送结果核验：UNKNOWN；检查次数=$checks；未发现新的己方消息；禁止立即重发")
             return SendConfirmationResult.UNKNOWN
         }
@@ -1036,9 +1680,120 @@ class AiReplyDraftCoordinator(
         return SendConfirmationResult.WAITING
     }
 
+    /**
+     * A previous SENT confirmation authorizes only a read-only look for the next composer.
+     * No old input node or scheduled gesture is reused across independently sent messages.
+     */
+    private fun resumeConfirmedNextMessageSegment(
+        batch: ChatMessageBatch,
+        snapshot: ChatPageSnapshot,
+        next: PendingNextMessageSegment
+    ): SendConfirmationResult {
+        if (!isCurrentGeneration(next.requestGeneration) || !isAiReplyActive() ||
+            !hasActiveTaskOwner() || synchronized(lock) { activeRequestId != next.requestId }
+        ) {
+            onLog("AI 消息段推进[STALE_REQUEST]：发送任务或运行代次已变化；不提交后续消息")
+            return SendConfirmationResult.UNKNOWN
+        }
+        val targetBefore = next.previousTarget
+        val currentInput = snapshot.inputFieldTarget
+        val currentWindowIdentity = snapshot.windowIdentityKey()
+        val sameChat = snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            snapshot.packageName == targetBefore.packageName &&
+            snapshot.activityClass == targetBefore.activityClass &&
+            snapshot.conversationIdentityKey() == targetBefore.conversationIdentityKey &&
+            normalizeTitle(snapshot.chatTitleText) == normalizeTitle(targetBefore.expectedChatTitle) &&
+            currentWindowIdentity == targetBefore.windowIdentityKey &&
+            batch.windowSessionKey == targetBefore.windowSessionKey &&
+            batch.capturedAtMillis > next.confirmedObservationAtMillis &&
+            currentInput != null &&
+            currentInput.window == targetBefore.nodeTarget.window
+        if (!sameChat || currentInput == null || currentWindowIdentity == null) {
+            onLog("AI 消息段推进[CHAT_REVALIDATION_WAIT]：尚无发送确认后的同窗口新鲜聊天与输入框证据；不发送")
+            return SendConfirmationResult.WAITING
+        }
+        val target = targetBefore.copy(windowIdentityKey = currentWindowIdentity, nodeTarget = currentInput)
+        val repo = replySegmentTaskRepository
+        if (repo != null) {
+            val records = repo.findByRequest(next.requestId).sortedBy { it.segmentIndex }
+            val segment = records.getOrNull(next.segmentIndex)
+            val valid = records.size == activeMessageSegments.size &&
+                records.indices.all { records[it].segmentIndex == it && records[it].requestId == next.requestId } &&
+                records.take(next.segmentIndex).all { it.status == ReplySegmentTaskStatus.SENT } &&
+                segment?.status == ReplySegmentTaskStatus.CREATED &&
+                segment?.segmentContentHash == activeMessageSegments.getOrNull(next.segmentIndex)?.let(::fingerprint)
+            if (!valid) {
+                onLog("AI 消息段推进[CHECKPOINT_CONFLICT]：持久化队列与待发送段不一致；禁止下一条发送")
+                return SendConfirmationResult.UNKNOWN
+            }
+        }
+        if (runCatching { inputPort.verifyDraft(target, "") }.getOrNull()?.status != ChatDraftInputStatus.VERIFIED) {
+            onLog("AI 消息段推进[COMPOSER_NOT_READY]：新输入框不为空或无法确认；不覆盖、不发送")
+            return SendConfirmationResult.WAITING
+        }
+        val reserved = synchronized(lock) {
+            if (pendingNextMessageSegment != next || pendingSendConfirmation != null ||
+                activeRequestId != next.requestId || !isCurrentGeneration(next.requestGeneration)) false
+            else {
+                pendingNextMessageSegment = null
+                pending.set(true)
+                true
+            }
+        }
+        if (!reserved) return SendConfirmationResult.WAITING
+        val scheduled = runCatching {
+            scheduler.schedule(0L) {
+                if (!isCurrentGeneration(next.requestGeneration) || !isAiReplyActive() || !hasActiveTaskOwner()) return@schedule
+                writeMessageSegment(target, next.segmentIndex, next.requestGeneration)
+            }
+        }.isSuccess
+        if (!scheduled) {
+            synchronized(lock) {
+                if (activeRequestId == next.requestId && isCurrentGeneration(next.requestGeneration)) {
+                    pendingNextMessageSegment = next
+                    pending.set(false)
+                }
+            }
+            onLog("AI 消息段推进[SCHEDULER_UNAVAILABLE]：保留未发送段，等待后续聊天观察")
+            return SendConfirmationResult.WAITING
+        }
+        onLog("AI 消息段推进[NEXT_SEGMENT_STARTED]：segmentIndex=${next.segmentIndex}；" +
+            "新鲜页面和空输入框已验证，按既有 DraftSegments 节奏输入")
+        return SendConfirmationResult.WAITING
+    }
+
+    /** A repository rejection is not a confirmed send and must never advance the queue. */
     private fun updateSegmentStatusAndContinue(pending: PendingSendConfirmation, confirmationId: String): Boolean {
-        updateSegmentStatus(pending.requestGeneration, pending.segmentIndex, ReplySegmentTaskStatus.SENT, nowMillis(), confirmationId)
-        return true
+        if (!isCurrentGeneration(pending.requestGeneration)) return false
+        val repo = replySegmentTaskRepository ?: return true
+        val record = repo.find("${pending.requestId}:segment:${pending.segmentIndex}") ?: return false
+        if (record.requestId != pending.requestId || record.segmentIndex != pending.segmentIndex ||
+            record.segmentContentHash != pending.segmentContentHash
+        ) return false
+        if (record.status == ReplySegmentTaskStatus.SENT) return record.confirmationId == confirmationId
+        if (record.status !in setOf(
+                ReplySegmentTaskStatus.SENT_UNCONFIRMED, ReplySegmentTaskStatus.UNKNOWN,
+                ReplySegmentTaskStatus.SENDING
+            )) return false
+        if (!repo.update(record.copy(status = ReplySegmentTaskStatus.SENT,
+                sentAt = nowMillis(), confirmationId = confirmationId))) return false
+        val saved = repo.find(record.taskId)
+        return saved?.status == ReplySegmentTaskStatus.SENT && saved.confirmationId == confirmationId
+    }
+
+    /**
+     * The only outward-facing business send result: internal queue progress remains WAITING,
+     * while the final confirmed segment yields one consumable transaction receipt. The
+     * receipt is delivered alongside the final outcome, never as a separate later callback.
+     */
+    fun confirmSendTransaction(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): ReplySendTransactionOutcome {
+        val result = confirmSendResult(batch, snapshot)
+        return ReplySendTransactionOutcome(
+            status = result,
+            finalSendConfirmationId = if (result == SendConfirmationResult.CONFIRMED) {
+                consumeConfirmedSendId()
+            } else null
+        )
     }
 
     fun consumeConfirmedSendId(): String? = synchronized(lock) {
@@ -1046,30 +1801,133 @@ class AiReplyDraftCoordinator(
     }
 
     private fun finish(reasonCode: String, requestGeneration: Long) {
-        if (reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED", "MODEL_DECISION_MODEL_CALL_FAILED")) {
-            updateTaskStatus(if (reasonCode == "MODEL_DECISION_MODEL_CALL_FAILED") ReplyTaskStatus.UNKNOWN else ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
-        }
-        synchronized(lock) {
+        var terminalLog: String? = null
+        val technicalPreSendFailure = reasonCode in setOf(
+            "DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED",
+            "MODEL_DECISION_MODEL_CALL_FAILED", "MODEL_DECISION_EMPTY_MODEL_OUTPUT",
+            "MODEL_DECISION_MODEL_OUTPUT_SCHEMA_INVALID"
+        )
+        val reclaimableFailure = technicalPreSendFailure ||
+            reasonCode == "MODEL_EMPTY_RETRY_CONTEXT_CHANGED"
+        val durableFailureRecorded = if (reclaimableFailure) {
+            // An uncertain send is never reclaimed by a model-only failure.
+            updateTaskStatus(ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
+        } else false
+        val event = synchronized(lock) {
             if (!isCurrentGeneration(requestGeneration)) return
+            val preSend = activeMessageSegments.isEmpty() &&
+                pendingSendConfirmation == null && pendingNextMessageSegment == null &&
+                pendingSendControl == null && !awaitingUserSend.get()
+            if (preSend) replyAwaitingConfirmedSend = false
             pending.set(false)
             pendingSendControl = null
             sendControlRetryScheduled = false
             sendControlRetryTicket++
             val key = activeMessageKey
+            val id = activeRequestId
+            val originalTarget = activeDraftTarget
+            val visitToken = activeDraftVisitToken
             activeMessageKey = null
             activeRequestId = null
-            // 模型/调度失败和已证实首次焦点拒绝且输入仍空，才允许有限重试；已写入或发送不明时禁止重试。
-            if (key != null && reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED",
-                    "MODEL_DECISION_MODEL_CALL_FAILED", "MODEL_DECISION_EMPTY_MODEL_OUTPUT",
-                    "MODEL_DECISION_MODEL_OUTPUT_SCHEMA_INVALID",
-                    "DRAFT_INPUT_CONFIRMED_EMPTY_RETRYABLE")) {
-                val attempts = (failedRequests[key]?.first ?: 0) + 1
-                failedRequests[key] = attempts to (nowMillis() + 30_000L)
+            activeDraftTarget = null
+            activeDraftVisitToken = null
+            var attempts = 0
+            if (key != null && (technicalPreSendFailure ||
+                    reasonCode == "DRAFT_INPUT_CONFIRMED_EMPTY_RETRYABLE")) {
+                attempts = (failedRequests[key]?.first ?: 0) + 1
+                failedRequests[key] = attempts to (nowMillis() + MODEL_FAILURE_RETRY_DELAY_MS)
                 while (failedRequests.size > MAX_PROCESSED_KEYS) failedRequests.remove(failedRequests.keys.first())
                 processedMessageKeys.remove(key)
             }
+            modelLifecycleTrace?.takeIf {
+                it.requestGeneration == requestGeneration && !it.terminalLogged
+            }?.let { trace ->
+                trace.terminalLogged = true
+                val cancelled = reasonCode == "MODEL_EMPTY_RETRY_CONTEXT_CHANGED" ||
+                    reasonCode.startsWith("AI_REPLY_STATE_CHANGED")
+                val retryState = when {
+                    reasonCode == "MODEL_EMPTY_RETRY_CONTEXT_CHANGED" -> "CANCELLED_CONTEXT_CHANGED"
+                    cancelled -> "CANCELLED_RUNTIME_INACTIVE"
+                    trace.lastOutcomeCategory == "EMPTY_MODEL_OUTPUT" &&
+                        trace.scheduledRetries == MAX_EMPTY_MODEL_RETRIES -> "EXHAUSTED"
+                    else -> "NONE"
+                }
+                terminalLog = terminalLifecycleRecord(
+                    trace, if (cancelled) "CANCELLED" else "FAILED", reasonCode, retryState
+                )
+            }
+            if (technicalPreSendFailure && preSend && durableFailureRecorded &&
+                key != null && id != null && originalTarget != null && visitToken != null
+            ) AiReplyPreSendModelFailure(
+                requestId = id,
+                requestKey = key,
+                conversationKey = originalTarget.conversationIdentityKey,
+                windowSessionKey = originalTarget.windowSessionKey,
+                visitToken = visitToken,
+                taskLease = originalTarget.taskLease,
+                reasonCode = reasonCode,
+                attempts = attempts,
+                retryDelayMs = MODEL_FAILURE_RETRY_DELAY_MS,
+                readyToDefer = attempts >= MODEL_FAILURE_MAX_ATTEMPTS
+            ) else null
         }
+        terminalLog?.let { runCatching { onLog(it) } }
         onLog("AI 回复草稿处理结束：$reasonCode")
+        if (event != null) {
+            onLog("AI 模型失败交接[PRE_SEND_NO_GESTURE]：reason=${event.reasonCode}；" +
+                "attempt=${event.attempts}/$MODEL_FAILURE_MAX_ATTEMPTS；defer=${event.readyToDefer}")
+            runCatching { onPreSendModelFailure(event) }.onFailure {
+                onLog("AI 模型失败交接[CALLBACK_REJECTED]：不执行页面操作")
+            }
+        }
+    }
+
+    /**
+     * A greeting can be deferred only after the original request is durably retryable,
+     * no segment was created, the request/lease still match, and the *fresh* composer is empty.
+     * This verification does not read or write a draft or submit a gesture.
+     */
+    fun verifyGreetingPreSendFailure(
+        failure: AiReplyPreSendModelFailure, snapshot: ChatPageSnapshot
+    ): Boolean {
+        if (!isAiReplyActive() || isConversationReturnBlocked || isSendConfirmationPending ||
+            isSendControlRecoveryPending
+        ) return false
+        if (snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            snapshot.conversationIdentityKey() != failure.conversationKey ||
+            snapshot.windowIdentityKey() == null ||
+            snapshot.inputFieldTarget == null ||
+            snapshot.packageName != failure.windowSessionKey.substringBefore('|')
+        ) return false
+        val window = snapshot.inputFieldTarget.window
+        val sessionKey = "${window.packageName}|${window.windowId}|${window.generation}|conversation=${failure.conversationKey}"
+        if (sessionKey != failure.windowSessionKey || captureTaskLease() != failure.taskLease) return false
+        val owner = replyTaskRepository?.find(failure.requestKey) ?: return false
+        if (owner.requestId != failure.requestId || owner.conversationKey != failure.conversationKey ||
+            owner.status != ReplyTaskStatus.FAILED_RETRYABLE
+        ) return false
+        if (replySegmentTaskRepository?.findByRequest(failure.requestId)?.isNotEmpty() == true) return false
+        val input = ChatDraftInputTarget(
+            packageName = snapshot.packageName, activityClass = snapshot.activityClass,
+            windowIdentityKey = snapshot.windowIdentityKey() ?: return false,
+            conversationIdentityKey = failure.conversationKey,
+            windowSessionKey = sessionKey,
+            nodeTarget = snapshot.inputFieldTarget,
+            expectedChatTitle = snapshot.chatTitleText,
+            taskLease = failure.taskLease
+        )
+        return runCatching { inputPort.verifyDraft(input, "") }.getOrNull()?.status == ChatDraftInputStatus.VERIFIED
+    }
+
+    /** Called only after a lease-gated safe BACK accepts an unprocessed greeting deferral. */
+    fun releaseDeferredGreetingModelFailure(failure: AiReplyPreSendModelFailure) {
+        synchronized(lock) {
+            if (activeMessageKey == failure.requestKey || pending.get() ||
+                pendingSendConfirmation != null || pendingNextMessageSegment != null
+            ) return
+            failedRequests.remove(failure.requestKey)
+            processedMessageKeys.remove(failure.requestKey)
+        }
     }
 
     private fun updateTaskStatus(status: ReplyTaskStatus, requestGeneration: Long): Boolean {
@@ -1085,6 +1943,10 @@ class AiReplyDraftCoordinator(
         return false
     }
 
+    /** Logging-only stable correlation label; never expose raw model free text or chat identity. */
+    private fun diagnosticHash(value: String?): String =
+        value?.takeIf(String::isNotBlank)?.let { fingerprint(it).take(12) } ?: "UNKNOWN"
+
     private fun fingerprint(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(StandardCharsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
@@ -1098,6 +1960,8 @@ class AiReplyDraftCoordinator(
 
     companion object {
         private const val MAX_PROCESSED_KEYS = 256
+        private const val MODEL_FAILURE_MAX_ATTEMPTS = 2
+        private const val MODEL_FAILURE_RETRY_DELAY_MS = 30_000L
         private const val MIN_VERIFY_DWELL_DELAY_MS = 500
         private const val MAX_VERIFY_DWELL_DELAY_MS = 900
         private const val RECOVERY_VERIFY_RETRY_DELAY_MS = 5_000L
@@ -1105,8 +1969,9 @@ class AiReplyDraftCoordinator(
         private const val REPLY_TASK_REQUEST_TIMEOUT_MILLIS = 120_000L
         private const val SEND_CONFIRMATION_TIMEOUT_MILLIS = 8_000L
         private const val SEND_CONFIRMATION_MAX_CHECKS = 2
-        private const val MAX_EMPTY_MODEL_RETRIES = 1
-        private const val EMPTY_MODEL_RETRY_DELAY_MS = 30_000L
+        private const val MAX_EMPTY_MODEL_RETRIES = 2
+        private const val FIRST_EMPTY_MODEL_RETRY_DELAY_MS = 2_500L
+        private const val SECOND_EMPTY_MODEL_RETRY_DELAY_MS = 6_000L
 
         private fun newDraftExecutor() = Executors.newSingleThreadExecutor(ThreadFactory { runnable ->
             Thread(runnable, "frdm-ai-model-request").apply { isDaemon = true }

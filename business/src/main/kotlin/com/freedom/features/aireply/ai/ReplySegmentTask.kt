@@ -27,7 +27,13 @@ data class ReplySegmentTaskRecord(
     val status: ReplySegmentTaskStatus,
     val createdAt: Long,
     val sentAt: Long? = null,
-    val confirmationId: String? = null
+    val confirmationId: String? = null,
+    /** Durable, non-content send evidence recorded before a gesture can be submitted. */
+    val sendAttemptStartedAt: Long? = null,
+    val sendWindowSessionKey: String? = null,
+    val sendChatTitleHash: String? = null,
+    val preSendOutgoingKeyHashes: Set<String> = emptySet(),
+    val sendRequestKey: String? = null
 ) {
     init {
         require(taskId.isNotBlank())

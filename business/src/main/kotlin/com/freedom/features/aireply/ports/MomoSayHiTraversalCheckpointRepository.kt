@@ -4,7 +4,11 @@ package com.freedom.features.aireply.ports
 data class MomoSayHiDeferredRowCheckpointRecord(
     val attempts: Int,
     val retryAfterEpochMs: Long,
-    val safeTargetValidationFailures: Int = 0
+    val safeTargetValidationFailures: Int = 0,
+    /** Diagnostic code only: no contact name, original ID or chat text. */
+    val lastDeferralReason: String = "",
+    /** SHA-256 of failed row's safe target geometry/structure. */
+    val failedSafeTargetEvidenceHash: String = ""
 )
 
 data class MomoSayHiTraversalCheckpointRecord(

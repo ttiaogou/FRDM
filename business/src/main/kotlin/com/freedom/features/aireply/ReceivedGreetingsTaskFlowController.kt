@@ -71,7 +71,11 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun traversalStatus(): ReceivedGreetingsTraversalStatus = executor.traversalStatus()
 
+    fun isWaitingForSafeTargetEvidence(): Boolean = executor.isWaitingForSafeTargetEvidence()
+
     fun currentDisplayName(): String? = executor.currentDisplayName()
+
+    fun currentRowKeyHash(): String? = executor.currentRowKeyHash()
 
     fun currentContactIdentity(): ContactRowIdentity? = executor.currentContactIdentity()
 
@@ -118,6 +122,8 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun completeDetailInspection(success: Boolean): Boolean =
         executor.completeDetailInspection(success)
+
+    fun deferAfterModelFailure(): Boolean = executor.deferAfterModelFailure()
 
     fun markAwaitingNormalInboxAfterReturn() = lifecycle.markAwaitingNormalInboxAfterReturn()
 

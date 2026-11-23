@@ -56,6 +56,45 @@ class AiModelConfigurationTest {
         assertFalse(configuration.toString().contains("highly-sensitive-api-key"))
         assertTrue(configuration.toString().contains("[REDACTED]"))
     }
+    @Test fun configurationToStringNeverRevealsCustomModelNameOrCredentials() {
+        val secretModel = "custom-model_internal-customer-credential_12345"
+        val apiKey = "secret-api-key-for-configuration-test"
+        val endpoint = "https://private-gateway.example.org/v1"
+        val configuration = AiModelConfiguration(
+            provider = AiModelServiceProvider.CUSTOM_OPENAI_COMPAT,
+            apiBaseUrl = endpoint,
+            modelName = secretModel,
+            apiKey = apiKey
+        )
+
+        val log = configuration.toString()
+        assertFalse(log.contains(secretModel))
+        assertFalse(log.contains(apiKey))
+        assertFalse(log.contains(endpoint))
+        assertTrue(log.contains("modelName=[CONFIGURED]"))
+        assertTrue(log.contains("apiBaseUrl=[CONFIGURED]"))
+        assertTrue(log.contains("apiKey=[REDACTED]"))
+        assertEquals(secretModel, configuration.modelName)
+        assertEquals(apiKey, configuration.apiKey)
+        assertTrue(configuration.isReadyForCloudProvider)
+        assertEquals(secretModel, configuration.normalized().modelName)
+        assertEquals(apiKey, configuration.normalized().apiKey)
+    }
+
+    @Test fun emptyModelConfigurationToStringStatesAreAccurate() {
+        val configuration = AiModelConfiguration(
+            provider = AiModelServiceProvider.CUSTOM_OPENAI_COMPAT,
+            apiBaseUrl = "",
+            modelName = "",
+            apiKey = ""
+        )
+        val log = configuration.toString()
+        assertTrue(log.contains("modelName=[EMPTY]"))
+        assertTrue(log.contains("apiBaseUrl=[EMPTY]"))
+        assertTrue(log.contains("apiKey=[REDACTED]"))
+        assertFalse(configuration.isReadyForCloudProvider)
+    }
+
     @Test fun providerCatalogContainsSelectableOpenAiAndDeepSeekModels() {
         assertTrue(AiModelServiceProvider.OPENAI.modelOptions.any { it.id == "gpt-6.1-sol" })
         assertTrue(AiModelServiceProvider.OPENAI.modelOptions.any { it.id == "gpt-6.1-terra" })

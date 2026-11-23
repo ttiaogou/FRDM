@@ -46,6 +46,21 @@ class DeepSeekAiModelTransportTest {
     }
 
     @Test
+    fun promptOnlyJsonRecoveryOmitsForcedJsonMode() {
+        val connection = FakeConnection(
+            URL("https://api.deepseek.com/chat/completions"),
+            200,
+            """{"choices":[{"message":{"content":"{\"action\":\"REPLY\",\"reason\":\"READY\",\"draft\":\"你好\"}"}}]}"""
+        )
+        val transport = DeepSeekAiModelTransport(configuration()) { connection }
+        transport.execute(request(AiModelResponseFormat.PlainText)).getOrThrow()
+        val body = connection.requestBody.toString(StandardCharsets.UTF_8.name())
+        assertFalse(body.contains("\"response_format\""))
+        assertTrue(body.contains("\"thinking\":{\"type\":\"disabled\"}"))
+        assertTrue(body.contains("\"stream\":false"))
+    }
+
+    @Test
     fun appendsDeepSeekChatCompletionsPathWithoutAddingV1() {
         var openedUrl: URL? = null
         val transport = DeepSeekAiModelTransport(configuration()) { url ->

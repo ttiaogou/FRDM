@@ -1,6 +1,13 @@
 package com.freedom.features.aireply.ai
 
 /** 决策引擎与供应商请求契约共用的严格 JSON Schema 和解析器。 */
+/** Fixed parser failure codes contain no untrusted model text. */
+enum class AiReplyOutputInvalidReason {
+    JSON_SYNTAX_INVALID, JSON_REQUIRED_FIELD_MISSING, JSON_SCHEMA_MISMATCH,
+    JSON_REASON_DETAIL_INVALID, JSON_REASON_INVALID, JSON_ACTION_INVALID,
+    JSON_DRAFT_EMPTY, JSON_DRAFT_TOO_LONG, JSON_DRAFT_INVALID
+}
+
 internal object AiReplyDecisionJsonParser {
     fun schema(maxDraftChars: Int): String = """
         {
@@ -31,32 +38,65 @@ internal object AiReplyDecisionJsonParser {
         }
     """.trimIndent()
 
-    fun parse(raw: String, maxDraftChars: Int): AiReplyDecision? = runCatching {
-        val values = StrictJsonStringObjectReader(raw).read()
-        require(values.keys == REQUIRED_KEYS || values.keys == REQUIRED_KEYS + "reasonDetail")
-        val reasonDetail = values["reasonDetail"]
-        if ("reasonDetail" in values) require(!reasonDetail.isNullOrBlank() && reasonDetail.length <= 1000)
+    /** Safe diagnostic result; never stores raw response or exception messages. */
+    data class ParseOutcome(
+        val decision: AiReplyDecision? = null,
+        val invalidReason: AiReplyOutputInvalidReason? = null
+    )
 
-        val actionValue = values["action"] ?: error("action missing")
-        val reason = values["reason"] ?: error("reason missing")
-        require(reason.isNotBlank() && reason.length <= 120 && REASON_PATTERN.matches(reason))
+    private class InvalidDecision(val code: AiReplyOutputInvalidReason) :
+        IllegalArgumentException("Invalid model decision protocol")
+
+    private fun invalid(code: AiReplyOutputInvalidReason): Nothing = throw InvalidDecision(code)
+
+    fun parse(raw: String, maxDraftChars: Int): AiReplyDecision? =
+        parseWithDiagnostics(raw, maxDraftChars).decision
+
+    /** Exactly the previous acceptance checks, now with safe rejection subcodes. */
+    fun parseWithDiagnostics(raw: String, maxDraftChars: Int): ParseOutcome = runCatching {
+        val values = try {
+            StrictJsonStringObjectReader(raw).read()
+        } catch (_: Exception) {
+            invalid(AiReplyOutputInvalidReason.JSON_SYNTAX_INVALID)
+        }
+        if (values.keys != REQUIRED_KEYS && values.keys != REQUIRED_KEYS + "reasonDetail") {
+            invalid(if (!values.keys.containsAll(REQUIRED_KEYS)) {
+                AiReplyOutputInvalidReason.JSON_REQUIRED_FIELD_MISSING
+            } else AiReplyOutputInvalidReason.JSON_SCHEMA_MISMATCH)
+        }
+        val reasonDetail = values["reasonDetail"]
+        if ("reasonDetail" in values && (reasonDetail.isNullOrBlank() || reasonDetail.length > 1000)) {
+            invalid(AiReplyOutputInvalidReason.JSON_REASON_DETAIL_INVALID)
+        }
+
+        val actionValue = values["action"]
+            ?: invalid(AiReplyOutputInvalidReason.JSON_REQUIRED_FIELD_MISSING)
+        val reason = values["reason"]
+            ?: invalid(AiReplyOutputInvalidReason.JSON_REQUIRED_FIELD_MISSING)
+        if (reason.isBlank() || reason.length > 120 || !REASON_PATTERN.matches(reason)) {
+            invalid(AiReplyOutputInvalidReason.JSON_REASON_INVALID)
+        }
         val action = AiReplyAction.entries.firstOrNull { it.name == actionValue }
-            ?: error("action invalid")
+            ?: invalid(AiReplyOutputInvalidReason.JSON_ACTION_INVALID)
         val draft = values["draft"]
 
-        when (action) {
+        val decision = when (action) {
             AiReplyAction.REPLY -> {
-                require(!draft.isNullOrBlank())
-                require(draft.length <= maxDraftChars)
-                require(draft == draft.trim())
+                if (draft.isNullOrBlank()) invalid(AiReplyOutputInvalidReason.JSON_DRAFT_EMPTY)
+                if (draft.length > maxDraftChars) invalid(AiReplyOutputInvalidReason.JSON_DRAFT_TOO_LONG)
+                if (draft != draft.trim()) invalid(AiReplyOutputInvalidReason.JSON_DRAFT_INVALID)
                 AiReplyDecision(action, reason, draft, reasonDetail = reasonDetail)
             }
             AiReplyAction.DO_NOT_REPLY, AiReplyAction.WAIT -> {
-                require(draft == null)
+                if (draft != null) invalid(AiReplyOutputInvalidReason.JSON_DRAFT_INVALID)
                 AiReplyDecision(action, reason, reasonDetail = reasonDetail)
             }
         }
-    }.getOrNull()
+        ParseOutcome(decision = decision)
+    }.getOrElse { failure ->
+        ParseOutcome(invalidReason = (failure as? InvalidDecision)?.code
+            ?: AiReplyOutputInvalidReason.JSON_SYNTAX_INVALID)
+    }
 
     private val REQUIRED_KEYS = setOf("action", "reason", "draft")
     private val REASON_PATTERN = Regex("[A-Z0-9_]{1,120}")
