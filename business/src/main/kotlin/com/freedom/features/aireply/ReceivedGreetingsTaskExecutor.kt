@@ -108,6 +108,10 @@ internal class ReceivedGreetingsTaskExecutor(
         pagePort.receivedGreetingsCurrentDisplayName()
     }.getOrNull()
 
+    fun currentRowKeyHash(): String? = runCatching {
+        pagePort.receivedGreetingsCurrentRowKeyHash()
+    }.getOrNull()
+
     fun currentContactIdentity(): ContactRowIdentity? = runCatching {
         pagePort.receivedGreetingsCurrentContactIdentity()
     }.getOrNull()

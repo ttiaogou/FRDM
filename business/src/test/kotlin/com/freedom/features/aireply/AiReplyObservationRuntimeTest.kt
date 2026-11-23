@@ -3665,6 +3665,8 @@ class AiReplyObservationRuntimeTest {
             receivedGreetingsWorkflowEnabled = true
             receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.DETAIL_READY
             receivedGreetingsContactIdentity = verified
+            receivedGreetingsRowKeyHash = "greeting-row-hash"
+            receivedGreetingsDisplayName = "Sample Contact"
             simulateStructureThenOcr = true
             ocrDebugTextByRowIndex = mapOf(1 to "CURRENT_GREETING_OCR")
             page = chatDetailSnapshot()
@@ -3735,6 +3737,155 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, greetingDraftCallbacks)
         assertEquals(1, port.persistedChatSamples)
         assertTrue(logs.any { it.contains("STALE_TASK_IGNORED") })
+    }
+
+    @Test
+    fun receivedGreetingBindsBeforeOcrAndKeepsSameChatWhenDetailStatusTemporarilyChanges() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val verified = ContactRowIdentity(
+            snapshotId = "verified-profile",
+            temporaryUserId = "greeting-row",
+            contactId = "greeting-contact-123",
+            confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.DETAIL_READY
+            receivedGreetingsContactIdentity = verified
+            receivedGreetingsRowKeyHash = "greeting-hashed-row"
+            receivedGreetingsDisplayName = "Sample Contact"
+            simulateStructureThenOcr = true
+            deferNextOcrRead = true
+            ocrDebugTextByRowIndex = mapOf(1 to "newly-read-ocr")
+            page = chatDetailSnapshot()
+        }
+        var greetingDrafts = 0
+        var privateDrafts = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            onDraftConversationObserved = { _, _, _, _ -> privateDrafts++; true },
+            onGreetingDraftConversationObserved = { batch, _, identity, _ ->
+                greetingDrafts++
+                assertEquals(verified, identity)
+                assertTrue(batch.ocrAttempted)
+                true
+            }
+        )
+        AiReplyObservationRuntime::class.java.getDeclaredField("sessionRunStarted").apply {
+            isAccessible = true
+        }.setBoolean(runtime, true)
+        val flow = AiReplyObservationRuntime::class.java.getDeclaredField("receivedGreetingsTaskFlow").apply {
+            isAccessible = true
+        }.get(runtime) as ReceivedGreetingsTaskFlowController
+        assertTrue(flow.claimOwnership("greeting test ownership"))
+        flow.markStarted()
+        AiReplyObservationRuntime::class.java.getDeclaredMethod(
+            "readVisibleMessages", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }.invoke(runtime, port.page)
+        assertTrue("Source binding must precede the OCR callback", logs.any { it.contains("GREETING_CHAT_BINDING_CREATED") })
+        assertEquals(1, port.ocrAsyncReadRequests)
+        assertEquals(0, greetingDrafts)
+        assertEquals(0, port.persistedChatSamples)
+
+        // The selected row and live chat are unchanged, but the adapter's one-off status
+        // temporarily loses DETAIL_READY while OCR is running. The bound conversation wins.
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.NAVIGATING
+        port.completeDeferredOcrRead()
+        runUntil(scheduler, 40) { greetingDrafts == 1 }
+        assertEquals(1, greetingDrafts)
+        assertEquals(0, privateDrafts)
+        assertEquals(1, port.persistedChatSamples)
+        assertTrue(logs.any { it.contains("GREETING_CHAT_OCR_REVALIDATED") })
+        assertFalse(logs.any { it.contains("CHAT_ENTRY_NOT_BOUND") })
+    }
+
+    @Test
+    fun receivedGreetingLateOcrRejectsChangedRowIdWindowHeaderOrTaskLease() {
+        for (change in listOf("ROW", "ID", "TITLE", "WINDOW", "LEASE", "RUN")) {
+            val scheduler = FakeScheduler()
+            val logs = ArrayList<String>()
+            val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+            var runGeneration = 12L
+            val verified = ContactRowIdentity(
+                snapshotId = "verified-profile",
+                temporaryUserId = "greeting-row",
+                contactId = "greeting-platform-123",
+                confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+            )
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                receivedGreetingsWorkflowEnabled = true
+                receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.DETAIL_READY
+                receivedGreetingsContactIdentity = verified
+                receivedGreetingsRowKeyHash = "original-greeting-row-hash"
+                receivedGreetingsDisplayName = "Sample Contact"
+                simulateStructureThenOcr = true
+                deferNextOcrRead = true
+                ocrDebugTextByRowIndex = mapOf(1 to "greeting-current-message")
+                page = chatDetailSnapshot()
+            }
+            var greetingDrafts = 0
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = NoOpGestureApi,
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L,
+                taskCoordinator = taskCoordinator,
+                currentRunGeneration = { runGeneration },
+                onGreetingDraftConversationObserved = { _, _, _, _ -> greetingDrafts++; true }
+            )
+            AiReplyObservationRuntime::class.java.getDeclaredField("sessionRunStarted").apply {
+                isAccessible = true
+            }.setBoolean(runtime, true)
+            val flow = AiReplyObservationRuntime::class.java.getDeclaredField("receivedGreetingsTaskFlow").apply {
+                isAccessible = true
+            }.get(runtime) as ReceivedGreetingsTaskFlowController
+            assertTrue(flow.claimOwnership("start greeting OCR"))
+            flow.markStarted()
+            AiReplyObservationRuntime::class.java.getDeclaredMethod(
+                "readVisibleMessages", ChatPageSnapshot::class.java
+            ).apply { isAccessible = true }.invoke(runtime, port.page)
+            assertEquals("change=$change", 1, port.ocrAsyncReadRequests)
+            assertTrue(logs.any { it.contains("GREETING_CHAT_BINDING_CREATED") })
+            when (change) {
+                "ROW" -> port.receivedGreetingsRowKeyHash = "different-row-hash"
+                "ID" -> port.receivedGreetingsContactIdentity = verified.copy(contactId = "different-contact")
+                "TITLE" -> port.page = chatDetailSnapshot().copy(chatTitleText = "与Another Person对话")
+                "WINDOW" -> port.page = chatDetailSnapshot(windowGeneration = 2L)
+                "LEASE" -> {
+                    val old = requireNotNull(taskCoordinator.currentLease())
+                    assertTrue(taskCoordinator.transfer(old, "AI_REPLY_PRIVATE_MESSAGES") != null)
+                }
+                "RUN" -> runGeneration = 13L
+            }
+            port.completeDeferredOcrRead()
+            runUntil(scheduler, 40) { logs.any {
+                it.contains("GREETING_CHAT_OCR_REJECTED") || it.contains("GREETING_CHAT_BATCH_REJECTED")
+            } }
+            assertEquals("change=$change", 0, greetingDrafts)
+            assertEquals("change=$change", 0, port.persistedChatSamples)
+        }
     }
 
     @Test
@@ -5415,6 +5566,13 @@ class AiReplyObservationRuntimeTest {
         var pendingIdentityReturnReinspection = false
         var simulateStructureThenOcr = false
         var ocrAsyncReadRequests = 0
+        var deferNextOcrRead = false
+        private var deferredOcrRead: Pair<ChatPageSnapshot, (ChatMessageBatch) -> Unit>? = null
+        fun completeDeferredOcrRead() {
+            val pending = requireNotNull(deferredOcrRead)
+            deferredOcrRead = null
+            pending.second(readRecentMessages(pending.first, 10))
+        }
         var deferNextStructureRead = false
         private var deferredStructureRead: Pair<ChatPageSnapshot, (ChatMessageBatch) -> Unit>? = null
         fun hasDeferredStructureRead() = deferredStructureRead != null
@@ -5473,6 +5631,8 @@ class AiReplyObservationRuntimeTest {
         var receivedGreetingsTraversalStatusValue: ReceivedGreetingsTraversalStatus =
             ReceivedGreetingsTraversalStatus.UNKNOWN
         var receivedGreetingsContactIdentity: ContactRowIdentity? = null
+        var receivedGreetingsRowKeyHash: String? = null
+        var receivedGreetingsDisplayName: String? = null
         var receivedGreetingsIdentityProfileProof = false
         var receivedGreetingsCheckpointFingerprint: String? = null
         var receivedGreetingsRecoverySyncAccepted: Boolean = false
@@ -5571,6 +5731,8 @@ class AiReplyObservationRuntimeTest {
             receivedGreetingsTraversalStatusValue
         override fun receivedGreetingsCurrentContactIdentity(): ContactRowIdentity? =
             receivedGreetingsContactIdentity
+        override fun receivedGreetingsCurrentRowKeyHash(): String? = receivedGreetingsRowKeyHash
+        override fun receivedGreetingsCurrentDisplayName(): String? = receivedGreetingsDisplayName
         override fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean =
             receivedGreetingsIdentityProfileProof &&
                 snapshot.packageName == "com.immomo.momo" &&
@@ -5651,7 +5813,12 @@ class AiReplyObservationRuntimeTest {
             onResult: (ChatMessageBatch) -> Unit
         ) {
             ocrAsyncReadRequests++
-            onResult(readRecentMessages(page, limit))
+            if (deferNextOcrRead) {
+                deferNextOcrRead = false
+                deferredOcrRead = page to onResult
+            } else {
+                onResult(readRecentMessages(page, limit))
+            }
         }
 
         override fun readRecentMessages(page: ChatPageSnapshot, limit: Int): ChatMessageBatch {

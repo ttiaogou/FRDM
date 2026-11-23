@@ -73,6 +73,8 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun currentDisplayName(): String? = executor.currentDisplayName()
 
+    fun currentRowKeyHash(): String? = executor.currentRowKeyHash()
+
     fun currentContactIdentity(): ContactRowIdentity? = executor.currentContactIdentity()
 
     /**
