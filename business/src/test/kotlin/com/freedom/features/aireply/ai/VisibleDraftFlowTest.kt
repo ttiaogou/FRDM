@@ -207,6 +207,136 @@ class VisibleDraftFlowTest {
             privateMessage.decisionRequests.single().outputContract)
     }
 
+    private fun traceField(log: String, field: String): String =
+        log.substringAfter("$field=").substringBefore("；")
+
+    private fun traceKeys(log: String): Set<String> =
+        log.substringAfter("：").split("；").map { it.substringBefore("=") }.toSet()
+
+    @Test fun bothBusinessesShareTraceContractAndCorrelateModelToConfirmedSend() {
+        for (taskId in listOf(AiDecisionTaskIds.PRIVATE_MESSAGES, AiDecisionTaskIds.RECEIVED_GREETINGS)) {
+            var sent = 0
+            val f = Fixture(object : ChatDraftSendPort {
+                override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                    sent++
+                    return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+                }
+            })
+            assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot, taskId = taskId))
+            f.drain()
+            val model = f.logs.single { it.startsWith("AI 模型生命周期：") &&
+                traceField(it, "eventType") == "MODEL_REQUEST_FINISHED" }
+            val submitted = f.logs.single { it.startsWith("AI 消息发送链路：") &&
+                traceField(it, "eventType") == "MESSAGE_SEND_SUBMITTED" }
+            assertEquals(traceKeys(model), traceKeys(submitted))
+            assertEquals(taskId, traceField(model, "taskId"))
+            assertEquals(taskId, traceField(submitted, "taskId"))
+            assertEquals(traceField(model, "requestId"), traceField(submitted, "requestId"))
+            assertEquals(traceField(model, "generation"), traceField(submitted, "generation"))
+            assertEquals("SUCCEEDED", traceField(model, "finalState"))
+            assertEquals("0", traceField(submitted, "segmentIndex"))
+            assertEquals("1", traceField(submitted, "segmentCount"))
+            assertEquals("SENT_UNCONFIRMED", traceField(submitted, "sendStatus"))
+            assertEquals("ORIGINAL", traceField(submitted, "sendAttemptOrigin"))
+            assertTrue(traceField(submitted, "sendAttemptId") != "UNKNOWN")
+            assertEquals(1, sent)
+            assertFalse(f.logs.any { it.contains("eventType=MESSAGE_SEND_COMPLETED") })
+            val bubble = ChatMessage("confirmed-outgoing", ChatMessageDirection.OUTGOING,
+                ChatMessageType.TEXT, "你好呀", ScreenRect(0, 10, 100, 30),
+                DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+            val after = f.batch.copy(messages = listOf(bubble), capturedAtMillis = 2L)
+            assertEquals(SendConfirmationResult.CONFIRMED,
+                f.coordinator.confirmSendResult(after, f.snapshot))
+            val sendEvents = f.logs.filter { it.startsWith("AI 消息发送链路：") }
+            assertEquals(listOf("MESSAGE_SEND_SUBMITTED", "MESSAGE_SEND_CONFIRMED",
+                "MESSAGE_SEND_COMPLETED"), sendEvents.map { traceField(it, "eventType") })
+            assertTrue(sendEvents.all { traceField(it, "taskId") == taskId })
+            assertTrue(sendEvents.all { traceField(it, "requestId") == traceField(model, "requestId") })
+            assertEquals(traceField(submitted, "sendAttemptId"),
+                traceField(sendEvents[1], "sendAttemptId"))
+            assertEquals(traceField(sendEvents[1], "sendConfirmationId"),
+                traceField(sendEvents[2], "sendConfirmationId"))
+            assertTrue(traceField(sendEvents[2], "sendConfirmationId") != "UNKNOWN")
+            assertEquals(SendConfirmationResult.NOT_PENDING,
+                f.coordinator.confirmSendResult(after.copy(capturedAtMillis = 3L), f.snapshot))
+            assertEquals(3, f.logs.count { it.startsWith("AI 消息发送链路：") })
+        }
+    }
+
+    @Test fun multiMessageTraceCompletesOnlyAfterBothSegmentsAreConfirmed() {
+        val segments = SegmentLedger()
+        lateinit var f: Fixture
+        f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                f.text = ""
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, TaskLedger())
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"第一\\n第二"}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val first = ChatMessage("first-out", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "第一", ScreenRect(0, 10, 100, 30), DirectionEvidence.LAYOUT_ID_AND_HIERARCHY,
+            MessageContentQuality.VERIFIED)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendResult(f.batch.copy(messages = listOf(first), capturedAtMillis = 2L), f.snapshot))
+        assertEquals(0, f.logs.count { it.contains("eventType=MESSAGE_SEND_COMPLETED") })
+        assertEquals(SendConfirmationResult.WAITING, f.coordinator.confirmSendResult(
+            f.batch.copy(messages = listOf(first), capturedAtMillis = 3L), f.snapshot))
+        f.drain()
+        val second = first.copy(id = "second-out", content = "第二")
+        assertEquals(SendConfirmationResult.CONFIRMED, f.coordinator.confirmSendResult(
+            f.batch.copy(messages = listOf(first, second), capturedAtMillis = 4L), f.snapshot))
+        val events = f.logs.filter { it.startsWith("AI 消息发送链路：") }
+        val submitted = events.filter { traceField(it, "eventType") == "MESSAGE_SEND_SUBMITTED" }
+        val confirmed = events.filter { traceField(it, "eventType") == "MESSAGE_SEND_CONFIRMED" }
+        assertEquals(listOf("0", "1"), submitted.map { traceField(it, "segmentIndex") })
+        assertEquals(listOf("0", "1"), confirmed.map { traceField(it, "segmentIndex") })
+        assertEquals(1, events.count { traceField(it, "eventType") == "MESSAGE_SEND_COMPLETED" })
+        assertEquals(1, events.map { traceField(it, "requestId") }.distinct().size)
+        assertTrue(events.all { traceField(it, "segmentCount") == "2" })
+        assertEquals(listOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.SENT),
+            segments.records.values.map { it.status })
+    }
+
+    @Test fun unknownSendTraceNeverReportsOverallCompletionOrStartsNextSegment() {
+        val sent = mutableListOf<String>()
+        lateinit var f: Fixture
+        f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sent += expectedText
+                f.text = ""
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, SegmentLedger(), TaskLedger())
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"先发\\n再发"}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val noBubble = f.batch.copy(capturedAtMillis = 2L)
+        assertEquals(SendConfirmationResult.WAITING, f.coordinator.confirmSendResult(noBubble, f.snapshot))
+        assertEquals(SendConfirmationResult.UNKNOWN, f.coordinator.confirmSendResult(noBubble, f.snapshot))
+        // Rechecking UNKNOWN must not invent a second send receipt or silently advance.
+        assertEquals(SendConfirmationResult.UNKNOWN, f.coordinator.confirmSendResult(noBubble, f.snapshot))
+        val events = f.logs.filter { it.startsWith("AI 消息发送链路：") }
+        assertEquals(1, events.count { traceField(it, "eventType") == "MESSAGE_SEND_UNCERTAIN" })
+        assertEquals(0, events.count { traceField(it, "eventType") == "MESSAGE_SEND_COMPLETED" })
+        assertEquals(0, events.count { traceField(it, "eventType") == "MESSAGE_SEND_CONFIRMED" })
+        assertEquals("UNKNOWN", traceField(events.last(), "sendStatus"))
+        assertTrue(f.logs.any { it.contains("eventType=MODEL_REQUEST_FINISHED") &&
+            it.contains("finalState=SUCCEEDED") })
+        assertEquals(listOf("先发"), sent)
+    }
+
+    @Test fun modelWaitHasNoSendTraceEvents() {
+        val f = Fixture()
+        f.modelOutput = """{"action":"WAIT","reason":"SAFE_SKIP","draft":null}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertTrue(f.logs.any { it.contains("eventType=MODEL_REQUEST_FINISHED") })
+        assertFalse(f.logs.any { it.startsWith("AI 消息发送链路：") })
+        assertEquals("", f.text)
+    }
+
     @Test fun registeredTasksOnlyReleaseSendGateAfterConfirmedBubbleWithoutDuplicateReceipt() {
         for (taskId in listOf(AiDecisionTaskIds.RECEIVED_GREETINGS, AiDecisionTaskIds.PRIVATE_MESSAGES)) {
             var sent = 0
@@ -1334,6 +1464,13 @@ class VisibleDraftFlowTest {
         assertEquals(1, submitted)
         assertEquals(0, replayed)
         assertEquals(0, restored.calls)
+        val recoveryEvents = restored.logs.filter { it.startsWith("AI 消息发送链路：") }
+        val recovered = recoveryEvents.single { traceField(it, "eventType") == "MESSAGE_SEND_REHYDRATED" }
+        assertEquals("UNKNOWN", traceField(recovered, "taskId"))
+        assertEquals("RECOVERED_SYNTHETIC", traceField(recovered, "sendAttemptOrigin"))
+        assertEquals("READ_ONLY_RECOVERY", traceField(recovered, "reasonCode"))
+        assertEquals(1, recoveryEvents.count { traceField(it, "eventType") == "MESSAGE_SEND_COMPLETED" })
+        assertTrue(recoveryEvents.all { traceField(it, "requestId") == segments.records.values.single().requestId })
     }
 
     @Test fun recoveredUnknownCannotConfirmIdenticalOutgoingPresentBeforeOriginalSend() {
