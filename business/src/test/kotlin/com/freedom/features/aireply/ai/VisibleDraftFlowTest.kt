@@ -23,6 +23,7 @@ class VisibleDraftFlowTest {
         var text = ""
         val inputWriteTargets = mutableListOf<ChatDraftInputTarget>()
         val logs = mutableListOf<String>()
+        val preSendFailures = mutableListOf<AiReplyPreSendModelFailure>()
         var modelOutput = """{"action":"REPLY","reason":"OK","draft":"你好呀"}"""
         var calls = 0
         var fail = false
@@ -88,7 +89,8 @@ class VisibleDraftFlowTest {
             } }, backgroundExecutor = Executor { it.run() }, nowMillis = { now }, chooseRandomInt = { min, _ -> min },
             sendPort = sendPort,
             replySegmentTaskRepository = segmentRepository,
-            replyTaskRepository = taskRepository)
+            replyTaskRepository = taskRepository,
+            onPreSendModelFailure = { preSendFailures.add(it) })
         fun drain() { while (tasks.isNotEmpty()) tasks.removeAt(0).invoke() }
         fun step() { assertTrue("Expected a scheduled task", tasks.isNotEmpty()); tasks.removeAt(0).invoke() }
     }
@@ -1144,6 +1146,66 @@ class VisibleDraftFlowTest {
         assertEquals(0, sends)
         assertEquals(ReplySegmentTaskStatus.PENDING_SEND, stored.records.values.single().status)
         assertTrue(f.logs.any { it.contains("SEND_PRECHECKPOINT_NOT_DURABLE") || it.contains("NOT_DURABLE") })
+    }
+
+    @Test fun technicalModelFailureEmitsOnlyUnsentFailureAndDefersAfterTwoAttempts() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val f = Fixture(segmentRepository = segments, taskRepository = tasks)
+        f.fail = true
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot, visitToken = "greeting-visit"))
+        assertEquals(1, f.preSendFailures.size)
+        val first = f.preSendFailures.single()
+        assertEquals("greeting-visit", first.visitToken)
+        assertEquals(1, first.attempts)
+        assertFalse(first.readyToDefer)
+        assertEquals(30_000L, first.retryDelayMs)
+        assertEquals(ReplyTaskStatus.FAILED_RETRYABLE, tasks.records.values.single().status)
+        assertTrue(segments.records.isEmpty())
+        assertTrue(f.coordinator.verifyGreetingPreSendFailure(first, f.snapshot))
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+
+        f.now = 30_001L
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch.copy(capturedAtMillis = 2L),
+            f.snapshot, visitToken = "greeting-visit"))
+        assertEquals(2, f.preSendFailures.size)
+        val second = f.preSendFailures.last()
+        assertEquals(2, second.attempts)
+        assertTrue(second.readyToDefer)
+        assertEquals(ReplyTaskStatus.FAILED_RETRYABLE, tasks.records.values.single().status)
+        assertTrue(f.coordinator.verifyGreetingPreSendFailure(second, f.snapshot))
+        f.text = "用户正在输入"
+        assertFalse(f.coordinator.verifyGreetingPreSendFailure(second, f.snapshot))
+        f.text = ""
+        assertFalse(f.coordinator.generateVisibleDraft(f.batch.copy(capturedAtMillis = 3L),
+            f.snapshot, visitToken = "greeting-visit"))
+        f.coordinator.releaseDeferredGreetingModelFailure(second)
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch.copy(capturedAtMillis = 4L),
+            f.snapshot, visitToken = "greeting-visit"))
+        assertEquals(1, f.preSendFailures.last().attempts)
+    }
+
+    @Test fun modelWaitAndSubmittedSendNeverProducePreSendFailureEvent() {
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+        }, SegmentLedger(), TaskLedger())
+        f.modelOutput = """{"action":"WAIT","reason":"SAFETY","draft":null}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(0, f.preSendFailures.size)
+        // A distinct request is used for the sending example.
+        val sending = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+        }, SegmentLedger(), TaskLedger())
+        assertTrue(sending.coordinator.generateVisibleDraft(sending.batch, sending.snapshot))
+        sending.drain()
+        assertTrue(sending.coordinator.isSendConfirmationPending)
+        assertEquals(0, sending.preSendFailures.size)
+        sending.coordinator.confirmSendResult(sending.batch.copy(capturedAtMillis = 2L), sending.snapshot)
+        sending.coordinator.confirmSendResult(sending.batch.copy(capturedAtMillis = 3L), sending.snapshot)
+        assertEquals(0, sending.preSendFailures.size)
     }
 
 }

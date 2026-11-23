@@ -461,7 +461,12 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             replyTaskRepository = root.replyTaskRepository,
             replySegmentTaskRepository = root.replySegmentTaskRepository,
-            captureTaskLease = { root.taskCoordinator.currentLease() }
+            captureTaskLease = { root.taskCoordinator.currentLease() },
+            onPreSendModelFailure = { failure ->
+                // This callback is dispatched asynchronously onto the runtime scheduler.
+                // It cannot grant a new task lease or authorize a stale greeting BACK.
+                aiReplyObservationRuntime.onPreSendModelFailure(failure)
+            }
         )
     }
     val aiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate
@@ -565,6 +570,12 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             onSendTransaction = { batch, snapshot ->
                 aiReplyDraftCoordinator.confirmSendTransaction(batch, snapshot)
+            },
+            verifyGreetingPreSendModelFailure = { failure, snapshot ->
+                aiReplyDraftCoordinator.verifyGreetingPreSendFailure(failure, snapshot)
+            },
+            onGreetingModelFailureDeferred = { failure ->
+                aiReplyDraftCoordinator.releaseDeferredGreetingModelFailure(failure)
             },
             onVerifiedConversationObserved = { batch, identity, snapshot ->
                 val verifiedIdentity = identity?.takeIf {

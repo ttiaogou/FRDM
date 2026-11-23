@@ -3679,7 +3679,20 @@ internal class MomoSocialAdapter(
         return saved
     }
 
-    override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean {
+    override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean =
+        completeReceivedGreetingDetailInspectionInternal(success, "DETAIL_SAMPLE_ARCHIVE_FAILED")
+
+    override fun deferReceivedGreetingAfterModelFailure(): Boolean {
+        val selected = sayHiSelectedGreeting ?: return false
+        // Never allow an unconfirmed model failure to overwrite an existing send fact.
+        val priorSend = runCatching { sayHiSendReturnJournal.findByRow(selected.rowKey) }.getOrNull()
+        if (priorSend?.phase == ReceivedGreetingsSendReturnPhase.SEND_CONFIRMED) return false
+        return completeReceivedGreetingDetailInspectionInternal(false, "DRAFT_MODEL_FAILURE")
+    }
+
+    private fun completeReceivedGreetingDetailInspectionInternal(
+        success: Boolean, failureReason: String
+    ): Boolean {
         if (sayHiReadOnlyStage != SayHiReadOnlyStage.WAITING_DETAIL ||
             sayHiRowTapFeedbackState != SayHiRowTapFeedbackState.VERIFIED
         ) return false
@@ -3702,7 +3715,7 @@ internal class MomoSocialAdapter(
         }
         var dispatchedBackWindow: WindowRef? = null
         val accepted = requestChatActivityBack(
-            reason = "收到招呼发送确认后返回列表",
+            reason = if (success) "收到招呼发送确认后返回列表" else "收到招呼未发送延期后安全返回列表",
             expectedWindow = confirmedDetail.first,
             onSubmitted = { window -> dispatchedBackWindow = window }
         )
@@ -3714,14 +3727,14 @@ internal class MomoSocialAdapter(
             } else {
                 // A safe BACK only closes the detail page; it never proves a reply was sent.
                 // Retain the existing deferral behavior for incomplete transactions.
-                deferSayHiRow(selected.rowKey, "DETAIL_SAMPLE_ARCHIVE_FAILED")
+                deferSayHiRow(selected.rowKey, failureReason)
             }
             sayHiReadOnlyStage = SayHiReadOnlyStage.DETAIL_BACK_PENDING
             sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
             resetSayHiDetailBackReturnTracking()
             sayHiDetailBackSourceWindow = dispatchedBackWindow
             onLog(
-                "收到招呼安全 BACK 已提交：本次聊天记录=${if (success) "已保存，待列表验证后记为已处理" else "未完成，已延期且不标记完成"}；" +
+                "收到招呼安全 BACK 已提交：本次聊天记录=${if (success) "已保存，待列表验证后记为已处理" else "未发送完成，已延期且不标记成功"}；" +
                     "ChatActivity 已通过窗口/弹层安全检查派发 VERIFIED_NAVIGATION_BACK；" +
                     "等待 NewSayHiSessionListActivity 与 listview 容器双重确认；发送成功已由上层独立核验"
             )

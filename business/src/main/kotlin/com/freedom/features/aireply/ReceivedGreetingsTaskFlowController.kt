@@ -121,6 +121,8 @@ internal class ReceivedGreetingsTaskFlowController(
     fun completeDetailInspection(success: Boolean): Boolean =
         executor.completeDetailInspection(success)
 
+    fun deferAfterModelFailure(): Boolean = executor.deferAfterModelFailure()
+
     fun markAwaitingNormalInboxAfterReturn() = lifecycle.markAwaitingNormalInboxAfterReturn()
 
     fun markTraversalReturnedToInbox() = lifecycle.markTraversalReturnedToInbox()

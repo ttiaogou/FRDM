@@ -114,6 +114,14 @@ class AiReplyObservationRuntime(
                 com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
             )
         },
+    /** A model-only failed attempt can defer only with new page, lease and empty composer proof. */
+    private val verifyGreetingPreSendModelFailure: (
+        com.freedom.features.aireply.ai.AiReplyPreSendModelFailure, ChatPageSnapshot
+    ) -> Boolean = { _, _ -> false },
+    /** Releases only the failed greeting request after the adapter accepted an unprocessed return. */
+    private val onGreetingModelFailureDeferred: (
+        com.freedom.features.aireply.ai.AiReplyPreSendModelFailure
+    ) -> Unit = {},
     private val draftStartupFailure: () -> String? = { null },
     /** Invalidates late model callbacks when this runtime is reset. */
     private val onDraftRuntimeReset: () -> Unit = {},
@@ -163,6 +171,7 @@ class AiReplyObservationRuntime(
         private const val DRAFT_PENDING_POLL_DELAY_MS = 500L
         private const val SEND_CONFIRMATION_RECHECK_DELAY_MS = 500L
         private const val GREETING_UNKNOWN_SEND_READ_ONLY_RECHECK_DELAY_MS = 5_000L
+        private const val GREETING_MODEL_FAILURE_SAFE_RECHECK_DELAY_MS = 5_000L
         private const val MAX_DRAFT_PENDING_WAIT_MS = 185_000L
         private const val IDENTITY_CAPTURE_TIMEOUT_MS = 15_000L
         private const val MAX_IDENTITY_CAPTURE_RETRIES = 30
@@ -642,6 +651,105 @@ class AiReplyObservationRuntime(
         var sendJournalSaved: Boolean = false
     )
     private var confirmedGreetingSend: ConfirmedGreetingSend? = null
+    private var greetingModelFailureRecovery:
+        com.freedom.features.aireply.ai.AiReplyPreSendModelFailure? = null
+    private var greetingModelFailureRecoveryTask: ScheduledTask? = null
+
+
+    /**
+     * A model-only failure is a business event, not permission to navigate. Delivery may
+     * arrive from the model executor after a page switch; always pass through the runtime
+     * scheduler and the original greeting visit/lease before considering any UI action.
+     */
+    fun onPreSendModelFailure(failure: com.freedom.features.aireply.ai.AiReplyPreSendModelFailure) {
+        runCatching {
+            scheduler.schedule(0L) {
+                val binding = greetingChatBinding
+                if (binding == null || !receivedGreetingsTaskActive || !sessionRunStarted ||
+                    !ownsTask(RECEIVED_GREETINGS_TASK_ID) || !isAiReplyActive() ||
+                    recoveryContext.pending || confirmedGreetingSend != null ||
+                    failure.visitToken != binding.visitToken ||
+                    failure.windowSessionKey != binding.windowSessionKey ||
+                    failure.conversationKey != binding.chatTitleKey ||
+                    failure.taskLease != binding.taskLease ||
+                    binding.runGeneration != currentRunGeneration()
+                ) {
+                    onLog("GREETING_MODEL_FAILURE_STALE_IGNORED：原招呼或任务租约已变化；不返回、不重试")
+                    return@schedule
+                }
+                greetingModelFailureRecovery = failure
+                onLog("GREETING_MODEL_FAILURE_RECORDED：reason=${failure.reasonCode}；" +
+                    "attempts=${failure.attempts}；readyToDefer=${failure.readyToDefer}；未标记回复成功")
+                scheduleGreetingModelFailureRecovery(
+                    if (failure.readyToDefer) 0L else failure.retryDelayMs
+                )
+            }
+        }.onFailure {
+            onLog("GREETING_MODEL_FAILURE_DISPATCH_REJECTED：等待新鲜页面观察；不操作 UI")
+        }
+    }
+
+    private fun scheduleGreetingModelFailureRecovery(delayMs: Long) {
+        val failure = greetingModelFailureRecovery ?: return
+        greetingModelFailureRecoveryTask?.cancel()
+        greetingModelFailureRecoveryTask = runCatching {
+            scheduler.schedule(delayMs) {
+                greetingModelFailureRecoveryTask = null
+                if (greetingModelFailureRecovery !== failure) return@schedule
+                val binding = greetingChatBinding
+                if (binding == null || !sessionRunStarted || !receivedGreetingsTaskActive ||
+                    !isAiReplyActive() || !ownsTask(RECEIVED_GREETINGS_TASK_ID) ||
+                    recoveryContext.pending || confirmedGreetingSend != null ||
+                    failure.visitToken != binding.visitToken ||
+                    failure.windowSessionKey != binding.windowSessionKey ||
+                    failure.conversationKey != binding.chatTitleKey ||
+                    failure.taskLease != binding.taskLease ||
+                    binding.runGeneration != currentRunGeneration()
+                ) {
+                    onLog("GREETING_MODEL_FAILURE_STALE_IGNORED：延迟回调已失去原招呼绑定或授权")
+                    return@schedule
+                }
+                val fresh = readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
+                val reason = if (fresh == null) "FRESH_CHAT_UNAVAILABLE"
+                    else greetingBindingRejectReason(fresh, binding)
+                if (fresh == null || reason != null ||
+                    isSendConfirmationPending() || isSendControlRecoveryPending() ||
+                    isConversationDraftPending() ||
+                    !verifyGreetingPreSendModelFailure(failure, fresh)
+                ) {
+                    onLog("GREETING_MODEL_FAILURE_VERIFY_WAIT：reason=${reason ?: "SEND_OR_COMPOSER_NOT_VERIFIED"}；" +
+                        "保留当前用户，等待新的安全页面证据")
+                    scheduleGreetingModelFailureRecovery(GREETING_MODEL_FAILURE_SAFE_RECHECK_DELAY_MS)
+                    return@schedule
+                }
+                if (!failure.readyToDefer) {
+                    // The previous request is durably retryable and the original composer
+                    // is still empty. Re-enter the existing OCR/model path once; no old
+                    // message observation or input locator is reused.
+                    onLog("GREETING_MODEL_FAILURE_RETRY_ADMITTED：已核验原招呼、任务租约与空输入框；重新读取 OCR")
+                    greetingModelFailureRecovery = null
+                    readVisibleMessages(fresh)
+                    return@schedule
+                }
+                // Never record SEND_CONFIRMED here. The adapter verifies the detail
+                // fingerprint and submits the same safe BACK used by greeting completion.
+                val deferred = receivedGreetingsTaskFlow.deferAfterModelFailure()
+                if (!deferred) {
+                    onLog("GREETING_MODEL_FAILURE_DEFER_WAIT：安全 BACK 未准入；继续只读复核，不标记完成")
+                    scheduleGreetingModelFailureRecovery(GREETING_MODEL_FAILURE_SAFE_RECHECK_DELAY_MS)
+                    return@schedule
+                }
+                onLog("GREETING_REPLY_DEFERRED：模型失败且无草稿/发送动作；原招呼延期，等待列表双快照确认")
+                runCatching { onGreetingModelFailureDeferred(failure) }
+                greetingModelFailureRecovery = null
+                invalidatePendingMessageRead()
+                scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
+            }
+        }.getOrNull()
+        if (greetingModelFailureRecoveryTask == null) {
+            onLog("GREETING_MODEL_FAILURE_SCHEDULER_UNAVAILABLE：保留未完成招呼；不执行 BACK")
+        }
+    }
 
     /**
      * Finishes only a confirmed greeting reply, never an OCR-only sample. A failed sample write
@@ -5914,6 +6022,9 @@ class AiReplyObservationRuntime(
     private var draftRetryTask: ScheduledTask? = null
 
     private fun invalidatePendingMessageRead() {
+        greetingModelFailureRecoveryTask?.cancel()
+        greetingModelFailureRecoveryTask = null
+        greetingModelFailureRecovery = null
         draftVisitToken = java.util.UUID.randomUUID().toString()
         greetingChatBinding = null
         confirmedGreetingSend = null

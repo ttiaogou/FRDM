@@ -659,6 +659,13 @@ interface ChatPagePort {
     /** Requests a safe BACK after confirmed sending; list return must be independently verified. */
     fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean = false
 
+    /**
+     * Defers a verified, unsent greeting after a model-only failure. Must revalidate
+     * the current detail and use the existing safe BACK transaction. This never
+     * records a send or marks the source row processed.
+     */
+    fun deferReceivedGreetingAfterModelFailure(): Boolean = false
+
     /** Returns from a confirmed received-greetings page so ordinary chat can regain priority. */
     fun returnFromReceivedGreetingsForPriorityCheck(): Boolean = false
 }

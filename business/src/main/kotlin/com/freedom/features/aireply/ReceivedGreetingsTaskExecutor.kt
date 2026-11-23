@@ -149,6 +149,12 @@ internal class ReceivedGreetingsTaskExecutor(
         runCatching { pagePort.synchronizeReceivedGreetingsRecoveryConfirmation() }
             .getOrDefault(false)
 
+    /** Keeps the current greeting unprocessed; only the adapter may safely submit BACK. */
+    fun deferAfterModelFailure(): Boolean {
+        if (!ownsTask()) return false
+        return runCatching { pagePort.deferReceivedGreetingAfterModelFailure() }.getOrDefault(false)
+    }
+
     /** Returns from a verified greetings boundary only when this task still owns UI operations. */
     fun returnForPriorityCheck(): Boolean {
         if (!ownsTask()) return false

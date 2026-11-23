@@ -37,6 +37,20 @@ enum class SendConfirmationResult {
  * verified empty composer. Only the final fully confirmed message queue supplies a receipt.
  * The existing per-segment matcher, delays and safety gates are deliberately unchanged.
  */
+/** Technical model failure before any input/send. This is not a model WAIT or a sent result. */
+data class AiReplyPreSendModelFailure(
+    val requestId: String,
+    val requestKey: String,
+    val conversationKey: String,
+    val windowSessionKey: String,
+    val visitToken: String,
+    val taskLease: TaskLease?,
+    val reasonCode: String,
+    val attempts: Int,
+    val retryDelayMs: Long,
+    val readyToDefer: Boolean
+)
+
 data class ReplySendTransactionOutcome(
     val status: SendConfirmationResult,
     val finalSendConfirmationId: String? = null
@@ -69,7 +83,9 @@ class AiReplyDraftCoordinator(
     private val replyTaskRepository: ReplyTaskRepository? = null,
     private val sendPort: ChatDraftSendPort? = null,
     private val replySegmentTaskRepository: ReplySegmentTaskRepository? = null,
-    private val captureTaskLease: () -> TaskLease? = { null }
+    private val captureTaskLease: () -> TaskLease? = { null },
+    /** Delivered after a durable, no-send technical failure to the task-specific runtime. */
+    private val onPreSendModelFailure: (AiReplyPreSendModelFailure) -> Unit = {}
 ) {
     private val pending = AtomicBoolean(false)
     private val awaitingUserSend = AtomicBoolean(false)
@@ -82,6 +98,8 @@ class AiReplyDraftCoordinator(
     private var activeInputObservationAtMillis = 0L
     private var activeMessageKey: String? = null
     private var activeRequestId: String? = null
+    private var activeDraftTarget: ChatDraftInputTarget? = null
+    private var activeDraftVisitToken: String? = null
     private var activeExistingOutgoingKeys: Set<String> = emptySet()
     private var pendingSendConfirmation: PendingSendConfirmation? = null
     /** A confirmed segment must obtain a fresh chat/composer observation before the next one starts. */
@@ -182,6 +200,8 @@ class AiReplyDraftCoordinator(
             activeInputObservationAtMillis = 0L
             activeMessageKey = null
             activeRequestId = null
+            activeDraftTarget = null
+            activeDraftVisitToken = null
             activeExistingOutgoingKeys = emptySet()
             pendingSendConfirmation = null
             pendingNextMessageSegment = null
@@ -394,6 +414,11 @@ class AiReplyDraftCoordinator(
             activeMessageKey = dedupeKey
             replyAwaitingConfirmedSend = true
             activeRequestId = requestId
+            activeDraftTarget = target
+            activeDraftVisitToken = visitToken
+            // Old successful requests may have retained their in-memory segment list.
+            // Starting a new model request must not inherit that prior queue.
+            activeMessageSegments = emptyList()
             activeInputObservationAtMillis = batch.capturedAtMillis
             verifiedEmptyInputRetries.remove(dedupeKey)
             activeExistingOutgoingKeys = batch.messages
@@ -1369,43 +1394,114 @@ class AiReplyDraftCoordinator(
     }
 
     private fun finish(reasonCode: String, requestGeneration: Long) {
-        if (reasonCode in setOf(
-                "DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED",
-                "MODEL_DECISION_MODEL_CALL_FAILED", "MODEL_DECISION_EMPTY_MODEL_OUTPUT",
-                "MODEL_DECISION_MODEL_OUTPUT_SCHEMA_INVALID", "MODEL_EMPTY_RETRY_CONTEXT_CHANGED"
-            )) {
-            // Only pre-send model failures are reclaimable. Real uncertain sends remain UNKNOWN.
+        val technicalPreSendFailure = reasonCode in setOf(
+            "DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED",
+            "MODEL_DECISION_MODEL_CALL_FAILED", "MODEL_DECISION_EMPTY_MODEL_OUTPUT",
+            "MODEL_DECISION_MODEL_OUTPUT_SCHEMA_INVALID"
+        )
+        val reclaimableFailure = technicalPreSendFailure ||
+            reasonCode == "MODEL_EMPTY_RETRY_CONTEXT_CHANGED"
+        val durableFailureRecorded = if (reclaimableFailure) {
+            // An uncertain send is never reclaimed by a model-only failure.
             updateTaskStatus(ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
-        }
-        synchronized(lock) {
+        } else false
+        val event = synchronized(lock) {
             if (!isCurrentGeneration(requestGeneration)) return
-            // Model-only terminal outcomes have no message segments or send attempt to confirm.
-            // Never release the gate after a draft/write/send transaction has started.
-            if (activeMessageSegments.isEmpty() &&
+            val preSend = activeMessageSegments.isEmpty() &&
                 pendingSendConfirmation == null && pendingNextMessageSegment == null &&
                 pendingSendControl == null && !awaitingUserSend.get()
-            ) {
-                replyAwaitingConfirmedSend = false
-            }
+            if (preSend) replyAwaitingConfirmedSend = false
             pending.set(false)
             pendingSendControl = null
             sendControlRetryScheduled = false
             sendControlRetryTicket++
             val key = activeMessageKey
+            val id = activeRequestId
+            val originalTarget = activeDraftTarget
+            val visitToken = activeDraftVisitToken
             activeMessageKey = null
             activeRequestId = null
-            // 模型/调度失败和已证实首次焦点拒绝且输入仍空，才允许有限重试；已写入或发送不明时禁止重试。
-            if (key != null && reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED",
-                    "MODEL_DECISION_MODEL_CALL_FAILED", "MODEL_DECISION_EMPTY_MODEL_OUTPUT",
-                    "MODEL_DECISION_MODEL_OUTPUT_SCHEMA_INVALID",
-                    "DRAFT_INPUT_CONFIRMED_EMPTY_RETRYABLE")) {
-                val attempts = (failedRequests[key]?.first ?: 0) + 1
-                failedRequests[key] = attempts to (nowMillis() + 30_000L)
+            activeDraftTarget = null
+            activeDraftVisitToken = null
+            var attempts = 0
+            if (key != null && (technicalPreSendFailure ||
+                    reasonCode == "DRAFT_INPUT_CONFIRMED_EMPTY_RETRYABLE")) {
+                attempts = (failedRequests[key]?.first ?: 0) + 1
+                failedRequests[key] = attempts to (nowMillis() + MODEL_FAILURE_RETRY_DELAY_MS)
                 while (failedRequests.size > MAX_PROCESSED_KEYS) failedRequests.remove(failedRequests.keys.first())
                 processedMessageKeys.remove(key)
             }
+            if (technicalPreSendFailure && preSend && durableFailureRecorded &&
+                key != null && id != null && originalTarget != null && visitToken != null
+            ) AiReplyPreSendModelFailure(
+                requestId = id,
+                requestKey = key,
+                conversationKey = originalTarget.conversationIdentityKey,
+                windowSessionKey = originalTarget.windowSessionKey,
+                visitToken = visitToken,
+                taskLease = originalTarget.taskLease,
+                reasonCode = reasonCode,
+                attempts = attempts,
+                retryDelayMs = MODEL_FAILURE_RETRY_DELAY_MS,
+                readyToDefer = attempts >= MODEL_FAILURE_MAX_ATTEMPTS
+            ) else null
         }
         onLog("AI 回复草稿处理结束：$reasonCode")
+        if (event != null) {
+            onLog("AI 模型失败交接[PRE_SEND_NO_GESTURE]：reason=${event.reasonCode}；" +
+                "attempt=${event.attempts}/$MODEL_FAILURE_MAX_ATTEMPTS；defer=${event.readyToDefer}")
+            runCatching { onPreSendModelFailure(event) }.onFailure {
+                onLog("AI 模型失败交接[CALLBACK_REJECTED]：不执行页面操作")
+            }
+        }
+    }
+
+    /**
+     * A greeting can be deferred only after the original request is durably retryable,
+     * no segment was created, the request/lease still match, and the *fresh* composer is empty.
+     * This verification does not read or write a draft or submit a gesture.
+     */
+    fun verifyGreetingPreSendFailure(
+        failure: AiReplyPreSendModelFailure, snapshot: ChatPageSnapshot
+    ): Boolean {
+        if (!isAiReplyActive() || isConversationReturnBlocked || isSendConfirmationPending ||
+            isSendControlRecoveryPending
+        ) return false
+        if (snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            snapshot.conversationIdentityKey() != failure.conversationKey ||
+            snapshot.windowIdentityKey() == null ||
+            snapshot.inputFieldTarget == null ||
+            snapshot.packageName != failure.windowSessionKey.substringBefore('|')
+        ) return false
+        val window = snapshot.inputFieldTarget.window
+        val sessionKey = "${window.packageName}|${window.windowId}|${window.generation}|conversation=${failure.conversationKey}"
+        if (sessionKey != failure.windowSessionKey || captureTaskLease() != failure.taskLease) return false
+        val owner = replyTaskRepository?.find(failure.requestKey) ?: return false
+        if (owner.requestId != failure.requestId || owner.conversationKey != failure.conversationKey ||
+            owner.status != ReplyTaskStatus.FAILED_RETRYABLE
+        ) return false
+        if (replySegmentTaskRepository?.findByRequest(failure.requestId)?.isNotEmpty() == true) return false
+        val input = ChatDraftInputTarget(
+            packageName = snapshot.packageName, activityClass = snapshot.activityClass,
+            windowIdentityKey = snapshot.windowIdentityKey() ?: return false,
+            conversationIdentityKey = failure.conversationKey,
+            windowSessionKey = sessionKey,
+            nodeTarget = snapshot.inputFieldTarget,
+            expectedChatTitle = snapshot.chatTitleText,
+            taskLease = failure.taskLease
+        )
+        return runCatching { inputPort.verifyDraft(input, "") }.getOrNull()?.status == ChatDraftInputStatus.VERIFIED
+    }
+
+    /** Called only after a lease-gated safe BACK accepts an unprocessed greeting deferral. */
+    fun releaseDeferredGreetingModelFailure(failure: AiReplyPreSendModelFailure) {
+        synchronized(lock) {
+            if (activeMessageKey == failure.requestKey || pending.get() ||
+                pendingSendConfirmation != null || pendingNextMessageSegment != null
+            ) return
+            failedRequests.remove(failure.requestKey)
+            processedMessageKeys.remove(failure.requestKey)
+        }
     }
 
     private fun updateTaskStatus(status: ReplyTaskStatus, requestGeneration: Long): Boolean {
@@ -1434,6 +1530,8 @@ class AiReplyDraftCoordinator(
 
     companion object {
         private const val MAX_PROCESSED_KEYS = 256
+        private const val MODEL_FAILURE_MAX_ATTEMPTS = 2
+        private const val MODEL_FAILURE_RETRY_DELAY_MS = 30_000L
         private const val MIN_VERIFY_DWELL_DELAY_MS = 500
         private const val MAX_VERIFY_DWELL_DELAY_MS = 900
         private const val RECOVERY_VERIFY_RETRY_DELAY_MS = 5_000L

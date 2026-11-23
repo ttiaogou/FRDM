@@ -4385,6 +4385,98 @@ class AiReplyObservationRuntimeTest {
         assertEquals(2, port.greetingSendJournalWrites)
     }
 
+
+    /** Reads the established binding, not a newly invented task lease or conversation. */
+    private fun greetingModelFailureEvent(
+        runtime: AiReplyObservationRuntime, attempts: Int = 2
+    ): com.freedom.features.aireply.ai.AiReplyPreSendModelFailure {
+        val binding = AiReplyObservationRuntime::class.java.getDeclaredField("greetingChatBinding")
+            .apply { isAccessible = true }.get(runtime)
+            ?: error("Greeting binding was not established")
+        fun bindingField(name: String): Any? =
+            binding.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(binding)
+        return com.freedom.features.aireply.ai.AiReplyPreSendModelFailure(
+            requestId = "greeting-model-test-request-${attempts}",
+            requestKey = "greeting-model-test-request-key",
+            conversationKey = bindingField("chatTitleKey") as String,
+            windowSessionKey = bindingField("windowSessionKey") as String,
+            visitToken = bindingField("visitToken") as String,
+            taskLease = bindingField("taskLease") as? com.freedom.core.runtime.TaskLease,
+            reasonCode = "MODEL_DECISION_MODEL_CALL_FAILED",
+            attempts = attempts,
+            retryDelayMs = 30_000L,
+            readyToDefer = attempts >= 2
+        )
+    }
+
+    @Test fun greetingTechnicalModelFailureRetriesThenDefersWithoutMarkingSendSuccess() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort()
+        var deferredCallbacks = 0
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs, greetingDraft = { true },
+            preSendModelFailureVerifier = { _, _ -> true },
+            modelFailureDeferred = { deferredCallbacks++ }
+        )
+        activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_SEND_PENDING") } }
+        runtime.onPreSendModelFailure(greetingModelFailureEvent(runtime, attempts = 1))
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_MODEL_FAILURE_RETRY_ADMITTED") } }
+        assertEquals(0, port.greetingModelFailureDeferralCalls)
+        assertEquals(0, deferredCallbacks)
+        runtime.onPreSendModelFailure(greetingModelFailureEvent(runtime, attempts = 2))
+        runUntil(scheduler, 80) { port.greetingModelFailureDeferralCalls == 1 }
+        assertEquals(1, deferredCallbacks)
+        assertEquals(0, port.greetingDetailSuccessfulCompletions)
+        assertEquals(0, port.greetingSendJournalWrites)
+        assertTrue(logs.any { it.contains("GREETING_REPLY_DEFERRED") })
+        assertFalse(logs.any { it.contains("GREETING_SEND_CONFIRMED") })
+    }
+
+    @Test fun greetingFailedDraftNeverReturnsWhenComposerOrSafeBackIsNotVerified() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort().apply { greetingModelFailureDeferralAccepted = false }
+        var composerSafe = false
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs, greetingDraft = { true },
+            preSendModelFailureVerifier = { _, _ -> composerSafe }
+        )
+        activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_SEND_PENDING") } }
+        runtime.onPreSendModelFailure(greetingModelFailureEvent(runtime))
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_MODEL_FAILURE_VERIFY_WAIT") } }
+        assertEquals(0, port.greetingModelFailureDeferralCalls)
+        composerSafe = true
+        runUntil(scheduler, 80) { port.greetingModelFailureDeferralCalls == 1 }
+        assertEquals(0, port.greetingDetailSuccessfulCompletions)
+        assertEquals(0, port.greetingSendJournalWrites)
+        assertTrue(logs.any { it.contains("GREETING_MODEL_FAILURE_DEFER_WAIT") })
+        port.greetingModelFailureDeferralAccepted = true
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_REPLY_DEFERRED") } }
+        assertEquals(2, port.greetingModelFailureDeferralCalls)
+    }
+
+    @Test fun staleGreetingModelFailureCallbackCannotDeferAfterTaskRelease() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort()
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs, greetingDraft = { true },
+            preSendModelFailureVerifier = { _, _ -> true }
+        )
+        val flow = activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_SEND_PENDING") } }
+        runtime.onPreSendModelFailure(greetingModelFailureEvent(runtime))
+        assertTrue(flow.releaseOwnership("model callback ownership revoked"))
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_MODEL_FAILURE_STALE_IGNORED") } }
+        assertEquals(0, port.greetingModelFailureDeferralCalls)
+    }
+
     private fun greetingDraftTestPort(): FakeChatPort {
         val identity = ContactRowIdentity(
             snapshotId = "greeting-profile-proof", temporaryUserId = "greeting-row",
@@ -4412,7 +4504,11 @@ class AiReplyObservationRuntimeTest {
             com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
         },
         consumeSendId: () -> String? = { null },
-        sendConfirmationPending: () -> Boolean = { false }
+        sendConfirmationPending: () -> Boolean = { false },
+        preSendModelFailureVerifier: (
+            com.freedom.features.aireply.ai.AiReplyPreSendModelFailure, ChatPageSnapshot
+        ) -> Boolean = { _, _ -> false },
+        modelFailureDeferred: (com.freedom.features.aireply.ai.AiReplyPreSendModelFailure) -> Unit = {}
     ): AiReplyObservationRuntime = AiReplyObservationRuntime(
         scheduler = scheduler,
         sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
@@ -4436,7 +4532,9 @@ class AiReplyObservationRuntimeTest {
                 } else null
             )
         },
-        isSendConfirmationPending = sendConfirmationPending
+        isSendConfirmationPending = sendConfirmationPending,
+        verifyGreetingPreSendModelFailure = preSendModelFailureVerifier,
+        onGreetingModelFailureDeferred = modelFailureDeferred
     )
 
     private fun activateGreetingTestFlow(runtime: AiReplyObservationRuntime): ReceivedGreetingsTaskFlowController {
@@ -6208,6 +6306,8 @@ class AiReplyObservationRuntimeTest {
         var greetingDetailCompletionCalls = 0
         var greetingDetailSuccessfulCompletions = 0
         var greetingDetailReturnAccepted = true
+        var greetingModelFailureDeferralCalls = 0
+        var greetingModelFailureDeferralAccepted = true
         var greetingSendJournalAccepted = true
         var greetingSendJournalWrites = 0
         var receivedGreetingsTraversalStatusValue: ReceivedGreetingsTraversalStatus =
@@ -6318,6 +6418,10 @@ class AiReplyObservationRuntimeTest {
         override fun persistReceivedGreetingConfirmedSend(confirmationId: String): Boolean {
             greetingSendJournalWrites++
             return greetingSendJournalAccepted && confirmationId.isNotBlank()
+        }
+        override fun deferReceivedGreetingAfterModelFailure(): Boolean {
+            greetingModelFailureDeferralCalls++
+            return greetingModelFailureDeferralAccepted && greetingDetailReturnAccepted
         }
         override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean {
             greetingDetailCompletionCalls++
