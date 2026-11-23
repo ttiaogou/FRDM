@@ -455,7 +455,8 @@ class AiReplyObservationRuntimeTest {
         while (fixture.logs.none { it.contains("RECOVERY_EXECUTION_READY") } &&
             steps < 80 && fixture.scheduler.pendingCount() > 0
         ) {
-            fixture.scheduler.runNext()
+            // A 0ms page read must run before the recurring 500ms+ recovery timer.
+            fixture.scheduler.runNextShortestDelay()
             steps++
         }
         assertTrue(
@@ -493,7 +494,7 @@ class AiReplyObservationRuntimeTest {
 
         // The launcher cannot authorize recovery or a previously queued list scroll.
         repeat(2) {
-            if (fixture.scheduler.pendingCount() > 0) fixture.scheduler.runNext()
+            if (fixture.scheduler.pendingCount() > 0) fixture.scheduler.runNextShortestDelay()
         }
         assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
         assertEquals(0, fixture.dispatchedGestures())
@@ -513,7 +514,7 @@ class AiReplyObservationRuntimeTest {
         assertTrue(fixture.checkpoint() != null)
         fixture.port.page = chatDetailSnapshot()
         repeat(3) {
-            if (fixture.scheduler.pendingCount() > 0) fixture.scheduler.runNext()
+            if (fixture.scheduler.pendingCount() > 0) fixture.scheduler.runNextShortestDelay()
         }
         assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
         assertEquals(0, fixture.dispatchedGestures())
@@ -5679,6 +5680,14 @@ class AiReplyObservationRuntimeTest {
 
         fun runNext() {
             val entry = entries.firstOrNull { !it.cancelled } ?: error("No pending task")
+            entry.cancelled = true
+            entry.block()
+        }
+
+        /** New recovery tests model delay ordering; the legacy FIFO fixture remains unchanged. */
+        fun runNextShortestDelay() {
+            val entry = entries.filterNot { it.cancelled }.minByOrNull { it.delay }
+                ?: error("No pending task")
             entry.cancelled = true
             entry.block()
         }
