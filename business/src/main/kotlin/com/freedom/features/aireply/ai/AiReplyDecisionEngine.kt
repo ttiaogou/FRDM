@@ -17,7 +17,13 @@ class AiReplyDecisionEngine(
         // retry paths. Never send OCR placeholders or unverified visual symbols to providers.
         val safeConversation = AiSafeConversationText.outbound(input.context.messages)
         if (safeConversation.isEmpty()) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.EMPTY_CONTEXT)
-        if (safeConversation.none { it.role == AiModelMessage.Role.USER }) {
+        // The last original entry is the current conversation tail. If it is outgoing or
+        // was removed as unverified visual noise, do not answer a previous incoming line.
+        val latestOriginal = input.context.messages.last()
+        if (latestOriginal.role != AiModelMessage.Role.USER ||
+            AiSafeConversationText.legacy(latestOriginal.content) == null ||
+            safeConversation.none { it.role == AiModelMessage.Role.USER }
+        ) {
             return AiReplyEvaluation.Execution(AiReplyExecutionStatus.MESSAGE_EVIDENCE_UNAVAILABLE)
         }
         if (input.cooldownActive) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.COOLDOWN_PENDING)
