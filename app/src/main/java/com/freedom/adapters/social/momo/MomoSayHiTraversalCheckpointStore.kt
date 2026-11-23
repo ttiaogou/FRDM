@@ -19,7 +19,9 @@ internal class MomoSayHiTraversalCheckpointStore(
                     MomoSayHiDeferredRowCheckpoint(
                         attempts = value.attempts,
                         retryAfterEpochMs = value.retryAfterEpochMs,
-                        safeTargetValidationFailures = value.safeTargetValidationFailures
+                        safeTargetValidationFailures = value.safeTargetValidationFailures,
+                        lastDeferralReason = value.lastDeferralReason,
+                        failedSafeTargetEvidenceHash = value.failedSafeTargetEvidenceHash
                     )
                 },
                 deferredReturnToTopActive = record.deferredReturnToTopActive,
@@ -38,7 +40,9 @@ internal class MomoSayHiTraversalCheckpointStore(
                     MomoSayHiDeferredRowCheckpointRecord(
                         attempts = value.attempts,
                         retryAfterEpochMs = value.retryAfterEpochMs,
-                        safeTargetValidationFailures = value.safeTargetValidationFailures
+                        safeTargetValidationFailures = value.safeTargetValidationFailures,
+                        lastDeferralReason = value.lastDeferralReason,
+                        failedSafeTargetEvidenceHash = value.failedSafeTargetEvidenceHash
                     )
                 },
                 deferredReturnToTopActive = checkpoint.deferredReturnToTopActive,
@@ -63,7 +67,9 @@ internal data class MomoSayHiTraversalCheckpoint(
 internal data class MomoSayHiDeferredRowCheckpoint(
     val attempts: Int,
     val retryAfterEpochMs: Long,
-    val safeTargetValidationFailures: Int = 0
+    val safeTargetValidationFailures: Int = 0,
+    val lastDeferralReason: String = "",
+    val failedSafeTargetEvidenceHash: String = ""
 )
 
 

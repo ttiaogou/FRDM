@@ -40,7 +40,10 @@ internal class MomoSayHiTraversalCheckpointDataStore(context: Context) : MomoSay
                 deferred[key] = MomoSayHiDeferredRowCheckpointRecord(
                     attempts = item.optInt("attempts", 0).coerceAtLeast(0),
                     retryAfterEpochMs = item.optLong("retryAfterEpochMs", 0L).coerceAtLeast(0L),
-                    safeTargetValidationFailures = item.optInt("safeTargetValidationFailures", 0).coerceAtLeast(0)
+                    safeTargetValidationFailures = item.optInt("safeTargetValidationFailures", 0).coerceAtLeast(0),
+                    lastDeferralReason = item.optString("lastDeferralReason", "").take(100),
+                    failedSafeTargetEvidenceHash = item.optString("failedSafeTargetEvidenceHash", "")
+                        .takeIf { it.matches(Regex("[0-9a-f]{64}")) }.orEmpty()
                 )
             }
             MomoSayHiTraversalCheckpointRecord(
@@ -68,7 +71,10 @@ internal class MomoSayHiTraversalCheckpointDataStore(context: Context) : MomoSay
             deferred.put(key, JSONObject()
                 .put("attempts", value.attempts.coerceAtLeast(0))
                 .put("retryAfterEpochMs", value.retryAfterEpochMs.coerceAtLeast(0L))
-                .put("safeTargetValidationFailures", value.safeTargetValidationFailures.coerceAtLeast(0)))
+                .put("safeTargetValidationFailures", value.safeTargetValidationFailures.coerceAtLeast(0))
+                .put("lastDeferralReason", value.lastDeferralReason.take(100))
+                .put("failedSafeTargetEvidenceHash", value.failedSafeTargetEvidenceHash
+                    .takeIf { it.matches(Regex("[0-9a-f]{64}")) }.orEmpty()))
         }
         val payload = JSONObject()
             .put("version", CHECKPOINT_VERSION)

@@ -2288,6 +2288,12 @@ internal class MomoSocialAdapter(
             val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
             key !in confirmedRows && !sayHiTraversalState.isProcessedRow(key) && !sayHiTraversalState.isDeferredRow(key)
         }
+        // Read-only recovery probe: the old finite click budget is never reset just
+        // because a timer fired. Inspect a NEW unique and independently safe row target.
+        // The traversal ledger requires TWO fresh, equal changed-evidence snapshots.
+        val exhaustedProbePending = inspectExhaustedSayHiSafeTargetEvidence(
+            tree, inspection, candidates, confirmedRows
+        )
         val deferredRetryCandidates = candidates.filter { row ->
             val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
             key !in confirmedRows && sayHiTraversalState.isDeferredRetryDue(key, System.currentTimeMillis())
@@ -2298,7 +2304,8 @@ internal class MomoSocialAdapter(
             sayHiStableCandidateKey = ""
             sayHiStableCandidateTarget = null
             sayHiStableCandidateWindow = null
-            return false
+            // Do not scroll away while the second safe-evidence observation is pending.
+            return exhaustedProbePending
         }
         val key = MomoSayHiIdentityFingerprintPolicy.rowKey(candidate)
         if (inspection.listRows.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1) {
@@ -2547,7 +2554,8 @@ internal class MomoSocialAdapter(
             sayHiGestureInFlight = false
             deferSayHiRow(
                 selected.rowKey,
-                "$SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX:$revalidationFailure"
+                "$SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX:$revalidationFailure",
+                failureEvidenceHash = sayHiSafeTargetEvidenceHash(tree, row, target)
             )
             onLog(
                 "收到招呼整行点击取消：安全区域二次校验失败；reason=$revalidationFailure；" +
@@ -2823,8 +2831,106 @@ internal class MomoSocialAdapter(
         sayHiRowTapHitReason = ""
     }
 
-    private fun deferSayHiRow(rowKey: String, reason: String) {
-        val result = sayHiTraversalState.deferRow(rowKey, reason, System.currentTimeMillis())
+
+    /**
+     * A diagnostic hash of the CURRENT row's safe geometry and existing structural
+     * fingerprint. No unredacted name, chat content, node handle, or click coordinate
+     * survives beyond the current evidence check.
+     */
+    private fun sayHiSafeTargetEvidenceHash(
+        tree: AccessibilityTreeSnapshot, row: MomoSayHiListRow, target: MomoSayHiTapTarget
+    ): String {
+        val evidence = listOf(
+            MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree),
+            row.bounds.toString(), row.rowPath.joinToString("/"),
+            target.path.childIndices.joinToString("/"),
+            target.targetBounds.toString(), target.preferredBounds.toString(),
+            target.excludedBounds.joinToString("|") { it.toString() }
+        ).joinToString("\u0000")
+        return java.security.MessageDigest.getInstance("SHA-256")
+            .digest(evidence.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Never rearm an exhausted row from a timestamp or a mere changed list position.
+     * A current complete list, unique row, safe recomputed target, active window and
+     * two strictly fresh snapshots are all required; this method NEVER clicks.
+     */
+    private fun inspectExhaustedSayHiSafeTargetEvidence(
+        tree: AccessibilityTreeSnapshot,
+        inspection: MomoSayHiPageInspection,
+        candidates: List<MomoSayHiListRow>,
+        confirmedRows: Set<String>
+    ): Boolean {
+        if (!sayHiTraversalState.hasExhaustedSafeTargetRows ||
+            inspection.kind != MomoSayHiPageKind.RECEIVED_GREETINGS_LIST ||
+            !sayHiNavigationFlowController.isReceivedListConfirmed() ||
+            !accessibilityGateway.isWindowCurrent(tree.window) ||
+            sayHiGestureInFlight || sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE
+        ) return false
+        val index = NodeTreeIndex(tree)
+        val now = System.currentTimeMillis()
+        var verificationScheduled = false
+        for (row in candidates) {
+            val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
+            if (key in confirmedRows || !sayHiTraversalState.isDeferredRow(key) ||
+                sayHiTraversalState.shouldRetryDeferredRow(key) ||
+                candidates.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1
+            ) continue
+            val namePath = row.namePath ?: continue
+            val target = MomoSayHiAvatarTargetPolicy.resolveRowTarget(
+                index, NodePath(row.rowPath), namePath
+            ) ?: continue
+            if (sayHiTapReadiness(tree, target) != MomoSayHiTapReadiness.READY) continue
+            val selected = SayHiSelectedGreeting(
+                rowKey = key,
+                displayName = row.displayName.value.orEmpty(),
+                greetingText = row.greetingText.value,
+                timestampText = row.timestampText.value,
+                sourceWindow = tree.window,
+                sourceStructureFingerprint =
+                    MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree)
+            )
+            if (revalidateSayHiRowTarget(tree, row, target, selected) != null) continue
+            val evidenceHash = sayHiSafeTargetEvidenceHash(tree, row, target)
+            val result = sayHiTraversalState.observeExhaustedSafeTargetEvidence(
+                rowKey = key,
+                evidenceHash = evidenceHash,
+                windowKey = sayHiWindowStabilityKey(tree.window),
+                capturedAtEpochMs = tree.capturedAtEpochMs,
+                nowEpochMs = now
+            )
+            when (result) {
+                MomoSayHiTraversalState.SafeEvidenceRecovery.BASELINE_RECORDED ->
+                    onLog("GREETING_DEFERRED_RECOVERY_BASELINE：历史断点缺少失败场景证据；只记录安全基线，不恢复点击额度")
+                MomoSayHiTraversalState.SafeEvidenceRecovery.WAIT_SECOND_SNAPSHOT -> {
+                    onLog("GREETING_DEFERRED_RECOVERY_VERIFYING：新的安全区域证据待第二份新鲜快照确认；未派发手势")
+                    verificationScheduled = true
+                }
+                MomoSayHiTraversalState.SafeEvidenceRecovery.REARMED -> {
+                    onLog("GREETING_DEFERRED_RECOVERY_REARMED：行身份、窗口及变更后的安全区域已双快照确认；恢复有限点击预算，不计入成功")
+                    verificationScheduled = true
+                }
+                MomoSayHiTraversalState.SafeEvidenceRecovery.NOT_READY -> Unit
+            }
+        }
+        if (verificationScheduled) {
+            scheduleSayHiListSnapshotInspection(
+                delayMs = 1_500L,
+                reason = "DEFERRED_SAFE_TARGET_READ_ONLY_PROOF",
+                retry = false
+            )
+        }
+        return verificationScheduled
+    }
+
+    private fun deferSayHiRow(
+        rowKey: String, reason: String, failureEvidenceHash: String? = null
+    ) {
+        val result = sayHiTraversalState.deferRow(
+            rowKey, reason, System.currentTimeMillis(), failureEvidenceHash
+        )
         onLog(
             "收到招呼单用户隔离[DEFERRED]：rowKeyHash=$rowKey；reason=$reason；" +
                 "cooldown=${result.delayMs}ms；backoffStage=${result.backoffStage}；" +
@@ -4151,6 +4257,38 @@ internal class MomoSocialAdapter(
                 )
             }
         }
+        // Recovery polls are intentionally read-only. The snapshot coordinator calls
+        // this path with allowAutonomousScroll=false: it must still examine exhausted
+        // rows and arrange the next read; no gesture is ever issued by the probe.
+        if (!allowAutonomousScroll &&
+            result.kind == MomoSayHiPageKind.RECEIVED_GREETINGS_LIST &&
+            sayHiNavigationFlowController.isReceivedListConfirmed() &&
+            !result.truncated && !result.queryBudgetExceeded && !tree.truncated &&
+            result.containerFound && result.containerMatchCountExact &&
+            !result.containerAmbiguous && sayHiTraversalState.hasExhaustedSafeTargetRows &&
+            sayHiReadOnlyStage == SayHiReadOnlyStage.IDLE &&
+            !sayHiGestureInFlight && accessibilityGateway.isWindowCurrent(tree.window)
+        ) {
+            val provenSends = runCatching {
+                receivedGreetingsSendReturnRepository.loadAll()
+            }.getOrNull()
+            if (provenSends != null) {
+                val pendingProof = inspectExhaustedSayHiSafeTargetEvidence(
+                    tree, result,
+                    result.listRows.filter { it.unread.status == EvidenceStatus.CONFIRMED && it.unread.value == true },
+                    provenSends.mapTo(HashSet()) { it.rowKeyHash }
+                )
+                if (!pendingProof) {
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = 30_000L,
+                        reason = "DEFERRED_SAFE_TARGET_READ_ONLY_POLL",
+                        retry = false
+                    )
+                }
+            } else {
+                onLog("GREETING_DEFERRED_RECOVERY_JOURNAL_UNAVAILABLE：保留安全点击失败断点，不重试点击")
+            }
+        }
         var greetingRowActionHandled = false
         if (allowAutonomousScroll && result.kind == MomoSayHiPageKind.RECEIVED_GREETINGS_LIST &&
             sayHiNavigationFlowController.isReceivedListConfirmed()
@@ -4295,7 +4433,12 @@ internal class MomoSocialAdapter(
                     onLog("收到招呼自主浏览暂未完成：已确认当前 listview 不可滚动，但仍有 ${sayHiTraversalState.deferredRowCount} 个用户待恢复；保留断点并等待回访，不报告完成")
                     scheduleSayHiListSnapshotInspection(2_000L, "DEFERRED_ROWS_WAIT_FOR_FRESH_LIST", retry = false)
                 } else {
-                    onLog("收到招呼自主浏览暂停：${sayHiTraversalState.deferredRowCount} 个用户的安全点击区域已达到有限复核上限；保留断点，不再自动重试、不报告完成")
+                    onLog("收到招呼安全点击已耗尽[READ_ONLY_WAIT]：${sayHiTraversalState.deferredRowCount} 个用户等待新的稳定安全区域证据；不直接重试点击、不报告完成")
+                    scheduleSayHiListSnapshotInspection(
+                        delayMs = 30_000L,
+                        reason = "DEFERRED_SAFE_TARGET_READ_ONLY_POLL",
+                        retry = false
+                    )
                 }
                 return
             }
@@ -4304,7 +4447,12 @@ internal class MomoSocialAdapter(
         }
         if (sayHiAutonomousBrowseController.isFinished() && sayHiTraversalState.hasDeferredRows) {
             if (!hasRetryableSayHiDeferredRows()) {
-                onLog("收到招呼自主浏览暂停：待恢复用户均已达到安全点击区域复核上限；保留断点，不再启动自动回访、不报告完成")
+                onLog("收到招呼安全点击已耗尽[READ_ONLY_WAIT]：保留延期行和失败证据；30秒后观察页面变化，不直接清空失败次数")
+                scheduleSayHiListSnapshotInspection(
+                    delayMs = 30_000L,
+                    reason = "DEFERRED_SAFE_TARGET_READ_ONLY_POLL",
+                    retry = false
+                )
                 return
             }
             when {

@@ -19,6 +19,15 @@ internal class MomoSayHiTraversalState(
     private val retryCounts = LinkedHashMap<String, Int>()
     private val retryAfterEpochMs = LinkedHashMap<String, Long>()
     private val safeTargetValidationFailures = LinkedHashMap<String, Int>()
+    private val lastDeferralReasons = LinkedHashMap<String, String>()
+    private val failedSafeTargetEvidenceHashes = LinkedHashMap<String, String>()
+    /** Only short-lived read-only validation data; never a cached Android target. */
+    private data class RecoveryEvidenceCandidate(
+        val evidenceHash: String,
+        val windowKey: String,
+        val capturedAtEpochMs: Long
+    )
+    private val recoveryEvidenceCandidates = LinkedHashMap<String, RecoveryEvidenceCandidate>()
 
     var deferredReturnToTopActive: Boolean = false
         private set
@@ -62,8 +71,13 @@ internal class MomoSayHiTraversalState(
                 if (value.safeTargetValidationFailures > 0) {
                     safeTargetValidationFailures[key] = value.safeTargetValidationFailures
                 }
+                if (value.lastDeferralReason.isNotBlank()) lastDeferralReasons[key] = value.lastDeferralReason
+                if (value.failedSafeTargetEvidenceHash.matches(Regex("[0-9a-f]{64}"))) {
+                    failedSafeTargetEvidenceHashes[key] = value.failedSafeTargetEvidenceHash
+                }
             }
         }
+        recoveryEvidenceCandidates.clear()
         // A platform scroll position is never restored; every run starts a fresh forward pass.
         deferredReturnToTopActive = false
         deferredReplayStarted = false
@@ -89,6 +103,60 @@ internal class MomoSayHiTraversalState(
 
     fun hasRetryableDeferredRows(): Boolean = deferredRowKeys.any(::shouldRetryDeferredRow)
 
+    val hasExhaustedSafeTargetRows: Boolean get() = deferredRowKeys.any { key ->
+        !shouldRetryDeferredRow(key) && key !in processedRowKeys
+    }
+
+    enum class SafeEvidenceRecovery {
+        NOT_READY, BASELINE_RECORDED, WAIT_SECOND_SNAPSHOT, REARMED
+    }
+
+    /**
+     * The finite click retry budget remains exhausted for the same failed evidence.
+     * A different, newly safe geometry must be independently observed twice in the
+     * same window generation before a new finite budget is granted.
+     * The adapter must independently verify each snapshot before calling this method.
+     */
+    fun observeExhaustedSafeTargetEvidence(
+        rowKey: String,
+        evidenceHash: String,
+        windowKey: String,
+        capturedAtEpochMs: Long,
+        nowEpochMs: Long
+    ): SafeEvidenceRecovery {
+        if (rowKey !in deferredRowKeys || rowKey in processedRowKeys ||
+            shouldRetryDeferredRow(rowKey) ||
+            nowEpochMs < (retryAfterEpochMs[rowKey] ?: Long.MAX_VALUE) ||
+            !evidenceHash.matches(Regex("[0-9a-f]{64}")) ||
+            windowKey.isBlank() || capturedAtEpochMs <= 0L || capturedAtEpochMs > nowEpochMs
+        ) return SafeEvidenceRecovery.NOT_READY
+        val failed = failedSafeTargetEvidenceHashes[rowKey]
+        if (failed == null) {
+            // Legacy checkpoint cannot prove the prior failure scene changed.
+            failedSafeTargetEvidenceHashes[rowKey] = evidenceHash
+            recoveryEvidenceCandidates.remove(rowKey)
+            persist(nowEpochMs)
+            return SafeEvidenceRecovery.BASELINE_RECORDED
+        }
+        if (failed == evidenceHash) {
+            recoveryEvidenceCandidates.remove(rowKey)
+            return SafeEvidenceRecovery.NOT_READY
+        }
+        val prior = recoveryEvidenceCandidates[rowKey]
+        if (prior == null || prior.evidenceHash != evidenceHash ||
+            prior.windowKey != windowKey || capturedAtEpochMs <= prior.capturedAtEpochMs
+        ) {
+            recoveryEvidenceCandidates[rowKey] =
+                RecoveryEvidenceCandidate(evidenceHash, windowKey, capturedAtEpochMs)
+            return SafeEvidenceRecovery.WAIT_SECOND_SNAPSHOT
+        }
+        safeTargetValidationFailures.remove(rowKey)
+        recoveryEvidenceCandidates.remove(rowKey)
+        retryAfterEpochMs[rowKey] = nowEpochMs + RECOVERED_EVIDENCE_SETTLE_MS
+        persist(nowEpochMs)
+        return SafeEvidenceRecovery.REARMED
+    }
+
     fun markProcessedRow(rowKey: String) {
         rememberBounded(processedRowKeys, rowKey)
         persist()
@@ -100,11 +168,19 @@ internal class MomoSayHiTraversalState(
     }
 
     /** Records the existing bounded retry schedule and checkpoints it before returning. */
-    fun deferRow(rowKey: String, reason: String, nowEpochMs: Long): DeferralResult {
+    fun deferRow(
+        rowKey: String, reason: String, nowEpochMs: Long,
+        failureEvidenceHash: String? = null
+    ): DeferralResult {
         rememberBounded(deferredRowKeys, rowKey)
         val attempts = ((retryCounts[rowKey] ?: 0) + 1).coerceAtMost(maxRetryBackoffStage)
         retryCounts[rowKey] = attempts
+        lastDeferralReasons[rowKey] = reason.take(100)
+        recoveryEvidenceCandidates.remove(rowKey)
         val safeTargetFailure = reason.startsWith(safeTargetFailureReasonPrefix)
+        if (safeTargetFailure && failureEvidenceHash?.matches(Regex("[0-9a-f]{64}")) == true) {
+            failedSafeTargetEvidenceHashes[rowKey] = failureEvidenceHash
+        }
         val safeFailures = if (safeTargetFailure) {
             MomoSayHiSafeTargetValidationRetryPolicy
                 .recordFailure(safeTargetValidationFailures[rowKey] ?: 0)
@@ -117,7 +193,9 @@ internal class MomoSayHiTraversalState(
             2 -> 3_000L
             else -> 5_000L
         }
-        retryAfterEpochMs[rowKey] = nowEpochMs + delayMs
+        retryAfterEpochMs[rowKey] = nowEpochMs +
+            if (safeTargetFailure && !MomoSayHiSafeTargetValidationRetryPolicy.shouldRetry(safeFailures))
+                EXHAUSTED_EVIDENCE_READ_ONLY_DELAY_MS else delayMs
         persist(nowEpochMs)
         return DeferralResult(
             delayMs = delayMs,
@@ -133,6 +211,9 @@ internal class MomoSayHiTraversalState(
         retryCounts.remove(rowKey)
         retryAfterEpochMs.remove(rowKey)
         safeTargetValidationFailures.remove(rowKey)
+        lastDeferralReasons.remove(rowKey)
+        failedSafeTargetEvidenceHashes.remove(rowKey)
+        recoveryEvidenceCandidates.remove(rowKey)
         persist(nowEpochMs)
     }
 
@@ -153,7 +234,9 @@ internal class MomoSayHiTraversalState(
                 deferred[key] = MomoSayHiDeferredRowCheckpoint(
                     attempts = retryCounts[key] ?: 0,
                     retryAfterEpochMs = retryAfterEpochMs[key] ?: 0L,
-                    safeTargetValidationFailures = safeTargetValidationFailures[key] ?: 0
+                    safeTargetValidationFailures = safeTargetValidationFailures[key] ?: 0,
+                    lastDeferralReason = lastDeferralReasons[key].orEmpty(),
+                    failedSafeTargetEvidenceHash = failedSafeTargetEvidenceHashes[key].orEmpty()
                 )
             }
         }
@@ -178,6 +261,9 @@ internal class MomoSayHiTraversalState(
         retryCounts.clear()
         retryAfterEpochMs.clear()
         safeTargetValidationFailures.clear()
+        lastDeferralReasons.clear()
+        failedSafeTargetEvidenceHashes.clear()
+        recoveryEvidenceCandidates.clear()
         deferredReturnToTopActive = false
         deferredReplayStarted = false
         hasRestorableCheckpoint = false
@@ -190,6 +276,8 @@ internal class MomoSayHiTraversalState(
     }
 
     private companion object {
+        const val EXHAUSTED_EVIDENCE_READ_ONLY_DELAY_MS = 30_000L
+        const val RECOVERED_EVIDENCE_SETTLE_MS = 1_500L
         const val DEFAULT_MAX_REMEMBERED_ROWS = 600
         const val DEFAULT_MAX_RETRY_BACKOFF_STAGE = 4
         const val DEFAULT_SAFE_TARGET_FAILURE_REASON_PREFIX = "ROW_SAFE_TAP_TARGET_SECOND_VALIDATION_FAILED"
