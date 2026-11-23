@@ -26,6 +26,7 @@ object RunDiagnosticAnalyzer {
         // old run is not permanently reported as a runtime failure.
         val errorEvents = persistedErrorLevelEvents.filter(::isRuntimeFailureEvent)
         val downgradedQualityEvents = persistedErrorLevelEvents.filterNot(::isRuntimeFailureEvent)
+            .filterNot(::isLegacyBenignIdentityWait)
         val persistedWarningEvents = sorted.filter {
             it.level == RunLogLevel.WARN && !isPreviousRunRecoveryEvent(it)
         }
@@ -254,11 +255,19 @@ object RunDiagnosticAnalyzer {
             event.eventType.equals("process_exit_without_run_finish", ignoreCase = true) ||
             event.eventType.equals("previous_run_recovered_uncleanly", ignoreCase = true)
 
+    /** Legacy free-text ERROR events from a normal identity wait are informational, not warnings. */
+    private fun isLegacyBenignIdentityWait(event: RunDiagnosticEvent): Boolean =
+        event.level == RunLogLevel.ERROR &&
+            event.result == "FAILED_OR_EXCEPTION" &&
+            event.errorType.isNullOrBlank() && event.errorDetail.isNullOrBlank() &&
+            RunLogBudgetPolicy.isBenignIdentityObservationWait(event.message)
+
     /** True only for a confirmed error/fatal event belonging to the run being diagnosed. */
     fun isRuntimeFailureEvent(event: RunDiagnosticEvent): Boolean =
         !isPreviousRunRecoveryEvent(event) && (
             event.level == RunLogLevel.FATAL ||
                 (event.level == RunLogLevel.ERROR &&
+                    !isLegacyBenignIdentityWait(event) &&
                     !RunLogBudgetPolicy.isNonFatalQualityWarningMessage(event.message))
             )
 

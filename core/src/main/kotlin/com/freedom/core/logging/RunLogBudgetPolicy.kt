@@ -153,12 +153,25 @@ object RunLogBudgetPolicy {
         return directionUnknown || partialOcr || safeNavigationPause
     }
 
+    /**
+     * A historical identity observation used a negated phrase containing "失败".
+     * Only that exact phrase on that exact waiting event is informational. This
+     * method never hides a separate error, exception or warning on the same line.
+     */
+    fun isBenignIdentityObservationWait(message: String): Boolean =
+        message.uppercase(Locale.ROOT).contains("AI 联系人身份采集[OBSERVE_WAITING]") &&
+            message.contains("不返回失败原因") &&
+            inferLevel(message) == RunLogLevel.INFO
+
     fun inferLevel(message: String): RunLogLevel {
         val value = message.uppercase(Locale.ROOT)
+        val observationValue = if (value.contains("AI 联系人身份采集[OBSERVE_WAITING]")) {
+            value.replace("不返回失败原因", "")
+        } else value
         // Older navigation-wait wording included a negated phrase ending in “失败判定”.
         // Remove only that known negation before generic severity matching; a real failure,
         // timeout or exception appended to the same event must still keep its severity.
-        val severityValue = value
+        val severityValue = observationValue
             .replace("不执行主聊天列表身份失败判定", "")
             .replace(Regex("CALLBACKAFTERDRAINTIMEOUT\\s*[=:：]\\s*FALSE\\b"), "")
             .replace(Regex("(?:截断|TRUNCATED)\\s*[=:：]\\s*FALSE\\b"), "")

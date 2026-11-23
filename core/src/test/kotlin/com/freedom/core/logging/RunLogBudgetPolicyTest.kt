@@ -146,6 +146,31 @@ class RunLogBudgetPolicyTest {
         assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel(message))
     }
 
+
+    @Test
+    fun identityObserveWaitingWithNegatedFailureIsInfoWithoutHidingRealFailures() {
+        val waiting = "AI 联系人身份采集[OBSERVE_WAITING]：事务仍在进行；不返回失败原因"
+        val event = RunLogBudgetPolicy.toEvent(
+            waiting, "RUN_IDENTITY_WAIT", 1, 1, 1
+        )
+        assertEquals(RunLogLevel.INFO, event.level)
+        assertEquals(null, event.result)
+        assertTrue(RunLogBudgetPolicy.isBenignIdentityObservationWait(waiting))
+        // The negation must not suppress real failures or other uncertain observations.
+        assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel(
+            "$waiting；资料页读取失败：IllegalStateException"
+        ))
+        assertEquals(RunLogLevel.WARN, RunLogBudgetPolicy.inferLevel(
+            "$waiting；状态=UNKNOWN"
+        ))
+        assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel(
+            "其他模块：不返回失败原因"
+        ))
+        assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel(
+            "AI 联系人身份采集[OBSERVE_WAITING]：资料页读取失败"
+        ))
+    }
+
     @Test
     fun inferLevelAndCategoryAreDeterministic() {
         assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("OCR 解析失败：IllegalStateException"))
