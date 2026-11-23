@@ -507,10 +507,17 @@ class AiReplyDraftCoordinator(
         if (localDraft && (visible == null || context.conversationId != visible.conversationId ||
                 context.messages.takeLast(visible.messages.size) != visible.messages)) return reject("VISIBLE_CONTEXT_MISMATCH")
         val latestIncoming = batch.messagesBottomToTop.firstOrNull {
-            (if (localDraft) VisibleDraftContext.eligible(it) else it.isAiInputEligible) && it.direction == ChatMessageDirection.INCOMING
+            (if (localDraft) VisibleDraftContext.eligible(batch, it)
+                else it.isAiInputEligible && AiSafeConversationText.legacy(it.content) != null) &&
+                it.direction == ChatMessageDirection.INCOMING
         } ?: return reject("NO_VERIFIED_INCOMING_MESSAGE")
+        val latestSafeText = if (localDraft) {
+            AiSafeConversationText.visible(batch, latestIncoming)
+        } else {
+            AiSafeConversationText.legacy(latestIncoming.content)
+        } ?: return reject("LATEST_CONTEXT_MESSAGE_NOT_INCOMING")
         if (context.messages.isEmpty() || context.messages.last().role != AiModelMessage.Role.USER ||
-            context.messages.last().content != latestIncoming.content?.take(2_000)
+            context.messages.last().content != latestSafeText.take(2_000)
         ) return reject("LATEST_CONTEXT_MESSAGE_NOT_INCOMING")
         if (!localDraft && !context.hasVerifiedIncoming) return reject("NO_VERIFIED_INCOMING_CONTEXT")
         if (!isAiReplyActive()) return reject("AI_REPLY_NOT_ACTIVE")

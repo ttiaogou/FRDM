@@ -339,4 +339,45 @@ class AiReplyDecisionEngineTest {
 
     private fun replyJson(draft: String) =
         """{"action":"REPLY","reason":"GREETING","draft":"${draft.replace("\\", "\\\\").replace("\"", "\\\"")}"}"""
+
+    @Test fun finalOutboundGateSanitizesDirectMixedContextsBeforeModelCall() {
+        val provider = FakeProvider(replyJson("你好"))
+        val context = context().copy(messages = listOf(
+            AiModelMessage(AiModelMessage.Role.USER, "早上好😊"),
+            AiModelMessage(AiModelMessage.Role.ASSISTANT, "昨天见"),
+            AiModelMessage(AiModelMessage.Role.USER, "在吗[表情/图形未识别]"),
+            AiModelMessage(AiModelMessage.Role.USER, "今晚有空吗")
+        ))
+        AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context, true, requestId = "p3-final-safe")
+        )
+        assertEquals(1, provider.callCount)
+        assertEquals(listOf("早上好", "昨天见", "今晚有空吗"),
+            provider.lastRequest!!.conversation.map { it.content })
+    }
+
+    @Test fun finalOutboundGateRefusesContextWithOnlyVisualPlaceholders() {
+        val provider = FakeProvider(replyJson("你好"))
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context("[图形/符号内容待确认] 在吗a"),
+                true, requestId = "p3-no-unverified")
+        )
+        assertEquals(AiReplyExecutionStatus.EMPTY_CONTEXT, execution(result).status)
+        assertEquals(0, provider.callCount)
+    }
+
+    @Test fun finalOutboundGateRejectsOnlyOutgoingHistoryAfterFiltering() {
+        val provider = FakeProvider(replyJson("你好"))
+        val context = context().copy(messages = listOf(
+            AiModelMessage(AiModelMessage.Role.USER, "😊"),
+            AiModelMessage(AiModelMessage.Role.ASSISTANT, "你好呀")
+        ))
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context, true, requestId = "p3-no-user")
+        )
+        assertEquals(AiReplyExecutionStatus.MESSAGE_EVIDENCE_UNAVAILABLE, execution(result).status)
+        assertEquals(0, provider.callCount)
+    }
+
+
 }

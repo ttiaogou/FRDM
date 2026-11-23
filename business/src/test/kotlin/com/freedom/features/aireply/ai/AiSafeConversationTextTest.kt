@@ -1,0 +1,125 @@
+package com.freedom.features.aireply.ai
+
+import com.freedom.core.accessibility.api.ScreenRect
+import com.freedom.features.aireply.domain.message.*
+import org.junit.Assert.*
+import org.junit.Test
+
+class AiSafeConversationTextTest {
+    private val line = OcrContentRect(1, 2, 80, 25)
+
+    @Test fun oldVisualMarkersAreNeverWashedIntoVerifiedHistory() {
+        OcrUncertaintyMarkers.all.forEach { marker ->
+            assertNull(AiSafeConversationText.legacy("你好${marker}还没睡吗"))
+            assertNull(AiSafeConversationText.legacy("${marker} 在吗a"))
+        }
+    }
+
+    @Test fun unicodeEmojiIsRemovedWithoutDiscardingIndependentText() {
+        assertEquals("你好还没睡吗", AiSafeConversationText.legacy("你好😊还没睡吗"))
+        assertEquals("明天见", AiSafeConversationText.legacy("明天见👩‍💻"))
+        assertEquals("8点见", AiSafeConversationText.legacy("8点见1️⃣"))
+        assertEquals("睡不着鸭", AiSafeConversationText.legacy("睡不着鸭"))
+    }
+
+    @Test fun pureEmojiSymbolsAndStrayJoinersDoNotBecomeSafeText() {
+        for (text in listOf("😊", "❤️", "1️⃣", ")(", "?!", "👩‍💻", "😂👍", " \u200D你好")) {
+            assertNull(text, AiSafeConversationText.legacy(text))
+        }
+    }
+
+    @Test fun outboundSanitizesEveryMessageAndRetainsRolesAndOrder() {
+        val messages = listOf(
+            AiModelMessage(AiModelMessage.Role.USER, "早上好😊"),
+            AiModelMessage(AiModelMessage.Role.ASSISTANT, "你好呀"),
+            AiModelMessage(AiModelMessage.Role.USER, "在吗${OcrUncertaintyMarkers.UNKNOWN_VISUAL_SYMBOL}"),
+            AiModelMessage(AiModelMessage.Role.USER, "👩‍💻"),
+            AiModelMessage(AiModelMessage.Role.USER, "明天见")
+        )
+        val safe = AiSafeConversationText.outbound(messages)
+        assertEquals(listOf("早上好", "你好呀", "明天见"), safe.map { it.content })
+        assertEquals(listOf(AiModelMessage.Role.USER, AiModelMessage.Role.ASSISTANT,
+            AiModelMessage.Role.USER), safe.map { it.role })
+    }
+
+    private fun msg(raw: String, quality: MessageContentQuality, row: Int = 3): ChatMessage = ChatMessage(
+        id = "same-logical-id", direction = ChatMessageDirection.INCOMING, type = ChatMessageType.TEXT,
+        content = raw, bounds = ScreenRect(0, 10, 100, 30),
+        directionEvidence = DirectionEvidence.LAYOUT_ID_AND_HIERARCHY,
+        contentQuality = quality, logicalMessageId = "same-logical-id",
+        observationRowIndex = row
+    )
+
+    private fun sample(raw: String, tokens: List<OcrContentToken>, projection: OcrTextProjection,
+        quality: MessageContentQuality = MessageContentQuality.AMBIGUOUS
+    ): Pair<ChatMessageBatch, ChatMessage> {
+        val message = msg(raw, quality)
+        val batch = ChatMessageBatch(MessageReadStatus.SUCCESS, "same-window", listOf(message),
+            1, 1, false, 1L,
+            ocrTokensByRowIndex = mapOf(3 to tokens),
+            ocrTextProjectionsByRowIndex = mapOf(3 to projection))
+        return batch to message
+    }
+
+    @Test fun independentlyAdmittedLineSurvivesASeparateUnknownVisualLine() {
+        val marker = OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY
+        val raw = "今晚有空吗\n${marker} 在吗a"
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED, "今晚有空吗",
+                OcrTokenSource.OCR_LINE, 0, line),
+            OcrContentToken(OcrContentKind.PLACEHOLDER, OcrTokenStatus.UNVERIFIED, marker,
+                OcrTokenSource.VISUAL_GUARD, 1, OcrContentRect(1, 40, 80, 60)),
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.AMBIGUOUS, " 在吗a",
+                OcrTokenSource.OCR_LINE, 1, OcrContentRect(1, 40, 80, 60))
+        )
+        val projection = OcrTextProjection("今晚有空吗", OcrTextProjectionStatus.PARTIAL,
+            listOf(0), listOf(1))
+        val (batch, message) = sample(raw, tokens, projection)
+        assertFalse(message.isAiInputEligible)
+        assertEquals("今晚有空吗", AiSafeConversationText.visible(batch, message))
+        assertEquals(raw, message.content)
+        assertEquals("same-logical-id", message.stableLogicalMessageId)
+        assertEquals("今晚有空吗", VisibleDraftContext.build(batch)!!.messages.single().content)
+    }
+
+    @Test fun tamperedProjectionCannotBeUsedAsAShortcutAroundOcrEvidence() {
+        val raw = "你好😊还没睡"
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED, "你好",
+                OcrTokenSource.OCR_LINE, 0, line),
+            OcrContentToken(OcrContentKind.EMOJI, OcrTokenStatus.UNVERIFIED, "😊",
+                OcrTokenSource.UNICODE_EMOJI, 0, line),
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED, "还没睡",
+                OcrTokenSource.OCR_LINE, 0, line)
+        )
+        val projection = OcrTextProjection("你好还没睡", OcrTextProjectionStatus.PARTIAL,
+            listOf(0), emptyList())
+        val (batch, message) = sample(raw, tokens, projection, MessageContentQuality.VERIFIED)
+        assertEquals("你好还没睡", AiSafeConversationText.visible(batch, message))
+        assertNull(AiSafeConversationText.visible(batch.copy(
+            ocrTextProjectionsByRowIndex = mapOf(3 to projection.copy(text = "不可信"))
+        ), message))
+        assertNull(AiSafeConversationText.visible(batch.copy(
+            ocrTokensByRowIndex = mapOf(3 to tokens.reversed())
+        ), message))
+        assertNull(AiSafeConversationText.visible(batch, message.copy(observationRowIndex = 4)))
+        assertNull(AiSafeConversationText.visible(batch, message.copy(content = "不是这条消息")))
+        assertNull(AiSafeConversationText.visible(batch.copy(
+            ocrTextProjectionsByRowIndex = emptyMap()
+        ), message))
+    }
+
+    @Test fun missingProjectionNeverUpgradesAmbiguousContent() {
+        val marker = OcrUncertaintyMarkers.UNKNOWN_VISUAL_SYMBOL
+        val raw = "你好${marker}"
+        val message = msg(raw, MessageContentQuality.AMBIGUOUS)
+        val batch = ChatMessageBatch(MessageReadStatus.SUCCESS, "window", listOf(message), 1, 1, false, 1L)
+        assertNull(AiSafeConversationText.visible(batch, message))
+    }
+
+    @Test fun aVerifiedTextWithNoOcrEvidenceUsesSafeLegacyPolicy() {
+        val message = msg("你好😊", MessageContentQuality.VERIFIED)
+        val batch = ChatMessageBatch(MessageReadStatus.SUCCESS, "window", listOf(message), 1, 1, false, 1L)
+        assertEquals("你好", AiSafeConversationText.visible(batch, message))
+    }
+}

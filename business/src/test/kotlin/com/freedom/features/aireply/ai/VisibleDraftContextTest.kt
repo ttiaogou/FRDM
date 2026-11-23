@@ -83,4 +83,17 @@ class VisibleDraftContextTest {
         assertEquals("window-chat", context.conversationId)
         assertEquals("window-chat", context.contactId)
     }
+
+    @Test fun latestUnsafeOcrDoesNotFallBackToAnOlderVerifiedMessage() {
+        val older = message(10)
+        val latest = message(100).copy(
+            content = "[表情/图形未识别]",
+            contentQuality = MessageContentQuality.VERIFIED
+        )
+        val snapshot = batch(older, latest)
+        assertFalse(VisibleDraftContext.assess(snapshot).accepted)
+        assertNull(VisibleDraftContext.build(snapshot))
+    }
+
+
 }

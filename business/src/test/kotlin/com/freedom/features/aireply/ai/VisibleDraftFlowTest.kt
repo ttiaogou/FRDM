@@ -1842,4 +1842,39 @@ class VisibleDraftFlowTest {
             failure, f.snapshot.copy(chatTitleText = "其他聊天")))
     }
 
+
+    @Test fun partialOcrProjectionReachesModelWithoutChangingRawMessageOrDedupeIdentity() {
+        val f = Fixture()
+        val marker = OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY
+        val raw = "今晚有空吗\n${marker} 在吗a"
+        val first = OcrContentRect(0, 0, 100, 23)
+        val second = OcrContentRect(0, 30, 100, 53)
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED, "今晚有空吗",
+                OcrTokenSource.OCR_LINE, 0, first),
+            OcrContentToken(OcrContentKind.PLACEHOLDER, OcrTokenStatus.UNVERIFIED, marker,
+                OcrTokenSource.VISUAL_GUARD, 1, second),
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.AMBIGUOUS, " 在吗a",
+                OcrTokenSource.OCR_LINE, 1, second)
+        )
+        val projection = OcrTextProjection("今晚有空吗", OcrTextProjectionStatus.PARTIAL,
+            listOf(0), listOf(1))
+        val original = f.batch.messages.single()
+        val current = original.copy(
+            content = raw, contentQuality = MessageContentQuality.AMBIGUOUS,
+            observationRowIndex = 0
+        )
+        val batch = f.batch.copy(
+            messages = listOf(current),
+            ocrTokensByRowIndex = mapOf(0 to tokens),
+            ocrTextProjectionsByRowIndex = mapOf(0 to projection)
+        )
+        assertTrue(f.coordinator.generateVisibleDraft(batch, f.snapshot))
+        assertEquals(1, f.calls)
+        assertEquals(listOf("今晚有空吗"), f.requests.single().conversation.map { it.content })
+        assertEquals(raw, batch.messages.single().content)
+        assertEquals(original.id, batch.messages.single().id)
+    }
+
+
 }

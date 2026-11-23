@@ -95,4 +95,22 @@ class DraftHistoryMergerTest {
 
     private fun emptyBatch() = ChatMessageBatch(
         MessageReadStatus.SUCCESS, "window", emptyList(), 0, 0, false, 1L)
+
+    @Test fun legacyHistoryWithUnknownVisualOrSymbolNoiseIsExcludedButUnicodeEmojiIsSanitized() {
+        val records = listOf(
+            stored("with-emoji", "昨天好😊", "INCOMING", 1),
+            stored("unknown-visual", "早上好[表情/图形未识别]", "INCOMING", 2),
+            stored("symbol-only", ")(", "INCOMING", 3),
+            stored("ordinary", "明天见", "OUTGOING", 4)
+        )
+        val history = VerifiedDraftHistory(
+            "", "c1", "momo-direct-c1", records, lookupSource = "LOCAL_PLATFORM_CONTACT"
+        )
+        val result = DraftHistoryMerger.merge(visible,
+            emptyBatch().copy(capturedAtMillis = 10), history)
+        assertEquals(listOf("昨天好", "明天见", "最新"), result.messages.map { it.content })
+        assertEquals("昨天好😊", records.first().content)
+    }
+
+
 }

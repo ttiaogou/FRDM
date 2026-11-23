@@ -1,5 +1,7 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.features.aireply.domain.message.OcrUncertaintyMarkers
+
 import com.freedom.features.aireply.domain.message.OcrContentKind
 import com.freedom.features.aireply.domain.message.OcrContentRect
 import com.freedom.features.aireply.domain.message.OcrContentToken
@@ -51,9 +53,9 @@ internal data class OcrVisualReconciliation(
  * a misleading OCR character is not passed to the AI conversation layer.
  */
 internal object MomoOcrVisualSymbolGuard {
-    const val UNKNOWN_VISUAL_SYMBOL = "[表情/图形未识别]"
-    const val UNCERTAIN_TEXT_SYMBOL = "[标点/符号待确认]"
-    const val UNCERTAIN_SYMBOL_ONLY = "[图形/符号内容待确认]"
+    const val UNKNOWN_VISUAL_SYMBOL = OcrUncertaintyMarkers.UNKNOWN_VISUAL_SYMBOL
+    const val UNCERTAIN_TEXT_SYMBOL = OcrUncertaintyMarkers.UNCERTAIN_TEXT_SYMBOL
+    const val UNCERTAIN_SYMBOL_ONLY = OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY
 
     /**
      * Detects compact, saturated color components from the already-cropped message body.

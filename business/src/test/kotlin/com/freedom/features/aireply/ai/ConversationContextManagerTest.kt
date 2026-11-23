@@ -193,4 +193,39 @@ class ConversationContextManagerTest {
         lastObservedAtMillis = observedAt,
         observationCount = 1
     )
+
+    @Test
+    fun legacyVerifiedHistoryIsFilteredBeforeItEntersModelContext() {
+        val repo = FakeConversationRepository(mutableListOf(
+            stored("contact-1", "momo-direct-contact-1", "safe", "晚上好😊", 1L, 10),
+            stored("contact-1", "momo-direct-contact-1", "bad-marker",
+                "在吗[表情/图形未识别]", 2L, 20),
+            stored("contact-1", "momo-direct-contact-1", "bad-symbol", ")(", 3L, 30),
+            stored("contact-1", "momo-direct-contact-1", "good", "明天见", 4L, 40)
+        ))
+        val result = ConversationContextManager(repo).loadForConversation(
+            "contact-1", "momo-direct-contact-1", "PLATFORM_ID_VERIFIED"
+        )
+        assertEquals(listOf("晚上好", "明天见"), result.messages.map { it.content })
+        assertTrue(result.hasVerifiedIncoming)
+        assertEquals("晚上好😊", repo.messages.first().content)
+        assertEquals("在吗[表情/图形未识别]", repo.messages[1].content)
+    }
+
+    @Test
+    fun currentUnsafeContentIsNotNewlyPersistedAsVerifiedHistory() {
+        val repo = FakeConversationRepository()
+        val batch = batch(1L, listOf(
+            message("safe", ChatMessageDirection.INCOMING, "你好😊"),
+            message("bad", ChatMessageDirection.INCOMING, "在吗[表情/图形未识别]", top = 60)
+        ))
+        val context = ConversationContextManager(repo).recordAndLoad(
+            "contact-1", "momo-direct-contact-1", "PLATFORM_ID_VERIFIED", batch
+        )
+        assertEquals(listOf("你好"), context.messages.map { it.content })
+        assertEquals(1, repo.messages.size)
+        assertEquals("你好😊", repo.messages.single().content)
+    }
+
+
 }
