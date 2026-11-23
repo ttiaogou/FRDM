@@ -33,8 +33,8 @@ import com.freedom.adapters.social.momo.MomoAppDescriptor
 import com.freedom.features.aireply.ai.AiReplyDraftCoordinator
 import com.freedom.features.aireply.ai.AiDecisionTaskIds
 import com.freedom.features.aireply.ai.EngineBackedAiDecisionGateway
-import com.freedom.features.aireply.policy.PrivateMessagesPolicy
-import com.freedom.features.aireply.policy.ReceivedGreetingsPolicy
+import com.freedom.features.aireply.policy.AiReplyPolicyRegistry
+import com.freedom.features.aireply.policy.PolicyRegistry
 import com.freedom.features.aireply.ai.TransportBackedAiModelProvider
 import com.freedom.adapters.social.momo.MomoSocialAdapter
 import com.freedom.application.ports.AiModelCloudConsentSettings
@@ -140,6 +140,8 @@ class AppCompositionRoot(context: Context) {
     val aiReplyPersonalizationRepository: AiReplyPersonalizationRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         AiReplyPersonalizationStore(appContext)
     }
+    /** Application-owned immutable policy registry, shared with the service-scoped draft flow. */
+    val aiReplyPolicyRegistry: PolicyRegistry = AiReplyPolicyRegistry
     val ocrReviewRepository: OcrReviewRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OcrReviewStore(appContext)
     }
@@ -468,6 +470,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             replyTaskRepository = root.replyTaskRepository,
             replySegmentTaskRepository = root.replySegmentTaskRepository,
+            policyRegistry = root.aiReplyPolicyRegistry,
             captureTaskLease = { root.taskCoordinator.currentLease() },
             onPreSendModelFailure = { failure ->
                 // This callback is dispatched asynchronously onto the runtime scheduler.
@@ -503,7 +506,10 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             prepareDraftHistory = { identity, snapshot ->
                 preparedDraftHistory = null
-                val verifiedIdentity = PrivateMessagesPolicy.contextPolicy().verifiedHistoryIdentity(identity)
+                val privatePolicy = requireNotNull(root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.PRIVATE_MESSAGES)) {
+                    "Private messages policy is not registered"
+                }
+                val verifiedIdentity = privatePolicy.contextPolicy().verifiedHistoryIdentity(identity)
                 if (verifiedIdentity != null) {
                     val history = com.freedom.features.conversation.domain.contact.ContactHistoryResolver(
                         root.conversationRepository
@@ -519,7 +525,10 @@ internal class AccessibilityServiceDependencies internal constructor(
                 }
             },
             onDraftConversationObserved = { batch, snapshot, identity, visitToken ->
-                val verifiedIdentity = PrivateMessagesPolicy.contextPolicy().verifiedHistoryIdentity(identity)
+                val privatePolicy = requireNotNull(root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.PRIVATE_MESSAGES)) {
+                    "Private messages policy is not registered"
+                }
+                val verifiedIdentity = privatePolicy.contextPolicy().verifiedHistoryIdentity(identity)
                 val history = if (verifiedIdentity != null) {
                     preparedDraftHistory?.also {
                         preparedDraftHistory = null
@@ -551,14 +560,17 @@ internal class AccessibilityServiceDependencies internal constructor(
                     batch,
                     snapshot,
                     visitToken = visitToken,
-                    history = PrivateMessagesPolicy.contextPolicy().selectHistory(history),
-                    taskId = PrivateMessagesPolicy.taskId
+                    history = privatePolicy.contextPolicy().selectHistory(history),
+                    taskId = privatePolicy.taskId
                 )
             },
             onGreetingDraftConversationObserved = { batch, snapshot, _, visitToken ->
                 // Greeting contacts are new conversations: use the verified current-window OCR
                 // only. Never reuse a private-chat preload or query stored contact history.
                 preparedDraftHistory = null
+                val greetingPolicy = requireNotNull(root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.RECEIVED_GREETINGS)) {
+                    "Received greetings policy is not registered"
+                }
                 addLog(
                     "收到招呼草稿上下文[CURRENT_WINDOW_ONLY]：仅使用本次聊天消息=${batch.messages.size}条；" +
                         "未读取历史记录；本次聊天采集仍由收到招呼任务保存"
@@ -567,8 +579,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                     batch,
                     snapshot,
                     visitToken = visitToken,
-                    history = ReceivedGreetingsPolicy.contextPolicy().selectHistory(null),
-                    taskId = ReceivedGreetingsPolicy.taskId
+                    history = greetingPolicy.contextPolicy().selectHistory(null),
+                    taskId = greetingPolicy.taskId
                 )
             },
             onSendTransaction = { batch, snapshot ->

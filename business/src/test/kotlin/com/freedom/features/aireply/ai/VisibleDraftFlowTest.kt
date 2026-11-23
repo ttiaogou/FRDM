@@ -4,6 +4,9 @@ import com.freedom.core.accessibility.api.*
 import com.freedom.core.runtime.*
 import com.freedom.features.aireply.domain.message.*
 import com.freedom.features.aireply.ports.*
+import com.freedom.features.aireply.policy.AiReplyPolicyRegistry
+import com.freedom.features.aireply.policy.PolicyRegistry
+import com.freedom.features.conversation.domain.message.StoredConversationMessage
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.concurrent.Executor
@@ -12,7 +15,8 @@ class VisibleDraftFlowTest {
     private class Fixture(
         private val sendPort: ChatDraftSendPort? = null,
         private val segmentRepository: ReplySegmentTaskRepository? = null,
-        private val taskRepository: ReplyTaskRepository? = null
+        private val taskRepository: ReplyTaskRepository? = null,
+        private val policyRegistry: PolicyRegistry = AiReplyPolicyRegistry
     ) {
         val tasks = mutableListOf<() -> Unit>()
         val scheduledDelays = mutableListOf<Long>()
@@ -98,7 +102,8 @@ class VisibleDraftFlowTest {
             sendPort = sendPort,
             replySegmentTaskRepository = segmentRepository,
             replyTaskRepository = taskRepository,
-            onPreSendModelFailure = { preSendFailures.add(it) })
+            onPreSendModelFailure = { preSendFailures.add(it) },
+            policyRegistry = policyRegistry)
         fun drain() { while (tasks.isNotEmpty()) tasks.removeAt(0).invoke() }
         fun step() { assertTrue("Expected a scheduled task", tasks.isNotEmpty()); tasks.removeAt(0).invoke() }
     }
@@ -132,6 +137,116 @@ class VisibleDraftFlowTest {
             if (before.requestId != requestId || !ReplyTaskStatusTransitions.isAllowed(before.status, status)) return false
             records[requestKey] = before.copy(status = status, updatedAtMillis = updatedAtMillis)
             return true
+        }
+    }
+
+    @Test fun policyRegistryRejectsUnknownAndMismatchedTaskBeforeModelOrInput() {
+        val unknown = Fixture()
+        assertFalse(unknown.coordinator.generateVisibleDraft(
+            unknown.batch, unknown.snapshot, taskId = "UNREGISTERED_TASK"
+        ))
+        assertEquals(0, unknown.calls)
+        assertEquals("", unknown.text)
+        assertTrue(unknown.decisionRequests.isEmpty())
+
+        val misregistered = Fixture(policyRegistry = object : PolicyRegistry {
+            override fun resolve(taskId: String) = com.freedom.features.aireply.policy.ReceivedGreetingsPolicy
+        })
+        assertFalse(misregistered.coordinator.generateVisibleDraft(
+            misregistered.batch, misregistered.snapshot, taskId = AiDecisionTaskIds.PRIVATE_MESSAGES
+        ))
+        assertEquals(0, misregistered.calls)
+        assertEquals("", misregistered.text)
+        assertTrue(misregistered.decisionRequests.isEmpty())
+    }
+
+    @Test fun registryForbidsGreetingHistoryAndPreservesVerifiedPrivateHistory() {
+        val history = VerifiedDraftHistory(
+            accountKey = "",
+            contactId = "contact-verified",
+            conversationId = "momo-direct-contact-verified",
+            lookupSource = "LOCAL_PLATFORM_CONTACT",
+            messages = listOf(
+                StoredConversationMessage(
+                    recordId = "historical-row",
+                    contactId = "contact-verified",
+                    conversationId = "momo-direct-contact-verified",
+                    messageFingerprint = "historical-logical-id",
+                    direction = "INCOMING",
+                    type = "TEXT",
+                    content = "昨日的历史消息",
+                    contentQuality = "VERIFIED",
+                    directionEvidence = "LAYOUT_ID_AND_HIERARCHY",
+                    bounds = ScreenRect(0, 20, 100, 40),
+                    identityConfidence = "PLATFORM_ID_VERIFIED",
+                    firstObservedAtMillis = 0L,
+                    lastObservedAtMillis = 0L,
+                    observationCount = 1
+                )
+            )
+        )
+        val greeting = Fixture()
+        assertTrue(greeting.coordinator.generateVisibleDraft(
+            greeting.batch, greeting.snapshot, history = history,
+            taskId = AiDecisionTaskIds.RECEIVED_GREETINGS
+        ))
+        assertEquals(listOf("你好"), greeting.requests.single().conversation.map { it.content })
+        assertEquals(ModelContextScope.CURRENT_WINDOW_ONLY,
+            greeting.decisionRequests.single().constraints.contextScope)
+
+        val privateMessage = Fixture()
+        assertTrue(privateMessage.coordinator.generateVisibleDraft(
+            privateMessage.batch, privateMessage.snapshot, history = history,
+            taskId = AiDecisionTaskIds.PRIVATE_MESSAGES
+        ))
+        assertEquals(listOf("昨日的历史消息", "你好"),
+            privateMessage.requests.single().conversation.map { it.content })
+        assertEquals(ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW,
+            privateMessage.decisionRequests.single().constraints.contextScope)
+        assertEquals(greeting.decisionRequests.single().outputContract,
+            privateMessage.decisionRequests.single().outputContract)
+    }
+
+    @Test fun registeredTasksOnlyReleaseSendGateAfterConfirmedBubbleWithoutDuplicateReceipt() {
+        for (taskId in listOf(AiDecisionTaskIds.RECEIVED_GREETINGS, AiDecisionTaskIds.PRIVATE_MESSAGES)) {
+            var sent = 0
+            val f = Fixture(object : ChatDraftSendPort {
+                override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                    sent++
+                    return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+                }
+            })
+            assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot, taskId = taskId))
+            f.drain()
+            assertEquals(1, f.calls)
+            assertEquals(1, sent)
+            assertTrue(f.coordinator.isConversationReturnBlocked)
+            val bubble = ChatMessage(
+                "confirmed-outgoing", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+                "你好呀", ScreenRect(0, 10, 100, 30),
+                DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED
+            )
+            val afterSend = f.batch.copy(messages = listOf(bubble), capturedAtMillis = 2L)
+            assertEquals(SendConfirmationResult.CONFIRMED,
+                f.coordinator.confirmSendResult(afterSend, f.snapshot))
+            assertFalse(f.coordinator.isConversationReturnBlocked)
+            assertEquals(SendConfirmationResult.NOT_PENDING,
+                f.coordinator.confirmSendResult(afterSend.copy(capturedAtMillis = 3L), f.snapshot))
+            assertEquals(1, sent)
+        }
+    }
+
+    @Test fun registryPreservesOriginalTaskAcrossEmptyModelOutputRecovery() {
+        for (taskId in listOf(AiDecisionTaskIds.RECEIVED_GREETINGS, AiDecisionTaskIds.PRIVATE_MESSAGES)) {
+            val f = Fixture()
+            f.emptyFailuresRemaining = 3
+            assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot, taskId = taskId))
+            f.drain()
+            assertEquals(3, f.calls)
+            assertEquals(listOf(taskId, taskId, taskId), f.decisionRequests.map { it.taskId })
+            assertEquals(listOf(ModelResponseMode.STRICT_JSON, ModelResponseMode.STRICT_JSON,
+                ModelResponseMode.PROMPT_ONLY_JSON), f.decisionRequests.map { it.responseMode })
+            assertEquals("", f.text)
         }
     }
 

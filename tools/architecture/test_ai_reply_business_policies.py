@@ -28,14 +28,17 @@ class AiReplyBusinessPoliciesBoundaryTest(unittest.TestCase):
             "onGreetingDraftConversationObserved = {", 1)[0]
         greeting = app.split("onGreetingDraftConversationObserved = {", 1)[1].split(
             "onSendTransaction = {", 1)[0]
-        self.assertIn("PrivateMessagesPolicy.contextPolicy().verifiedHistoryIdentity(identity)", preload)
-        self.assertIn("PrivateMessagesPolicy.contextPolicy().verifiedHistoryIdentity(identity)", private)
-        self.assertIn("PrivateMessagesPolicy.contextPolicy().selectHistory(history)", private)
-        self.assertIn("ReceivedGreetingsPolicy.contextPolicy().selectHistory(null)", greeting)
+        self.assertIn("root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.PRIVATE_MESSAGES)", preload)
+        self.assertIn("root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.PRIVATE_MESSAGES)", private)
+        self.assertIn("privatePolicy.contextPolicy().verifiedHistoryIdentity(identity)", preload)
+        self.assertIn("privatePolicy.contextPolicy().verifiedHistoryIdentity(identity)", private)
+        self.assertIn("privatePolicy.contextPolicy().selectHistory(history)", private)
+        self.assertIn("root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.RECEIVED_GREETINGS)", greeting)
+        self.assertIn("greetingPolicy.contextPolicy().selectHistory(null)", greeting)
         self.assertNotIn("loadDraftHistory(", greeting)
         self.assertNotIn("ContactHistoryResolver(", greeting)
-        self.assertIn("taskId = PrivateMessagesPolicy.taskId", private)
-        self.assertIn("taskId = ReceivedGreetingsPolicy.taskId", greeting)
+        self.assertIn("taskId = privatePolicy.taskId", private)
+        self.assertIn("taskId = greetingPolicy.taskId", greeting)
 
     def test_policies_cannot_take_over_page_read_ocr_gestures_or_send(self):
         for name in ("ReceivedGreetingsPolicy.kt", "PrivateMessagesPolicy.kt", "AiReplyTaskPolicyDefaults.kt"):

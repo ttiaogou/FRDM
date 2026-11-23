@@ -10,6 +10,9 @@ import com.freedom.features.aireply.ports.ChatDraftInputStatus
 import com.freedom.features.aireply.ports.ChatDraftInputTarget
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.aireply.policy.AiReplyPolicyRegistry
+import com.freedom.features.aireply.policy.PolicyRegistry
+import com.freedom.features.aireply.policy.TaskPolicy
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import com.freedom.core.runtime.TaskScheduler
@@ -85,7 +88,9 @@ class AiReplyDraftCoordinator(
     private val replySegmentTaskRepository: ReplySegmentTaskRepository? = null,
     private val captureTaskLease: () -> TaskLease? = { null },
     /** Delivered after a durable, no-send technical failure to the task-specific runtime. */
-    private val onPreSendModelFailure: (AiReplyPreSendModelFailure) -> Unit = {}
+    private val onPreSendModelFailure: (AiReplyPreSendModelFailure) -> Unit = {},
+    /** Same immutable registry used by the composition root; never grants UI ownership. */
+    private val policyRegistry: PolicyRegistry = AiReplyPolicyRegistry
 ) {
     private val pending = AtomicBoolean(false)
     private val awaitingUserSend = AtomicBoolean(false)
@@ -228,8 +233,10 @@ class AiReplyDraftCoordinator(
                              visitToken: String = batch.windowSessionKey.orEmpty(),
                              history: VerifiedDraftHistory? = null,
                              taskId: String = AiDecisionTaskIds.PRIVATE_MESSAGES): Boolean {
+        val policy = policyRegistry.resolve(taskId)?.takeIf { it.taskId == taskId }
+            ?: return reject("AI_TASK_POLICY_NOT_REGISTERED")
         val visible = VisibleDraftContext.build(batch, visitToken) ?: return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
-        val context = DraftHistoryMerger.merge(visible, batch, history)
+        val context = DraftHistoryMerger.merge(visible, batch, policy.contextPolicy().selectHistory(history))
         val contextScope = if (context.messages.size > visible.messages.size) {
             ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW
         } else {
@@ -252,6 +259,15 @@ class AiReplyDraftCoordinator(
             ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW
         }
     ): Boolean {
+        val policy = policyRegistry.resolve(taskId)?.takeIf { it.taskId == taskId }
+            ?: return reject("AI_TASK_POLICY_NOT_REGISTERED")
+        // A greeting must remain current-window-only even if a caller supplies history
+        // directly through generateAndFill instead of generateVisibleDraft.
+        if (policy.contextPolicy().scope == ModelContextScope.CURRENT_WINDOW_ONLY) {
+            if (contextScope != ModelContextScope.CURRENT_WINDOW_ONLY || !context.currentWindowDraft ||
+                context.messages != VisibleDraftContext.build(batch, visitToken)?.messages
+            ) return reject("AI_TASK_POLICY_CONTEXT_MISMATCH")
+        }
         val localDraft = context.currentWindowDraft
         val contactId = if (localDraft) VisibleDraftContext.build(batch, visitToken)?.contactId ?: return reject("CHAT_WINDOW_UNAVAILABLE")
             else identity?.contactId?.takeIf(String::isNotBlank) ?: return reject("CONTACT_ID_MISSING")
@@ -447,7 +463,7 @@ class AiReplyDraftCoordinator(
         val accepted = runCatching {
             backgroundExecutor.execute {
                 try {
-                    generateOnBackground(configuration, context, target, requestGeneration, requestId, taskId, contextScope)
+                    generateOnBackground(configuration, context, target, requestGeneration, requestId, policy, contextScope)
                 } catch (_: Throwable) {
                     onLog("AI 回复草稿生成失败：[DRAFT_GENERATION_FAILED]")
                     finish("DRAFT_GENERATION_FAILED", requestGeneration)
@@ -468,7 +484,7 @@ class AiReplyDraftCoordinator(
         target: ChatDraftInputTarget,
         requestGeneration: Long,
         requestId: String,
-        taskId: String,
+        policy: TaskPolicy,
         contextScope: ModelContextScope,
         emptyRetryAttempt: Int = 0
     ) {
@@ -491,7 +507,7 @@ class AiReplyDraftCoordinator(
         val evaluation = try {
             createGateway(configuration).decide(
                 ModelDecisionRequest(
-                    taskId = taskId,
+                    taskId = policy.taskId,
                     requestId = requestId,
                     context = context,
                     constraints = ModelDecisionConstraints(
@@ -500,7 +516,7 @@ class AiReplyDraftCoordinator(
                         cooldownActive = false,
                         personalization = personalizationRepository.load()
                     ),
-                    outputContract = AiReplyModelContracts.currentOutput(),
+                    outputContract = policy.modelContract(),
                     responseMode = if (promptOnlyJsonSchema) {
                         ModelResponseMode.PROMPT_ONLY_JSON
                     } else {
@@ -561,7 +577,7 @@ class AiReplyDraftCoordinator(
                                     try {
                                         generateOnBackground(
                                             configuration, context, target, requestGeneration, requestId,
-                                            taskId, contextScope, emptyRetryAttempt + 1
+                                            policy, contextScope, emptyRetryAttempt + 1
                                         )
                                     } catch (_: Throwable) {
                                         finish("DRAFT_GENERATION_FAILED", requestGeneration)
