@@ -340,7 +340,8 @@ class VisibleDraftFlowTest {
 
     @Test fun p3LogsNeverExposeFreeModelReasonModelNameOrConversationIdentity() {
         for (taskId in listOf(AiDecisionTaskIds.PRIVATE_MESSAGES, AiDecisionTaskIds.RECEIVED_GREETINGS)) {
-            val f = Fixture()
+            // Segment-creation diagnostics are emitted only when a segment repository is configured.
+            val f = Fixture(segmentRepository = SegmentLedger())
             val modelSecret = "CUSTOM_MODEL_PRIVATE_KEY_987654321"
             val privateReason = "13800138000"
             val privateDetail = "user.private@example.org sk-private-secret"
