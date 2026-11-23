@@ -1014,8 +1014,10 @@ class VisibleDraftFlowTest {
     @Test fun recoveredUnknownCannotConfirmIdenticalOutgoingPresentBeforeOriginalSend() {
         val segments = SegmentLedger()
         val tasks = TaskLedger()
+        // The reader orders by vertical position, not insertion order. Keep the
+        // historical outgoing bubble above the latest incoming row.
         val old = ChatMessage("historical", ChatMessageDirection.OUTGOING,
-            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 40, 100, 60),
+            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 0, 100, 9),
             DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
         val first = Fixture(object : ChatDraftSendPort {
             override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
