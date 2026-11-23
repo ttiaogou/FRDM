@@ -1,6 +1,7 @@
 package com.freedom.adapters.social.momo
 
 import com.freedom.features.aireply.domain.message.MessageContentQuality
+import com.freedom.features.aireply.domain.message.OcrContentToken
 
 /**
  * Short-lived local OCR outputs. The legacy chineseTextByRowIndex archive field now stores the
@@ -23,7 +24,9 @@ internal data class MomoChatOcrResult(
     /** Number of valid OCR text/box lines returned for each cropped row. */
     val lineCountByRowIndex: Map<Int, Int> = emptyMap(),
     /** Captured batch identity; blank is accepted only for legacy/unit-test callers. */
-    val observationBatchId: String = ""
+    val observationBatchId: String = "",
+    /** Row-indexed in-memory OCR tokens; legacy text and P0 quality remain unchanged. */
+    val tokensByRowIndex: Map<Int, List<OcrContentToken>> = emptyMap()
 ) {
     override fun toString(): String =
         "MomoChatOcrResult(recognizedRows=${textByRowIndex.values.count(String::isNotBlank)}," +

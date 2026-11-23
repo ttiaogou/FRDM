@@ -217,7 +217,9 @@ data class ChatMessageBatch(
     /** 适配器确认已读取列表末行且行内完整；null 表示末尾仍存在缺口。 */
     val completeTailRowBounds: ScreenRect? = null,
     val observationBatchId: String = "",
-    val windowSnapshotSignature: String = ""
+    val windowSnapshotSignature: String = "",
+    /** Ephemeral OCR evidence. Excluded from summary, logs and AI input until a later stage. */
+    val ocrTokensByRowIndex: Map<Int, List<OcrContentToken>> = emptyMap()
 ) {
     val effectiveObservationBatchId: String
         get() = observationBatchId.ifBlank { "${windowSessionKey.orEmpty()}@${capturedAtMillis}" }
