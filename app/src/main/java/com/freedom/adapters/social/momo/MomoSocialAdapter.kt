@@ -1045,7 +1045,7 @@ internal class MomoSocialAdapter(
         sayHiStableCandidateKey = ""
         sayHiStableCandidateTarget = null
         sayHiStableCandidateWindow = null
-        onLog("收到的招呼人工入口接管[ACCEPTED]：复核当前活动窗口和已确认 listview；从当前列表启动只读遍历，不执行入口导航")
+        onLog("收到的招呼人工入口接管[ACCEPTED]：复核当前活动窗口和已确认 listview；从当前列表启动会话遍历，不执行入口导航")
         return true
     }
 
@@ -2176,7 +2176,7 @@ internal class MomoSocialAdapter(
                 sayHiTraversalState.markProcessedRow(selected.rowKey)
                 clearSayHiRowDeferral(selected.rowKey)
                 persistSayHiTraversalCheckpoint()
-                onLog("收到招呼只读采集：头像身份对应的联系人本轮已完成 OCR；跳过重复会话，不重复打开")
+                onLog("收到招呼任务：头像身份对应的联系人本轮已处理；跳过重复会话，不重复打开")
                 clearSayHiSelectedGreeting()
                 return false
             }
@@ -2442,7 +2442,7 @@ internal class MomoSocialAdapter(
             clearSayHiSelectedGreeting()
             onLog("收到招呼头像导航未提交：统一手势协调器拒绝；submission=$submission")
         } else {
-            onLog("收到招呼只读采集：已提交 userlist_item_iv_face 的独立头像点击；后续仅读取身份与消息，不回复")
+            onLog("收到招呼身份采集：已提交 userlist_item_iv_face 独立头像点击；后续进入已验证聊天事务")
         }
         return true
     }
@@ -2526,7 +2526,7 @@ internal class MomoSocialAdapter(
                 durationMs = RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS,
                 feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
             ),
-            description = "陌陌收到招呼用户行安全区域进入详情（只读 OCR）",
+            description = "陌陌收到招呼用户行安全区域进入聊天详情",
             executionContext = executionContext
         )
         val submission = runCatching {
@@ -2628,7 +2628,7 @@ internal class MomoSocialAdapter(
                 onLog("收到招呼详情导航未提交：统一手势协调器拒绝；submission=$submission")
             }
         } else {
-            onLog("收到招呼只读采集：头像身份步骤已完成；已提交第二阶段用户行安全区域点击；头像区域保留为候选，仅排除 VIP/SVIP、财富等级及独立行内功能控件；若命中头像并进入资料页则复用安全 BACK；明确禁止输入和发送")
+            onLog("收到招呼会话导航：头像身份步骤已完成；已提交第二阶段用户行安全区域点击；头像区域保留为候选，仅排除 VIP/SVIP、财富等级及独立行内功能控件；若命中头像并进入资料页则复用安全 BACK；进入聊天后由统一授权执行回复")
         }
         return true
     }
@@ -3598,7 +3598,7 @@ internal class MomoSocialAdapter(
         }
         var dispatchedBackWindow: WindowRef? = null
         val accepted = requestChatActivityBack(
-            reason = "收到招呼只读详情采集完成",
+            reason = "收到招呼发送确认后返回列表",
             expectedWindow = confirmedDetail.first,
             onSubmitted = { window -> dispatchedBackWindow = window }
         )
@@ -3612,8 +3612,8 @@ internal class MomoSocialAdapter(
                 }
                 clearSayHiRowDeferral(selected.rowKey)
             } else {
-                // A safe BACK only closes the detail page. It is not proof that the OCR sample
-                // was archived, so keep this row eligible for the existing bounded retry flow.
+                // A safe BACK only closes the detail page; it never proves a reply was sent.
+                // Retain the existing deferral behavior for incomplete transactions.
                 deferSayHiRow(selected.rowKey, "DETAIL_SAMPLE_ARCHIVE_FAILED")
             }
             sayHiReadOnlyStage = SayHiReadOnlyStage.DETAIL_BACK_PENDING
@@ -3621,12 +3621,12 @@ internal class MomoSocialAdapter(
             resetSayHiDetailBackReturnTracking()
             sayHiDetailBackSourceWindow = dispatchedBackWindow
             onLog(
-                "收到招呼只读 OCR 完成：样本状态=${if (success) "已保存，已记录处理" else "读取/归档未成功，已延期且不标记完成"}；" +
+                "收到招呼发送完成安全返回：本次聊天记录=${if (success) "已保存，已记录处理" else "未完成，已延期且不标记完成"}；" +
                     "ChatActivity 已通过窗口/弹层安全检查派发 VERIFIED_NAVIGATION_BACK；" +
-                    "等待 NewSayHiSessionListActivity 与 listview 容器双重确认；本流程未调用 AI 输入回调、输入框或发送控件"
+                    "等待 NewSayHiSessionListActivity 与 listview 容器双重确认；发送成功已由上层独立核验"
             )
         } else {
-            onLog("收到招呼只读 OCR 完成，但 ChatActivity 未通过安全 BACK 检查或系统拒绝返回；暂停后续用户处理")
+            onLog("收到招呼发送后返回暂未通过 ChatActivity 安全 BACK 检查；保持原会话等待复核")
         }
         return accepted
     }
@@ -4104,7 +4104,7 @@ internal class MomoSocialAdapter(
         val onlineStatus = profile?.online?.status?.name ?: "N/A"
         val biographyStatus = profile?.biography?.status?.name ?: "N/A"
         onLog(
-            "陌陌收到招呼只读采集：页面=${result.kind}；Activity=${result.activityClass}; " +
+            "陌陌收到招呼任务观察：页面=${result.kind}；Activity=${result.activityClass}; " +
                 "顶部推荐头像已排除=${result.excludedRecommendationCardCount}；下方纵向招呼行=${result.listRows.size}； " +
                 "扫描节点=${result.nodeCount}；可见节点=${result.visibleNodeCount}；" +
                 "容器命中=${result.containerFound}；容器候选=${result.containerMatchCount}；" +
