@@ -272,7 +272,7 @@ class VisibleDraftFlowTest {
                 return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
             }
         }, segments, TaskLedger())
-        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"第一\\n第二"}"""
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"第一\n第二"}"""
         assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
         f.drain()
         val first = ChatMessage("first-out", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
@@ -309,7 +309,7 @@ class VisibleDraftFlowTest {
                 return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
             }
         }, SegmentLedger(), TaskLedger())
-        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"先发\\n再发"}"""
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"先发\n再发"}"""
         assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
         f.drain()
         val noBubble = f.batch.copy(capturedAtMillis = 2L)
