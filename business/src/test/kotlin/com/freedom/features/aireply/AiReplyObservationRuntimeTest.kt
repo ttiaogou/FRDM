@@ -367,6 +367,168 @@ class AiReplyObservationRuntimeTest {
         assertTrue(saved != null)
     }
 
+
+    private data class PreScrollPageRecoveryFixture(
+        val scheduler: FakeScheduler,
+        val runtime: AiReplyObservationRuntime,
+        val port: FakeChatPort,
+        val listPage: ChatPageSnapshot,
+        val logs: MutableList<String>,
+        val ownership: TaskCoordinator,
+        val checkpoint: () -> PrivateMessagesTraversalCheckpoint?,
+        val dispatchedGestures: () -> Int
+    )
+
+    private fun preScrollPageRecoveryFixture(): PreScrollPageRecoveryFixture {
+        val scheduler = FakeScheduler()
+        val listPage = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(sessionCandidate(
+                completeBoundaryEvidence = true, unreadStatus = ChatUnreadStatus.READ
+            )),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            page = listPage
+        }
+        var saved: PrivateMessagesTraversalCheckpoint? = null
+        val repository = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = saved
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { saved = checkpoint }
+            override fun clear() = Unit
+        }
+        val logs = mutableListOf<String>()
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var gestures = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest, callback: GestureExecutionListener
+                ): GestureSubmission {
+                    gestures++
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = ownership,
+            currentRunGeneration = { 6L },
+            privateMessagesCheckpointRepository = repository
+        )
+        runtime.scheduleInitialObservation()
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        return PreScrollPageRecoveryFixture(
+            scheduler, runtime, port, listPage, logs, ownership, { saved }, { gestures }
+        )
+    }
+
+    private fun invokePreScrollPageValidation(fixture: PreScrollPageRecoveryFixture) {
+        val method = fixture.runtime.javaClass.getDeclaredMethod(
+            "scrollSessionList", ChatPageSnapshot::class.java, Boolean::class.javaPrimitiveType!!
+        ).apply { isAccessible = true }
+        method.invoke(fixture.runtime, fixture.listPage, false)
+    }
+
+    private fun desktopPage() = ChatPageSnapshot(
+        packageName = "com.bbk.launcher2",
+        activityClass = "com.bbk.launcher2.Launcher",
+        pageKind = ChatPageKind.UNKNOWN,
+        scannedNodeCount = 12,
+        editableInputCount = 0,
+        messageListCount = 0,
+        sendActionCount = 0,
+        messageRelatedViewIdCount = 0,
+        hasChatTab = false,
+        messageListTarget = null,
+        inputFieldTarget = null
+    )
+
+    @Test
+    fun preScrollDesktopReturnUsesCheckpointRecoveryWithoutOldGesture() {
+        val fixture = preScrollPageRecoveryFixture()
+        fixture.port.page = desktopPage()
+        invokePreScrollPageValidation(fixture)
+        assertTrue(fixture.logs.any {
+            it.contains("PAUSED_CHECKPOINT_SAVED") &&
+                it.contains("MESSAGE_LIST_PRE_SCROLL_PAGE_IDENTITY_MISMATCH")
+        })
+        assertTrue(fixture.checkpoint() != null)
+        assertEquals(0, fixture.dispatchedGestures())
+
+        // The launcher cannot authorize recovery or a previously queued list scroll.
+        repeat(2) {
+            if (fixture.scheduler.pendingCount() > 0) fixture.scheduler.runNext()
+        }
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertEquals(0, fixture.dispatchedGestures())
+
+        fixture.port.page = fixture.listPage
+        runUntil(fixture.scheduler, 80) {
+            fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") }
+        }
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertTrue(fixture.logs.any { it.contains("消息列表检查点恢复[") })
+    }
+
+    @Test
+    fun preScrollChatDetailDoesNotResumeUntilOriginalListIsVerified() {
+        val fixture = preScrollPageRecoveryFixture()
+        fixture.port.page = desktopPage()
+        invokePreScrollPageValidation(fixture)
+        assertTrue(fixture.checkpoint() != null)
+        fixture.port.page = chatDetailSnapshot()
+        repeat(3) {
+            if (fixture.scheduler.pendingCount() > 0) fixture.scheduler.runNext()
+        }
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertEquals(0, fixture.dispatchedGestures())
+
+        fixture.port.page = fixture.listPage
+        runUntil(fixture.scheduler, 80) {
+            fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") }
+        }
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+    }
+
+    @Test
+    fun preScrollSnapshotReadFailureAlsoEntersReadOnlyCheckpointRecovery() {
+        val fixture = preScrollPageRecoveryFixture()
+        fixture.port.failNextInspection = true
+        invokePreScrollPageValidation(fixture)
+        assertTrue(fixture.logs.any {
+            it.contains("PAUSED_CHECKPOINT_SAVED") &&
+                it.contains("MESSAGE_LIST_PRE_SCROLL_SNAPSHOT_UNAVAILABLE")
+        })
+        assertTrue(fixture.checkpoint() != null)
+        assertEquals(0, fixture.dispatchedGestures())
+
+        runUntil(fixture.scheduler, 80) {
+            fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") }
+        }
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+    }
+
     @Test
     fun cancelledRejectedAndFailedScrollsEnterCheckpointRecoveryInsteadOfTerminalPause() {
         for (status in listOf(
@@ -5171,6 +5333,7 @@ class AiReplyObservationRuntimeTest {
         var ocrDebugTextByRowIndex: Map<Int, String>? = null
         var simulateOcrWithoutDebugPayload: Boolean = false
         var inspectionPages: List<ChatPageSnapshot>? = null
+        var failNextInspection = false
         var omitMessageTabPositionEvidence = false
         var provideMessageTabPositionEvidence = false
         var sessionRunEnabled = false
@@ -5320,6 +5483,10 @@ class AiReplyObservationRuntimeTest {
 
         override fun inspectChatPage(): ChatPageSnapshot {
             fullInspections++
+            if (failNextInspection) {
+                failNextInspection = false
+                error("test transient page inspection failure")
+            }
             val snapshot = inspectionPages?.getOrNull(fullInspections - 1) ?: page
             if (!provideMessageTabPositionEvidence || omitMessageTabPositionEvidence ||
                 !snapshot.hasChatTab ||

@@ -4849,6 +4849,10 @@ class AiReplyObservationRuntime(
                 "AI 会话管理已暂停：滚动前页面身份复核失败；原因=$reason；" +
                     "不会使用旧视口坐标"
             )
+            // A missing fresh pre-scroll page is not a terminal business pause. The
+            // existing recovery transaction owns checkpointing, read-only retries and
+            // the two-snapshot/lease gate before any future action.
+            recoverRetryablePrivateList("MESSAGE_LIST_PRE_SCROLL_SNAPSHOT_UNAVAILABLE")
             return
         }
         val identityFailureReason = when {
@@ -4892,6 +4896,10 @@ class AiReplyObservationRuntime(
                     "列表候选数=${fresh.chatListCandidates.size}；" +
                     "不会使用旧视口坐标"
             )
+            // Another foreground app or a changed window must revoke the old
+            // scroll attempt, but not strand the retained private-message task.
+            // Recovery will re-acquire all page evidence after the user returns.
+            recoverRetryablePrivateList("MESSAGE_LIST_PRE_SCROLL_PAGE_IDENTITY_MISMATCH")
             return
         }
         val listViewport = fresh.chatListViewport
