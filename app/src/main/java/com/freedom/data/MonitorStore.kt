@@ -19,7 +19,6 @@ object MonitorStore {
     private const val KEY_TARGET = "target_package"
     private const val KEY_RUNNING = "monitor_running"
     private const val KEY_ACTIVE_RUN_MODE = "active_run_mode"
-    private const val KEY_INPUT_MANUAL_REVIEW_REQUIRED = "input_manual_review_required"
     private const val KEY_LOGS = "event_logs"
     private const val KEY_APP = "current_app"
     private const val KEY_PAGE = "current_page"
@@ -88,16 +87,6 @@ object MonitorStore {
     @Synchronized
     fun activeRunMode(context: Context): RunMode? =
         RunMode.fromStorageValue(prefs(context).getString(KEY_ACTIVE_RUN_MODE, null))
-
-    /** A provenance ambiguity must survive process/service recovery until a deliberate new run. */
-    @Synchronized
-    fun isInputManualReviewRequired(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_INPUT_MANUAL_REVIEW_REQUIRED, false)
-
-    @Synchronized
-    fun setInputManualReviewRequired(context: Context, required: Boolean) {
-        prefs(context).edit().putBoolean(KEY_INPUT_MANUAL_REVIEW_REQUIRED, required).commit()
-    }
 
     @Synchronized
     fun setActiveRunMode(context: Context, mode: RunMode?) {

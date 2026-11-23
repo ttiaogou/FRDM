@@ -43,7 +43,10 @@ import com.freedom.application.ports.RunDiagnosticsPort
 import com.freedom.application.ports.SessionSampleArchivePort
 import com.freedom.application.ports.TaskLaunchParametersRepository
 import com.freedom.application.runtime.RunSessionCommandUseCase
+import com.freedom.application.runtime.RunGenerationClock
 import com.freedom.application.runtime.RunSessionCoordinator
+import com.freedom.core.accessibility.api.UnifiedAccessibilityEntry
+import com.freedom.core.accessibility.api.UnifiedAccessibilityEvent
 import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
 import com.freedom.core.accessibility.events.InputOriginClassifier
 import com.freedom.core.accessibility.events.TouchInteractionMonitor
@@ -54,23 +57,30 @@ import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
+import com.freedom.core.runtime.UiWriteAuthorization
+import com.freedom.core.runtime.UiWriteScope
 import com.freedom.core.runtime.TargetAppReadinessController
 import com.freedom.data.MonitorStoreRepository
 import com.freedom.data.MonitorStoreSnapshotRepository
 import com.freedom.data.OcrReviewStore
 import com.freedom.data.AccountBrowseCheckpointDataStore
+import com.freedom.data.RecoveryScheduleDataStore
 import com.freedom.data.RunDiagnosticsManager
 import com.freedom.data.SharedPreferencesAiModelCloudConsent
 import com.freedom.data.SharedPreferencesGestureSettingsRepository
 import com.freedom.data.TaskLaunchParametersStore
+import com.freedom.data.ContactMessageLedgerDataStore
 import com.freedom.data.ai.EncryptedAiModelConfigurationRepository
 import com.freedom.data.ai.AiReplyPersonalizationStore
 import com.freedom.data.database.LocalConversationRepository
 import com.freedom.data.database.LocalReplyTaskRepository
+import com.freedom.data.database.LocalReplySegmentTaskRepository
 import com.freedom.features.aireply.ai.ReplyTaskRepository
+import com.freedom.features.aireply.ai.ReplySegmentTaskRepository
 import com.freedom.data.social.momo.MomoSayHiTraversalCheckpointDataStore
 import com.freedom.data.PrivateMessagesTraversalCheckpointDataStore
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
+import com.freedom.features.aireply.domain.contact.ContactMessageLedgerRepository
 import com.freedom.data.samples.MomoChatSampleArchiveDataStore
 import com.freedom.features.aireply.AiReplyObservationRuntime
 import com.freedom.features.aireply.ai.AiModelServiceProvider
@@ -79,6 +89,8 @@ import com.freedom.features.aireply.ai.AiModelConfigurationRepository
 import com.freedom.features.aireply.ai.AiReplyPersonalizationRepository
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
+import com.freedom.features.recovery.RecoveryScheduleRepository
+import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.ports.ConversationRepository
 import com.freedom.gesture.api.GestureApi as PublicGestureApi
@@ -110,6 +122,9 @@ class AppCompositionRoot(context: Context) {
     val taskLaunchParametersRepository: TaskLaunchParametersRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TaskLaunchParametersStore(appContext)
     }
+    val contactMessageLedgerRepository: ContactMessageLedgerRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ContactMessageLedgerDataStore(appContext)
+    }
     val aiModelCloudConsent: AiModelCloudConsentSettings by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         SharedPreferencesAiModelCloudConsent(appContext)
     }
@@ -129,6 +144,9 @@ class AppCompositionRoot(context: Context) {
     val replyTaskRepository: ReplyTaskRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         LocalReplyTaskRepository(File(appContext.filesDir, "reply_task_store.tsv"))
     }
+    val replySegmentTaskRepository: ReplySegmentTaskRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        LocalReplySegmentTaskRepository(File(appContext.filesDir, "reply_segment_task_store.tsv"))
+    }
     val conversationContextManager: ConversationContextManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         ConversationContextManager(conversationRepository)
     }
@@ -141,8 +159,22 @@ class AppCompositionRoot(context: Context) {
     val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         AccountBrowseCheckpointDataStore(appContext)
     }
+    val recoveryScheduleRepository: RecoveryScheduleRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RecoveryScheduleDataStore(appContext)
+    }
+    // AI list and greetings checkpoint plans must never overwrite Browse or each other.
+    val privateMessagesRecoveryScheduleRepository: RecoveryScheduleRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RecoveryScheduleDataStore(appContext, "recovery_schedule_ai_private_messages")
+    }
+    val receivedGreetingsRecoveryScheduleRepository: RecoveryScheduleRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RecoveryScheduleDataStore(appContext, "recovery_schedule_ai_received_greetings")
+    }
     val sampleArchivePort: SessionSampleArchivePort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MomoChatSampleArchiveDataStore()
+    }
+    /** Process-scoped alongside the UI leases; a recreated Service must not restart generation at zero. */
+    val runGenerationClock by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RunGenerationClock()
     }
     /** Shared across the mutually exclusive business modes and AI Reply sub-tasks. */
     val uiOperationOwnershipCoordinator by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
@@ -150,6 +182,13 @@ class AppCompositionRoot(context: Context) {
     }
     val taskCoordinator by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TaskCoordinator(uiOperationOwnershipCoordinator)
+    }
+    /** P6: one process recovery admission manager, shared by both automation modes. */
+    val recoveryTransactionManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        UnifiedRecoveryTransactionManager(
+            currentRunGeneration = runGenerationClock::current,
+            onLog = monitorRepository::addLog
+        )
     }
     val monitorSnapshotRepository: MonitorSnapshotRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         MonitorStoreSnapshotRepository(appContext)
@@ -182,7 +221,6 @@ class AppCompositionRoot(context: Context) {
         mainHandler: Handler,
         addLog: (String) -> Unit,
         dp: (Int) -> Int,
-        persistManualReviewHold: (String) -> Unit,
         requestScreenOff: () -> Boolean,
         refreshViews: () -> Unit
     ): AccessibilityServiceDependencies = AccessibilityServiceDependencies(
@@ -191,7 +229,6 @@ class AppCompositionRoot(context: Context) {
         mainHandler = mainHandler,
         addLog = addLog,
         dp = dp,
-        persistManualReviewHold = persistManualReviewHold,
         requestScreenOff = requestScreenOff,
         refreshViews = refreshViews
     )
@@ -218,7 +255,6 @@ internal class AccessibilityServiceDependencies internal constructor(
     private val mainHandler: Handler,
     private val addLog: (String) -> Unit,
     private val dp: (Int) -> Int,
-    private val persistManualReviewHold: (String) -> Unit,
     private val requestScreenOff: () -> Boolean,
     private val refreshViews: () -> Unit
 ) {
@@ -259,6 +295,40 @@ internal class AccessibilityServiceDependencies internal constructor(
     val pageObservationCoordinator: PageObservationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
         PageObservationCoordinator(taskScheduler)
     }
+    /** Service-scoped Activity recovery; no gesture or page-action capability is injected. */
+    val activityEvidenceReader by lazy(LazyThreadSafetyMode.NONE) {
+        com.freedom.adapters.accessibility.android.AndroidUsageActivityEvidenceReader(
+            service = service,
+            targetPackage = monitorRepository::targetPackage,
+            currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() }
+        )
+    }
+    val activityRecoveryCoordinator by lazy(LazyThreadSafetyMode.NONE) {
+        com.freedom.adapters.accessibility.android.AndroidForegroundActivityRecoveryCoordinator(
+            scheduler = taskScheduler,
+            isRunRequested = {
+                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() != null
+            },
+            currentActivityClass = windowContextTracker::currentActivityClass,
+            readEvidence = activityEvidenceReader::probe,
+            acceptEvidence = { evidence ->
+                accessibilityGateway.currentWindowGeneration() == evidence.windowGeneration &&
+                    windowContextTracker.restoreActivityClass(
+                        evidence.activityClass, evidence.windowId, evidence.windowGeneration
+                    )
+            },
+            onLog = addLog
+        )
+    }
+    val uiWriteAuthorization: UiWriteAuthorization by lazy(LazyThreadSafetyMode.NONE) {
+        UiWriteAuthorization(
+            taskCoordinator = root.taskCoordinator,
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+            activeRunMode = {
+                if (monitorRepository.isRunRequested()) runSessionCoordinator.activeMode() else null
+            }
+        )
+    }
     val accessibilityGateway: AndroidAccessibilityGateway by lazy(LazyThreadSafetyMode.NONE) {
         AndroidAccessibilityGateway(
             service = service,
@@ -272,7 +342,13 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             targetAppReadinessController = targetAppReadinessController,
             inputOriginClassifier = inputOriginClassifier,
-            onReadinessDiagnostic = addLog
+            uiWriteAuthorization = uiWriteAuthorization,
+            onReadinessDiagnostic = addLog,
+            recoveredActivityBindingCurrent = windowContextTracker::recoveredActivityMatches,
+            onRecoveredActivityBindingMismatch = {
+                windowContextTracker.invalidateRecoveredActivity()
+                activityRecoveryCoordinator.ensureStarted()
+            }
         )
     }
     val gestureVisualizerDelegate = lazy(LazyThreadSafetyMode.NONE) { AndroidGestureVisualizer(service) }
@@ -335,6 +411,14 @@ internal class AccessibilityServiceDependencies internal constructor(
                     packageName = monitorRepository.targetPackage(),
                     targetActivityClass = targetActivityClass
                 )
+            },
+            isAiReplyUiOperationOwned = {
+                uiWriteAuthorization.permits(UiWriteScope.AI_COMPOSER) ||
+                    uiWriteAuthorization.permits(UiWriteScope.VERIFIED_GREETING_COMPOSER)
+            },
+            isBoundAiReplyUiOperationOwned = { lease ->
+                uiWriteAuthorization.permitsBound(UiWriteScope.AI_COMPOSER, lease) ||
+                    uiWriteAuthorization.permitsBound(UiWriteScope.VERIFIED_GREETING_COMPOSER, lease)
             }
         )
     }
@@ -349,9 +433,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             scheduler = taskScheduler,
             isAiReplyActive = {
                 monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
-            },
-            isManualReviewRequired = {
-                monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
             },
             onLog = addLog,
             createProvider = { configuration ->
@@ -372,7 +453,9 @@ internal class AccessibilityServiceDependencies internal constructor(
                     cloudConsent = root.aiModelCloudConsent
                 )
             },
-            replyTaskRepository = root.replyTaskRepository
+            replyTaskRepository = root.replyTaskRepository,
+            replySegmentTaskRepository = root.replySegmentTaskRepository,
+            captureTaskLease = { root.taskCoordinator.currentLease() }
         )
     }
     val aiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate
@@ -391,6 +474,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             isAiReplyActive = {
                 monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
             },
+            inspectAndroidRecoveryReadiness = { _ -> accessibilityGateway.inspectRecoveryReadiness() },
             onLog = addLog,
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
@@ -458,6 +542,12 @@ internal class AccessibilityServiceDependencies internal constructor(
                     history = history
                 )
             },
+            onSendConfirmation = { batch, snapshot ->
+                aiReplyDraftCoordinator.confirmSendResult(batch, snapshot)
+            },
+            onConfirmedSendId = {
+                aiReplyDraftCoordinator.consumeConfirmedSendId()
+            },
             onVerifiedConversationObserved = { batch, identity, snapshot ->
                 val verifiedIdentity = identity?.takeIf {
                     it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
@@ -487,14 +577,25 @@ internal class AccessibilityServiceDependencies internal constructor(
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             sharedPageObservationCoordinator = pageObservationCoordinator,
-            isConversationDraftPending = { aiReplyDraftCoordinator.isPending },
-            isDraftAwaitingUserSend = { aiReplyDraftCoordinator.isAwaitingUserSend },
+            isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
+            isSendControlRecoveryPending = { aiReplyDraftCoordinator.isSendControlRecoveryPending },
             onDraftRuntimeReset = {
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {
                     aiReplyDraftCoordinator.resetForRuntimeReset()
                 }
             },
-            privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository
+            messageInterceptionThreshold = {
+                root.taskLaunchParametersRepository.read().messageInterceptionThreshold
+            },
+            imageSendThreshold = {
+                root.taskLaunchParametersRepository.read().imageSendThreshold
+            },
+            contactMessageLedgerRepository = root.contactMessageLedgerRepository,
+            privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository,
+            receivedGreetingsCheckpointRepository = root.sayHiTraversalCheckpointRepository,
+            privateMessagesRecoveryScheduleRepository = root.privateMessagesRecoveryScheduleRepository,
+            receivedGreetingsRecoveryScheduleRepository = root.receivedGreetingsRecoveryScheduleRepository,
+            recoveryTransactionManager = root.recoveryTransactionManager
         )
     }
     val accountBrowseWorkflow by lazy(LazyThreadSafetyMode.NONE) {
@@ -512,19 +613,17 @@ internal class AccessibilityServiceDependencies internal constructor(
                 "当前识别应用=${snapshot.appLabel}；当前识别页面=${snapshot.pageLabel}"
             },
             onLog = addLog,
-            isManualReviewRequired = {
-                monitorRepository.isInputManualReviewRequired() || inputOriginClassifier.isManualReviewRequired()
-            },
-            onManualReviewRequired = persistManualReviewHold,
             onRequestScreenOff = requestScreenOff,
             pageObservationCoordinator = pageObservationCoordinator,
-            accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository
+            accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository,
+            recoveryScheduleRepository = root.recoveryScheduleRepository,
+            recoveryTransactionManager = root.recoveryTransactionManager,
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() }
         )
     }
     val accountBrowseRuntimeAdapter by lazy(LazyThreadSafetyMode.NONE) {
         AccountBrowseModeRuntimeAdapter(
             workflow = { accountBrowseWorkflow },
-            acknowledgeManualReview = inputOriginClassifier::acknowledgeManualReview,
             onReadinessStarting = { mode, reason ->
                 targetAppReadinessController.markStarting(mode, reason, SystemClock.uptimeMillis())
             },
@@ -552,17 +651,35 @@ internal class AccessibilityServiceDependencies internal constructor(
                     }
                 )
             ),
-            log = monitorRepository
+            log = monitorRepository,
+            generationClock = root.runGenerationClock,
+            taskCoordinator = root.taskCoordinator
         )
+    }
+    // Service-scoped platform-neutral routing gateway. Existing runtime dispatch order
+    // and AI self-navigation attribution are preserved, but never called from the Service.
+    val unifiedAccessibilityEntry: UnifiedAccessibilityEntry by lazy(LazyThreadSafetyMode.NONE) {
+        UnifiedAccessibilityEntry { notification ->
+            when (notification) {
+                is UnifiedAccessibilityEvent.TargetApplication ->
+                    runSessionCoordinator.dispatchTargetApplicationEvent(notification.event)
+                is UnifiedAccessibilityEvent.GlobalTouch ->
+                    runSessionCoordinator.dispatchGlobalTouchEvent(notification.event)
+                is UnifiedAccessibilityEvent.ActivityTransition ->
+                    runSessionCoordinator.dispatchActivityTransition(notification.activityClass)
+                is UnifiedAccessibilityEvent.NavigationObservation -> {
+                    val attached = notification.attachedSelfNavigation
+                    if (attached != null) aiReplyObservationRuntime.onSelfNavigationAttached(attached)
+                    else aiReplyObservationRuntime.onUnmatchedNavigationObserved(notification.activityClass)
+                }
+            }
+        }
     }
     val accessibilityEventPipelineDelegate = lazy(LazyThreadSafetyMode.NONE) {
         AndroidAccessibilityEventPipeline(
             targetPackage = { monitorRepository.targetPackage() },
             freedomPackage = service.packageName,
             resolveAppLabel = appLabelResolver::resolve,
-            dispatchTargetApplicationEvent = runSessionCoordinator::dispatchTargetApplicationEvent,
-            dispatchGlobalTouchEvent = runSessionCoordinator::dispatchGlobalTouchEvent,
-            dispatchActivityTransition = runSessionCoordinator::dispatchActivityTransition,
             interactionDiagnostics = runSessionCoordinator::interactionDiagnostics,
             handleManualInteractionFallback = runSessionCoordinator::handleManualInteractionFallback,
             updateAppPage = { appLabel, pageLabel -> monitorRepository.updateAppPage(appLabel, pageLabel) },
@@ -570,9 +687,22 @@ internal class AccessibilityServiceDependencies internal constructor(
             currentActivityClass = windowContextTracker::currentActivityClass,
             updateCurrentActivityClass = windowContextTracker::updateActivityClass,
             onBrowseEventLogged = { monitorPreviewScheduler.scheduleBrowseScan() },
+            unifiedAccessibilityEntry = unifiedAccessibilityEntry,
             currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() },
             inputOriginClassifier = inputOriginClassifier,
             observeWindowStateEvent = windowContextTracker::observeWindowStateEvent,
+            pageObservationCoordinator = pageObservationCoordinator,
+            onActivityWindowEventDiagnostic = { className, windowId, generation, tracked ->
+                addLog(
+                    "ACTIVITY_EVENT_DIAGNOSTIC stage=PIPELINE; " +
+                        "activityEvidenceSource=ACCESSIBILITY_WINDOW_STATE; " +
+                        "eventClass=${com.freedom.adapters.accessibility.android.safeActivityEventClassName(className)}; " +
+                        "windowId=$windowId; pageGeneration=$generation; " +
+                        "classIsActivity=${com.freedom.adapters.accessibility.android.isActivityWindowClassName(className)}; " +
+                        "tracked=$tracked; result=${if (tracked) "ACTIVITY_CLUE_RECORDED" else "CLASS_NOT_TRACKED"}; " +
+                        "readinessNotGrantedByDiagnostic=true"
+                )
+            },
             onDuplicateSuppressed = { event ->
                 val decision = event.inputOriginDecision
                 diagnostics.recordStructured(

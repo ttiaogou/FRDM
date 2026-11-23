@@ -5,7 +5,7 @@ import com.freedom.core.runtime.ModeRuntimePort
 import com.freedom.core.runtime.RunMode
 import com.freedom.features.aireply.AiReplyObservationRuntime
 
-/** Keeps AI page observation behind the application runtime contract. */
+/** 通过应用运行时契约封装 AI 页面观察能力。 */
 internal class AiReplyModeRuntimeAdapter(
     private val runtime: () -> AiReplyObservationRuntime,
     private val onLog: (String) -> Unit = {},
@@ -24,10 +24,22 @@ internal class AiReplyModeRuntimeAdapter(
 
     override fun onRunStopped(reason: String) {
         onReadinessInvalidated("AI Reply 已停止：$reason")
-        runtime().reset("运行停止：$reason")
+        val activeRuntime = runtime()
+        try {
+            activeRuntime.reset("运行停止：$reason")
+        } finally {
+            activeRuntime.clearRecoverySchedulesAfterRunStop()
+        }
     }
 
     override fun onAccessibilityServiceConnected() {
+        if (awaitingServiceReconnect) {
+            // 在重新绑定持久化调度之前，先重建本次运行所需的恢复门禁。
+            // 否则后续 scheduleInitialObservation() 可能清除刚刚重新绑定的验证证据。
+            awaitingServiceReconnect = false
+            onReadinessStarting(mode, "AI Reply 服务重连；重新等待目标应用正式就绪")
+            runtime().scheduleInitialObservation()
+        }
         val messageCheckpointLoaded = runCatching {
             runtime().reloadPrivateMessagesCheckpointAfterServiceReconnect()
         }.getOrDefault(false)
@@ -48,17 +60,14 @@ internal class AiReplyModeRuntimeAdapter(
                 "收到招呼服务重连：断点已尝试读取；当前页面未确认，保持只读等待并由后续页面事件复核"
             }
         )
-        if (awaitingServiceReconnect) {
-            awaitingServiceReconnect = false
-            onReadinessStarting(mode, "AI Reply 服务重连；重新等待目标应用正式就绪")
-            runtime().scheduleInitialObservation()
-        }
     }
 
     override fun onAccessibilityServiceDisconnected() {
         onReadinessInvalidated("无障碍服务断开；目标应用就绪状态失效")
         awaitingServiceReconnect = true
-        runtime().reset("无障碍服务断开连接")
+        val activeRuntime = runtime()
+        activeRuntime.persistCheckpointBeforeServiceInterruption("SERVICE_DISCONNECTED")
+        activeRuntime.reset("无障碍服务断开连接")
     }
 
     override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = runtime().schedule(event)
@@ -68,12 +77,16 @@ internal class AiReplyModeRuntimeAdapter(
     override fun onAccessibilityServiceInterrupted(reason: String) {
         onReadinessInvalidated("无障碍服务中断；目标应用就绪状态失效：$reason")
         awaitingServiceReconnect = true
-        runtime().reset("无障碍服务中断：$reason")
+        val activeRuntime = runtime()
+        activeRuntime.persistCheckpointBeforeServiceInterruption("SERVICE_INTERRUPTED")
+        activeRuntime.reset("无障碍服务中断：$reason")
     }
 
     override fun onServiceDestroyed() {
         onReadinessInvalidated("无障碍服务销毁；目标应用就绪状态失效")
-        runtime().reset("无障碍服务销毁")
+        val activeRuntime = runtime()
+        activeRuntime.persistCheckpointBeforeServiceInterruption("SERVICE_DESTROYED")
+        activeRuntime.reset("无障碍服务销毁")
     }
 
     override fun resetRuntime(reason: String) = runtime().reset("运行时外部重置：$reason")

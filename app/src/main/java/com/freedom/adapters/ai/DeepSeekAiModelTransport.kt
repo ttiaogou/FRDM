@@ -15,7 +15,7 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.nio.charset.StandardCharsets
 
-/** DeepSeek-specific Chat Completions adapter. It does not expose provider response bodies. */
+/** DeepSeek 专用的 Chat Completions 适配器，不暴露服务商响应正文。 */
 class DeepSeekAiModelTransport(
     private val configuration: AiModelConfiguration,
     private val connectionFactory: AiHttpConnectionFactory = AiHttpConnectionFactory { url ->
@@ -111,8 +111,8 @@ class DeepSeekAiModelTransport(
             "messages" to messages,
             "temperature" to request.temperature,
             "max_tokens" to request.maxOutputTokens,
-            // DeepSeek defaults to thinking mode; explicitly disable it for this response-only
-            // workflow so temperature retains its documented behavior and reasoning stays off.
+            // DeepSeek 默认使用思考模式；本流程只需要生成回复，因此明确关闭思考模式，
+            // 使 temperature 参数保持文档规定的行为，同时不返回推理过程。
             "thinking" to mapOf("type" to "disabled"),
             "stream" to false
         )
@@ -135,7 +135,8 @@ class DeepSeekAiModelTransport(
             ?: throw AiModelHttpException("HTTP_RESPONSE_EMPTY_CHOICES")
         val message = firstChoice["message"] as? Map<*, *>
             ?: throw AiModelHttpException("HTTP_RESPONSE_MISSING_MESSAGE")
-        val content = message["content"] as? String
+        val contentValue = message["content"]
+        val content = contentValue as? String
         val usageMap = root["usage"] as? Map<*, *>
         val usage = usageMap?.let {
             val input = (it["prompt_tokens"] as? Number)?.toInt()
@@ -144,12 +145,29 @@ class DeepSeekAiModelTransport(
                 TokenUsage(input, output)
             } else null
         }
+        val finishReason = firstChoice["finish_reason"] as? String
+        if (content.isNullOrBlank()) {
+            val state = when {
+                !message.containsKey("content") -> "ABSENT"
+                contentValue == null -> "NULL"
+                contentValue !is String -> "NON_STRING"
+                else -> "BLANK"
+            }
+            throw AiModelHttpException(
+                "EMPTY_MODEL_OUTPUT",
+                retryable = state != "NON_STRING" && (finishReason == null || finishReason == "stop"),
+                responseContentState = state,
+                responseFinishReason = finishReason,
+                responseInputTokens = usage?.inputTokens,
+                responseOutputTokens = usage?.outputTokens
+            )
+        }
         return AiModelResult(
             text = content,
             provider = PROVIDER_NAME,
             model = (root["model"] as? String)?.takeIf(String::isNotBlank) ?: configuredModel,
             usage = usage,
-            finishReason = firstChoice["finish_reason"] as? String
+            finishReason = finishReason
         )
     }
 

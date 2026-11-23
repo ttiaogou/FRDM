@@ -39,10 +39,14 @@ import com.freedom.core.accessibility.api.TreeInspectionRequest
 import com.freedom.core.accessibility.api.WindowRef
 import com.freedom.core.accessibility.events.InputOriginClassifier
 import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.UiWriteAuthorization
+import com.freedom.core.runtime.UiWriteScope
+import com.freedom.core.runtime.TaskLease
 import com.freedom.core.runtime.TargetAppPageReadiness
 import com.freedom.core.runtime.TargetAppReadinessController
 import com.freedom.core.runtime.TargetAppReadinessEvidence
 import com.freedom.core.runtime.TargetAppReadinessStatus
+import com.freedom.core.runtime.TargetAppReadinessSnapshot
 import com.freedom.core.accessibility.query.NodeTargetResolver
 import java.util.ArrayDeque
 
@@ -60,7 +64,10 @@ internal class AndroidAccessibilityGateway(
     private val activeRunMode: () -> RunMode?,
     private val inspectPageReadiness: (AccessibilityNodeInfo, String, RunMode) -> TargetAppPageReadiness,
     private val targetAppReadinessController: TargetAppReadinessController,
-    private val onReadinessDiagnostic: (String) -> Unit = {}
+    private val uiWriteAuthorization: UiWriteAuthorization,
+    private val onReadinessDiagnostic: (String) -> Unit = {},
+    private val recoveredActivityBindingCurrent: (Int, Long) -> Boolean = { _, _ -> true },
+    private val onRecoveredActivityBindingMismatch: () -> Unit = {}
 ) : AccessibilityGateway, GestureExecutionPort, AndroidActiveWindowRootAccess, AndroidScreenshotCapture {
 
     @Volatile
@@ -149,11 +156,12 @@ internal class AndroidAccessibilityGateway(
         return try {
             val packageName = safeString { root.packageName?.toString().orEmpty() }
             if (packageName.isBlank()) return null
+            val currentWindowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: -1
             WindowRef(
                 packageName = packageName,
-                activityClass = activityClass(),
+                activityClass = activityForWindow(currentWindowId),
                 generation = windowGeneration,
-                windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: -1
+                windowId = currentWindowId
             )
         } finally {
             recycle(root)
@@ -395,6 +403,9 @@ internal class AndroidAccessibilityGateway(
     }
 
     override fun performNodeAction(request: NodeActionRequest): ActionResult {
+        if (!uiWriteAuthorization.permits(UiWriteScope.BROWSE_NODE_ACTION)) {
+            return ActionResult(accepted = false, performed = false, reason = "ui_operation_lease_missing")
+        }
         val readinessFailure = inspectAutonomousDispatchReadiness()
         if (readinessFailure != null) {
             return ActionResult(accepted = false, performed = false, reason = "app_not_ready:$readinessFailure")
@@ -456,7 +467,10 @@ internal class AndroidAccessibilityGateway(
                 if (inspectAutonomousDispatchReadiness() != null) {
                     return@withActiveTargetRoot false
                 }
-                runCatching { performSemanticNodeAction(target, request.action, request.textArgument) }.getOrDefault(false)
+                uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.BROWSE_NODE_ACTION) {
+                    runCatching { performSemanticNodeAction(target, request.action, request.textArgument) }
+                        .getOrDefault(false)
+                } ?: false
             } finally {
                 recycle(target)
             }
@@ -472,6 +486,7 @@ internal class AndroidAccessibilityGateway(
         expectedWindow: WindowRef,
         expectedActivityClass: String
     ): Boolean {
+        if (!uiWriteAuthorization.permits(UiWriteScope.VERIFIED_AI_BACK)) return false
         val expectedPackage = targetPackage().trim()
         if (expectedActivityClass.isBlank() || expectedPackage.isBlank() ||
             expectedWindow.packageName != expectedPackage ||
@@ -497,9 +512,11 @@ internal class AndroidAccessibilityGateway(
                 )
                 false
             } else {
-                val accepted = runCatching {
-                    service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                }.getOrDefault(false)
+                val accepted = uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.VERIFIED_AI_BACK) {
+                    runCatching {
+                        service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                    }.getOrDefault(false)
+                } ?: false
                 onReadinessDiagnostic(
                     "经验证导航返回派发：windowId=$actualWindowId；generation=$windowGeneration；" +
                         "platformAccepted=$accepted；路径=VERIFIED_NAVIGATION_BACK"
@@ -515,34 +532,63 @@ internal class AndroidAccessibilityGateway(
         // Lock-screen requests are a safety response to manual-review holds. Every other global
         // action changes the target UI and must pass the same current-page readiness gate.
         if (action != GlobalAccessibilityAction.LOCK_SCREEN) {
+            if (!uiWriteAuthorization.permits(UiWriteScope.GLOBAL_NAVIGATION)) return false
             val readinessFailure = inspectAutonomousDispatchReadiness()
             if (readinessFailure != null) return false
         }
         if (action == GlobalAccessibilityAction.LOCK_SCREEN && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             return false
         }
-        return runCatching {
-            service.performGlobalAction(
-                when (action) {
-                    GlobalAccessibilityAction.BACK -> AccessibilityService.GLOBAL_ACTION_BACK
-                    GlobalAccessibilityAction.HOME -> AccessibilityService.GLOBAL_ACTION_HOME
-                    GlobalAccessibilityAction.RECENTS -> AccessibilityService.GLOBAL_ACTION_RECENTS
-                    GlobalAccessibilityAction.NOTIFICATIONS -> AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS
-                    GlobalAccessibilityAction.QUICK_SETTINGS -> AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS
-                    GlobalAccessibilityAction.LOCK_SCREEN -> AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
-                }
-            )
-        }.getOrDefault(false)
+        val submit = {
+            runCatching {
+                service.performGlobalAction(
+                    when (action) {
+                        GlobalAccessibilityAction.BACK -> AccessibilityService.GLOBAL_ACTION_BACK
+                        GlobalAccessibilityAction.HOME -> AccessibilityService.GLOBAL_ACTION_HOME
+                        GlobalAccessibilityAction.RECENTS -> AccessibilityService.GLOBAL_ACTION_RECENTS
+                        GlobalAccessibilityAction.NOTIFICATIONS -> AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS
+                        GlobalAccessibilityAction.QUICK_SETTINGS -> AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS
+                        GlobalAccessibilityAction.LOCK_SCREEN -> AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
+                    }
+                )
+            }.getOrDefault(false)
+        }
+        // LOCK_SCREEN is a manual-review safety response, not an autonomous task action.
+        return if (action == GlobalAccessibilityAction.LOCK_SCREEN) submit()
+        else uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.GLOBAL_NAVIGATION, submit) ?: false
+    }
+
+    private fun authorizedGestureDispatch(spec: GestureSpec, submit: () -> GestureSubmission): GestureSubmission {
+        if (spec.dispatchPurpose == GestureDispatchPurpose.INTERNAL_CALIBRATION) {
+            // Explicit user calibration is allowed only on Freedom's own active window.
+            return if (currentActiveWindowPackage() == service.packageName) submit()
+            else GestureSubmission.REJECTED
+        }
+        return uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE, submit)
+            ?: GestureSubmission.REJECTED
     }
 
     override fun dispatchGesture(spec: GestureSpec, listener: GestureResultListener): GestureSubmission =
-        gestureDispatcher.dispatchGesture(spec, listener)
+        authorizedGestureDispatch(spec) { gestureDispatcher.dispatchGesture(spec, listener) }
 
     override fun dispatchGesture(
         spec: GestureSpec,
         listener: GestureResultListener,
         onPlatformDispatch: () -> Unit
-    ): GestureSubmission = gestureDispatcher.dispatchGesture(spec, listener, onPlatformDispatch)
+    ): GestureSubmission =
+        authorizedGestureDispatch(spec) {
+            gestureDispatcher.dispatchGesture(spec, listener, onPlatformDispatch)
+        }
+
+    /**
+     * Forces the same read-only Android safety evaluation used before dispatch.
+     * This does not dispatch a gesture or grant UI ownership. The cached current()
+     * diagnostic alone is insufficient after a service restart.
+     */
+    fun inspectRecoveryReadiness(): TargetAppReadinessSnapshot {
+        inspectAutonomousDispatchReadiness()
+        return targetAppReadinessController.current()
+    }
 
     private fun inspectAutonomousDispatchReadiness(): String? {
         val expectedPackage = targetPackage()
@@ -567,8 +613,13 @@ internal class AndroidAccessibilityGateway(
 
         try {
             val foregroundPackage = safeString { root.packageName?.toString().orEmpty() }
-            val currentActivity = activityClass()
             val windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: -1
+            val currentActivity = activityForWindow(windowId)
+            if (currentActivity.isBlank() && activityClass().isNotBlank()) {
+                // The recovered identity was tied to a different window or generation.
+                // Revoke that provisional clue and re-enter read-only evidence collection.
+                onRecoveredActivityBindingMismatch()
+            }
             val pageReadiness = if (mode != null && foregroundPackage == expectedPackage) {
                 runCatching { inspectPageReadiness(root, currentActivity, mode) }
                     .getOrElse {
@@ -730,10 +781,36 @@ internal class AndroidAccessibilityGateway(
         node: AccessibilityNodeInfo,
         action: NodeAction,
         text: String?
-    ): Boolean = when (action) {
-        NodeAction.FOCUS -> node.isFocused || performSemanticNodeAction(node, action, null)
-        NodeAction.SET_TEXT -> text != null && performSemanticNodeAction(node, action, text)
-        NodeAction.DISMISS -> false
+    ): Boolean = uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.AI_COMPOSER) {
+        when (action) {
+            NodeAction.FOCUS -> node.isFocused || performSemanticNodeAction(node, action, null)
+            NodeAction.SET_TEXT -> text != null && performSemanticNodeAction(node, action, text)
+            NodeAction.DISMISS -> false
+        }
+    } ?: false
+
+    /**
+     * Only the Momo adapter may call this after rechecking the exact chat window and title
+     * for the target. The original private-chat composer scope remains unchanged.
+     */
+    override fun performVerifiedChatInputAction(
+        node: AccessibilityNodeInfo,
+        action: NodeAction,
+        text: String?,
+        taskLease: TaskLease?
+    ): Boolean {
+        val scope = if (uiWriteAuthorization.permitsBound(UiWriteScope.VERIFIED_GREETING_COMPOSER, taskLease)) {
+            UiWriteScope.VERIFIED_GREETING_COMPOSER
+        } else {
+            UiWriteScope.AI_COMPOSER
+        }
+        return uiWriteAuthorization.withBoundAuthorizedWrite(scope, taskLease) {
+            when (action) {
+                NodeAction.FOCUS -> node.isFocused || performSemanticNodeAction(node, action, null)
+                NodeAction.SET_TEXT -> text != null && performSemanticNodeAction(node, action, text)
+                NodeAction.DISMISS -> false
+            }
+        } ?: false
     }
 
     /** 所有非触摸节点动作共用此唯一平台调用点，原有目标校验仍由各自入口负责。 */
@@ -919,15 +996,19 @@ internal class AndroidAccessibilityGateway(
         }
     }
 
+    private fun activityForWindow(windowId: Int): String =
+        if (recoveredActivityBindingCurrent(windowId, windowGeneration)) activityClass() else ""
+
     private fun createWindowRef(root: AccessibilityNodeInfo, windowIdFallback: Int = -1): WindowRef? {
         displayContextTracker.snapshot()
         val packageName = safeString { root.packageName?.toString().orEmpty() }
         if (packageName.isBlank() || packageName != targetPackage()) return null
+        val windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: windowIdFallback
         return WindowRef(
             packageName = packageName,
-            activityClass = activityClass(),
+            activityClass = activityForWindow(windowId),
             generation = windowGeneration,
-            windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: windowIdFallback
+            windowId = windowId
         )
     }
 
@@ -999,6 +1080,8 @@ internal data class AndroidTargetWindowRoot(
 internal interface AndroidActiveWindowRootAccess {
     /** 仅同步操作当前回调中的输入框；允许 FOCUS / SET_TEXT，不提供触摸动作。 */
     fun performCurrentInputAction(node: AccessibilityNodeInfo, action: NodeAction, text: String? = null): Boolean
+    /** Only for a freshly verified chat target; the final platform call rechecks the task lease. */
+    fun performVerifiedChatInputAction(node: AccessibilityNodeInfo, action: NodeAction, text: String? = null, taskLease: TaskLease? = null): Boolean = false
     fun <T> withActiveTargetRoot(block: (AccessibilityNodeInfo, WindowRef) -> T): T?
     fun <T> withActiveWindowRoot(block: (AccessibilityNodeInfo) -> T): T?
     fun <T> withTargetWindowRoots(block: (List<AndroidTargetWindowRoot>) -> T): T?

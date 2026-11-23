@@ -12,7 +12,6 @@ import com.freedom.core.runtime.TaskExecutionController
 /** Routes normalized lifecycle and accessibility events into the AccountBrowse Android adapter. */
 internal class AccountBrowseModeRuntimeAdapter(
     private val workflow: () -> AndroidAccountBrowseWorkflow,
-    private val acknowledgeManualReview: (String) -> Unit = {},
     private val onReadinessStarting: (RunMode, String) -> Unit = { _, _ -> },
     private val onReadinessInvalidated: (String) -> Unit = {},
     private val taskCoordinator: TaskCoordinator,
@@ -34,9 +33,7 @@ internal class AccountBrowseModeRuntimeAdapter(
         }
         try {
             onReadinessStarting(mode, "AccountBrowse 已启动；等待目标应用正式就绪")
-            // A new run is an explicit user acknowledgement of a previously latched review hold.
-            acknowledgeManualReview("显式新建动态浏览运行已通过UI命令确认")
-            workflow().startAccountBrowseIfNeeded()
+            workflow().startIfIdle()
         } catch (error: Throwable) {
             releaseTaskOwnership("自动浏览启动失败")
             throw error
@@ -58,15 +55,21 @@ internal class AccountBrowseModeRuntimeAdapter(
             if (!ensureTaskOwnership("无障碍服务重连")) return
             awaitingServiceReconnect = false
             onReadinessStarting(mode, "AccountBrowse 服务重连；重新等待目标应用正式就绪")
-            workflow().startAccountBrowseIfNeeded()
+            workflow().restoreRecoveryAfterServiceReconnect()
+            workflow().startIfIdle()
         }
     }
 
     override fun onAccessibilityServiceDisconnected() {
         onReadinessInvalidated("无障碍服务断开；目标应用就绪状态失效")
         awaitingServiceReconnect = true
-        workflow().cancelScheduledStep()
-        workflow().cancelPageObservation()
+        try {
+            workflow().cancelScheduledStep()
+            workflow().cancelPageObservation()
+            workflow().suspendRecoveryForServiceDisconnect()
+        } finally {
+            releaseTaskOwnership("无障碍服务断开；撤销旧 UI 操作租约")
+        }
     }
 
     override fun onExternalRefresh() {
@@ -116,7 +119,12 @@ internal class AccountBrowseModeRuntimeAdapter(
     override fun onAccessibilityServiceInterrupted(reason: String) {
         onReadinessInvalidated("无障碍服务中断；目标应用就绪状态失效：$reason")
         awaitingServiceReconnect = true
-        workflow().pauseAccountBrowse(reason)
+        try {
+            workflow().pauseAccountBrowse(reason)
+            workflow().suspendRecoveryForServiceDisconnect()
+        } finally {
+            releaseTaskOwnership("无障碍服务中断；撤销旧 UI 操作租约")
+        }
     }
 
     override fun onServiceDestroyed() {

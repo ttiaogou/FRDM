@@ -30,11 +30,12 @@ class AiModelFailureDiagnosticsTest {
     private fun diagnostics(deepSeek: Boolean, factory: AiHttpConnectionFactory): AiModelCallDiagnostics {
         val provider = TransportBackedAiModelProvider("test", "configured-model", transport(deepSeek, factory), consent)
         val context = ConversationContext("contact", "conversation", request().conversation, 1, 0, 0, true)
-        val decision = AiReplyDecisionEngine(provider, consent).decide(AiReplyDecisionInput(context, true, requestId = "request-1"))
-        assertEquals("MODEL_CALL_FAILED", decision.reason)
-        assertEquals(AiReplyAction.HUMAN_REVIEW, decision.action)
-        assertNull(decision.draft)
-        return decision.callDiagnostics!!
+        val result = AiReplyDecisionEngine(provider, consent).decide(AiReplyDecisionInput(context, true, requestId = "request-1"))
+        assertTrue(result is AiReplyEvaluation.Execution)
+        val execution = result as AiReplyEvaluation.Execution
+        assertEquals(AiReplyExecutionStatus.MODEL_CALL_FAILED, execution.status)
+        assertEquals("MODEL_CALL_FAILED", execution.status.reasonCode)
+        return execution.callDiagnostics!!
     }
 
     @Test fun httpRejectionsRetainExactStatusAndExistingRetryClassificationForBothProviders() {
@@ -127,6 +128,49 @@ class AiModelFailureDiagnosticsTest {
     @Test fun emptyProviderOutputHasAnExplicitSafeCode() {
         val d = diagnostics(false) { FakeConnection(200, """{"choices":[{"message":{"content":""}}]}""") }
         assertEquals("EMPTY_MODEL_OUTPUT", d.safeCode)
+        assertEquals("BLANK", d.responseContentState)
+        assertEquals(true, d.retryable)
+        assertFalse(d.logFields().contains(privateText))
+    }
+
+    @Test fun deepSeekEmptyResponseRetainsStatusShapeFinishReasonAndTokenCounts() {
+        val response = """{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":31,"completion_tokens":0}}"""
+        val d = diagnostics(true) { FakeConnection(200, response) }
+        assertEquals("EMPTY_MODEL_OUTPUT", d.safeCode)
+        assertEquals(AiModelCallStage.RESPONSE_PARSE, d.stage)
+        assertEquals(200, d.httpStatus)
+        assertEquals("BLANK", d.responseContentState)
+        assertEquals("stop", d.responseFinishReason)
+        assertEquals(31, d.responseInputTokens)
+        assertEquals(0, d.responseOutputTokens)
+        assertEquals(true, d.retryable)
+        assertTrue(d.logFields().contains("finishReason=stop"))
+        assertFalse(d.logFields().contains(privateText))
+    }
+
+    @Test fun deepSeekMissingOrNullContentIsDiagnosedButInvalidTypeAndLengthDoNotRetry() {
+        for ((content, expected) in listOf(
+            "" to "ABSENT",
+            "\"content\":null," to "NULL",
+            "\"content\":{\"private\":\"$privateText\"}," to "NON_STRING"
+        )) {
+            val response = """{"choices":[{"message":{$content"role":"assistant"},"finish_reason":"stop"}]}"""
+            val d = diagnostics(true) { FakeConnection(200, response) }
+            assertEquals("EMPTY_MODEL_OUTPUT", d.safeCode)
+            assertEquals(expected, d.responseContentState)
+            assertEquals(expected != "NON_STRING", d.retryable)
+            assertFalse(d.logFields().contains(privateText))
+        }
+        val truncated = diagnostics(true) { FakeConnection(200, """{"choices":[{"message":{"content":""},"finish_reason":"length"}]}""") }
+        assertEquals(false, truncated.retryable)
+        assertEquals("length", truncated.responseFinishReason)
+    }
+
+    @Test fun unrecognizedProviderFinishReasonIsRedacted() {
+        val body = """{"choices":[{"message":{"content":""},"finish_reason":"$secret $privateText"}]}"""
+        val d = diagnostics(true) { FakeConnection(200, body) }
+        assertEquals("REDACTED", d.responseFinishReason)
+        assertFalse(d.logFields().contains(secret))
         assertFalse(d.logFields().contains(privateText))
     }
 
@@ -156,7 +200,7 @@ class AiModelFailureDiagnosticsTest {
                 override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult = error("must not verify")
             }, scheduler = object : TaskScheduler {
                 override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask = error("must not schedule input")
-            }, isAiReplyActive = { true }, isManualReviewRequired = { false }, onLog = { logs.add(it) },
+            }, isAiReplyActive = { true }, onLog = { logs.add(it) },
             createProvider = { TransportBackedAiModelProvider("test", "configured-model", transport(false) {
                 now += 234L
                 FakeConnection(401, "$secret $privateText")
@@ -171,12 +215,14 @@ class AiModelFailureDiagnosticsTest {
         assertTrue(log.contains("safeCode=HTTP_401_UNAUTHORIZED"))
         val requestId = log.substringAfter("requestId=").substringBefore("；")
         assertTrue(requestId.isNotBlank())
-        assertTrue(logs.single { it.startsWith("AI 模型决策详情：") }.contains("requestId=$requestId"))
+        val executionLog = logs.single { it.startsWith("AI 程序执行状态：") }
+        assertTrue(executionLog.contains("requestId=$requestId"))
+        assertTrue(executionLog.contains("executionState=MODEL_CALL_FAILED"))
+        assertFalse(logs.any { it.startsWith("AI 模型决策详情：") })
         assertFalse(logs.joinToString().contains("模型未提供详细解释"))
         assertFalse(logs.joinToString().contains(secret))
         assertFalse(logs.joinToString().contains(privateText))
         assertFalse(coordinator.isPending)
-        assertFalse(coordinator.isAwaitingUserSend)
     }
 
     private class FakeConnection(private val status: Int, private val body: String,

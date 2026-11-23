@@ -1,0 +1,8 @@
+# Extracted from user-supplied Freedom-运行日志-20261122-033243(1).txt
+# Device test on 2026-11-22, original times retained. No chat content or full node dump.
+03:31:57.130  recoveryType=recovery_event; outcome=CheckpointLoaded; unknownReason=PROCESS_RESTART_CHECKPOINT
+03:31:57.632  recoveryType=recovery_event; outcome=CheckpointLoaded; unknownReason=SERVICE_RECONNECT_CHECKPOINT
+03:31:58.811  统一页面恢复[RECOVERY_VERIFIED]：目标路由=AI_REPLY_PRIVATE_MESSAGES；双快照=true；UI操作权=true
+03:32:00.144  目标应用就绪状态[TRANSITION]：STARTING->STARTING；mode=AI_REPLY；package=com.immomo.momo；activity=UNKNOWN；windowId=116；pageGeneration=0；reason=当前 Activity 身份尚未确认
+03:32:00.159  自主手势派发拒绝[APP_NOT_READY]：status=STARTING；mode=AI_REPLY；windowId=116；reason=当前 Activity 身份尚未确认
+# Regressions: a verified business route does not establish Activity; no inference from the list tree.

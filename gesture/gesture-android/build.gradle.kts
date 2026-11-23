@@ -26,7 +26,7 @@ android {
 kotlin {
     sourceSets {
         getByName("main") {
-            kotlin.srcDir("../../app/src/main/java")
+            kotlin.srcDir("src/main/kotlin")
             kotlin.include(
                 "com/freedom/adapters/accessibility/android/AndroidGesturePathFactory.kt",
                 "com/freedom/adapters/accessibility/android/AndroidGestureVisualizer.kt",

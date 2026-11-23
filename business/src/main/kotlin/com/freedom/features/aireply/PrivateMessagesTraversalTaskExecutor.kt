@@ -1,0 +1,744 @@
+package com.freedom.features.aireply
+
+import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
+import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.aireply.ports.ChatPageKind
+import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+import com.freedom.features.aireply.ports.ChatUnreadStatus
+import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
+import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
+
+/**
+ * Owns the private-message list traversal state and pure list decisions.
+ *
+ * Page snapshots and operation results are supplied by AiReplyObservationRuntime; this component
+ * owns traversal progress, frozen unread identities, boundary evidence and candidate selection.
+ * Android access, scheduling and gesture dispatch remain outside this class.
+ */
+internal enum class SessionListTraversalPhase {
+    POSITIONING_AT_BOTTOM,
+    /** Search for the stable read-only suffix below the frozen unread rows. */
+    SEEKING_UNREAD_BOUNDARY,
+    SCANNING_BOTTOM_TO_TOP
+}
+
+/** 高层私聊会话流程状态。执行器持有状态，运行时仅负责调度外部副作用。 */
+internal enum class SessionManagerState {
+    STOPPED,
+    POSITIONING_SESSION_LIST_AT_TOP,
+    POSITIONING_SESSION_LIST_AT_BOTTOM,
+    SCANNING_SESSION_LIST_BOTTOM_TO_TOP,
+    WAITING_FOR_SESSION_LIST,
+    CAPTURING_SESSION_LIST,
+    OPENING_SESSION,
+    READING_SESSION,
+    RETURNING_TO_SESSION_LIST,
+    SCROLLING_SESSION_LIST,
+    WAITING_FOR_UNREAD,
+    COMPLETED,
+    PAUSED
+}
+
+internal data class PrivateMessagesUnreadEvidence(
+    val hasUnread: Boolean,
+    val hasUnknown: Boolean
+)
+
+internal enum class PrivateMessagesUnreadAdmissionDecision {
+    FIRST_SWIPE_REQUIRED,
+    UNKNOWN_BLOCKED,
+    NO_UNREAD,
+    CONTINUE_BOTTOM_POSITIONING,
+    WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+    UNREAD_BOUNDARY_CONFIRMED
+}
+
+internal enum class PrivateMessagesScrollObservationDecision {
+    NO_PENDING_SCROLL,
+    TOP_VIEWPORT_CHANGED,
+    TOP_NO_PROGRESS_RETRY,
+    TOP_BOUNDARY_CANDIDATE,
+    BOTTOM_NO_PROGRESS,
+    BOTTOM_BOUNDARY_CANDIDATE,
+    BOTTOM_VIEWPORT_CHANGED
+}
+
+private const val UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS = 2
+
+/** A complete, read-only decision packet for one fresh inbox snapshot. */
+internal data class PrivateMessagesListSnapshotEvaluation(
+    val snapshotAmbiguousKeys: Set<String>,
+    val newlyAmbiguousKeys: Set<String>,
+    val unreadAuditChanged: Boolean,
+    val wasWaitingForUnread: Boolean,
+    val visibleKeys: List<String>,
+    val scrollDecision: PrivateMessagesScrollObservationDecision,
+    val viewportPositionInvalidated: Boolean,
+    val candidatesEmpty: Boolean,
+    val unreadAdmissionDecision: PrivateMessagesUnreadAdmissionDecision?,
+    val explicitUnreadWhileWaiting: Boolean,
+    val nextCandidate: ChatListCandidateSnapshot?,
+    val structuralFingerprint: String
+)
+
+internal class PrivateMessagesTraversalTaskExecutor {
+    var checkpointRunGeneration: Long = 0L
+    var checkpointLastSuccessfulTaskId: String? = null
+    var checkpointNextCursorKey: String? = null
+    var checkpointTraversalDirection: String = "BOTTOM_TO_TOP"
+    fun checkpoint(): PrivateMessagesTraversalCheckpoint = PrivateMessagesTraversalCheckpoint(
+        attemptedSessionKeys = attemptedSessionKeys.toSet(),
+        lockedUnreadSessionKeys = lockedUnreadSessionKeys.toSet(),
+        ambiguousSessionIdentityKeys = ambiguousSessionIdentityKeys.toSet(),
+        lastStableVisibleKeys = lastStableSessionListVisibleKeys.orEmpty().toList(),
+        phase = phase.name,
+        atTop = atTop,
+        initialInboxPositionCheckCompleted = initialInboxPositionCheckCompleted,
+        initialInboxTopPositioningCompleted = initialInboxTopPositioningCompleted,
+        initialUnreadGateSwipeCompleted = initialUnreadGateSwipeCompleted,
+        lockedUnreadSetFinalized = lockedUnreadSetFinalized,
+        normalInboxHadUnread = normalInboxHadUnread,
+        normalInboxUnreadStateUnknown = normalInboxUnreadStateUnknown,
+        resumeSessionKey = resumeSessionKey,
+        resumeSessionName = resumeSessionName,
+        runGeneration = checkpointRunGeneration,
+        lastSuccessfulTaskId = checkpointLastSuccessfulTaskId,
+        nextCursorKey = checkpointNextCursorKey,
+        traversalDirection = checkpointTraversalDirection
+    )
+
+    fun restore(checkpoint: PrivateMessagesTraversalCheckpoint) {
+        // A checkpoint replaces the in-memory traversal cursor. It must not inherit a
+        // previous run's pending session, scroll baseline, or boundary evidence.
+        clearIdentityReturn()
+        clearCurrentSession()
+        headerMismatchRecordedForCurrentAttempt = false
+        sessionListStabilityRetryCount = 0
+        sessionActionCount = 0
+        noProgressScrollCount = 0
+        pendingScrollBaseline = null
+        pendingScrollToTop = false
+        cancelledScrollRecoveryCount = 0
+        unreadBoundarySignature = ""
+        unreadBoundaryStabilityCount = 0
+        capturedSessionListFingerprints.clear()
+        pendingBoundaryConfirmationKeys = null
+        pendingBoundaryConfirmationToTop = false
+        boundaryStabilityConfirmationCount = 0
+        lastUnreadAuditFingerprint = ""
+        attemptedSessionKeys.clear()
+        lockedUnreadSessionKeys.clear()
+        ambiguousSessionIdentityKeys.clear()
+        attemptedSessionKeys += checkpoint.attemptedSessionKeys
+        lockedUnreadSessionKeys += checkpoint.lockedUnreadSessionKeys
+        ambiguousSessionIdentityKeys += checkpoint.ambiguousSessionIdentityKeys
+        lastStableSessionListVisibleKeys = checkpoint.lastStableVisibleKeys.toList()
+        phase = runCatching { SessionListTraversalPhase.valueOf(checkpoint.phase) }
+            .getOrDefault(SessionListTraversalPhase.POSITIONING_AT_BOTTOM)
+        atTop = checkpoint.atTop
+        initialInboxPositionCheckCompleted = checkpoint.initialInboxPositionCheckCompleted
+        initialInboxTopPositioningCompleted = checkpoint.initialInboxTopPositioningCompleted
+        initialUnreadGateSwipeCompleted = checkpoint.initialUnreadGateSwipeCompleted
+        lockedUnreadSetFinalized = checkpoint.lockedUnreadSetFinalized
+        normalInboxHadUnread = checkpoint.normalInboxHadUnread
+        normalInboxUnreadStateUnknown = checkpoint.normalInboxUnreadStateUnknown
+        resumeSessionKey = checkpoint.resumeSessionKey
+        resumeSessionName = checkpoint.resumeSessionName
+        checkpointRunGeneration = checkpoint.runGeneration
+        checkpointLastSuccessfulTaskId = checkpoint.lastSuccessfulTaskId
+        checkpointNextCursorKey = checkpoint.nextCursorKey
+        checkpointTraversalDirection = checkpoint.traversalDirection
+    }
+
+    internal enum class RestoreReanchorStatus { REANCHORED, NOT_FOUND, AMBIGUOUS }
+    internal data class RestoreReanchorResult(
+        val status: RestoreReanchorStatus,
+        val matchedCandidate: ChatListCandidateSnapshot? = null
+    )
+
+    /**
+     * Re-anchors a restored traversal to the newest list snapshot. Coordinates and row indexes
+     * from the checkpoint are never reused. The last session identity is only a search hint;
+     * clicking still goes through the normal fresh-row validation path.
+     */
+    fun reanchorRestoredCheckpoint(snapshot: ChatPageSnapshot): RestoreReanchorResult {
+        val visible = visibleSessionKeys(snapshot)
+        if (visible.isNotEmpty()) lastStableSessionListVisibleKeys = visible
+
+        val candidates = snapshot.chatListCandidates.filter { candidate ->
+            candidate.selectionClass == "PRIVATE_CHAT" && ChatSessionManagementPolicy.isEligible(candidate)
+        }
+        val keyMatches = resumeSessionKey?.let { key ->
+            candidates.filter { ChatSessionManagementPolicy.stableSessionKey(it) == key }
+        }.orEmpty()
+        val titleKey = ChatSessionManagementPolicy.stableSessionKeyForTitle(resumeSessionName)
+        val titleMatches = if (titleKey.isBlank()) emptyList() else candidates.filter {
+            ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) == titleKey
+        }
+        val matches = when {
+            keyMatches.size == 1 -> keyMatches
+            titleMatches.size == 1 -> titleMatches
+            keyMatches.size > 1 || titleMatches.size > 1 -> return RestoreReanchorResult(RestoreReanchorStatus.AMBIGUOUS)
+            else -> return RestoreReanchorResult(RestoreReanchorStatus.NOT_FOUND)
+        }
+        val matched = matches.single()
+        val newKey = ChatSessionManagementPolicy.stableSessionKey(matched)
+        val oldKey = resumeSessionKey
+        if (oldKey != null && oldKey != newKey) {
+            if (attemptedSessionKeys.remove(oldKey)) attemptedSessionKeys += newKey
+            if (lockedUnreadSessionKeys.remove(oldKey)) lockedUnreadSessionKeys += newKey
+            if (ambiguousSessionIdentityKeys.remove(oldKey)) ambiguousSessionIdentityKeys += newKey
+        }
+        resumeSessionKey = newKey.takeIf(String::isNotBlank)
+        resumeSessionName = matched.nameText
+        return RestoreReanchorResult(RestoreReanchorStatus.REANCHORED, matched)
+    }
+
+    /** Keeps the most recent business identity as a recovery search hint. */
+    fun rememberRecoveryAnchor(candidate: ChatListCandidateSnapshot) {
+        resumeSessionKey = ChatSessionManagementPolicy.stableSessionKey(candidate).takeIf(String::isNotBlank)
+        resumeSessionName = candidate.nameText?.takeIf(String::isNotBlank)
+    }
+
+    /**
+     * Legacy compatibility predicate retained for callers/tests; recovery no longer treats a
+     * viewport mismatch as a fatal condition.
+     */
+    fun isRestoredViewportCompatible(snapshot: ChatPageSnapshot): Boolean {
+        val expected = lastStableSessionListVisibleKeys.orEmpty()
+        if (expected.isEmpty()) return true
+        val actual = visibleSessionKeys(snapshot)
+        if (actual.isEmpty()) return false
+        // Compatibility is deliberately stricter than re-anchoring: a row identity that is
+        // still visible at a different geometry must enter the re-anchor path instead of
+        // allowing the caller to reuse the old viewport/checkpoint coordinates.
+        return actual == expected
+    }
+    private data class IdentityReturn(
+        val original: ChatListCandidateSnapshot,
+        val oldKey: String,
+        val baseline: List<String>,
+        val generation: Long
+    )
+    internal enum class IdentityReturnStatus { WAITING, RESTORED, REJECTED }
+    internal data class IdentityReturnResult(val status: IdentityReturnStatus, val candidate: ChatListCandidateSnapshot? = null)
+    private var identityReturn: IdentityReturn? = null
+    var identityReturnRetries: Int = 0
+    val identityReturnPending: Boolean get() = identityReturn != null
+    val identityReturnOldKey: String? get() = identityReturn?.oldKey
+
+    /** 仅保留普通快照数据；不跨页面保留 Android 节点。 */
+    fun beginIdentityReturn(candidate: ChatListCandidateSnapshot, generation: Long): Boolean {
+        val baseline = lastStableSessionListVisibleKeys ?: return false
+        val key = ChatSessionManagementPolicy.stableSessionKey(candidate)
+        if (identityReturn != null || key.isBlank() || baseline.none { it.startsWith("$key@") }) return false
+        identityReturn = IdentityReturn(candidate, key, baseline.toList(), generation)
+        identityReturnRetries = 0
+        return true
+    }
+
+    fun reconcileIdentityReturn(snapshot: ChatPageSnapshot, generation: Long): IdentityReturnResult {
+        val pending = identityReturn ?: return IdentityReturnResult(IdentityReturnStatus.REJECTED)
+        val original = pending.original
+        if (pending.generation != generation || snapshot.pageKind != ChatPageKind.CHAT_LIST ||
+            snapshot.chatListExtractionTruncated || original.rowTarget.window.windowId < 0 ||
+            snapshot.packageName != original.rowTarget.window.packageName ||
+            snapshot.activityClass != original.rowTarget.window.activityClass ||
+            snapshot.windowGeneration <= 0L
+        ) return IdentityReturnResult(IdentityReturnStatus.REJECTED)
+        val titleKey = ChatSessionManagementPolicy.stableSessionKeyForTitle(original.nameText)
+        val matches = snapshot.chatListCandidates.filter {
+            ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) == titleKey &&
+                it.selectionClass == "PRIVATE_CHAT"
+        }
+        if (titleKey.isBlank() || matches.size != 1) return IdentityReturnResult(IdentityReturnStatus.REJECTED)
+        val row = matches.single()
+        if (row.contactIdentity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED ||
+            row.contactIdentity?.contactId.isNullOrBlank()
+        ) return IdentityReturnResult(IdentityReturnStatus.WAITING)
+        val newKey = ChatSessionManagementPolicy.stableSessionKey(row)
+        if (row.rowIndex != original.rowIndex || row.rowTarget.path != original.rowTarget.path ||
+            row.rowBounds != original.rowBounds || row.avatarBounds != original.avatarBounds ||
+            row.avatarPath != original.avatarPath || row.nameNodePath != original.nameNodePath ||
+            row.rowTarget.window.windowId != original.rowTarget.window.windowId ||
+            row.rowTarget.window.packageName != snapshot.packageName ||
+            row.rowTarget.window.activityClass != snapshot.activityClass ||
+            row.rowTarget.window.generation != snapshot.windowGeneration ||
+            row.unreadStatus != ChatUnreadStatus.UNREAD || !ChatSessionManagementPolicy.isEligible(row) ||
+            newKey.isBlank() || newKey == pending.oldKey ||
+            snapshot.chatListCandidates.count { ChatSessionManagementPolicy.isEligible(it) && ChatSessionManagementPolicy.stableSessionKey(it) == newKey } != 1 ||
+            pending.oldKey !in lockedUnreadSessionKeys || newKey in lockedUnreadSessionKeys ||
+            pending.oldKey in attemptedSessionKeys || newKey in attemptedSessionKeys ||
+            pending.oldKey in ambiguousSessionIdentityKeys || newKey in ambiguousSessionIdentityKeys
+        ) return IdentityReturnResult(IdentityReturnStatus.REJECTED)
+        val expected = pending.baseline.map { entry ->
+            if (entry.startsWith("${pending.oldKey}@")) newKey + entry.substring(pending.oldKey.length) else entry
+        }
+        if (expected != visibleSessionKeys(snapshot)) return IdentityReturnResult(IdentityReturnStatus.REJECTED)
+        lockedUnreadSessionKeys.remove(pending.oldKey)
+        lockedUnreadSessionKeys.add(newKey)
+        lastStableSessionListVisibleKeys = expected
+        identityReturn = null
+        return IdentityReturnResult(IdentityReturnStatus.RESTORED, row)
+    }
+
+    fun clearIdentityReturn() { identityReturn = null; identityReturnRetries = 0 }
+    /** 私聊流程和当前会话上下文由此执行器独占持有。 */
+    var executionState: SessionManagerState = SessionManagerState.STOPPED
+    var currentSessionKey: String? = null
+    var currentSessionName: String? = null
+    var currentSessionCandidate: ChatListCandidateSnapshot? = null
+    var currentSessionReadCaptured: Boolean = false
+    var currentSessionWindowKey: String? = null
+    val headerMismatchGuard = Any()
+    var headerMismatchRecordedForCurrentAttempt: Boolean = false
+
+    var phase: SessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+    var atTop: Boolean = false
+
+    var initialInboxPositionCheckCompleted: Boolean = false
+    /** True only after the startup list-top boundary has been independently confirmed. */
+    var initialInboxTopPositioningCompleted: Boolean = false
+    var initialUnreadGateSwipeCompleted: Boolean = false
+
+    val attemptedSessionKeys: MutableSet<String> = LinkedHashSet()
+    val ambiguousSessionIdentityKeys: MutableSet<String> = LinkedHashSet()
+    val lockedUnreadSessionKeys: MutableSet<String> = LinkedHashSet()
+    var lockedUnreadSetFinalized: Boolean = false
+    private var unreadBoundarySignature: String = ""
+    private var unreadBoundaryStabilityCount: Int = 0
+
+    var normalInboxHadUnread: Boolean = false
+    var normalInboxUnreadStateUnknown: Boolean = false
+    var resumeSessionKey: String? = null
+    var resumeSessionName: String? = null
+    var sessionListStabilityRetryCount: Int = 0
+    var sessionActionCount: Int = 0
+
+    var noProgressScrollCount: Int = 0
+    var pendingScrollBaseline: List<String>? = null
+    var pendingScrollToTop: Boolean = false
+    var lastStableSessionListVisibleKeys: List<String>? = null
+    var cancelledScrollRecoveryCount: Int = 0
+
+    val capturedSessionListFingerprints: MutableSet<String> = LinkedHashSet()
+    var pendingBoundaryConfirmationKeys: List<String>? = null
+    var pendingBoundaryConfirmationToTop: Boolean = false
+    var boundaryStabilityConfirmationCount: Int = 0
+    var lastUnreadAuditFingerprint: String = ""
+
+    /** Derives visible, complete row identities in the established bottom-to-top order. */
+    fun visibleSessionKeys(snapshot: ChatPageSnapshot): List<String> =
+        ChatSessionManagementPolicy.orderBottomToTop(
+            snapshot.chatListCandidates.filter {
+                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
+            }
+        ).mapNotNull { candidate ->
+            val identityKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
+            if (identityKey.isBlank()) return@mapNotNull null
+            // Stable identity plus physical row geometry measures real viewport movement.
+            // Row indexes are deliberately omitted because dynamic cards can shift row indexes.
+            "$identityKey@${candidate.rowBounds.left},${candidate.rowBounds.top}," +
+                "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
+        }
+
+    fun ambiguousIdentityKeys(candidates: List<ChatListCandidateSnapshot>): Set<String> =
+        ChatSessionManagementPolicy.ambiguousSessionIdentityKeys(candidates)
+
+    fun selectNextCandidate(
+        candidates: List<ChatListCandidateSnapshot>,
+        lockedIdentityKeys: Set<String> = emptySet()
+    ): ChatListCandidateSnapshot? {
+        val eligibleCandidates = if (lockedIdentityKeys.isNotEmpty()) {
+            candidates.filter { ChatSessionManagementPolicy.stableSessionKey(it) in lockedIdentityKeys }
+        } else {
+            candidates
+        }
+        return ChatSessionManagementPolicy.selectNext(
+            eligibleCandidates,
+            attemptedSessionKeys,
+            ambiguousSessionIdentityKeys
+        )
+    }
+
+    private fun resetUnreadBoundaryObservation() {
+        unreadBoundarySignature = ""
+        unreadBoundaryStabilityCount = 0
+    }
+
+    private fun buildUnreadBoundarySignature(snapshot: ChatPageSnapshot): String {
+        val rows = snapshot.chatListCandidates
+            .filter { ChatSessionManagementPolicy.isEligible(it) }
+            .filter {
+                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
+            }
+            .sortedWith(
+                compareBy<ChatListCandidateSnapshot> { it.rowBounds.top }
+                    .thenBy { it.rowBounds.bottom }
+            )
+        val keys = rows.mapNotNull { row ->
+            ChatSessionManagementPolicy.stableSessionKey(row)
+                .takeIf(String::isNotBlank)
+                ?.let { key ->
+                    "$key@${row.rowBounds.left},${row.rowBounds.top}," +
+                        "${row.rowBounds.right},${row.rowBounds.bottom}:${row.unreadStatus.name}"
+                }
+        }
+        return if (rows.isNotEmpty() && keys.size == rows.size) keys.joinToString("|") else ""
+    }
+
+    fun unreadEvidence(snapshot: ChatPageSnapshot): PrivateMessagesUnreadEvidence {
+        val eligible = snapshot.chatListCandidates.filter(ChatSessionManagementPolicy::isEligible)
+        return PrivateMessagesUnreadEvidence(
+            hasUnread = eligible.any { it.unreadStatus == ChatUnreadStatus.UNREAD },
+            hasUnknown = eligible.any { it.unreadStatus == ChatUnreadStatus.UNKNOWN }
+        )
+    }
+
+    /**
+     * Owns the policy sequence from a fresh inbox snapshot to the next traversal decision.
+     * The returned packet contains only decisions; screenshots, diagnostics, timers, navigation
+     * and gestures remain effects performed by AiReplyObservationRuntime.
+     */
+    fun evaluateListSnapshot(
+        snapshot: ChatPageSnapshot,
+        wasWaitingForUnread: Boolean,
+        maxNoProgressScrolls: Int,
+        allowExpectedSessionReturnViewportChange: Boolean = false
+    ): PrivateMessagesListSnapshotEvaluation {
+        val snapshotAmbiguousKeys = ambiguousIdentityKeys(snapshot.chatListCandidates)
+        val newlyAmbiguousKeys = snapshotAmbiguousKeys - ambiguousSessionIdentityKeys
+        if (snapshotAmbiguousKeys.isNotEmpty()) {
+            ambiguousSessionIdentityKeys += snapshotAmbiguousKeys
+        }
+
+        // Diagnostic counters are deliberately not part of stableKey(), so audit updates cannot
+        // invalidate a pending row or gesture operation.
+        val unreadAuditFingerprint =
+            "${executionState.name}:${snapshot.stableKey()}:" +
+                "${snapshot.chatListUnreadDiagnostics}:${snapshotAmbiguousKeys.sorted().joinToString(",")}"
+        val unreadAuditChanged = unreadAuditFingerprint != lastUnreadAuditFingerprint
+        if (unreadAuditChanged) lastUnreadAuditFingerprint = unreadAuditFingerprint
+
+        val hadPendingScrollBaseline = pendingScrollBaseline != null
+        val visibleKeys = visibleSessionKeys(snapshot)
+        val scrollDecision = consumePendingScrollObservation(
+            visibleKeys = visibleKeys,
+            maxNoProgressScrolls = maxNoProgressScrolls
+        )
+
+        val viewportPositionInvalidated = if (allowExpectedSessionReturnViewportChange) {
+            false
+        } else {
+            reconcileUnrequestedViewportChange(
+                hadPendingScrollBaseline = hadPendingScrollBaseline,
+                wasWaitingForUnread = wasWaitingForUnread,
+                visibleKeys = visibleKeys,
+                snapshot = snapshot
+            )
+        }
+        if (visibleKeys.isNotEmpty()) lastStableSessionListVisibleKeys = visibleKeys
+
+        val candidatesEmpty = snapshot.chatListCandidates.isEmpty()
+        if (!candidatesEmpty) sessionListStabilityRetryCount = 0
+
+        val unreadAdmissionDecision = if (initialInboxTopPositioningCompleted && !candidatesEmpty &&
+            (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM ||
+                phase == SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) && !wasWaitingForUnread
+        ) {
+            evaluateUnreadAdmission(snapshot)
+        } else {
+            null
+        }
+
+        val explicitUnreadWhileWaiting = wasWaitingForUnread && snapshot.chatListCandidates.any {
+            it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
+        }
+        if (explicitUnreadWhileWaiting) attemptedSessionKeys.clear()
+
+        val nextCandidate = if (initialInboxTopPositioningCompleted && !candidatesEmpty &&
+            (unreadAdmissionDecision == null ||
+                unreadAdmissionDecision == PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED)
+        ) {
+            selectNextCandidate(snapshot.chatListCandidates, lockedUnreadSessionKeys)
+        } else {
+            null
+        }
+
+        val structuralFingerprint = buildString {
+            append(snapshot.stableKey())
+            append("|visibleRows=")
+            append(visibleKeys.joinToString(","))
+        }
+
+        return PrivateMessagesListSnapshotEvaluation(
+            snapshotAmbiguousKeys = snapshotAmbiguousKeys,
+            newlyAmbiguousKeys = newlyAmbiguousKeys,
+            unreadAuditChanged = unreadAuditChanged,
+            wasWaitingForUnread = wasWaitingForUnread,
+            visibleKeys = visibleKeys,
+            scrollDecision = scrollDecision,
+            viewportPositionInvalidated = viewportPositionInvalidated,
+            candidatesEmpty = candidatesEmpty,
+            unreadAdmissionDecision = unreadAdmissionDecision,
+            explicitUnreadWhileWaiting = explicitUnreadWhileWaiting,
+            nextCandidate = nextCandidate,
+            structuralFingerprint = structuralFingerprint
+        )
+    }
+
+    /** Accumulates the same tri-state evidence as the original runtime list state machine. */
+    fun recordViewportUnreadEvidence(snapshot: ChatPageSnapshot, receivedGreetingsActive: Boolean) {
+        if (receivedGreetingsActive) return
+        val evidence = unreadEvidence(snapshot)
+        if (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM) {
+            if (!lockedUnreadSetFinalized) {
+                normalInboxHadUnread = evidence.hasUnread
+                normalInboxUnreadStateUnknown = evidence.hasUnknown
+            } else if (evidence.hasUnknown) {
+                normalInboxUnreadStateUnknown = true
+            }
+        } else {
+            if (evidence.hasUnread) normalInboxHadUnread = true
+            if (evidence.hasUnknown) normalInboxUnreadStateUnknown = true
+        }
+    }
+
+    /** Applies the unread gate after the mandatory first successful upward swipe. */
+    fun evaluateUnreadAdmission(snapshot: ChatPageSnapshot): PrivateMessagesUnreadAdmissionDecision {
+        if (!initialUnreadGateSwipeCompleted) {
+            return PrivateMessagesUnreadAdmissionDecision.FIRST_SWIPE_REQUIRED
+        }
+        val viewportUnread = snapshot.chatListCandidates.filter {
+            it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
+        }
+        if (!lockedUnreadSetFinalized) {
+            lockedUnreadSessionKeys += viewportUnread.map(ChatSessionManagementPolicy::stableSessionKey)
+            normalInboxHadUnread = lockedUnreadSessionKeys.isNotEmpty()
+        }
+        if (snapshot.chatListCandidates.any {
+                ChatSessionManagementPolicy.isEligible(it) && it.unreadStatus == ChatUnreadStatus.UNKNOWN
+            }
+        ) normalInboxUnreadStateUnknown = true
+
+        if (normalInboxUnreadStateUnknown) {
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
+        }
+        if (lockedUnreadSessionKeys.isEmpty()) {
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.NO_UNREAD
+        }
+
+        if (viewportUnread.isNotEmpty()) {
+            phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
+        }
+
+        if (phase != SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) {
+            phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
+            resetUnreadBoundaryObservation()
+        }
+
+        val eligibleRows = snapshot.chatListCandidates.filter(ChatSessionManagementPolicy::isEligible)
+        val visibleReadSuffix = eligibleRows.isNotEmpty() &&
+            eligibleRows.all { it.unreadStatus == ChatUnreadStatus.READ }
+        if (!visibleReadSuffix) {
+            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
+        }
+
+        val signature = buildUnreadBoundarySignature(snapshot)
+        if (signature.isBlank()) {
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
+        }
+        if (signature == unreadBoundarySignature) {
+            unreadBoundaryStabilityCount++
+        } else {
+            unreadBoundarySignature = signature
+            unreadBoundaryStabilityCount = 1
+        }
+        if (unreadBoundaryStabilityCount < UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS) {
+            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
+        }
+
+        phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        lockedUnreadSetFinalized = true
+        resetUnreadBoundaryObservation()
+        return PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED
+    }
+
+    /**
+     * Consumes one completed scroll against its fresh geometry-aware viewport baseline and returns
+     * the exact next boundary decision. Side effects (new gestures or delayed confirmation) stay
+     * in the runtime, while the traversal transition itself is owned here.
+     */
+    fun consumePendingScrollObservation(
+        visibleKeys: List<String>,
+        maxNoProgressScrolls: Int
+    ): PrivateMessagesScrollObservationDecision {
+        val baseline = pendingScrollBaseline
+            ?: return PrivateMessagesScrollObservationDecision.NO_PENDING_SCROLL
+        val positionChanged = visibleKeys != baseline
+        val wasScrollingToTop = pendingScrollToTop
+        pendingScrollBaseline = null
+        pendingScrollToTop = false
+
+        if (wasScrollingToTop) {
+            if (positionChanged) {
+                noProgressScrollCount = 0
+                atTop = false
+                return PrivateMessagesScrollObservationDecision.TOP_VIEWPORT_CHANGED
+            }
+            noProgressScrollCount += 1
+            return if (noProgressScrollCount < maxNoProgressScrolls) {
+                atTop = false
+                PrivateMessagesScrollObservationDecision.TOP_NO_PROGRESS_RETRY
+            } else {
+                PrivateMessagesScrollObservationDecision.TOP_BOUNDARY_CANDIDATE
+            }
+        }
+
+        if (!positionChanged) {
+            noProgressScrollCount += 1
+            return if (
+                (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM ||
+                    phase == SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) &&
+                noProgressScrollCount >= maxNoProgressScrolls
+            ) {
+                PrivateMessagesScrollObservationDecision.BOTTOM_BOUNDARY_CANDIDATE
+            } else {
+                PrivateMessagesScrollObservationDecision.BOTTOM_NO_PROGRESS
+            }
+        }
+
+        noProgressScrollCount = 0
+        atTop = false
+        return PrivateMessagesScrollObservationDecision.BOTTOM_VIEWPORT_CHANGED
+    }
+
+    /** Returns true when an unsolicited viewport change invalidated a bottom-to-top scan. */
+    fun reconcileUnrequestedViewportChange(
+        hadPendingScrollBaseline: Boolean,
+        wasWaitingForUnread: Boolean,
+        visibleKeys: List<String>,
+        snapshot: ChatPageSnapshot
+    ): Boolean {
+        if (hadPendingScrollBaseline || wasWaitingForUnread || visibleKeys.isEmpty() ||
+            phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        ) return false
+        val previousVisibleKeys = lastStableSessionListVisibleKeys ?: return false
+        if (previousVisibleKeys == visibleKeys) return false
+
+        phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+        atTop = false
+        noProgressScrollCount = 0
+        sessionListStabilityRetryCount = 0
+        val evidence = unreadEvidence(snapshot)
+        normalInboxHadUnread = evidence.hasUnread
+        normalInboxUnreadStateUnknown = evidence.hasUnknown
+        return true
+    }
+
+    /** Clears all traversal state at the AI Reply runtime reset boundary. */
+    fun reset() {
+        clearIdentityReturn()
+        executionState = SessionManagerState.STOPPED
+        clearCurrentSession()
+        headerMismatchRecordedForCurrentAttempt = false
+        phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+        atTop = false
+        initialInboxPositionCheckCompleted = false
+        initialInboxTopPositioningCompleted = false
+        initialUnreadGateSwipeCompleted = false
+        attemptedSessionKeys.clear()
+        ambiguousSessionIdentityKeys.clear()
+        lockedUnreadSessionKeys.clear()
+        lockedUnreadSetFinalized = false
+        resetUnreadBoundaryObservation()
+        normalInboxHadUnread = false
+        normalInboxUnreadStateUnknown = false
+        sessionListStabilityRetryCount = 0
+        sessionActionCount = 0
+        noProgressScrollCount = 0
+        pendingScrollBaseline = null
+        pendingScrollToTop = false
+        lastStableSessionListVisibleKeys = null
+        resumeSessionKey = null
+        resumeSessionName = null
+        cancelledScrollRecoveryCount = 0
+        capturedSessionListFingerprints.clear()
+        pendingBoundaryConfirmationKeys = null
+        pendingBoundaryConfirmationToTop = false
+        boundaryStabilityConfirmationCount = 0
+        lastUnreadAuditFingerprint = ""
+    }
+
+    /**
+     * Begins a new ordinary-inbox pass after the greetings branch returns to the inbox.
+     * The startup admission swipe is not replayed because the inbox context was already established.
+     */
+    fun resetForReturnedInbox() {
+        clearIdentityReturn()
+        executionState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
+        clearCurrentSession()
+        lockedUnreadSessionKeys.clear()
+        lockedUnreadSetFinalized = false
+        resetUnreadBoundaryObservation()
+        attemptedSessionKeys.clear()
+        initialInboxPositionCheckCompleted = true
+        phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+        atTop = false
+        noProgressScrollCount = 0
+        pendingScrollBaseline = null
+        pendingScrollToTop = false
+        lastStableSessionListVisibleKeys = null
+        resumeSessionKey = null
+        resumeSessionName = null
+        normalInboxHadUnread = false
+        normalInboxUnreadStateUnknown = false
+    }
+
+    /**
+     * Resumes the existing inbox traversal after the greetings branch returns.
+     * The viewport may have changed, but the admission decision, attempted identities and
+     * boundary memory remain valid; only the currently open conversation is no longer valid.
+     */
+    fun resumeAfterReturnedInbox() {
+        clearCurrentSession()
+        executionState = SessionManagerState.WAITING_FOR_SESSION_LIST
+        pendingScrollBaseline = null
+        pendingScrollToTop = false
+        lastStableSessionListVisibleKeys = null
+    }
+
+    fun clearCurrentSession() {
+        currentSessionKey = null
+        currentSessionName = null
+        currentSessionCandidate = null
+        currentSessionReadCaptured = false
+        currentSessionWindowKey = null
+    }
+
+    fun beginSession(
+        candidate: ChatListCandidateSnapshot,
+        sessionKey: String,
+        windowKey: String?
+    ) {
+        rememberRecoveryAnchor(candidate)
+        currentSessionKey = sessionKey
+        currentSessionName = candidate.nameText
+        currentSessionCandidate = candidate
+        currentSessionReadCaptured = false
+        currentSessionWindowKey = windowKey
+        synchronized(headerMismatchGuard) {
+            headerMismatchRecordedForCurrentAttempt = false
+        }
+    }
+
+    fun setSessionReadCaptured(captured: Boolean) {
+        currentSessionReadCaptured = captured
+    }
+
+}

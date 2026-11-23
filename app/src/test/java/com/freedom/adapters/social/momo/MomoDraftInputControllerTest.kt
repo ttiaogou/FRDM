@@ -1,6 +1,7 @@
 package com.freedom.adapters.social.momo
 
 import com.freedom.core.accessibility.api.*
+import com.freedom.core.runtime.*
 import com.freedom.features.aireply.ports.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -47,6 +48,94 @@ class MomoDraftInputControllerTest {
         assertEquals(ChatDraftInputStatus.INPUT_NOT_EMPTY, controller.writeDraft(target, "", "草稿").status)
         assertEquals("人工输入", field.text)
         assertEquals(0, field.writes)
+    }
+
+
+    @Test fun rejectedFocusNeverCallsSetText() {
+        val field = Field()
+        field.focused = false
+        val controller = MomoDraftInputController { operation -> operation(field) }
+        assertEquals(ChatDraftInputStatus.ACTION_REJECTED, controller.writeDraft(target, "", "草稿").status)
+        assertEquals("", field.text)
+        assertEquals(0, field.writes)
+    }
+
+    @Test fun permissionRevokedBetweenFocusAndWriteNeverMutatesComposer() {
+        val field = Field()
+        var authorized = true
+        val controller = MomoDraftInputController { operation ->
+            operation(object : MomoDraftInputController.Field {
+                override fun readText() = field.text
+                override fun focus(): Boolean {
+                    authorized = false
+                    return true
+                }
+                override fun setText(text: String): Boolean {
+                    if (!authorized) return false
+                    field.text = text
+                    return true
+                }
+            })
+        }
+        assertEquals(ChatDraftInputStatus.ACTION_REJECTED, controller.writeDraft(target, "", "草稿").status)
+        assertEquals("", field.text)
+    }
+
+
+    @Test fun validatedGreetingOwnerCanInputWithoutPrivateComposerScope() {
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val privateLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", 1L))
+        val greetingLease = requireNotNull(tasks.transfer(privateLease, "AI_REPLY_RECEIVED_GREETINGS"))
+        val gate = UiWriteAuthorization(tasks, { 1L }, { RunMode.AI_REPLY })
+        var liveChatMatches = true
+        val field = Field()
+        val controller = MomoDraftInputController { operation ->
+            operation(object : MomoDraftInputController.Field {
+                override fun readText() = field.text
+                override fun focus(): Boolean = liveChatMatches &&
+                    (gate.withBoundAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER, greetingLease) { true } ?: false)
+                override fun setText(text: String): Boolean {
+                    if (!liveChatMatches) return false
+                    return gate.withBoundAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER, greetingLease) {
+                        field.text = text
+                        true
+                    } ?: false
+                }
+            })
+        }
+        assertFalse(gate.permits(UiWriteScope.AI_COMPOSER))
+        assertEquals(ChatDraftInputStatus.WRITTEN, controller.writeDraft(target, "", "你好").status)
+        assertEquals("你好", field.text)
+        liveChatMatches = false
+        assertEquals(ChatDraftInputStatus.ACTION_REJECTED, controller.writeDraft(target, "你好", "你好呀").status)
+        assertEquals("你好", field.text)
+    }
+
+    @Test fun greetingCallbackCannotReuseLeaseAfterTaskSwitchDuringFocus() {
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val privateLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", 2L))
+        val greetingsLease = requireNotNull(tasks.transfer(privateLease, "AI_REPLY_RECEIVED_GREETINGS"))
+        val gate = UiWriteAuthorization(tasks, { 2L }, { RunMode.AI_REPLY })
+        val field = Field()
+        val controller = MomoDraftInputController { operation ->
+            operation(object : MomoDraftInputController.Field {
+                override fun readText() = field.text
+                override fun focus(): Boolean {
+                    val focused = gate.withBoundAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER, greetingsLease) {
+                        true
+                    } ?: false
+                    if (focused) tasks.transfer(greetingsLease, "AI_REPLY_PRIVATE_MESSAGES")
+                    return focused
+                }
+                override fun setText(text: String): Boolean =
+                    gate.withBoundAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER, greetingsLease) {
+                        field.text = text
+                        true
+                    } ?: false
+            })
+        }
+        assertEquals(ChatDraftInputStatus.ACTION_REJECTED, controller.writeDraft(target, "", "草稿").status)
+        assertEquals("", field.text)
     }
 
     @Test fun noCorrectComposerReturnsFailureWithoutWrite() {

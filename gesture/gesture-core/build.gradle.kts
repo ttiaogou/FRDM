@@ -7,14 +7,14 @@ kotlin {
     jvmToolchain(17)
     sourceSets {
         val main by getting {
-            kotlin.srcDir("../../app/src/main/java")
+            kotlin.srcDir("src/main/kotlin")
             kotlin.include(
                 "com/freedom/core/accessibility/gesture/GestureGeometryPolicy.kt",
                 "com/freedom/core/accessibility/gesture/GestureDynamicsPolicy.kt"
             )
         }
         val test by getting {
-            kotlin.srcDir("../../app/src/test/java")
+            kotlin.srcDir("src/test/kotlin")
             kotlin.include(
                 "com/freedom/core/accessibility/gesture/GestureGeometryPolicyTest.kt",
                 "com/freedom/core/accessibility/gesture/GestureDynamicsPolicyTest.kt"

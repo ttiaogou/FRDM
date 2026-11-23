@@ -789,7 +789,7 @@ class MainActivity : Activity() {
             if (entries.isEmpty()) return@reviewActionText
             AlertDialog.Builder(this@MainActivity)
                 .setTitle("删除全部 OCR 核验数据")
-                .setMessage("这会删除所有 OCR 核验样本、原始截图、裁剪图、标注图和人工审核标记，且无法恢复。")
+                .setMessage("这会删除所有 OCR 核验样本、原始截图、裁剪图和标注图，且无法恢复。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("全部删除") { _, _ ->
                     if (store.deleteAll()) {
@@ -1316,10 +1316,24 @@ class MainActivity : Activity() {
                 onBack = ::showConfigurationPage,
                 taskParameters = { taskLaunchParametersStore.read() },
                 onTaskParametersChanged = taskLaunchParametersStore::write,
+                onImageResourceImportRequested = ::launchImageResourceImport,
                 loadAiReplyPersonalization = aiReplyPersonalizationRepository::load,
                 onAiReplyPersonalizationChanged = aiReplyPersonalizationRepository::save
             ).create()
         )
+    }
+
+    private fun launchImageResourceImport() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "image/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        runCatching { startActivityForResult(intent, REQUEST_IMAGE_RESOURCE_IMPORT) }
+            .onFailure {
+                Toast.makeText(this, "无法打开图片选择器", Toast.LENGTH_SHORT).show()
+            }
     }
 
     /** Opens the locally encrypted model configuration and its cloud-processing consent. */
@@ -1342,8 +1356,6 @@ class MainActivity : Activity() {
                 initialConfiguration = configuration,
                 onBack = ::showConfigurationPage,
                 onSave = { value -> runCatching { aiModelConfigurationRepository.save(value) } },
-                onClearApiKey = { runCatching { aiModelConfigurationRepository.clearApiKey() } },
-                cloudConsentGranted = aiModelCloudConsent::isGranted,
                 onCloudConsentChanged = aiModelCloudConsent::setGranted
             ).create()
         )
@@ -2298,6 +2310,31 @@ class MainActivity : Activity() {
     @Deprecated("Use the document picker result to write the selected URI")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_IMAGE_RESOURCE_IMPORT) {
+            if (resultCode == RESULT_OK && data != null) {
+                val selectedUris = buildList {
+                    data.data?.let(::add)
+                    data.clipData?.let { clip ->
+                        for (index in 0 until clip.itemCount) clip.getItemAt(index).uri?.let(::add)
+                    }
+                }.distinct()
+                val grantedFlags = data.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION
+                selectedUris.forEach { uri ->
+                    if (grantedFlags != 0) {
+                        runCatching { contentResolver.takePersistableUriPermission(uri, grantedFlags) }
+                    }
+                }
+                if (selectedUris.isNotEmpty()) {
+                    val current = taskLaunchParametersStore.read()
+                    taskLaunchParametersStore.write(
+                        current.copy(imageResourceUris = (current.imageResourceUris + selectedUris.map { it.toString() }).distinct())
+                    )
+                    Toast.makeText(this, "已导入 ${selectedUris.size} 张图片", Toast.LENGTH_SHORT).show()
+                }
+            }
+            if (currentScreen == Screen.PERSONALIZATION) showPersonalizationPage()
+            return
+        }
         if (requestCode == REQUEST_OCR_IMAGE_TEST) {
             if (resultCode == RESULT_OK) {
                 val resultIntent = data
@@ -2407,6 +2444,7 @@ class MainActivity : Activity() {
         (value * resources.displayMetrics.density + 0.5f).toInt()
 
     companion object {
+        private const val REQUEST_IMAGE_RESOURCE_IMPORT = 2007
         private const val REQUEST_OCR_IMAGE_TEST = 2006
         private const val REQUEST_EXPORT_LOGS = 2002
         private const val REQUEST_NOTIFICATION_PERMISSION = 2003

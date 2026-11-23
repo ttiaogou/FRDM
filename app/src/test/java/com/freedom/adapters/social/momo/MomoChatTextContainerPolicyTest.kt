@@ -102,7 +102,7 @@ class MomoChatTextContainerPolicyTest {
                 override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask {
                     scheduled += task; return ScheduledTask { scheduled.remove(task) }
                 }
-            }, isAiReplyActive = { true }, isManualReviewRequired = { false }, onLog = { logs.add(it) },
+            }, isAiReplyActive = { true }, onLog = { logs.add(it) },
             createProvider = { object : AiModelProvider {
                 override fun generate(request: AiModelRequest): AiModelResult {
                     modelCalls++; this@Flow.request = request
@@ -129,7 +129,6 @@ class MomoChatTextContainerPolicyTest {
         assertEquals(1, flow.modelCalls)
         assertEquals(listOf("自己之前说的话", "对方的问题"), flow.request!!.conversation.map { it.content })
         assertEquals("测试回复内容", flow.text)
-        assertTrue(flow.coordinator.isAwaitingUserSend)
     }
 
     @Test fun noFormalTextProducesNoInventedReply() {

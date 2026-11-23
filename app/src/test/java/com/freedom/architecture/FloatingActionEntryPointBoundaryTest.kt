@@ -14,7 +14,7 @@ class FloatingActionEntryPointBoundaryTest {
                 ?: start
         }
 
-    private fun source(path: String): String = File(projectRoot, path).readText()
+    private fun source(path: String): String = TestSourceResolver.resolve(projectRoot, path).readText()
 
     @Test
     fun globalNodeCollectionHasExactlyOneEntryInTheFloatingMenu() {
@@ -173,7 +173,7 @@ class FloatingActionEntryPointBoundaryTest {
     }
 
     @Test
-    fun replyLimitAndImagePreReplyLiveInPersonalizationAndPersistAsPreferences() {
+    fun imageAndInterceptionThresholdsLiveInPersonalizationAndPersistAsPreferences() {
         val home = source("app/src/main/java/com/freedom/ui/config/ConfigurationHome.kt")
         val homeOnly = home
         val personalization = source("app/src/main/java/com/freedom/ui/config/PersonalizationScreen.kt")
@@ -183,12 +183,14 @@ class FloatingActionEntryPointBoundaryTest {
         assertFalse(homeOnly.contains("回复数量限制"))
         assertTrue(personalization.contains("messageInterceptionPreferenceRow()"))
         assertTrue(personalization.contains("图片预回复"))
-        assertTrue(model.contains("imagePreReplyLimit"))
-        assertTrue(store.contains("KEY_IMAGE_PRE_REPLY_ENABLED"))
-        assertTrue(store.contains("KEY_IMAGE_PRE_REPLY_LIMIT"))
-        assertTrue(store.contains("getInt(KEY_IMAGE_PRE_REPLY_LIMIT, 0)"))
-        assertTrue(store.contains("putInt(KEY_IMAGE_PRE_REPLY_LIMIT"))
-        assertTrue(personalization.contains("回复消息满足后执行/0不开启"))
+        assertTrue(model.contains("messageInterceptionThreshold"))
+        assertTrue(model.contains("imageSendThreshold"))
+        assertTrue(model.contains("imageResourceUris"))
+        assertTrue(store.contains("KEY_MESSAGE_INTERCEPTION_THRESHOLD"))
+        assertTrue(store.contains("KEY_IMAGE_SEND_THRESHOLD"))
+        assertTrue(store.contains("KEY_IMAGE_RESOURCE_URIS"))
+        assertTrue(personalization.contains("回复消息满足后发送图片 / 0 不开启"))
+        assertTrue(personalization.contains("onImageResourceImportRequested"))
     }
 
     @Test
@@ -208,8 +210,16 @@ class FloatingActionEntryPointBoundaryTest {
         assertTrue(configMenu.contains("AI 模型配置"))
         assertTrue(configMenu.contains("callbacks.onAiModelConfiguration()"))
         assertTrue(activity.contains("onAiModelConfiguration = ::showAiModelConfigurationPage"))
-        assertTrue(modelScreen.contains("cloudConsentPreferenceRow()"))
-        assertTrue(modelScreen.contains("cloudConsentGranted()"))
+        assertFalse(modelScreen.contains("private fun cloudConsentPreferenceRow()"))
+        assertFalse(modelScreen.contains("private fun confirmClearApiKey()"))
+        assertFalse(modelScreen.contains("private val cloudConsentGranted:"))
+        assertFalse(modelScreen.contains("private val onClearApiKey:"))
+        assertTrue(modelScreen.contains("onCloudConsentChanged(next.apiKey.isNotBlank())"))
+        assertTrue(modelScreen.contains("apiKey = input.text.toString().trim()"))
+        assertTrue(modelScreen.contains("onSave(next).fold("))
+        assertTrue(activity.contains("onCloudConsentChanged = aiModelCloudConsent::setGranted"))
+        assertFalse(activity.contains("onClearApiKey ="))
+        assertFalse(activity.contains("cloudConsentGranted ="))
         assertFalse(personalization.contains("modelConfigurationPreferenceRow()"))
         assertFalse(personalization.contains("cloudConsentPreferenceRow()"))
     }

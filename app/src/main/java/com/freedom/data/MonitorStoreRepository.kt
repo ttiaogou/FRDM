@@ -49,11 +49,6 @@ class MonitorStoreRepository(context: Context) : MonitorControlRepository {
 
     override fun setRunRequested(requested: Boolean) = MonitorStore.setRunning(appContext, requested)
 
-    override fun isInputManualReviewRequired(): Boolean = MonitorStore.isInputManualReviewRequired(appContext)
-
-    override fun setInputManualReviewRequired(required: Boolean) =
-        MonitorStore.setInputManualReviewRequired(appContext, required)
-
     override fun selectedMode(): RunMode? = RunModePreferences.selectedMode(appContext)
 
     override fun isKeepAliveEnabled(): Boolean = MonitorStore.isKeepAliveEnabled(appContext)

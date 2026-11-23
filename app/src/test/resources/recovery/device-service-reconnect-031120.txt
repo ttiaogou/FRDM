@@ -1,0 +1,9 @@
+# Extracted from user-supplied Freedom-运行日志 2(2).txt
+# Device test on 2026-11-22, original times retained. No chat content or full node dump.
+03:11:02.544  recoveryType=recovery_event; outcome=CheckpointLoaded; unknownReason=PROCESS_RESTART_CHECKPOINT
+03:11:02.632  recoveryType=recovery_event; outcome=CheckpointLoaded; unknownReason=SERVICE_RECONNECT_CHECKPOINT
+03:11:09.726  自主手势派发拒绝[APP_NOT_READY]：status=STARTING；mode=AI_REPLY；windowId=116；reason=目标应用已进入前台；启动保护静默观察中
+03:11:12.326  目标应用就绪状态[TRANSITION]：STARTING->READY；mode=AI_REPLY；package=com.immomo.momo；activity=com.immomo.momo.maintab.MaintabActivity；windowId=116
+03:11:12.434  AI 会话管理：列表滚动被系统取消
+03:11:12.700  AI 会话管理已暂停：滚动取消后页面复核失败
+# Out of scope for this Activity-evidence patch: cancelled gesture retry behaviour.

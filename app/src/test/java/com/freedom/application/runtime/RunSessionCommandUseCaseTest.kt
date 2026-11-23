@@ -12,14 +12,8 @@ class RunSessionCommandUseCaseTest {
         var requested = false
         var mode: RunMode? = null
         val writes = mutableListOf<String>()
-        var manualReviewRequired = false
 
         override fun isRunRequested() = requested
-        override fun isInputManualReviewRequired() = manualReviewRequired
-        override fun setInputManualReviewRequired(required: Boolean) {
-            manualReviewRequired = required
-            writes += "manual-review:$required"
-        }
         override fun activeMode() = mode
         override fun setActiveMode(mode: RunMode?) {
             this.mode = mode
@@ -37,19 +31,18 @@ class RunSessionCommandUseCaseTest {
         val state = FakeState()
         val commands = RunSessionCommandUseCase(state)
         assertTrue(commands.requestStart(RunMode.AI_REPLY))
-        assertEquals(listOf("manual-review:false", "mode:ai_reply", "running:true"), state.writes)
+        assertEquals(listOf("mode:ai_reply", "running:true"), state.writes)
         assertEquals(RunMode.AI_REPLY, state.mode)
     }
 
     @Test
-    fun requestStartWithoutModeCreatesManualObservationAndDoesNotClearAiReviewHold() {
-        val state = FakeState().apply { manualReviewRequired = true }
+    fun requestStartWithoutModeCreatesManualObservation() {
+        val state = FakeState()
         val commands = RunSessionCommandUseCase(state)
 
         assertTrue(commands.requestStart())
         assertTrue(state.requested)
         assertEquals(null, state.mode)
-        assertTrue(state.manualReviewRequired)
         assertEquals(listOf("mode:null", "running:true"), state.writes)
     }
 
@@ -58,12 +51,10 @@ class RunSessionCommandUseCaseTest {
         val state = FakeState().apply {
             requested = true
             mode = RunMode.ACCOUNT_BROWSE
-            manualReviewRequired = true
         }
         val commands = RunSessionCommandUseCase(state)
         assertFalse(commands.requestStart(RunMode.AI_REPLY))
         assertEquals(RunMode.ACCOUNT_BROWSE, state.mode)
-        assertTrue(state.manualReviewRequired)
         assertTrue(state.writes.isEmpty())
     }
 
@@ -72,12 +63,10 @@ class RunSessionCommandUseCaseTest {
         val state = FakeState().apply {
             requested = true
             mode = RunMode.ACCOUNT_BROWSE
-            manualReviewRequired = true
         }
         RunSessionCommandUseCase(state).requestStop()
         assertFalse(state.requested)
         assertEquals(null, state.mode)
         assertEquals(listOf("running:false"), state.writes)
-        assertTrue("Stopping does not acknowledge an input-origin review hold", state.manualReviewRequired)
     }
 }

@@ -5,6 +5,9 @@ import com.freedom.core.runtime.ModeRuntimePort
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.RunStateRepository
 import com.freedom.core.runtime.RuntimeLogSink
+import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.TaskExecutionController
+import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -16,13 +19,7 @@ class RunSessionCoordinatorTest {
         var requested = false
         var mode: RunMode? = null
         val writes = mutableListOf<String>()
-        var manualReviewRequired = false
         override fun isRunRequested() = requested
-        override fun isInputManualReviewRequired() = manualReviewRequired
-        override fun setInputManualReviewRequired(required: Boolean) {
-            manualReviewRequired = required
-            writes += "manual-review:$required"
-        }
         override fun activeMode() = mode
         override fun setActiveMode(mode: RunMode?) {
             this.mode = mode
@@ -160,11 +157,10 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
-    fun implicitRunRequestSynchronizationDoesNotClearInputReviewHold() {
+    fun implicitRunRequestSynchronizationKeepsActiveRuntime() {
         val state = FakeState().apply {
             requested = true
             mode = RunMode.AI_REPLY
-            manualReviewRequired = true
         }
         val ai = FakeRuntime(RunMode.AI_REPLY)
         val coordinator = RunSessionCoordinator(
@@ -175,7 +171,6 @@ class RunSessionCoordinatorTest {
 
         coordinator.synchronizeRunRequest()
 
-        assertTrue(state.manualReviewRequired)
         assertTrue(state.writes.isEmpty())
         assertEquals(listOf("start"), ai.calls)
     }
@@ -228,6 +223,97 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun sharedTaskLifecycleRevokesLeasesAcrossModeSwitchReconnectAndUserStop() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        val shared = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val session = RunSessionCoordinator(
+            state = state,
+            runtimes = mapOf(
+                RunMode.AI_REPLY to FakeRuntime(RunMode.AI_REPLY),
+                RunMode.ACCOUNT_BROWSE to FakeRuntime(RunMode.ACCOUNT_BROWSE)
+            ),
+            log = RuntimeLogSink { },
+            taskCoordinator = shared
+        )
+        val ai = TaskExecutionController(shared, session::currentRunGeneration)
+        val browse = TaskExecutionController(shared, session::currentRunGeneration)
+
+        assertTrue(session.synchronizeRunRequest())
+        ai.beginRun(session.currentRunGeneration())
+        assertTrue(ai.claim("AI_REPLY_PRIVATE_MESSAGES", "confirmed inbox"))
+        val old = requireNotNull(shared.currentLease())
+        assertTrue(ai.claim("AI_REPLY_RECEIVED_GREETINGS", "confirmed greeting page"))
+        assertFalse(ai.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertTrue(ai.owns("AI_REPLY_RECEIVED_GREETINGS"))
+        assertFalse(shared.release(old))
+
+        state.mode = RunMode.ACCOUNT_BROWSE
+        assertTrue(session.synchronizeRunRequest())
+        assertNull(shared.activeTaskId())
+        assertFalse(ai.owns("AI_REPLY_RECEIVED_GREETINGS"))
+        assertFalse(ai.release("AI_REPLY_RECEIVED_GREETINGS", "late AI stop"))
+        assertFalse(ai.claim("AI_REPLY_PRIVATE_MESSAGES", "late AI callback"))
+        browse.beginRun(session.currentRunGeneration())
+        assertTrue(browse.claim("ACCOUNT_BROWSE", "verified browser run"))
+        assertFalse(ai.claim("AI_REPLY_PRIVATE_MESSAGES", "other mode is active"))
+
+        val beforeDisconnect = requireNotNull(shared.currentLease())
+        session.onAccessibilityServiceDisconnected()
+        assertNull(shared.activeTaskId())
+        assertFalse(shared.isCurrent(beforeDisconnect))
+        assertFalse(browse.owns("ACCOUNT_BROWSE"))
+        assertFalse(browse.claim("ACCOUNT_BROWSE", "late queued event"))
+
+        session.onAccessibilityServiceConnected()
+        browse.beginRun(session.currentRunGeneration())
+        assertTrue(browse.claim("ACCOUNT_BROWSE", "reconnected validated run"))
+        assertTrue(browse.owns("ACCOUNT_BROWSE"))
+
+        session.stop("user stop")
+        assertNull(shared.activeTaskId())
+        assertFalse(browse.owns("ACCOUNT_BROWSE"))
+        assertFalse(browse.claim("ACCOUNT_BROWSE", "post-stop callback"))
+    }
+
+    @Test
+    fun resetInterruptionAndDestructionRevokeTaskSlotImmediately() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        val shared = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val session = RunSessionCoordinator(
+            state = state,
+            runtimes = mapOf(RunMode.AI_REPLY to FakeRuntime(RunMode.AI_REPLY)),
+            log = RuntimeLogSink { },
+            taskCoordinator = shared
+        )
+        val owner = TaskExecutionController(shared, session::currentRunGeneration)
+        session.synchronizeRunRequest()
+        owner.beginRun(session.currentRunGeneration())
+        assertTrue(owner.claim("AI_REPLY_PRIVATE_MESSAGES", "start"))
+
+        session.resetRuntime(RunMode.AI_REPLY, "activity invalidated")
+        assertNull(shared.activeTaskId())
+        assertFalse(owner.owns("AI_REPLY_PRIVATE_MESSAGES"))
+
+        owner.beginRun(session.currentRunGeneration())
+        assertTrue(owner.claim("AI_REPLY_PRIVATE_MESSAGES", "revalidated"))
+        session.onAccessibilityServiceInterrupted("connection lost")
+        assertNull(shared.activeTaskId())
+        assertFalse(owner.owns("AI_REPLY_PRIVATE_MESSAGES"))
+
+        owner.beginRun(session.currentRunGeneration())
+        assertTrue(owner.claim("AI_REPLY_PRIVATE_MESSAGES", "revalidated again"))
+        session.onServiceDestroyed()
+        assertNull(shared.activeTaskId())
+        assertFalse(owner.owns("AI_REPLY_PRIVATE_MESSAGES"))
+    }
+
+    @Test
     fun manualObservationRunAlsoReceivesItsOwnGeneration() {
         val state = FakeState().apply { requested = true }
         val coordinator = RunSessionCoordinator(state, emptyMap(), RuntimeLogSink { })
@@ -239,6 +325,187 @@ class RunSessionCoordinatorTest {
         coordinator.stop("manual_stop")
         assertEquals(2L, coordinator.currentRunGeneration())
         assertFalse(state.requested)
+    }
+
+
+    @Test
+    fun reconnectReusesPersistedRunIntentButRebindsOnlyServiceLifecycle() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val coordinator = RunSessionCoordinator(state, mapOf(RunMode.AI_REPLY to ai), RuntimeLogSink { })
+
+        coordinator.onAccessibilityServiceConnected()
+        assertEquals(listOf("start", "connected"), ai.calls)
+        assertEquals(1L, coordinator.currentRunGeneration())
+
+        coordinator.onAccessibilityServiceDisconnected()
+        assertEquals(2L, coordinator.currentRunGeneration())
+        assertEquals(listOf("start", "connected", "disconnected"), ai.calls)
+        assertTrue(state.requested)
+
+        coordinator.onAccessibilityServiceConnected()
+        assertEquals(listOf("start", "connected", "disconnected", "connected"), ai.calls)
+        assertEquals(2L, coordinator.currentRunGeneration())
+        assertEquals(1, ai.calls.count { it == "start" })
+        assertTrue(state.writes.isEmpty())
+    }
+
+    @Test
+    fun userStopBeforeServiceReconnectCannotRestartOldRuntime() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.ACCOUNT_BROWSE
+        }
+        val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
+        val coordinator = RunSessionCoordinator(state, mapOf(RunMode.ACCOUNT_BROWSE to browse), RuntimeLogSink { })
+
+        coordinator.onAccessibilityServiceConnected()
+        coordinator.onAccessibilityServiceDisconnected()
+        coordinator.stop("user_stopped")
+        coordinator.onAccessibilityServiceConnected()
+
+        assertEquals(1, browse.calls.count { it == "start" })
+        assertEquals(1, browse.calls.count { it == "connected" })
+        assertEquals(1, browse.calls.count { it == "disconnected" })
+        assertTrue(browse.calls.any { it == "stop:user_stopped" })
+        assertFalse(state.requested)
+        assertNull(coordinator.resolveActiveModeForRestore())
+    }
+
+
+    @Test
+    fun disconnectedRunRevokesOldTaskExecutionAndReconnectCanClaimNewGeneration() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.ACCOUNT_BROWSE
+        }
+        val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
+        val session = RunSessionCoordinator(
+            state,
+            mapOf(RunMode.ACCOUNT_BROWSE to browse),
+            RuntimeLogSink { }
+        )
+        val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val execution = TaskExecutionController(coordinator, session::currentRunGeneration)
+
+        session.onAccessibilityServiceConnected()
+        execution.beginRun(session.currentRunGeneration())
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "connected"))
+        assertTrue(execution.owns("ACCOUNT_BROWSE"))
+
+        session.onAccessibilityServiceDisconnected()
+        assertFalse(execution.owns("ACCOUNT_BROWSE"))
+        assertFalse(execution.claim("ACCOUNT_BROWSE", "disconnected old callback"))
+
+        session.onAccessibilityServiceConnected()
+        execution.beginRun(session.currentRunGeneration())
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "reconnected"))
+        assertTrue(execution.owns("ACCOUNT_BROWSE"))
+        assertEquals(session.currentRunGeneration(), coordinator.currentLease()?.runGeneration)
+    }
+
+    @Test
+    fun recreatedServiceUsesProcessGenerationAndCanClaimReleasedAiTaskSlot() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        // The Application root and its UI lease coordinators survive a Service recreation.
+        val processClock = RunGenerationClock()
+        val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val originalRuntime = FakeRuntime(RunMode.AI_REPLY)
+        val originalSession = RunSessionCoordinator(
+            state, mapOf(RunMode.AI_REPLY to originalRuntime),
+            RuntimeLogSink { }, processClock
+        )
+        val oldExecution = TaskExecutionController(taskCoordinator, originalSession::currentRunGeneration)
+
+        originalSession.onAccessibilityServiceConnected()
+        oldExecution.beginRun(originalSession.currentRunGeneration())
+        assertTrue(oldExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "original service"))
+        val oldLease = requireNotNull(taskCoordinator.currentLease())
+        val oldGeneration = originalSession.currentRunGeneration()
+
+        originalSession.onAccessibilityServiceDisconnected()
+        assertFalse(oldExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertFalse(oldExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "old disconnected callback"))
+        oldExecution.releaseCurrent("service cleanup")
+        originalSession.onServiceDestroyed()
+        assertNull(taskCoordinator.activeTaskId())
+
+        // A fresh Service owns a fresh RunSessionCoordinator but not a fresh TaskCoordinator.
+        val recreatedRuntime = FakeRuntime(RunMode.AI_REPLY)
+        val recreatedSession = RunSessionCoordinator(
+            state, mapOf(RunMode.AI_REPLY to recreatedRuntime),
+            RuntimeLogSink { }, processClock
+        )
+        recreatedSession.resetRuntime(RunMode.ACCOUNT_BROWSE, "AI mode restore")
+        recreatedSession.onAccessibilityServiceConnected()
+        val newGeneration = recreatedSession.currentRunGeneration()
+        assertTrue(newGeneration > oldGeneration)
+
+        val newExecution = TaskExecutionController(taskCoordinator, recreatedSession::currentRunGeneration)
+        newExecution.beginRun(newGeneration)
+        assertTrue(newExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "service reconnect"))
+        assertTrue(newExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertEquals(newGeneration, taskCoordinator.currentLease()?.runGeneration)
+
+        // Stale capabilities still cannot alter the new run, even when the old owner is the same.
+        assertFalse(taskCoordinator.isCurrent(oldLease))
+        assertFalse(taskCoordinator.release(oldLease))
+        assertFalse(oldExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "late callback after recreation"))
+        assertNull(taskCoordinator.tryAcquire("AI_REPLY_RECEIVED_GREETINGS", oldGeneration))
+        assertTrue(newExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+        assertEquals(listOf("start", "connected"), recreatedRuntime.calls)
+    }
+
+    @Test
+    fun repeatedServiceRecreationsKeepUiLeaseEpochMonotonicAcrossThreeConnections() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.AI_REPLY
+        }
+        val processClock = RunGenerationClock()
+        val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var previousRunGeneration = -1L
+
+        repeat(3) { reconnect ->
+            val runtime = FakeRuntime(RunMode.AI_REPLY)
+            val serviceSession = RunSessionCoordinator(
+                state, mapOf(RunMode.AI_REPLY to runtime), RuntimeLogSink { }, processClock
+            )
+            serviceSession.resetRuntime(RunMode.ACCOUNT_BROWSE, "AI mode reconnect")
+            serviceSession.onAccessibilityServiceConnected()
+
+            val generation = serviceSession.currentRunGeneration()
+            assertTrue("Service $reconnect must advance the process clock", generation > previousRunGeneration)
+            val taskExecution = TaskExecutionController(taskCoordinator, serviceSession::currentRunGeneration)
+            taskExecution.beginRun(generation)
+            assertTrue(taskExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "service reconnect $reconnect"))
+            assertTrue(taskExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+            val ownedLease = requireNotNull(taskCoordinator.currentLease())
+            if (previousRunGeneration >= 0L) {
+                assertNull(taskCoordinator.tryAcquire("AI_REPLY_RECEIVED_GREETINGS", previousRunGeneration))
+            }
+
+            serviceSession.onAccessibilityServiceDisconnected()
+            assertFalse(taskExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+            assertFalse(taskExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "disconnected callback"))
+            taskExecution.releaseCurrent("service disconnected")
+            serviceSession.onServiceDestroyed()
+
+            assertFalse(taskCoordinator.isCurrent(ownedLease))
+            assertFalse(taskCoordinator.release(ownedLease))
+            assertNull(taskCoordinator.activeTaskId())
+            assertEquals(listOf("start", "connected", "disconnected"), runtime.calls)
+            previousRunGeneration = serviceSession.currentRunGeneration()
+        }
+
+        assertTrue("Reconnect must preserve persisted run intent", state.requested)
+        assertTrue(state.writes.isEmpty())
     }
 
     @Test

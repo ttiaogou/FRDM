@@ -48,6 +48,7 @@ import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatPageNodeEvidence
 import com.freedom.features.aireply.ports.ChatPagePort
+import com.freedom.features.aireply.ports.MessageWorkAreaNavigationOutcome
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
 import com.freedom.features.aireply.ports.ChatDraftInputPort
@@ -98,7 +99,11 @@ internal class MomoSocialAdapter(
     private val ocrReviewRepository: OcrReviewRepository,
     private val sampleArchivePort: SessionSampleArchivePort,
     /** Registers the imminent profile-to-chat return in the unified navigation provenance layer. */
-    private val registerSelfNavigation: (String) -> Unit = {}
+    private val registerSelfNavigation: (String) -> Unit = {},
+    /** The AI task lease must still be current when a send gesture is admitted. */
+    private val isAiReplyUiOperationOwned: () -> Boolean = { true },
+    /** Exact lease captured at model admission; task handoff revokes old async callbacks. */
+    private val isBoundAiReplyUiOperationOwned: (com.freedom.core.runtime.TaskLease?) -> Boolean = { true }
 ) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort,
     ChatDraftSendPort {
 
@@ -3626,6 +3631,23 @@ internal class MomoSocialAdapter(
         return accepted
     }
 
+    override fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean {
+        if (snapshot.packageName != targetPackage ||
+            snapshot.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
+            snapshot.pageKind != ChatPageKind.NON_CHAT ||
+            sayHiSelectedGreeting == null ||
+            sayHiReadOnlyStage !in setOf(
+                SayHiReadOnlyStage.AVATAR_TAP_PENDING,
+                SayHiReadOnlyStage.WAITING_PROFILE,
+                SayHiReadOnlyStage.PROFILE_SCROLL_PENDING,
+                SayHiReadOnlyStage.PROFILE_BACK_PENDING
+            )
+        ) return false
+        // Existing five-anchor profile proof plus live-window validity. Do not infer the
+        // destination from the Activity event or an already-consumed gesture callback.
+        return isSayHiProfileSurfacePresent()
+    }
+
     override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus {
         val currentActivity = activityClass()
         if (receivedGreetingsEntrySearchActive || receivedGreetingsEntrySearchGestureInFlight) {
@@ -4359,7 +4381,11 @@ internal class MomoSocialAdapter(
      */
     override fun supportsVerifiedMessageWorkAreaNavigation(): Boolean = true
 
-    override fun ensureMessageWorkArea(): Boolean {
+    override fun ensureMessageWorkArea(): Boolean = ensureMessageWorkArea { }
+
+    override fun ensureMessageWorkArea(
+        onGestureOutcome: (MessageWorkAreaNavigationOutcome) -> Unit
+    ): Boolean {
         fun captureSnapshot(
             expectedWindow: WindowRef? = null,
             expectedWindowId: Int? = null
@@ -4456,6 +4482,13 @@ internal class MomoSocialAdapter(
             executionContext = executionContext
         )
         val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
+            onGestureOutcome(
+                when (result.status) {
+                    GestureExecutionStatus.COMPLETED -> MessageWorkAreaNavigationOutcome.COMPLETED
+                    GestureExecutionStatus.DEFERRED -> MessageWorkAreaNavigationOutcome.DEFERRED_NOT_DISPATCHED
+                    else -> MessageWorkAreaNavigationOutcome.UNCONFIRMED
+                }
+            )
             onLog(
                 if (result.status == GestureExecutionStatus.COMPLETED) {
                     "消息工作区域入口：消息标签手势完成；等待新鲜页面指纹确认"
@@ -4476,31 +4509,74 @@ internal class MomoSocialAdapter(
         return true
     }
 
-    private val draftInputController by lazy(LazyThreadSafetyMode.NONE) {
-        MomoDraftInputController { operation ->
-            withCurrentDraftInput { node ->
-                operation(object : MomoDraftInputController.Field {
-                    override fun readText(): String = draftInputText(node)
-                    override fun focus(): Boolean = rootAccess.performCurrentInputAction(node, NodeAction.FOCUS)
-                    override fun setText(text: String): Boolean =
-                        rootAccess.performCurrentInputAction(node, NodeAction.SET_TEXT, text)
-                })
-            }
+    private fun draftInputController(target: ChatDraftInputTarget) = MomoDraftInputController { operation ->
+        withCurrentDraftInput { node ->
+            operation(object : MomoDraftInputController.Field {
+                override fun readText(): String = draftInputText(node)
+
+                // Recheck the exact window, title, task lease and run generation before EVERY
+                // mutation, including after focusing rebuilds the composer node.
+                override fun focus(): Boolean =
+                    isCurrentDraftTarget(target) && isAiReplyUiOperationOwned() &&
+                        isBoundAiReplyUiOperationOwned(target.taskLease) &&
+                        rootAccess.performVerifiedChatInputAction(node, NodeAction.FOCUS, taskLease = target.taskLease)
+
+                override fun setText(text: String): Boolean =
+                    isCurrentDraftTarget(target) && isAiReplyUiOperationOwned() &&
+                        isBoundAiReplyUiOperationOwned(target.taskLease) &&
+                        rootAccess.performVerifiedChatInputAction(node, NodeAction.SET_TEXT, text, target.taskLease)
+            })
         }
     }
 
-    override fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult =
-        draftInputController.writeDraft(target, expectedText, text)
+    override fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult {
+        if (!isCurrentDraftTarget(target)) {
+            return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_CONTEXT_CHANGED")
+        }
+        return draftInputController(target).writeDraft(target, expectedText, text)
+    }
 
-    override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult =
-        draftInputController.verifyDraft(target, text)
+    override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult {
+        if (!isCurrentDraftTarget(target)) {
+            return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_CONTEXT_CHANGED")
+        }
+        return draftInputController(target).verifyDraft(target, text)
+    }
+
+    /** Stage-one gate: the live root must still be the window captured for this chat. */
+    private fun isCurrentDraftTarget(target: ChatDraftInputTarget): Boolean {
+        if (target.packageName != targetPackage || activityClass() != target.activityClass) return false
+        return rootAccess.withActiveTargetRoot { root, window ->
+            if (window != target.nodeTarget.window) return@withActiveTargetRoot false
+            val titleNodes = root.findAccessibilityNodeInfosByViewId(MomoChatPageContract.CHAT_TITLE_VIEW_ID).orEmpty()
+            try {
+                val currentTitle = titleNodes.firstOrNull { it.isVisibleToUser }
+                    ?.let { it.text?.toString().orEmpty().ifBlank { it.contentDescription?.toString().orEmpty() } }
+                    ?.trim()
+                    .orEmpty()
+                val expectedTitle = target.expectedChatTitle?.trim().orEmpty()
+                expectedTitle.isNotBlank() && normalizeIdentityDisplayName(currentTitle) ==
+                    normalizeIdentityDisplayName(expectedTitle)
+            } finally {
+                titleNodes.forEach { node -> runCatching { node.recycle() } }
+            }
+        } ?: false
+    }
 
     override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+        if (!isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease)) {
+            return ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "TASK_OWNERSHIP_LOST")
+        }
+        if (!isCurrentDraftTarget(target)) {
+            return ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_IDENTITY_CONFLICT")
+        }
         if (target.packageName != targetPackage || activityClass() != target.activityClass) {
             return ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_CONTEXT_CHANGED")
         }
         return try {
-            rootAccess.withActiveWindowRoot { root ->
+            // Use the target application's root so an auxiliary dialog/card window does not
+            // replace the chat controls used by this already-validated send operation.
+            rootAccess.withActiveTargetRoot { root, _ ->
                 val inputs = root.findAccessibilityNodeInfosByViewId(MomoChatPageContract.CHAT_COMPOSER_VIEW_ID).orEmpty()
                 val writableInputs = inputs.filter { node ->
                     node.viewIdResourceName == MomoChatPageContract.CHAT_COMPOSER_VIEW_ID &&
@@ -4508,56 +4584,91 @@ internal class MomoSocialAdapter(
                 }
                 if (writableInputs.size != 1) {
                     inputs.forEach { node -> runCatching { node.recycle() } }
-                    return@withActiveWindowRoot ChatDraftInputResult(
+                    return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "INPUT_IDENTITY_CHANGED"
                     )
                 }
                 val input = writableInputs.single()
                 val inputText = draftInputText(input)
                 if (inputText != expectedText) {
+                    val state = MomoSendControlEligibility.observeComposer(
+                        inputText, expectedText, input.isShowingHintText, eligibleButtonCount = 0
+                    )
+                    onLog("AI 输入状态观察：state=${state.name}；inputMatched=false；不覆盖当前输入")
                     inputs.forEach { node -> runCatching { node.recycle() } }
-                    return@withActiveWindowRoot ChatDraftInputResult(
+                    return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "DRAFT_CHANGED_BEFORE_SEND"
                     )
                 }
-                val sendNodes = SEND_CONTROL_VIEW_ID_SUFFIXES.flatMap { suffix ->
+                // Momo displays message_btn_sendtext only when the composer contains text.
+                // Absence is not proof of an empty composer: the verified input above is authoritative.
+                val sendCandidates = SEND_CONTROL_VIEW_ID_SUFFIXES.flatMap { suffix ->
                     root.findAccessibilityNodeInfosByViewId("$targetPackage:id/$suffix").orEmpty()
-                }.distinctBy { node ->
-                    "${node.viewIdResourceName}|${node.hashCode()}"
-                }.filter { node ->
-                    val label = (node.text?.toString().orEmpty() + " " + node.contentDescription?.toString().orEmpty()).lowercase()
-                    node.isVisibleToUser && node.isEnabled && node.isClickable &&
-                        (label.contains("发送") || label.contains("send"))
                 }
-                inputs.forEach { node -> runCatching { node.recycle() } }
-                if (sendNodes.isEmpty()) {
-                    sendNodes.forEach { node -> runCatching { node.recycle() } }
-                    return@withActiveWindowRoot ChatDraftInputResult(
-                        ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_FOUND"
+                val composerParent = input.parent
+                val bounds = try {
+                    val sendNodes = try {
+                        sendCandidates.distinctBy { node ->
+                            "${node.viewIdResourceName}|${node.hashCode()}"
+                        }.filter { node ->
+                            val parent = if (node.viewIdResourceName == MomoSendControlEligibility.TEXT_SEND_VIEW_ID) {
+                                node.parent
+                            } else null
+                            try {
+                                val sharesEditorParent = parent != null && composerParent != null &&
+                                    parent == composerParent &&
+                                    parent.viewIdResourceName == MomoSendControlEligibility.EDITOR_LAYOUT_VIEW_ID
+                                val label = node.text?.toString().orEmpty() + " " +
+                                    node.contentDescription?.toString().orEmpty()
+                                MomoSendControlEligibility.accepts(
+                                    viewId = node.viewIdResourceName,
+                                    className = node.className?.toString(),
+                                    label = label,
+                                    visible = node.isVisibleToUser,
+                                    enabled = node.isEnabled,
+                                    clickable = node.isClickable,
+                                    sharesEditorParent = sharesEditorParent
+                                )
+                            } finally {
+                                runCatching { parent?.recycle() }
+                            }
+                        }
+                    } finally {
+                        runCatching { composerParent?.recycle() }
+                    }
+                    val observedState = MomoSendControlEligibility.observeComposer(
+                        inputText, expectedText, input.isShowingHintText, sendNodes.size
                     )
+                    onLog("AI 输入状态观察：state=${observedState.name}；inputMatched=true；" +
+                        "validSendControls=${sendNodes.size}；不记录输入正文")
+                    if (sendNodes.isEmpty()) {
+                        return@withActiveTargetRoot ChatDraftInputResult(
+                            ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_READY"
+                        )
+                    }
+                    if (sendNodes.size != 1) {
+                        return@withActiveTargetRoot ChatDraftInputResult(
+                            ChatDraftInputStatus.SEND_CONTROL_AMBIGUOUS, "SEND_CONTROL_AMBIGUOUS"
+                        )
+                    }
+                    val rect = Rect()
+                    sendNodes.single().getBoundsInScreen(rect)
+                    rect.toScreenRect()
+                } finally {
+                    inputs.forEach { node -> runCatching { node.recycle() } }
+                    sendCandidates.forEach { node -> runCatching { node.recycle() } }
                 }
-                if (sendNodes.size != 1) {
-                    sendNodes.forEach { node -> runCatching { node.recycle() } }
-                    return@withActiveWindowRoot ChatDraftInputResult(
-                        ChatDraftInputStatus.SEND_CONTROL_AMBIGUOUS, "SEND_CONTROL_AMBIGUOUS"
-                    )
-                }
-                val send = sendNodes.single()
-                val rect = Rect()
-                send.getBoundsInScreen(rect)
-                val bounds = rect.toScreenRect()
-                send.recycle()
                 if (bounds.isEmpty) {
-                    return@withActiveWindowRoot ChatDraftInputResult(
+                    return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_BOUNDS_INVALID"
                     )
                 }
                 val executionContext = gesturePolicy.captureContext(target.nodeTarget.window)
-                    ?: return@withActiveWindowRoot ChatDraftInputResult(
+                    ?: return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_WINDOW_NOT_CURRENT"
                     )
                 if (executionContext.targetWindow != target.nodeTarget.window) {
-                    return@withActiveWindowRoot ChatDraftInputResult(
+                    return@withActiveTargetRoot ChatDraftInputResult(
                         ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "CHAT_WINDOW_GENERATION_CHANGED"
                     )
                 }
@@ -4572,6 +4683,11 @@ internal class MomoSocialAdapter(
                     description = "Tap verified Momo send control after draft revalidation",
                     executionContext = executionContext
                 )
+                if (!isBoundAiReplyUiOperationOwned(target.taskLease)) {
+                    return@withActiveTargetRoot ChatDraftInputResult(
+                        ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "TASK_OWNERSHIP_LOST"
+                    )
+                }
                 val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
                     onLog("AI 发送手势回调：status=${result.status}; reason=${result.reason}")
                 })
@@ -4734,15 +4850,29 @@ internal class MomoSocialAdapter(
             )
             chatListExtraction.candidates.zip(identities).forEachIndexed { index, (candidate, identity) ->
                 candidate.contactIdentity = identity
+                val verificationResult = classifyMomoIdentityVerification(
+                    confidence = identity.confidence,
+                    contactId = identity.contactId
+                )
                 if (index != pendingIdentityMatchIndex && cachedPlatformIds[index] != null &&
-                    identity.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                    verificationResult != MomoIdentityVerificationResult.IDENTITY_VERIFIED
                 ) {
                     createInboxIdentityAnchor(candidate)?.opaqueKey()?.let { key ->
                         synchronized(inboxIdentityCaptureLock) {
                             verifiedInboxIdentityByAnchor.remove(key)
-                            failedInboxIdentityCaptureKeys += key
+                            if (verificationResult.isTerminalFailure()) {
+                                failedInboxIdentityCaptureKeys += key
+                                onIdentityVerificationLog(verificationResult, "EXPLICIT_IDENTITY_CONFLICT", true, "SKIP_CURRENT_TARGET", key)
+                            } else {
+                                failedInboxIdentityCaptureKeys.remove(key)
+                                onIdentityVerificationLog(verificationResult, "PROFILE_ID_NOT_CONFIRMED", false, "RETRY_ON_NEXT_OBSERVATION", key)
+                            }
                         }
                     }
+                    onLog(
+                        "AI 联系人身份验证分类：result=${verificationResult.name}；" +
+                            "confidence=${identity.confidence.name}；不把本次暂时无法确认写入永久失败缓存"
+                    )
                 }
             }
             if (canConsumePendingIdentity) {
@@ -4880,12 +5010,27 @@ internal class MomoSocialAdapter(
         return result
     }
 
-    override fun consumeIdentityReturnReinspectionRequest(): Boolean =
-        synchronized(inboxIdentityCaptureLock) {
-            if (!identityReturnReinspectionPending) return@synchronized false
-            identityReturnReinspectionPending = false
-            true
+    override fun hasPendingIdentityReturnReinspectionRequest(): Boolean =
+        synchronized(inboxIdentityCaptureLock) { identityReturnReinspectionPending }
+
+    override fun consumeIdentityReturnReinspectionRequest(): Boolean {
+        val consumed = synchronized(inboxIdentityCaptureLock) {
+            if (!identityReturnReinspectionPending) false
+            else {
+                identityReturnReinspectionPending = false
+                true
+            }
         }
+        onLog(
+            if (consumed) {
+                "AI 身份回接[REQUEST_CONSUMED]：result=CONSUMED；reason=REQUEST_AVAILABLE；" +
+                    "仅确认信号消费，业务读写仍由运行时门禁控制"
+            } else {
+                "AI 身份回接[REQUEST_NOT_CONSUMED]：result=NOT_CONSUMED；reason=NO_PENDING_REQUEST"
+            }
+        )
+        return consumed
+    }
 
     // ---- ChatSessionManagementPort: bounded Momo session navigation and local samples ----
 
@@ -4913,8 +5058,10 @@ internal class MomoSocialAdapter(
         val anchorKey = anchor.opaqueKey()
         synchronized(inboxIdentityCaptureLock) {
             if (anchorKey in failedInboxIdentityCaptureKeys) {
+                onLog("IDENTITY_CAPTURE_BLOCKED result=IDENTITY_CAPTURE_BLOCKED；reason=EXPLICIT_IDENTITY_CONFLICT；failedCacheHit=true；action=SKIP_CURRENT_TARGET；anchorHash=${anchorKey.take(12)}")
                 return ContactIdentityCaptureRequestResult.REJECTED
             }
+            onLog("IDENTITY_RETRY_ALLOWED result=IDENTITY_RETRY_ALLOWED；previousFailure=NONE_OR_RETRYABLE；failedCacheHit=false；action=REACQUIRE_AVATAR；anchorHash=${anchorKey.take(12)}")
             val pending = pendingInboxIdentityCapture
             if (pending != null) return ContactIdentityCaptureRequestResult.IN_PROGRESS
         }
@@ -4937,7 +5084,11 @@ internal class MomoSocialAdapter(
             lastTransitionAtMs = System.currentTimeMillis()
         )
         synchronized(inboxIdentityCaptureLock) {
-            if (pendingInboxIdentityCapture != null || anchorKey in failedInboxIdentityCaptureKeys) {
+            if (anchorKey in failedInboxIdentityCaptureKeys) {
+                onLog("IDENTITY_CAPTURE_BLOCKED result=IDENTITY_CAPTURE_BLOCKED；reason=EXPLICIT_IDENTITY_CONFLICT；failedCacheHit=true；action=SKIP_CURRENT_TARGET；anchorHash=${anchorKey.take(12)}")
+                return ContactIdentityCaptureRequestResult.REJECTED
+            }
+            if (pendingInboxIdentityCapture != null) {
                 return ContactIdentityCaptureRequestResult.IN_PROGRESS
             }
             pendingInboxIdentityCapture = pending
@@ -5134,6 +5285,17 @@ internal class MomoSocialAdapter(
         )
     }
 
+    /** Retryable failures must not leave a terminal outcome for the next observation. */
+    private fun clearRetryableInboxIdentityState(anchorKey: String) {
+        completedInboxIdentityOutcomes.remove(anchorKey)
+        failedInboxIdentityCaptureKeys.remove(anchorKey)
+        verifiedInboxIdentityByAnchor.remove(anchorKey)
+    }
+
+    private fun onIdentityVerificationLog(result: MomoIdentityVerificationResult, reason: String, cacheWrite: Boolean, nextAction: String, anchorKey: String) {
+        onLog("IDENTITY_VERIFICATION result=${result.name}；reason=$reason；cacheWrite=$cacheWrite；nextAction=$nextAction；anchorHash=${anchorKey.take(12)}")
+    }
+
     private fun localNodeId(viewId: String): String = viewId.substringAfterLast('/')
 
     private fun completePendingInboxIdentityBinding(
@@ -5157,15 +5319,25 @@ internal class MomoSocialAdapter(
                     ),
                     observedAtMillis = System.currentTimeMillis()
                 ).singleOrNull()
+                val verificationResult = classifyMomoIdentityVerification(
+                    confidence = identity?.confidence,
+                    contactId = identity?.contactId
+                )
                 completedInboxIdentityOutcomes[anchorKey] = if (
-                    identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                    verificationResult == MomoIdentityVerificationResult.IDENTITY_VERIFIED
                 ) {
-                    ContactIdentityCaptureOutcome.completed(identity)
-                } else {
+                    ContactIdentityCaptureOutcome.completed(requireNotNull(identity))
+                } else if (verificationResult.isTerminalFailure()) {
+                    failedInboxIdentityCaptureKeys += anchorKey
+                    onIdentityVerificationLog(verificationResult, "EXPLICIT_IDENTITY_CONFLICT", true, "SKIP_CURRENT_TARGET", anchorKey)
                     ContactIdentityCaptureOutcome.failed(
                         ContactIdentityCaptureRequestResult.REJECTED,
-                        "IDENTITY_CAPTURE_MANAGER_DID_NOT_VERIFY_PLATFORM_ID"
+                        verificationResult.name
                     )
+                } else {
+                    clearRetryableInboxIdentityState(anchorKey)
+                    onIdentityVerificationLog(verificationResult, "PROFILE_ID_NOT_CONFIRMED", false, "RETRY_ON_NEXT_OBSERVATION", anchorKey)
+                    ContactIdentityCaptureOutcome.waiting(ContactIdentityCaptureRequestResult.RETRY_LATER)
                 }
                 while (verifiedInboxIdentityByAnchor.size > MAX_INBOX_VERIFIED_IDENTITY_CACHE_ENTRIES) {
                     val oldest = verifiedInboxIdentityByAnchor.entries.firstOrNull()?.key ?: break
@@ -5175,7 +5347,7 @@ internal class MomoSocialAdapter(
                 // Missing profile ID is retryable observation failure, not an identity
                 // conflict. Do not populate either terminal cache: the next observation must
                 // be allowed to reacquire the chat page, relocate the avatar and retry.
-                completedInboxIdentityOutcomes.remove(anchorKey)
+                clearRetryableInboxIdentityState(anchorKey)
             }
             pendingInboxIdentityCapture = null
         }
@@ -5301,6 +5473,7 @@ internal class MomoSocialAdapter(
                 pending.lastTransitionAtMs = System.currentTimeMillis()
                 if (!back.dialogHPresent) {
                     pending.stage = InboxIdentityCaptureStage.WAITING_LIST_RETURN
+                    onLog("AI 身份回接[REQUEST_WAITING]：result=NOT_PRODUCED；reason=AWAITING_VERIFIED_CHAT_RETURN")
                 }
                 return true
             }
@@ -5336,6 +5509,7 @@ internal class MomoSocialAdapter(
                     restoredTitle == anchorTitle
                 if (restored) {
                     if (!pending.profileEntryVerified) {
+                        onLog("AI 身份回接[REQUEST_NOT_PRODUCED]：result=NOT_PRODUCED；reason=PROFILE_ENTRY_NOT_VERIFIED")
                         releaseAvatarCaptureAfterProfileMiss(
                             pending,
                             MomoAvatarClickFailureReason.PROFILE_PAGE_NOT_CONFIRMED
@@ -5354,6 +5528,11 @@ internal class MomoSocialAdapter(
                     synchronized(inboxIdentityCaptureLock) {
                         identityReturnReinspectionPending = true
                     }
+                    onLog(
+                        "AI 身份回接[REQUEST_PRODUCED]：result=PRODUCED；" +
+                            "reason=ORIGINAL_CHAT_FINGERPRINT_AND_TITLE_VERIFIED；" +
+                            "profileIdRead=${!pending.platformUserId.isNullOrBlank()}；不记录原始用户ID"
+                    )
                     onLog("AI 联系人身份采集：已返回并确认原私人聊天详情页；三节点指纹和聊天标题匹配；继续当前窗口回复流程")
                     return false
                 }
@@ -5402,6 +5581,7 @@ internal class MomoSocialAdapter(
             reason
         )
         if (shouldLog) {
+            onLog("AI 身份回接[REQUEST_NOT_PRODUCED]：result=NOT_PRODUCED；reason=$reason")
             onLog("AI 联系人身份采集失败：$reason；保留未验证身份，不以昵称关联历史")
         }
     }
@@ -5946,11 +6126,13 @@ internal class MomoSocialAdapter(
     }
 
     override fun refreshKnownChatRegions(previous: ChatPageSnapshot): ChatRegionSnapshot {
-        val previousWindow = previous.messageListTarget?.window
-            ?: previous.inputFieldTarget?.window
-        val bothTargetsShareWindow = previous.messageListTarget == null ||
-            previous.inputFieldTarget == null ||
-            previous.messageListTarget.window == previous.inputFieldTarget.window
+        val messageListTarget = previous.messageListTarget
+        val inputFieldTarget = previous.inputFieldTarget
+        val previousWindow = messageListTarget?.window
+            ?: inputFieldTarget?.window
+        val bothTargetsShareWindow = messageListTarget == null ||
+            inputFieldTarget == null ||
+            messageListTarget.window == inputFieldTarget.window
         if (previousWindow == null || !bothTargetsShareWindow) {
             return ChatRegionSnapshot(false, 0, 0, 0, 0, false)
         }
@@ -5970,13 +6152,13 @@ internal class MomoSocialAdapter(
             sendActionCount = previous.sendActionCount,
             messageRelatedViewIdCount = previous.messageRelatedViewIdCount,
             hasChatTab = previous.hasChatTab,
-            messageListPath = previous.messageListTarget?.path?.childIndices,
-            inputFieldPath = previous.inputFieldTarget?.path?.childIndices,
-            messageListClassName = previous.messageListTarget?.expectedClassName,
-            messageListViewId = previous.messageListTarget?.expectedViewId,
+            messageListPath = messageListTarget?.path?.childIndices,
+            inputFieldPath = inputFieldTarget?.path?.childIndices,
+            messageListClassName = messageListTarget?.expectedClassName,
+            messageListViewId = messageListTarget?.expectedViewId,
             hasCanonicalMessageList =
-                previous.messageListTarget?.expectedClassName == MomoChatPageContract.MESSAGE_LIST_CLASS_NAME &&
-                    previous.messageListTarget?.expectedViewId == MomoChatPageContract.MESSAGE_LIST_VIEW_ID
+                messageListTarget?.expectedClassName == MomoChatPageContract.MESSAGE_LIST_CLASS_NAME &&
+                    messageListTarget?.expectedViewId == MomoChatPageContract.MESSAGE_LIST_VIEW_ID
         )
 
         return rootAccess.withActiveTargetRoot { root, currentWindow ->
@@ -6214,7 +6396,7 @@ internal class MomoSocialAdapter(
         private const val RECEIVED_GREETINGS_ENTRY_TAP_DURATION_MS = 90L
         private const val SEND_TAP_DURATION_MS = 90L
         private val SEND_CONTROL_VIEW_ID_SUFFIXES = setOf(
-            "send", "btn_send", "message_btn_send", "submit_message"
+            "send", "btn_send", "message_btn_send", "submit_message", "message_btn_sendtext"
         )
         private const val RECEIVED_GREETINGS_ENTRY_SEARCH_SCROLL_DURATION_MS = 520L
         private const val RECEIVED_GREETINGS_PRE_TAP_MAX_SNAPSHOT_AGE_MS = 750L

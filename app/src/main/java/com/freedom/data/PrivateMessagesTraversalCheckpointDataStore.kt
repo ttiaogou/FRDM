@@ -28,7 +28,11 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
                 json.optBoolean("lockedUnreadSetFinalized"), json.optBoolean("normalInboxHadUnread"),
                 json.optBoolean("normalInboxUnreadStateUnknown"), saved,
                 json.optString("resumeSessionKey").takeIf(String::isNotBlank),
-                json.optString("resumeSessionName").takeIf(String::isNotBlank)
+                json.optString("resumeSessionName").takeIf(String::isNotBlank),
+                json.optLong("runGeneration", 0L),
+                json.optString("lastSuccessfulTaskId").takeIf(String::isNotBlank),
+                json.optString("nextCursorKey").takeIf(String::isNotBlank),
+                json.optString("traversalDirection", "BOTTOM_TO_TOP")
             )
         }.getOrElse { clear(); null }
     }
@@ -49,6 +53,10 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
             .put("normalInboxUnreadStateUnknown", checkpoint.normalInboxUnreadStateUnknown)
             .put("resumeSessionKey", checkpoint.resumeSessionKey.orEmpty())
             .put("resumeSessionName", checkpoint.resumeSessionName.orEmpty())
+            .put("runGeneration", checkpoint.runGeneration)
+            .put("lastSuccessfulTaskId", checkpoint.lastSuccessfulTaskId.orEmpty())
+            .put("nextCursorKey", checkpoint.nextCursorKey.orEmpty())
+            .put("traversalDirection", checkpoint.traversalDirection)
         preferences.edit().putString(KEY, json.toString()).apply()
     }
 

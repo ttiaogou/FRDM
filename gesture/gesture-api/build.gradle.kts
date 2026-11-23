@@ -7,7 +7,7 @@ kotlin {
     jvmToolchain(17)
     sourceSets {
         val main by getting {
-            kotlin.srcDir("../../app/src/main/java")
+            kotlin.srcDir("src/main/kotlin")
             kotlin.include("com/freedom/gesture/api/GestureApi.kt")
             kotlin.include(
                 "com/freedom/core/accessibility/gesture/GestureIntent.kt",

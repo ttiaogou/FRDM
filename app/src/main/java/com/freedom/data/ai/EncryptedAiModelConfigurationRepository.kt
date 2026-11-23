@@ -17,7 +17,7 @@ import javax.crypto.spec.GCMParameterSpec
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 
-/** Stores the complete model configuration as one authenticated ciphertext value. */
+/** 将完整的模型配置保存为一份经过认证的密文数据。 */
 internal class EncryptedAiModelConfigurationRepository(
     context: Context,
     private val cipher: AiModelConfigurationCipher = AndroidKeystoreAiModelConfigurationCipher()
@@ -59,7 +59,7 @@ internal class EncryptedAiModelConfigurationRepository(
     }
 }
 
-/** AES-GCM with a dedicated Keystore key and associated data for AI configuration only. */
+/** 使用专用 Keystore 密钥及关联数据进行 AES-GCM 加密，仅用于 AI 配置。 */
 internal class AndroidKeystoreAiModelConfigurationCipher : AiModelConfigurationCipher {
     override fun encrypt(plaintext: ByteArray): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
@@ -119,7 +119,7 @@ internal interface AiModelConfigurationCipher {
     fun decrypt(ciphertext: ByteArray): ByteArray
 }
 
-/** Versioned binary codec kept separate from Android APIs so its compatibility can be unit-tested. */
+/** 带版本号的二进制编解码器独立于 Android API，便于通过单元测试验证兼容性。 */
 internal object AiModelConfigurationCodec {
     private const val MAGIC = 0x46524149 // FRAI
     private const val VERSION = 2

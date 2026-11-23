@@ -16,9 +16,6 @@ class RunSessionCommandUseCase(
     @Synchronized
     fun requestStart(mode: RunMode? = null): Boolean {
         if (state.isRunRequested()) return false
-        // Only an explicitly selected business mode acknowledges the AI input-origin review hold.
-        // Manual-observation standby does not start AI Reply and must not clear that safety hold.
-        if (mode != null) state.setInputManualReviewRequired(false)
         state.setActiveMode(mode)
         state.setRunRequested(true)
         return true

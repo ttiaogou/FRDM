@@ -11,6 +11,8 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Optional user-enabled Usage Access for read-only Activity identity after service reconnect. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
     <uses-permission android:name="com.freedom.permission.BIND_OCR_PLUGIN" />
 
     <permission

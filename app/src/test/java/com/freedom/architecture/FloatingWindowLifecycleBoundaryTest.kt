@@ -14,7 +14,7 @@ class FloatingWindowLifecycleBoundaryTest {
                 ?: start
         }
 
-    private fun source(path: String) = File(root, path).readText()
+    private fun source(path: String) = TestSourceResolver.resolve(root, path).readText()
 
     @Test
     fun activityLifecycleChangesVisibilityInsteadOfDestroyingTheWindow() {

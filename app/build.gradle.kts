@@ -69,54 +69,6 @@ android {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
         }
     }
-
-    // These legacy paths remain in place for source-history compatibility, but are compiled by
-    // their owning Gradle modules below, never a second time in :app.
-    sourceSets.getByName("main").java.exclude(
-        "com/freedom/core/**",
-        "com/freedom/features/**",
-        "com/freedom/application/gesture/GestureExecutionCoordinator.kt",
-        "com/freedom/application/gesture/GesturePolicyPipeline.kt",
-        "com/freedom/application/gesture/GestureCommandCompiler.kt",
-        "com/freedom/application/gesture/GesturePolicyValidator.kt",
-        "com/freedom/application/gesture/GestureValidationTypes.kt",
-        "com/freedom/application/gesture/GestureRuntimeFactory.kt",
-        "com/freedom/application/gesture/GesturePolicyManager.kt",
-        "com/freedom/adapters/accessibility/android/AndroidGesturePathFactory.kt",
-        "com/freedom/adapters/accessibility/android/AndroidGestureVisualizer.kt",
-        "com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt",
-        "com/freedom/adapters/accessibility/android/GestureTrailOverlay.kt"
-    )
-    sourceSets.getByName("test").java.exclude(
-        "com/freedom/core/**",
-        "com/freedom/features/**",
-        "com/freedom/application/gesture/**"
-    )
-}
-
-kotlin {
-    sourceSets {
-        getByName("main").kotlin.exclude(
-            "com/freedom/core/**",
-            "com/freedom/features/**",
-            "com/freedom/application/gesture/GestureExecutionCoordinator.kt",
-            "com/freedom/application/gesture/GesturePolicyPipeline.kt",
-            "com/freedom/application/gesture/GestureCommandCompiler.kt",
-            "com/freedom/application/gesture/GesturePolicyValidator.kt",
-            "com/freedom/application/gesture/GestureValidationTypes.kt",
-            "com/freedom/application/gesture/GestureRuntimeFactory.kt",
-            "com/freedom/application/gesture/GesturePolicyManager.kt",
-            "com/freedom/adapters/accessibility/android/AndroidGesturePathFactory.kt",
-            "com/freedom/adapters/accessibility/android/AndroidGestureVisualizer.kt",
-            "com/freedom/adapters/accessibility/android/AndroidGestureDispatcher.kt",
-            "com/freedom/adapters/accessibility/android/GestureTrailOverlay.kt"
-        )
-        getByName("test").kotlin.exclude(
-            "com/freedom/core/**",
-            "com/freedom/features/**",
-            "com/freedom/application/gesture/**"
-        )
-    }
 }
 
 dependencies {
@@ -128,4 +80,5 @@ dependencies {
     implementation(project(":ocr-plugin-api"))
     implementation("androidx.core:core-ktx:1.15.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation(kotlin("test"))
 }

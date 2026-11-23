@@ -10,12 +10,13 @@ import android.content.IntentFilter
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
+import com.freedom.adapters.accessibility.android.AndroidAccessibilityEventForwarder
 import com.freedom.adapters.accessibility.android.AndroidAccessibilitySubscriptionPolicy
-import com.freedom.adapters.accessibility.android.AccessibilityEventFormatter
 import com.freedom.adapters.accessibility.diagnostics.LatestAccessibilityNodeDump
 import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
 import com.freedom.adapters.accessibility.android.NodeHierarchyOverlay
 import com.freedom.core.runtime.RunMode
+import com.freedom.core.accessibility.api.UnifiedAccessibilityEvent
 import com.freedom.core.accessibility.api.GlobalAccessibilityAction
 import com.freedom.core.accessibility.api.AccessibilityTreeLimits
 import com.freedom.core.accessibility.api.NodePath
@@ -24,7 +25,6 @@ import com.freedom.core.accessibility.api.TreeInspectionRequest
 import com.freedom.core.accessibility.query.NodeTargetResolver
 import com.freedom.core.accessibility.query.NodeTreeIndex
 import com.freedom.core.accessibility.overlay.NodeBoundsHighlightPlanner
-import com.freedom.core.accessibility.events.AccessibilityEventType
 import com.freedom.adapters.android.MonitorActions
 import com.freedom.core.logging.RunLogCategory
 import com.freedom.core.logging.RunLogLevel
@@ -42,7 +42,6 @@ class FreedomAccessibilityService : AccessibilityService() {
             mainHandler = mainHandler,
             addLog = ::addLog,
             dp = ::dp,
-            persistManualReviewHold = ::persistManualReviewHold,
             requestScreenOff = ::requestScreenOff,
             refreshViews = ::refreshViews
         )
@@ -69,7 +68,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     private val globalNodeLayoutVisualizationUseCase get() = dependencies.globalNodeLayoutVisualizationUseCase
     private val momoSocialAdapterDelegate get() = dependencies.momoSocialAdapterDelegate
     private val momoSocialAdapter get() = dependencies.momoSocialAdapter
-    private val aiReplyObservationRuntime get() = dependencies.aiReplyObservationRuntime
+    private val unifiedAccessibilityEntry get() = dependencies.unifiedAccessibilityEntry
     private val accountBrowseWorkflow get() = dependencies.accountBrowseWorkflow
     private val accountBrowseRuntimeAdapter get() = dependencies.accountBrowseRuntimeAdapter
     private val monitorSnapshotRepository get() = dependencies.monitorSnapshotRepository
@@ -82,6 +81,23 @@ class FreedomAccessibilityService : AccessibilityService() {
     private val serviceReceiverRegistry get() = dependencies.serviceReceiverRegistry
     private val serviceRecoveryCoordinatorDelegate get() = dependencies.serviceRecoveryCoordinatorDelegate
     private val serviceRecoveryCoordinator get() = dependencies.serviceRecoveryCoordinator
+    private val activityRecoveryCoordinator get() = dependencies.activityRecoveryCoordinator
+
+    private val accessibilityEventForwarder by lazy(LazyThreadSafetyMode.NONE) {
+        AndroidAccessibilityEventForwarder(
+            activeMode = runSessionCoordinator::activeMode,
+            targetPackage = monitorRepository::targetPackage,
+            isRunRequested = monitorRepository::isRunRequested,
+            onLog = ::addLog,
+            onGlobalTouch = { type, eventTimeMs, callbackUptimeMs, packageName, windowId ->
+                touchInteractionMonitor.record(type, eventTimeMs, callbackUptimeMs, packageName, windowId)
+            },
+            onWindowTransition = ::handleAccessibilityWindowTransition,
+            pipeline = accessibilityEventPipeline,
+            currentRunGeneration = runSessionCoordinator::currentRunGeneration,
+            currentWindowGeneration = accessibilityGateway::currentWindowGeneration
+        )
+    }
 
     private val targetChangedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -91,12 +107,14 @@ class FreedomAccessibilityService : AccessibilityService() {
                 runSessionCoordinator.resetRuntime(RunMode.ACCOUNT_BROWSE, "监听目标已更新")
             }
             runSessionCoordinator.resetRuntime(RunMode.AI_REPLY, "监听目标已更新")
+            activityRecoveryCoordinator.stop()
             windowContextTracker.clearActivityClass()
             LatestAccessibilityNodeDump.clear()
             overlayPort.clearNodeBoundsHighlight()
             NodeHierarchyOverlay.clear()
             globalNodeLayoutVisualizationUseCase.clear()
             applyTargetPackageFilter()
+            activityRecoveryCoordinator.ensureStarted()
             addLog("监听目标已更新：${monitorRepository.targetPackage()}；清除上一目标的节点快照")
         }
     }
@@ -105,7 +123,12 @@ class FreedomAccessibilityService : AccessibilityService() {
         override fun onReceive(context: Context?, intent: Intent?) {
             runSessionCoordinator.onExternalRefresh()
             applyTargetPackageFilter()
-            if (!monitorRepository.isRunRequested()) windowContextTracker.clearActivityClass()
+            if (!monitorRepository.isRunRequested()) {
+                activityRecoveryCoordinator.stop()
+                windowContextTracker.clearActivityClass()
+            } else {
+                activityRecoveryCoordinator.ensureStarted()
+            }
         }
     }
 
@@ -364,6 +387,9 @@ class FreedomAccessibilityService : AccessibilityService() {
         applyTargetPackageFilter()
         serviceRecoveryCoordinator.onServiceConnected()
         applyTargetPackageFilter()
+        // Reacquire live Activity evidence even when Momo stays on the same page and
+        // Android emits no new TYPE_WINDOW_STATE_CHANGED callback after reconnect.
+        activityRecoveryCoordinator.restart()
         diagnostics.recordStructured(
             eventType = "accessibility_service_connected",
             category = RunLogCategory.LIFECYCLE,
@@ -424,129 +450,66 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null) return
-        val activeMode = runSessionCoordinator.activeMode()
-        val eventPackage = event.packageName?.toString()
-        val eventTypeName = AccessibilityEventFormatter.rawEventName(event.eventType)
-        val isGlobalTouch = event.eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START ||
-            event.eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END
-        val accepted = AndroidAccessibilitySubscriptionPolicy.acceptsCallbackEvent(
-            eventPackage = eventPackage,
-            eventType = event.eventType,
-            targetPackage = monitorRepository.targetPackage(),
-            runMode = activeMode
-        )
-        if (isGlobalTouch) {
-            addLog(
-                "全局触摸链路[SERVICE_CALLBACK]：收到=$eventTypeName；" +
-                    "eventTimeUptimeMs=${event.eventTime}；callbackUptimeMs=${android.os.SystemClock.uptimeMillis()}；" +
-                    "eventPackage=${eventPackage ?: "NULL"}；windowId=${runCatching { event.windowId }.getOrDefault(-1)}；" +
-                    "targetPackage=${monitorRepository.targetPackage()}；mode=${activeMode ?: "NONE"}；" +
-                    "callbackAccepted=$accepted；actorProvenance=UNAVAILABLE；origin=UNKNOWN"
-            )
-            touchInteractionMonitor.record(
-                type = if (event.eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START) {
-                    AccessibilityEventType.TOUCH_INTERACTION_START
-                } else AccessibilityEventType.TOUCH_INTERACTION_END,
-                eventTimeMs = event.eventTime,
-                callbackUptimeMs = android.os.SystemClock.uptimeMillis(),
-                packageName = eventPackage,
-                windowId = runCatching { event.windowId }.getOrDefault(-1)
-            )
-        }
-        if (!accepted) {
-            if (isGlobalTouch) {
-                addLog("全局触摸链路[SERVICE_DROPPED]：回调入口过滤拒绝；事件=$eventTypeName")
-            }
-            return
-        }
-        if (isGlobalTouch) {
-            addLog("全局触摸链路[SERVICE_ACCEPTED]：已放行至事件管线；事件=$eventTypeName")
-        }
+        accessibilityEventForwarder.accept(event)
+    }
 
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
-        ) {
-            // Some Android versions emit WINDOWS_CHANGED before WINDOW_STATE_CHANGED. Preserve
-            // the pre-transition generation across that pair so a NAVIGATION_ENTRY tap remains
-            // attributable even when the platform reports two lifecycle callbacks.
-            val sourcePageGeneration = accessibilityGateway.currentWindowGeneration()
-            accessibilityGateway.noteWindowTransition()
-            overlayPort.clearNodeBoundsHighlight()
-            NodeHierarchyOverlay.clear()
-            if (globalNodeLayoutVisualizationUseCase.snapshots().isNotEmpty()) {
-                globalNodeLayoutVisualizationUseCase.clear()
-            }
-            if (activeMode == RunMode.AI_REPLY) {
-                val foregroundPackage = accessibilityGateway.observeForegroundWindowForReadiness()
-                addLog(
-                    "AI启动保护[FOREGROUND_OBSERVED]：activeWindowPackage=${foregroundPackage.ifBlank { "UNKNOWN" }}；" +
-                        "targetPackage=${monitorRepository.targetPackage()}；静默窗口=5000ms"
-                )
-            }
-            targetAppReadinessController.invalidate(
-                "检测到窗口或Activity变化；必须重新确认目标应用和业务页面就绪",
-                android.os.SystemClock.uptimeMillis()
-            )
-            val isTargetWindowEvent = event.packageName?.toString() == monitorRepository.targetPackage()
-            if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED && isTargetWindowEvent) {
-                if (pendingNavigationSourcePageGeneration == null ||
-                    event.eventTime - pendingNavigationSourceAtUptimeMs > NAVIGATION_TRANSITION_EVENT_PAIR_MS
-                ) {
-                    pendingNavigationSourcePageGeneration = sourcePageGeneration
-                    pendingNavigationSourceAtUptimeMs = event.eventTime
-                }
-            }
-            val pairedSource = if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && isTargetWindowEvent) {
-                pendingNavigationSourcePageGeneration?.takeIf {
-                    event.eventTime >= pendingNavigationSourceAtUptimeMs &&
-                        event.eventTime - pendingNavigationSourceAtUptimeMs <= NAVIGATION_TRANSITION_EVENT_PAIR_MS
-                }
-            } else null
-            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && isTargetWindowEvent) {
-                inputOriginClassifier.noteActivityTransition(
-                    packageName = monitorRepository.targetPackage(),
-                    targetActivityClass = event.className?.toString().orEmpty(),
-                    sourcePageGeneration = pairedSource ?: sourcePageGeneration,
-                    targetPageGeneration = accessibilityGateway.currentWindowGeneration(),
-                    targetWindowId = runCatching { event.windowId }.getOrDefault(-1),
-                    transitionAtUptimeMs = event.eventTime
-                )
-                val attachedSelfNavigation = inputOriginClassifier.takeAttachedSelfNavigation()
-                if (attachedSelfNavigation != null) {
-                    aiReplyObservationRuntime.onSelfNavigationAttached(attachedSelfNavigation)
-                } else {
-                    aiReplyObservationRuntime.onUnmatchedNavigationObserved(
-                        event.className?.toString().orEmpty()
-                    )
-                }
-                pendingNavigationSourcePageGeneration = null
-                pendingNavigationSourceAtUptimeMs = 0L
-            }
-            // Attribute the transition while the dispatch ledger still retains the
-            // navigation-entry tap. Only then invalidate the active gesture execution;
-            // otherwise the coordinator can settle the tap as CANCELLED before the
-            // unified accessibility entry point attaches its navigation transaction.
-            val currentPageGeneration = accessibilityGateway.currentWindowGeneration()
-            if (gestureRuntimeDelegate.isInitialized()) {
-                gestureRuntime.onPageTransition(
-                    newPageGeneration = currentPageGeneration,
-                    reason = "accessibility_window_or_activity_transition"
-                )
+    private fun handleAccessibilityWindowTransition(event: AccessibilityEvent, activeMode: RunMode?) {
+        // Preserve the existing transition ordering and attribution semantics. This callback is
+        // owned by the forwarder boundary; the Service callback itself remains pure forwarding.
+        val sourcePageGeneration = accessibilityGateway.currentWindowGeneration()
+        accessibilityGateway.noteWindowTransition()
+        windowContextTracker.invalidateRecoveredActivity()
+        activityRecoveryCoordinator.onWindowTransition()
+        overlayPort.clearNodeBoundsHighlight()
+        NodeHierarchyOverlay.clear()
+        if (globalNodeLayoutVisualizationUseCase.snapshots().isNotEmpty()) {
+            globalNodeLayoutVisualizationUseCase.clear()
+        }
+        if (activeMode == RunMode.AI_REPLY) {
+            val foregroundPackage = accessibilityGateway.observeForegroundWindowForReadiness()
+            addLog("AI启动保护[FOREGROUND_OBSERVED]：activeWindowPackage=${foregroundPackage.ifBlank { "UNKNOWN" }}；targetPackage=${monitorRepository.targetPackage()}；静默窗口=5000ms")
+        }
+        targetAppReadinessController.invalidate("检测到窗口或Activity变化；必须重新确认目标应用和业务页面就绪", android.os.SystemClock.uptimeMillis())
+        val isTargetWindowEvent = event.packageName?.toString() == monitorRepository.targetPackage()
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED && isTargetWindowEvent) {
+            if (pendingNavigationSourcePageGeneration == null || event.eventTime - pendingNavigationSourceAtUptimeMs > NAVIGATION_TRANSITION_EVENT_PAIR_MS) {
+                pendingNavigationSourcePageGeneration = sourcePageGeneration
+                pendingNavigationSourceAtUptimeMs = event.eventTime
             }
         }
-        if (!monitorRepository.isRunRequested()) return
-        val runMode = activeMode ?: return
-        accessibilityEventPipeline.process(event, runMode)
+        val pairedSource = if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && isTargetWindowEvent) {
+            pendingNavigationSourcePageGeneration?.takeIf {
+                event.eventTime >= pendingNavigationSourceAtUptimeMs && event.eventTime - pendingNavigationSourceAtUptimeMs <= NAVIGATION_TRANSITION_EVENT_PAIR_MS
+            }
+        } else null
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && isTargetWindowEvent) {
+            inputOriginClassifier.noteActivityTransition(
+                packageName = monitorRepository.targetPackage(),
+                targetActivityClass = event.className?.toString().orEmpty(),
+                sourcePageGeneration = pairedSource ?: sourcePageGeneration,
+                targetPageGeneration = accessibilityGateway.currentWindowGeneration(),
+                targetWindowId = runCatching { event.windowId }.getOrDefault(-1),
+                transitionAtUptimeMs = event.eventTime
+            )
+            val attachedSelfNavigation = inputOriginClassifier.takeAttachedSelfNavigation()
+            // Business-facing navigation attribution now crosses the same normalized entry.
+            unifiedAccessibilityEntry.accept(
+                UnifiedAccessibilityEvent.NavigationObservation(
+                    activityClass = event.className?.toString().orEmpty(),
+                    attachedSelfNavigation = attachedSelfNavigation
+                )
+            )
+            pendingNavigationSourcePageGeneration = null
+            pendingNavigationSourceAtUptimeMs = 0L
+        }
+        val currentPageGeneration = accessibilityGateway.currentWindowGeneration()
+        if (gestureRuntimeDelegate.isInitialized()) {
+            gestureRuntime.onPageTransition(currentPageGeneration, "accessibility_window_or_activity_transition")
+        }
     }
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()
-
-    private fun persistManualReviewHold(reason: String) {
-        monitorRepository.setInputManualReviewRequired(true)
-        inputOriginClassifier.requireManualReview(reason)
-    }
 
     private fun requestScreenOff(): Boolean =
         accessibilityGateway.performGlobalAction(GlobalAccessibilityAction.LOCK_SCREEN)
@@ -565,6 +528,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        activityRecoveryCoordinator.stop()
         diagnostics.recordStructured(
             eventType = "accessibility_service_interrupted",
             category = RunLogCategory.LIFECYCLE,
@@ -595,6 +559,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        activityRecoveryCoordinator.stop()
         diagnostics.recordStructured(
             eventType = "accessibility_service_destroyed",
             category = RunLogCategory.LIFECYCLE,

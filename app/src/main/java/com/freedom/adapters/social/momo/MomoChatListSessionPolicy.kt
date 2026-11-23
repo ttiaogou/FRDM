@@ -179,7 +179,7 @@ internal object MomoChatListSessionPolicy {
 
     /**
      * Returns the largest rectangular part of [bounds] that does not intersect the live floating
-     * control. The result remains a rectangle because GestureGeometryPolicy samples and validates
+     * control. The result remains a rectangle because the shared gesture pipeline samples and validates
      * a complete gesture path inside one rectangle. No coordinate clipping or fallback is used.
      */
     fun largestSafeSubRect(
