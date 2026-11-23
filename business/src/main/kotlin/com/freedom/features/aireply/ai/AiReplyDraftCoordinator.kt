@@ -464,8 +464,9 @@ class AiReplyDraftCoordinator(
             backgroundExecutor.execute {
                 try {
                     generateOnBackground(configuration, context, target, requestGeneration, requestId, policy, contextScope)
-                } catch (_: Throwable) {
-                    onLog("AI 回复草稿生成失败：[DRAFT_GENERATION_FAILED]")
+                } catch (error: Throwable) {
+                    onLog("AI 回复草稿生成失败：[DRAFT_GENERATION_FAILED]；requestId=$requestId；" +
+                        "taskId=${policy.taskId}；exceptionType=${error.javaClass.simpleName}")
                     finish("DRAFT_GENERATION_FAILED", requestGeneration)
                 }
             }
@@ -536,6 +537,27 @@ class AiReplyDraftCoordinator(
         fun safeLog(value: String?): String = AiModelDataRedactor.redact(value.orEmpty())
             .replace(Regex("[\\r\\n\\t\\p{Cntrl}]"), " ").take(1_000)
         if (evaluation is AiReplyEvaluation.Execution) {
+            val outcomeCategory = when {
+                evaluation.status == AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT ||
+                    evaluation.callDiagnostics?.safeCode == "EMPTY_MODEL_OUTPUT" ->
+                    AiModelOutputCategory.EMPTY_MODEL_OUTPUT
+                evaluation.status == AiReplyExecutionStatus.MODEL_OUTPUT_INVALID ->
+                    AiModelOutputCategory.MODEL_OUTPUT_INVALID
+                evaluation.status == AiReplyExecutionStatus.MODEL_CALL_FAILED ->
+                    AiModelOutputCategory.MODEL_CALL_FAILED
+                else -> AiModelOutputCategory.LOCAL_PRECHECK_BLOCKED
+            }
+            val safeCode = evaluation.outputInvalidReason?.name
+                ?: evaluation.callDiagnostics?.safeCode ?: evaluation.status.reasonCode
+            val contentState = evaluation.outputContentState
+                ?: evaluation.callDiagnostics?.responseContentState ?: "UNKNOWN"
+            onLog("AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
+                "generation=$requestGeneration；outcomeCategory=${outcomeCategory.name}；" +
+                "safeCode=${safeLog(safeCode)}；contentState=${safeLog(contentState)}；" +
+                "executionState=${evaluation.status.name}；" +
+                "provider=${safeLog(evaluation.provider ?: configuration.provider.name)}；" +
+                "model=${safeLog(evaluation.model ?: configuration.modelName)}；" +
+                "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；draftPresent=false")
             // A local gate, transport failure or invalid protocol is never a model WAIT.
             onLog(
                 "AI 程序执行状态：requestId=$requestId；executionState=${evaluation.status.name}；" +
@@ -604,6 +626,21 @@ class AiReplyDraftCoordinator(
             return
         }
         val decision = (evaluation as AiReplyEvaluation.Model).decision
+        val draftPresent = !decision.draft.isNullOrBlank()
+        val draftLength = decision.draft?.codePointCount(0, decision.draft.length) ?: 0
+        val messageCount = if (draftPresent) ReplyMessageSegments.parse(decision.draft!!).messages.size else 0
+        onLog("AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
+            "generation=$requestGeneration；outcomeCategory=VALID_DECISION；" +
+            "safeCode=MODEL_DECISION_${decision.action.name}；contentState=PRESENT；" +
+            "action=${decision.action.name}；reason=${safeLog(decision.reason)}；" +
+            "provider=${safeLog(decision.provider)}；model=${safeLog(decision.model)}；" +
+            "finishReason=${AiModelCallDiagnostics.safeFinishReason(decision.finishReason)}；" +
+            "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；" +
+            "inputTokens=${decision.usage?.inputTokens ?: "UNKNOWN"}；" +
+            "outputTokens=${decision.usage?.outputTokens ?: "UNKNOWN"}；" +
+            "draftPresent=$draftPresent；draftLength=$draftLength；messageCount=$messageCount；" +
+            "reasonDetailPresent=${!decision.reasonDetail.isNullOrBlank()}；" +
+            "reasonDetailLength=${decision.reasonDetail?.length ?: 0}")
         onLog(
             "AI 模型调用完成：requestId=$requestId；" +
                 "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；" +
@@ -611,19 +648,21 @@ class AiReplyDraftCoordinator(
                 "reason=${decision.reason}；" +
                 "draftPresent=${!decision.draft.isNullOrBlank()}"
         )
-        if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
-            onLog("AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
-                "reason=${safeLog(decision.reason)}；reasonDetail=${safeLog(decision.reasonDetail ?: "模型未提供详细解释；请核查模型响应协议")}；" +
-                "provider=${safeLog(decision.provider)}；model=${safeLog(decision.model)}；" +
-                "finishReason=${safeLog(decision.finishReason)}；contextMessages=${context.messages.size}；" +
-                "inputTokens=${decision.usage?.inputTokens}；outputTokens=${decision.usage?.outputTokens}；" +
-                "draftPresent=${!decision.draft.isNullOrBlank()}")
-        }
+        onLog("AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
+            "reason=${safeLog(decision.reason)}；" +
+            "reasonDetailPresent=${!decision.reasonDetail.isNullOrBlank()}；" +
+            "reasonDetailLength=${decision.reasonDetail?.length ?: 0}；" +
+            "provider=${safeLog(decision.provider)}；model=${safeLog(decision.model)}；" +
+            "finishReason=${AiModelCallDiagnostics.safeFinishReason(decision.finishReason)}；" +
+            "contextMessages=${context.messages.size}；" +
+            "inputTokens=${decision.usage?.inputTokens ?: "UNKNOWN"}；" +
+            "outputTokens=${decision.usage?.outputTokens ?: "UNKNOWN"}；" +
+            "draftPresent=$draftPresent；draftLength=$draftLength；messageCount=$messageCount")
         updateTaskStatus(ReplyTaskStatus.MODEL_COMPLETED, requestGeneration)
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
             onLog(
                 "AI 草稿状态：MODEL_DID_NOT_RETURN_DRAFT；模型未返回可用草稿；" +
-                    "中文原因=${safeLog(decision.reasonDetail ?: decision.reason)}；" +
+                    "reason=${safeLog(decision.reason)}；reasonDetailPresent=${!decision.reasonDetail.isNullOrBlank()}；" +
                     "action=${decision.action.name}；draftPresent=${!decision.draft.isNullOrBlank()}"
             )
             // Never interpret an untrusted model reason as a technical retry code.

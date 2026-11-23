@@ -310,12 +310,53 @@ class VisibleDraftFlowTest {
         val log = f.logs.single { it.startsWith("AI 模型决策详情：") }
         assertTrue(log.contains("action=WAIT"))
         assertTrue(log.contains("reason=FINANCIAL_TRANSACTION_REVIEW"))
-        assertTrue(log.contains("涉及转账等高后果事项"))
+        assertTrue(log.contains("reasonDetailPresent=true"))
+        assertFalse(log.contains("涉及转账等高后果事项"))
         assertTrue(log.contains("provider=fake"))
         assertTrue(log.contains("finishReason=stop"))
         assertTrue(log.contains("outputTokens=20"))
         assertFalse(log.contains("13800138000"))
         assertEquals("", f.text)
+    }
+
+    @Test fun modelOutputCategoriesCoverValidAndInvalidDecisionsWithoutRawExplanation() {
+        for ((output, category, action) in listOf(
+            Triple("""{"action":"REPLY","reason":"OK","reasonDetail":"私人解释13800138000","draft":"你好呀"}""",
+                "VALID_DECISION", "REPLY"),
+            Triple("""{"action":"WAIT","reason":"OK","reasonDetail":"私人解释13800138000","draft":null}""",
+                "VALID_DECISION", "WAIT"),
+            Triple("""{"action":"DO_NOT_REPLY","reason":"OK","reasonDetail":"私人解释13800138000","draft":null}""",
+                "VALID_DECISION", "DO_NOT_REPLY"),
+            Triple("""{"action":"WAIT","reason":"OK","draft":"bad"}""",
+                "MODEL_OUTPUT_INVALID", "")
+        )) {
+            val f = Fixture()
+            f.modelOutput = output
+            assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+            f.drain()
+            val classification = f.logs.single { it.startsWith("AI 模型结果分类：") }
+            assertTrue(classification.contains("outcomeCategory=$category"))
+            assertTrue(classification.contains("taskId=${AiDecisionTaskIds.PRIVATE_MESSAGES}"))
+            assertTrue(classification.contains("requestId="))
+            if (action.isNotEmpty()) {
+                assertTrue(classification.contains("action=$action"))
+                assertTrue(f.logs.single { it.startsWith("AI 模型决策详情：") }.contains("action=$action"))
+            } else assertTrue(classification.contains("safeCode=JSON_DRAFT_INVALID"))
+            assertFalse(f.logs.joinToString("\n").contains("私人解释"))
+            assertFalse(f.logs.joinToString("\n").contains("13800138000"))
+        }
+    }
+
+    @Test fun emptyTransportOutputIsClassifiedWithoutChangingRetry() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 1
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val categories = f.logs.filter { it.startsWith("AI 模型结果分类：") }
+        assertEquals(2, categories.size)
+        assertTrue(categories.first().contains("outcomeCategory=EMPTY_MODEL_OUTPUT"))
+        assertTrue(categories.last().contains("outcomeCategory=VALID_DECISION"))
+        assertEquals(2, f.calls)
     }
 
     @Test fun modelWaitWithTechnicalLookingReasonNeverSchedulesTechnicalRetry() {

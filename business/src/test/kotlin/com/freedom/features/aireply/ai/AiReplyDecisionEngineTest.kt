@@ -259,6 +259,42 @@ class AiReplyDecisionEngineTest {
         assertTrue(provider.lastRequest!!.systemInstruction.contains("低承诺"))
     }
 
+    @Test fun parserDiagnosticReasonsDoNotChangeValidationOrDraft() {
+        val cases = listOf(
+            "not-json" to AiReplyOutputInvalidReason.JSON_SYNTAX_INVALID,
+            """{"action":"REPLY","reason":"OK"}""" to AiReplyOutputInvalidReason.JSON_REQUIRED_FIELD_MISSING,
+            """{"action":"REPLY","reason":"OK","draft":"hi","extra":"value"}""" to AiReplyOutputInvalidReason.JSON_SCHEMA_MISMATCH,
+            """{"action":"UNKNOWN","reason":"OK","draft":"hi"}""" to AiReplyOutputInvalidReason.JSON_ACTION_INVALID,
+            """{"action":"REPLY","reason":"invalid reason","draft":"hi"}""" to AiReplyOutputInvalidReason.JSON_REASON_INVALID,
+            """{"action":"REPLY","reason":"OK","draft":null}""" to AiReplyOutputInvalidReason.JSON_DRAFT_EMPTY,
+            """{"action":"REPLY","reason":"OK","draft":" hello "}""" to AiReplyOutputInvalidReason.JSON_DRAFT_INVALID,
+            """{"action":"WAIT","reason":"OK","reasonDetail":"","draft":null}""" to AiReplyOutputInvalidReason.JSON_REASON_DETAIL_INVALID
+        )
+        for ((output, expected) in cases) {
+            val rejected = execution(AiReplyDecisionEngine(FakeProvider(output), grantedConsent).decide(
+                AiReplyDecisionInput(context(), true, requestId = "invalid-output")))
+            assertEquals(AiReplyExecutionStatus.MODEL_OUTPUT_INVALID, rejected.status)
+            assertEquals(expected, rejected.outputInvalidReason)
+            assertEquals("PRESENT", rejected.outputContentState)
+        }
+        val tooLong = AiReplyDecisionEngine(FakeProvider(replyJson("12345")), grantedConsent, maxDraftChars = 4)
+            .decide(AiReplyDecisionInput(context(), true, requestId = "too-long"))
+        assertEquals(AiReplyOutputInvalidReason.JSON_DRAFT_TOO_LONG, execution(tooLong).outputInvalidReason)
+
+        // Preserve existing compatibility: reasonDetail may be absent in locally accepted responses.
+        val accepted = AiReplyDecisionEngine(FakeProvider(replyJson("你好")), grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "legacy-detail"))
+        assertEquals(AiReplyAction.REPLY, model(accepted).action)
+        assertNull(model(accepted).reasonDetail)
+    }
+
+    @Test fun directProviderBlankOutputRetainsEmptyStatusAndAddsContentState() {
+        val rejected = execution(AiReplyDecisionEngine(FakeProvider("  "), grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "direct-empty")))
+        assertEquals(AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT, rejected.status)
+        assertEquals("BLANK", rejected.outputContentState)
+    }
+
     private fun model(result: AiReplyEvaluation): AiReplyDecision =
         (result as AiReplyEvaluation.Model).decision
 

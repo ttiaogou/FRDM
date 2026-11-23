@@ -49,15 +49,22 @@ class AiReplyDecisionEngine(
             )
         }
         val raw = result.text?.trim().orEmpty()
-        if (raw.isBlank()) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT)
-        val parsed = AiReplyDecisionJsonParser.parse(raw, maxDraftChars)
-            ?: return AiReplyEvaluation.Execution(
-                AiReplyExecutionStatus.MODEL_OUTPUT_INVALID,
-                provider = result.provider,
-                model = result.model
-            )
+        if (raw.isBlank()) return AiReplyEvaluation.Execution(
+            AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT,
+            provider = result.provider,
+            model = result.model,
+            outputContentState = if (result.text == null) "NULL" else "BLANK"
+        )
+        val parsed = AiReplyDecisionJsonParser.parseWithDiagnostics(raw, maxDraftChars)
+        val decision = parsed.decision ?: return AiReplyEvaluation.Execution(
+            AiReplyExecutionStatus.MODEL_OUTPUT_INVALID,
+            provider = result.provider,
+            model = result.model,
+            outputInvalidReason = parsed.invalidReason,
+            outputContentState = "PRESENT"
+        )
         return AiReplyEvaluation.Model(
-            parsed.copy(provider = result.provider, model = result.model, finishReason = result.finishReason, usage = result.usage)
+            decision.copy(provider = result.provider, model = result.model, finishReason = result.finishReason, usage = result.usage)
         )
     }
 
@@ -110,7 +117,9 @@ sealed interface AiReplyEvaluation {
         val status: AiReplyExecutionStatus,
         val callDiagnostics: AiModelCallDiagnostics? = null,
         val provider: String? = null,
-        val model: String? = null
+        val model: String? = null,
+        val outputInvalidReason: AiReplyOutputInvalidReason? = null,
+        val outputContentState: String? = null
     ) : AiReplyEvaluation
 }
 
