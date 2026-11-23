@@ -1039,7 +1039,21 @@ internal class MomoSocialAdapter(
             sayHiGestureInFlight || sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE ||
             receivedGreetingsEntrySearchGestureInFlight
         ) {
-            onLog("收到的招呼人工入口接管[REJECTED]：当前列表、窗口或只读阶段未通过重新验证；保持页面不动")
+            // Diagnostic-only second sampling: the original short-circuit guard above is unchanged.
+            // An all-ready sample means the admission state changed between rejection and logging.
+            val admissionDiagnostic = MomoReceivedGreetingsAdmissionDiagnostic(
+                listConfirmed = sayHiNavigationFlowController.isReceivedListConfirmed(),
+                listStructureVisible = runCatching { isReceivedGreetingsListStructureVisible() }.getOrDefault(false),
+                windowTargetPresent = confirmedTarget != null,
+                windowCurrent = runCatching {
+                    confirmedTarget?.let { accessibilityGateway.isWindowCurrent(it.window) } == true
+                }.getOrDefault(false),
+                sayHiGestureInFlight = sayHiGestureInFlight,
+                readOnlyStage = sayHiReadOnlyStage.name,
+                entrySearchGestureInFlight = receivedGreetingsEntrySearchGestureInFlight
+            )
+            onLog("收到的招呼人工入口接管[REJECTED]：" +
+                admissionDiagnostic.toLogFields() + "；保持页面不动")
             return false
         }
 
