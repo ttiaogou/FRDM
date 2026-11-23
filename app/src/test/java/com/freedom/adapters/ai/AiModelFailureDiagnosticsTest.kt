@@ -309,10 +309,13 @@ class AiModelFailureDiagnosticsTest {
             }, scheduler = object : TaskScheduler {
                 override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask = error("must not schedule input")
             }, isAiReplyActive = { true }, onLog = { logs.add(it) },
-            createProvider = { TransportBackedAiModelProvider("test", "configured-model", transport(false) {
-                now += 234L
-                FakeConnection(401, "$secret $privateText")
-            }, consent) }, backgroundExecutor = Executor { it.run() }, nowMillis = { now })
+            createGateway = { EngineBackedAiDecisionGateway(
+                TransportBackedAiModelProvider("test", "configured-model", transport(false) {
+                    now += 234L
+                    FakeConnection(401, "$secret $privateText")
+                }, consent),
+                consent
+            ) }, backgroundExecutor = Executor { it.run() }, nowMillis = { now })
         val accepted = coordinator.generateVisibleDraft(batch, snapshot)
         assertTrue(logs.joinToString("\n"), accepted)
         val log = logs.single { it.startsWith("AI 模型调用失败：") }
@@ -384,14 +387,17 @@ class AiModelFailureDiagnosticsTest {
             },
             isAiReplyActive = { true },
             onLog = { logs.add(it) },
-            createProvider = {
-                TransportBackedAiModelProvider(
-                    "deepseek", "configured-model",
-                    transport(true) {
-                        val connection = FakeConnection(200, pendingBodies.removeFirst())
-                        requests += connection
-                        connection
-                    },
+            createGateway = {
+                EngineBackedAiDecisionGateway(
+                    TransportBackedAiModelProvider(
+                        "deepseek", "configured-model",
+                        transport(true) {
+                            val connection = FakeConnection(200, pendingBodies.removeFirst())
+                            requests += connection
+                            connection
+                        },
+                        consent
+                    ),
                     consent
                 )
             },

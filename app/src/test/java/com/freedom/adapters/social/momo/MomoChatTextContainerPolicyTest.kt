@@ -103,12 +103,12 @@ class MomoChatTextContainerPolicyTest {
                     scheduled += task; return ScheduledTask { scheduled.remove(task) }
                 }
             }, isAiReplyActive = { true }, onLog = { logs.add(it) },
-            createProvider = { object : AiModelProvider {
+            createGateway = { EngineBackedAiDecisionGateway(object : AiModelProvider {
                 override fun generate(request: AiModelRequest): AiModelResult {
                     modelCalls++; this@Flow.request = request
                     return AiModelResult("""{"action":"REPLY","reason":"OK","reasonDetail":"回复已确认的文字消息","draft":"测试回复内容"}""", "fake", "fake")
                 }
-            } }, backgroundExecutor = Executor { it.run() }, chooseRandomInt = { minimum, _ -> minimum }
+            }, AiModelCloudConsent { true }) }, backgroundExecutor = Executor { it.run() }, chooseRandomInt = { minimum, _ -> minimum }
         )
         fun batch(messages: List<ChatMessage>) = ChatMessageBatch(MessageReadStatus.SUCCESS,
             "pkg|1|1|conversation=${snapshot.conversationIdentityKey()}", messages, messages.size,
