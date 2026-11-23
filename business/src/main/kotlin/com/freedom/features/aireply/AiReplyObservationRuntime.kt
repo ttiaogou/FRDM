@@ -1568,12 +1568,18 @@ class AiReplyObservationRuntime(
                 lastPageInspection = inspection
                 if (privateDetailRecovery) {
                     currentSessionWindowKey = windowSessionKey(inspection)
-                    // Consume a same-window return signal too, so the ordinary observer
-                    // cannot process the already-verified return a second time.
-                    chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()
-                    lastIdentityReturnNotConsumedReason = null
-                    onLog("AI 身份回接[RECOVERY_HANDOFF]：result=RESUMED；reason=FRESH_DETAIL_AND_LEASE_VERIFIED")
-                    onLog("AI 聊天详情恢复[RECOVERY_VERIFIED]：原目标聊天与新窗口已复核；继续只读消息采集")
+                    if (isSendConfirmationPending()) {
+                        // A pending send is a read-only confirmation handoff, not an
+                        // identity-return receipt. Do not consume unrelated identity proof.
+                        onLog("AI 发送恢复[RECOVERY_VERIFIED]：原目标聊天与新窗口已复核；重新读取消息，仅核验既有发送，不重发")
+                    } else {
+                        // Consume a same-window return signal too, so the ordinary observer
+                        // cannot process the already-verified identity return a second time.
+                        chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()
+                        lastIdentityReturnNotConsumedReason = null
+                        onLog("AI 身份回接[RECOVERY_HANDOFF]：result=RESUMED；reason=FRESH_DETAIL_AND_LEASE_VERIFIED")
+                        onLog("AI 聊天详情恢复[RECOVERY_VERIFIED]：原目标聊天与新窗口已复核；继续只读消息采集")
+                    }
                 } else {
                     onLog("AI 发送恢复[RECOVERY_VERIFIED]：聊天详情页已连续双快照确认；重新读取消息，仅核验既有发送，不重发")
                 }
