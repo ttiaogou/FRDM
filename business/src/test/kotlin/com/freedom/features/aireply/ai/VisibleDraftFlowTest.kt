@@ -968,4 +968,157 @@ class VisibleDraftFlowTest {
     }
 
 
+    @Test fun restoredUnknownSendRequiresTwoFreshMatchingObservationsAndNeverResends() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        var submitted = 0
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                submitted++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+        first.drain()
+        assertEquals(1, submitted)
+        assertTrue(segments.records.values.single().sendRequestKey?.isNotBlank() == true)
+        assertTrue(segments.records.values.single().sendWindowSessionKey?.isNotBlank() == true)
+        first.coordinator.resetForRuntimeReset()
+        assertEquals(ReplySegmentTaskStatus.UNKNOWN, segments.records.values.single().status)
+
+        var replayed = 0
+        val restored = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                replayed++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        val outgoing = ChatMessage("new-outgoing", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val afterSend = restored.batch.copy(messages = listOf(outgoing), capturedAtMillis = 2L)
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendTransaction(afterSend, restored.snapshot).status)
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendTransaction(
+            afterSend.copy(capturedAtMillis = 3L), restored.snapshot).status)
+        val terminal = restored.coordinator.confirmSendTransaction(
+            afterSend.copy(capturedAtMillis = 4L), restored.snapshot)
+        assertEquals(SendConfirmationResult.CONFIRMED, terminal.status)
+        assertTrue(terminal.finalSendConfirmationId?.isNotBlank() == true)
+        assertEquals(ReplySegmentTaskStatus.SENT, segments.records.values.single().status)
+        assertEquals(ReplyTaskStatus.SENT, tasks.records.values.single().status)
+        assertEquals(1, submitted)
+        assertEquals(0, replayed)
+        assertEquals(0, restored.calls)
+    }
+
+    @Test fun recoveredUnknownCannotConfirmIdenticalOutgoingPresentBeforeOriginalSend() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val old = ChatMessage("historical", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 40, 100, 60),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+        }, segments, tasks)
+        val initial = first.batch.copy(messages = listOf(old) + first.batch.messages)
+        assertTrue(first.coordinator.generateVisibleDraft(initial, first.snapshot))
+        first.drain()
+        assertTrue(segments.records.values.single().preSendOutgoingKeyHashes.isNotEmpty())
+        first.coordinator.resetForRuntimeReset()
+
+        var repeated = 0
+        val restored = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                repeated++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        val current = restored.batch.copy(messages = listOf(old), capturedAtMillis = 2L)
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendTransaction(current, restored.snapshot).status)
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendTransaction(
+            current.copy(capturedAtMillis = 3L), restored.snapshot).status)
+        assertEquals(SendConfirmationResult.UNKNOWN, restored.coordinator.confirmSendTransaction(
+            current.copy(capturedAtMillis = 4L), restored.snapshot).status)
+        assertEquals(ReplySegmentTaskStatus.UNKNOWN, segments.records.values.single().status)
+        assertEquals(0, repeated)
+        assertFalse(restored.coordinator.generateVisibleDraft(restored.batch, restored.snapshot))
+    }
+
+    @Test fun legacyUnknownWithoutDurableSendProofCannotBeConfirmedByMatchingText() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+        }, segments, tasks)
+        assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+        first.drain()
+        first.coordinator.resetForRuntimeReset()
+        val old = segments.records.values.single()
+        segments.records[old.taskId] = old.copy(
+            sendAttemptStartedAt = null, sendWindowSessionKey = null,
+            sendChatTitleHash = null, sendRequestKey = null
+        )
+        val restored = Fixture(segmentRepository = segments, taskRepository = tasks)
+        val outgoing = ChatMessage("new-outgoing", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        assertEquals(SendConfirmationResult.UNKNOWN, restored.coordinator.confirmSendTransaction(
+            restored.batch.copy(messages = listOf(outgoing), capturedAtMillis = 2L),
+            restored.snapshot).status)
+        assertEquals(ReplySegmentTaskStatus.UNKNOWN, segments.records.values.single().status)
+        assertTrue(restored.logs.any { it.contains("UNRESOLVED_EVIDENCE") })
+    }
+
+    @Test fun recoveredFirstMessageConfirmsThenResumesNextSegmentWithFreshComposer() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val sends = mutableListOf<String>()
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sends.add(expectedText)
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        first.modelOutput = """{"action":"REPLY","reason":"OK","draft":"第一\n第二"}"""
+        assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+        first.drain()
+        assertEquals(listOf("第一"), sends)
+        first.coordinator.resetForRuntimeReset()
+
+        val restored = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sends.add(expectedText)
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        val firstOutgoing = ChatMessage("first-out", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "第一", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val firstBatch = restored.batch.copy(messages = listOf(firstOutgoing), capturedAtMillis = 2L)
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendResult(firstBatch, restored.snapshot))
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendResult(
+            firstBatch.copy(capturedAtMillis = 3L), restored.snapshot))
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendResult(
+            firstBatch.copy(capturedAtMillis = 4L), restored.snapshot))
+        assertEquals(listOf("第一"), sends)
+        assertEquals(listOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.CREATED),
+            segments.records.values.map { it.status })
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendResult(
+            firstBatch.copy(capturedAtMillis = 5L), restored.snapshot))
+        restored.drain()
+        assertEquals(listOf("第一", "第二"), sends)
+        val secondOutgoing = ChatMessage("second-out", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "第二", ScreenRect(0, 30, 100, 50),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val last = restored.coordinator.confirmSendTransaction(
+            firstBatch.copy(messages = listOf(firstOutgoing, secondOutgoing), capturedAtMillis = 6L),
+            restored.snapshot)
+        assertEquals(SendConfirmationResult.CONFIRMED, last.status)
+        assertTrue(last.finalSendConfirmationId?.isNotBlank() == true)
+        assertEquals(listOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.SENT),
+            segments.records.values.map { it.status })
+    }
+
 }

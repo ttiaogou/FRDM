@@ -125,6 +125,63 @@ class LocalReplyTaskRepositoryTest {
         }
     }
 
+
+    @Test
+    fun sendEvidenceSurvivesSegmentLedgerReopenAndUnknownTransition() {
+        val file = File.createTempFile("reply-segments", ".tsv")
+        file.delete()
+        try {
+            val repository = LocalReplySegmentTaskRepository(file)
+            val created = com.freedom.features.aireply.ai.ReplySegmentTaskRecord(
+                taskId = "request:segment:0", requestId = "request",
+                conversationKey = "conversation", segmentIndex = 0, segmentCount = 1,
+                segmentContentHash = "content-hash", segmentContent = "你好",
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.CREATED,
+                createdAt = 1L
+            )
+            repository.save(created)
+            assertTrue(repository.update(created.copy(
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.DRAFT_APPLIED)))
+            assertTrue(repository.update(created.copy(
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.PENDING_SEND)))
+            val proof = created.copy(
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.SENDING,
+                sendAttemptStartedAt = 2L, sendWindowSessionKey = "pkg|21|7|conversation=conversation",
+                sendChatTitleHash = "title-hash", preSendOutgoingKeyHashes = setOf("one", "two"),
+                sendRequestKey = "request-key"
+            )
+            assertTrue(repository.update(proof))
+            val reopened = LocalReplySegmentTaskRepository(file)
+            assertEquals(proof, reopened.find(proof.taskId))
+            assertTrue(reopened.update(proof.copy(
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.UNKNOWN)))
+            assertEquals(com.freedom.features.aireply.ai.ReplySegmentTaskStatus.UNKNOWN,
+                LocalReplySegmentTaskRepository(file).find(proof.taskId)?.status)
+            assertEquals(setOf("one", "two"),
+                LocalReplySegmentTaskRepository(file).find(proof.taskId)?.preSendOutgoingKeyHashes)
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun legacySegmentRowsWithoutSendProofRemainReadableAndUnproven() {
+        val file = File.createTempFile("reply-segments-legacy", ".tsv")
+        try {
+            fun encoded(value: String) = java.util.Base64.getUrlEncoder().encodeToString(value.toByteArray())
+            file.writeText(listOf(encoded("old:segment:0"), encoded("old"), encoded("conversation"),
+                "0", "1", "content-hash", "UNKNOWN", "1", "", encoded(""),
+                encoded("你好"), "v2").joinToString("\t"))
+            val original = LocalReplySegmentTaskRepository(file).find("old:segment:0")
+            assertEquals(com.freedom.features.aireply.ai.ReplySegmentTaskStatus.UNKNOWN, original?.status)
+            assertNull(original?.sendAttemptStartedAt)
+            assertNull(original?.sendWindowSessionKey)
+            assertTrue(original?.preSendOutgoingKeyHashes?.isEmpty() == true)
+        } finally {
+            file.delete()
+        }
+    }
+
     private fun record(key: String, requestId: String, updatedAt: Long) = ReplyTaskRecord(
         requestKey = key,
         conversationKey = "conversation",

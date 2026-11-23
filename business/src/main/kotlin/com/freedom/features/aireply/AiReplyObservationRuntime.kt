@@ -162,6 +162,7 @@ class AiReplyObservationRuntime(
         private const val SESSION_RETURN_VERIFY_DELAY_MS = 900L
         private const val DRAFT_PENDING_POLL_DELAY_MS = 500L
         private const val SEND_CONFIRMATION_RECHECK_DELAY_MS = 500L
+        private const val GREETING_UNKNOWN_SEND_READ_ONLY_RECHECK_DELAY_MS = 5_000L
         private const val MAX_DRAFT_PENDING_WAIT_MS = 185_000L
         private const val IDENTITY_CAPTURE_TIMEOUT_MS = 15_000L
         private const val MAX_IDENTITY_CAPTURE_RETRIES = 30
@@ -3427,6 +3428,13 @@ class AiReplyObservationRuntime(
                 if (receivedGreetingsTaskActive) {
                     // Unknown send outcome cannot complete a greeting or authorize replay.
                     onLog("GREETING_SEND_UNKNOWN：发送结果未明确确认；保持当前聊天，不标记处理、不重发")
+                    // An UNKNOWN greeting must keep observing without re-entering the draft
+                    // or gesture path. The current lease and page are rechecked on each pass.
+                    if (isAiReplyActive() && sessionRunStarted && !recoveryContext.pending &&
+                        ownsTask(RECEIVED_GREETINGS_TASK_ID)
+                    ) {
+                        scheduleFullInspectionAfter(GREETING_UNKNOWN_SEND_READ_ONLY_RECHECK_DELAY_MS)
+                    }
                     return true
                 }
                 if (!requestSendConfirmationRecovery("SEND_CONFIRMATION_UNKNOWN")) {

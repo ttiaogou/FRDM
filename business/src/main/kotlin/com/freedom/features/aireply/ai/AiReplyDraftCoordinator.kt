@@ -127,8 +127,20 @@ class AiReplyDraftCoordinator(
         val requestGeneration: Long,
         val target: ChatDraftInputTarget,
         val draft: String,
-        val existingOutgoingKeys: Set<String>
+        val existingOutgoingKeys: Set<String>,
+        /** Hashed identities of outgoing bubbles visible before the original send. */
+        val previousOutgoingKeyHashes: Set<String> = emptySet(),
+        val recoveredFromLedger: Boolean = false
     )
+
+    private data class ReadOnlyRecoveredMatch(
+        val requestId: String,
+        val segmentIndex: Int,
+        val messageKey: String,
+        val observedAtMillis: Long
+    )
+
+    private var readOnlyRecoveredMatch: ReadOnlyRecoveredMatch? = null
 
     private data class VerifiedEmptyInputRetry(
         val windowSessionKey: String,
@@ -173,6 +185,7 @@ class AiReplyDraftCoordinator(
             activeExistingOutgoingKeys = emptySet()
             pendingSendConfirmation = null
             pendingNextMessageSegment = null
+            readOnlyRecoveredMatch = null
             replyAwaitingConfirmedSend = false
             sendConfirmationChecks = 0
             lastConfirmedSendId = null
@@ -671,6 +684,33 @@ class AiReplyDraftCoordinator(
         // SEND_CONTROL_NOT_READY 且确认未派发手势时，才允许回退此状态。
         updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.SENDING)
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
+        // Persist the pre-send snapshot BEFORE invoking the gesture port. The absence of
+        // an outgoing bubble after a restart must not permit replay or text-only proof.
+        val sendEvidenceSaved = replySegmentTaskRepository?.let { repository ->
+            runCatching {
+                val requestId = synchronized(lock) { activeRequestId }.orEmpty()
+                val requestKey = synchronized(lock) { activeMessageKey }.orEmpty()
+                val id = "$requestId:segment:$segmentIndex"
+                val record = repository.find(id)
+                val evidence = record?.copy(
+                    status = ReplySegmentTaskStatus.SENDING,
+                    sendAttemptStartedAt = nowMillis(),
+                    sendWindowSessionKey = target.windowSessionKey,
+                    sendChatTitleHash = fingerprint(normalizeTitle(target.expectedChatTitle)),
+                    preSendOutgoingKeyHashes = synchronized(lock) { activeExistingOutgoingKeys.mapTo(LinkedHashSet()) { fingerprint(it) } },
+                    sendRequestKey = requestKey
+                )
+                requestId.isNotBlank() && requestKey.isNotBlank() &&
+                    record?.status == ReplySegmentTaskStatus.SENDING &&
+                    evidence != null && repository.update(evidence) &&
+                    repository.find(id) == evidence
+            }.getOrDefault(false)
+        } ?: true
+        if (!sendEvidenceSaved) {
+            onLog("AI 发送前检查点[NOT_DURABLE]：无法确认证据已持久化；禁止提交发送")
+            finish("SEND_PRECHECKPOINT_NOT_DURABLE", requestGeneration)
+            return
+        }
         val sent = runCatching { sendPort?.sendDraft(target, message) ?: ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_UNAVAILABLE") }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_EXCEPTION") }
         if (sent.status == ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND &&
@@ -985,11 +1025,116 @@ class AiReplyDraftCoordinator(
         activeMessageKey != null && activeRequestId != null
     }
 
+    /**
+     * Rehydrate only an uncertain, already-attempted send. Never recreate input chunks
+     * or invoke the send port during recovery. Legacy records without a pre-send
+     * baseline remain unresolved rather than accepting a same-text historical bubble.
+     */
+    private fun restoreUncertainSendConfirmation(
+        batch: ChatMessageBatch, snapshot: ChatPageSnapshot
+    ): SendConfirmationResult {
+        val conversationKey = snapshot.conversationIdentityKey() ?: return SendConfirmationResult.NOT_PENDING
+        val repository = replySegmentTaskRepository ?: return SendConfirmationResult.NOT_PENDING
+        val all = runCatching { repository.findByConversation(conversationKey) }.getOrNull()
+            ?: return SendConfirmationResult.UNKNOWN
+        val uncertain = all.filter {
+            it.status in setOf(
+                ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.SENT_UNCONFIRMED,
+                ReplySegmentTaskStatus.UNKNOWN
+            )
+        }
+        if (uncertain.isEmpty()) return SendConfirmationResult.NOT_PENDING
+        synchronized(lock) { replyAwaitingConfirmedSend = true }
+        val candidate = uncertain.singleOrNull()
+        val segments = candidate?.let { current ->
+            all.filter { it.requestId == current.requestId }.sortedBy { it.segmentIndex }
+        }
+        val startedAt = candidate?.sendAttemptStartedAt
+        val requestKey = candidate?.sendRequestKey
+        val targetNode = snapshot.inputFieldTarget
+        val windowIdentity = snapshot.windowIdentityKey()
+        val session = targetNode?.window
+        val currentWindowKey = if (session == null) null
+            else "${session.packageName}|${session.windowId}|${session.generation}|conversation=$conversationKey"
+        val valid = candidate != null && segments != null && startedAt != null &&
+            !requestKey.isNullOrBlank() && candidate.sendChatTitleHash != null &&
+            candidate.sendWindowSessionKey?.endsWith("|conversation=$conversationKey") == true &&
+            snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            snapshot.packageName.isNotBlank() && targetNode != null &&
+            windowIdentity != null && batch.windowSessionKey == currentWindowKey &&
+            batch.capturedAtMillis > startedAt &&
+            fingerprint(normalizeTitle(snapshot.chatTitleText)) == candidate.sendChatTitleHash &&
+            segments.size == candidate.segmentCount &&
+            segments.indices.all { index ->
+                val record = segments[index]
+                record.segmentIndex == index && record.segmentCount == candidate.segmentCount &&
+                    record.segmentContent.isNotBlank() && fingerprint(record.segmentContent) == record.segmentContentHash &&
+                    (when {
+                        index < candidate.segmentIndex -> record.status == ReplySegmentTaskStatus.SENT
+                        index == candidate.segmentIndex -> record.status == candidate.status
+                        else -> record.status == ReplySegmentTaskStatus.CREATED
+                    })
+            } &&
+            replyTaskRepository?.find(requestKey)?.let {
+                it.requestId == candidate.requestId && it.conversationKey == conversationKey &&
+                    it.status in setOf(ReplyTaskStatus.SENDING, ReplyTaskStatus.SENT_UNCONFIRMED, ReplyTaskStatus.UNKNOWN)
+            } == true &&
+            isAiReplyActive()
+        if (!valid || candidate == null || segments == null || targetNode == null ||
+            windowIdentity == null || currentWindowKey == null || requestKey == null || startedAt == null
+        ) {
+            onLog("AI 发送只读恢复[UNRESOLVED_EVIDENCE]：原发送基线、身份、持久化队列或新鲜页面证据不足；禁止重发")
+            return SendConfirmationResult.UNKNOWN
+        }
+        val target = ChatDraftInputTarget(
+            packageName = snapshot.packageName,
+            activityClass = snapshot.activityClass,
+            windowIdentityKey = windowIdentity,
+            conversationIdentityKey = conversationKey,
+            windowSessionKey = currentWindowKey,
+            nodeTarget = targetNode,
+            expectedChatTitle = snapshot.chatTitleText,
+            taskLease = captureTaskLease()
+        )
+        synchronized(lock) {
+            if (pendingSendConfirmation != null || pendingNextMessageSegment != null ||
+                pending.get() || awaitingUserSend.get()
+            ) return SendConfirmationResult.WAITING
+            activeRequestId = candidate.requestId
+            activeMessageKey = requestKey
+            activeMessageSegments = segments.map { it.segmentContent }
+            activeExistingOutgoingKeys = emptySet()
+            replyAwaitingConfirmedSend = true
+            readOnlyRecoveredMatch = null
+            pendingSendConfirmation = PendingSendConfirmation(
+                sendAttemptId = fingerprint("${candidate.requestId}|${candidate.segmentIndex}|READ_ONLY"),
+                requestId = candidate.requestId,
+                conversationKey = conversationKey,
+                segmentIndex = candidate.segmentIndex,
+                segmentCount = candidate.segmentCount,
+                segmentContentHash = candidate.segmentContentHash,
+                submittedAt = startedAt,
+                confirmationDeadline = nowMillis() + SEND_CONFIRMATION_TIMEOUT_MILLIS,
+                requestGeneration = generation.get(),
+                target = target,
+                draft = candidate.segmentContent,
+                existingOutgoingKeys = emptySet(),
+                previousOutgoingKeyHashes = candidate.preSendOutgoingKeyHashes,
+                recoveredFromLedger = true
+            )
+            sendConfirmationChecks = 0
+        }
+        onLog("AI 发送只读恢复[REHYDRATED]：requestId=${candidate.requestId.take(12)}；" +
+            "segmentIndex=${candidate.segmentIndex}；仅核验新鲜己方气泡，不重新输入或发送")
+        return SendConfirmationResult.WAITING
+    }
+
     fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): SendConfirmationResult {
         val pending = synchronized(lock) { pendingSendConfirmation }
         if (pending == null) {
-            val next = synchronized(lock) { pendingNextMessageSegment } ?: return SendConfirmationResult.NOT_PENDING
-            return resumeConfirmedNextMessageSegment(batch, snapshot, next)
+            val next = synchronized(lock) { pendingNextMessageSegment }
+            if (next != null) return resumeConfirmedNextMessageSegment(batch, snapshot, next)
+            return restoreUncertainSendConfirmation(batch, snapshot)
         }
         if (generation.get() != pending.requestGeneration) {
             onLog("AI 发送结果核验：UNKNOWN；运行代次已失效；禁止重发")
@@ -1013,13 +1158,33 @@ class AiReplyDraftCoordinator(
             onLog("AI 发送结果核验：WAITING；当前批次不属于发送后的稳定聊天观察；检查次数=$checks")
             return SendConfirmationResult.WAITING
         }
-        val matched = batch.messages.firstOrNull { message ->
+        val eligibleMatches = batch.messages.filter { message ->
             message.direction == ChatMessageDirection.OUTGOING &&
                 message.contentQuality == MessageContentQuality.VERIFIED &&
                 fingerprint(message.content.orEmpty()) == pending.segmentContentHash &&
-                messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys
+                messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys &&
+                fingerprint(messageKey(message.stableLogicalMessageId, message.effectiveContentRevision)) !in pending.previousOutgoingKeyHashes
         }
+        // A reconstructed transaction needs a single, stable bubble on two fresh reads;
+        // a matching string on one OCR pass is never sufficient proof.
+        val matched = if (pending.recoveredFromLedger) eligibleMatches.singleOrNull() else eligibleMatches.firstOrNull()
         if (matched != null) {
+            if (pending.recoveredFromLedger) {
+                val matchKey = messageKey(matched.stableLogicalMessageId, matched.effectiveContentRevision)
+                val prior = synchronized(lock) { readOnlyRecoveredMatch }
+                if (prior == null || prior.requestId != pending.requestId ||
+                    prior.segmentIndex != pending.segmentIndex ||
+                    prior.messageKey != matchKey || batch.capturedAtMillis <= prior.observedAtMillis
+                ) {
+                    synchronized(lock) {
+                        readOnlyRecoveredMatch = ReadOnlyRecoveredMatch(
+                            pending.requestId, pending.segmentIndex, matchKey, batch.capturedAtMillis
+                        )
+                    }
+                    onLog("AI 发送只读恢复[CANDIDATE_SEEN]：等待第二次新鲜同一消息确认；禁止重发")
+                    return SendConfirmationResult.WAITING
+                }
+            }
             val confirmationId = fingerprint("${pending.requestId}|${pending.segmentIndex}|${pending.segmentContentHash}|${matched.stableLogicalMessageId}|${matched.effectiveContentRevision}")
             if (updateSegmentStatusAndContinue(pending, confirmationId)) {
                 onLog("AI 发送结果核验：SENT；sendConfirmationId=${confirmationId.take(12)}；" +
@@ -1029,8 +1194,12 @@ class AiReplyDraftCoordinator(
                     pendingSendConfirmation = null
                     awaitingUserSend.set(false)
                     // A later segment with identical text must never match this earlier bubble.
-                    activeExistingOutgoingKeys = activeExistingOutgoingKeys +
+                    activeExistingOutgoingKeys = if (pending.recoveredFromLedger) {
+                        batch.messages.filter { it.direction == ChatMessageDirection.OUTGOING }
+                            .mapTo(LinkedHashSet()) { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
+                    } else activeExistingOutgoingKeys +
                         messageKey(matched.stableLogicalMessageId, matched.effectiveContentRevision)
+                    readOnlyRecoveredMatch = null
                     if (nextIndex < activeMessageSegments.size) {
                         pendingNextMessageSegment = PendingNextMessageSegment(
                             pending.requestId, nextIndex, pending.requestGeneration,
@@ -1166,7 +1335,10 @@ class AiReplyDraftCoordinator(
             record.segmentContentHash != pending.segmentContentHash
         ) return false
         if (record.status == ReplySegmentTaskStatus.SENT) return record.confirmationId == confirmationId
-        if (record.status != ReplySegmentTaskStatus.SENT_UNCONFIRMED) return false
+        if (record.status !in setOf(
+                ReplySegmentTaskStatus.SENT_UNCONFIRMED, ReplySegmentTaskStatus.UNKNOWN,
+                ReplySegmentTaskStatus.SENDING
+            )) return false
         if (!repo.update(record.copy(status = ReplySegmentTaskStatus.SENT,
                 sentAt = nowMillis(), confirmationId = confirmationId))) return false
         val saved = repo.find(record.taskId)

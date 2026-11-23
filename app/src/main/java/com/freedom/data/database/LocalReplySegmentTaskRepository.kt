@@ -37,12 +37,17 @@ internal class LocalReplySegmentTaskRepository(private val file: File) : ReplySe
         val result = LinkedHashMap<String, ReplySegmentTaskRecord>()
         if (!file.isFile) return result
         file.forEachLine { line -> runCatching {
-            val f = line.split('\t'); if (f.size !in setOf(11, 12)) return@runCatching
+            val f = line.split('\t'); if (f.size !in setOf(11, 12, 17)) return@runCatching
             val record = ReplySegmentTaskRecord(
                 taskId = unpack(f[0]), requestId = unpack(f[1]), conversationKey = unpack(f[2]),
                 segmentIndex = f[3].toInt(), segmentCount = f[4].toInt(), segmentContentHash = f[5],
-                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.valueOf(f[6]), segmentContent = if (f.size == 12) unpack(f[10]) else "",
-                createdAt = f[7].toLong(), sentAt = f[8].toLongOrNull(), confirmationId = unpack(f[9]).ifBlank { null }
+                status = com.freedom.features.aireply.ai.ReplySegmentTaskStatus.valueOf(f[6]), segmentContent = if (f.size >= 12) unpack(f[10]) else "",
+                createdAt = f[7].toLong(), sentAt = f[8].toLongOrNull(), confirmationId = unpack(f[9]).ifBlank { null },
+                sendAttemptStartedAt = if (f.size == 17) f[11].toLongOrNull() else null,
+                sendWindowSessionKey = if (f.size == 17) unpack(f[12]).ifBlank { null } else null,
+                sendChatTitleHash = if (f.size == 17) f[13].ifBlank { null } else null,
+                preSendOutgoingKeyHashes = if (f.size == 17) unpack(f[14]).split('\n').filter(String::isNotBlank).toSet() else emptySet(),
+                sendRequestKey = if (f.size == 17) unpack(f[15]).ifBlank { null } else null
             )
             result[record.taskId] = record
         } }
@@ -54,7 +59,9 @@ internal class LocalReplySegmentTaskRepository(private val file: File) : ReplySe
         val tmp = File(file.parentFile, "${file.name}.tmp")
         tmp.writeText(records.values.joinToString("\n") { r ->
             listOf(pack(r.taskId), pack(r.requestId), pack(r.conversationKey), r.segmentIndex, r.segmentCount,
-                r.segmentContentHash, r.status.name, r.createdAt, r.sentAt ?: "", pack(r.confirmationId.orEmpty()), pack(r.segmentContent), "v2").joinToString("\t")
+                r.segmentContentHash, r.status.name, r.createdAt, r.sentAt ?: "", pack(r.confirmationId.orEmpty()), pack(r.segmentContent),
+                r.sendAttemptStartedAt ?: "", pack(r.sendWindowSessionKey.orEmpty()), r.sendChatTitleHash.orEmpty(),
+                pack(r.preSendOutgoingKeyHashes.sorted().joinToString("\n")), pack(r.sendRequestKey.orEmpty()), "v3").joinToString("\t")
         }, StandardCharsets.UTF_8)
         Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
     }
