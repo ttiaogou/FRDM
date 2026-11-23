@@ -187,6 +187,24 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun legacyCheckpointDoesNotReleaseIfPrivateUnknownRowIsNowIneligible() {
+        val known = candidate(0, "Known", ChatUnreadStatus.UNREAD)
+        val unresolved = candidate(1, "Unknown", ChatUnreadStatus.UNKNOWN)
+        val old = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
+            normalInboxUnreadStateUnknown = true
+            lastStableSessionListVisibleKeys = visibleSessionKeys(snapshot(known, unresolved))
+        }.checkpoint()
+        val executor = PrivateMessagesTraversalTaskExecutor().apply { restore(old) }
+        val stillUnknown = snapshot(known, unresolved.copy(previewBoundsValid = false))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED,
+            executor.evaluateUnreadAdmission(stillUnknown))
+        assertTrue(executor.normalInboxUnreadStateUnknown)
+    }
+
+    @Test
     fun mandatoryFirstSwipeAndTriStateUnreadAdmissionRemainDistinct() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val unread = candidate(0, "Unread", ChatUnreadStatus.UNREAD)

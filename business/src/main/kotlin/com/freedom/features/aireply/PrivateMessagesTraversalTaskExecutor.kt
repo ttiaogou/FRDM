@@ -569,7 +569,12 @@ internal class PrivateMessagesTraversalTaskExecutor {
             // Legacy checkpoints did not persist the unknown row keys. They can be reconciled
             // only on the exact old viewport after its current eligible UNKNOWN count reaches 0.
             val legacyRevalidated = unresolvedUnknownUnreadKeys.isEmpty() &&
-                legacyUnknownUnreadViewportKeys != null
+                legacyUnknownUnreadViewportKeys != null &&
+                // With no durable blocker-row keys, every current private row must have an
+                // explicit unread state. "Eligible UNKNOWN = 0" alone is not enough.
+                snapshot.chatListCandidates.none {
+                    it.selectionClass == "PRIVATE_CHAT" && it.unreadStatus == ChatUnreadStatus.UNKNOWN
+                }
             if (sameBlockedViewport && (blockersNowExplicit || legacyRevalidated)) {
                 normalInboxUnreadStateUnknown = false
                 unresolvedUnknownUnreadKeys.clear()
