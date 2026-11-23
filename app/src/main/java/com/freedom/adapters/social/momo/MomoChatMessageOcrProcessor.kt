@@ -16,6 +16,8 @@ import com.freedom.application.ports.OcrReviewRepository
 import java.io.ByteArrayOutputStream
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.OcrContentToken
+import com.freedom.features.aireply.domain.message.OcrTextProjection
+import com.freedom.features.aireply.domain.message.MessageContentQuality
 import com.freedom.ocr.OcrManager
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -50,7 +52,8 @@ internal class MomoChatMessageOcrProcessor(
         val meanConfidence: Float?,
         val lineCount: Int,
         val detectionBoxes: List<OcrDetectionBox> = emptyList(),
-        val tokens: List<OcrContentToken> = emptyList()
+        val tokens: List<OcrContentToken> = emptyList(),
+        val textProjection: OcrTextProjection? = null
     )
 
     private val executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
@@ -197,6 +200,7 @@ internal class MomoChatMessageOcrProcessor(
                                 latinRecognized = LinkedHashMap(),
                                 qualityByRowIndex = LinkedHashMap(),
                                 tokensByRowIndex = LinkedHashMap(),
+                                textProjectionsByRowIndex = LinkedHashMap(),
                                 confidenceByRowIndex = LinkedHashMap(),
                                 lineCountByRowIndex = LinkedHashMap(),
                                 captureDescription = captureDescription,
@@ -250,6 +254,7 @@ internal class MomoChatMessageOcrProcessor(
         latinRecognized: LinkedHashMap<Int, String>,
         qualityByRowIndex: LinkedHashMap<Int, com.freedom.features.aireply.domain.message.MessageContentQuality>,
         tokensByRowIndex: LinkedHashMap<Int, List<OcrContentToken>>,
+        textProjectionsByRowIndex: LinkedHashMap<Int, OcrTextProjection>,
         confidenceByRowIndex: LinkedHashMap<Int, Float>,
         lineCountByRowIndex: LinkedHashMap<Int, Int>,
         captureDescription: String,
@@ -286,6 +291,7 @@ internal class MomoChatMessageOcrProcessor(
                     latinTextByRowIndex = latinRecognized.toMap(),
                     qualityByRowIndex = qualityByRowIndex.toMap(),
                     tokensByRowIndex = tokensByRowIndex.toMap(),
+                    textProjectionsByRowIndex = textProjectionsByRowIndex.toMap(),
                     captureDescription = captureDescription,
                     sampleScreenshotPath = sampleScreenshotPath,
                     sampleCropPathsByRowIndex = cropPaths.toMap(),
@@ -313,7 +319,8 @@ internal class MomoChatMessageOcrProcessor(
             }
             recognizeNext(
                 bitmap, rootBounds, targets, index + 1, recognized, chineseRecognized,
-                latinRecognized, qualityByRowIndex, tokensByRowIndex, confidenceByRowIndex, lineCountByRowIndex,
+                latinRecognized, qualityByRowIndex, tokensByRowIndex, textProjectionsByRowIndex,
+                confidenceByRowIndex, lineCountByRowIndex,
                 captureDescription, sampleScreenshotPath, reviewBatchId, cropPaths, failed + 1, isCompleted, onComplete
             )
             return
@@ -347,6 +354,7 @@ internal class MomoChatMessageOcrProcessor(
             recognized[target.rowIndex] = finalText
             qualityByRowIndex[target.rowIndex] = MomoOcrQualityPolicy.classify(finalText)
             if (recognition.tokens.isNotEmpty()) tokensByRowIndex[target.rowIndex] = recognition.tokens
+            recognition.textProjection?.let { textProjectionsByRowIndex[target.rowIndex] = it }
         }
         recognition.meanConfidence?.let { confidenceByRowIndex[target.rowIndex] = it }
         if (recognition.lineCount > 0) lineCountByRowIndex[target.rowIndex] = recognition.lineCount
@@ -364,6 +372,7 @@ internal class MomoChatMessageOcrProcessor(
             latinRecognized = latinRecognized,
             qualityByRowIndex = qualityByRowIndex,
             tokensByRowIndex = tokensByRowIndex,
+            textProjectionsByRowIndex = textProjectionsByRowIndex,
             confidenceByRowIndex = confidenceByRowIndex,
             lineCountByRowIndex = lineCountByRowIndex,
             captureDescription = captureDescription,
@@ -411,6 +420,16 @@ internal class MomoChatMessageOcrProcessor(
         }
         val reconciled = MomoOcrVisualSymbolGuard.reconcileWithTokens(lines, colorRegions)
         val finalText = normalizeRecognizedText(reconciled.text)
+        // Projection is separate from the existing P0 text/quality. A truncated OCR render
+        // cannot prove that its tokens align with the complete captured message.
+        val textProjection = reconciled.text.takeIf { it.length <= MAX_RECOGNIZED_TEXT_LENGTH }
+            ?.let { MomoOcrTextProjector.extract(it, reconciled.tokens) }
+            ?.let { projection ->
+                val usable = normalizeRecognizedText(projection.text)
+                if (usable.isNotBlank() &&
+                    MomoOcrQualityPolicy.classify(usable) == MessageContentQuality.VERIFIED
+                ) projection.copy(text = usable) else null
+            }
         val detectionBoxes = result.mapNotNull { item ->
             val text = normalizeRecognizedText(item.text)
             if (text.isBlank() || item.points.isEmpty()) return@mapNotNull null
@@ -429,7 +448,8 @@ internal class MomoChatMessageOcrProcessor(
             meanConfidence = validConfidences.takeIf { it.isNotEmpty() }?.average()?.toFloat(),
             lineCount = lines.size,
             detectionBoxes = detectionBoxes,
-            tokens = reconciled.tokens
+            tokens = reconciled.tokens,
+            textProjection = textProjection
         )
     }
 

@@ -219,7 +219,9 @@ data class ChatMessageBatch(
     val observationBatchId: String = "",
     val windowSnapshotSignature: String = "",
     /** Ephemeral OCR evidence. Excluded from summary, logs and AI input until a later stage. */
-    val ocrTokensByRowIndex: Map<Int, List<OcrContentToken>> = emptyMap()
+    val ocrTokensByRowIndex: Map<Int, List<OcrContentToken>> = emptyMap(),
+    /** P2 text evidence only. P0 admission and message content are intentionally unchanged. */
+    val ocrTextProjectionsByRowIndex: Map<Int, OcrTextProjection> = emptyMap()
 ) {
     val effectiveObservationBatchId: String
         get() = observationBatchId.ifBlank { "${windowSessionKey.orEmpty()}@${capturedAtMillis}" }
