@@ -359,6 +359,124 @@ class VisibleDraftFlowTest {
         assertEquals(2, f.calls)
     }
 
+    private fun lifecycleEvents(f: Fixture): List<String> =
+        f.logs.filter { it.startsWith("AI 模型生命周期：") }
+
+    private fun lifecycleField(log: String, field: String): String =
+        log.substringAfter("$field=").substringBefore("；")
+
+    @Test fun modelLifecycleFirstTrySuccessHasOneTerminalAndNoRetry() {
+        val f = Fixture()
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val logs = lifecycleEvents(f)
+        assertEquals(listOf("MODEL_ATTEMPT_STARTED", "MODEL_ATTEMPT_FINISHED", "MODEL_REQUEST_FINISHED"),
+            logs.map { lifecycleField(it, "eventType") })
+        assertTrue(logs.all { lifecycleField(it, "attemptIndex") == "0" })
+        assertEquals("SUCCEEDED", lifecycleField(logs.last(), "finalState"))
+        assertEquals("SUCCEEDED", lifecycleField(logs.last(), "retryState"))
+        assertEquals(1, f.calls)
+    }
+
+    @Test fun modelLifecycleEmptyRecoveryExhaustionHasThreeAttemptsAndOneTerminal() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 3
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val logs = lifecycleEvents(f)
+        assertEquals(listOf(
+            "MODEL_ATTEMPT_STARTED", "MODEL_ATTEMPT_FINISHED", "MODEL_RETRY_SCHEDULED",
+            "MODEL_RETRY_EXECUTING", "MODEL_ATTEMPT_STARTED", "MODEL_ATTEMPT_FINISHED",
+            "MODEL_RETRY_SCHEDULED", "MODEL_RETRY_EXECUTING", "MODEL_ATTEMPT_STARTED",
+            "MODEL_ATTEMPT_FINISHED", "MODEL_REQUEST_FINISHED"
+        ), logs.map { lifecycleField(it, "eventType") })
+        assertEquals(listOf("0", "1", "2"), logs.filter {
+            lifecycleField(it, "eventType") == "MODEL_ATTEMPT_STARTED"
+        }.map { lifecycleField(it, "attemptIndex") })
+        assertEquals(listOf("2500", "6000"), logs.filter {
+            lifecycleField(it, "eventType") == "MODEL_RETRY_SCHEDULED"
+        }.map { lifecycleField(it, "delayMs") })
+        assertEquals("EXHAUSTED", lifecycleField(logs.last(), "retryState"))
+        assertEquals("FAILED", lifecycleField(logs.last(), "finalState"))
+        assertEquals(3, f.calls)
+    }
+
+    @Test fun modelLifecycleRecoverySuccessReusesRequestIdAndHasSingleSuccessTerminal() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 1
+        assertTrue(f.coordinator.generateVisibleDraft(
+            f.batch, f.snapshot, taskId = AiDecisionTaskIds.RECEIVED_GREETINGS))
+        f.drain()
+        val logs = lifecycleEvents(f)
+        assertEquals(1, logs.count { lifecycleField(it, "eventType") == "MODEL_REQUEST_FINISHED" })
+        assertEquals("SUCCEEDED", lifecycleField(logs.last(), "finalState"))
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", lifecycleField(logs.last(), "taskId"))
+        assertEquals(1, logs.map { lifecycleField(it, "requestId") }.distinct().size)
+        assertEquals(2, f.calls)
+        assertEquals("你好呀", f.text)
+    }
+
+    @Test fun modelLifecycleComposerChangeCancelsWithoutAdditionalModelCall() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 1
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.text = "人工输入"
+        f.drain()
+        val logs = lifecycleEvents(f)
+        assertEquals(1, logs.count { lifecycleField(it, "eventType") == "MODEL_RETRY_CANCELLED" })
+        assertEquals("CANCELLED_CONTEXT_CHANGED", lifecycleField(logs.last(), "retryState"))
+        assertEquals("CANCELLED", lifecycleField(logs.last(), "finalState"))
+        assertEquals(1, f.calls)
+        assertEquals("人工输入", f.text)
+    }
+
+    @Test fun modelLifecycleRuntimeResetCancelsPendingRetryOnce() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 2
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.step() // first retry ran, second retry is scheduled
+        f.coordinator.resetForRuntimeReset()
+        f.drain() // stale retry must not run
+        val logs = lifecycleEvents(f)
+        assertEquals(1, logs.count { lifecycleField(it, "eventType") == "MODEL_RETRY_CANCELLED" })
+        assertEquals(1, logs.count { lifecycleField(it, "eventType") == "MODEL_REQUEST_FINISHED" })
+        assertEquals("CANCELLED_GENERATION_CHANGED", lifecycleField(logs.last(), "retryState"))
+        assertEquals("CANCELLED", lifecycleField(logs.last(), "finalState"))
+        assertEquals(2, f.calls)
+    }
+
+    @Test fun modelLifecycleInactiveRuntimeIsCancelledWithoutRetryOrNewInput() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 1
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.active = false
+        f.drain()
+        val logs = lifecycleEvents(f)
+        assertEquals("CANCELLED_RUNTIME_INACTIVE", lifecycleField(logs.last(), "retryState"))
+        assertEquals("CANCELLED", lifecycleField(logs.last(), "finalState"))
+        assertEquals(1, f.calls)
+        assertEquals("", f.text)
+    }
+
+    @Test fun modelLifecycleNonRetryableEmptyAndNetworkFailureDoNotScheduleRetries() {
+        for (transportFailure in listOf(false, true)) {
+            val f = Fixture()
+            if (transportFailure) f.fail = true else {
+                f.emptyFailuresRemaining = 1
+                f.emptyFinishReason = "length"
+            }
+            assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+            f.drain()
+            val logs = lifecycleEvents(f)
+            assertEquals(1, logs.count { lifecycleField(it, "eventType") == "MODEL_ATTEMPT_STARTED" })
+            assertEquals(0, logs.count { lifecycleField(it, "eventType") == "MODEL_RETRY_SCHEDULED" })
+            assertEquals(1, logs.count { lifecycleField(it, "eventType") == "MODEL_REQUEST_FINISHED" })
+            assertEquals("FAILED", lifecycleField(logs.last(), "finalState"))
+            assertEquals("NONE", lifecycleField(logs.last(), "retryState"))
+            assertEquals(1, f.calls)
+        }
+    }
+
     @Test fun modelWaitWithTechnicalLookingReasonNeverSchedulesTechnicalRetry() {
         val f = Fixture()
         f.modelOutput = """{"action":"WAIT","reason":"MODEL_CALL_FAILED","reasonDetail":"涉及转账，不自动回复。","draft":null}"""
