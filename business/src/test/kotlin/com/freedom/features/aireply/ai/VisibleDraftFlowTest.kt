@@ -29,6 +29,7 @@ class VisibleDraftFlowTest {
         val inputWriteTargets = mutableListOf<ChatDraftInputTarget>()
         val logs = mutableListOf<String>()
         val preSendFailures = mutableListOf<AiReplyPreSendModelFailure>()
+        var configuredModelName = "test"
         var modelOutput = """{"action":"REPLY","reason":"OK","draft":"你好呀"}"""
         var calls = 0
         var fail = false
@@ -48,7 +49,7 @@ class VisibleDraftFlowTest {
             completeTailRowBounds = ScreenRect(0, 10, 100, 30))
         val coordinator = AiReplyDraftCoordinator(
             configurationRepository = object : AiModelConfigurationRepository {
-                override fun load() = AiModelConfiguration(apiBaseUrl = "https://example.com/v1", modelName = "test",
+                override fun load() = AiModelConfiguration(apiBaseUrl = "https://example.com/v1", modelName = configuredModelName,
                     apiKey = "test", provider = configuredProvider)
                 override fun save(configuration: AiModelConfiguration) = Unit
                 override fun clearApiKey() = Unit
@@ -337,6 +338,61 @@ class VisibleDraftFlowTest {
         assertEquals("", f.text)
     }
 
+    @Test fun p3LogsNeverExposeFreeModelReasonModelNameOrConversationIdentity() {
+        for (taskId in listOf(AiDecisionTaskIds.PRIVATE_MESSAGES, AiDecisionTaskIds.RECEIVED_GREETINGS)) {
+            val f = Fixture()
+            val modelSecret = "CUSTOM_MODEL_PRIVATE_KEY_987654321"
+            val privateReason = "13800138000"
+            val privateDetail = "user.private@example.org sk-private-secret"
+            f.configuredModelName = modelSecret
+            f.modelOutput = """{"action":"REPLY","reason":"$privateReason","reasonDetail":"$privateDetail","draft":"普通回复"}"""
+            assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot, taskId = taskId))
+            f.drain()
+            val logs = f.logs.joinToString("\n")
+            assertFalse(logs.contains(modelSecret))
+            assertFalse(logs.contains(privateReason))
+            assertFalse(logs.contains(privateDetail))
+            assertFalse(logs.contains("sk-private-secret"))
+            assertFalse(logs.contains(f.snapshot.conversationIdentityKey().orEmpty()))
+            assertTrue(f.logs.any { it.startsWith("AI 模型调用开始：") && it.contains("modelHash=") })
+            assertTrue(f.logs.any { it.startsWith("AI 模型调用完成：") && it.contains("reasonHash=") })
+            assertTrue(f.logs.any { it.startsWith("AI 消息段任务已建立：") &&
+                it.contains("conversationKeyHash=") })
+            assertEquals("普通回复", f.text)
+            assertEquals(1, f.calls)
+        }
+    }
+
+    @Test fun p3InvalidModelProtocolNeverLeaksDraftOrStartsSend() {
+        val f = Fixture()
+        val secret = "raw_private_draft_payload"
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"$secret","extra":"private"}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertFalse(f.logs.joinToString("\n").contains(secret))
+        assertTrue(f.logs.any { it.contains("outcomeCategory=MODEL_OUTPUT_INVALID") &&
+            it.contains("safeCode=JSON_SCHEMA_MISMATCH") })
+        assertFalse(f.logs.any { it.startsWith("AI 消息发送链路：") })
+        assertEquals("", f.text)
+        assertEquals(1, f.calls)
+    }
+
+    @Test fun p3StructuredTraceRejectsMultilineIdentifiersAndKeepsBoundedSize() {
+        val secret = "private@example.org\nAPI_KEY=sk-example-secret"
+        val log = AiReplyTraceContract.format(
+            component = "SEND", requestId = secret,
+            taskId = AiDecisionTaskIds.PRIVATE_MESSAGES, generation = 11,
+            eventType = "MESSAGE_SEND_UNCERTAIN", reasonCode = secret,
+            sendAttemptId = secret, sendConfirmationId = secret, sendStatus = "UNKNOWN"
+        )
+        assertFalse(log.contains(secret))
+        assertFalse(log.contains("sk-example-secret"))
+        assertFalse(log.contains("\n"))
+        assertEquals("UNKNOWN", traceField(log, "requestId"))
+        assertEquals("UNKNOWN", traceField(log, "reasonCode"))
+        assertTrue(log.length < 1024)
+    }
+
     @Test fun registeredTasksOnlyReleaseSendGateAfterConfirmedBubbleWithoutDuplicateReceipt() {
         for (taskId in listOf(AiDecisionTaskIds.RECEIVED_GREETINGS, AiDecisionTaskIds.PRIVATE_MESSAGES)) {
             var sent = 0
@@ -439,7 +495,8 @@ class VisibleDraftFlowTest {
         f.drain()
         val log = f.logs.single { it.startsWith("AI 模型决策详情：") }
         assertTrue(log.contains("action=WAIT"))
-        assertTrue(log.contains("reason=FINANCIAL_TRANSACTION_REVIEW"))
+        assertTrue(log.contains("reasonHash="))
+        assertFalse(log.contains("reason=FINANCIAL_TRANSACTION_REVIEW"))
         assertTrue(log.contains("reasonDetailPresent=true"))
         assertFalse(log.contains("涉及转账等高后果事项"))
         assertTrue(log.contains("provider=fake"))
@@ -614,7 +671,8 @@ class VisibleDraftFlowTest {
         f.drain()
         assertEquals(1, f.calls)
         assertEquals("", f.text)
-        assertTrue(f.logs.any { it.contains("action=WAIT") && it.contains("reason=MODEL_CALL_FAILED") })
+        assertTrue(f.logs.any { it.contains("action=WAIT") && it.contains("reasonHash=") })
+        assertFalse(f.logs.any { it.contains("reason=MODEL_CALL_FAILED") })
         assertFalse(f.logs.any { it.contains("AI 模型空输出有限恢复") })
         assertFalse(f.logs.any { it.startsWith("AI 程序执行状态：") })
     }

@@ -320,7 +320,8 @@ class AiModelFailureDiagnosticsTest {
         assertTrue(logs.joinToString("\n"), accepted)
         val log = logs.single { it.startsWith("AI 模型调用失败：") }
         assertTrue(log.contains("provider=OPENAI"))
-        assertTrue(log.contains("model=configured-model"))
+        assertTrue(log.contains("modelHash="))
+        assertFalse(log.contains("model=configured-model"))
         assertTrue(log.contains("elapsedMs=234"))
         assertTrue(log.contains("httpStatus=401"))
         assertTrue(log.contains("safeCode=HTTP_401_UNAUTHORIZED"))

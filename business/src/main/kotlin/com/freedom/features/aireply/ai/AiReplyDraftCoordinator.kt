@@ -721,7 +721,7 @@ class AiReplyDraftCoordinator(
         onLog(
             "AI 模型调用开始：requestId=$requestId；" +
                 "provider=${configuration.provider.name}；" +
-                "model=${configuration.modelName}；" +
+                "modelHash=${diagnosticHash(configuration.modelName)}；" +
                 "contextMessages=${context.messages.size}；" +
                 "emptyRetryAttempt=$emptyRetryAttempt；responseMode=$responseMode"
         )
@@ -786,7 +786,7 @@ class AiReplyDraftCoordinator(
                 "safeCode=${safeLog(safeCode)}；contentState=${safeLog(contentState)}；" +
                 "executionState=${evaluation.status.name}；" +
                 "provider=${safeLog(evaluation.provider ?: configuration.provider.name)}；" +
-                "model=${safeLog(evaluation.model ?: configuration.modelName)}；" +
+                "modelHash=${diagnosticHash(evaluation.model ?: configuration.modelName)}；" +
                 "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；draftPresent=false")
             // A local gate, transport failure or invalid protocol is never a model WAIT.
             onLog(
@@ -795,7 +795,7 @@ class AiReplyDraftCoordinator(
             )
             evaluation.callDiagnostics?.let { diagnostics ->
                 onLog("AI 模型调用失败：requestId=${safeLog(requestId)}；" +
-                    "provider=${safeLog(configuration.provider.name)}；model=${safeLog(configuration.modelName)}；" +
+                    "provider=${safeLog(configuration.provider.name)}；modelHash=${diagnosticHash(configuration.modelName)}；" +
                     "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；${diagnostics.logFields()}")
             }
             if (evaluation.status == AiReplyExecutionStatus.MODEL_CALL_FAILED) {
@@ -902,8 +902,8 @@ class AiReplyDraftCoordinator(
         onLog("AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
             "generation=$requestGeneration；outcomeCategory=VALID_DECISION；" +
             "safeCode=MODEL_DECISION_${decision.action.name}；contentState=PRESENT；" +
-            "action=${decision.action.name}；reason=${safeLog(decision.reason)}；" +
-            "provider=${safeLog(decision.provider)}；model=${safeLog(decision.model)}；" +
+            "action=${decision.action.name}；reasonHash=${diagnosticHash(decision.reason)}；" +
+            "provider=${safeLog(decision.provider)}；modelHash=${diagnosticHash(decision.model)}；" +
             "finishReason=${AiModelCallDiagnostics.safeFinishReason(decision.finishReason)}；" +
             "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；" +
             "inputTokens=${decision.usage?.inputTokens ?: "UNKNOWN"}；" +
@@ -915,14 +915,14 @@ class AiReplyDraftCoordinator(
             "AI 模型调用完成：requestId=$requestId；" +
                 "elapsedMs=${(nowMillis() - callStartedAt).coerceAtLeast(0L)}；" +
                 "action=${decision.action.name}；" +
-                "reason=${decision.reason}；" +
+                "reasonHash=${diagnosticHash(decision.reason)}；" +
                 "draftPresent=${!decision.draft.isNullOrBlank()}"
         )
         onLog("AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
-            "reason=${safeLog(decision.reason)}；" +
+            "reasonHash=${diagnosticHash(decision.reason)}；" +
             "reasonDetailPresent=${!decision.reasonDetail.isNullOrBlank()}；" +
             "reasonDetailLength=${decision.reasonDetail?.length ?: 0}；" +
-            "provider=${safeLog(decision.provider)}；model=${safeLog(decision.model)}；" +
+            "provider=${safeLog(decision.provider)}；modelHash=${diagnosticHash(decision.model)}；" +
             "finishReason=${AiModelCallDiagnostics.safeFinishReason(decision.finishReason)}；" +
             "contextMessages=${context.messages.size}；" +
             "inputTokens=${decision.usage?.inputTokens ?: "UNKNOWN"}；" +
@@ -935,7 +935,7 @@ class AiReplyDraftCoordinator(
         if (decision.action != AiReplyAction.REPLY || decision.draft.isNullOrBlank()) {
             onLog(
                 "AI 草稿状态：MODEL_DID_NOT_RETURN_DRAFT；模型未返回可用草稿；" +
-                    "reason=${safeLog(decision.reason)}；reasonDetailPresent=${!decision.reasonDetail.isNullOrBlank()}；" +
+                    "reasonHash=${diagnosticHash(decision.reason)}；reasonDetailPresent=${!decision.reasonDetail.isNullOrBlank()}；" +
                     "action=${decision.action.name}；draftPresent=${!decision.draft.isNullOrBlank()}"
             )
             // Never interpret an untrusted model reason as a technical retry code.
@@ -986,7 +986,7 @@ class AiReplyDraftCoordinator(
                 onLog("AI 消息段任务持久化失败：requestId=$requestId；segmentIndex=${record.segmentIndex}；error=${error.javaClass.simpleName}")
             }
         }
-        onLog("AI 消息段任务已建立：requestId=$requestId；conversationKey=$conversationKey；segmentCount=${records.size}；输入片段仍由 DraftSegments 独立处理")
+        onLog("AI 消息段任务已建立：requestId=$requestId；conversationKeyHash=${diagnosticHash(conversationKey)}；segmentCount=${records.size}；输入片段仍由 DraftSegments 独立处理")
     }
 
     private fun writeMessageSegment(target: ChatDraftInputTarget, segmentIndex: Int, requestGeneration: Long) {
@@ -1942,6 +1942,10 @@ class AiReplyDraftCoordinator(
         onLog("AI 回复草稿未启动：$reasonCode")
         return false
     }
+
+    /** Logging-only stable correlation label; never expose raw model free text or chat identity. */
+    private fun diagnosticHash(value: String?): String =
+        value?.takeIf(String::isNotBlank)?.let { fingerprint(it).take(12) } ?: "UNKNOWN"
 
     private fun fingerprint(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(StandardCharsets.UTF_8))
