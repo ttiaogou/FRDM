@@ -265,6 +265,85 @@ class VisibleDraftFlowTest {
         assertFalse(f.coordinator.isConversationReturnBlocked)
     }
 
+    @Test fun nonRetryableFinishReasonsNeverScheduleRecoveryOrHoldReturnGate() {
+        for (finishReason in listOf("length", "content_filter", "tool_calls")) {
+            val ledger = TaskLedger()
+            val f = Fixture(taskRepository = ledger)
+            f.emptyFailuresRemaining = 1
+            f.emptyFinishReason = finishReason
+            assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+            f.drain()
+            assertEquals(1, f.calls)
+            assertEquals("", f.text)
+            assertTrue(f.scheduledDelays.isEmpty())
+            assertFalse(f.coordinator.isConversationReturnBlocked)
+            assertEquals(ReplyTaskStatus.FAILED_RETRYABLE, ledger.records.values.single().status)
+            assertFalse(f.logs.any { it.contains("AI 模型空输出有限恢复") })
+        }
+    }
+
+    @Test fun runtimeResetAfterFirstRetryCancelsSecondRetryWithoutAStaleDraft() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 2
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.step()
+        assertEquals(2, f.calls)
+        assertEquals("", f.text)
+        f.coordinator.resetForRuntimeReset()
+        f.drain()
+        assertEquals(2, f.calls)
+        assertEquals("", f.text)
+        assertFalse(f.coordinator.isPending)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+        assertTrue(f.inputWriteTargets.isEmpty())
+    }
+
+    @Test fun modelWaitAfterDeepSeekFallbackCannotStartAFourthRequest() {
+        val ledger = TaskLedger()
+        val f = Fixture(taskRepository = ledger)
+        f.emptyFailuresRemaining = 2
+        f.modelOutput = """{"action":"WAIT","reason":"FINANCIAL_TRANSACTION_REVIEW","draft":null}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(3, f.calls)
+        assertEquals(AiModelResponseFormat.PlainText, f.requests.last().responseFormat)
+        assertEquals("", f.text)
+        assertTrue(f.inputWriteTargets.isEmpty())
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+        assertEquals(ReplyTaskStatus.MODEL_COMPLETED, ledger.records.values.single().status)
+        assertFalse(f.logs.any { it.contains("attempt=3/2") })
+    }
+
+    @Test fun uncertainSendAfterDeepSeekFallbackStaysUnknownWithoutRegeneration() {
+        val tasks = TaskLedger()
+        val segments = SegmentLedger()
+        var sends = 0
+        lateinit var f: Fixture
+        f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sends++
+                f.text = ""
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        f.emptyFailuresRemaining = 2
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(3, f.calls)
+        assertEquals(1, sends)
+        assertTrue(f.coordinator.isSendConfirmationPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        val noOutgoing = f.batch.copy(capturedAtMillis = 2L)
+        assertEquals(SendConfirmationResult.WAITING, f.coordinator.confirmSendResult(noOutgoing, f.snapshot))
+        assertEquals(SendConfirmationResult.UNKNOWN, f.coordinator.confirmSendResult(noOutgoing, f.snapshot))
+        assertEquals(ReplyTaskStatus.UNKNOWN, tasks.records.values.single().status)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertFalse(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(1, sends)
+        assertEquals(3, f.calls)
+    }
+
     @Test fun invalidModelOutputRemainsReclaimableWithoutAFalseSendGate() {
         val ledger = TaskLedger()
         val f = Fixture(taskRepository = ledger)

@@ -73,6 +73,31 @@ class LocalReplyTaskRepositoryTest {
     }
 
     @Test
+    fun uncertainSendUnknownCannotBeReclaimedAfterReopenOrByAnotherOwner() {
+        val file = File.createTempFile("reply-task", ".tsv")
+        file.delete()
+        try {
+            val first = LocalReplyTaskRepository(file) { 10_000L }
+            val task = record("unknown-sent-request", "original-owner", 1_000L)
+            assertTrue(first.tryClaim(task, 120_000L))
+            assertTrue(first.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.MODEL_COMPLETED, 1_100L))
+            assertTrue(first.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.DRAFT_APPLIED, 1_200L))
+            assertTrue(first.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.PENDING_SEND, 1_300L))
+            assertTrue(first.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.SENDING, 1_400L))
+            assertTrue(first.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.UNKNOWN, 1_500L))
+
+            val reopened = LocalReplyTaskRepository(file) { 300_000L }
+            assertEquals(ReplyTaskStatus.UNKNOWN, reopened.find(task.requestKey)?.status)
+            assertFalse(reopened.tryClaim(task.copy(requestId = "another-owner", updatedAtMillis = 300_000L), 120_000L))
+            assertFalse(reopened.updateStatus(task.requestKey, "another-owner", ReplyTaskStatus.FAILED_RETRYABLE, 300_001L))
+            assertEquals(ReplyTaskStatus.UNKNOWN, first.find(task.requestKey)?.status)
+        } finally {
+            file.delete()
+            File(file.parentFile, "${file.name}.lock").delete()
+        }
+    }
+
+    @Test
     fun durableRecordPreservesMemoryBufferIdentityAndRejectsIllegalTransition() {
         val file = File.createTempFile("reply-task", ".tsv")
         file.delete()
