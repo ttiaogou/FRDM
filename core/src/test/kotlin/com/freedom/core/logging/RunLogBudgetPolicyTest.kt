@@ -83,7 +83,8 @@ class RunLogBudgetPolicyTest {
         assertEquals("RUN_LEGACY", event.taskId)
         assertEquals("gesture-123", event.traceId)
         assertEquals("gesture-123", event.actionId)
-        assertEquals("正常任务", event.eventType)
+        // Legacy substring matching of "Type=" inside "eventType=" is unchanged.
+        assertEquals("NOT_A_TRACE", event.eventType)
         assertEquals(log, event.message)
     }
 
@@ -104,10 +105,10 @@ class RunLogBudgetPolicyTest {
         val spoofed = RunLogBudgetPolicy.toEvent(wrongComponent, "RUN_GUARD", 2, 2, 2)
         assertEquals("RUN_GUARD", spoofed.traceId)
         assertEquals("RUN_GUARD", spoofed.taskId)
-        assertEquals("AI 模型生命周期", spoofed.eventType)
+        assertEquals("MODEL_REQUEST_FINISHED", spoofed.eventType)
         val crossed = RunLogBudgetPolicy.toEvent(wrongEvent, "RUN_GUARD", 3, 3, 3)
         assertEquals("valid-123", crossed.traceId)
-        assertEquals("AI 模型生命周期", crossed.eventType)
+        assertEquals("MESSAGE_SEND_COMPLETED", crossed.eventType)
     }
 
     @Test
