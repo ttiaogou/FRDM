@@ -3,6 +3,9 @@ package com.freedom.features.aireply.policy
 import com.freedom.features.aireply.ai.AiModelCallDiagnostics
 import com.freedom.features.aireply.ai.ModelContextScope
 import com.freedom.features.aireply.ai.ModelOutputContract
+import com.freedom.features.aireply.ai.VerifiedDraftHistory
+import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
+import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 
 /**
  * Declarative, side-effect-free business contract.
@@ -48,8 +51,25 @@ data class TaskPerceptionConfig(
     }
 }
 
-/** History access is a business decision; never infer it from the model provider. */
-data class ContextPolicy(val scope: ModelContextScope)
+/**
+ * Declares which context a business may use. Identity admission mirrors the existing
+ * private-message preload check; current-window-only strategies never read history.
+ * This does not resolve contacts or inspect pages, and cannot grant a task lease.
+ */
+data class ContextPolicy(val scope: ModelContextScope) {
+    fun verifiedHistoryIdentity(identity: ContactRowIdentity?): ContactRowIdentity? =
+        if (scope == ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW) {
+            identity?.takeIf {
+                it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                    !it.contactId.isNullOrBlank()
+            }
+        } else {
+            null
+        }
+
+    fun selectHistory(history: VerifiedDraftHistory?): VerifiedDraftHistory? =
+        if (scope == ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW) history else null
+}
 
 /** Safe failure taxonomy; no raw message, exception text, URL or credentials. */
 enum class TaskFailureCode {

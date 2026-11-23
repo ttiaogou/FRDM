@@ -33,6 +33,8 @@ import com.freedom.adapters.social.momo.MomoAppDescriptor
 import com.freedom.features.aireply.ai.AiReplyDraftCoordinator
 import com.freedom.features.aireply.ai.AiDecisionTaskIds
 import com.freedom.features.aireply.ai.EngineBackedAiDecisionGateway
+import com.freedom.features.aireply.policy.PrivateMessagesPolicy
+import com.freedom.features.aireply.policy.ReceivedGreetingsPolicy
 import com.freedom.features.aireply.ai.TransportBackedAiModelProvider
 import com.freedom.adapters.social.momo.MomoSocialAdapter
 import com.freedom.application.ports.AiModelCloudConsentSettings
@@ -501,10 +503,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             prepareDraftHistory = { identity, snapshot ->
                 preparedDraftHistory = null
-                val verifiedIdentity = identity?.takeIf {
-                    it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
-                        !it.contactId.isNullOrBlank()
-                }
+                val verifiedIdentity = PrivateMessagesPolicy.contextPolicy().verifiedHistoryIdentity(identity)
                 if (verifiedIdentity != null) {
                     val history = com.freedom.features.conversation.domain.contact.ContactHistoryResolver(
                         root.conversationRepository
@@ -520,10 +519,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                 }
             },
             onDraftConversationObserved = { batch, snapshot, identity, visitToken ->
-                val verifiedIdentity = identity?.takeIf {
-                    it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
-                        !it.contactId.isNullOrBlank()
-                }
+                val verifiedIdentity = PrivateMessagesPolicy.contextPolicy().verifiedHistoryIdentity(identity)
                 val history = if (verifiedIdentity != null) {
                     preparedDraftHistory?.also {
                         preparedDraftHistory = null
@@ -555,8 +551,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                     batch,
                     snapshot,
                     visitToken = visitToken,
-                    history = history,
-                    taskId = AiDecisionTaskIds.PRIVATE_MESSAGES
+                    history = PrivateMessagesPolicy.contextPolicy().selectHistory(history),
+                    taskId = PrivateMessagesPolicy.taskId
                 )
             },
             onGreetingDraftConversationObserved = { batch, snapshot, _, visitToken ->
@@ -571,8 +567,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                     batch,
                     snapshot,
                     visitToken = visitToken,
-                    history = null,
-                    taskId = AiDecisionTaskIds.RECEIVED_GREETINGS
+                    history = ReceivedGreetingsPolicy.contextPolicy().selectHistory(null),
+                    taskId = ReceivedGreetingsPolicy.taskId
                 )
             },
             onSendTransaction = { batch, snapshot ->

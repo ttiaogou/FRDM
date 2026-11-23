@@ -26,8 +26,8 @@ class AiDecisionGatewayWiringTest(unittest.TestCase):
         source = code("app/src/main/java/com/freedom/app/AppCompositionRoot.kt")
         self.assertEqual(1, len(re.findall(r"createGateway\s*=", source)))
         self.assertIn("EngineBackedAiDecisionGateway(", source)
-        self.assertIn("taskId = AiDecisionTaskIds.PRIVATE_MESSAGES", source)
-        self.assertIn("taskId = AiDecisionTaskIds.RECEIVED_GREETINGS", source)
+        self.assertIn("taskId = PrivateMessagesPolicy.taskId", source)
+        self.assertIn("taskId = ReceivedGreetingsPolicy.taskId", source)
 
     def test_gateway_does_not_gain_ui_or_second_provider_implementation(self):
         source = code("business/src/main/kotlin/com/freedom/features/aireply/ai/EngineBackedAiDecisionGateway.kt")
