@@ -1671,7 +1671,9 @@ class AiReplyObservationRuntime(
                     // Existing active traversal continues only on the next fresh observation.
                     scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
                 } else {
-                    startReceivedGreetingsTaskFromConfirmedPage()
+                    startReceivedGreetingsTaskFromConfirmedPage(
+                        ConfirmedGreetingsListEvidence.UnifiedRecoveryVerified
+                    )
                 }
             }
             return
@@ -1814,8 +1816,10 @@ class AiReplyObservationRuntime(
                 ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION,
                 ReceivedGreetingsPageArrivalStatus.UNKNOWN -> Unit
                 ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
-                    // Observation supplies evidence; only the runtime may start a task.
-                    startReceivedGreetingsTaskFromConfirmedPage()
+                    // Page recognition and ownership enter one task admission transaction.
+                    startReceivedGreetingsTaskFromConfirmedPage(
+                        ConfirmedGreetingsListEvidence.Observed(arrivalStatus)
+                    )
                     return
                 }
                 ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE,
@@ -2266,7 +2270,9 @@ class AiReplyObservationRuntime(
         recoveryContext.clear()
         recoveryTransaction.reset()
         pageRecoveryVerificationGate.reset(gate)
-        startReceivedGreetingsTaskFromConfirmedPage()
+        startReceivedGreetingsTaskFromConfirmedPage(
+            ConfirmedGreetingsListEvidence.CrossTaskRecoveryVerified
+        )
         if (receivedGreetingsTaskActive && ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
             suspendedPrivateRecovery = pending
             receivedGreetingsPageProbePending = false
@@ -4636,8 +4642,24 @@ class AiReplyObservationRuntime(
         scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
     }
 
-    /** Starts the greetings task from a list the current page structure and adapter have confirmed. */
-    private fun startReceivedGreetingsTaskFromConfirmedPage() {
+    /**
+     * One business admission for a recognized received-greetings list and its UI-operation
+     * lease. The three evidence sources have already passed their independent page/recovery
+     * verifier; none is itself permission to operate before the lease and adapter recheck.
+     */
+    private sealed interface ConfirmedGreetingsListEvidence {
+        data class Observed(val arrival: ReceivedGreetingsPageArrivalStatus) : ConfirmedGreetingsListEvidence
+        data object UnifiedRecoveryVerified : ConfirmedGreetingsListEvidence
+        data object CrossTaskRecoveryVerified : ConfirmedGreetingsListEvidence
+    }
+
+    private fun startReceivedGreetingsTaskFromConfirmedPage(evidence: ConfirmedGreetingsListEvidence) {
+        if (evidence is ConfirmedGreetingsListEvidence.Observed &&
+            evidence.arrival != ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+        ) {
+            onLog("GREETING_LIST_ADMISSION_REJECTED reason=LIST_NOT_CONFIRMED")
+            return
+        }
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
         if (receivedGreetingsTaskCompletedAwaitingUserExit) {
             onLog("收到的招呼页面监听：当前列表本轮已经处理完成；保持页面不动，等待用户离开后再次进入")
@@ -4647,7 +4669,29 @@ class AiReplyObservationRuntime(
             reason = "接管人工打开的收到招呼列表",
             begin = { receivedGreetingsTaskFlow.beginFromConfirmedList() }
         )
-        if (start != ReceivedGreetingsTaskFlowController.StartResult.STARTED) return
+        if (start != ReceivedGreetingsTaskFlowController.StartResult.STARTED) {
+            onLog("GREETING_LIST_ADMISSION_REJECTED reason=${start.name}；未启用列表遍历")
+            return
+        }
+        // Lease acquisition, the adapter's fresh current-window proof, and lifecycle start
+        // are all required; a page fingerprint alone is never a UI-operation authorization.
+        if (!receivedGreetingsTaskActive || !ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
+            // A concurrent handoff may have transferred the lease elsewhere; never
+            // release a new owner's UI capability when the greeting admission loses.
+            if (ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
+                releaseTaskOwnership("收到招呼列表准入后任务未激活；回滚本任务租约")
+            }
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("GREETING_LIST_ADMISSION_REJECTED reason=LEASE_NOT_ACTIVE")
+            return
+        }
+        val evidenceSource = when (evidence) {
+            is ConfirmedGreetingsListEvidence.Observed -> "PAGE_OBSERVATION"
+            ConfirmedGreetingsListEvidence.UnifiedRecoveryVerified -> "RECOVERY_VERIFIED"
+            ConfirmedGreetingsListEvidence.CrossTaskRecoveryVerified -> "CROSS_TASK_VERIFIED"
+        }
+        onLog("GREETING_LIST_READY：列表识别/恢复证据、适配器当前窗口复核及独占任务租约均已确认；" +
+            "source=$evidenceSource")
         sessionActionGeneration += 1L
         receivedGreetingsPageProbePending = false
 

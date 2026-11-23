@@ -788,6 +788,9 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
         assertEquals(1, port.receivedGreetingsIdleSteps)
         assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_TRANSFERRED") })
+        assertTrue(logs.any {
+            it.contains("GREETING_LIST_READY") && it.contains("source=CROSS_TASK_VERIFIED")
+        })
         assertFalse(logs.any { it.contains("PRIVATE_TO_GREETINGS_ROLLBACK") })
         assertEquals(original, repository.load())
         assertEquals(originalRecovery?.checkpointId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
@@ -1056,6 +1059,8 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.manualGreetingsArrivalObservations)
         assertEquals(0, gestureCount)
         assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertFalse("Stabilizing list is only read-only evidence, not an operation lease",
+            logs.any { it.contains("GREETING_LIST_READY") })
 
         port.manualGreetingsArrivalStatuses = listOf(
             ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
@@ -1072,6 +1077,9 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, port.receivedGreetingsNavigationTaskStarts)
         assertEquals("AI_REPLY_RECEIVED_GREETINGS", taskCoordinator.activeTaskId())
         assertTrue(logs.any { it.contains("收到的招呼任务[STARTED]") })
+        assertTrue(logs.any {
+            it.contains("GREETING_LIST_READY") && it.contains("source=PAGE_OBSERVATION")
+        })
 
         // Option A: completion releases automation ownership but never navigates away.
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
@@ -1081,6 +1089,66 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("收到的招呼任务[COMPLETE_STAY_ON_PAGE]") })
     }
 
+
+    @Test
+    fun confirmedGreetingsListRequiresAdapterRecheckBeforeRetainingTaskOwnership() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            manualGreetingsArrivalStatuses = listOf(
+                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
+                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+            )
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            beginCurrentListResult = false
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity",
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 20,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null
+            )
+        }
+        val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = taskCoordinator,
+            currentRunGeneration = { 5L }
+        )
+
+        runtime.scheduleInitialObservation()
+        runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN))
+        scheduler.runNextWithDelay(300L)
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertFalse(logs.any { it.contains("GREETING_LIST_READY") })
+        scheduler.runNextWithDelay(350L)
+
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertNull("Adapter rejected the current-window list proof; no usable UI lease remains",
+            taskCoordinator.activeTaskId())
+        assertFalse(logs.any { it.contains("GREETING_LIST_READY") })
+        assertTrue(logs.any { it.contains("GREETING_LIST_ADMISSION_REJECTED reason=START_FAILED") })
+    }
 
     /**
      * Reproduces the device trace: a manually confirmed greetings list is NON_CHAT,
