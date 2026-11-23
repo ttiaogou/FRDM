@@ -56,6 +56,31 @@ class AiReplyDecisionEngineTest {
         assertTrue(responseFormat.schema.contains("REPLY"))
     }
 
+    @Test fun promptOnlyJsonRecoveryPreservesSchemaAndStrictLocalParsing() {
+        val provider = FakeProvider(replyJson("你好"))
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "prompt-only",
+                promptOnlyJsonSchema = true)
+        )
+        assertEquals(AiReplyAction.REPLY, model(result).action)
+        val request = provider.lastRequest!!
+        assertEquals(AiModelResponseFormat.PlainText, request.responseFormat)
+        assertTrue(request.systemInstruction.contains("请严格匹配以下 JSON Schema"))
+        assertTrue(request.systemInstruction.contains("\"reasonDetail\""))
+        assertTrue(request.systemInstruction.contains("additionalProperties"))
+        assertTrue(request.systemInstruction.contains("如果对方直接询问你是否为人工智能，必须如实回答"))
+    }
+
+    @Test fun promptOnlyJsonRecoveryRejectsNonJsonAndDoesNotTurnItIntoDraft() {
+        val provider = FakeProvider("你好")
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), contactIdentityVerified = true, requestId = "prompt-only-bad",
+                promptOnlyJsonSchema = true)
+        )
+        assertEquals(AiReplyExecutionStatus.MODEL_OUTPUT_INVALID, execution(result).status)
+        assertEquals(AiModelResponseFormat.PlainText, provider.lastRequest?.responseFormat)
+    }
+
     @Test fun defaultPersonalizationUsesDailyChatGenerationPresets() {
         val provider = FakeProvider(replyJson("收到"))
         AiReplyDecisionEngine(provider, grantedConsent).decide(

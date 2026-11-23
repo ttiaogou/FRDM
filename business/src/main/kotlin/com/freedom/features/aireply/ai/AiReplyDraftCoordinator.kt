@@ -440,11 +440,16 @@ class AiReplyDraftCoordinator(
             return
         }
         val callStartedAt = nowMillis()
+        // Only the final DeepSeek empty-output retry changes the transport response mode.
+        val promptOnlyJsonSchema = configuration.provider == AiModelServiceProvider.DEEPSEEK &&
+            emptyRetryAttempt == MAX_EMPTY_MODEL_RETRIES
+        val responseMode = if (promptOnlyJsonSchema) "PROMPT_ONLY_JSON" else "STRICT_JSON"
         onLog(
             "AI 模型调用开始：requestId=$requestId；" +
                 "provider=${configuration.provider.name}；" +
                 "model=${configuration.modelName}；" +
-                "contextMessages=${context.messages.size}"
+                "contextMessages=${context.messages.size}；" +
+                "emptyRetryAttempt=$emptyRetryAttempt；responseMode=$responseMode"
         )
         val evaluation = try {
             val provider = createProvider(configuration)
@@ -457,7 +462,8 @@ class AiReplyDraftCoordinator(
                     contactIdentityVerified = !context.currentWindowDraft,
                     cooldownActive = false,
                     requestId = requestId,
-                    personalization = personalizationRepository.load()
+                    personalization = personalizationRepository.load(),
+                    promptOnlyJsonSchema = promptOnlyJsonSchema
                 )
             )
         } catch (error: Throwable) {
@@ -488,11 +494,16 @@ class AiReplyDraftCoordinator(
                     emptyRetryAttempt < MAX_EMPTY_MODEL_RETRIES &&
                     isCurrentGeneration(requestGeneration) && isAiReplyActive()
                 ) {
+                    val retryDelayMs = if (emptyRetryAttempt == 0) FIRST_EMPTY_MODEL_RETRY_DELAY_MS
+                        else SECOND_EMPTY_MODEL_RETRY_DELAY_MS
+                    val nextMode = if (configuration.provider == AiModelServiceProvider.DEEPSEEK &&
+                        emptyRetryAttempt + 1 == MAX_EMPTY_MODEL_RETRIES
+                    ) "PROMPT_ONLY_JSON" else "STRICT_JSON"
                     onLog("AI 模型空输出有限恢复：requestId=$requestId；" +
                         "attempt=${emptyRetryAttempt + 1}/$MAX_EMPTY_MODEL_RETRIES；" +
-                        "delayMs=$EMPTY_MODEL_RETRY_DELAY_MS；不写草稿、不执行发送")
+                        "delayMs=$retryDelayMs；responseMode=$nextMode；不写草稿、不执行发送")
                     val scheduled = runCatching {
-                        scheduler.schedule(EMPTY_MODEL_RETRY_DELAY_MS) {
+                        scheduler.schedule(retryDelayMs) {
                             if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive()) return@schedule
                             // 等待期间用户可能切换了会话或自行输入文字。
                             // 再次发送模型请求前，必须重新验证当前真实输入框。
@@ -1269,8 +1280,9 @@ class AiReplyDraftCoordinator(
         private const val REPLY_TASK_REQUEST_TIMEOUT_MILLIS = 120_000L
         private const val SEND_CONFIRMATION_TIMEOUT_MILLIS = 8_000L
         private const val SEND_CONFIRMATION_MAX_CHECKS = 2
-        private const val MAX_EMPTY_MODEL_RETRIES = 1
-        private const val EMPTY_MODEL_RETRY_DELAY_MS = 30_000L
+        private const val MAX_EMPTY_MODEL_RETRIES = 2
+        private const val FIRST_EMPTY_MODEL_RETRY_DELAY_MS = 2_500L
+        private const val SECOND_EMPTY_MODEL_RETRY_DELAY_MS = 6_000L
 
         private fun newDraftExecutor() = Executors.newSingleThreadExecutor(ThreadFactory { runnable ->
             Thread(runnable, "frdm-ai-model-request").apply { isDaemon = true }

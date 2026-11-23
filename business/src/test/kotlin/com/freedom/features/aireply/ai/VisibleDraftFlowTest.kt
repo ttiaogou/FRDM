@@ -15,6 +15,9 @@ class VisibleDraftFlowTest {
         private val taskRepository: ReplyTaskRepository? = null
     ) {
         val tasks = mutableListOf<() -> Unit>()
+        val scheduledDelays = mutableListOf<Long>()
+        val requests = mutableListOf<AiModelRequest>()
+        var configuredProvider = AiModelServiceProvider.DEEPSEEK
         var active = true
         var consent = true
         var text = ""
@@ -39,7 +42,8 @@ class VisibleDraftFlowTest {
             completeTailRowBounds = ScreenRect(0, 10, 100, 30))
         val coordinator = AiReplyDraftCoordinator(
             configurationRepository = object : AiModelConfigurationRepository {
-                override fun load() = AiModelConfiguration(apiBaseUrl = "https://example.com/v1", modelName = "test", apiKey = "test")
+                override fun load() = AiModelConfiguration(apiBaseUrl = "https://example.com/v1", modelName = "test",
+                    apiKey = "test", provider = configuredProvider)
                 override fun save(configuration: AiModelConfiguration) = Unit
                 override fun clearApiKey() = Unit
             },
@@ -64,6 +68,7 @@ class VisibleDraftFlowTest {
             },
             scheduler = object : TaskScheduler {
                 override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask {
+                    scheduledDelays.add(delayMillis)
                     tasks.add(task)
                     return ScheduledTask { tasks.remove(task) }
                 }
@@ -72,6 +77,7 @@ class VisibleDraftFlowTest {
             createProvider = { object : AiModelProvider {
                 override fun generate(request: AiModelRequest): AiModelResult {
                     calls++
+                    requests.add(request)
                     if (fail) error("simulated transport failure")
                     if (emptyFailuresRemaining > 0) {
                         emptyFailuresRemaining--
@@ -166,32 +172,36 @@ class VisibleDraftFlowTest {
         assertTrue(f.coordinator.isPending)
         assertTrue(f.coordinator.isConversationReturnBlocked)
         assertEquals("", f.text)
-        assertTrue(f.logs.any { it.contains("delayMs=30000") })
+        assertTrue(f.logs.any { it.contains("delayMs=2500") })
+        assertTrue(f.requests.single().responseFormat is AiModelResponseFormat.JsonSchema)
         f.drain()
         assertEquals(2, f.calls)
         assertEquals("你好呀", f.text)
         assertTrue(f.coordinator.isConversationReturnBlocked)
     }
 
-    @Test fun repeatedEmptyOutputStopsAfterOneScheduledRetryWithoutSending() {
+    @Test fun repeatedEmptyOutputStopsAfterTwoScheduledRetriesWithoutSending() {
         val f = Fixture()
-        f.emptyFailuresRemaining = 2
+        f.emptyFailuresRemaining = 3
         assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
         f.drain()
-        assertEquals(2, f.calls)
+        assertEquals(3, f.calls)
         assertEquals("", f.text)
         assertFalse(f.coordinator.isPending)
         assertFalse(f.coordinator.isConversationReturnBlocked)
-        assertEquals(1, f.logs.count { it.contains("AI 模型空输出有限恢复") })
+        assertEquals(2, f.logs.count { it.contains("AI 模型空输出有限恢复") })
+        assertTrue(f.scheduledDelays.containsAll(listOf(2_500L, 6_000L)))
+        assertTrue(f.requests.take(2).all { it.responseFormat is AiModelResponseFormat.JsonSchema })
+        assertEquals(AiModelResponseFormat.PlainText, f.requests.last().responseFormat)
     }
 
     @Test fun exhaustedEmptyOutputReleasesGateAndReclaimsPersistedModelTask() {
         val ledger = TaskLedger()
         val f = Fixture(taskRepository = ledger)
-        f.emptyFailuresRemaining = 2
+        f.emptyFailuresRemaining = 3
         assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
         f.drain()
-        assertEquals(2, f.calls)
+        assertEquals(3, f.calls)
         assertEquals("", f.text)
         assertFalse(f.coordinator.isPending)
         assertFalse(f.coordinator.isConversationReturnBlocked)
@@ -200,8 +210,59 @@ class VisibleDraftFlowTest {
         f.now = 30_000L
         assertTrue(f.coordinator.generateVisibleDraft(f.batch.copy(capturedAtMillis = 2L), f.snapshot))
         f.drain()
-        assertEquals(3, f.calls)
+        assertEquals(4, f.calls)
         assertEquals("你好呀", f.text)
+    }
+
+    @Test fun compatibleResponseModeOnlyOnFinalDeepSeekRetryAndStillRequiresJson() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 2
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(3, f.calls)
+        assertEquals(listOf(2_500L, 6_000L), f.scheduledDelays.filter { it > 0L }.take(2))
+        assertTrue(f.requests.take(2).all { it.responseFormat is AiModelResponseFormat.JsonSchema })
+        assertEquals(AiModelResponseFormat.PlainText, f.requests[2].responseFormat)
+        assertTrue(f.requests[2].systemInstruction.contains("JSON Schema"))
+        assertEquals("你好呀", f.text)
+    }
+
+    @Test fun compatibleResponseModeInvalidJsonIsRejectedWithoutSending() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 2
+        f.modelOutput = "not-json"
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(3, f.calls)
+        assertEquals(AiModelResponseFormat.PlainText, f.requests.last().responseFormat)
+        assertEquals("", f.text)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+        assertTrue(f.logs.any { it.contains("MODEL_OUTPUT_SCHEMA_INVALID") })
+    }
+
+    @Test fun otherProvidersKeepStrictResponseModeOnEveryRetry() {
+        val f = Fixture()
+        f.configuredProvider = AiModelServiceProvider.OPENAI
+        f.emptyFailuresRemaining = 2
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(3, f.calls)
+        assertTrue(f.requests.all { it.responseFormat is AiModelResponseFormat.JsonSchema })
+        assertEquals("你好呀", f.text)
+    }
+
+    @Test fun secondEmptyRetryCancelsIfUserEditsComposer() {
+        val f = Fixture()
+        f.emptyFailuresRemaining = 2
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.step()
+        assertEquals(2, f.calls)
+        f.text = "用户输入"
+        f.drain()
+        assertEquals(2, f.calls)
+        assertEquals("用户输入", f.text)
+        assertFalse(f.coordinator.isPending)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
     }
 
     @Test fun invalidModelOutputRemainsReclaimableWithoutAFalseSendGate() {
