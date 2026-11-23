@@ -71,6 +71,9 @@ data class ContactIdentityCaptureOutcome(
 interface ChatSessionManagementPort {
     fun beginSessionManagement(): String?
 
+    /** Non-consuming diagnostic probe; never authorizes UI or message actions. */
+    fun hasPendingIdentityReturnReinspectionRequest(): Boolean = false
+
     /** Consumes the one-shot signal raised when profile identity returned to the original chat. */
     fun consumeIdentityReturnReinspectionRequest(): Boolean = false
 

@@ -266,6 +266,8 @@ class AiReplyObservationRuntime(
     private var messageReadRetryTask: ScheduledTask? = null
     private var messageReadRetryCount = 0
     private var lastRecoveryAndroidReadinessWait: String? = null
+    /** Diagnostic-only deduplication; never grants UI authority or consumes a receipt. */
+    private var lastIdentityReturnNotConsumedReason: String? = null
     private var serviceInterruptionCheckpointPersisted = false
     private var readinessDeferredRetryTask: ScheduledTask? = null
     private var readinessDeferredRetryCount = 0
@@ -737,6 +739,7 @@ class AiReplyObservationRuntime(
             purpose = pageRead.purpose,
             failure = pageRead.failure
         )
+        diagnosePendingIdentityReturn(observationDecision, inspection)
         if (observationDecision.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) {
             if (recoveryContext.pending) {
                 recoveryContext.invalidateFingerprint()
@@ -882,6 +885,47 @@ class AiReplyObservationRuntime(
         }
         scheduleFullInspectionAfter(500L)
         return false
+    }
+
+    /**
+     * Diagnose a pending adapter receipt before any routing early-return. This check cannot
+     * consume the receipt, change the lease or start OCR, even for UNKNOWN or stale pages.
+     */
+    private fun diagnosePendingIdentityReturn(
+        observation: ObservationResult,
+        snapshot: ChatPageSnapshot?
+    ) {
+        val pending = runCatching {
+            chatSessionManagementPort.hasPendingIdentityReturnReinspectionRequest()
+        }.getOrDefault(false)
+        if (!pending) {
+            lastIdentityReturnNotConsumedReason = null
+            return
+        }
+        val reason = when {
+            observation.status != ObservationStatus.CONFIRMED_PAGE || snapshot == null ->
+                "PAGE_EVIDENCE_UNAVAILABLE"
+            recoveryContext.pending -> "RECOVERY_TRANSACTION_PENDING"
+            !sessionRunStarted -> "BUSINESS_RUN_NOT_STARTED"
+            receivedGreetingsTaskActive -> "RECEIVED_GREETINGS_TASK_ACTIVE"
+            !ownsTask(PRIVATE_MESSAGES_TASK_ID) -> "PRIVATE_TASK_LEASE_MISSING"
+            snapshot.packageName != targetPackage() -> "TARGET_PACKAGE_MISMATCH"
+            snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE -> "CHAT_DETAIL_NOT_CONFIRMED"
+            sessionManagerState != SessionManagerState.READING_SESSION -> "SESSION_NOT_READING"
+            !hasBoundPrivateDetailRecoverySession() -> "SOURCE_SESSION_BINDING_MISSING"
+            currentSessionHeaderMatchMode(snapshot) == null -> "CHAT_TITLE_MISMATCH"
+            windowSessionKey(snapshot) == null -> "WINDOW_SESSION_KEY_MISSING"
+            !isVerifiedRecoveredPrivateDetail(snapshot) -> "TARGET_SESSION_NOT_VERIFIED"
+            else -> null
+        }
+        if (reason != null && reason != lastIdentityReturnNotConsumedReason) {
+            lastIdentityReturnNotConsumedReason = reason
+            onLog(
+                "AI 身份回接[REQUEST_NOT_CONSUMED]：result=NOT_CONSUMED；reason=$reason；" +
+                    "pending=true；route=${recoveryContext.routeId ?: "NONE"}；" +
+                    "保留请求，不启动 OCR 或草稿"
+            )
+        }
     }
 
     /** Uses the original checkpoint re-anchor algorithm; never reuses saved row coordinates. */
@@ -1366,6 +1410,8 @@ class AiReplyObservationRuntime(
                     // Consume a same-window return signal too, so the ordinary observer
                     // cannot process the already-verified return a second time.
                     chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()
+                    lastIdentityReturnNotConsumedReason = null
+                    onLog("AI 身份回接[RECOVERY_HANDOFF]：result=RESUMED；reason=FRESH_DETAIL_AND_LEASE_VERIFIED")
                     onLog("AI 聊天详情恢复[RECOVERY_VERIFIED]：原目标聊天与新窗口已复核；继续只读消息采集")
                 } else {
                     onLog("AI 发送恢复[RECOVERY_VERIFIED]：聊天详情页已连续双快照确认；重新读取消息，仅核验既有发送，不重发")
@@ -1487,6 +1533,8 @@ class AiReplyObservationRuntime(
             // newly verified window; the next read must use this fresh observation.
             invalidatePendingMessageRead()
             currentSessionWindowKey = restoredSessionKey
+            lastIdentityReturnNotConsumedReason = null
+            onLog("AI 身份回接[BUSINESS_HANDOFF]：result=CONSUMED；reason=FRESH_TARGET_CHAT_VERIFIED")
             onLog(
                 "AI 身份业务续接[IDENTITY_RETURN_CONFIRMED]：目标会话、任务租约和当前窗口已复核；" +
                     "更新会话窗口键并重新读取消息，继续现有 OCR/草稿流水线"
@@ -2217,6 +2265,7 @@ class AiReplyObservationRuntime(
         cancelSessionSafeViewportRetry(resetCount = true)
         pageObservationCoordinator.reset()
         lastRecoveryAndroidReadinessWait = null
+        lastIdentityReturnNotConsumedReason = null
         serviceInterruptionCheckpointPersisted = false
         sessionTransitionTask?.cancel()
         cancelMessageReadRetry()

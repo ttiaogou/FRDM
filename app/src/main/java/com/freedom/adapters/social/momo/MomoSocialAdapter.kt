@@ -4996,12 +4996,27 @@ internal class MomoSocialAdapter(
         return result
     }
 
-    override fun consumeIdentityReturnReinspectionRequest(): Boolean =
-        synchronized(inboxIdentityCaptureLock) {
-            if (!identityReturnReinspectionPending) return@synchronized false
-            identityReturnReinspectionPending = false
-            true
+    override fun hasPendingIdentityReturnReinspectionRequest(): Boolean =
+        synchronized(inboxIdentityCaptureLock) { identityReturnReinspectionPending }
+
+    override fun consumeIdentityReturnReinspectionRequest(): Boolean {
+        val consumed = synchronized(inboxIdentityCaptureLock) {
+            if (!identityReturnReinspectionPending) false
+            else {
+                identityReturnReinspectionPending = false
+                true
+            }
         }
+        onLog(
+            if (consumed) {
+                "AI 身份回接[REQUEST_CONSUMED]：result=CONSUMED；reason=REQUEST_AVAILABLE；" +
+                    "仅确认信号消费，业务读写仍由运行时门禁控制"
+            } else {
+                "AI 身份回接[REQUEST_NOT_CONSUMED]：result=NOT_CONSUMED；reason=NO_PENDING_REQUEST"
+            }
+        )
+        return consumed
+    }
 
     // ---- ChatSessionManagementPort: bounded Momo session navigation and local samples ----
 
@@ -5444,6 +5459,7 @@ internal class MomoSocialAdapter(
                 pending.lastTransitionAtMs = System.currentTimeMillis()
                 if (!back.dialogHPresent) {
                     pending.stage = InboxIdentityCaptureStage.WAITING_LIST_RETURN
+                    onLog("AI 身份回接[REQUEST_WAITING]：result=NOT_PRODUCED；reason=AWAITING_VERIFIED_CHAT_RETURN")
                 }
                 return true
             }
@@ -5479,6 +5495,7 @@ internal class MomoSocialAdapter(
                     restoredTitle == anchorTitle
                 if (restored) {
                     if (!pending.profileEntryVerified) {
+                        onLog("AI 身份回接[REQUEST_NOT_PRODUCED]：result=NOT_PRODUCED；reason=PROFILE_ENTRY_NOT_VERIFIED")
                         releaseAvatarCaptureAfterProfileMiss(
                             pending,
                             MomoAvatarClickFailureReason.PROFILE_PAGE_NOT_CONFIRMED
@@ -5497,6 +5514,11 @@ internal class MomoSocialAdapter(
                     synchronized(inboxIdentityCaptureLock) {
                         identityReturnReinspectionPending = true
                     }
+                    onLog(
+                        "AI 身份回接[REQUEST_PRODUCED]：result=PRODUCED；" +
+                            "reason=ORIGINAL_CHAT_FINGERPRINT_AND_TITLE_VERIFIED；" +
+                            "profileIdRead=${!pending.platformUserId.isNullOrBlank()}；不记录原始用户ID"
+                    )
                     onLog("AI 联系人身份采集：已返回并确认原私人聊天详情页；三节点指纹和聊天标题匹配；继续当前窗口回复流程")
                     return false
                 }
@@ -5545,6 +5567,7 @@ internal class MomoSocialAdapter(
             reason
         )
         if (shouldLog) {
+            onLog("AI 身份回接[REQUEST_NOT_PRODUCED]：result=NOT_PRODUCED；reason=$reason")
             onLog("AI 联系人身份采集失败：$reason；保留未验证身份，不以昵称关联历史")
         }
     }

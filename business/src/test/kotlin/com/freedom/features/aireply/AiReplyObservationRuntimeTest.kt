@@ -2298,6 +2298,9 @@ class AiReplyObservationRuntimeTest {
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
             resolvedTapBounds = candidate.rowBounds
+            // Structure read -> identity terminal -> OCR callback -> draft, as in Momo.
+            simulateStructureThenOcr = true
+            ocrDebugTextByRowIndex = mapOf(1 to "OCR_CONFIRMED_BODY")
             identityCaptureOutcomeOverride = ContactIdentityCaptureOutcome.waiting(
                 ContactIdentityCaptureRequestResult.RETRY_LATER
             )
@@ -2320,6 +2323,8 @@ class AiReplyObservationRuntimeTest {
         }
         val logs = ArrayList<String>()
         var draftCalls = 0
+        var draftHadOcrEvidence = false
+        var draftIdentityVerified = false
         val gesture = object : TestGestureApi {
             override fun execute(
                 command: GestureIntentRequest,
@@ -2343,7 +2348,12 @@ class AiReplyObservationRuntimeTest {
             inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
-            onDraftConversationObserved = { _, _, _, _ -> draftCalls++; true }
+            onDraftConversationObserved = { batch, _, identity, _ ->
+                draftCalls++
+                draftHadOcrEvidence = batch.ocrAttempted && batch.ocrRecognizedTargetCount > 0
+                draftIdentityVerified = identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                true
+            }
         )
         runtime.scheduleInitialObservation()
         runUntil(scheduler, 180) {
@@ -2414,6 +2424,13 @@ class AiReplyObservationRuntimeTest {
         }
         assertTrue(logs.any { it.contains("AI 聊天详情恢复[RECOVERY_VERIFIED]") })
         assertTrue("Fresh detail must be read after recovery", port.messageReads > readsBeforeRecovery)
+        assertTrue("OCR may run only after identity terminal", logs.any { it.contains("AI OCR 启动") })
+        assertEquals("Exactly one OCR read from the restored chat", 1, port.ocrAsyncReadRequests)
+        assertTrue("Draft must have verified OCR content", draftHadOcrEvidence)
+        assertTrue("Draft must keep the platform-confirmed identity", draftIdentityVerified)
+        assertTrue(logs.any { it.contains("AI 身份回接[REQUEST_NOT_CONSUMED]") &&
+            it.contains("reason=RECOVERY_TRANSACTION_PENDING") })
+        assertTrue(logs.any { it.contains("AI 身份回接[RECOVERY_HANDOFF]") })
         assertEquals("Only the verified current target may draft", 1, draftCalls)
         assertEquals(0, port.navigateBackCalls)
     }
@@ -2425,6 +2442,8 @@ class AiReplyObservationRuntimeTest {
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
             resolvedTapBounds = candidate.rowBounds
+            simulateStructureThenOcr = true
+            ocrDebugTextByRowIndex = mapOf(1 to "OCR_CONFIRMED_BODY")
             identityCaptureOutcomeOverride = ContactIdentityCaptureOutcome.waiting(
                 ContactIdentityCaptureRequestResult.RETRY_LATER
             )
@@ -2448,6 +2467,7 @@ class AiReplyObservationRuntimeTest {
         val logs = ArrayList<String>()
         var draftCalls = 0
         var passedIdentity: ContactRowIdentity? = null
+        var draftHadOcrEvidence = false
         val gesture = object : TestGestureApi {
             override fun execute(
                 command: GestureIntentRequest,
@@ -2471,9 +2491,10 @@ class AiReplyObservationRuntimeTest {
             inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
-            onDraftConversationObserved = { _, _, identity, _ ->
+            onDraftConversationObserved = { batch, _, identity, _ ->
                 draftCalls++
                 passedIdentity = identity
+                draftHadOcrEvidence = batch.ocrAttempted && batch.ocrRecognizedTargetCount > 0
                 true
             }
         )
@@ -2496,6 +2517,8 @@ class AiReplyObservationRuntimeTest {
         port.page = chatDetailSnapshot().copy(chatTitleText = "与Another Contact对话")
         read.invoke(runtime)
         assertTrue("Foreign chat must preserve the return receipt", port.pendingIdentityReturnReinspection)
+        assertTrue(logs.any { it.contains("AI 身份回接[REQUEST_NOT_CONSUMED]") &&
+            it.contains("reason=CHAT_TITLE_MISMATCH") })
         assertEquals(0, draftCalls)
 
         port.page = chatDetailSnapshot()
@@ -2505,7 +2528,11 @@ class AiReplyObservationRuntimeTest {
             attempts++
         }
         assertTrue(logs.any { it.contains("AI 身份业务续接[IDENTITY_RETURN_CONFIRMED]") })
+        assertTrue(logs.any { it.contains("AI 身份回接[BUSINESS_HANDOFF]") })
+        assertTrue(logs.any { it.contains("AI OCR 启动") })
         assertFalse(port.pendingIdentityReturnReinspection)
+        assertEquals(1, port.ocrAsyncReadRequests)
+        assertTrue(draftHadOcrEvidence)
         assertEquals(1, draftCalls)
         assertEquals(ContactIdentityConfidence.PLATFORM_ID_VERIFIED, passedIdentity?.confidence)
         assertEquals(0, port.navigateBackCalls)
@@ -5122,6 +5149,8 @@ class AiReplyObservationRuntimeTest {
         var messageReads = 0
         var identityCaptureOutcomeOverride: ContactIdentityCaptureOutcome? = null
         var pendingIdentityReturnReinspection = false
+        var simulateStructureThenOcr = false
+        var ocrAsyncReadRequests = 0
         var deferNextStructureRead = false
         private var deferredStructureRead: Pair<ChatPageSnapshot, (ChatMessageBatch) -> Unit>? = null
         fun hasDeferredStructureRead() = deferredStructureRead != null
@@ -5185,6 +5214,7 @@ class AiReplyObservationRuntimeTest {
         val resolvedTapCandidateNames = ArrayList<String?>()
 
         override fun beginSessionManagement(): String? = if (sessionRunEnabled) "test-run" else null
+        override fun hasPendingIdentityReturnReinspectionRequest(): Boolean = pendingIdentityReturnReinspection
         override fun consumeIdentityReturnReinspectionRequest(): Boolean =
             pendingIdentityReturnReinspection.also { pendingIdentityReturnReinspection = false }
         override fun observeContactIdentityCapture(candidate: ChatListCandidateSnapshot): ContactIdentityCaptureOutcome =
@@ -5329,9 +5359,27 @@ class AiReplyObservationRuntimeTest {
             if (deferNextStructureRead) {
                 deferNextStructureRead = false
                 deferredStructureRead = page to onResult
+            } else if (simulateStructureThenOcr) {
+                // Emulate Momo's pre-identity structure phase: OCR targets exist,
+                // but the screenshot/recognizer must not be invoked yet.
+                onResult(readRecentMessages(page, limit).copy(
+                    ocrAttempted = false,
+                    ocrRecognizedTargetCount = 0,
+                    ocrFailedTargetCount = 0,
+                    ocrDebugTextByRowIndex = null
+                ))
             } else {
                 super<ChatMessagePort>.readRecentMessagesStructureAsync(page, limit, onResult)
             }
+        }
+
+        override fun readRecentMessagesAsync(
+            page: ChatPageSnapshot,
+            limit: Int,
+            onResult: (ChatMessageBatch) -> Unit
+        ) {
+            ocrAsyncReadRequests++
+            onResult(readRecentMessages(page, limit))
         }
 
         override fun readRecentMessages(page: ChatPageSnapshot, limit: Int): ChatMessageBatch {
