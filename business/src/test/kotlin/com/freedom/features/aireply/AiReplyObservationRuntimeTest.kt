@@ -450,6 +450,21 @@ class AiReplyObservationRuntimeTest {
         method.invoke(fixture.runtime, fixture.listPage, false)
     }
 
+    private fun awaitPreScrollRecovery(fixture: PreScrollPageRecoveryFixture) {
+        var steps = 0
+        while (fixture.logs.none { it.contains("RECOVERY_EXECUTION_READY") } &&
+            steps < 80 && fixture.scheduler.pendingCount() > 0
+        ) {
+            fixture.scheduler.runNext()
+            steps++
+        }
+        assertTrue(
+            "Recovery not reached after $steps steps; pending=${fixture.scheduler.pendingCount()}; " +
+                "recentLogs=${fixture.logs.takeLast(45)}",
+            fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") }
+        )
+    }
+
     private fun desktopPage() = ChatPageSnapshot(
         packageName = "com.bbk.launcher2",
         activityClass = "com.bbk.launcher2.Launcher",
@@ -484,9 +499,8 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, fixture.dispatchedGestures())
 
         fixture.port.page = fixture.listPage
-        runUntil(fixture.scheduler, 80) {
-            fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") }
-        }
+        fixture.runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        awaitPreScrollRecovery(fixture)
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
         assertTrue(fixture.logs.any { it.contains("消息列表检查点恢复[") })
     }
@@ -505,9 +519,8 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, fixture.dispatchedGestures())
 
         fixture.port.page = fixture.listPage
-        runUntil(fixture.scheduler, 80) {
-            fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") }
-        }
+        fixture.runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        awaitPreScrollRecovery(fixture)
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
     }
 
@@ -523,9 +536,7 @@ class AiReplyObservationRuntimeTest {
         assertTrue(fixture.checkpoint() != null)
         assertEquals(0, fixture.dispatchedGestures())
 
-        runUntil(fixture.scheduler, 80) {
-            fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") }
-        }
+        awaitPreScrollRecovery(fixture)
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
     }
 
