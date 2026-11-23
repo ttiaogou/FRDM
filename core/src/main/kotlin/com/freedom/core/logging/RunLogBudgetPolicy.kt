@@ -66,6 +66,50 @@ object RunLogBudgetPolicy {
         return safe
     }
 
+    /**
+     * Read correlation metadata only from the existing, fixed P2 AI log contract.
+     * General/legacy text remains on the original inference path, and the business
+     * module is deliberately not a dependency of core.
+     */
+    private data class AiReplyTraceFields(
+        val taskId: String?,
+        val requestId: String?,
+        val eventType: String?
+    )
+
+    private fun aiReplyTraceFields(message: String): AiReplyTraceFields? {
+        val component = when {
+            message.startsWith("AI 模型生命周期：") -> "MODEL"
+            message.startsWith("AI 消息发送链路：") -> "SEND"
+            else -> return null
+        }
+        val payload = message.substringAfter('：')
+        fun field(key: String): String? {
+            val matches = payload.split('；').mapNotNull { part ->
+                if (part.startsWith("$key=")) part.substring(key.length + 1) else null
+            }
+            val value = matches.singleOrNull() ?: return null
+            return value.takeIf {
+                it.length in 1..128 && it != "UNKNOWN" && it.all { char ->
+                    char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' ||
+                        char == '_' || char == '-' || char == '.' || char == ':'
+                }
+            }
+        }
+        if (field("component") != component) return null
+
+        val taskId = field("taskId")?.takeIf {
+            it == "AI_REPLY_PRIVATE_MESSAGES" || it == "AI_REPLY_RECEIVED_GREETINGS"
+        }
+        val eventType = field("eventType")?.takeIf {
+            it.length <= 100 &&
+                (if (component == "MODEL") it.startsWith("MODEL_")
+                else it.startsWith("MESSAGE_SEND_")) &&
+                it.all { char -> char in 'A'..'Z' || char in '0'..'9' || char == '_' }
+        }
+        return AiReplyTraceFields(taskId, field("requestId"), eventType)
+    }
+
     fun toEvent(
         message: String,
         runId: String,
@@ -80,12 +124,14 @@ object RunLogBudgetPolicy {
         )
         val level = inferLevel(safeMessage)
         val category = inferCategory(safeMessage, level)
+        val aiTrace = aiReplyTraceFields(safeMessage)
         val actionId = Regex("(?:actionId|action_id)\\s*[=:：]\\s*([A-Za-z0-9_.:-]+)", RegexOption.IGNORE_CASE)
             .find(safeMessage)?.groupValues?.getOrNull(1)
         val windowId = Regex("windowId\\s*[=:：]\\s*(-?\\d+)", RegexOption.IGNORE_CASE)
             .find(safeMessage)?.groupValues?.getOrNull(1)?.toIntOrNull()
-        val eventType = Regex("(?:事件|event|type)\\s*[=:：]\\s*([A-Za-z0-9_.-]+)", RegexOption.IGNORE_CASE)
-            .find(safeMessage)?.groupValues?.getOrNull(1)
+        val eventType = aiTrace?.eventType
+            ?: Regex("(?:事件|event|type)\\s*[=:：]\\s*([A-Za-z0-9_.-]+)", RegexOption.IGNORE_CASE)
+                .find(safeMessage)?.groupValues?.getOrNull(1)
             ?: safeMessage.substringBefore('[').substringBefore('：').trim().take(72).ifBlank { "runtime_log" }
         val component = safeMessage.substringBefore('[').substringBefore('：').substringBefore(':')
             .trim().take(80).ifBlank { "runtime" }
@@ -95,8 +141,8 @@ object RunLogBudgetPolicy {
             sequence = sequence,
             eventId = UUID.randomUUID().toString(),
             runId = runId,
-            taskId = runId,
-            traceId = actionId ?: runId,
+            taskId = aiTrace?.taskId ?: runId,
+            traceId = aiTrace?.requestId ?: actionId ?: runId,
             timestampEpochMs = timestampEpochMs,
             elapsedRealtimeMs = elapsedRealtimeMs,
             level = level,

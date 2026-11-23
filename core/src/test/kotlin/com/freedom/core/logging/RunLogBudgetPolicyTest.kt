@@ -37,6 +37,80 @@ class RunLogBudgetPolicyTest {
 
 
     @Test
+    fun bothAiReplyBusinessesMapModelAndSendFieldsToStructuredEventMetadata() {
+        for (task in listOf("AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS")) {
+            val requestId = "12345678-1234-1234-1234-123456789abc"
+            val modelLog = "AI 模型生命周期：component=MODEL；requestId=$requestId；" +
+                "taskId=$task；generation=12；eventType=MODEL_REQUEST_FINISHED；" +
+                "retryState=SUCCEEDED；reasonCode=MODEL_DECISION_REPLY；finalState=SUCCEEDED"
+            val sendLog = "AI 消息发送链路：component=SEND；requestId=$requestId；" +
+                "taskId=$task；generation=12；eventType=MESSAGE_SEND_CONFIRMED；" +
+                "segmentIndex=0；sendStatus=CONFIRMED"
+
+            val model = RunLogBudgetPolicy.toEvent(modelLog, "RUN_01", 1, 100, 200)
+            val send = RunLogBudgetPolicy.toEvent(sendLog, "RUN_01", 2, 101, 201)
+
+            assertEquals("RUN_01", model.runId)
+            assertEquals("RUN_01", send.runId)
+            assertEquals(task, model.taskId)
+            assertEquals(task, send.taskId)
+            assertEquals(requestId, model.traceId)
+            assertEquals(model.traceId, send.traceId)
+            assertEquals("MODEL_REQUEST_FINISHED", model.eventType)
+            assertEquals("MESSAGE_SEND_CONFIRMED", send.eventType)
+            assertEquals("AI 模型生命周期", model.component)
+            assertEquals("AI 消息发送链路", send.component)
+            assertEquals(modelLog, model.message)
+            assertEquals(sendLog, send.message)
+        }
+    }
+
+    @Test
+    fun aiTraceUnknownTaskKeepsRunIdentityButStillLinksByRequestId() {
+        val log = "AI 消息发送链路：component=SEND；requestId=request-123；" +
+            "taskId=UNKNOWN；eventType=MESSAGE_SEND_REHYDRATED；sendAttemptOrigin=RECOVERED_SYNTHETIC"
+        val event = RunLogBudgetPolicy.toEvent(log, "RUN_RECOVERY", 3, 4, 5)
+        assertEquals("RUN_RECOVERY", event.taskId)
+        assertEquals("request-123", event.traceId)
+        assertEquals("MESSAGE_SEND_REHYDRATED", event.eventType)
+    }
+
+    @Test
+    fun legacyEventsKeepOriginalActionIdAndTextInferenceWithoutAiTracePrefix() {
+        val log = "正常任务：eventType=NOT_A_TRACE；requestId=foreign-value；" +
+            "taskId=AI_REPLY_PRIVATE_MESSAGES；actionId=gesture-123"
+        val event = RunLogBudgetPolicy.toEvent(log, "RUN_LEGACY", 1, 1, 1)
+        assertEquals("RUN_LEGACY", event.taskId)
+        assertEquals("gesture-123", event.traceId)
+        assertEquals("gesture-123", event.actionId)
+        assertEquals("正常任务", event.eventType)
+        assertEquals(log, event.message)
+    }
+
+    @Test
+    fun malformedOrConflictingAiTraceFieldsCannotOverwriteRunMetadata() {
+        val prefix = "AI 模型生命周期：component=MODEL；taskId=AI_REPLY_PRIVATE_MESSAGES；"
+        val duplicated = prefix + "requestId=first；requestId=second；eventType=MODEL_REQUEST_FINISHED"
+        val invalid = prefix + "requestId=secret@example.com；eventType=MODEL_REQUEST_FINISHED"
+        val wrongComponent = "AI 模型生命周期：component=SEND；requestId=forged；" +
+            "taskId=AI_REPLY_PRIVATE_MESSAGES；eventType=MODEL_REQUEST_FINISHED"
+        val wrongEvent = prefix + "requestId=valid-123；eventType=MESSAGE_SEND_COMPLETED"
+        for (log in listOf(duplicated, invalid)) {
+            val event = RunLogBudgetPolicy.toEvent(log, "RUN_GUARD", 1, 1, 1)
+            assertEquals("RUN_GUARD", event.traceId)
+            assertEquals("AI_REPLY_PRIVATE_MESSAGES", event.taskId)
+            assertEquals("MODEL_REQUEST_FINISHED", event.eventType)
+        }
+        val spoofed = RunLogBudgetPolicy.toEvent(wrongComponent, "RUN_GUARD", 2, 2, 2)
+        assertEquals("RUN_GUARD", spoofed.traceId)
+        assertEquals("RUN_GUARD", spoofed.taskId)
+        assertEquals("AI 模型生命周期", spoofed.eventType)
+        val crossed = RunLogBudgetPolicy.toEvent(wrongEvent, "RUN_GUARD", 3, 3, 3)
+        assertEquals("valid-123", crossed.traceId)
+        assertEquals("AI 模型生命周期", crossed.eventType)
+    }
+
+    @Test
     fun structuredNodeEvidenceLongerThanLegacyFourKbLimitIsPreserved() {
         val value = "AI 模式节点树明细：" + "node-evidence/0/1/2;class=TextView;flags=visible || ".repeat(90)
         val event = RunLogBudgetPolicy.toEvent(
