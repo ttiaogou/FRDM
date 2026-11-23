@@ -2790,6 +2790,9 @@ class AiReplyObservationRuntimeTest {
         var draftCalls = 0
         var draftHadOcrEvidence = false
         var draftIdentityVerified = false
+        var boundAtRebind = false
+        var sendGateReasonAtRebind: String? = null
+        lateinit var runtime: AiReplyObservationRuntime
         val gesture = object : TestGestureApi {
             override fun execute(
                 command: GestureIntentRequest,
@@ -2800,7 +2803,7 @@ class AiReplyObservationRuntimeTest {
                 return GestureSubmission.ACCEPTED
             }
         }
-        val runtime = AiReplyObservationRuntime(
+        runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
@@ -2809,7 +2812,16 @@ class AiReplyObservationRuntimeTest {
             gesturePolicy = gesture,
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
-            onLog = logs::add,
+            onLog = { entry ->
+            logs += entry
+            if (entry.contains("AI 会话绑定[VERIFIED_CHAT_REBOUND]")) {
+                boundAtRebind = runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
+                    .apply { isAccessible = true }.invoke(runtime) as Boolean
+                sendGateReasonAtRebind = runtime.javaClass.getDeclaredMethod(
+                    "privateSendConfirmationDetailReason", ChatPageSnapshot::class.java
+                ).apply { isAccessible = true }.invoke(runtime, port.page) as String
+            }
+        },
             inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
@@ -2896,14 +2908,9 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("AI 身份回接[REQUEST_NOT_CONSUMED]") &&
             it.contains("reason=RECOVERY_TRANSACTION_PENDING") })
         assertTrue(logs.any { it.contains("AI 身份回接[RECOVERY_HANDOFF]") })
-        assertTrue("The restored window generation must rebind the original source session",
-            runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
-                .apply { isAccessible = true }.invoke(runtime) as Boolean)
-        assertEquals("The same chat must be eligible for later read-only send confirmation",
-            "CHAT_DETAIL_NOT_VERIFIED",
-            runtime.javaClass.getDeclaredMethod(
-                "privateSendConfirmationDetailReason", ChatPageSnapshot::class.java
-            ).apply { isAccessible = true }.invoke(runtime, port.page))
+        assertTrue("At the verified recovery handoff, the source row and fresh window must be bound", boundAtRebind)
+        assertEquals("At rebind the same chat must pass the read-only send confirmation identity gate",
+            "CHAT_DETAIL_NOT_VERIFIED", sendGateReasonAtRebind)
         assertTrue(logs.any { it.contains("AI 会话绑定[VERIFIED_CHAT_REBOUND]") })
         assertEquals("Only the verified current target may draft", 1, draftCalls)
         assertEquals(0, port.navigateBackCalls)
@@ -2942,6 +2949,8 @@ class AiReplyObservationRuntimeTest {
         var draftCalls = 0
         var passedIdentity: ContactRowIdentity? = null
         var draftHadOcrEvidence = false
+        var boundAtRebind = false
+        lateinit var runtime: AiReplyObservationRuntime
         val gesture = object : TestGestureApi {
             override fun execute(
                 command: GestureIntentRequest,
@@ -2952,7 +2961,7 @@ class AiReplyObservationRuntimeTest {
                 return GestureSubmission.ACCEPTED
             }
         }
-        val runtime = AiReplyObservationRuntime(
+        runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
@@ -2961,7 +2970,13 @@ class AiReplyObservationRuntimeTest {
             gesturePolicy = gesture,
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
-            onLog = logs::add,
+            onLog = { entry ->
+            logs += entry
+            if (entry.contains("AI 会话绑定[VERIFIED_CHAT_REBOUND]")) {
+                boundAtRebind = runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
+                    .apply { isAccessible = true }.invoke(runtime) as Boolean
+            }
+        },
             inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
@@ -3003,9 +3018,8 @@ class AiReplyObservationRuntimeTest {
         }
         assertTrue(logs.any { it.contains("AI 身份业务续接[IDENTITY_RETURN_CONFIRMED]") })
         assertTrue(logs.any { it.contains("AI 身份回接[BUSINESS_HANDOFF]") })
-        assertTrue("Ordinary same-window identity return must preserve the source session binding",
-            runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
-                .apply { isAccessible = true }.invoke(runtime) as Boolean)
+        assertTrue("At the ordinary identity-return handoff, source session binding must remain valid",
+            boundAtRebind)
         assertTrue(logs.any { it.contains("AI OCR 启动") })
         assertFalse(port.pendingIdentityReturnReinspection)
         assertEquals(1, port.ocrAsyncReadRequests)
