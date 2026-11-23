@@ -13,6 +13,26 @@ import com.freedom.core.accessibility.api.ScreenRect
  * so rejecting the un-clipped Rect would incorrectly discard the only valid content scroller.
  */
 internal object MomoSayHiProfileScrollPolicy {
+    // Identical five view IDs to the existing business profile fingerprint.
+    private val PROFILE_SURFACE_IDS = setOf(
+        "root_layout", "personal_profile_name", "toolbar_id", "tabs", "pagertabcontent"
+    )
+
+    fun matchesProfileSurface(viewIds: Iterable<String>): Boolean {
+        val observed = viewIds.map { it.substringAfterLast('/') }.toSet()
+        return PROFILE_SURFACE_IDS.all(observed::contains)
+    }
+
+    fun permitsPendingProfileScroll(
+        mode: com.freedom.core.runtime.RunMode,
+        pendingOnCurrentWindow: Boolean,
+        activeWindowId: Int,
+        currentRootViewIds: Iterable<String>
+    ): Boolean =
+        mode == com.freedom.core.runtime.RunMode.AI_REPLY &&
+            pendingOnCurrentWindow && activeWindowId >= 0 &&
+            matchesProfileSurface(currentRootViewIds)
+
     data class Decision(
         val viewport: ScreenRect?,
         val candidateCount: Int,

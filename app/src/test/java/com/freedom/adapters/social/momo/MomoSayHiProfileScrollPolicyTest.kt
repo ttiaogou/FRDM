@@ -78,6 +78,42 @@ class MomoSayHiProfileScrollPolicyTest {
         }
     }
 
+    @Test fun pendingProfileScrollAcceptsFiveAnchorsWithoutDependingOnStaleActivityLabel() {
+        val ids = listOf(
+            "com.immomo.momo:id/root_layout",
+            "com.immomo.momo:id/personal_profile_name",
+            "com.immomo.momo:id/toolbar_id",
+            "com.immomo.momo:id/tabs",
+            "com.immomo.momo:id/pagertabcontent"
+        )
+        assertTrue(MomoSayHiProfileScrollPolicy.permitsPendingProfileScroll(
+            mode = com.freedom.core.runtime.RunMode.AI_REPLY,
+            pendingOnCurrentWindow = true,
+            activeWindowId = 10,
+            currentRootViewIds = ids
+        ))
+    }
+
+    @Test fun profilePermitStillRequiresExactPendingWindowModeAndAllFiveAnchors() {
+        val ids = setOf(
+            "root_layout", "personal_profile_name", "toolbar_id", "tabs", "pagertabcontent"
+        )
+        val policy = MomoSayHiProfileScrollPolicy
+        assertTrue(policy.matchesProfileSurface(ids))
+        assertTrue(!policy.permitsPendingProfileScroll(
+            com.freedom.core.runtime.RunMode.AI_REPLY, false, 10, ids
+        ))
+        assertTrue(!policy.permitsPendingProfileScroll(
+            com.freedom.core.runtime.RunMode.ACCOUNT_BROWSE, true, 10, ids
+        ))
+        assertTrue(!policy.permitsPendingProfileScroll(
+            com.freedom.core.runtime.RunMode.AI_REPLY, true, -1, ids
+        ))
+        assertTrue(!policy.permitsPendingProfileScroll(
+            com.freedom.core.runtime.RunMode.AI_REPLY, true, 10, ids - "tabs"
+        ))
+    }
+
     @Test fun selectsObservedProfileRecyclerViewAndClipsAccessibilityBoundsToDisplay() {
         val decision = MomoSayHiProfileScrollPolicy.resolveViewport(
             nodes = observedProfileNodes(),

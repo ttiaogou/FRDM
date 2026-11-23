@@ -103,10 +103,32 @@ internal class MomoGesturePageReadinessInspector(
             )
         }
 
-        if (mode == RunMode.AI_REPLY &&
-            currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY &&
-            isSayHiProfileScrollPending(rootWindowId)
-        ) {
+        if (mode == RunMode.AI_REPLY && isSayHiProfileScrollPending(rootWindowId)) {
+            // Activity events can lag the profile currently shown in the active window.
+            // Grant the existing window-bound permit only when the full five-anchor
+            // profile fingerprint is independently re-read from this fresh root.
+            val profileIds = collectCurrentRootViewIds(root)
+            if (!MomoSayHiProfileScrollPolicy.permitsPendingProfileScroll(
+                    mode = mode,
+                    pendingOnCurrentWindow = true,
+                    activeWindowId = rootWindowId,
+                    currentRootViewIds = profileIds
+                )
+            ) {
+                return TargetAppPageReadiness(
+                    ready = false,
+                    reason = "资料页上滑暂缓：当前活动窗口没有完整资料页五节点指纹",
+                    retryable = true
+                )
+            }
+            if (currentActivity != MomoSayHiPageContract.PROFILE_ACTIVITY) {
+                onLog(
+                    "资料页上滑准入[STRUCTURAL_PROFILE_CONFIRMED]：" +
+                        "Activity=" + currentActivity.ifBlank { "UNKNOWN" } +
+                        ";windowId=$rootWindowId;profileFiveAnchors=true;" +
+                        "原有弹层及执行许可检查仍然生效"
+                )
+            }
             val dialogObservation = latestDialogWindowObservation()
             if (dialogObservation != null) {
                 val dialogStillPresent = rootAccess.isTargetWindowPresent(dialogObservation.windowId)
@@ -222,6 +244,35 @@ internal class MomoGesturePageReadinessInspector(
         return false
     }
 
+    /** ID-only, bounded traversal of the active root. All obtained nodes are recycled. */
+    private fun collectCurrentRootViewIds(root: AccessibilityNodeInfo): Set<String> {
+        val queue = java.util.ArrayDeque<AccessibilityNodeInfo>()
+        val ids = HashSet<String>()
+        queue.add(AccessibilityNodeInfo.obtain(root))
+        var visited = 0
+        try {
+            while (queue.isNotEmpty() && visited < PROFILE_FINGERPRINT_MAX_NODES) {
+                val node = queue.removeFirst()
+                visited++
+                try {
+                    val id = safeString { node.viewIdResourceName.orEmpty() }
+                    if (id.isNotBlank()) ids.add(id.substringAfterLast('/'))
+                    if (MomoSayHiProfileScrollPolicy.matchesProfileSurface(ids)) break
+                    val count = safeInt { node.childCount }
+                    for (index in 0 until count) {
+                        if (visited + queue.size >= PROFILE_FINGERPRINT_MAX_NODES) break
+                        safeNode { node.getChild(index) }?.let(queue::add)
+                    }
+                } finally {
+                    runCatching { node.recycle() }
+                }
+            }
+        } finally {
+            while (queue.isNotEmpty()) runCatching { queue.removeFirst().recycle() }
+        }
+        return ids
+    }
+
     private fun hasVisibleContent(root: AccessibilityNodeInfo): Boolean {
         val queue = java.util.ArrayDeque<AccessibilityNodeInfo>()
         queue.add(AccessibilityNodeInfo.obtain(root))
@@ -255,6 +306,7 @@ internal class MomoGesturePageReadinessInspector(
 
     private companion object {
         const val PAGE_FINGERPRINT_MAX_NODES = 500
+        const val PROFILE_FINGERPRINT_MAX_NODES = 1_200
         const val POPUP_SAFETY_SCAN_DIAGNOSTIC_NODE_THRESHOLD = 350
         const val POPUP_SAFETY_SCAN_DIAGNOSTIC_DURATION_MS = 300L
     }
