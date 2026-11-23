@@ -529,11 +529,8 @@ class AiReplyDraftCoordinator(
                     "MODEL_DECISION_${evaluation.status.reasonCode}"
                 else -> "EXECUTION_${evaluation.status.reasonCode}"
             }
-            // Retain the existing persisted MODEL_COMPLETED transition only for a model
-            // response that arrived but was empty or failed schema validation.
-            if (evaluation.status == AiReplyExecutionStatus.MODEL_EMPTY_OUTPUT ||
-                evaluation.status == AiReplyExecutionStatus.MODEL_OUTPUT_INVALID
-            ) updateTaskStatus(ReplyTaskStatus.MODEL_COMPLETED, requestGeneration)
+            // No valid decision or draft exists: do not persist MODEL_COMPLETED.
+            // finish() records a retryable, pre-send terminal failure instead.
             finish(finishCode, requestGeneration)
             return
         }
@@ -1200,11 +1197,24 @@ class AiReplyDraftCoordinator(
     }
 
     private fun finish(reasonCode: String, requestGeneration: Long) {
-        if (reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED", "MODEL_DECISION_MODEL_CALL_FAILED")) {
-            updateTaskStatus(if (reasonCode == "MODEL_DECISION_MODEL_CALL_FAILED") ReplyTaskStatus.UNKNOWN else ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
+        if (reasonCode in setOf(
+                "DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED",
+                "MODEL_DECISION_MODEL_CALL_FAILED", "MODEL_DECISION_EMPTY_MODEL_OUTPUT",
+                "MODEL_DECISION_MODEL_OUTPUT_SCHEMA_INVALID", "MODEL_EMPTY_RETRY_CONTEXT_CHANGED"
+            )) {
+            // Only pre-send model failures are reclaimable. Real uncertain sends remain UNKNOWN.
+            updateTaskStatus(ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
         }
         synchronized(lock) {
             if (!isCurrentGeneration(requestGeneration)) return
+            // Model-only terminal outcomes have no message segments or send attempt to confirm.
+            // Never release the gate after a draft/write/send transaction has started.
+            if (activeMessageSegments.isEmpty() &&
+                pendingSendConfirmation == null && pendingNextMessageSegment == null &&
+                pendingSendControl == null && !awaitingUserSend.get()
+            ) {
+                replyAwaitingConfirmedSend = false
+            }
             pending.set(false)
             pendingSendControl = null
             sendControlRetryScheduled = false

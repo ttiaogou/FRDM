@@ -52,6 +52,27 @@ class LocalReplyTaskRepositoryTest {
     }
 
     @Test
+    fun modelOnlyRetryableFailureCanBeReclaimedAfterRepositoryReopen() {
+        val file = File.createTempFile("reply-task", ".tsv")
+        file.delete()
+        try {
+            val originalOwner = LocalReplyTaskRepository(file) { 10_000L }
+            val task = record("model-empty-request", "first-owner", 1_000L)
+            assertTrue(originalOwner.tryClaim(task, 120_000L))
+            assertTrue(originalOwner.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.FAILED_RETRYABLE, 2_000L))
+
+            val reopened = LocalReplyTaskRepository(file) { 10_000L }
+            assertTrue(reopened.tryClaim(task.copy(requestId = "second-owner", updatedAtMillis = 3_000L), 120_000L))
+            assertEquals(ReplyTaskStatus.REQUESTED, originalOwner.find(task.requestKey)?.status)
+            assertFalse(originalOwner.updateStatus(task.requestKey, task.requestId, ReplyTaskStatus.MODEL_COMPLETED, 4_000L))
+            assertTrue(reopened.updateStatus(task.requestKey, "second-owner", ReplyTaskStatus.MODEL_COMPLETED, 4_000L))
+        } finally {
+            file.delete()
+            File(file.parentFile, "${file.name}.lock").delete()
+        }
+    }
+
+    @Test
     fun durableRecordPreservesMemoryBufferIdentityAndRejectsIllegalTransition() {
         val file = File.createTempFile("reply-task", ".tsv")
         file.delete()

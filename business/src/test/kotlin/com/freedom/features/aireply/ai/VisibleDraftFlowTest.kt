@@ -181,8 +181,49 @@ class VisibleDraftFlowTest {
         assertEquals(2, f.calls)
         assertEquals("", f.text)
         assertFalse(f.coordinator.isPending)
-        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
         assertEquals(1, f.logs.count { it.contains("AI 模型空输出有限恢复") })
+    }
+
+    @Test fun exhaustedEmptyOutputReleasesGateAndReclaimsPersistedModelTask() {
+        val ledger = TaskLedger()
+        val f = Fixture(taskRepository = ledger)
+        f.emptyFailuresRemaining = 2
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(2, f.calls)
+        assertEquals("", f.text)
+        assertFalse(f.coordinator.isPending)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+        assertFalse(f.coordinator.isSendConfirmationPending)
+        assertEquals(ReplyTaskStatus.FAILED_RETRYABLE, ledger.records.values.single().status)
+        f.now = 30_000L
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch.copy(capturedAtMillis = 2L), f.snapshot))
+        f.drain()
+        assertEquals(3, f.calls)
+        assertEquals("你好呀", f.text)
+    }
+
+    @Test fun invalidModelOutputRemainsReclaimableWithoutAFalseSendGate() {
+        val ledger = TaskLedger()
+        val f = Fixture(taskRepository = ledger)
+        f.modelOutput = "not-json"
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals("", f.text)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+        assertEquals(ReplyTaskStatus.FAILED_RETRYABLE, ledger.records.values.single().status)
+    }
+
+    @Test fun modelWaitHasCompletedDecisionButDoesNotHoldSendGate() {
+        val ledger = TaskLedger()
+        val f = Fixture(taskRepository = ledger)
+        f.modelOutput = """{"action":"WAIT","reason":"FINANCIAL_TRANSACTION_REVIEW","draft":null}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals("", f.text)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+        assertEquals(ReplyTaskStatus.MODEL_COMPLETED, ledger.records.values.single().status)
     }
 
     @Test fun emptyOutputWithLengthFinishReasonDoesNotRetry() {
@@ -206,6 +247,22 @@ class VisibleDraftFlowTest {
             assertEquals(1, f.calls)
             assertEquals(if (reset) "" else "用户输入", f.text)
         }
+    }
+
+    @Test fun modelTransportFailureClosesLedgerAsRetryableAndAllowsFreshClaim() {
+        val ledger = TaskLedger()
+        val f = Fixture(taskRepository = ledger)
+        f.fail = true
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        assertEquals(ReplyTaskStatus.FAILED_RETRYABLE, ledger.records.values.single().status)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+        assertEquals("", f.text)
+        f.now = 30_000L
+        f.fail = false
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch.copy(capturedAtMillis = 2L), f.snapshot))
+        f.drain()
+        assertEquals(2, f.calls)
+        assertEquals("你好呀", f.text)
     }
 
     @Test fun transientModelFailureRetriesOnceAfterCooldown() {
@@ -694,12 +751,12 @@ class VisibleDraftFlowTest {
         assertFalse(attempted)
     }
 
-    @Test fun returnGateStaysClosedAfterModelFailureAndResetsOnRuntimeReset() {
+    @Test fun returnGateReleasesAfterModelFailureAndResetsOnRuntimeReset() {
         val f = Fixture()
         f.fail = true
         assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
         assertFalse(f.coordinator.isPending)
-        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
         f.coordinator.resetForRuntimeReset()
         assertFalse(f.coordinator.isConversationReturnBlocked)
     }
