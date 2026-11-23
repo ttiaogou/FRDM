@@ -836,6 +836,55 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun repeatedCrossTaskStartFailuresBackOffWithoutLosingPrivateCheckpointOrReplayingTask() {
+        val (runtime, scheduler, port, ownership, manager, repository, original, logs) =
+            crossTaskRecoveryFixture()
+        port.beginCurrentListResult = false
+        runtime.scheduleInitialObservation()
+        val originalRecoveryId = manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId
+        assertTrue(originalRecoveryId != null)
+
+        // Initial double-snapshot verification completes, but adapter start still rejects.
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertEquals(original, repository.load())
+
+        // First read-only timer (500ms) permits a NEW two-snapshot verification.
+        scheduler.runNextWithDelay(500L)
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals(2, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertEquals(2, logs.count { it.contains("PRIVATE_TO_GREETINGS_ROLLBACK") })
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_READ_ONLY_WAIT") &&
+            it.contains("attempt=2") && it.contains("delayMs=1000") })
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertEquals(original, repository.load())
+        assertEquals(null, ownership.activeTaskId())
+
+        // More events on the unchanged page cannot bypass the queued 1000ms observation.
+        runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertEquals(2, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+
+        port.beginCurrentListResult = true
+        scheduler.runNextWithDelay(1_000L)
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals(3, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertEquals(2, logs.count { it.contains("PRIVATE_TO_GREETINGS_ROLLBACK") })
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertEquals(original, repository.load())
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_TRANSFERRED") })
+    }
+
+    @Test
     fun adapterAdmissionBlockKeepsPrivateLeaseAndRetriesOnlyAfterReadOnlyWait() {
         val (runtime, scheduler, port, ownership, manager, repository, original, logs) =
             crossTaskRecoveryFixture(adapterConfirmation = false)
