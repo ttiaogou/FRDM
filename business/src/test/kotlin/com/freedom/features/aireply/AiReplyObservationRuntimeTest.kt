@@ -3908,6 +3908,32 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun submittedGreetingSendRequiresOcrBeforeConfirmationAndSchedulesNextRead() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort()
+        var confirmationCalls = 0
+        val runtime = greetingRuntimeFixture(
+            scheduler = scheduler, port = port, logs = logs, greetingDraft = { false },
+            sendConfirmation = {
+                confirmationCalls++
+                com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+            },
+            sendConfirmationPending = { true }
+        )
+        activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        assertEquals(1, port.ocrAsyncReadRequests)
+        assertEquals(0, confirmationCalls) // No confirmation on the structure-only batch.
+        runUntil(scheduler, 30) { confirmationCalls == 1 }
+        assertTrue(logs.any { it.contains("AI 发送确认[OCR_REVALIDATED]") })
+        assertTrue(logs.any { it.contains("AI 发送确认[RECHECK_SCHEDULED]") })
+        assertTrue(scheduler.hasPendingDelay(500L))
+        assertEquals(0, port.greetingDetailCompletionCalls)
+        assertEquals(0, port.navigateBackCalls)
+    }
+
+    @Test
     fun greetingConfirmedSendArchivesFinalChatAndUsesOnlyGreetingSafeReturn() {
         val scheduler = FakeScheduler()
         val logs = ArrayList<String>()
@@ -4033,7 +4059,8 @@ class AiReplyObservationRuntimeTest {
         sendConfirmation: () -> com.freedom.features.aireply.ai.SendConfirmationResult = {
             com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
         },
-        consumeSendId: () -> String? = { null }
+        consumeSendId: () -> String? = { null },
+        sendConfirmationPending: () -> Boolean = { false }
     ): AiReplyObservationRuntime = AiReplyObservationRuntime(
         scheduler = scheduler,
         sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
@@ -4049,6 +4076,7 @@ class AiReplyObservationRuntimeTest {
         regionRefreshDebounceMs = 500L,
         onGreetingDraftConversationObserved = { batch, _, _, _ -> greetingDraft(batch) },
         onSendConfirmation = { _, _ -> sendConfirmation() },
+        isSendConfirmationPending = sendConfirmationPending,
         onConfirmedSendId = consumeSendId
     )
 

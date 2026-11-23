@@ -113,6 +113,8 @@ class AiReplyDraftCoordinator(
     val isAwaitingUserSend: Boolean get() = awaitingUserSend.get()
     /** 对现有页面返回门禁而言，等待尚未提交的发送按钮不等于任务完成。 */
     val isSendControlRecoveryPending: Boolean get() = synchronized(lock) { pendingSendControl != null }
+    /** A submitted send requires fresh read-only confirmation; draft generation alone does not. */
+    val isSendConfirmationPending: Boolean get() = synchronized(lock) { pendingSendConfirmation != null }
     val isConversationReturnBlocked: Boolean get() = synchronized(lock) {
         pending.get() || awaitingUserSend.get() ||
             pendingSendConfirmation != null || replyAwaitingConfirmedSend

@@ -92,6 +92,8 @@ class AiReplyObservationRuntime(
     private val sharedPageObservationCoordinator: PageObservationCoordinator,
     /** Prevents leaving the chat while a bounded model request/draft verification is in flight. */
     private val isConversationDraftPending: () -> Boolean = { false },
+    /** Read-only proof that an already submitted send still needs confirmation. */
+    private val isSendConfirmationPending: () -> Boolean = { false },
     /** A missing send button after verified draft input is a recoverable wait, not a deadline failure. */
     private val isSendControlRecoveryPending: () -> Boolean = { false },
     /** Current-window draft callback; true reserves the page for generation/review. */
@@ -152,6 +154,7 @@ class AiReplyObservationRuntime(
         private const val SESSION_RETURN_DELAY_MS = 1_500L
         private const val SESSION_RETURN_VERIFY_DELAY_MS = 900L
         private const val DRAFT_PENDING_POLL_DELAY_MS = 500L
+        private const val SEND_CONFIRMATION_RECHECK_DELAY_MS = 500L
         private const val MAX_DRAFT_PENDING_WAIT_MS = 185_000L
         private const val IDENTITY_CAPTURE_TIMEOUT_MS = 15_000L
         private const val MAX_IDENTITY_CAPTURE_RETRIES = 30
@@ -1603,6 +1606,25 @@ class AiReplyObservationRuntime(
             return
         }
 
+        // A submitted send holds the page, but must not suppress read-only proof collection.
+        // The normal draft/gesture path remains blocked until the existing matcher confirms it.
+        if (isSendConfirmationPending()) {
+            lastPageInspection = inspection
+            val boundDetail = observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                sessionRunStarted && if (receivedGreetingsTaskActive) {
+                    ownsTask(RECEIVED_GREETINGS_TASK_ID) && greetingBindingRejectReason(inspection) == null
+                } else {
+                    sessionManagerState == SessionManagerState.READING_SESSION &&
+                        canPerformPrivateMessagesUiAction() && isVerifiedRecoveredPrivateDetail(inspection)
+                }
+            if (boundDetail) {
+                onLog("AI 发送确认[READ_ONLY_RECHECK]：当前目标聊天与任务租约已验证；重新读取消息，不发送")
+                readVisibleMessages(inspection)
+            } else {
+                onLog("AI 发送确认[READ_DEFERRED]：聊天页面或任务租约未验证；保留发送检查点，不重发")
+            }
+            return
+        }
         // 模型请求和分段填入期间，不让遍历任务抢走页面。
         if (isConversationDraftPending()) {
             lastPageInspection = inspection
@@ -3132,6 +3154,130 @@ class AiReplyObservationRuntime(
             batch.windowSessionKey == expectedWindowSessionKey
     }
 
+    /**
+     * A structural batch cannot prove the text of a newly sent bubble. Read OCR under a fresh
+     * same-conversation and same-task check before giving it to the unchanged send matcher.
+     */
+    private fun requestPendingSendConfirmationOcr(snapshot: ChatPageSnapshot) {
+        val visit = draftVisitToken
+        val runGeneration = currentRunGeneration()
+        val greetingBinding = greetingChatBinding.takeIf { receivedGreetingsTaskActive }
+        runCatching {
+            chatMessagePort.readRecentMessagesAsync(snapshot, limit = 10) { ocrBatch ->
+                scheduler.schedule(0L) sendOcr@{
+                    if (!isAiReplyActive() || !isSendConfirmationPending() || recoveryContext.pending ||
+                        visit != draftVisitToken || (sessionRunStarted && runGeneration != currentRunGeneration())
+                    ) {
+                        onLog("AI 发送确认[OCR_STALE_IGNORED]：原发送事务或运行代次已变化")
+                        return@sendOcr
+                    }
+                    val fresh = readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
+                    val boundDetail = fresh != null && if (receivedGreetingsTaskActive) {
+                        greetingBinding != null && greetingBindingRejectReason(fresh, greetingBinding) == null &&
+                            ownsTask(RECEIVED_GREETINGS_TASK_ID)
+                    } else {
+                        sessionManagerState == SessionManagerState.READING_SESSION &&
+                            canPerformPrivateMessagesUiAction() && isVerifiedRecoveredPrivateDetail(fresh)
+                    }
+                    if (!boundDetail || fresh == null ||
+                        !isMessageReadResultCurrent(snapshot, ocrBatch, fresh)
+                    ) {
+                        onLog("AI 发送确认[OCR_REJECTED]：新鲜页面、身份或消息批次不匹配；保留待核验发送")
+                        if (!recoveryContext.pending) scheduleFullInspectionAfter(SEND_CONFIRMATION_RECHECK_DELAY_MS)
+                        return@sendOcr
+                    }
+                    onLog("AI 发送确认[OCR_REVALIDATED]：新鲜聊天页面与任务租约已验证；核对己方消息")
+                    handleSendConfirmationResult(onSendConfirmation(ocrBatch, snapshot), ocrBatch, snapshot)
+                }
+            }
+        }.onFailure {
+            onLog("AI 发送确认[OCR_REQUEST_FAILED]：只读采集无法启动；保留待核验发送")
+            if (isAiReplyActive() && !recoveryContext.pending) {
+                scheduleFullInspectionAfter(SEND_CONFIRMATION_RECHECK_DELAY_MS)
+            }
+        }
+    }
+
+    /** Only a fully verified outgoing message may release the send hold or advance its queue. */
+    private fun handleSendConfirmationResult(
+        result: com.freedom.features.aireply.ai.SendConfirmationResult,
+        batch: ChatMessageBatch,
+        snapshot: ChatPageSnapshot
+    ): Boolean {
+        when (result) {
+            com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED -> {
+                if (receivedGreetingsTaskActive) {
+                    val bound = greetingChatBinding ?: run {
+                        onLog("GREETING_SEND_RETURN_BLOCKED reason=BINDING_MISSING")
+                        return true
+                    }
+                    val sendId = onConfirmedSendId()
+                    if (sendId.isNullOrBlank()) {
+                        onLog("GREETING_SEND_RETURN_BLOCKED reason=CONFIRMATION_ID_MISSING")
+                        return true
+                    }
+                    recordSuccessfulSend(sendId)
+                    confirmedGreetingSend = ConfirmedGreetingSend(bound, sendId)
+                    onLog("GREETING_SEND_CONFIRMED：已核验最终消息段，记录本次联系人发送结果；准备安全返回")
+                    completeConfirmedGreetingSend(batch, snapshot)
+                    return true
+                }
+                if (!currentSessionSendConfirmed) {
+                    currentSessionSendConfirmed = true
+                    val sendConfirmationId = onConfirmedSendId()
+                    if (sendConfirmationId.isNullOrBlank()) {
+                        currentSessionSendConfirmed = false
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 发送成功记录被阻止：缺少稳定 sendConfirmationId；不返回列表")
+                        return true
+                    }
+                    recordSuccessfulSend(sendConfirmationId)
+                    privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
+                    privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
+                    privateMessagesTraversalTaskExecutor.checkpointNextCursorKey = currentSessionKey
+                    privateMessagesTraversalTaskExecutor.checkpointTraversalDirection = "BOTTOM_TO_TOP"
+                    val checkpointWritten = currentSessionCandidate?.let {
+                        privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(it)
+                        privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+                        true
+                    } ?: run {
+                        sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 会话返回被阻止：缺少当前会话稳定键，未写入返回检查点")
+                        false
+                    }
+                    if (!checkpointWritten) return
+                    onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
+                }
+                if (!currentSessionSendConfirmed || !currentSessionReadCaptured) {
+                    sessionManagerState = SessionManagerState.PAUSED
+                    onLog("AI 会话返回被阻止：发送确认或当前段确认状态不完整")
+                    return true
+                }
+                scheduleReturnToSessionList(snapshot)
+                return true
+            }
+            com.freedom.features.aireply.ai.SendConfirmationResult.UNKNOWN -> {
+                if (receivedGreetingsTaskActive) {
+                    // Unknown send outcome cannot complete a greeting or authorize replay.
+                    onLog("GREETING_SEND_UNKNOWN：发送结果未明确确认；保持当前聊天，不标记处理、不重发")
+                    return true
+                }
+                if (!requestSendConfirmationRecovery("SEND_CONFIRMATION_UNKNOWN")) {
+                    onLog("AI 发送结果核验：UNKNOWN；恢复事务已在等待新鲜页面证据；不返回列表、不重发")
+                }
+                return true
+            }
+            com.freedom.features.aireply.ai.SendConfirmationResult.WAITING -> {
+                if (isSendConfirmationPending() && isAiReplyActive() && sessionRunStarted && !recoveryContext.pending) {
+                    onLog("AI 发送确认[RECHECK_SCHEDULED]：等待下一次新鲜聊天快照和只读消息核验；不重发")
+                    scheduleFullInspectionAfter(SEND_CONFIRMATION_RECHECK_DELAY_MS)
+                }
+                return true
+            }
+            com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING -> return false
+        }
+    }
+
     private fun handleMessageReadBatch(batch: ChatMessageBatch, snapshot: ChatPageSnapshot) {
         if (sessionRunStarted) {
             val requiredTask = if (receivedGreetingsTaskActive) {
@@ -3155,72 +3301,11 @@ class AiReplyObservationRuntime(
             completeConfirmedGreetingSend(batch, snapshot)
             return
         }
-        when (onSendConfirmation(batch, snapshot)) {
-            com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED -> {
-                if (receivedGreetingsTaskActive) {
-                    val bound = greetingChatBinding ?: run {
-                        onLog("GREETING_SEND_RETURN_BLOCKED reason=BINDING_MISSING")
-                        return
-                    }
-                    val sendId = onConfirmedSendId()
-                    if (sendId.isNullOrBlank()) {
-                        onLog("GREETING_SEND_RETURN_BLOCKED reason=CONFIRMATION_ID_MISSING")
-                        return
-                    }
-                    recordSuccessfulSend(sendId)
-                    confirmedGreetingSend = ConfirmedGreetingSend(bound, sendId)
-                    onLog("GREETING_SEND_CONFIRMED：已核验最终消息段，记录本次联系人发送结果；准备安全返回")
-                    completeConfirmedGreetingSend(batch, snapshot)
-                    return
-                }
-                if (!currentSessionSendConfirmed) {
-                    currentSessionSendConfirmed = true
-                    val sendConfirmationId = onConfirmedSendId()
-                    if (sendConfirmationId.isNullOrBlank()) {
-                        currentSessionSendConfirmed = false
-                        sessionManagerState = SessionManagerState.PAUSED
-                        onLog("AI 发送成功记录被阻止：缺少稳定 sendConfirmationId；不返回列表")
-                        return
-                    }
-                    recordSuccessfulSend(sendConfirmationId)
-                    privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
-                    privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
-                    privateMessagesTraversalTaskExecutor.checkpointNextCursorKey = currentSessionKey
-                    privateMessagesTraversalTaskExecutor.checkpointTraversalDirection = "BOTTOM_TO_TOP"
-                    val checkpointWritten = currentSessionCandidate?.let {
-                        privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(it)
-                        privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
-                        true
-                    } ?: run {
-                        sessionManagerState = SessionManagerState.PAUSED
-                        onLog("AI 会话返回被阻止：缺少当前会话稳定键，未写入返回检查点")
-                        false
-                    }
-                    if (!checkpointWritten) return
-                    onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
-                }
-                if (!currentSessionSendConfirmed || !currentSessionReadCaptured) {
-                    sessionManagerState = SessionManagerState.PAUSED
-                    onLog("AI 会话返回被阻止：发送确认或当前段确认状态不完整")
-                    return
-                }
-                scheduleReturnToSessionList(snapshot)
-                return
-            }
-            com.freedom.features.aireply.ai.SendConfirmationResult.UNKNOWN -> {
-                if (receivedGreetingsTaskActive) {
-                    // Unknown send outcome cannot complete a greeting or authorize replay.
-                    onLog("GREETING_SEND_UNKNOWN：发送结果未明确确认；保持当前聊天，不标记处理、不重发")
-                    return
-                }
-                if (!requestSendConfirmationRecovery("SEND_CONFIRMATION_UNKNOWN")) {
-                    onLog("AI 发送结果核验：UNKNOWN；恢复事务已在等待新鲜页面证据；不返回列表、不重发")
-                }
-                return
-            }
-            com.freedom.features.aireply.ai.SendConfirmationResult.WAITING -> return
-            com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING -> Unit
+        if (isSendConfirmationPending() && !batch.ocrAttempted && batch.ocrTargets.isNotEmpty()) {
+            requestPendingSendConfirmationOcr(snapshot)
+            return
         }
+        if (handleSendConfirmationResult(onSendConfirmation(batch, snapshot), batch, snapshot)) return
         val greetingDetail = sessionRunStarted && receivedGreetingsTaskActive &&
             greetingBindingRejectReason(snapshot) == null
         val privateDetail = sessionRunStarted && !receivedGreetingsTaskActive && currentSessionCandidate != null &&
