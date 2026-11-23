@@ -3245,7 +3245,7 @@ class AiReplyObservationRuntime(
                         onLog("AI 会话返回被阻止：缺少当前会话稳定键，未写入返回检查点")
                         false
                     }
-                    if (!checkpointWritten) return
+                    if (!checkpointWritten) return true
                     onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
                 }
                 if (!currentSessionSendConfirmed || !currentSessionReadCaptured) {
