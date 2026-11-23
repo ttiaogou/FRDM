@@ -2469,6 +2469,113 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun pendingPrivateSendRouteChangeKeepsDetailRecoveryUntilOriginalChatIsVerified() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            simulateStructureThenOcr = true
+            page = inbox
+        }
+        val logs = mutableListOf<String>()
+        val gestures = mutableListOf<GestureKind>()
+        var pendingSend = false
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    gestures += command.kind
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            isSendConfirmationPending = { pendingSend },
+            onSendConfirmation = { _, _ ->
+                com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+            }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) {
+            logs.any { it.contains("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定") }
+        }
+        assertTrue("The private conversation must be bound before a send", logs.any {
+            it.contains("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定")
+        })
+
+        // The gesture was already submitted. Its outcome is still unconfirmed when
+        // Momo returns to the inbox through an unattributed page transition.
+        pendingSend = true
+        val inspect = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
+            isAccessible = true
+        }
+        port.page = inbox.copy(windowGeneration = 2L)
+        runtime.onUnmatchedNavigationObserved(port.page.activityClass)
+        inspect.invoke(runtime)
+        assertTrue("The pending send must select the detail recovery route", logs.any {
+            it.contains("AI 发送恢复[DETAIL_ROUTE_HELD]") &&
+                it.contains("reason=PAGE_ROUTE_CHANGED")
+        })
+        val gesturesAtPause = gestures.size
+        repeat(3) { inspect.invoke(runtime) }
+        assertFalse("Inbox snapshots must not complete the pending-send recovery", logs.any {
+            it.contains("统一页面恢复[RECOVERY_EXECUTION_READY]") &&
+                it.contains("AI_REPLY_CHAT_DETAIL")
+        })
+        assertEquals("No list traversal or replay while the send is unconfirmed",
+            gesturesAtPause, gestures.size)
+
+        // A different conversation cannot steal the pending send, even with a stable page.
+        port.page = chatDetailSnapshot().copy(chatTitleText = "与Another Contact对话")
+        repeat(3) { inspect.invoke(runtime) }
+        assertTrue(logs.any { it.contains("AI 聊天详情恢复[ROUTE_WAIT]") })
+        assertEquals(gesturesAtPause, gestures.size)
+
+        // Only the independently verified original detail can resume read-only proof.
+        val readsBeforeResume = port.messageReads
+        port.page = chatDetailSnapshot()
+        repeat(4) { inspect.invoke(runtime) }
+        assertTrue("The original chat should complete two-snapshot recovery", logs.any {
+            it.contains("AI 发送恢复[RECOVERY_VERIFIED]")
+        })
+        assertTrue("Resumption must read messages instead of re-sending",
+            port.messageReads > readsBeforeResume)
+        assertEquals("Recovery must not submit another send or list gesture",
+            gesturesAtPause, gestures.size)
+        assertEquals(0, port.navigateBackCalls)
+    }
+
+    @Test
     fun boundPrivateDetailEmptySnapshotRecoversOnlyAfterFreshTargetAndIdentityReturnProof() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)

@@ -2610,13 +2610,20 @@ class AiReplyObservationRuntime(
     /** Single pause/checkpoint entry used by page-route changes and UNKNOWN observations. */
     private fun requestUnifiedPauseAndCheckpoint(taskId: String, reason: String): Boolean {
         if (recoveryContext.pending) return false
-        // Only an already-bound, actively read private conversation may select its detail
-        // subroute for a transient missing snapshot. Service/restart and inbox checkpoints
-        // continue using the original primary message-list verifier.
-        val recoverCurrentChatDetail = taskId == PRIVATE_MESSAGES_TASK_ID &&
-            reason == "EMPTY_SNAPSHOT" &&
-            sessionManagerState == SessionManagerState.READING_SESSION &&
-            hasBoundPrivateDetailRecoverySession()
+        // A submitted but unconfirmed private send must keep its chat-detail recovery
+        // destination across any route change. A list checkpoint cannot authorize new
+        // traversal while the original send still requires read-only verification.
+        // This only selects the recovery route: fresh target identity, Android READY,
+        // two independent snapshots and the UI lease remain mandatory for resumption.
+        val pendingPrivateSend = taskId == PRIVATE_MESSAGES_TASK_ID &&
+            !receivedGreetingsTaskActive && isSendConfirmationPending()
+        // Other private recoveries retain the primary list route, except the existing
+        // bound detail fallback for a transient empty snapshot.
+        val recoverCurrentChatDetail = pendingPrivateSend ||
+            (taskId == PRIVATE_MESSAGES_TASK_ID &&
+                reason == "EMPTY_SNAPSHOT" &&
+                sessionManagerState == SessionManagerState.READING_SESSION &&
+                hasBoundPrivateDetailRecoverySession())
         val route = if (recoverCurrentChatDetail) chatDetailRecoveryRoute
             else (recoveryRouteForTask(taskId) ?: return false)
         route.saveCheckpoint()
@@ -2626,7 +2633,11 @@ class AiReplyObservationRuntime(
                 else privateMessagesCheckpointRepository?.load()
             messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION
             if (recoverCurrentChatDetail) {
-                onLog("AI 聊天详情恢复[ROUTE_SELECTED]：保留当前会话检查点；等待独立的新鲜详情页验证")
+                if (pendingPrivateSend) {
+                    onLog("AI 发送恢复[DETAIL_ROUTE_HELD]：reason=$reason；pendingSend=true；保留原聊天发送检查点，禁止消息列表遍历或重发")
+                } else {
+                    onLog("AI 聊天详情恢复[ROUTE_SELECTED]：保留当前会话检查点；等待独立的新鲜详情页验证")
+                }
             }
         } else if (taskId == RECEIVED_GREETINGS_TASK_ID) {
             receivedGreetingsCheckpointVerifier.reset()
