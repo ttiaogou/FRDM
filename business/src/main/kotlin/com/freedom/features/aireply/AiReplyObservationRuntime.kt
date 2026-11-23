@@ -98,6 +98,8 @@ class AiReplyObservationRuntime(
     /** Loads verified draft history after identity restoration and before OCR starts. */
     private val prepareDraftHistory: (ContactRowIdentity?, ChatPageSnapshot) -> Unit = { _, _ -> },
     private val onDraftConversationObserved: (ChatMessageBatch, ChatPageSnapshot, ContactRowIdentity?, String) -> Boolean = { _, _, _, _ -> false },
+    /** Received greetings never consults stored chat history; its verified current-window batch owns the draft. */
+    private val onGreetingDraftConversationObserved: (ChatMessageBatch, ChatPageSnapshot, ContactRowIdentity?, String) -> Boolean = onDraftConversationObserved,
     /** Confirms a previously submitted send against a fresh, validated message batch. */
     private val onSendConfirmation: (ChatMessageBatch, ChatPageSnapshot) -> com.freedom.features.aireply.ai.SendConfirmationResult = { _, _ -> com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING },
     /** Returns the stable ID produced by the confirmation matcher exactly once. */
@@ -3278,18 +3280,27 @@ class AiReplyObservationRuntime(
             return
         }
 
-        val rowIdentity = if (greetingDetail) receivedGreetingsTaskFlow.currentContactIdentity()
+        val rowIdentity = if (receivedGreetingsTaskActive) receivedGreetingsTaskFlow.currentContactIdentity()
             else currentSessionCandidate?.contactIdentity
-        // A transient capture result or unbound platform ID must never be recovered by
-        // display-name lookup; the draft and sample callbacks receive no contact identity.
-        val identity = if (currentWindowOnlyFallback) null else runCatching {
-            resolveConversationIdentity(rowIdentity, snapshot.chatTitleText)
-        }.getOrElse {
-            onLog("AI 历史联系人解析失败：CONTACT_HISTORY_LOOKUP_FAILED；exception=${it.javaClass.simpleName}")
-            rowIdentity
+        // Received greetings uses only the identity collected from the current avatar/profile.
+        // Never resolve that identity by display name or consult previously stored contacts.
+        val identity = when {
+            receivedGreetingsTaskActive -> rowIdentity
+            currentWindowOnlyFallback -> null
+            else -> runCatching {
+                resolveConversationIdentity(rowIdentity, snapshot.chatTitleText)
+            }.getOrElse {
+                onLog("AI 历史联系人解析失败：CONTACT_HISTORY_LOOKUP_FAILED；exception=${it.javaClass.simpleName}")
+                rowIdentity
+            }
         }
         val draftHoldsPage = if (draftTargetConfirmed && draftAdmission.accepted) {
-            runCatching { onDraftConversationObserved(batch, snapshot, identity, draftVisitToken) }.getOrElse {
+            val draftCallback = if (receivedGreetingsTaskActive) {
+                onGreetingDraftConversationObserved
+            } else {
+                onDraftConversationObserved
+            }
+            runCatching { draftCallback(batch, snapshot, identity, draftVisitToken) }.getOrElse {
                 onLog("AI 草稿入口异常：[DRAFT_CALLBACK_FAILED]；未执行发送")
                 false
             }

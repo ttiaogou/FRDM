@@ -542,6 +542,21 @@ internal class AccessibilityServiceDependencies internal constructor(
                     history = history
                 )
             },
+            onGreetingDraftConversationObserved = { batch, snapshot, _, visitToken ->
+                // Greeting contacts are new conversations: use the verified current-window OCR
+                // only. Never reuse a private-chat preload or query stored contact history.
+                preparedDraftHistory = null
+                addLog(
+                    "收到招呼草稿上下文[CURRENT_WINDOW_ONLY]：仅使用本次聊天消息=${batch.messages.size}条；" +
+                        "未读取历史记录；本次聊天采集仍由收到招呼任务保存"
+                )
+                aiReplyDraftCoordinator.generateVisibleDraft(
+                    batch,
+                    snapshot,
+                    visitToken = visitToken,
+                    history = null
+                )
+            },
             onSendConfirmation = { batch, snapshot ->
                 aiReplyDraftCoordinator.confirmSendResult(batch, snapshot)
             },

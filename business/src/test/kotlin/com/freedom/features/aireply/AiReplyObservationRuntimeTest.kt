@@ -3651,6 +3651,93 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun receivedGreetingsDraftUsesCurrentIdentityWithoutStoredHistoryAndPreservesSample() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val verified = ContactRowIdentity(
+            snapshotId = "greeting-avatar-proof",
+            temporaryUserId = "greeting-row",
+            contactId = "greeting-platform-id",
+            confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.DETAIL_READY
+            receivedGreetingsContactIdentity = verified
+            simulateStructureThenOcr = true
+            ocrDebugTextByRowIndex = mapOf(1 to "CURRENT_GREETING_OCR")
+            page = chatDetailSnapshot()
+        }
+        var storedIdentityLookups = 0
+        var historyPreloads = 0
+        var privateDraftCallbacks = 0
+        var greetingDraftCallbacks = 0
+        var observedIdentity: ContactRowIdentity? = null
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            resolveConversationIdentity = { _, _ ->
+                storedIdentityLookups++
+                error("Greeting draft must not consult stored contacts")
+            },
+            prepareDraftHistory = { _, _ -> historyPreloads++ },
+            onDraftConversationObserved = { _, _, _, _ ->
+                privateDraftCallbacks++
+                true
+            },
+            onGreetingDraftConversationObserved = { batch, _, identity, _ ->
+                greetingDraftCallbacks++
+                observedIdentity = identity
+                assertTrue(batch.ocrAttempted)
+                assertEquals(1, batch.ocrRecognizedTargetCount)
+                true
+            }
+        )
+        AiReplyObservationRuntime::class.java.getDeclaredField("sessionRunStarted").apply {
+            isAccessible = true
+        }.setBoolean(runtime, true)
+        val greetingsFlow = AiReplyObservationRuntime::class.java.getDeclaredField("receivedGreetingsTaskFlow").apply {
+            isAccessible = true
+        }.get(runtime) as ReceivedGreetingsTaskFlowController
+        assertTrue(greetingsFlow.claimOwnership("test current greeting context"))
+        greetingsFlow.markStarted()
+        val readVisible = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+            "readVisibleMessages", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        readVisible.invoke(runtime, port.page)
+        runUntil(scheduler, 40) { greetingDraftCallbacks == 1 }
+        assertEquals(1, greetingDraftCallbacks)
+        assertEquals(0, privateDraftCallbacks)
+        assertEquals(0, storedIdentityLookups)
+        assertEquals(0, historyPreloads)
+        assertEquals(verified, observedIdentity)
+        assertEquals(1, port.ocrAsyncReadRequests)
+        assertEquals(1, port.persistedChatSamples)
+        assertTrue("Greeting sample must keep its current OCR batch", port.lastPersistedBatch?.ocrAttempted == true)
+
+        // An expired greeting lease must not dispatch another callback or save the same batch.
+        assertTrue(greetingsFlow.releaseOwnership("test stale OCR callback"))
+        val handleBatch = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+            "handleMessageReadBatch", ChatMessageBatch::class.java, ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        handleBatch.invoke(runtime, requireNotNull(port.lastPersistedBatch), port.page)
+        assertEquals(1, greetingDraftCallbacks)
+        assertEquals(1, port.persistedChatSamples)
+        assertTrue(logs.any { it.contains("STALE_TASK_IGNORED") })
+    }
+
+    @Test
     fun receivedGreetingsNavigationPhaseDefersStaleMainInboxSnapshots() {
         val scheduler = FakeScheduler()
         val readCandidate = sessionCandidate(
@@ -5385,6 +5472,7 @@ class AiReplyObservationRuntimeTest {
         var receivedGreetingsPriorityReturns: Int = 0
         var receivedGreetingsTraversalStatusValue: ReceivedGreetingsTraversalStatus =
             ReceivedGreetingsTraversalStatus.UNKNOWN
+        var receivedGreetingsContactIdentity: ContactRowIdentity? = null
         var receivedGreetingsIdentityProfileProof = false
         var receivedGreetingsCheckpointFingerprint: String? = null
         var receivedGreetingsRecoverySyncAccepted: Boolean = false
@@ -5481,6 +5569,8 @@ class AiReplyObservationRuntimeTest {
         }
         override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus =
             receivedGreetingsTraversalStatusValue
+        override fun receivedGreetingsCurrentContactIdentity(): ContactRowIdentity? =
+            receivedGreetingsContactIdentity
         override fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean =
             receivedGreetingsIdentityProfileProof &&
                 snapshot.packageName == "com.immomo.momo" &&
