@@ -1208,4 +1208,119 @@ class VisibleDraftFlowTest {
         assertEquals(0, sending.preSendFailures.size)
     }
 
+    @Test fun restoredUnknownNeedsConsecutiveFreshProofAfterOcrMissAndWrongWindow() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        var originalSends = 0
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                originalSends++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+        first.drain()
+        assertEquals(1, originalSends)
+        first.coordinator.resetForRuntimeReset()
+        assertEquals(ReplySegmentTaskStatus.UNKNOWN, segments.records.values.single().status)
+
+        var replayed = 0
+        val restored = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                replayed++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        val outgoing = ChatMessage("new-outgoing", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val after = restored.batch.copy(messages = listOf(outgoing), capturedAtMillis = 2L)
+        fun confirm(batch: ChatMessageBatch): SendConfirmationResult =
+            restored.coordinator.confirmSendTransaction(batch, restored.snapshot).status
+
+        assertEquals(SendConfirmationResult.WAITING, confirm(after)) // Rehydrate only.
+        assertEquals(SendConfirmationResult.WAITING, confirm(after.copy(capturedAtMillis = 3L)))
+        // OCR missed the outgoing bubble. Its absence is not proof of a failed send.
+        assertEquals(SendConfirmationResult.WAITING, confirm(
+            after.copy(messages = emptyList(), capturedAtMillis = 4L)))
+        assertEquals(SendConfirmationResult.WAITING, confirm(after.copy(capturedAtMillis = 5L)))
+        assertEquals(ReplySegmentTaskStatus.UNKNOWN, segments.records.values.single().status)
+        assertEquals(0, replayed)
+        assertEquals(SendConfirmationResult.CONFIRMED, confirm(after.copy(capturedAtMillis = 6L)))
+        assertEquals(ReplySegmentTaskStatus.SENT, segments.records.values.single().status)
+
+        // A receipt is single-use; an old OCR callback cannot report completion twice.
+        val duplicate = restored.coordinator.confirmSendTransaction(
+            after.copy(capturedAtMillis = 7L), restored.snapshot)
+        assertEquals(SendConfirmationResult.NOT_PENDING, duplicate.status)
+        assertNull(duplicate.finalSendConfirmationId)
+        assertEquals(1, originalSends)
+        assertEquals(0, replayed)
+    }
+
+    @Test fun recoveredUnknownWindowMismatchBreaksConsecutiveProofWithoutReplaying() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+        }, segments, tasks)
+        assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+        first.drain()
+        first.coordinator.resetForRuntimeReset()
+        var resent = 0
+        val restored = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                resent++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        val bubble = ChatMessage("bubble", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val valid = restored.batch.copy(messages = listOf(bubble), capturedAtMillis = 2L)
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendResult(valid, restored.snapshot))
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendResult(
+            valid.copy(capturedAtMillis = 3L), restored.snapshot))
+        // Unrelated page generation must invalidate the pending proof, not complete the send.
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendResult(
+            valid.copy(windowSessionKey = "pkg|99|99|conversation=unrelated", capturedAtMillis = 4L),
+            restored.snapshot))
+        assertEquals(SendConfirmationResult.WAITING, restored.coordinator.confirmSendResult(
+            valid.copy(capturedAtMillis = 5L), restored.snapshot))
+        assertEquals(SendConfirmationResult.CONFIRMED, restored.coordinator.confirmSendResult(
+            valid.copy(capturedAtMillis = 6L), restored.snapshot))
+        assertEquals(0, resent)
+    }
+
+    @Test fun modelFailureDeferralProofRejectsNewOwnerOrAnyUnconfirmedSegment() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val f = Fixture(segmentRepository = segments, taskRepository = tasks)
+        f.fail = true
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot, visitToken = "greeting-visit"))
+        val failure = f.preSendFailures.single()
+        assertTrue(f.coordinator.verifyGreetingPreSendFailure(failure, f.snapshot))
+        assertEquals(ReplyTaskStatus.FAILED_RETRYABLE, tasks.records.values.single().status)
+        val row = requireNotNull(tasks.records[failure.requestKey])
+        tasks.records[failure.requestKey] = row.copy(requestId = "new-request")
+        assertFalse(f.coordinator.verifyGreetingPreSendFailure(failure, f.snapshot))
+        tasks.records[failure.requestKey] = row
+
+        // A concurrent send attempt, even unconfirmed, defeats "no send" proof.
+        val segment = ReplySegmentTaskRecord(
+            taskId = "${failure.requestId}:segment:0",
+            requestId = failure.requestId, conversationKey = failure.conversationKey,
+            segmentIndex = 0, segmentCount = 1,
+            segmentContentHash = "hash", segmentContent = "你好",
+            status = ReplySegmentTaskStatus.UNKNOWN, createdAt = 1L
+        )
+        segments.records[segment.taskId] = segment
+        assertFalse(f.coordinator.verifyGreetingPreSendFailure(failure, f.snapshot))
+        segments.records.clear()
+        assertTrue(f.coordinator.verifyGreetingPreSendFailure(failure, f.snapshot))
+        assertFalse(f.coordinator.verifyGreetingPreSendFailure(
+            failure, f.snapshot.copy(chatTitleText = "其他聊天")))
+    }
+
 }

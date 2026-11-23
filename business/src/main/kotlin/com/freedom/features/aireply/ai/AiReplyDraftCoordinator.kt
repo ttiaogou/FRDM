@@ -1177,6 +1177,9 @@ class AiReplyDraftCoordinator(
             normalizeTitle(snapshot.chatTitleText) == normalizeTitle(pending.target.expectedChatTitle) &&
             batch.capturedAtMillis >= pending.submittedAt
         if (!observationMatches) {
+            // A reconstructed send requires consecutive, independently fresh proof.
+            // A wrong page/window observation invalidates the first proof candidate.
+            if (pending.recoveredFromLedger) synchronized(lock) { readOnlyRecoveredMatch = null }
             val checks = synchronized(lock) { ++sendConfirmationChecks }
             if (checks >= SEND_CONFIRMATION_MAX_CHECKS) {
                 onLog("AI 发送结果核验：UNKNOWN；窗口、会话标题或时间条件连续不匹配；禁止重发")
@@ -1262,6 +1265,9 @@ class AiReplyDraftCoordinator(
             onLog("AI 发送结果核验[SEGMENT_PERSIST_REJECTED]：消息段状态持久化未确认；禁止推进下一条")
             return SendConfirmationResult.UNKNOWN
         }
+        // An OCR miss, ambiguous match or changed bubble breaks the consecutive-read
+        // chain. It is not a failed send and must never reopen the send port.
+        if (pending.recoveredFromLedger) synchronized(lock) { readOnlyRecoveredMatch = null }
         val checks = synchronized(lock) { ++sendConfirmationChecks }
         if (checks >= SEND_CONFIRMATION_MAX_CHECKS || nowMillis() >= pending.confirmationDeadline) {
             updateTaskStatus(ReplyTaskStatus.UNKNOWN, pending.requestGeneration)

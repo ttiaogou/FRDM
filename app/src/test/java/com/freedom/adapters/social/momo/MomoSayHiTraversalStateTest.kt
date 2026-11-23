@@ -285,4 +285,91 @@ class MomoSayHiTraversalStateTest {
                 "row-a", "b".repeat(64), "window:1", 50_001L, 50_001L))
     }
 
+    @Test
+    fun mixedDeferredUsersSurviveRestartWithoutPhantomCompletionOrBudgetReset() {
+        val repository = InMemoryRepository()
+        val store = MomoSayHiTraversalCheckpointStore(repository)
+        val original = MomoSayHiTraversalState(store, safeTargetFailureReasonPrefix = "SAFE_TARGET")
+        original.markProcessedRow("already-confirmed-row")
+        original.markProcessedContactHash("confirmed-contact-hash")
+        repeat(3) { index ->
+            original.deferRow("exhausted-unsafe", "SAFE_TARGET:UNSAFE_BOUNDS",
+                1_000L + index * 1_000L, failureEvidenceHash = "a".repeat(64))
+        }
+        original.deferRow("recoverable-user", "DRAFT_MODEL_FAILURE", 4_000L)
+
+        val resumed = MomoSayHiTraversalState(store, safeTargetFailureReasonPrefix = "SAFE_TARGET")
+        assertEquals(3, resumed.restore()?.let { it.processedRows + it.deferredRows })
+        assertEquals(2, resumed.deferredRowCount)
+        assertTrue(resumed.hasDeferredRows)
+        assertTrue(resumed.hasExhaustedSafeTargetRows)
+        assertTrue(resumed.hasRetryableDeferredRows())
+        assertFalse(resumed.isDeferredRetryDue("exhausted-unsafe", 500_000L))
+        assertTrue(resumed.isDeferredRetryDue("recoverable-user", 6_000L))
+        assertFalse(resumed.isProcessedRow("exhausted-unsafe"))
+        assertFalse(resumed.isProcessedRow("recoverable-user"))
+        // New user is not held by the unrelated failed row, even after process restart.
+        assertFalse(resumed.isDeferredRow("new-user"))
+        assertFalse(resumed.isProcessedRow("new-user"))
+
+        resumed.markProcessedRow("recoverable-user")
+        resumed.clearDeferral("recoverable-user", 8_000L)
+        assertEquals(1, resumed.deferredRowCount)
+        assertTrue(resumed.hasExhaustedSafeTargetRows)
+        assertFalse(resumed.hasRetryableDeferredRows())
+        assertFalse(resumed.isProcessedRow("exhausted-unsafe"))
+        assertTrue(resumed.isProcessedRow("already-confirmed-row"))
+
+        // Changed safe evidence restores eligibility only; it does not mark a greeting done.
+        assertEquals(MomoSayHiTraversalState.SafeEvidenceRecovery.WAIT_SECOND_SNAPSHOT,
+            resumed.observeExhaustedSafeTargetEvidence(
+                "exhausted-unsafe", "b".repeat(64), "window:1", 34_000L, 34_000L))
+        assertEquals(MomoSayHiTraversalState.SafeEvidenceRecovery.REARMED,
+            resumed.observeExhaustedSafeTargetEvidence(
+                "exhausted-unsafe", "b".repeat(64), "window:1", 34_010L, 34_010L))
+        assertTrue(resumed.isDeferredRow("exhausted-unsafe"))
+        assertFalse(resumed.isProcessedRow("exhausted-unsafe"))
+        assertEquals(1, resumed.deferredRowCount)
+        assertFalse(resumed.isDeferredRetryDue("exhausted-unsafe", 35_509L))
+        assertTrue(resumed.isDeferredRetryDue("exhausted-unsafe", 35_510L))
+
+        val later = MomoSayHiTraversalState(store, safeTargetFailureReasonPrefix = "SAFE_TARGET")
+        later.restore()
+        assertTrue(later.isDeferredRow("exhausted-unsafe"))
+        assertFalse(later.isProcessedRow("exhausted-unsafe"))
+        assertEquals(1, later.deferredRowCount)
+    }
+
+    @Test
+    fun deferredEvidenceRestartNeverInheritsOneSnapshotProofOrOldClickPermission() {
+        val repository = InMemoryRepository()
+        val store = MomoSayHiTraversalCheckpointStore(repository)
+        val first = MomoSayHiTraversalState(store, safeTargetFailureReasonPrefix = "SAFE_TARGET")
+        repeat(3) { index ->
+            first.deferRow("unsafe", "SAFE_TARGET:BOUNDS_CHANGED", 1_000L + index * 1_000L,
+                failureEvidenceHash = "a".repeat(64))
+        }
+        assertEquals(MomoSayHiTraversalState.SafeEvidenceRecovery.WAIT_SECOND_SNAPSHOT,
+            first.observeExhaustedSafeTargetEvidence(
+                "unsafe", "b".repeat(64), "window:old", 34_000L, 34_000L))
+        val restarted = MomoSayHiTraversalState(store, safeTargetFailureReasonPrefix = "SAFE_TARGET")
+        restarted.restore()
+        assertFalse(restarted.shouldRetryDeferredRow("unsafe"))
+        // First snapshot from the prior process is intentionally not a durable proof.
+        assertEquals(MomoSayHiTraversalState.SafeEvidenceRecovery.WAIT_SECOND_SNAPSHOT,
+            restarted.observeExhaustedSafeTargetEvidence(
+                "unsafe", "b".repeat(64), "window:new", 34_100L, 34_100L))
+        assertFalse(restarted.shouldRetryDeferredRow("unsafe"))
+        assertEquals(MomoSayHiTraversalState.SafeEvidenceRecovery.WAIT_SECOND_SNAPSHOT,
+            restarted.observeExhaustedSafeTargetEvidence(
+                "unsafe", "b".repeat(64), "window:different", 34_101L, 34_101L))
+        assertFalse(restarted.shouldRetryDeferredRow("unsafe"))
+        assertEquals(MomoSayHiTraversalState.SafeEvidenceRecovery.REARMED,
+            restarted.observeExhaustedSafeTargetEvidence(
+                "unsafe", "b".repeat(64), "window:different", 34_102L, 34_102L))
+        assertTrue(restarted.shouldRetryDeferredRow("unsafe"))
+        assertFalse(restarted.isProcessedRow("unsafe"))
+    }
+
+
 }

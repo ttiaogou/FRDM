@@ -117,4 +117,72 @@ class MomoSayHiListSnapshotCoordinatorTest {
         assertFalse(coordinator.forceFullListSnapshot)
         assertEquals(0, policy.retryAttemptCount())
     }
+    @Test
+    fun pendingReadOnlyRecoveryCannotRunAfterTaskSwitchOrReset() {
+        val scheduler = FakeScheduler()
+        var navigationRelevant = true
+        var inspections = 0
+        val coordinator = MomoSayHiListSnapshotCoordinator(
+            recoveryPolicy = MomoSayHiListSnapshotRecoveryPolicy(sampleDelayMs = { it.first }),
+            isNavigationRelevant = { navigationRelevant },
+            isGestureBusy = { false },
+            beforeFreshInspection = {},
+            inspectFreshSnapshot = { inspections++ },
+            onLog = {},
+            taskScheduler = scheduler,
+            elapsedRealtimeMs = { 1_000L }
+        )
+        coordinator.scheduleInspection(30_000L, "DEFERRED_SAFE_TARGET_READ_ONLY_POLL", retry = false)
+        val stale = scheduler.scheduled.single().task
+        assertTrue(coordinator.isPending)
+        navigationRelevant = false
+        scheduler.runNext()
+        assertEquals(0, inspections)
+        assertFalse(coordinator.isPending)
+
+        navigationRelevant = true
+        coordinator.scheduleInspection(30_000L, "DEFERRED_SAFE_TARGET_READ_ONLY_POLL", retry = false)
+        val afterSwitch = scheduler.scheduled.single().task
+        coordinator.reset()
+        assertFalse(coordinator.isPending)
+        assertTrue(scheduler.scheduled.isEmpty())
+        // Simulate platform dispatching a cancelled Runnable after task reset.
+        stale.run()
+        afterSwitch.run()
+        assertEquals(0, inspections)
+
+        coordinator.scheduleInspection(30_000L, "DEFERRED_SAFE_TARGET_READ_ONLY_POLL", retry = false)
+        scheduler.runNext()
+        assertEquals(1, inspections)
+    }
+
+    @Test
+    fun gestureInFlightDefersReadOnlyPollWithoutInspectingOrChangingRetryBudget() {
+        val scheduler = FakeScheduler()
+        var gestureBusy = true
+        var inspections = 0
+        var freshPreparations = 0
+        val coordinator = MomoSayHiListSnapshotCoordinator(
+            recoveryPolicy = MomoSayHiListSnapshotRecoveryPolicy(sampleDelayMs = { it.first }),
+            isNavigationRelevant = { true },
+            isGestureBusy = { gestureBusy },
+            beforeFreshInspection = { freshPreparations++ },
+            inspectFreshSnapshot = { inspections++ },
+            onLog = {},
+            taskScheduler = scheduler,
+            elapsedRealtimeMs = { 1_000L }
+        )
+        coordinator.scheduleInspection(30_000L, "DEFERRED_SAFE_TARGET_READ_ONLY_POLL", retry = false)
+        scheduler.runNext()
+        assertEquals(0, inspections)
+        assertEquals(0, freshPreparations)
+        assertEquals(250L, scheduler.scheduled.single().delayMs)
+        gestureBusy = false
+        scheduler.runNext()
+        assertEquals(1, inspections)
+        assertEquals(1, freshPreparations)
+        assertFalse(coordinator.isPending)
+    }
+
+
 }

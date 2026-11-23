@@ -4477,6 +4477,82 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, port.greetingModelFailureDeferralCalls)
     }
 
+
+    @Test fun greetingUnknownSendBlocksConcurrentModelFailureDeferralEvenWithValidComposer() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort()
+        var pendingUnconfirmedSend = true
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs,
+            greetingDraft = { true },
+            sendConfirmation = { com.freedom.features.aireply.ai.SendConfirmationResult.UNKNOWN },
+            sendConfirmationPending = { pendingUnconfirmedSend },
+            preSendModelFailureVerifier = { _, _ -> true }
+        )
+        activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_SEND_UNKNOWN") } }
+        runtime.onPreSendModelFailure(greetingModelFailureEvent(runtime))
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_MODEL_FAILURE_VERIFY_WAIT") } }
+        assertEquals(0, port.greetingModelFailureDeferralCalls)
+        assertEquals(0, port.greetingDetailCompletionCalls)
+        assertEquals(0, port.greetingSendJournalWrites)
+        assertTrue(logs.any { it.contains("GREETING_SEND_UNKNOWN") })
+        pendingUnconfirmedSend = true
+        // The recovery loop may observe indefinitely but cannot treat UNKNOWN as unsent.
+        repeat(3) { scheduler.runNext() }
+        assertEquals(0, port.greetingModelFailureDeferralCalls)
+        assertEquals(0, port.greetingDetailCompletionCalls)
+    }
+
+    @Test fun modelFailureRecoveryScheduledBeforeLeaseReleaseCannotNavigateAfterRevocation() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort()
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs, greetingDraft = { true },
+            preSendModelFailureVerifier = { _, _ -> true }
+        )
+        val flow = activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_SEND_PENDING") } }
+        runtime.onPreSendModelFailure(greetingModelFailureEvent(runtime, attempts = 1))
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_MODEL_FAILURE_RECORDED") } }
+        assertTrue(flow.releaseOwnership("revoked during backoff"))
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_MODEL_FAILURE_STALE_IGNORED") } }
+        assertEquals(0, port.greetingModelFailureDeferralCalls)
+        assertEquals(0, port.greetingDetailSuccessfulCompletions)
+        assertEquals(0, port.greetingSendJournalWrites)
+        assertFalse(logs.any { it.contains("GREETING_MODEL_FAILURE_RETRY_ADMITTED") })
+    }
+
+    @Test fun staleGreetingVisitFailureCannotDeferOrSuppressExistingSendReceipt() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort()
+        var confirmation = com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs, greetingDraft = { true },
+            sendConfirmation = { confirmation }, consumeSendId = { "confirmed-once" },
+            preSendModelFailureVerifier = { _, _ -> true }
+        )
+        activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_SEND_PENDING") } }
+        val oldVisit = greetingModelFailureEvent(runtime).copy(visitToken = "stale-visit")
+        runtime.onPreSendModelFailure(oldVisit)
+        runUntil(scheduler, 80) { logs.any { it.contains("GREETING_MODEL_FAILURE_STALE_IGNORED") } }
+        assertEquals(0, port.greetingModelFailureDeferralCalls)
+        confirmation = com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED
+        val batch = requireNotNull(port.lastPersistedBatch)
+        handleGreetingTestBatch(runtime, batch, port.page)
+        assertEquals(1, port.greetingSendJournalWrites)
+        assertEquals(1, port.greetingDetailSuccessfulCompletions)
+        assertEquals(0, port.greetingModelFailureDeferralCalls)
+        assertTrue(logs.any { it.contains("GREETING_SEND_CONFIRMED") })
+    }
+
     private fun greetingDraftTestPort(): FakeChatPort {
         val identity = ContactRowIdentity(
             snapshotId = "greeting-profile-proof", temporaryUserId = "greeting-row",
