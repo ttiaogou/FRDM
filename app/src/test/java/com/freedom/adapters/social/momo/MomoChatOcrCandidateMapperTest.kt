@@ -119,7 +119,7 @@ class MomoChatOcrCandidateMapperTest {
     }
 
     @Test
-    fun uncertainEmojiMarkerIsPreservedInParsedMessageContent() {
+    fun uncertainEmojiMarkerIsPreservedButNotEligibleForAi() {
         val text = "嗨打个招呼${MomoOcrVisualSymbolGuard.UNKNOWN_VISUAL_SYMBOL}你这么晚也没睡"
         val messages = MomoChatOcrCandidateMapper.parse(
             listOf(incomingTarget),
@@ -131,8 +131,8 @@ class MomoChatOcrCandidateMapperTest {
 
         assertEquals(1, messages.size)
         assertEquals(text, messages.single().content)
-        assertEquals(MessageContentQuality.VERIFIED, messages.single().contentQuality)
-        assertTrue(messages.single().isAiInputEligible)
+        assertEquals(MessageContentQuality.AMBIGUOUS, messages.single().contentQuality)
+        assertFalse(messages.single().isAiInputEligible)
     }
 
     @Test
@@ -177,7 +177,7 @@ class MomoChatOcrCandidateMapperTest {
     }
 
     @Test
-    fun symbolOnlyOcrResultIsStillSubmittedAsRecognizedText() {
+    fun symbolOnlyOcrResultIsNotEligibleForAi() {
         val messages = MomoChatOcrCandidateMapper.parse(
             listOf(incomingTarget),
             mapOf(1 to ")("),
@@ -187,8 +187,8 @@ class MomoChatOcrCandidateMapperTest {
         )
 
         assertEquals(1, messages.size)
-        assertEquals(MessageContentQuality.VERIFIED, messages.single().contentQuality)
-        assertTrue(messages.single().isAiInputEligible)
+        assertEquals(MessageContentQuality.AMBIGUOUS, messages.single().contentQuality)
+        assertFalse(messages.single().isAiInputEligible)
     }
 
     @Test
@@ -238,5 +238,30 @@ class MomoChatOcrCandidateMapperTest {
         assertFalse(incomingTarget.toString().contains("PRIVATE_OCR_BODY_SENTINEL"))
         assertFalse(result.toString().contains("PRIVATE_OCR_BODY_SENTINEL"))
         assertTrue(result.toString().contains("REDACTED"))
+    }
+
+    @Test
+    fun standaloneEmojiAndUncertainLineCannotEnterAiInputBatch() {
+        val texts = listOf("😊", "${MomoOcrVisualSymbolGuard.UNCERTAIN_SYMBOL_ONLY} 在吗a")
+        texts.forEach { text ->
+            val messages = MomoChatOcrCandidateMapper.parse(
+                listOf(incomingTarget), mapOf(1 to text),
+                listBounds, ChatMessageParser(), limit = 10
+            )
+            assertEquals(1, messages.size)
+            assertEquals(text, messages.single().content)
+            assertEquals(MessageContentQuality.AMBIGUOUS, messages.single().contentQuality)
+            assertFalse(messages.single().isAiInputEligible)
+            val batch = ChatMessageBatch(
+                status = MessageReadStatus.SUCCESS,
+                windowSessionKey = "window",
+                messages = messages,
+                scannedRowCount = 1,
+                candidateRowCount = 1,
+                truncated = false,
+                capturedAtMillis = 1L
+            )
+            assertTrue(batch.aiInputMessages.isEmpty())
+        }
     }
 }
