@@ -2757,6 +2757,118 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun privateUnconfirmedSendRetriesRejectedBindingUntilFreshOcrWithoutReplayingGesture() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            simulateStructureThenOcr = true
+            ocrDebugTextByRowIndex = mapOf(1 to "verified message")
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+        }
+        val logs = ArrayList<String>()
+        var pendingSend = false
+        var confirmationCalls = 0
+        var gestureCalls = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    gestureCalls++
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            isSendConfirmationPending = { pendingSend },
+            onSendTransaction = { _, _ ->
+                confirmationCalls++
+                com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                    com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+                )
+            }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) {
+            logs.any { it.contains("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定") }
+        }
+        val bindingField = runtime.javaClass.getDeclaredField("currentSessionBinding").apply {
+            isAccessible = true
+        }
+        val originalBinding = requireNotNull(bindingField.get(runtime))
+        val inspect = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
+            isAccessible = true
+        }
+
+        // Simulate the previously observed temporary source-binding admission failure.
+        // Pending is the already-submitted send: only read-only inspection is permitted.
+        pendingSend = true
+        bindingField.set(runtime, null)
+        val gesturesBefore = gestureCalls
+        inspect.invoke(runtime)
+        assertTrue(logs.any {
+            it.contains("AI 发送确认[READ_DEFERRED] reason=SOURCE_CHAT_BINDING_NOT_VERIFIED")
+        })
+        assertTrue(logs.any {
+            it.contains("AI 发送确认[READ_ONLY_RETRY_SCHEDULED]") &&
+                it.contains("attempt=1") && it.contains("delayMs=500")
+        })
+        assertTrue(scheduler.hasPendingDelay(500L))
+        assertEquals(0, confirmationCalls)
+        assertEquals(gesturesBefore, gestureCalls)
+
+        scheduler.runNextWithDelay(500L)
+        assertTrue("An unverified binding must remain on autonomous read-only backoff",
+            logs.any { it.contains("attempt=2") && it.contains("delayMs=1000") })
+        assertTrue(scheduler.hasPendingDelay(1_000L))
+        assertEquals(0, confirmationCalls)
+
+        // An independently restored original binding is allowed to resume the
+        // unchanged OCR/send matcher on the next timer, without input or a new gesture.
+        bindingField.set(runtime, originalBinding)
+        scheduler.runNextWithDelay(1_000L)
+        runUntil(scheduler, 50) { confirmationCalls > 0 }
+        assertTrue(logs.any { it.contains("AI 发送确认[READ_ONLY_RECHECK]") })
+        assertTrue(logs.any { it.contains("AI 发送确认[OCR_REVALIDATED]") })
+        assertEquals("No new UI gestures may be submitted during send-proof recovery",
+            gesturesBefore, gestureCalls)
+        assertEquals(0, port.navigateBackCalls)
+
+        runtime.reset("user stopped")
+        assertFalse("A stopped run must cancel a pending send-proof recheck",
+            scheduler.hasPendingDelay(500L))
+    }
+
+    @Test
     fun boundPrivateDetailEmptySnapshotRecoversOnlyAfterFreshTargetAndIdentityReturnProof() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)

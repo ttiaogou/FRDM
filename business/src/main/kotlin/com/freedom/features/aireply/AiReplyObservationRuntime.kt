@@ -585,6 +585,8 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
     private var receivedGreetingsRecoveryRetryAttempt = 0
     private var messageRecoveryRetryAttempt = 0
+    /** Read-only send-proof admission failures use the existing unbounded recovery backoff. */
+    private var deferredSendProofRetryAttempt = 0
     private var messageListRecoveryVerificationPending = false
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
@@ -1848,9 +1850,12 @@ class AiReplyObservationRuntime(
                     inspection, observation.status == ObservationStatus.CONFIRMED_PAGE
                 )
                 onLog("AI 发送确认[READ_DEFERRED] reason=$reason；聊天页面或任务租约未验证；保留发送检查点，不重发")
+                scheduleDeferredSendProofRecheck(reason)
             }
             return
         }
+        // No submitted send remains: the next transaction starts with a fresh backoff budget.
+        deferredSendProofRetryAttempt = 0
         // 模型请求和分段填入期间，不让遍历任务抢走页面。
         if (isConversationDraftPending()) {
             lastPageInspection = inspection
@@ -2776,6 +2781,7 @@ class AiReplyObservationRuntime(
         messageListCheckpointRestored = false
         messageListCheckpointForUnified = null
         messageRecoveryRetryAttempt = 0
+        deferredSendProofRetryAttempt = 0
         transientEmptySnapshotRecovery.reset()
         pageRecoveryVerificationGate.reset()
         receivedGreetingsRecoveryVerificationPending = false
@@ -3553,6 +3559,21 @@ class AiReplyObservationRuntime(
     }
 
     /**
+     * A rejected page, lease or OCR proof is not a failed send. Keep observing at the
+     * existing recovery cadence until the original send is confirmed or the user stops.
+     * This callback only requests a fresh snapshot; it never replays a gesture or draft.
+     */
+    private fun scheduleDeferredSendProofRecheck(reason: String) {
+        if (!isAiReplyActive() || !sessionRunStarted || !isSendConfirmationPending() ||
+            recoveryContext.pending
+        ) return
+        val attempt = ++deferredSendProofRetryAttempt
+        val delayMs = RecoveryScheduler.readOnlyRetryDelayMs(attempt)
+        onLog("AI 发送确认[READ_ONLY_RETRY_SCHEDULED] reason=$reason；attempt=$attempt；delayMs=$delayMs；保留发送检查点，不重发")
+        scheduleFullInspectionAfter(delayMs)
+    }
+
+    /**
      * A structural batch cannot prove the text of a newly sent bubble. Read OCR under a fresh
      * same-conversation and same-task check before giving it to the unchanged send matcher.
      */
@@ -3584,18 +3605,17 @@ class AiReplyObservationRuntime(
                             snapshot, ocrBatch, fresh, greetingBinding
                         )
                         onLog("AI 发送确认[OCR_REJECTED] reason=$reason；新鲜页面、身份或消息批次不匹配；保留待核验发送")
-                        if (!recoveryContext.pending) scheduleFullInspectionAfter(SEND_CONFIRMATION_RECHECK_DELAY_MS)
+                        scheduleDeferredSendProofRecheck(reason)
                         return@sendOcr
                     }
+                    deferredSendProofRetryAttempt = 0
                     onLog("AI 发送确认[OCR_REVALIDATED]：新鲜聊天页面与任务租约已验证；核对己方消息")
                     handleSendConfirmationResult(onSendTransaction(ocrBatch, snapshot), ocrBatch, snapshot)
                 }
             }
         }.onFailure {
             onLog("AI 发送确认[OCR_REQUEST_FAILED]：只读采集无法启动；保留待核验发送")
-            if (isAiReplyActive() && !recoveryContext.pending) {
-                scheduleFullInspectionAfter(SEND_CONFIRMATION_RECHECK_DELAY_MS)
-            }
+            scheduleDeferredSendProofRecheck("OCR_REQUEST_FAILED")
         }
     }
 
@@ -3675,6 +3695,7 @@ class AiReplyObservationRuntime(
                 return true
             }
             com.freedom.features.aireply.ai.SendConfirmationResult.WAITING -> {
+                deferredSendProofRetryAttempt = 0
                 if (isSendConfirmationPending() && isAiReplyActive() && sessionRunStarted && !recoveryContext.pending) {
                     onLog("AI 发送确认[RECHECK_SCHEDULED]：等待下一次新鲜聊天快照和只读消息核验；不重发")
                     scheduleFullInspectionAfter(SEND_CONFIRMATION_RECHECK_DELAY_MS)
