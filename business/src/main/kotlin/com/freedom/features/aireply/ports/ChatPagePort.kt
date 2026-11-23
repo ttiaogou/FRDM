@@ -631,6 +631,9 @@ interface ChatPagePort {
     fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus =
         ReceivedGreetingsTraversalStatus.UNKNOWN
 
+    /** True only when a verified list boundary is waiting for changed safe-click evidence. */
+    fun isReceivedGreetingsWaitingForSafeTargetEvidence(): Boolean = false
+
     /**
      * Read-only proof that the *current* page is the identity profile belonging to an
      * in-progress received-greetings avatar transaction. False for overlays, unrelated

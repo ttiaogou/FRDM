@@ -4772,6 +4772,13 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("依次采集头像身份、绑定聊天、读取本次消息；回复完成需独立发送确认") })
         assertTrue(scheduler.hasPendingDelay(1_300L))
 
+        // An all-exhausted stable list must switch to low-frequency, read-only recovery,
+        // without touching the adapter's gesture algorithm or prematurely completing.
+        port.greetingAwaitingSafeTargetEvidenceOnly = true
+        scheduler.runNextWithDelay(1_300L)
+        assertTrue(scheduler.hasPendingDelay(30_000L))
+        assertTrue(logs.any { it.contains("GREETING_DEFERRED_EVIDENCE_ONLY") })
+        port.greetingAwaitingSafeTargetEvidenceOnly = false
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
         runUntilLog(scheduler, logs, "收到的招呼任务[COMPLETE_STAY_ON_PAGE]")
         assertEquals(0, port.receivedGreetingsPriorityReturns)
@@ -6312,6 +6319,7 @@ class AiReplyObservationRuntimeTest {
         var greetingSendJournalWrites = 0
         var receivedGreetingsTraversalStatusValue: ReceivedGreetingsTraversalStatus =
             ReceivedGreetingsTraversalStatus.UNKNOWN
+        var greetingAwaitingSafeTargetEvidenceOnly = false
         var receivedGreetingsContactIdentity: ContactRowIdentity? = null
         var receivedGreetingsRowKeyHash: String? = null
         var receivedGreetingsDisplayName: String? = null
@@ -6411,6 +6419,8 @@ class AiReplyObservationRuntimeTest {
         }
         override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus =
             receivedGreetingsTraversalStatusValue
+        override fun isReceivedGreetingsWaitingForSafeTargetEvidence(): Boolean =
+            greetingAwaitingSafeTargetEvidenceOnly
         override fun receivedGreetingsCurrentContactIdentity(): ContactRowIdentity? =
             receivedGreetingsContactIdentity
         override fun receivedGreetingsCurrentRowKeyHash(): String? = receivedGreetingsRowKeyHash

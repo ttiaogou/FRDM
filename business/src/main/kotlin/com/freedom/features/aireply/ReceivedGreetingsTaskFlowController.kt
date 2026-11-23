@@ -71,6 +71,8 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun traversalStatus(): ReceivedGreetingsTraversalStatus = executor.traversalStatus()
 
+    fun isWaitingForSafeTargetEvidence(): Boolean = executor.isWaitingForSafeTargetEvidence()
+
     fun currentDisplayName(): String? = executor.currentDisplayName()
 
     fun currentRowKeyHash(): String? = executor.currentRowKeyHash()

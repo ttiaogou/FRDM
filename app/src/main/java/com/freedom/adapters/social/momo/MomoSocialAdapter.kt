@@ -332,6 +332,8 @@ internal class MomoSocialAdapter(
     @Volatile private var receivedGreetingsEntrySearchGestureInFlight: Boolean = false
     @Volatile private var receivedGreetingsEntrySearchWindowIdentity: String = ""
     @Volatile private var sayHiReadOnlyStage: SayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
+    /** Business-visible read-only wait; never a permission to click or mark a row complete. */
+    @Volatile private var sayHiDeferredSafeEvidenceOnlyWait = false
     @Volatile private var sayHiSelectedGreeting: SayHiSelectedGreeting? = null
     @Volatile private var sayHiSelectedContactIdentity: ContactRowIdentity? = null
     @Volatile private var sayHiSelectedIdentityStatus: MomoSayHiPlatformIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
@@ -2307,6 +2309,7 @@ internal class MomoSocialAdapter(
             // Do not scroll away while the second safe-evidence observation is pending.
             return exhaustedProbePending
         }
+        sayHiDeferredSafeEvidenceOnlyWait = false
         val key = MomoSayHiIdentityFingerprintPolicy.rowKey(candidate)
         if (inspection.listRows.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1) {
             deferSayHiRow(key, "ROW_NOT_SAFELY_ACTIONABLE")
@@ -2909,6 +2912,7 @@ internal class MomoSocialAdapter(
                     verificationScheduled = true
                 }
                 MomoSayHiTraversalState.SafeEvidenceRecovery.REARMED -> {
+                    sayHiDeferredSafeEvidenceOnlyWait = false
                     onLog("GREETING_DEFERRED_RECOVERY_REARMED：行身份、窗口及变更后的安全区域已双快照确认；恢复有限点击预算，不计入成功")
                     verificationScheduled = true
                 }
@@ -3867,6 +3871,11 @@ internal class MomoSocialAdapter(
         return isSayHiProfileSurfacePresent()
     }
 
+    override fun isReceivedGreetingsWaitingForSafeTargetEvidence(): Boolean =
+        sayHiDeferredSafeEvidenceOnlyWait && sayHiTraversalState.hasExhaustedSafeTargetRows &&
+            !sayHiTraversalState.hasRetryableDeferredRows() &&
+            sayHiReadOnlyStage == SayHiReadOnlyStage.IDLE
+
     override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus {
         val currentActivity = activityClass()
         if (receivedGreetingsEntrySearchActive || receivedGreetingsEntrySearchGestureInFlight) {
@@ -4433,6 +4442,7 @@ internal class MomoSocialAdapter(
                     onLog("收到招呼自主浏览暂未完成：已确认当前 listview 不可滚动，但仍有 ${sayHiTraversalState.deferredRowCount} 个用户待恢复；保留断点并等待回访，不报告完成")
                     scheduleSayHiListSnapshotInspection(2_000L, "DEFERRED_ROWS_WAIT_FOR_FRESH_LIST", retry = false)
                 } else {
+                    sayHiDeferredSafeEvidenceOnlyWait = true
                     onLog("收到招呼安全点击已耗尽[READ_ONLY_WAIT]：${sayHiTraversalState.deferredRowCount} 个用户等待新的稳定安全区域证据；不直接重试点击、不报告完成")
                     scheduleSayHiListSnapshotInspection(
                         delayMs = 30_000L,
@@ -4447,6 +4457,7 @@ internal class MomoSocialAdapter(
         }
         if (sayHiAutonomousBrowseController.isFinished() && sayHiTraversalState.hasDeferredRows) {
             if (!hasRetryableSayHiDeferredRows()) {
+                sayHiDeferredSafeEvidenceOnlyWait = true
                 onLog("收到招呼安全点击已耗尽[READ_ONLY_WAIT]：保留延期行和失败证据；30秒后观察页面变化，不直接清空失败次数")
                 scheduleSayHiListSnapshotInspection(
                     delayMs = 30_000L,
@@ -4490,6 +4501,9 @@ internal class MomoSocialAdapter(
             }
         }
         val now = System.currentTimeMillis()
+        if (!sayHiAutonomousBrowseController.isFinished() || hasRetryableSayHiDeferredRows()) {
+            sayHiDeferredSafeEvidenceOnlyWait = false
+        }
         if (!sayHiAutonomousBrowseController.shouldScroll(signature, now, list.scrollable)) {
             if (sayHiAutonomousBrowseController.isFinished()) {
                 if (!sayHiTraversalState.hasDeferredRows) {

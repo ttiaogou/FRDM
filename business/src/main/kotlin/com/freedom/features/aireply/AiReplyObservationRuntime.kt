@@ -193,6 +193,7 @@ class AiReplyObservationRuntime(
         private const val LOW_FREQUENCY_IDLE_MAX_SECONDS = 120
         private const val PRIORITY_RETURN_INSPECTION_DELAY_MS = 500L
         private const val RECEIVED_GREETINGS_RECHECK_DELAY_MS = 1_300L
+        private const val GREETING_EXHAUSTED_SAFE_EVIDENCE_READ_ONLY_POLL_MS = 30_000L
         private const val RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS = 750L
         private const val MAX_EVENT_BURST_INSPECTION_WAIT_MS = 1_200L
         private const val SESSION_TAP_DURATION_MS = 90L
@@ -1992,7 +1993,12 @@ class AiReplyObservationRuntime(
                 }
                 ReceivedGreetingsTaskFlowController.DecisionKind.LIST_CONTINUES -> {
                     onLog("收到的招呼任务：列表已验证；依次采集头像身份、绑定聊天、读取本次消息；回复完成需独立发送确认")
-                    scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
+                    val evidenceOnly = receivedGreetingsTaskFlow.isWaitingForSafeTargetEvidence()
+                    if (evidenceOnly) onLog("GREETING_DEFERRED_EVIDENCE_ONLY：安全点击额度已耗尽；低频只读等待，不点击、不报告完成")
+                    scheduleFullInspectionAfter(
+                        if (evidenceOnly) GREETING_EXHAUSTED_SAFE_EVIDENCE_READ_ONLY_POLL_MS
+                        else RECEIVED_GREETINGS_RECHECK_DELAY_MS
+                    )
                 }
                 ReceivedGreetingsTaskFlowController.DecisionKind.PROFILE_CARD_PENDING -> {
                     // Keep the diagnostic marker compatible with existing tests without placing
@@ -2166,7 +2172,12 @@ class AiReplyObservationRuntime(
                         }
                         ReceivedGreetingsTaskFlowController.DecisionKind.LIST_CONTINUES -> {
                             onLog("收到的招呼任务：列表已验证；依次采集头像身份、绑定聊天、读取本次消息；回复完成需独立发送确认")
-                            scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
+                            val evidenceOnly = receivedGreetingsTaskFlow.isWaitingForSafeTargetEvidence()
+                    if (evidenceOnly) onLog("GREETING_DEFERRED_EVIDENCE_ONLY：安全点击额度已耗尽；低频只读等待，不点击、不报告完成")
+                    scheduleFullInspectionAfter(
+                        if (evidenceOnly) GREETING_EXHAUSTED_SAFE_EVIDENCE_READ_ONLY_POLL_MS
+                        else RECEIVED_GREETINGS_RECHECK_DELAY_MS
+                    )
                         }
                         ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE -> {
                             if (completeReceivedGreetingsTaskAtCurrentPage()) return

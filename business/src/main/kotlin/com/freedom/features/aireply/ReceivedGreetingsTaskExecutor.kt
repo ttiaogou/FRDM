@@ -100,6 +100,9 @@ internal class ReceivedGreetingsTaskExecutor(
     fun observePageReadOnly(): Boolean =
         runCatching { pagePort.observeReceivedGreetingsPage() }.getOrDefault(false)
 
+    fun isWaitingForSafeTargetEvidence(): Boolean =
+        runCatching { pagePort.isReceivedGreetingsWaitingForSafeTargetEvidence() }.getOrDefault(false)
+
     fun traversalStatus(): ReceivedGreetingsTraversalStatus =
         runCatching { pagePort.receivedGreetingsTraversalStatus() }
             .getOrDefault(ReceivedGreetingsTraversalStatus.UNKNOWN)
