@@ -968,6 +968,24 @@ class AiReplyObservationRuntime(
             onLog("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定；昵称仅作辅助校验")
         }
     }
+    /**
+     * A profile return may recreate the chat window. Rebind only after the existing
+     * source-row, target-session, task-lease, chat-title and fresh-window gates pass.
+     * Retain the original source-row anchor and expected-navigation evidence.
+     */
+    private fun rebindVerifiedPrivateChat(snapshot: ChatPageSnapshot): Boolean {
+        if (!isVerifiedRecoveredPrivateDetail(snapshot)) return false
+        val original = currentSessionBinding ?: return false
+        val freshWindowKey = windowSessionKey(snapshot) ?: return false
+        val freshSurfaceKey = chatSurfaceKey(snapshot) ?: return false
+        currentSessionBinding = original.copy(
+            chatWindowKey = freshWindowKey,
+            chatSurfaceKey = freshSurfaceKey
+        )
+        currentSessionWindowKey = freshWindowKey
+        onLog("AI 会话绑定[VERIFIED_CHAT_REBOUND]：原会话及任务租约已验证；聊天窗口与表面绑定已同步；保留来源行锚点")
+        return true
+    }
     private var identityCaptureSessionKey: String? = null
     private var identityCaptureStartedAtMs = 0L
     private var identityCaptureRetryCount = 0
@@ -1716,6 +1734,18 @@ class AiReplyObservationRuntime(
                     return
                 }
             }
+            // Complete the binding handoff while the verified recovery checkpoint is
+            // still held. An unconfirmed send has a separate read-only recovery path.
+            if (privateDetailRecovery && !isSendConfirmationPending() &&
+                !rebindVerifiedPrivateChat(inspection)
+            ) {
+                recoveryContext.invalidateFingerprint()
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 聊天详情恢复[CHAT_REBIND_WAIT]：原目标聊天绑定未完整复核；保留检查点并继续只读观察")
+                scheduleFullInspectionAfter(350L)
+                lastPageInspection = inspection
+                return
+            }
             recoveryContext.markUiOwnershipTransferred()
             val completedRecoveryIdentity = recoveryTransaction.currentIdentity()
             val sourceTaskId = recoveryContext.sourceTaskId
@@ -1904,11 +1934,14 @@ class AiReplyObservationRuntime(
             isVerifiedRecoveredPrivateDetail(inspection) &&
             chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()
         ) {
-            val restoredSessionKey = requireNotNull(windowSessionKey(inspection))
             // Invalidate any pre-profile asynchronous OCR result before binding the
             // newly verified window; the next read must use this fresh observation.
             invalidatePendingMessageRead()
-            currentSessionWindowKey = restoredSessionKey
+            if (!rebindVerifiedPrivateChat(inspection)) {
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 身份回接[CHAT_REBIND_WAIT]：已确认返回信号，但原会话绑定未复核；不启动 OCR 或草稿")
+                return
+            }
             lastIdentityReturnNotConsumedReason = null
             onLog("AI 身份回接[BUSINESS_HANDOFF]：result=CONSUMED；reason=FRESH_TARGET_CHAT_VERIFIED")
             onLog(

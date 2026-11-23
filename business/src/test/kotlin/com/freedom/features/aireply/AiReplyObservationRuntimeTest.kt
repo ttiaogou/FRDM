@@ -2896,6 +2896,15 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("AI 身份回接[REQUEST_NOT_CONSUMED]") &&
             it.contains("reason=RECOVERY_TRANSACTION_PENDING") })
         assertTrue(logs.any { it.contains("AI 身份回接[RECOVERY_HANDOFF]") })
+        assertTrue("The restored window generation must rebind the original source session",
+            runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
+                .apply { isAccessible = true }.invoke(runtime) as Boolean)
+        assertEquals("The same chat must be eligible for later read-only send confirmation",
+            "CHAT_DETAIL_NOT_VERIFIED",
+            runtime.javaClass.getDeclaredMethod(
+                "privateSendConfirmationDetailReason", ChatPageSnapshot::class.java
+            ).apply { isAccessible = true }.invoke(runtime, port.page))
+        assertTrue(logs.any { it.contains("AI 会话绑定[VERIFIED_CHAT_REBOUND]") })
         assertEquals("Only the verified current target may draft", 1, draftCalls)
         assertEquals(0, port.navigateBackCalls)
     }
@@ -2994,6 +3003,9 @@ class AiReplyObservationRuntimeTest {
         }
         assertTrue(logs.any { it.contains("AI 身份业务续接[IDENTITY_RETURN_CONFIRMED]") })
         assertTrue(logs.any { it.contains("AI 身份回接[BUSINESS_HANDOFF]") })
+        assertTrue("Ordinary same-window identity return must preserve the source session binding",
+            runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
+                .apply { isAccessible = true }.invoke(runtime) as Boolean)
         assertTrue(logs.any { it.contains("AI OCR 启动") })
         assertFalse(port.pendingIdentityReturnReinspection)
         assertEquals(1, port.ocrAsyncReadRequests)
