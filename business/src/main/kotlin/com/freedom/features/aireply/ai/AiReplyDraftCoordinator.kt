@@ -328,30 +328,15 @@ class AiReplyDraftCoordinator(
             schedulePendingSendControlRetry()
             return true
         }
-        val recovered = replySegmentTaskRepository?.findByConversation(dedupeConversationKey)
-            ?.filter { it.status in setOf(ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) && it.segmentContent.isNotBlank() }
-            ?.groupBy { it.requestId }
-            ?.maxByOrNull { it.value.maxOf { record -> record.segmentIndex } }
-        if (recovered != null) {
-            val records = recovered.value.sortedBy { it.segmentIndex }
-            val current = records.firstOrNull { it.status == ReplySegmentTaskStatus.UNKNOWN } ?: return reject("RECOVERY_NO_UNKNOWN_SEGMENT")
-            val currentHashAlreadyVisible = batch.messages.any {
-                it.direction == ChatMessageDirection.OUTGOING && fingerprint(it.content.orEmpty()) == current.segmentContentHash
-            }
-            if (currentHashAlreadyVisible) return reject("RECOVERY_REQUIRES_OBSERVED_SEND_CONFIRMATION")
-            val requestGeneration = synchronized(lock) {
-                activeMessageKey = dedupeKey
-                replyAwaitingConfirmedSend = true
-                activeRequestId = current.requestId
-                activeExistingOutgoingKeys = batch.messages.filter { it.direction == ChatMessageDirection.OUTGOING }
-                    .mapTo(LinkedHashSet()) { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
-                activeMessageSegments = records.map { it.segmentContent }
-                pending.set(true)
-                generation.get()
-            }
-            onLog("AI 段任务恢复：requestId=${current.requestId.take(12)}；segmentIndex=${current.segmentIndex}；禁止从 segment 0 重发")
-            writeMessageSegment(target, current.segmentIndex, requestGeneration)
-            return true
+        // UNKNOWN and SENT_UNCONFIRMED may already have reached the platform. A missing
+        // outgoing bubble is not proof the send gesture was never submitted.
+        // Resume only by read-only send verification; never recreate draft chunks here.
+        val uncertainSend = replySegmentTaskRepository?.findByConversation(dedupeConversationKey)
+            ?.firstOrNull { it.status in setOf(ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) }
+        if (uncertainSend != null) {
+            onLog("AI 段任务恢复[READ_ONLY_REQUIRED]：requestId=${uncertainSend.requestId.take(12)}；" +
+                "segmentIndex=${uncertainSend.segmentIndex}；status=${uncertainSend.status.name}；禁止重新输入或发送")
+            return reject("RECOVERY_UNCERTAIN_SEND_REQUIRES_READ_ONLY_CONFIRMATION")
         }
         // A failed first focus action never submitted a send gesture. Even so, do not retry
         // until a later message observation confirms the same chat, unchanged outgoing

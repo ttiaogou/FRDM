@@ -344,6 +344,46 @@ class VisibleDraftFlowTest {
         assertEquals(3, f.calls)
     }
 
+    @Test fun recoveredUnconfirmedOrUnknownSendNeverRewritesAfterRuntimeRecreation() {
+        for (expectUnknown in listOf(false, true)) {
+            val segments = SegmentLedger()
+            val tasks = TaskLedger()
+            var initialSends = 0
+            val first = Fixture(object : ChatDraftSendPort {
+                override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                    initialSends++
+                    return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+                }
+            }, segments, tasks)
+            first.emptyFailuresRemaining = 2
+            assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+            first.drain()
+            assertEquals(3, first.calls)
+            assertEquals(1, initialSends)
+            if (expectUnknown) {
+                val noOutgoing = first.batch.copy(capturedAtMillis = 2L)
+                assertEquals(SendConfirmationResult.WAITING, first.coordinator.confirmSendResult(noOutgoing, first.snapshot))
+                assertEquals(SendConfirmationResult.UNKNOWN, first.coordinator.confirmSendResult(noOutgoing, first.snapshot))
+            }
+            assertEquals(if (expectUnknown) ReplySegmentTaskStatus.UNKNOWN else ReplySegmentTaskStatus.SENT_UNCONFIRMED,
+                segments.records.values.single().status)
+
+            var repeatedSends = 0
+            val restored = Fixture(object : ChatDraftSendPort {
+                override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                    repeatedSends++
+                    return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+                }
+            }, segments, tasks)
+            assertFalse(restored.coordinator.generateVisibleDraft(restored.batch, restored.snapshot))
+            restored.drain()
+            assertEquals(0, restored.calls)
+            assertEquals(0, repeatedSends)
+            assertEquals(1, initialSends)
+            assertTrue(restored.logs.any { it.contains("RECOVERY_UNCERTAIN_SEND_REQUIRES_READ_ONLY_CONFIRMATION") })
+        }
+    }
+
     @Test fun invalidModelOutputRemainsReclaimableWithoutAFalseSendGate() {
         val ledger = TaskLedger()
         val f = Fixture(taskRepository = ledger)
