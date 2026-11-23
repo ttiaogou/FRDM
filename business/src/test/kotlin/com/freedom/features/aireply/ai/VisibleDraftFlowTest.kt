@@ -468,6 +468,69 @@ class VisibleDraftFlowTest {
         assertEquals(listOf("第一", "第二"), sentTexts)
     }
 
+    @Test fun multiMessageTransactionHandoffYieldsReceiptOnlyAfterFinalConfirmedSegment() {
+        val segments = SegmentLedger()
+        val sentTexts = mutableListOf<String>()
+        lateinit var f: Fixture
+        f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sentTexts += expectedText
+                f.text = ""
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, TaskLedger())
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"第一\n第二"}"""
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(listOf("第一"), sentTexts)
+        val first = ChatMessage("first-message", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "第一", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val afterFirst = f.batch.copy(messages = listOf(first), capturedAtMillis = 2L)
+        val partial = f.coordinator.confirmSendTransaction(afterFirst, f.snapshot)
+        assertEquals(SendConfirmationResult.WAITING, partial.status)
+        assertNull(partial.finalSendConfirmationId)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertEquals(listOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.CREATED),
+            segments.records.values.map { it.status })
+        assertNull(f.coordinator.consumeConfirmedSendId())
+
+        val sameSnapshot = f.coordinator.confirmSendTransaction(afterFirst, f.snapshot)
+        assertEquals(SendConfirmationResult.WAITING, sameSnapshot.status)
+        assertNull(sameSnapshot.finalSendConfirmationId)
+        assertEquals(listOf("第一"), sentTexts)
+        val fresh = afterFirst.copy(capturedAtMillis = 3L)
+        val advancing = f.coordinator.confirmSendTransaction(fresh, f.snapshot)
+        assertEquals(SendConfirmationResult.WAITING, advancing.status)
+        assertNull(advancing.finalSendConfirmationId)
+        f.drain()
+        assertEquals(listOf("第一", "第二"), sentTexts)
+        val second = first.copy(id = "second-message", content = "第二")
+        val finalBatch = f.batch.copy(messages = listOf(first, second), capturedAtMillis = 4L)
+        val completed = f.coordinator.confirmSendTransaction(finalBatch, f.snapshot)
+        assertEquals(SendConfirmationResult.CONFIRMED, completed.status)
+        assertFalse(completed.finalSendConfirmationId.isNullOrBlank())
+        assertEquals(listOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.SENT),
+            segments.records.values.map { it.status })
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+        assertNull("Final receipt must not be consumed twice", f.coordinator.consumeConfirmedSendId())
+        val duplicate = f.coordinator.confirmSendTransaction(finalBatch, f.snapshot)
+        assertEquals(SendConfirmationResult.NOT_PENDING, duplicate.status)
+        assertNull(duplicate.finalSendConfirmationId)
+    }
+
+    @Test fun partialOrUnknownSendTransactionCannotCarryFinalReceipt() {
+        assertTrue(runCatching {
+            ReplySendTransactionOutcome(SendConfirmationResult.WAITING, "must-not-be-final")
+        }.isFailure)
+        assertTrue(runCatching {
+            ReplySendTransactionOutcome(SendConfirmationResult.UNKNOWN, "must-not-be-final")
+        }.isFailure)
+        assertTrue(runCatching {
+            ReplySendTransactionOutcome(SendConfirmationResult.NOT_PENDING, "must-not-be-final")
+        }.isFailure)
+    }
+
     @Test fun identicalMessageSegmentsNeedTwoDistinctConfirmedOutgoingBubbles() {
         val segments = SegmentLedger()
         val tasks = TaskLedger()

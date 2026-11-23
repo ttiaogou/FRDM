@@ -563,11 +563,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                     history = null
                 )
             },
-            onSendConfirmation = { batch, snapshot ->
-                aiReplyDraftCoordinator.confirmSendResult(batch, snapshot)
-            },
-            onConfirmedSendId = {
-                aiReplyDraftCoordinator.consumeConfirmedSendId()
+            onSendTransaction = { batch, snapshot ->
+                aiReplyDraftCoordinator.confirmSendTransaction(batch, snapshot)
             },
             onVerifiedConversationObserved = { batch, identity, snapshot ->
                 val verifiedIdentity = identity?.takeIf {

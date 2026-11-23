@@ -103,10 +103,17 @@ class AiReplyObservationRuntime(
     private val onDraftConversationObserved: (ChatMessageBatch, ChatPageSnapshot, ContactRowIdentity?, String) -> Boolean = { _, _, _, _ -> false },
     /** Received greetings never consults stored chat history; its verified current-window batch owns the draft. */
     private val onGreetingDraftConversationObserved: (ChatMessageBatch, ChatPageSnapshot, ContactRowIdentity?, String) -> Boolean = onDraftConversationObserved,
-    /** Confirms a previously submitted send against a fresh, validated message batch. */
-    private val onSendConfirmation: (ChatMessageBatch, ChatPageSnapshot) -> com.freedom.features.aireply.ai.SendConfirmationResult = { _, _ -> com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING },
-    /** Returns the stable ID produced by the confirmation matcher exactly once. */
-    private val onConfirmedSendId: () -> String? = { null },
+    /**
+     * Single business result for one or more message-level send segments. The draft
+     * coordinator alone manages per-segment confirmation and only its final completion
+     * may provide a send receipt; this runtime owns the post-send return transaction.
+     */
+    private val onSendTransaction: (ChatMessageBatch, ChatPageSnapshot) ->
+        com.freedom.features.aireply.ai.ReplySendTransactionOutcome = { _, _ ->
+            com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+            )
+        },
     private val draftStartupFailure: () -> String? = { null },
     /** Invalidates late model callbacks when this runtime is reset. */
     private val onDraftRuntimeReset: () -> Unit = {},
@@ -3348,7 +3355,7 @@ class AiReplyObservationRuntime(
                         return@sendOcr
                     }
                     onLog("AI 发送确认[OCR_REVALIDATED]：新鲜聊天页面与任务租约已验证；核对己方消息")
-                    handleSendConfirmationResult(onSendConfirmation(ocrBatch, snapshot), ocrBatch, snapshot)
+                    handleSendConfirmationResult(onSendTransaction(ocrBatch, snapshot), ocrBatch, snapshot)
                 }
             }
         }.onFailure {
@@ -3361,18 +3368,18 @@ class AiReplyObservationRuntime(
 
     /** Only a fully verified outgoing message may release the send hold or advance its queue. */
     private fun handleSendConfirmationResult(
-        result: com.freedom.features.aireply.ai.SendConfirmationResult,
+        transaction: com.freedom.features.aireply.ai.ReplySendTransactionOutcome,
         batch: ChatMessageBatch,
         snapshot: ChatPageSnapshot
     ): Boolean {
-        when (result) {
+        when (transaction.status) {
             com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED -> {
                 if (receivedGreetingsTaskActive) {
                     val bound = greetingChatBinding ?: run {
                         onLog("GREETING_SEND_RETURN_BLOCKED reason=BINDING_MISSING")
                         return true
                     }
-                    val sendId = onConfirmedSendId()
+                    val sendId = transaction.finalSendConfirmationId
                     if (sendId.isNullOrBlank()) {
                         onLog("GREETING_SEND_RETURN_BLOCKED reason=CONFIRMATION_ID_MISSING")
                         return true
@@ -3384,7 +3391,7 @@ class AiReplyObservationRuntime(
                 }
                 if (!currentSessionSendConfirmed) {
                     currentSessionSendConfirmed = true
-                    val sendConfirmationId = onConfirmedSendId()
+                    val sendConfirmationId = transaction.finalSendConfirmationId
                     if (sendConfirmationId.isNullOrBlank()) {
                         currentSessionSendConfirmed = false
                         sessionManagerState = SessionManagerState.PAUSED
@@ -3465,7 +3472,7 @@ class AiReplyObservationRuntime(
             requestPendingSendConfirmationOcr(snapshot)
             return
         }
-        if (handleSendConfirmationResult(onSendConfirmation(batch, snapshot), batch, snapshot)) return
+        if (handleSendConfirmationResult(onSendTransaction(batch, snapshot), batch, snapshot)) return
         // Recheck after the send-confirmation callback: it is a separate external
         // boundary and may have changed the current task or binding. OCR callbacks also
         // revalidate against an independently acquired live chat snapshot.

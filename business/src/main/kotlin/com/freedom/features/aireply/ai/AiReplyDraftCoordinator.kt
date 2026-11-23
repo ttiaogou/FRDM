@@ -32,6 +32,23 @@ enum class SendConfirmationResult {
 }
 
 /**
+ * Single business handoff for a multi-message send transaction. WAITING covers both a
+ * segment awaiting OCR confirmation and an already confirmed segment awaiting a freshly
+ * verified empty composer. Only the final fully confirmed message queue supplies a receipt.
+ * The existing per-segment matcher, delays and safety gates are deliberately unchanged.
+ */
+data class ReplySendTransactionOutcome(
+    val status: SendConfirmationResult,
+    val finalSendConfirmationId: String? = null
+) {
+    init {
+        require(status == SendConfirmationResult.CONFIRMED || finalSendConfirmationId == null) {
+            "A partial or unknown send must not carry a final confirmation ID"
+        }
+    }
+}
+
+/**
  * 调用已配置的远端模型并填写已验证的输入框。发送操作在本阶段之外，
  * 后续阶段可继续处理已持久化的 PENDING_SEND 状态。
  */
@@ -1161,6 +1178,21 @@ class AiReplyDraftCoordinator(
                 sentAt = nowMillis(), confirmationId = confirmationId))) return false
         val saved = repo.find(record.taskId)
         return saved?.status == ReplySegmentTaskStatus.SENT && saved.confirmationId == confirmationId
+    }
+
+    /**
+     * The only outward-facing business send result: internal queue progress remains WAITING,
+     * while the final confirmed segment yields one consumable transaction receipt. The
+     * receipt is delivered alongside the final outcome, never as a separate later callback.
+     */
+    fun confirmSendTransaction(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): ReplySendTransactionOutcome {
+        val result = confirmSendResult(batch, snapshot)
+        return ReplySendTransactionOutcome(
+            status = result,
+            finalSendConfirmationId = if (result == SendConfirmationResult.CONFIRMED) {
+                consumeConfirmedSendId()
+            } else null
+        )
     }
 
     fun consumeConfirmedSendId(): String? = synchronized(lock) {

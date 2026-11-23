@@ -2589,8 +2589,10 @@ class AiReplyObservationRuntimeTest {
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             isSendConfirmationPending = { pendingSend },
-            onSendConfirmation = { _, _ ->
-                com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+            onSendTransaction = { _, _ ->
+                com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                    com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+                )
             }
         )
         runtime.scheduleInitialObservation()
@@ -4298,11 +4300,15 @@ class AiReplyObservationRuntimeTest {
             } else {
                 com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED
             }
+            var sendReceiptReads = 0
             val runtime = greetingRuntimeFixture(
                 scheduler = scheduler, port = port, logs = logs,
                 greetingDraft = { true },
                 sendConfirmation = { result },
-                consumeSendId = { if (scenario == "NO_ID") null else "safe-confirm-id" }
+                consumeSendId = {
+                    sendReceiptReads++
+                    if (scenario == "NO_ID") null else "safe-confirm-id"
+                }
             )
             activateGreetingTestFlow(runtime)
             readGreetingTestMessages(runtime, port.page)
@@ -4311,6 +4317,7 @@ class AiReplyObservationRuntimeTest {
             assertEquals("scenario=$scenario", 0, port.greetingDetailCompletionCalls)
             assertEquals("scenario=$scenario", 0, port.greetingDetailSuccessfulCompletions)
             assertEquals("scenario=$scenario", 0, port.navigateBackCalls)
+            assertEquals("scenario=$scenario", if (scenario == "NO_ID") 1 else 0, sendReceiptReads)
             assertTrue("scenario=$scenario logs=$logs", logs.any {
                 it.contains("GREETING_SEND_UNKNOWN") || it.contains("CONFIRMATION_ID_MISSING") ||
                     scenario == "WAITING"
@@ -4420,9 +4427,16 @@ class AiReplyObservationRuntimeTest {
         fullInspectionDebounceMs = 300L,
         regionRefreshDebounceMs = 500L,
         onGreetingDraftConversationObserved = { batch, _, _, _ -> greetingDraft(batch) },
-        onSendConfirmation = { _, _ -> sendConfirmation() },
-        isSendConfirmationPending = sendConfirmationPending,
-        onConfirmedSendId = consumeSendId
+        onSendTransaction = { _, _ ->
+            val result = sendConfirmation()
+            com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                status = result,
+                finalSendConfirmationId = if (result == com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED) {
+                    consumeSendId()
+                } else null
+            )
+        },
+        isSendConfirmationPending = sendConfirmationPending
     )
 
     private fun activateGreetingTestFlow(runtime: AiReplyObservationRuntime): ReceivedGreetingsTaskFlowController {
