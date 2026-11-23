@@ -1031,30 +1031,31 @@ internal class MomoSocialAdapter(
         }
     }
 
+    /**
+     * Uses exactly the final start gates in the shared recovery preflight. No gesture is
+     * admitted here; each caller takes a fresh snapshot and fails closed on missing evidence.
+     */
+    private fun sampleReceivedGreetingsListAdmission(): MomoReceivedGreetingsAdmissionDiagnostic {
+        val confirmedTarget = sayHiConfirmedListTarget
+        return MomoReceivedGreetingsAdmissionDiagnostic(
+            listConfirmed = sayHiNavigationFlowController.isReceivedListConfirmed(),
+            listStructureVisible = runCatching { isReceivedGreetingsListStructureVisible() }.getOrDefault(false),
+            windowTargetPresent = confirmedTarget != null,
+            windowCurrent = runCatching {
+                confirmedTarget?.let { accessibilityGateway.isWindowCurrent(it.window) } == true
+            }.getOrDefault(false),
+            sayHiGestureInFlight = sayHiGestureInFlight,
+            readOnlyStage = sayHiReadOnlyStage.name,
+            entrySearchGestureInFlight = receivedGreetingsEntrySearchGestureInFlight
+        )
+    }
+
     /** Starts the existing read-only browser on the already confirmed current list. */
     override fun beginReceivedGreetingsTaskFromCurrentList(): Boolean {
-        val confirmedTarget = sayHiConfirmedListTarget
-        if (!sayHiNavigationFlowController.isReceivedListConfirmed() ||
-            !isReceivedGreetingsListStructureVisible() ||
-            confirmedTarget == null || !accessibilityGateway.isWindowCurrent(confirmedTarget.window) ||
-            sayHiGestureInFlight || sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE ||
-            receivedGreetingsEntrySearchGestureInFlight
-        ) {
-            // Diagnostic-only second sampling: the original short-circuit guard above is unchanged.
-            // An all-ready sample means the admission state changed between rejection and logging.
-            val admissionDiagnostic = MomoReceivedGreetingsAdmissionDiagnostic(
-                listConfirmed = sayHiNavigationFlowController.isReceivedListConfirmed(),
-                listStructureVisible = runCatching { isReceivedGreetingsListStructureVisible() }.getOrDefault(false),
-                windowTargetPresent = confirmedTarget != null,
-                windowCurrent = runCatching {
-                    confirmedTarget?.let { accessibilityGateway.isWindowCurrent(it.window) } == true
-                }.getOrDefault(false),
-                sayHiGestureInFlight = sayHiGestureInFlight,
-                readOnlyStage = sayHiReadOnlyStage.name,
-                entrySearchGestureInFlight = receivedGreetingsEntrySearchGestureInFlight
-            )
+        val admission = sampleReceivedGreetingsListAdmission()
+        if (!admission.isReadyForCurrentList()) {
             onLog("收到的招呼人工入口接管[REJECTED]：" +
-                admissionDiagnostic.toLogFields() + "；保持页面不动")
+                admission.toLogFields() + "；保持页面不动")
             return false
         }
 
@@ -1083,14 +1084,16 @@ internal class MomoSocialAdapter(
         if (status != ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED) {
             status = observeManuallyOpenedReceivedGreetingsPage()
         }
+        val admission = sampleReceivedGreetingsListAdmission()
         val confirmed = status == ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED &&
-            isReceivedGreetingsListStructureVisible() &&
-            sayHiNavigationFlowController.isReceivedListConfirmed() &&
-            sayHiConfirmedListTarget?.let { accessibilityGateway.isWindowCurrent(it.window) } == true
+            admission.isReadyForCurrentList()
         onLog(
             "收到的招呼统一恢复确认同步：结果=${if (confirmed) "已同步" else "未同步"}；" +
-                "adapterList=${sayHiNavigationFlowController.isReceivedListConfirmed()}；" +
-                "windowTarget=${sayHiConfirmedListTarget != null}"
+                "adapterList=${admission.listConfirmed}；" +
+                "windowTarget=${admission.windowTargetPresent}；" +
+                "admissionReady=${admission.isReadyForCurrentList()}；" +
+                "failedGates=${admission.rejectedGates().joinToString(",").ifEmpty { "NONE" }}；" +
+                "readOnlyStage=${admission.readOnlyStage}"
         )
         return confirmed
     }
