@@ -178,7 +178,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
 
         // The row still has an unknown status, but is now ineligible due to missing geometry.
         // It is unsafe to declare the old evidence resolved just because eligibleUnknown=0.
-        val incomplete = snapshot(known, unknown.copy(previewBoundsValid = false))
+        val incomplete = snapshot(known, candidate(1, "Uncertain", ChatUnreadStatus.UNKNOWN, previewBoundsValid = false))
         executor.recordViewportUnreadEvidence(incomplete, receivedGreetingsActive = false)
         assertEquals(PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED,
             executor.evaluateListSnapshot(incomplete, false, 2).unreadAdmissionDecision)
@@ -198,7 +198,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
             lastStableSessionListVisibleKeys = visibleSessionKeys(snapshot(known, unresolved))
         }.checkpoint()
         val executor = PrivateMessagesTraversalTaskExecutor().apply { restore(old) }
-        val stillUnknown = snapshot(known, unresolved.copy(previewBoundsValid = false))
+        val stillUnknown = snapshot(known, candidate(1, "Unknown", ChatUnreadStatus.UNKNOWN, previewBoundsValid = false))
         assertEquals(PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED,
             executor.evaluateUnreadAdmission(stillUnknown))
         assertTrue(executor.normalInboxUnreadStateUnknown)
@@ -692,7 +692,8 @@ class PrivateMessagesTraversalTaskExecutorTest {
         rowIndex: Int,
         name: String,
         unread: ChatUnreadStatus,
-        top: Int = 100 + rowIndex * 150
+        top: Int = 100 + rowIndex * 150,
+        previewBoundsValid: Boolean = true
     ): ChatListCandidateSnapshot {
         val row = ScreenRect(0, top, 720, top + 140)
         val nameBounds = ScreenRect(150, top + 10, 380, top + 40)
@@ -726,7 +727,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
             previewNodeVisibleToUser = true,
             previewBoundsIntersectViewport = true,
             previewBoundsFullyInsideViewport = true,
-            previewBoundsValid = true,
+            previewBoundsValid = previewBoundsValid,
             timestampText = "10:20",
             timestampSource = ChatNodeTextSource.NODE_TEXT,
             timestampNodePath = null,
