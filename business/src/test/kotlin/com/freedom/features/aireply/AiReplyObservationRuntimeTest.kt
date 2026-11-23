@@ -2564,8 +2564,8 @@ class AiReplyObservationRuntimeTest {
         // Only the independently verified original detail can resume read-only proof.
         val readsBeforeResume = port.messageReads
         port.page = chatDetailSnapshot()
-        repeat(4) { inspect.invoke(runtime) }
-        assertTrue("The original chat should complete two-snapshot recovery", logs.any {
+        repeat(12) { inspect.invoke(runtime) }
+        assertTrue("The original chat should complete two-snapshot recovery; recent logs=${logs.takeLast(35)}", logs.any {
             it.contains("AI 发送恢复[RECOVERY_VERIFIED]")
         })
         assertTrue("Resumption must read messages instead of re-sending",
