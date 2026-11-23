@@ -503,7 +503,10 @@ class AiReplyObservationRuntimeTest {
         fixture.runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
         awaitPreScrollRecovery(fixture)
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
-        assertTrue(fixture.logs.any { it.contains("消息列表检查点恢复[") })
+        assertTrue(fixture.logs.any {
+            it.contains("统一页面恢复[RECOVERY_VERIFIED]") &&
+                it.contains("AI_REPLY_PRIVATE_MESSAGES")
+        })
     }
 
     @Test
