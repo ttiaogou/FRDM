@@ -73,6 +73,36 @@ class UiWriteAuthorizationTest {
     }
 
     @Test
+    fun verifiedGreetingComposerRequiresTheExactCurrentAiLease() {
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var generation = 20L
+        var mode: RunMode? = RunMode.AI_REPLY
+        val gate = UiWriteAuthorization(tasks, { generation }, { mode })
+        val privateLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", generation))
+        assertFalse(gate.permits(UiWriteScope.VERIFIED_GREETING_COMPOSER))
+        val greetingLease = requireNotNull(tasks.transfer(privateLease, "AI_REPLY_RECEIVED_GREETINGS"))
+        var dispatched = 0
+        assertFalse(gate.permits(UiWriteScope.AI_COMPOSER))
+        assertTrue(gate.permits(UiWriteScope.VERIFIED_GREETING_COMPOSER))
+        assertEquals(1, gate.withAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER) { ++dispatched })
+
+        generation = 21L
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER) { ++dispatched })
+        tasks.advanceRunGeneration(generation)
+        assertFalse(tasks.isCurrent(greetingLease))
+        assertEquals(1, dispatched)
+
+        val freshLease = requireNotNull(tasks.tryAcquire("AI_REPLY_RECEIVED_GREETINGS", generation))
+        mode = RunMode.ACCOUNT_BROWSE
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER) { ++dispatched })
+        mode = RunMode.AI_REPLY
+        assertTrue(gate.permits(UiWriteScope.VERIFIED_GREETING_COMPOSER))
+        assertTrue(tasks.release(freshLease))
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER) { ++dispatched })
+        assertEquals(1, dispatched)
+    }
+
+    @Test
     fun staleOrReleasedLeaseNeverRunsPlatformMutationCallback() {
         val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
         var generation = 11L
@@ -92,6 +122,24 @@ class UiWriteAuthorizationTest {
         assertTrue(tasks.release(current))
         assertNull(gate.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE) { ++dispatched })
         assertEquals(1, dispatched)
+    }
+
+    @Test
+    fun oldGreetingDraftLeaseCannotWriteAfterTaskHandoffEvenWhenNewOwnerIsAuthorized() {
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val gate = UiWriteAuthorization(tasks, { 30L }, { RunMode.AI_REPLY })
+        val privateLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", 30L))
+        val firstGreetingLease = requireNotNull(tasks.transfer(privateLease, "AI_REPLY_RECEIVED_GREETINGS"))
+        var actions = 0
+        assertEquals(1, gate.withBoundAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER, firstGreetingLease) { ++actions })
+        val nextPrivateLease = requireNotNull(tasks.transfer(firstGreetingLease, "AI_REPLY_PRIVATE_MESSAGES"))
+        assertNull(gate.withBoundAuthorizedWrite(UiWriteScope.AI_COMPOSER, firstGreetingLease) { ++actions })
+        assertNull(gate.withBoundAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER, firstGreetingLease) { ++actions })
+        assertTrue(gate.permitsBound(UiWriteScope.AI_COMPOSER, nextPrivateLease))
+        val laterGreetingLease = requireNotNull(tasks.transfer(nextPrivateLease, "AI_REPLY_RECEIVED_GREETINGS"))
+        assertNull(gate.withBoundAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER, firstGreetingLease) { ++actions })
+        assertEquals(2, gate.withBoundAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER, laterGreetingLease) { ++actions })
+        assertEquals(2, actions)
     }
 
     @Test

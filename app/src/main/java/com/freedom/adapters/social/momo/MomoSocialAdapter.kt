@@ -101,7 +101,9 @@ internal class MomoSocialAdapter(
     /** Registers the imminent profile-to-chat return in the unified navigation provenance layer. */
     private val registerSelfNavigation: (String) -> Unit = {},
     /** The AI task lease must still be current when a send gesture is admitted. */
-    private val isAiReplyUiOperationOwned: () -> Boolean = { true }
+    private val isAiReplyUiOperationOwned: () -> Boolean = { true },
+    /** Exact lease captured at model admission; task handoff revokes old async callbacks. */
+    private val isBoundAiReplyUiOperationOwned: (com.freedom.core.runtime.TaskLease?) -> Boolean = { true }
 ) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort,
     ChatDraftSendPort {
 
@@ -4507,16 +4509,23 @@ internal class MomoSocialAdapter(
         return true
     }
 
-    private val draftInputController by lazy(LazyThreadSafetyMode.NONE) {
-        MomoDraftInputController { operation ->
-            withCurrentDraftInput { node ->
-                operation(object : MomoDraftInputController.Field {
-                    override fun readText(): String = draftInputText(node)
-                    override fun focus(): Boolean = rootAccess.performCurrentInputAction(node, NodeAction.FOCUS)
-                    override fun setText(text: String): Boolean =
-                        rootAccess.performCurrentInputAction(node, NodeAction.SET_TEXT, text)
-                })
-            }
+    private fun draftInputController(target: ChatDraftInputTarget) = MomoDraftInputController { operation ->
+        withCurrentDraftInput { node ->
+            operation(object : MomoDraftInputController.Field {
+                override fun readText(): String = draftInputText(node)
+
+                // Recheck the exact window, title, task lease and run generation before EVERY
+                // mutation, including after focusing rebuilds the composer node.
+                override fun focus(): Boolean =
+                    isCurrentDraftTarget(target) && isAiReplyUiOperationOwned() &&
+                        isBoundAiReplyUiOperationOwned(target.taskLease) &&
+                        rootAccess.performVerifiedChatInputAction(node, NodeAction.FOCUS, taskLease = target.taskLease)
+
+                override fun setText(text: String): Boolean =
+                    isCurrentDraftTarget(target) && isAiReplyUiOperationOwned() &&
+                        isBoundAiReplyUiOperationOwned(target.taskLease) &&
+                        rootAccess.performVerifiedChatInputAction(node, NodeAction.SET_TEXT, text, target.taskLease)
+            })
         }
     }
 
@@ -4524,14 +4533,14 @@ internal class MomoSocialAdapter(
         if (!isCurrentDraftTarget(target)) {
             return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_CONTEXT_CHANGED")
         }
-        return draftInputController.writeDraft(target, expectedText, text)
+        return draftInputController(target).writeDraft(target, expectedText, text)
     }
 
     override fun verifyDraft(target: ChatDraftInputTarget, text: String): ChatDraftInputResult {
         if (!isCurrentDraftTarget(target)) {
             return ChatDraftInputResult(ChatDraftInputStatus.STALE_CHAT, "CHAT_CONTEXT_CHANGED")
         }
-        return draftInputController.verifyDraft(target, text)
+        return draftInputController(target).verifyDraft(target, text)
     }
 
     /** Stage-one gate: the live root must still be the window captured for this chat. */
@@ -4555,7 +4564,7 @@ internal class MomoSocialAdapter(
     }
 
     override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
-        if (!isAiReplyUiOperationOwned()) {
+        if (!isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease)) {
             return ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "TASK_OWNERSHIP_LOST")
         }
         if (!isCurrentDraftTarget(target)) {
@@ -4674,6 +4683,11 @@ internal class MomoSocialAdapter(
                     description = "Tap verified Momo send control after draft revalidation",
                     executionContext = executionContext
                 )
+                if (!isBoundAiReplyUiOperationOwned(target.taskLease)) {
+                    return@withActiveTargetRoot ChatDraftInputResult(
+                        ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "TASK_OWNERSHIP_LOST"
+                    )
+                }
                 val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
                     onLog("AI 发送手势回调：status=${result.status}; reason=${result.reason}")
                 })

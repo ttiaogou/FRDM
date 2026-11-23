@@ -13,6 +13,7 @@ import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import com.freedom.core.runtime.TaskScheduler
+import com.freedom.core.runtime.TaskLease
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.LinkedHashSet
@@ -50,7 +51,8 @@ class AiReplyDraftCoordinator(
     },
     private val replyTaskRepository: ReplyTaskRepository? = null,
     private val sendPort: ChatDraftSendPort? = null,
-    private val replySegmentTaskRepository: ReplySegmentTaskRepository? = null
+    private val replySegmentTaskRepository: ReplySegmentTaskRepository? = null,
+    private val captureTaskLease: () -> TaskLease? = { null }
 ) {
     private val pending = AtomicBoolean(false)
     private val awaitingUserSend = AtomicBoolean(false)
@@ -58,6 +60,9 @@ class AiReplyDraftCoordinator(
     private val lock = Any()
     private val processedMessageKeys = LinkedHashSet<String>()
     private val failedRequests = linkedMapOf<String, Pair<Int, Long>>()
+    /** Only a first-chunk focus rejection with a freshly re-read empty composer can be retried. */
+    private val verifiedEmptyInputRetries = linkedMapOf<String, VerifiedEmptyInputRetry>()
+    private var activeInputObservationAtMillis = 0L
     private var activeMessageKey: String? = null
     private var activeRequestId: String? = null
     private var activeExistingOutgoingKeys: Set<String> = emptySet()
@@ -98,6 +103,12 @@ class AiReplyDraftCoordinator(
         val existingOutgoingKeys: Set<String>
     )
 
+    private data class VerifiedEmptyInputRetry(
+        val windowSessionKey: String,
+        val outgoingMessageKeys: Set<String>,
+        val observationAtMillis: Long
+    )
+
     val isPending: Boolean get() = pending.get()
     val isAwaitingUserSend: Boolean get() = awaitingUserSend.get()
     /** 对现有页面返回门禁而言，等待尚未提交的发送按钮不等于任务完成。 */
@@ -124,6 +135,8 @@ class AiReplyDraftCoordinator(
             awaitingUserSend.set(false)
             processedMessageKeys.clear()
             failedRequests.clear()
+            verifiedEmptyInputRetries.clear()
+            activeInputObservationAtMillis = 0L
             activeMessageKey = null
             activeRequestId = null
             activeExistingOutgoingKeys = emptySet()
@@ -207,7 +220,8 @@ class AiReplyDraftCoordinator(
             conversationIdentityKey = conversationIdentity,
             windowSessionKey = expectedWindowSessionKey,
             nodeTarget = inputTarget,
-            expectedChatTitle = snapshot.chatTitleText
+            expectedChatTitle = snapshot.chatTitleText,
+            taskLease = captureTaskLease()
         )
         // 窗口代次用于防止旧回调继续执行，不代表新的模型任务身份。
         val dedupeConversationKey = conversationIdentity
@@ -307,6 +321,21 @@ class AiReplyDraftCoordinator(
             writeMessageSegment(target, current.segmentIndex, requestGeneration)
             return true
         }
+        // A failed first focus action never submitted a send gesture. Even so, do not retry
+        // until a later message observation confirms the same chat, unchanged outgoing
+        // messages and an empty, freshly located composer.
+        val verifiedRetry = synchronized(lock) { verifiedEmptyInputRetries[dedupeKey] }
+        if (verifiedRetry != null) {
+            val outgoingNow = batch.messages.asSequence()
+                .filter { it.direction == ChatMessageDirection.OUTGOING }
+                .map { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
+                .toSet()
+            if (verifiedRetry.windowSessionKey != batch.windowSessionKey ||
+                batch.capturedAtMillis <= verifiedRetry.observationAtMillis ||
+                outgoingNow != verifiedRetry.outgoingMessageKeys ||
+                runCatching { inputPort.verifyDraft(target, "") }.getOrNull()?.status != ChatDraftInputStatus.VERIFIED
+            ) return reject("DRAFT_INPUT_RETRY_REQUIRES_FRESH_EMPTY_UNCHANGED_CHAT")
+        }
         val requestId = UUID.randomUUID().toString()
         val taskRecord = ReplyTaskRecord(
             requestKey = dedupeKey,
@@ -335,6 +364,8 @@ class AiReplyDraftCoordinator(
             activeMessageKey = dedupeKey
             replyAwaitingConfirmedSend = true
             activeRequestId = requestId
+            activeInputObservationAtMillis = batch.capturedAtMillis
+            verifiedEmptyInputRetries.remove(dedupeKey)
             activeExistingOutgoingKeys = batch.messages
                 .filter { it.direction == ChatMessageDirection.OUTGOING }
                 .mapTo(LinkedHashSet()) { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
@@ -559,7 +590,36 @@ class AiReplyDraftCoordinator(
         val expected = confirmed + chunks[chunkIndex]
         val result = runCatching { inputPort.writeDraft(target, confirmed, expected) }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED) }
-        if (!result.succeeded) { finish("DRAFT_INPUT_${result.reasonCode}", requestGeneration); return }
+        if (!result.succeeded) {
+            // First chunk, first message: a rejected FOCUS never performed SET_TEXT
+            // and no send path has run. A blank composer re-read is the final proof.
+            val safeBeforeAnyWrite = segmentIndex == 0 && chunkIndex == 0 &&
+                confirmed.isEmpty() && result.status == ChatDraftInputStatus.ACTION_REJECTED &&
+                result.reasonCode == "INPUT_FOCUS_REJECTED" &&
+                runCatching { inputPort.verifyDraft(target, "") }.getOrNull()?.status == ChatDraftInputStatus.VERIFIED &&
+                synchronized(lock) { pendingSendConfirmation == null && !awaitingUserSend.get() &&
+                    activeMessageKey != null && activeRequestId != null } &&
+                updateTaskStatus(ReplyTaskStatus.FAILED_RETRYABLE, requestGeneration)
+            if (safeBeforeAnyWrite) {
+                synchronized(lock) {
+                    if (!isCurrentGeneration(requestGeneration)) return
+                    val key = activeMessageKey ?: return
+                    verifiedEmptyInputRetries[key] = VerifiedEmptyInputRetry(
+                        target.windowSessionKey, activeExistingOutgoingKeys.toSet(), activeInputObservationAtMillis
+                    )
+                    while (verifiedEmptyInputRetries.size > MAX_PROCESSED_KEYS) {
+                        verifiedEmptyInputRetries.remove(verifiedEmptyInputRetries.keys.first())
+                    }
+                    replyAwaitingConfirmedSend = false
+                }
+                onLog("AI 草稿首次输入恢复：FOCUS_REJECTED；已确认原会话空输入框、未写入且未开始发送；" +
+                    "等待新鲜消息观察复核，有限重试，不复用旧节点")
+                finish("DRAFT_INPUT_CONFIRMED_EMPTY_RETRYABLE", requestGeneration)
+                return
+            }
+            finish("DRAFT_INPUT_${result.reasonCode}", requestGeneration)
+            return
+        }
         scheduler.schedule(chooseRandomInt(MIN_VERIFY_DWELL_DELAY_MS, MAX_VERIFY_DWELL_DELAY_MS).toLong()) {
             val checked = runCatching { inputPort.verifyDraft(target, expected) }
                 .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.VERIFICATION_FAILED) }
@@ -998,10 +1058,11 @@ class AiReplyDraftCoordinator(
             val key = activeMessageKey
             activeMessageKey = null
             activeRequestId = null
-            // 仅模型/调度失败允许后续观察触发一次重试；输入过的草稿不得盲目重写。
+            // 模型/调度失败和已证实首次焦点拒绝且输入仍空，才允许有限重试；已写入或发送不明时禁止重试。
             if (key != null && reasonCode in setOf("DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED",
                     "MODEL_DECISION_MODEL_CALL_FAILED", "MODEL_DECISION_EMPTY_MODEL_OUTPUT",
-                    "MODEL_DECISION_MODEL_OUTPUT_SCHEMA_INVALID")) {
+                    "MODEL_DECISION_MODEL_OUTPUT_SCHEMA_INVALID",
+                    "DRAFT_INPUT_CONFIRMED_EMPTY_RETRYABLE")) {
                 val attempts = (failedRequests[key]?.first ?: 0) + 1
                 failedRequests[key] = attempts to (nowMillis() + 30_000L)
                 while (failedRequests.size > MAX_PROCESSED_KEYS) failedRequests.remove(failedRequests.keys.first())

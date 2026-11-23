@@ -1,6 +1,7 @@
 package com.freedom.features.aireply.ports
 
 import com.freedom.core.accessibility.api.NodeTarget
+import com.freedom.core.runtime.TaskLease
 
 /** Original request metadata for diagnostics; input uses a freshly located correct composer. */
 data class ChatDraftInputTarget(
@@ -11,7 +12,9 @@ data class ChatDraftInputTarget(
     val windowSessionKey: String,
     val nodeTarget: NodeTarget,
     /** Title captured after the chat header was validated; used for send-time continuity only. */
-    val expectedChatTitle: String? = null
+    val expectedChatTitle: String? = null,
+    /** Exact lease of the request that produced this draft, not the lease of a later task. */
+    val taskLease: TaskLease? = null
 )
 
 enum class ChatDraftInputStatus {

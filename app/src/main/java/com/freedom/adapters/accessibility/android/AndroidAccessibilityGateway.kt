@@ -41,6 +41,7 @@ import com.freedom.core.accessibility.events.InputOriginClassifier
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.UiWriteAuthorization
 import com.freedom.core.runtime.UiWriteScope
+import com.freedom.core.runtime.TaskLease
 import com.freedom.core.runtime.TargetAppPageReadiness
 import com.freedom.core.runtime.TargetAppReadinessController
 import com.freedom.core.runtime.TargetAppReadinessEvidence
@@ -788,6 +789,30 @@ internal class AndroidAccessibilityGateway(
         }
     } ?: false
 
+    /**
+     * Only the Momo adapter may call this after rechecking the exact chat window and title
+     * for the target. The original private-chat composer scope remains unchanged.
+     */
+    override fun performVerifiedChatInputAction(
+        node: AccessibilityNodeInfo,
+        action: NodeAction,
+        text: String?,
+        taskLease: TaskLease?
+    ): Boolean {
+        val scope = if (uiWriteAuthorization.permitsBound(UiWriteScope.VERIFIED_GREETING_COMPOSER, taskLease)) {
+            UiWriteScope.VERIFIED_GREETING_COMPOSER
+        } else {
+            UiWriteScope.AI_COMPOSER
+        }
+        return uiWriteAuthorization.withBoundAuthorizedWrite(scope, taskLease) {
+            when (action) {
+                NodeAction.FOCUS -> node.isFocused || performSemanticNodeAction(node, action, null)
+                NodeAction.SET_TEXT -> text != null && performSemanticNodeAction(node, action, text)
+                NodeAction.DISMISS -> false
+            }
+        } ?: false
+    }
+
     /** 所有非触摸节点动作共用此唯一平台调用点，原有目标校验仍由各自入口负责。 */
     private fun performSemanticNodeAction(node: AccessibilityNodeInfo, action: NodeAction, text: String?): Boolean {
         val arguments = if (action == NodeAction.SET_TEXT && text != null) {
@@ -1055,6 +1080,8 @@ internal data class AndroidTargetWindowRoot(
 internal interface AndroidActiveWindowRootAccess {
     /** 仅同步操作当前回调中的输入框；允许 FOCUS / SET_TEXT，不提供触摸动作。 */
     fun performCurrentInputAction(node: AccessibilityNodeInfo, action: NodeAction, text: String? = null): Boolean
+    /** Only for a freshly verified chat target; the final platform call rechecks the task lease. */
+    fun performVerifiedChatInputAction(node: AccessibilityNodeInfo, action: NodeAction, text: String? = null, taskLease: TaskLease? = null): Boolean = false
     fun <T> withActiveTargetRoot(block: (AccessibilityNodeInfo, WindowRef) -> T): T?
     fun <T> withActiveWindowRoot(block: (AccessibilityNodeInfo) -> T): T?
     fun <T> withTargetWindowRoots(block: (List<AndroidTargetWindowRoot>) -> T): T?

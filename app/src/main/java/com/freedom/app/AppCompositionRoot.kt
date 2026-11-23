@@ -413,7 +413,12 @@ internal class AccessibilityServiceDependencies internal constructor(
                 )
             },
             isAiReplyUiOperationOwned = {
-                uiWriteAuthorization.permits(UiWriteScope.AI_COMPOSER)
+                uiWriteAuthorization.permits(UiWriteScope.AI_COMPOSER) ||
+                    uiWriteAuthorization.permits(UiWriteScope.VERIFIED_GREETING_COMPOSER)
+            },
+            isBoundAiReplyUiOperationOwned = { lease ->
+                uiWriteAuthorization.permitsBound(UiWriteScope.AI_COMPOSER, lease) ||
+                    uiWriteAuthorization.permitsBound(UiWriteScope.VERIFIED_GREETING_COMPOSER, lease)
             }
         )
     }
@@ -449,7 +454,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                 )
             },
             replyTaskRepository = root.replyTaskRepository,
-            replySegmentTaskRepository = root.replySegmentTaskRepository
+            replySegmentTaskRepository = root.replySegmentTaskRepository,
+            captureTaskLease = { root.taskCoordinator.currentLease() }
         )
     }
     val aiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate

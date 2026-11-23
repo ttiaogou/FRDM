@@ -8,6 +8,7 @@ package com.freedom.core.runtime
 enum class UiWriteScope {
     BROWSE_NODE_ACTION,
     AI_COMPOSER,
+    VERIFIED_GREETING_COMPOSER,
     VERIFIED_AI_BACK,
     GLOBAL_NAVIGATION,
     AUTONOMOUS_GESTURE
@@ -48,6 +49,26 @@ class UiWriteAuthorization(
         }
     }
 
+    /** Advisory check for the EXACT lease captured when this draft request was admitted. */
+    fun permitsBound(scope: UiWriteScope, expectedLease: TaskLease?): Boolean {
+        val expected = expectedLease ?: return false
+        return expected.runGeneration == currentRunGeneration() &&
+            accepts(scope, activeRunMode(), expected.taskId) &&
+            taskCoordinator.isCurrent(expected)
+    }
+
+    /** Final mutation barrier: ownership transfers cannot revive an old asynchronous draft. */
+    fun <T> withBoundAuthorizedWrite(scope: UiWriteScope, expectedLease: TaskLease?, action: () -> T): T? {
+        val expected = expectedLease ?: return null
+        val runGeneration = currentRunGeneration()
+        val mode = activeRunMode()
+        if (expected.runGeneration != runGeneration || !accepts(scope, mode, expected.taskId)) return null
+        return taskCoordinator.withCurrentLease(expected) {
+            if (currentRunGeneration() != runGeneration || activeRunMode() != mode) null
+            else action()
+        }
+    }
+
     private fun accepts(scope: UiWriteScope, mode: RunMode?, taskId: String): Boolean {
         val browse = mode == RunMode.ACCOUNT_BROWSE && taskId == ACCOUNT_BROWSE
         val privateMessages = mode == RunMode.AI_REPLY && taskId == AI_PRIVATE
@@ -55,6 +76,9 @@ class UiWriteAuthorization(
         return when (scope) {
             UiWriteScope.BROWSE_NODE_ACTION -> browse
             UiWriteScope.AI_COMPOSER -> privateMessages
+            // This is a distinct capability; the Momo adapter must verify live chat/window/target
+            // before calling its Android-only composer entry point.
+            UiWriteScope.VERIFIED_GREETING_COMPOSER -> greetings
             UiWriteScope.VERIFIED_AI_BACK -> privateMessages || greetings
             UiWriteScope.GLOBAL_NAVIGATION, UiWriteScope.AUTONOMOUS_GESTURE ->
                 browse || privateMessages || greetings

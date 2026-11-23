@@ -22,6 +22,7 @@ class VisibleDraftFlowTest {
         var modelOutput = """{"action":"REPLY","reason":"OK","draft":"你好呀"}"""
         var calls = 0
         var fail = false
+        var focusRejectionsRemaining = 0
         var emptyFailuresRemaining = 0
         var emptyFinishReason: String? = "stop"
         var now = 0L
@@ -49,6 +50,10 @@ class VisibleDraftFlowTest {
             inputPort = object : ChatDraftInputPort {
                 override fun writeDraft(target: ChatDraftInputTarget, expectedText: String, text: String): ChatDraftInputResult {
                     if (this@Fixture.text != expectedText) return ChatDraftInputResult(ChatDraftInputStatus.INPUT_NOT_EMPTY)
+                    if (focusRejectionsRemaining > 0) {
+                        focusRejectionsRemaining--
+                        return ChatDraftInputResult(ChatDraftInputStatus.ACTION_REJECTED, "INPUT_FOCUS_REJECTED")
+                    }
                     this@Fixture.text = text
                     return ChatDraftInputResult(ChatDraftInputStatus.WRITTEN)
                 }
@@ -99,7 +104,8 @@ class VisibleDraftFlowTest {
         override fun find(requestKey: String) = records[requestKey]
         override fun save(record: ReplyTaskRecord) { records[record.requestKey] = record }
         override fun tryClaim(record: ReplyTaskRecord, requestTimeoutMillis: Long): Boolean {
-            if (record.requestKey in records) return false
+            val previous = records[record.requestKey]
+            if (previous != null && previous.status != ReplyTaskStatus.FAILED_RETRYABLE) return false
             records[record.requestKey] = record
             return true
         }
@@ -212,6 +218,89 @@ class VisibleDraftFlowTest {
         assertEquals("", f.text)
         assertTrue(f.logs.any { it.startsWith("AI 程序执行状态：") && it.contains("executionState=MODEL_CALL_FAILED") })
         assertFalse(f.logs.any { it.contains("action=WAIT") })
+    }
+
+
+    @Test fun verifiedFirstFocusFailureRetriesOnlyAfterFreshObservationAndSendsOnce() {
+        var sends = 0
+        val tasks = TaskLedger()
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sends++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, taskRepository = tasks)
+        f.focusRejectionsRemaining = 1
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals("", f.text)
+        assertEquals(0, sends)
+        assertEquals(ReplyTaskStatus.FAILED_RETRYABLE, tasks.records.values.single().status)
+        assertTrue(f.logs.any { it.contains("DRAFT_INPUT_CONFIRMED_EMPTY_RETRYABLE") })
+
+        f.now = 30_001L
+        assertFalse(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        assertEquals(1, f.calls)
+        val refreshed = f.batch.copy(capturedAtMillis = 2L)
+        assertTrue(f.coordinator.generateVisibleDraft(refreshed, f.snapshot))
+        f.drain()
+        assertEquals(2, f.calls)
+        assertEquals("你好呀", f.text)
+        assertEquals(1, sends)
+        // Never turn the same confirmed request into a second send.
+        assertFalse(f.coordinator.generateVisibleDraft(refreshed.copy(capturedAtMillis = 3L), f.snapshot))
+        assertEquals(1, sends)
+    }
+
+    @Test fun firstFocusRetryRejectsUserEditsAndNewOutgoingMessages() {
+        val f = Fixture(taskRepository = TaskLedger())
+        f.focusRejectionsRemaining = 1
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        f.now = 30_001L
+        f.text = "人工输入"
+        assertFalse(f.coordinator.generateVisibleDraft(f.batch.copy(capturedAtMillis = 2L), f.snapshot))
+        assertEquals("人工输入", f.text)
+        f.text = ""
+        val outgoing = ChatMessage("new-outgoing", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "已发送", ScreenRect(0, 35, 100, 55), DirectionEvidence.LAYOUT_ID_AND_HIERARCHY,
+            MessageContentQuality.VERIFIED)
+        assertFalse(f.coordinator.generateVisibleDraft(f.batch.copy(
+            messages = f.batch.messages + outgoing, capturedAtMillis = 3L
+        ), f.snapshot))
+        assertEquals(1, f.calls)
+        assertTrue(f.logs.any { it.contains("DRAFT_INPUT_RETRY_REQUIRES_FRESH_EMPTY_UNCHANGED_CHAT") })
+    }
+
+    @Test fun repeatedVerifiedFocusRejectionNeverLoopsOrResends() {
+        var sends = 0
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                sends++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, taskRepository = TaskLedger())
+        f.focusRejectionsRemaining = 3
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        f.now = 30_001L
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch.copy(capturedAtMillis = 2L), f.snapshot))
+        f.drain()
+        f.now = 60_002L
+        assertFalse(f.coordinator.generateVisibleDraft(f.batch.copy(capturedAtMillis = 3L), f.snapshot))
+        assertEquals(2, f.calls)
+        assertEquals(0, sends)
+        assertEquals("", f.text)
+    }
+
+    @Test fun staleModelCallbackAfterRunResetNeverWritesOrCreatesRetryProof() {
+        val f = Fixture(taskRepository = TaskLedger())
+        f.focusRejectionsRemaining = 1
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.coordinator.resetForRuntimeReset()
+        f.drain()
+        assertEquals("", f.text)
+        assertFalse(f.logs.any { it.contains("DRAFT_INPUT_CONFIRMED_EMPTY_RETRYABLE") })
     }
 
     @Test fun existingInputIsPreserved() {
