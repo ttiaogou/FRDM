@@ -51,7 +51,12 @@ internal object AiSafeConversationText {
         ) return null
 
         val row = message.observationRowIndex
-        if (row != null && (row in batch.ocrTokensByRowIndex || row in batch.ocrTextProjectionsByRowIndex)) {
+        val hasOcrEvidence = batch.ocrTokensByRowIndex.isNotEmpty() ||
+            batch.ocrTextProjectionsByRowIndex.isNotEmpty()
+        if (hasOcrEvidence) {
+            // A row index not tied to this batch's OCR evidence must never silently fall back
+            // to the raw VERIFIED string. This also rejects missing/stale projections.
+            if (row == null) return null
             val tokens = batch.ocrTokensByRowIndex[row] ?: return null
             val projection = batch.ocrTextProjectionsByRowIndex[row] ?: return null
             return validateProjection(message.content, tokens, projection)
