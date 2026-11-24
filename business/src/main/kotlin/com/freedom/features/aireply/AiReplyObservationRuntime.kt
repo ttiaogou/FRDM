@@ -3641,16 +3641,27 @@ class AiReplyObservationRuntime(
         // workflow retain the existing private-message startup contract.
         privateMessagesTaskController.beginRun(currentRunGeneration())
         val supportsReceivedGreetingsStartup = receivedGreetingsTaskFlow.supportsWorkflow()
+        startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
+        resetPollingRound()
+        receivedGreetingsTaskFlow.reset()
+        val startupGreetingsStatus = if (supportsReceivedGreetingsStartup && sessionRunStarted) {
+            runCatching { receivedGreetingsTaskFlow.observeManuallyOpenedPage() }
+                .getOrDefault(ReceivedGreetingsPageArrivalStatus.UNKNOWN)
+        } else {
+            ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+        }
         receivedGreetingsPageProbePending = sessionRunStarted && supportsReceivedGreetingsStartup
-        if (sessionRunStarted && !supportsReceivedGreetingsStartup &&
-            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动私人消息任务")
+        val startupPageBelongsToGreetings = startupGreetingsStatus in setOf(
+            ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED,
+            ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE,
+            ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING
+        )
+        if (sessionRunStarted && (!supportsReceivedGreetingsStartup || !startupPageBelongsToGreetings) &&
+            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动页面未确认收到招呼列表")
         ) {
             sessionRunStarted = false
             onLog("AI Reply 启动暂停：私人消息任务未取得唯一 UI 操作权；不会执行自动滚动或打开会话")
         }
-        startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
-        resetPollingRound()
-        receivedGreetingsTaskFlow.reset()
         receivedGreetingsRecoveryRetryAttempt = 0
         privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
         privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted = false
