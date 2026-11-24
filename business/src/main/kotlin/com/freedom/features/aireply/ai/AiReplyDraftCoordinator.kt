@@ -145,7 +145,7 @@ class AiReplyDraftCoordinator(
     /** Requests the existing read-only page observer after a correlated platform completion. */
     private val onSendConfirmationObservationRequested: () -> Unit = {},
     /** Greeting flow can provide the last verified message observation immediately before send. */
-    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null },
+    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
     /** Private-message flow uses the same pre-send diff baseline contract. */
     private val capturePrivatePreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
 ) {
@@ -1578,9 +1578,12 @@ class AiReplyDraftCoordinator(
         if (!valid || candidate == null || segments == null || targetNode == null ||
             windowIdentity == null || currentWindowKey == null || requestKey == null || startedAt == null
         ) {
-            if (activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS && candidate != null) {
-                archiveGreetingUnconfirmedAttempt(candidate, segments.orEmpty())
-                onLog("收到招呼历史发送[ARCHIVED_UNCONFIRMED]：补登记证据不足；本轮跳过历史发送，仅继续处理新消息")
+            if (candidate != null && (activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS ||
+                activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES
+            )) {
+                archiveUnconfirmedAttempt(candidate, segments.orEmpty())
+                val taskLabel = if (activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS) "收到招呼" else "私聊"
+                onLog("$taskLabel 历史发送[ARCHIVED_UNCONFIRMED]：补登记证据不足；本轮跳过历史发送，仅继续处理新消息")
                 return SendConfirmationResult.NOT_PENDING
             }
             candidate?.let {
@@ -1642,8 +1645,8 @@ class AiReplyDraftCoordinator(
         return SendConfirmationResult.WAITING
     }
 
-    /** Treats an unprovable historical greeting send as handled for this round, never as resent. */
-    private fun archiveGreetingUnconfirmedAttempt(
+    /** Treats an unprovable historical send as handled for this round, never as resent. */
+    private fun archiveUnconfirmedAttempt(
         candidate: ReplySegmentTaskRecord,
         segments: List<ReplySegmentTaskRecord>
     ) {
@@ -1663,14 +1666,12 @@ class AiReplyDraftCoordinator(
                 ))
             }
         }
-        candidate.sendRequestKey?.let { requestKey ->
-            replyTaskRepository?.updateStatus(
-                requestKey,
-                candidate.requestId,
-                ReplyTaskStatus.SENT,
-                nowMillis()
-            )
-        }
+        replyTaskRepository?.updateStatus(
+            candidate.requestKey,
+            candidate.requestId,
+            ReplyTaskStatus.SENT,
+            nowMillis()
+        )
     }
 
     fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): SendConfirmationResult {
