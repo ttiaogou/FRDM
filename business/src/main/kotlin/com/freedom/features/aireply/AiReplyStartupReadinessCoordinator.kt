@@ -37,6 +37,7 @@ internal class AiReplyStartupReadinessCoordinator(
     private var task: ScheduledTask? = null
     private var generation = 0L
     private var retryCount = 0
+    private var suspendedForRecovery = false
     private var tapAttempts = 0
     private var tapAttemptSequence = 0L
     private var pendingTapAttemptId: Long? = null
@@ -57,6 +58,7 @@ internal class AiReplyStartupReadinessCoordinator(
 
     fun resetState(sessionStarted: Boolean) {
         initializationPending = sessionStarted
+        suspendedForRecovery = false
         workAreaConfirmed = !sessionStarted
         retryCount = 0
         tapAttempts = 0
@@ -93,6 +95,29 @@ internal class AiReplyStartupReadinessCoordinator(
         lastStableSnapshot = null
     }
 
+    /**
+     * The shared recovery owner must finish its page/lease verification before the
+     * startup owner resumes. Invalidated taps never regain their real-tap allowance.
+     */
+    fun suspendForPageRecovery() {
+        if (!initializationPending || workAreaConfirmed) return
+        suspendedForRecovery = true
+        cancelRecovery()
+    }
+
+    /** Resume the original startup gate without creating a second navigation allowance. */
+    fun resumeAfterPageRecovery(): Boolean {
+        if (!suspendedForRecovery || !initializationPending || workAreaConfirmed ||
+            !isSessionRunStarted() || !isAiReplyActive()
+        ) return false
+        suspendedForRecovery = false
+        timedOut = false
+        retryCount = 0
+        onLog("AI 启动导航[RECOVERY_REVERIFY]：原启动工作区尚未确认；重新采集三次新鲜证据，保留原点击额度")
+        runProbe(generation)
+        return true
+    }
+
     /** Starts bounded Activity readiness and Message-tab verification. */
     fun beginVerification() {
         retryCount = 0
@@ -111,7 +136,7 @@ internal class AiReplyStartupReadinessCoordinator(
     }
 
     private fun runProbe(expectedGeneration: Long) {
-        if (expectedGeneration != generation || timedOut || workAreaConfirmed ||
+        if (expectedGeneration != generation || timedOut || workAreaConfirmed || suspendedForRecovery ||
             !initializationPending || !isSessionRunStarted() || !isAiReplyActive()
         ) return
 

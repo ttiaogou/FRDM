@@ -283,7 +283,9 @@ class AiReplyObservationRuntime(
             fullInspectionDebounceMs = fullInspectionDebounceMs,
             regionRefreshDebounceMs = regionRefreshDebounceMs,
             maxEventBurstInspectionWaitMs = MAX_EVENT_BURST_INSPECTION_WAIT_MS,
-            runFullInspection = { runFullInspection() },
+            runFullInspection = {
+                if (!hasProtectedPrivateInspection()) runFullInspection()
+            },
             runRegionRefresh = ::runRegionRefresh,
             onFallbackCheckRequested = ::requestReceivedGreetingsFallbackCheck,
             onSnapshotRequested = ::requestReceivedGreetingsSnapshot,
@@ -1150,6 +1152,7 @@ class AiReplyObservationRuntime(
         // The watchdog callback is already a fresh-observation request. Schedule it through
         // the runtime-owned inspection slot so a stale/coalesced full-inspection channel cannot
         // swallow the probe while an earlier page inspection is still being retired.
+        if (hasProtectedPrivateInspection()) return
         scheduleFullInspectionAfter(
             fullInspectionDebounceMs,
             AiReplyPageReadPurpose.RECEIVED_GREETINGS
@@ -1166,6 +1169,7 @@ class AiReplyObservationRuntime(
         // snapshot immediately; adding another full-page debounce here changes the contract
         // from 350ms to 350ms + debounce and leaves LIST_CONFIRMED behind the test/runtime
         // retry boundary.
+        if (hasProtectedPrivateInspection()) return
         pendingPageReadPurpose = AiReplyPageReadPurpose.RECEIVED_GREETINGS
         runFullInspection()
     }
@@ -2045,7 +2049,11 @@ class AiReplyObservationRuntime(
                 confirmedPrivateReturnAwaitingRecovery = false
                 reanchorRestoredMessageList(inspection)
                 lastPageInspection = inspection
-                handleSessionListPage(inspection)
+                // A page recovery is not startup admission. If the startup probe was
+                // interrupted, it must collect its original three fresh samples first.
+                if (!startupReadinessCoordinator.resumeAfterPageRecovery()) {
+                    handleSessionListPage(inspection)
+                }
             } else {
                 receivedGreetingsRecoveryVerificationPending = false
                 receivedGreetingsRecoveryVerifiedForNextSnapshot = false
@@ -3251,9 +3259,17 @@ class AiReplyObservationRuntime(
         // A new recovery transaction also invalidates pending structure/OCR callbacks.
         // Their old batch cannot resume identity processing or start a draft before route proof.
         invalidatePendingMessageRead()
-        // Gesture algorithms are unchanged; only stale callback authority is revoked.
+        // Revoke callback authority BEFORE cancelling a still-active old command.
+        // The original gesture policy owns actual cancellation; never replay its path.
         sessionActionGeneration += 1L
+        val interruptedGestureRequestId = activeSessionGestureRequestId
         activeSessionGestureRequestId = null
+        if (interruptedGestureRequestId != null) {
+            gesturePolicy.cancelActive(interruptedGestureRequestId, "page_recovery:$reason")
+        }
+        if (taskId == PRIVATE_MESSAGES_TASK_ID) {
+            startupReadinessCoordinator.suspendForPageRecovery()
+        }
         incompleteUnreadRelocationWait = null
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
@@ -3281,9 +3297,13 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
         privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
         if (!isAiReplyActive() || !sessionRunStarted) return
-        if (requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, reason) || recoveryContext.pending) {
+        val created = requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, reason)
+        if (created || recoveryContext.pending) {
             onLog("统一恢复[GESTURE_RECOVERY_REQUESTED]：task=$PRIVATE_MESSAGES_TASK_ID；reason=$reason；保留检查点，继续只读观察")
-            scheduleFullInspectionAfter(delayMs)
+            if (created) scheduleFullInspectionAfter(delayMs)
+            else if (recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+                recoveryContext.routeId == messageListRecoveryRoute.routeId
+            ) schedulePendingPrivateListObservation()
         } else {
             sessionManagerState = SessionManagerState.PAUSED
             onLog("统一恢复[GESTURE_RECOVERY_UNAVAILABLE]：reason=$reason；无法建立恢复检查点，禁止继续手势")
@@ -3721,6 +3741,12 @@ class AiReplyObservationRuntime(
             regionRefreshTask?.cancel()
             regionRefreshTask = null
             pageObservationCoordinator.cancelRegionRefresh()
+            if (hasProtectedPrivateInspection()) {
+                // Route/window invalidation above still runs for every event. The
+                // explicit fresh read must not be replaced by a sliding debounce.
+                onLog("AI 页面观察[ACTIVE_RECHECK_RETAINED]：保留已排定的启动或手势复查；event=${event.type}")
+                return
+            }
             pageInspectionTask?.cancel()
             pageInspectionTask = null
             if (receivedGreetingsPageProbePending) {
@@ -6749,7 +6775,7 @@ class AiReplyObservationRuntime(
                             // two-fresh-snapshot transaction used by reconnect and UNKNOWN.
                             privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount += 1
                             onLog(
-                                "AI 会话管理[SCROLL_CANCELLED]：次数=$privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount；" +
+                                "AI 会话管理[SCROLL_CANCELLED]：次数=${privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount}；" +
                                     "不再使用硬重试上限，不假定列表已经移动"
                             )
                             recoverTransientPrivateGesture("GESTURE_SCROLL_CANCELLED", SCROLL_CANCEL_RECOVERY_DELAY_MS)
@@ -6996,6 +7022,23 @@ class AiReplyObservationRuntime(
 
     private fun hasSameTargetPackage(snapshot: ChatPageSnapshot): Boolean =
         snapshot.packageName == targetPackage()
+
+    /**
+     * Protect the existing private startup/scroll follow-up from passive observation
+     * channels. This is only a timer admission decision, never page or gesture proof.
+     */
+    private fun hasProtectedPrivateInspection(): Boolean {
+        if (pageInspectionTask == null || !sessionRunStarted || receivedGreetingsTaskActive) return false
+        val gestureRecovery = recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+            recoveryContext.routeId == messageListRecoveryRoute.routeId &&
+            (recoveryContext.reason?.startsWith("GESTURE_SCROLL_") == true ||
+                recoveryContext.reason == "GESTURE_WINDOW_CHANGED" ||
+                recoveryContext.reason == "PRIVATE_SCROLL_CALLBACK_LEASE_LOST")
+        return pendingPageReadPurpose == AiReplyPageReadPurpose.SCROLL_AFTER ||
+            gestureRecovery ||
+            (startupReadinessCoordinator.initializationPending &&
+                startupReadinessCoordinator.workAreaConfirmed && !recoveryContext.pending)
+    }
 
     private fun scheduleFullInspection() {
         scheduleFullInspectionAfter(fullInspectionDebounceMs, AiReplyPageReadPurpose.FULL_INSPECTION)

@@ -900,6 +900,26 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p4CancelledScrollKeepsAutonomousRetryThroughPassiveEvents() {
+        val fixture = capturedScrollRecoveryFixture()
+        fixture.listener.onResult(GestureExecutionResult(fixture.request.id, GestureExecutionStatus.CANCELLED))
+        runUntilLog(fixture.scheduler, fixture.logs, "GESTURE_RECOVERY_REQUESTED")
+        val saved = requireNotNull(fixture.savedCheckpoint())
+        assertTrue(fixture.scheduler.hasPendingDelay(180L))
+        repeat(4) { fixture.runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED)) }
+        assertTrue(fixture.scheduler.hasPendingDelay(180L))
+        assertTrue(fixture.logs.any { it.contains("ACTIVE_RECHECK_RETAINED") })
+        assertTrue(fixture.logs.any { it.contains("SCROLL_CANCELLED") && it.contains("次数=1") })
+        assertEquals(saved, fixture.savedCheckpoint())
+        assertEquals(1, fixture.dispatchedGestures())
+        runUntilLog(fixture.scheduler, fixture.logs, "RECOVERY_EXECUTION_READY")
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        // The original command remains cancelled; a later admitted action must be
+        // a newly computed request from the recovered list, not a replay.
+        assertTrue(fixture.logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+    }
+
+    @Test
     fun windowTransitionDuringScrollInvalidatesOldGestureCallbackAndKeepsCheckpoint() {
         val fixture = capturedScrollRecoveryFixture()
         fixture.runtime.schedule(event(AccessibilityEventType.WINDOWS_CHANGED))
@@ -907,6 +927,7 @@ class AiReplyObservationRuntimeTest {
             it.contains("GESTURE_RECOVERY_REQUESTED") && it.contains("GESTURE_WINDOW_CHANGED")
         })
         assertTrue(fixture.savedCheckpoint() != null)
+        assertEquals(listOf(fixture.request.id), fixture.cancelledRequests)
         // A delayed completion from the old window must not be interpreted as a success.
         fixture.listener.onResult(
             GestureExecutionResult(fixture.request.id, GestureExecutionStatus.COMPLETED)
@@ -2426,6 +2447,72 @@ class AiReplyObservationRuntimeTest {
         )
     }
 
+
+    @Test
+    fun p4StartupRecoveryReverifiesThreeSamplesWithoutRefundingUnconfirmedTap() {
+        val scheduler = FakeScheduler()
+        val feed = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.NON_CHAT,
+            scannedNodeCount = 60,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            screenBounds = ScreenRect(0, 0, 720, 1600),
+            sessionListNavigationTarget = testNavigationTarget(
+                "com.immomo.momo.maintab.MaintabActivity", generation = 5L
+            ),
+            windowGeneration = 5L
+        )
+        val inbox = feed.copy(
+            pageKind = ChatPageKind.CHAT_LIST,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(sessionCandidate(completeBoundaryEvidence = true, windowGeneration = 5L))
+        )
+        val port = FakeChatPort().apply {
+            page = feed
+            provideMessageTabPositionEvidence = true
+            captureMessageWorkAreaGestureOutcome = true
+        }
+        val logs = mutableListOf<String>()
+        var confirmations = 0
+        val coordinator = AiReplyStartupReadinessCoordinator(
+            scheduler = scheduler,
+            chatPagePort = port,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            isSessionRunStarted = { true },
+            inspectFreshPageSnapshot = port::inspectChatPage,
+            isMessageViewportPositionedAgainstTab = { _, _, _ -> true },
+            hasRelevantMessageStructureDelta = { _, _, _, _ -> true },
+            onConfirmed = { confirmations++ },
+            onTimedOut = {},
+            onLog = logs::add
+        )
+        coordinator.resetForRun(sessionStarted = true)
+        coordinator.beginVerification()
+        assertEquals(1, port.messageWorkAreaEntryAttempts)
+        coordinator.suspendForPageRecovery()
+        assertFalse(scheduler.hasPendingDelay(900L))
+        port.messageWorkAreaOutcomeCallbacks[0](MessageWorkAreaNavigationOutcome.DEFERRED_NOT_DISPATCHED)
+        assertTrue(coordinator.resumeAfterPageRecovery())
+        assertEquals(1, port.messageWorkAreaEntryAttempts)
+        assertFalse(coordinator.workAreaConfirmed)
+        port.page = inbox
+        scheduler.runNextWithDelay(400L)
+        assertEquals(0, confirmations)
+        scheduler.runNextWithDelay(300L)
+        assertEquals(0, confirmations)
+        scheduler.runNextWithDelay(300L)
+        assertEquals(1, confirmations)
+        assertTrue(coordinator.workAreaConfirmed)
+        assertEquals(1, port.messageWorkAreaEntryAttempts)
+    }
 
     @Test
     fun deferredMessageTabGestureDoesNotConsumeTapLimitOrAcceptOldCallback() {
@@ -6769,7 +6856,8 @@ class AiReplyObservationRuntimeTest {
         val request: GestureIntentRequest,
         val listener: GestureExecutionListener,
         val savedCheckpoint: () -> PrivateMessagesTraversalCheckpoint?,
-        val dispatchedGestures: () -> Int
+        val dispatchedGestures: () -> Int,
+        val cancelledRequests: List<String>
     )
 
     private fun capturedScrollRecoveryFixture(): CapturedScrollRecoveryFixture {
@@ -6797,6 +6885,7 @@ class AiReplyObservationRuntimeTest {
         var request: GestureIntentRequest? = null
         var listener: GestureExecutionListener? = null
         var dispatchCount = 0
+        val cancelledRequests = mutableListOf<String>()
         var saved: PrivateMessagesTraversalCheckpoint? = null
         val repo = object : PrivateMessagesTraversalCheckpointRepository {
             override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = saved
@@ -6810,6 +6899,11 @@ class AiReplyObservationRuntimeTest {
             chatMessagePort = port,
             chatSessionManagementPort = port,
             gesturePolicy = object : TestGestureApi {
+                override fun cancelActive(commandId: String, reason: String): Boolean {
+                    cancelledRequests += commandId
+                    return true
+                }
+
                 override fun execute(
                     command: GestureIntentRequest,
                     callback: GestureExecutionListener
@@ -6834,7 +6928,7 @@ class AiReplyObservationRuntimeTest {
         runUntil(scheduler, 60) { request?.intent is GestureIntent.VerticalSwipe && listener != null }
         return CapturedScrollRecoveryFixture(
             scheduler, runtime, logs, requireNotNull(request), requireNotNull(listener),
-            { saved }, { dispatchCount }
+            { saved }, { dispatchCount }, cancelledRequests
         )
     }
 
