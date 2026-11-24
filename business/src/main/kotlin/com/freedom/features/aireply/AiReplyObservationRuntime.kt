@@ -3644,20 +3644,11 @@ class AiReplyObservationRuntime(
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         resetPollingRound()
         receivedGreetingsTaskFlow.reset()
-        val startupGreetingsStatus = if (supportsReceivedGreetingsStartup && sessionRunStarted) {
-            runCatching { receivedGreetingsTaskFlow.observeManuallyOpenedPage() }
-                .getOrDefault(ReceivedGreetingsPageArrivalStatus.UNKNOWN)
-        } else {
-            ReceivedGreetingsPageArrivalStatus.NOT_TARGET
-        }
+        // Keep the existing lease lifecycle for compatibility, but do not perform any UI action
+        // until the first fresh page event has classified the visible business route.
         receivedGreetingsPageProbePending = sessionRunStarted && supportsReceivedGreetingsStartup
-        val startupPageBelongsToGreetings = startupGreetingsStatus in setOf(
-            ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED,
-            ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE,
-            ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING
-        )
-        if (sessionRunStarted && (!supportsReceivedGreetingsStartup || !startupPageBelongsToGreetings) &&
-            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动页面未确认收到招呼列表")
+        if (sessionRunStarted &&
+            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "等待首次页面事件确认任务归属")
         ) {
             sessionRunStarted = false
             onLog("AI Reply 启动暂停：私人消息任务未取得唯一 UI 操作权；不会执行自动滚动或打开会话")
@@ -3723,12 +3714,9 @@ class AiReplyObservationRuntime(
                     scheduleFullInspectionAfter(0L)
                 } else if (supportsReceivedGreetingsStartup) {
                     onLog(
-                        "AI Reply 启动页面探针：先读取当前页面并确认任务归属；" +
-                            "收到的招呼页面优先由收到招呼任务接管，普通消息列表再申请私人消息租约"
+                        "AI Reply 启动页面探针：等待首个新鲜页面事件确认任务归属；" +
+                            "收到的招呼页面优先转交收到招呼任务，普通消息列表保持私人消息租约"
                     )
-                    // The first fresh snapshot decides the visible business owner. No task may
-                    // claim the UI slot before a supported adapter has classified the page.
-                    scheduleFullInspectionAfter(0L, AiReplyPageReadPurpose.RECEIVED_GREETINGS)
                 } else if (chatPagePort.supportsVerifiedMessageWorkAreaNavigation()) {
                     startupReadinessCoordinator.beginVerification()
                 } else {
