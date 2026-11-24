@@ -922,6 +922,117 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun p8CombinedRecoveryMustResolveBothBlockersBeforeNextFullPollingRound() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val processedA = candidate(0, "Processed A", ChatUnreadStatus.READ)
+        val unknownB = candidate(1, "Unknown B", ChatUnreadStatus.UNKNOWN)
+        val incompleteC = candidate(2, "Incomplete C", ChatUnreadStatus.UNREAD,
+            previewBoundsValid = false)
+        val newD = candidate(3, "New D", ChatUnreadStatus.UNREAD)
+        val blockedIdentity = key(candidate(4, "Identity collision", ChatUnreadStatus.UNREAD))
+
+        executor.beginNextPollingRound()
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.lockedUnreadSetFinalized = true
+        executor.checkpointRunGeneration = 17L
+        executor.checkpointLastSuccessfulTaskId = "confirmed-prior-send"
+        executor.attemptedSessionKeys += key(processedA)
+        executor.lockedUnreadSessionKeys += key(processedA)
+        executor.ambiguousSessionIdentityKeys += blockedIdentity
+        assertTrue(executor.observeUnreadBlockers(snapshot(unknownB)))
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(incompleteC)))
+
+        // Simulate a service/process restart by discarding all in-memory executors.
+        val saved = executor.checkpoint()
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(saved) }
+        assertTrue(restored.fullListPollingRoundRequired)
+        assertEquals(saved.unresolvedUnknownUnreadKeys, restored.unresolvedUnknownUnreadKeys)
+        assertEquals(saved.unresolvedIncompleteUnreadKeys, restored.unresolvedIncompleteUnreadKeys)
+        assertEquals(saved.attemptedSessionKeys, restored.attemptedSessionKeys)
+        assertEquals(saved.lockedUnreadSessionKeys, restored.lockedUnreadSessionKeys)
+        assertEquals("confirmed-prior-send", restored.checkpointLastSuccessfulTaskId)
+        assertTrue(restored.ambiguousSessionIdentityKeys.contains(blockedIdentity))
+
+        // A different clean viewport cannot release either saved blocker.
+        assertTrue(restored.observeUnreadBlockers(snapshot(
+            candidate(5, "Different read row", ChatUnreadStatus.READ)
+        )))
+        assertTrue(restored.observeIncompleteUnreadEvidence(snapshot(
+            candidate(5, "Different read row", ChatUnreadStatus.READ)
+        )))
+        assertTrue(runCatching { restored.beginNextPollingRound() }.isFailure)
+        assertEquals(setOf(key(processedA)), restored.attemptedSessionKeys)
+
+        // The original UNKNOWN viewport and incomplete row each need new explicit proof.
+        assertFalse(restored.observeUnreadBlockers(snapshot(
+            candidate(1, "Unknown B", ChatUnreadStatus.READ)
+        )))
+        assertTrue(restored.observeIncompleteUnreadEvidence(snapshot(
+            candidate(5, "Different read row", ChatUnreadStatus.READ)
+        )))
+        assertTrue(runCatching { restored.beginNextPollingRound() }.isFailure)
+        assertFalse(restored.observeIncompleteUnreadEvidence(snapshot(
+            candidate(2, "Incomplete C", ChatUnreadStatus.UNREAD, previewBoundsValid = true)
+        )))
+
+        // Only now may a new round retire old A's selection cursor, not its send receipt
+        // or the run-scoped identity conflict.
+        restored.beginNextPollingRound()
+        assertTrue(restored.attemptedSessionKeys.isEmpty())
+        assertTrue(restored.lockedUnreadSessionKeys.isEmpty())
+        assertTrue(restored.fullListPollingRoundRequired)
+        assertTrue(restored.ambiguousSessionIdentityKeys.contains(blockedIdentity))
+        assertEquals("confirmed-prior-send", restored.checkpointLastSuccessfulTaskId)
+        assertEquals(17L, restored.checkpointRunGeneration)
+        assertEquals(null, restored.checkpointNextCursorKey)
+        restored.initialInboxTopPositioningCompleted = true
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.FIRST_SWIPE_REQUIRED,
+            restored.evaluateUnreadAdmission(snapshot(newD)))
+        restored.initialUnreadGateSwipeCompleted = true
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            restored.evaluateUnreadAdmission(snapshot(newD)))
+        assertEquals(setOf(key(newD)), restored.lockedUnreadSessionKeys)
+        restored.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        restored.lockedUnreadSetFinalized = true
+        assertEquals(newD, restored.evaluateListSnapshot(snapshot(newD), false, 2).nextCandidate)
+    }
+
+    @Test
+    fun p8RestoredReanchorKeepsConfirmedAttemptAndNeverReusesOldSessionNode() {
+        val original = candidate(0, "Sent session", ChatUnreadStatus.UNREAD, top = 100)
+        val moved = candidate(3, "Sent session", ChatUnreadStatus.UNREAD, top = 900)
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.initialInboxTopPositioningCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.attemptedSessionKeys += key(original)
+        executor.lockedUnreadSessionKeys += key(original)
+        executor.checkpointLastSuccessfulTaskId = "confirmed-send-unchanged"
+        executor.rememberRecoveryAnchor(original)
+        executor.lastStableSessionListVisibleKeys = executor.visibleSessionKeys(snapshot(original))
+        executor.beginSession(original, key(original), "obsolete-window")
+        executor.pendingScrollBaseline = executor.visibleSessionKeys(snapshot(original))
+
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(executor.checkpoint()) }
+        assertEquals(null, restored.currentSessionCandidate)
+        assertEquals(null, restored.currentSessionKey)
+        assertEquals(null, restored.pendingScrollBaseline)
+        assertFalse(restored.isRestoredViewportCompatible(snapshot(moved)))
+        assertEquals(
+            PrivateMessagesTraversalTaskExecutor.RestoreReanchorStatus.REANCHORED,
+            restored.reanchorRestoredCheckpoint(snapshot(moved)).status
+        )
+        assertEquals(setOf(key(original)), restored.attemptedSessionKeys)
+        assertEquals(setOf(key(original)), restored.lockedUnreadSessionKeys)
+        assertEquals("confirmed-send-unchanged", restored.checkpointLastSuccessfulTaskId)
+        assertEquals(null, restored.selectNextCandidate(
+            snapshot(moved).chatListCandidates, restored.lockedUnreadSessionKeys
+        ))
+    }
+
+    @Test
     fun restoredViewportMismatchReanchorsBySessionNameWithoutReusingCoordinates() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val saved = candidate(0, "Alice", ChatUnreadStatus.UNREAD, top = 100)
