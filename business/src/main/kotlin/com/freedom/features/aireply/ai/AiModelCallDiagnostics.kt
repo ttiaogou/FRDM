@@ -41,7 +41,7 @@ data class AiModelCallDiagnostics(
     val responseContentState: String? = null,
     val responseFinishReason: String? = null,
     val responseInputTokens: Int? = null,
-    val responseOutputTokens: Int? = null
+    val responseOutputTokens: Int? = null,
     val responseReasoningContentState: String? = null
 ) {
     fun logFields(): String = "safeCode=${safeToken(safeCode)}；failureStage=${stage.name}；" +
