@@ -177,6 +177,25 @@ class ReceivedGreetingsTaskFlowControllerTest {
         assertFalse(flow.returnRequested)
     }
 
+    @Test
+    fun confirmedInboxCleanupIsIdempotentUntilLeaseHandoffCompletes() {
+        val port = FakePagePort()
+        val flow = createFlow(port)
+        assertTrue(flow.claimOwnership("start"))
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
+        flow.markTraversalCompleted()
+        flow.markReturnRequested()
+        assertTrue(flow.confirmCompletionReturn())
+        assertTrue(flow.confirmCompletionReturn())
+        assertEquals(1, port.confirmedReturns)
+        assertTrue(flow.isActive)
+        assertTrue(flow.awaitingNormalInboxAfterReturn)
+        assertEquals(ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION, flow.returnForPriorityCheck())
+        flow.markTraversalReturnedToInbox()
+        assertFalse(flow.confirmCompletionReturn())
+        assertFalse(flow.isActive)
+    }
+
     private fun createFlow(port: FakePagePort): ReceivedGreetingsTaskFlowController {
         val ownership = AiReplyTaskOwnership(
             coordinator = TaskCoordinator(UiOperationOwnershipCoordinator()),
@@ -191,6 +210,7 @@ class ReceivedGreetingsTaskFlowControllerTest {
         var navigationStarts = 0
         var idleSteps = 0
         var currentListStarts = 0
+        var confirmedReturns = 0
         var status = ReceivedGreetingsTraversalStatus.SCANNING
         var stepAccepted = true
         var workflowSupported = true
@@ -208,6 +228,10 @@ class ReceivedGreetingsTaskFlowControllerTest {
         }
         override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult =
             ReceivedGreetingsBackResult.BACK_SUBMITTED
+        override fun confirmReceivedGreetingsCompletionReturn(): Boolean {
+            confirmedReturns++
+            return true
+        }
         override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean = true
         override fun observeManuallyOpenedReceivedGreetingsPage(): ReceivedGreetingsPageArrivalStatus =
             ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED

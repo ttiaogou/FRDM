@@ -13,13 +13,16 @@ internal class ReceivedGreetingsTaskController(
         const val TASK_ID = "AI_REPLY_RECEIVED_GREETINGS"
     }
 
-    private enum class Lifecycle { IDLE, TRAVERSING, RETURN_PENDING, RETURN_REQUESTED }
+    private enum class Lifecycle { IDLE, TRAVERSING, RETURN_PENDING, RETURN_REQUESTED, INBOX_CONFIRMED }
 
     private var lifecycle = Lifecycle.IDLE
     val isActive: Boolean
         get() = lifecycle != Lifecycle.IDLE
     val awaitingNormalInboxAfterReturn: Boolean
-        get() = lifecycle == Lifecycle.RETURN_PENDING || lifecycle == Lifecycle.RETURN_REQUESTED
+        get() = lifecycle == Lifecycle.RETURN_PENDING || lifecycle == Lifecycle.RETURN_REQUESTED ||
+            lifecycle == Lifecycle.INBOX_CONFIRMED
+    val inboxConfirmed: Boolean
+        get() = lifecycle == Lifecycle.INBOX_CONFIRMED
     val returnRequested: Boolean
         get() = lifecycle == Lifecycle.RETURN_REQUESTED
 
@@ -45,6 +48,11 @@ internal class ReceivedGreetingsTaskController(
     /** The adapter accepted a return step; this is not proof of arrival. */
     fun markReturnRequested() {
         if (lifecycle == Lifecycle.RETURN_PENDING) lifecycle = Lifecycle.RETURN_REQUESTED
+    }
+
+    /** Adapter cleanup was acknowledged; lease handoff may still need retry. */
+    fun markInboxConfirmed() {
+        if (awaitingNormalInboxAfterReturn) lifecycle = Lifecycle.INBOX_CONFIRMED
     }
 
     fun markTraversalReturnedToInbox() {

@@ -119,14 +119,21 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun performInitialIdleStep(): Boolean = executor.performIdleStep()
 
-    fun returnForPriorityCheck(): ReceivedGreetingsBackResult = executor.returnForPriorityCheck()
+    fun returnForPriorityCheck(): ReceivedGreetingsBackResult =
+        if (lifecycle.inboxConfirmed) ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
+        else executor.returnForPriorityCheck()
 
     fun isCompletionReturnIntermediate(): Boolean =
         lifecycle.awaitingNormalInboxAfterReturn && lifecycle.returnRequested &&
             executor.isCompletionReturnIntermediate()
 
-    fun confirmCompletionReturn(): Boolean =
-        lifecycle.awaitingNormalInboxAfterReturn && executor.confirmCompletionReturn()
+    fun confirmCompletionReturn(): Boolean {
+        if (!lifecycle.awaitingNormalInboxAfterReturn || !lifecycle.ownsTask()) return false
+        if (lifecycle.inboxConfirmed) return true
+        if (!executor.confirmCompletionReturn()) return false
+        lifecycle.markInboxConfirmed()
+        return true
+    }
 
     fun completeDetailInspection(success: Boolean): Boolean =
         executor.completeDetailInspection(success)

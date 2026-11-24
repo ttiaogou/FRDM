@@ -988,6 +988,9 @@ class AiReplyObservationRuntimeTest {
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
         runUntilLog(scheduler, logs, "收到的招呼返回恢复[RESUMED]")
         assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        runUntilLog(scheduler, logs, "跨任务交接[INBOX_VERIFYING]")
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
         runUntilLog(scheduler, logs, "跨任务恢复[PRIVATE_CHECKPOINT_REARMED]")
         assertEquals(1, port.receivedGreetingsConfirmedReturns)
         assertEquals(null, ownership.activeTaskId())
@@ -4099,6 +4102,15 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("首次成功向上滑动后的视口没有明确未读") })
         assertFalse(logs.any { it.contains("底部边界经延迟独立快照复核通过") })
         assertFalse(logs.any { it.contains("随机待机") || it.contains("模拟回复人数") || it.contains("模拟处理目标") })
+
+        // A fully searched but absent greeting entry is normal completion in the inbox.
+        port.provideMessageTabPositionEvidence = true
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND
+        runUntilLog(scheduler, logs, "跨任务交接[ENTRY_ABSENT]")
+        runUntilLog(scheduler, logs, "跨任务交接[PRIVATE_LEASE_TRANSFERRED]")
+        assertEquals(0, port.receivedGreetingsPriorityReturns)
+        assertEquals(1, port.receivedGreetingsConfirmedReturns)
+        assertTrue(logs.any { it.contains("AI Reply 低频待机") })
     }
 
     @Test
@@ -5144,6 +5156,15 @@ class AiReplyObservationRuntimeTest {
         assertEquals(ordinaryList, port.page)
         assertTrue(logs.any { it.contains("返回步骤已受理") })
         assertFalse(logs.any { it.contains("模拟回复人数") })
+
+        port.provideMessageTabPositionEvidence = true
+        runUntilLog(scheduler, logs, "跨任务交接[INBOX_VERIFYING]")
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        runUntilLog(scheduler, logs, "跨任务交接[PRIVATE_LEASE_TRANSFERRED]")
+        assertEquals(1, port.receivedGreetingsConfirmedReturns)
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertTrue(logs.any { it.contains("AI Reply 低频待机") })
     }
 
     @Test

@@ -206,6 +206,7 @@ class AiReplyObservationRuntime(
         private const val MESSAGE_LIST_RECOVERY_ROUTE_ID = "AI_REPLY_MESSAGE_LIST_RECOVERY"
         private const val CROSS_TASK_GREETING_HANDOFF_GATE = "AI_REPLY_PRIVATE_TO_GREETINGS_HANDOFF"
         private const val GREETINGS_RETURN_RECOVERY_REASON = "GREETING_COMPLETION_RETURN"
+        private const val GREETINGS_TO_PRIVATE_HANDOFF_GATE = "AI_REPLY_GREETINGS_TO_PRIVATE_HANDOFF"
         private val PAGE_CHANGE_RECHECK_EVENT_TYPES = setOf(
             AccessibilityEventType.WINDOW_STATE_CHANGED,
             AccessibilityEventType.WINDOWS_CHANGED,
@@ -1417,24 +1418,27 @@ class AiReplyObservationRuntime(
             }
         }
 
-        // A completed greetings task may reveal the original inbox again. Re-arm its
-        // saved private checkpoint BEFORE normal inbox dispatch can claim a lease or scroll.
-        if (tryRearmSuspendedPrivateRecovery(observation, inspection, matchedRouteId)) {
+        // Both normal completion and suspended-private recovery cross one handoff gate.
+        // A CHAT_LIST candidate alone never grants a private task lease.
+        val inboxReturnCandidate = sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn &&
+            inspection.pageKind == ChatPageKind.CHAT_LIST
+        val verifiedGreetingsInboxReturn = if (inboxReturnCandidate) {
+            if (!verifyGreetingsToPrivateHandoff(observation, inspection, matchedRouteId)) {
+                lastPageInspection = inspection
+                return
+            }
+            true
+        } else {
+            pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
+            false
+        }
+        // The original private checkpoint must take precedence over a fresh private round.
+        if (verifiedGreetingsInboxReturn &&
+            tryRearmSuspendedPrivateRecovery(observation, inspection, matchedRouteId)
+        ) {
             lastPageInspection = inspection
-            scheduleFullInspectionAfter(0L)
             return
         }
-        // A completed traversal is still an active greetings task. Only independently
-        // confirmed ordinary inbox evidence may authorize its existing return handoff.
-        val verifiedGreetingsInboxReturn = sessionRunStarted && receivedGreetingsTaskActive &&
-            awaitingNormalInboxAfterGreetingsReturn && ownsTask(RECEIVED_GREETINGS_TASK_ID) &&
-            !recoveryContext.pending && !isSendConfirmationPending() && !isConversationDraftPending() &&
-            matchedRouteId == messageListRecoveryRoute.routeId &&
-            observation.status == ObservationStatus.CONFIRMED_PAGE &&
-            inspection.packageName == targetPackage() &&
-            inspection.pageKind == ChatPageKind.CHAT_LIST &&
-            inspection.messageTabPositionKey() != null &&
-            inspection.messageTabAnchorPositionKey() != null
         // A list BACK may first reveal its verified entry-card surface. Only this
         // transaction-scoped adapter proof can admit that normal intermediate transition.
         val verifiedGreetingsReturnIntermediate = sessionRunStarted &&
@@ -2019,8 +2023,18 @@ class AiReplyObservationRuntime(
             val decision = receivedGreetingsTaskFlow.evaluatePageSnapshot(inspection.pageKind)
             when (decision.kind) {
                 ReceivedGreetingsTaskFlowController.DecisionKind.ENTRY_NOT_FOUND -> {
-                    sessionManagerState = SessionManagerState.PAUSED
                     onLog("收到的招呼入口未发现：普通消息列表已完成双向搜索并复核两端边界；这是已确认的入口缺失结果，不是单次页面核验失败")
+                    if (observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                        inspection.packageName == targetPackage() &&
+                        inspection.pageKind == ChatPageKind.CHAT_LIST &&
+                        matchedRouteId == messageListRecoveryRoute.routeId
+                    ) {
+                        receivedGreetingsTaskFlow.markTraversalCompleted()
+                        onLog("跨任务交接[ENTRY_ABSENT]：本轮招呼入口搜索完成；在普通消息列表验证后交还私聊任务")
+                        scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
+                    } else {
+                        scheduleReceivedGreetingsRecoveryRetry("入口缺失结果尚未获得普通消息列表独立复核")
+                    }
                     return
                 }
                 ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE -> {
@@ -2117,8 +2131,7 @@ class AiReplyObservationRuntime(
                             scheduleReceivedGreetingsRecoveryRetry("返回已确认，等待原有跨任务租约交接")
                             return
                         }
-                        receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
-                        sessionActionGeneration += 1L
+                        finishGreetingsToPrivateHandoff()
                         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
                         // The greeting branch returned to the already-established inbox context.
                         // Preserve the existing traversal memory; only the open conversation and
@@ -2131,6 +2144,7 @@ class AiReplyObservationRuntime(
                         val eligibleUnknown = inspection.chatListCandidates.count {
                             it.unreadStatus == ChatUnreadStatus.UNKNOWN && ChatSessionManagementPolicy.isEligible(it)
                         }
+                        onLog("跨任务交接[PRIVATE_LEASE_TRANSFERRED]：普通消息列表已双快照确认；私聊任务取得唯一操作权")
                         onLog("AI Reply 测试遍历：收到的招呼列表已返回普通消息页；当前位置明确未读=$eligibleUnread；未知=$eligibleUnknown")
                         when {
                             eligibleUnknown > 0 -> {
@@ -2546,6 +2560,56 @@ class AiReplyObservationRuntime(
      * NOT resume the private task: the existing checkpoint verifier must still obtain its
      * own two fresh list samples, Android READY and the unique UI lease.
      */
+    private fun verifyGreetingsToPrivateHandoff(
+        observation: ObservationResult,
+        inspection: ChatPageSnapshot,
+        matchedRouteId: String?
+    ): Boolean {
+        val gate = GREETINGS_TO_PRIVATE_HANDOFF_GATE
+        val key = inspection.messageTabPositionKey()
+        if (!sessionRunStarted || !isAiReplyActive() || userInteractionActive ||
+            recoveryContext.pending || !receivedGreetingsTaskActive ||
+            !awaitingNormalInboxAfterGreetingsReturn || !ownsTask(RECEIVED_GREETINGS_TASK_ID) ||
+            isSendConfirmationPending() || isConversationDraftPending() ||
+            observation.status != ObservationStatus.CONFIRMED_PAGE ||
+            inspection.packageName != targetPackage() || inspection.pageKind != ChatPageKind.CHAT_LIST ||
+            matchedRouteId != messageListRecoveryRoute.routeId ||
+            key.isNullOrBlank() || inspection.messageTabAnchorPositionKey() == null
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            scheduleReceivedGreetingsRecoveryRetry("跨任务交接尚未确认普通消息列表、任务租约或未决发送/草稿状态")
+            return false
+        }
+        if (!ensureAndroidRecoveryReady(inspection, "GREETINGS_TO_PRIVATE_HANDOFF")) {
+            pageRecoveryVerificationGate.reset(gate)
+            return false
+        }
+        if (!pageRecoveryVerificationGate.observe(gate, key)) {
+            onLog("跨任务交接[INBOX_VERIFYING]：第1/2次新鲜普通消息列表快照；保留招呼租约，不执行私聊动作")
+            scheduleFullInspectionAfter(350L)
+            return false
+        }
+        if (!ensureAndroidRecoveryReady(inspection, "GREETINGS_TO_PRIVATE_BEFORE_TRANSFER")) {
+            pageRecoveryVerificationGate.reset(gate)
+            return false
+        }
+        return true
+    }
+
+    /** Retire only old task callbacks and transient page evidence; never discard private cursor. */
+    private fun finishGreetingsToPrivateHandoff() {
+        receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
+        pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
+        sessionActionGeneration += 1L
+        invalidatePendingMessageRead()
+        sessionTransitionTask?.cancel()
+        sessionTransitionTask = null
+        receivedGreetingsPageProbePending = false
+        receivedGreetingsRecoveryRetryAttempt = 0
+        pendingNavigationSourceResult = null
+        unmatchedNavigationObservationPending = false
+    }
+
     private fun tryRearmSuspendedPrivateRecovery(
         observation: ObservationResult,
         inspection: ChatPageSnapshot,
@@ -2562,6 +2626,7 @@ class AiReplyObservationRuntime(
         ) return false
         if (suspended.runGeneration != currentRunGeneration()) {
             onLog("跨任务恢复[PRIVATE_CHECKPOINT_STALE_RUN]：运行代次不一致；不恢复旧任务或复用窗口")
+            scheduleReceivedGreetingsRecoveryRetry("原私聊检查点运行代次不匹配")
             return true
         }
         val checkpoint = privateMessagesCheckpointRepository?.load() ?: messageListCheckpointForUnified
@@ -2581,8 +2646,7 @@ class AiReplyObservationRuntime(
             return true
         }
         privateMessagesTraversalTaskExecutor.restore(checkpoint)
-        receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
-        sessionActionGeneration += 1L
+        finishGreetingsToPrivateHandoff()
         releaseTaskOwnership("收到的招呼任务已确认返回普通消息路由；恢复原私聊检查点")
         suspendedPrivateRecovery = null
         sessionManagerState = SessionManagerState.PAUSED
@@ -2592,6 +2656,7 @@ class AiReplyObservationRuntime(
                 "checkpointId=${suspended.checkpointId}；原游标已恢复；" +
                 "等待Android READY、双快照验证与UI操作权，尚未执行滚动"
         )
+        scheduleFullInspectionAfter(0L)
         return true
     }
 
@@ -3373,6 +3438,7 @@ class AiReplyObservationRuntime(
             recoverTransientPrivateGesture("GESTURE_WINDOW_CHANGED")
         }
         if (windowTransition && awaitingNormalInboxAfterGreetingsReturn) {
+            pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
             invalidateGreetingsCompletionReturnEvidence()
         }
         if (windowTransition && recoveryContext.pending) {
@@ -4897,8 +4963,12 @@ class AiReplyObservationRuntime(
             reason = "切换收到的招呼任务",
             begin = { receivedGreetingsTaskFlow.beginNavigationTask() }
         )
-        if (start != ReceivedGreetingsTaskFlowController.StartResult.STARTED) return
+        if (start != ReceivedGreetingsTaskFlowController.StartResult.STARTED) {
+            recoverRetryablePrivateList("GREETING_HANDOFF_${start.name}")
+            return
+        }
         sessionActionGeneration += 1L
+        pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
         val ordinarySessionClickCount = privateMessagesTraversalTaskExecutor.sessionActionCount
@@ -5052,6 +5122,7 @@ class AiReplyObservationRuntime(
 
     private fun holdGreetingsCompletionReturn(reason: String) {
         if (!sessionRunStarted || !awaitingNormalInboxAfterGreetingsReturn) return
+        pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
         invalidateGreetingsCompletionReturnEvidence()
         if (!recoveryContext.pending) {
             requestUnifiedPauseAndCheckpoint(RECEIVED_GREETINGS_TASK_ID, "$GREETINGS_RETURN_RECOVERY_REASON:$reason")
