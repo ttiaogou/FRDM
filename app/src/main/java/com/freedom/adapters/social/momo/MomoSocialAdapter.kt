@@ -3101,7 +3101,7 @@ internal class MomoSocialAdapter(
             )
         )
         if (tree == null || tree.window.packageName != targetPackage ||
-            !isSayHiProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)) {
+            tree.window.windowId < 0 || !accessibilityGateway.isWindowCurrent(tree.window)) {
             if (ageMs < SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
             sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
             sessionComponents.sampleStore.persistSayHiIdentityResult(
@@ -3126,7 +3126,20 @@ internal class MomoSocialAdapter(
             return returnFromSayHiIdentityProfile(true)
         }
 
+        // Read identity evidence first; the full profile surface is a gesture/BACK safety
+        // concern, not a prerequisite for reading a unique ID from the avatar destination.
         val readout = MomoSayHiPlatformIdentityParser.parse(tree.nodes)
+        if (tree.window.windowId == selected.sourceWindow.windowId &&
+            tree.window.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY &&
+            !isSayHiProfileTree(tree)
+        ) {
+            // A completed tap is not proof that we left the source list. Same-window
+            // profile layouts retain their existing structural evidence requirement.
+            if (ageMs >= SAYHI_PROFILE_PAGE_TIMEOUT_MS && isReceivedGreetingsListConfirmed()) {
+                return returnFromSayHiIdentityProfile(false)
+            }
+            return true
+        }
         if (readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED) {
             val resolved = sessionComponents.contactIdentityManager.resolveSnapshot(
                 snapshotId = "sayhi-${System.currentTimeMillis()}-${selected.rowKey.take(12)}",
@@ -3162,7 +3175,7 @@ internal class MomoSocialAdapter(
         }
 
         if (!sayHiProfileScrollAttempted) {
-            // The full fresh profile fingerprint and active window were verified above.
+            // The ID is missing; only the existing safe profile-scroll path may move the UI.
             // A deferred swipe must not be resubmitted on every identical observation.
             if (!sayHiProfileDeferredRetryGate.mayAttempt(tree.window, SystemClock.uptimeMillis())) {
                 return true
@@ -3192,8 +3205,11 @@ internal class MomoSocialAdapter(
     /** Dispatches the one allowed upward profile scroll through the shared gesture policy path. */
     private fun dispatchSayHiProfileIdentityScroll(tree: AccessibilityTreeSnapshot): Boolean {
         if (sayHiProfileScrollAttempted) return true
-        sayHiProfileScrollAttempted = true
         val selected = sayHiSelectedGreeting ?: return false
+        if (!isSayHiProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)) {
+            onLog("收到招呼身份采集：资料页滑动安全条件尚未确认；等待新鲜快照，不消耗滑动机会")
+            return true
+        }
         val metrics = accessibilityGateway.displayMetrics()
         val decision = MomoSayHiProfileScrollPolicy.resolveViewport(
             nodes = tree.nodes,
@@ -3202,6 +3218,10 @@ internal class MomoSocialAdapter(
         )
         val viewport = decision.viewport
         if (viewport == null) {
+            if (System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs < SAYHI_PROFILE_PAGE_TIMEOUT_MS) {
+                onLog("收到招呼身份采集：安全滑动视口暂不可用；reason=${decision.reason}；等待新鲜快照，不消耗滑动机会")
+                return true
+            }
             sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
             sessionComponents.sampleStore.persistSayHiIdentityResult(
                 selected.rowKey, selected.displayName, sayHiSelectedIdentityStatus,
@@ -3226,8 +3246,8 @@ internal class MomoSocialAdapter(
             // No platform gesture was submitted. Preserve the one permitted scroll attempt for
             // a later fresh snapshot instead of consuming it on a stale execution context.
             sayHiProfileScrollAttempted = false
-            sayHiProfileScrollFailed = true
-            onLog("收到招呼身份采集：资料页滑动坐标上下文已失效；不使用旧视口")
+            sayHiProfileScrollFailed = false
+            onLog("收到招呼身份采集：资料页滑动坐标上下文已失效；等待新鲜快照，不使用旧视口")
             return true
         }
         val request = GestureIntentRequest(
@@ -3263,6 +3283,7 @@ internal class MomoSocialAdapter(
                 sayHiProfileScrollInFlight = false
                 sayHiProfileScrollRequestId = null
                 if (result.status == GestureExecutionStatus.COMPLETED) {
+                    sayHiProfileScrollAttempted = true
                     sayHiProfileDeferredRetryGate.reset()
                     sayHiProfileScrollFailed = false
                     sayHiProfileScrollSettledAtMs = System.currentTimeMillis()

@@ -207,6 +207,33 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
+    fun momoGreetingProfileReadsIdBeforeRequiringScrollSafetyAndCountsOnlyCompletedSwipe() {
+        val source = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt").readText()
+        val scan = source.substringAfter("private fun inspectPendingSayHiAvatarProfile(")
+            .substringBefore("private fun dispatchSayHiProfileIdentityScroll(")
+        val scroll = source.substringAfter("private fun dispatchSayHiProfileIdentityScroll(")
+            .substringBefore("private fun isSayHiProfileTree(")
+        val parse = scan.indexOf("MomoSayHiPlatformIdentityParser.parse(tree.nodes)")
+        val currentWindow = scan.indexOf("!accessibilityGateway.isWindowCurrent(tree.window)")
+        val sourceWindow = scan.indexOf("tree.window.windowId == selected.sourceWindow.windowId")
+        val fingerprint = scan.indexOf("!isSayHiProfileTree(tree)")
+        val confirmed = scan.indexOf("if (readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED)")
+        val missingScroll = scan.indexOf("return dispatchSayHiProfileIdentityScroll(tree)")
+        assertTrue("Only current target snapshots may be parsed", currentWindow >= 0 && parse > currentWindow)
+        assertTrue("Read ID before any complete-profile fingerprint gate", parse >= 0 && fingerprint > parse)
+        assertTrue("Unchanged source window must not bind an identity", sourceWindow > parse && confirmed > sourceWindow)
+        assertTrue("Resolve and save a confirmed ID before considering any swipe", confirmed > parse && missingScroll > confirmed)
+        assertTrue("Missing ID must use existing profile/active-window safety checks", scroll.contains("!isSayHiProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)"))
+        val unavailable = scroll.substringAfter("if (viewport == null) {").substringBefore("sayHiSelectedIdentityStatus =")
+        assertTrue("Transient missing viewport must wait without consuming the swipe", unavailable.contains("SAYHI_PROFILE_PAGE_TIMEOUT_MS") && unavailable.contains("return true"))
+        val completed = scroll.indexOf("if (result.status == GestureExecutionStatus.COMPLETED)")
+        val consumed = scroll.indexOf("sayHiProfileScrollAttempted = true")
+        val deferred = scroll.indexOf("else if (result.status == GestureExecutionStatus.DEFERRED)")
+        assertTrue("Only a completed swipe consumes the single swipe opportunity", completed >= 0 && consumed > completed && deferred > consumed)
+        assertEquals(1, Regex("sayHiProfileScrollAttempted = true").findAll(scroll).count())
+    }
+
+    @Test
     fun momoProfileBackRebuildsRowTargetAndRebindsCurrentWindowGenerationOnlyAfterRevalidation() {
         val adapter = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt")
         val source = adapter.readText()
