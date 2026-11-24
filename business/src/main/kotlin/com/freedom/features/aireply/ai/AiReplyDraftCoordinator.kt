@@ -145,7 +145,7 @@ class AiReplyDraftCoordinator(
     /** Requests the existing read-only page observer after a correlated platform completion. */
     private val onSendConfirmationObservationRequested: () -> Unit = {},
     /** Greeting flow can provide the last verified message observation immediately before send. */
-    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
+    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null },
     /** Private-message flow uses the same pre-send diff baseline contract. */
     private val capturePrivatePreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
 ) {
@@ -1666,12 +1666,14 @@ class AiReplyDraftCoordinator(
                 ))
             }
         }
-        replyTaskRepository?.updateStatus(
-            candidate.requestKey,
-            candidate.requestId,
-            ReplyTaskStatus.SENT,
-            nowMillis()
-        )
+        candidate.sendRequestKey?.let { requestKey ->
+            replyTaskRepository?.updateStatus(
+                requestKey,
+                candidate.requestId,
+                ReplyTaskStatus.SENT,
+                nowMillis()
+            )
+        }
     }
 
     fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): SendConfirmationResult {
