@@ -2601,6 +2601,141 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.sessionListSamples)
     }
 
+    /** A no-op gesture must not poison the traverser's attempted-session checkpoint. */
+    @Test
+    fun acceptedTapThatNeverNavigatesRetriesSameUnreadSessionAfterFreshListRecovery() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            page = inbox
+        }
+        val logs = ArrayList<String>()
+        var tapCount = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) {
+                        tapCount++
+                        if (tapCount == 2) port.page = chatDetailSnapshot()
+                    }
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 160) { logs.any { it.contains("NO_NAVIGATION_RECOVERY") } }
+        val traversal = AiReplyObservationRuntime::class.java.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(runtime) as PrivateMessagesTraversalTaskExecutor
+        val selectedKey = com.freedom.features.aireply.ports.ChatSessionManagementPolicy.stableSessionKey(candidate)
+        assertEquals(1, tapCount)
+        assertFalse("No-op tap must not stay in attempted-session memory",
+            traversal.attemptedSessionKeys.contains(selectedKey))
+        assertFalse("No-op tap must not be saved as attempted",
+            traversal.checkpoint().attemptedSessionKeys.contains(selectedKey))
+        assertEquals("No-op tap is not a completed session action", 0, traversal.sessionActionCount)
+        assertTrue(logs.any { it.contains("NO_NAVIGATION_RECOVERY") &&
+            it.contains("attempt=1") && it.contains("delayMs=500") })
+
+        runUntil(scheduler, 220) { logs.any { it.contains("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定") } }
+        assertEquals("The same unread row must be reselected from a fresh snapshot", 2, tapCount)
+        assertTrue(traversal.attemptedSessionKeys.contains(selectedKey))
+        assertEquals(1, traversal.sessionActionCount)
+        assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+    }
+
+    @Test
+    fun repeatedNoOpSessionTapsUseIncreasingRecoveryBackoff() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+        }
+        val logs = ArrayList<String>()
+        var taps = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) taps++
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 350) {
+            logs.any { it.contains("NO_NAVIGATION_RECOVERY") && it.contains("attempt=2") }
+        }
+        assertEquals("The second retry must follow a newly verified list and actual tap", 2, taps)
+        assertTrue(logs.any { it.contains("NO_NAVIGATION_RECOVERY") &&
+            it.contains("attempt=2") && it.contains("delayMs=1000") })
+        assertTrue(logs.none { it.contains("点击后仍停留在会话列表；记录本次未命中") })
+    }
+
     @Test
     fun openedPrivateSessionBuildsBindingForBothEventAndDelayedVerification() {
         for (eventFirst in listOf(false, true)) {

@@ -529,6 +529,9 @@ class AiReplyObservationRuntime(
         get() = privateMessagesTraversalTaskExecutor.headerMismatchRecordedForCurrentAttempt
         set(value) { privateMessagesTraversalTaskExecutor.headerMismatchRecordedForCurrentAttempt = value }
     private var sessionTransitionTask: ScheduledTask? = null
+    /** A submitted session tap is not a completed visit until the intended detail is verified. */
+    private var missedPrivateSessionTapKey: String? = null
+    private var missedPrivateSessionTapCount = 0
     /** Count only re-dispatched BACK actions, never the read-only verification samples. */
     private var confirmedPrivateReturnBackRetryCount = 0
     /** A unified list recovery after confirmed send must finish the old return before traversal. */
@@ -979,6 +982,9 @@ class AiReplyObservationRuntime(
                 chatWindowKey = chatWindowKey,
                 chatSurfaceKey = chatSurfaceKey(snapshot).orEmpty()
             )
+            // Only a verified detail binding retires a no-navigation retry sequence.
+            missedPrivateSessionTapKey = null
+            missedPrivateSessionTapCount = 0
             onLog("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定；昵称仅作辅助校验")
         }
     }
@@ -2878,6 +2884,8 @@ class AiReplyObservationRuntime(
         pageInspectionTask = null
         regionRefreshTask = null
         sessionTransitionTask = null
+        missedPrivateSessionTapKey = null
+        missedPrivateSessionTapCount = 0
         confirmedPrivateReturnBackRetryCount = 0
         confirmedPrivateReturnAwaitingRecovery = false
         lastPageInspection = null
@@ -3038,6 +3046,13 @@ class AiReplyObservationRuntime(
     /** Single pause/checkpoint entry used by page-route changes and UNKNOWN observations. */
     private fun requestUnifiedPauseAndCheckpoint(taskId: String, reason: String): Boolean {
         if (recoveryContext.pending) return false
+        if (taskId == PRIVATE_MESSAGES_TASK_ID &&
+            sessionManagerState == SessionManagerState.OPENING_SESSION
+        ) {
+            // A page-route change can race the delayed tap verification. Save only a
+            // retriable checkpoint, never the provisional attempted-session marker.
+            rollbackUnverifiedPrivateSessionTap("PAGE_RECOVERY_$reason")
+        }
         if (taskId == PRIVATE_MESSAGES_TASK_ID &&
             sessionManagerState == SessionManagerState.RETURNING_TO_SESSION_LIST &&
             currentSessionSendConfirmed
@@ -5476,6 +5491,34 @@ class AiReplyObservationRuntime(
         }
     }
 
+    /**
+     * A submitted tap is provisional. No-op navigation and page-route recovery must
+     * not persist its selected key as a completed/attempted session. Preserve the
+     * existing traversal checkpoint; only the attempted marker and tentative detail
+     * binding are rolled back, before the unified read-only recovery is saved.
+     */
+    private fun rollbackUnverifiedPrivateSessionTap(reason: String): Int {
+        if (sessionManagerState != SessionManagerState.OPENING_SESSION) return 0
+        val selectedKey = currentSessionKey ?: return 0
+        if (privateMessagesTraversalTaskExecutor.attemptedSessionKeys.remove(selectedKey)) {
+            privateMessagesTraversalTaskExecutor.sessionActionCount =
+                (privateMessagesTraversalTaskExecutor.sessionActionCount - 1).coerceAtLeast(0)
+        }
+        missedPrivateSessionTapCount = if (missedPrivateSessionTapKey == selectedKey) {
+            missedPrivateSessionTapCount + 1
+        } else {
+            missedPrivateSessionTapKey = selectedKey
+            1
+        }
+        privateMessagesTraversalTaskExecutor.clearCurrentSession()
+        expectedPrivateSessionDetailNavigation = null
+        currentSessionBinding = null
+        onLog("AI 会话点击[UNVERIFIED_TAP_ROLLBACK]：reason=$reason；" +
+            "attempt=$missedPrivateSessionTapCount；cacheWrite=false；" +
+            "action=RECOVER_FRESH_LIST_AND_REACQUIRE_ROW；已撤销未成功打开会话的尝试记录")
+        return missedPrivateSessionTapCount
+    }
+
     private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) {
         if (!isAiReplyActive() || !sessionRunStarted || !canPerformPrivateMessagesUiAction()) return
         currentSessionSendConfirmed = false
@@ -5723,17 +5766,24 @@ class AiReplyObservationRuntime(
             readVisibleMessages(current)
             return
         }
-        if (current?.pageKind == ChatPageKind.CHAT_LIST) {
-            onLog("AI 会话管理：点击后仍停留在会话列表；记录本次未命中，不重复点击同一会话")
-            currentSessionKey = null
-            currentSessionName = null
-            currentSessionCandidate = null
-            currentSessionReadCaptured = false
-            sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-            handleSessionListPage(current)
+        if (current?.pageKind == ChatPageKind.CHAT_LIST &&
+            current.packageName == targetPackage()
+        ) {
+            val retryAttempt = rollbackUnverifiedPrivateSessionTap("TAP_COMPLETED_BUT_DETAIL_NOT_OPENED")
+            val delayMs = RecoveryScheduler.readOnlyRetryDelayMs(retryAttempt.coerceAtLeast(1))
+            onLog("AI 会话点击[NO_NAVIGATION_RECOVERY]：已提交点击但未进入聊天；" +
+                "attempt=$retryAttempt；delayMs=$delayMs；保留未读候选；" +
+                "先恢复双快照列表再重新定位，不使用旧节点或旧坐标")
+            recoverTransientPrivateGesture("GESTURE_TAP_NO_NAVIGATION", delayMs)
         } else {
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("AI 会话管理已暂停：点击后的页面无法确认是目标聊天；不会继续操作或自动返回")
+            val retryAttempt = rollbackUnverifiedPrivateSessionTap("TAP_DESTINATION_UNVERIFIED")
+            onLog("AI 会话点击[DESTINATION_UNVERIFIED]：未确认目标聊天；" +
+                "page=${current?.pageKind?.name ?: "NO_SNAPSHOT"}；attempt=$retryAttempt；" +
+                "保留检查点，等待合法私聊列表页面后再尝试")
+            recoverTransientPrivateGesture(
+                "GESTURE_TAP_DESTINATION_UNVERIFIED",
+                RecoveryScheduler.readOnlyRetryDelayMs(retryAttempt.coerceAtLeast(1))
+            )
         }
     }
 
