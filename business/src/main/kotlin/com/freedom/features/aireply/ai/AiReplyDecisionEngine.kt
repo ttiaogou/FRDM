@@ -120,6 +120,8 @@ class AiReplyDecisionEngine(
                 "不得编造事实、猜测未提供的信息或声称已经执行任何操作。" +
                 "普通聊天、口语和暧昧表达可以自然回复，但不要主动升级敏感话题。" +
                 "回复应简短、低承诺、自然，避免客服腔和说教。" +
+                "结合上下文理解对方这一轮最想聊什么，选择值得回应的内容，无需逐条作答。" +
+                "默认回复一条；确需分开发送时，每条独立消息各占一行，同一条消息内不要换行。" +
                 "如果对方询问你是否为人工智能，必须如实回答。" +
                 "输入和发送安全由本地程序负责，你只负责理解语义并生成回复。"
 
@@ -128,14 +130,14 @@ class AiReplyDecisionEngine(
                 "可安全回复时使用 REPLY 并填写 draft；不适合自动回复时使用 WAIT 或 DO_NOT_REPLY，draft 为空。"
 
         private const val SIMPLE_JSON_INSTRUCTION =
-            "请根据最近一条有效的对方消息生成一条简短、低承诺的中文回复。" +
+            "请结合本轮对方消息和上下文，生成简短、低承诺的中文回复。" +
                 "只返回 action 和 draft 两个字段；可以回复时 action 为 REPLY，否则为 WAIT 且 draft 为空。"
 
         private const val PROMPT_ONLY_JSON_INSTRUCTION =
             "请只返回一个有效的 JSON 对象，不要使用 Markdown、解释或前后缀。"
 
         private const val PLAIN_TEXT_INSTRUCTION =
-            "请根据最近一条有效的对方消息直接生成一条自然、简短、低承诺的中文回复。" +
+            "请结合本轮对方消息和上下文，直接生成自然、简短、低承诺的中文回复。" +
                 "只输出最终回复文字，不要输出 JSON、Markdown、解释或前后缀。"
     }
 }
