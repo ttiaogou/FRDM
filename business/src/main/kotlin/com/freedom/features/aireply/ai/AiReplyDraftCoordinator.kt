@@ -1926,6 +1926,31 @@ class AiReplyDraftCoordinator(
         return runCatching { inputPort.verifyDraft(input, "") }.getOrNull()?.status == ChatDraftInputStatus.VERIFIED
     }
 
+    /**
+     * Re-arm only a private technical, no-send failure after the existing cooldown.
+     * The same durable FAILED_RETRYABLE owner, original lease, exact chat window and
+     * a newly checked empty composer must pass the existing pre-send verifier.
+     * This method never writes text, requests a model, or submits a send gesture.
+     */
+    fun rearmVerifiedPrivatePreSendFailure(
+        failure: AiReplyPreSendModelFailure,
+        snapshot: ChatPageSnapshot
+    ): Boolean {
+        if (!verifyGreetingPreSendFailure(failure, snapshot)) return false
+        return synchronized(lock) {
+            val previous = failedRequests[failure.requestKey] ?: return@synchronized false
+            if (nowMillis() < previous.second || activeMessageKey != null ||
+                pending.get() || awaitingUserSend.get() ||
+                pendingSendConfirmation != null || pendingNextMessageSegment != null ||
+                pendingSendControl != null
+            ) return@synchronized false
+            failedRequests.remove(failure.requestKey)
+            processedMessageKeys.remove(failure.requestKey)
+            onLog("AI 私聊模型失败[VERIFIED_REARM]：原失败任务与空输入框已复核；允许新鲜 OCR 再次申请模型")
+            true
+        }
+    }
+
     /** Called only after a lease-gated safe BACK accepts an unprocessed greeting deferral. */
     fun releaseDeferredGreetingModelFailure(failure: AiReplyPreSendModelFailure) {
         synchronized(lock) {

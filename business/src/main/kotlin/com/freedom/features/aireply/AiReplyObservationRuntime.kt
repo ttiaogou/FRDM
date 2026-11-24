@@ -119,6 +119,10 @@ class AiReplyObservationRuntime(
     private val verifyGreetingPreSendModelFailure: (
         com.freedom.features.aireply.ai.AiReplyPreSendModelFailure, ChatPageSnapshot
     ) -> Boolean = { _, _ -> false },
+    /** Private pre-send rearm requires the durable FAILED_RETRYABLE fact and a fresh empty composer. */
+    private val verifyPrivatePreSendModelFailure: (
+        com.freedom.features.aireply.ai.AiReplyPreSendModelFailure, ChatPageSnapshot
+    ) -> Boolean = { _, _ -> false },
     /** Releases only the failed greeting request after the adapter accepted an unprocessed return. */
     private val onGreetingModelFailureDeferred: (
         com.freedom.features.aireply.ai.AiReplyPreSendModelFailure
@@ -344,6 +348,7 @@ class AiReplyObservationRuntime(
             onAdapterFailure = {
                 onLog("AI 模式消息读取失败：读取适配器异常；未保留消息正文")
                 cancelMessageReadRetry()
+                schedulePrivatePreSendReadRetry("MESSAGE_READ_ADAPTER_FAILURE")
             }
         )
     }
@@ -685,6 +690,10 @@ class AiReplyObservationRuntime(
     fun onPreSendModelFailure(failure: com.freedom.features.aireply.ai.AiReplyPreSendModelFailure) {
         runCatching {
             scheduler.schedule(0L) {
+                if (!receivedGreetingsTaskActive) {
+                    onPrivatePreSendModelFailure(failure)
+                    return@schedule
+                }
                 val binding = greetingChatBinding
                 if (binding == null || !receivedGreetingsTaskActive || !sessionRunStarted ||
                     !ownsTask(RECEIVED_GREETINGS_TASK_ID) || !isAiReplyActive() ||
@@ -707,6 +716,69 @@ class AiReplyObservationRuntime(
             }
         }.onFailure {
             onLog("GREETING_MODEL_FAILURE_DISPATCH_REJECTED：等待新鲜页面观察；不操作 UI")
+        }
+    }
+
+    /**
+     * A technical failure before the first input/send belongs to its original chat
+     * visit. Re-enter OCR only after the durable failure and freshly empty composer
+     * have been checked by the original coordinator; never replay model text or a send.
+     */
+    private fun onPrivatePreSendModelFailure(
+        failure: com.freedom.features.aireply.ai.AiReplyPreSendModelFailure
+    ) {
+        if (!sessionRunStarted || !isAiReplyActive() ||
+            sessionManagerState != SessionManagerState.READING_SESSION ||
+            !canPerformPrivateMessagesUiAction() || currentSessionSendConfirmed ||
+            isSendConfirmationPending() || failure.visitToken != draftVisitToken ||
+            failure.windowSessionKey != currentSessionWindowKey ||
+            !hasBoundPrivateDetailRecoverySession()
+        ) {
+            onLog("AI 私聊模型恢复[STALE_FAILURE_IGNORED]：原会话、发送状态或操作权已变化")
+            return
+        }
+        privateModelFailureRecovery = failure
+        privateModelRetryAwaitingDraft = false
+        // Earlier OCR sample handling may already have queued a BACK; revoke it.
+        sessionTransitionTask?.cancel()
+        sessionTransitionTask = null
+        onLog("AI 私聊模型恢复[PRE_SEND_FAILURE_RECORDED]：reason=${failure.reasonCode}；" +
+            "attempt=${failure.attempts}；仅待冷却后复核 OCR/空输入框；无发送动作")
+        schedulePrivateModelFailureRecovery(failure.retryDelayMs)
+    }
+
+    private fun schedulePrivateModelFailureRecovery(delayMs: Long) {
+        val failure = privateModelFailureRecovery ?: return
+        privateModelFailureRecoveryTask?.cancel()
+        privateModelFailureRecoveryTask = scheduler.schedule(delayMs) {
+            privateModelFailureRecoveryTask = null
+            if (privateModelFailureRecovery !== failure || !sessionRunStarted ||
+                !isAiReplyActive() || receivedGreetingsTaskActive ||
+                sessionManagerState != SessionManagerState.READING_SESSION ||
+                currentSessionSendConfirmed || isSendConfirmationPending()
+            ) return@schedule
+            if (!canPerformPrivateMessagesUiAction()) {
+                onLog("AI 私聊模型恢复[LEASE_WAIT]：页面操作权或恢复门禁未满足；不调用模型")
+                schedulePrivateModelFailureRecovery(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                return@schedule
+            }
+            val fresh = runCatching {
+                readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
+            }.getOrNull()
+            if (fresh == null || !isVerifiedRecoveredPrivateDetail(fresh) ||
+                currentSessionWindowKey != failure.windowSessionKey ||
+                fresh.conversationIdentityKey() != failure.conversationKey ||
+                isConversationDraftPending() || isSendControlRecoveryPending() ||
+                !verifyPrivatePreSendModelFailure(failure, fresh)
+            ) {
+                onLog("AI 私聊模型恢复[READ_ONLY_WAIT]：原会话、原失败任务或空输入框未验证；不重用旧草稿")
+                schedulePrivateModelFailureRecovery(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                return@schedule
+            }
+            privateModelFailureRecovery = null
+            privateModelRetryAwaitingDraft = true
+            onLog("AI 私聊模型恢复[RETRY_ADMITTED]：原会话及空输入框已独立验证；重新读取 OCR 后再生成")
+            readVisibleMessages(fresh)
         }
     }
 
@@ -4168,11 +4240,18 @@ class AiReplyObservationRuntime(
                 }
                 return
             }
-            onLog("AI 消息复读停止：${draftAdmission.reason}；已达两次重试上限，不猜测内容")
-            onLog("AI 会话返回门禁[OCR_READ_NOT_CONFIRMED]：消息证据仍不完整；保留当前聊天页，等待新的页面观察")
+            onLog("AI 消息复读停止：${draftAdmission.reason}；已达两次快速重试上限，不猜测内容")
+            onLog("AI 会话返回门禁[OCR_READ_NOT_CONFIRMED]：消息证据仍不完整；保留当前聊天页")
+            if (privateDetail && !receivedGreetingsTaskActive) {
+                schedulePrivatePreSendReadRetry("OCR_READ_NOT_CONFIRMED")
+            }
             return
         }
 
+        if (privateDetail && draftAdmission.accepted) {
+            privateOcrRecoveryAttempt = 0
+            draftReadRetries = 0
+        }
         val rowIdentity = if (receivedGreetingsTaskActive) receivedGreetingsTaskFlow.currentContactIdentity()
             else currentSessionCandidate?.contactIdentity
         // Received greetings uses only the identity collected from the current avatar/profile.
@@ -4219,6 +4298,15 @@ class AiReplyObservationRuntime(
             onLog("AI 草稿未准入：${if (!draftTargetConfirmed) "CHAT_ENTRY_NOT_BOUND" else draftAdmission.reason}")
             false
         } || isConversationDraftPending()
+        if (privateDetail && privateModelRetryAwaitingDraft && draftAdmission.accepted) {
+            if (draftHoldsPage) {
+                privateModelRetryAwaitingDraft = false
+                onLog("AI 私聊模型恢复[DRAFT_RESTARTED]：新鲜 OCR 已重新进入原草稿协调器；等待已有发送确认事务")
+            } else {
+                onLog("AI 私聊模型恢复[DRAFT_ADMISSION_WAIT]：草稿尚未重新取得准入；保留原会话，低频只读复核")
+                schedulePrivatePreSendReadRetry("PRIVATE_MODEL_DRAFT_NOT_ADMITTED")
+            }
+        }
         // The greeting callback uses only the current chat OCR, not stored contact history.
         // Saving a sample cannot complete the greeting before confirmed send and safe BACK.
         if (greetingDetail) {
@@ -6068,6 +6156,12 @@ class AiReplyObservationRuntime(
             onLog("AI 会话返回被阻止：私人消息任务未持有 UI 操作权")
             return
         }
+        if (privateModelFailureRecovery != null || privateModelRetryAwaitingDraft) {
+            sessionTransitionTask?.cancel()
+            sessionTransitionTask = null
+            onLog("AI 私聊模型恢复[RETURN_HELD]：发送前模型失败正在复核；不允许提前 BACK")
+            return
+        }
         val draftPending = runCatching { isConversationDraftPending() }.getOrDefault(true)
         if (draftPending) {
             if (draftPendingWaitedMs >= MAX_DRAFT_PENDING_WAIT_MS &&
@@ -6103,8 +6197,12 @@ class AiReplyObservationRuntime(
                 onLog("AI 会话返回[STALE_TASK_IGNORED]：私人消息任务租约或恢复门禁已失效；不提交返回动作")
                 return@schedule
             }
-            // A model request can start after this delayed BACK was scheduled. Recheck
-            // the live reply transaction here, not only when scheduling the BACK.
+            // A model request or technical pre-send failure can arrive after scheduling.
+            // Neither can authorize BACK on an obsolete OCR observation.
+            if (privateModelFailureRecovery != null || privateModelRetryAwaitingDraft) {
+                onLog("AI 私聊模型恢复[RETURN_HELD]：派发前发现模型恢复事务；保留聊天页")
+                return@schedule
+            }
             if (runCatching { isConversationDraftPending() }.getOrDefault(true)) {
                 onLog("AI 会话返回门禁[RECHECK_DRAFT_PENDING]：返回派发前发现草稿或发送事务未完成；重新等待")
                 scheduleReturnToSessionList(snapshot, draftPendingWaitedMs + SESSION_RETURN_DELAY_MS)
@@ -6653,8 +6751,9 @@ class AiReplyObservationRuntime(
         // accessibility tree must not reset the budget and turn retries into an unbounded loop.
         if (messageReadRetryTask != null) return
         if (messageReadRetryCount >= MAX_MESSAGE_LIST_RETRIES) {
-            onLog("AI 模式消息列表连续不可用；已完成 $MAX_MESSAGE_LIST_RETRIES 次延迟重试，等待下一次界面事件")
+            onLog("AI 模式消息列表连续不可用；已完成 $MAX_MESSAGE_LIST_RETRIES 次快速延迟重试")
             cancelMessageReadRetry()
+            schedulePrivatePreSendReadRetry("MESSAGE_LIST_UNAVAILABLE")
             return
         }
 
@@ -6684,9 +6783,34 @@ class AiReplyObservationRuntime(
         }
     }
 
+    /**
+     * Fast OCR retries stay bounded. After they are exhausted, continue with
+     * low-frequency, read-only observations of the same verified private chat.
+     * An OCR failure never authorizes drafting, sending, or returning.
+     */
+    private fun schedulePrivatePreSendReadRetry(reason: String) {
+        if (!sessionRunStarted || receivedGreetingsTaskActive ||
+            sessionManagerState != SessionManagerState.READING_SESSION ||
+            !isAiReplyActive() || !canPerformPrivateMessagesUiAction() ||
+            !hasBoundPrivateDetailRecoverySession() ||
+            isSendConfirmationPending() || currentSessionSendConfirmed
+        ) return
+        privateOcrRecoveryAttempt += 1
+        val delayMs = RecoveryScheduler.readOnlyRetryDelayMs(privateOcrRecoveryAttempt)
+        onLog("AI 私聊读取恢复[READ_ONLY_RECHECK_SCHEDULED]：reason=$reason；" +
+            "attempt=$privateOcrRecoveryAttempt；delayMs=$delayMs；" +
+            "仅重新观察原会话，不猜测 OCR 内容、不执行发送")
+        scheduleFullInspectionAfter(delayMs, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
+    }
+
     private var draftVisitToken = java.util.UUID.randomUUID().toString()
     private var draftReadRetries = 0
     private var draftRetryTask: ScheduledTask? = null
+    /** Private retry state never grants UI permission or counts as a send receipt. */
+    private var privateOcrRecoveryAttempt = 0
+    private var privateModelFailureRecovery: com.freedom.features.aireply.ai.AiReplyPreSendModelFailure? = null
+    private var privateModelFailureRecoveryTask: ScheduledTask? = null
+    private var privateModelRetryAwaitingDraft = false
 
     private fun invalidatePendingMessageRead() {
         greetingModelFailureRecoveryTask?.cancel()
@@ -6698,6 +6822,11 @@ class AiReplyObservationRuntime(
         draftReadRetries = 0
         draftRetryTask?.cancel()
         draftRetryTask = null
+        privateOcrRecoveryAttempt = 0
+        privateModelFailureRecoveryTask?.cancel()
+        privateModelFailureRecoveryTask = null
+        privateModelFailureRecovery = null
+        privateModelRetryAwaitingDraft = false
         messageReadCoordinator.invalidatePending()
         lastMessageFingerprint = ""
         loggedOcrDebugFingerprints.clear()

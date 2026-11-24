@@ -6554,6 +6554,156 @@ class AiReplyObservationRuntimeTest {
 
 
     @Test
+    fun privateOcrFailureAfterFastRetriesSchedulesFreshReadOnlyObservation() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            messageReadStatuses = List(12) { MessageReadStatus.OCR_FAILED }
+            page = inbox
+        }
+        val logs = ArrayList<String>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) { logs.any { it.contains("READ_ONLY_RECHECK_SCHEDULED") } }
+        assertEquals(0, port.navigateBackCalls)
+        assertEquals(0, port.persistedChatSamples)
+        assertTrue(logs.any { it.contains("OCR_READ_NOT_CONFIRMED") })
+        assertTrue(scheduler.hasPendingDelay(500L))
+        val earlierReads = port.messageReads
+        runUntil(scheduler, 160) { port.messageReads > earlierReads }
+        assertTrue(port.messageReads > earlierReads)
+        assertEquals(0, port.navigateBackCalls)
+        assertTrue(logs.none { it.contains("AI 发送成功记录") })
+    }
+
+    @Test
+    fun privateTechnicalModelFailureWaitsForFreshComposerThenRestartsOcrWithoutBack() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            page = inbox
+        }
+        val logs = ArrayList<String>()
+        var draftCalls = 0
+        var emptyComposerVerified = false
+        var verificationCalls = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            onDraftConversationObserved = { _, _, _, _ -> draftCalls++; true },
+            verifyPrivatePreSendModelFailure = { _, _ ->
+                verificationCalls++
+                emptyComposerVerified
+            }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) { logs.any { it.contains("聊天样本已保存") } }
+        assertEquals(1, draftCalls)
+        val originalChat = port.page
+        val window = requireNotNull(originalChat.inputFieldTarget).window
+        val conversation = requireNotNull(originalChat.conversationIdentityKey())
+        val sessionKey = "${window.packageName}|${window.windowId}|${window.generation}|conversation=$conversation"
+        val visit = AiReplyObservationRuntime::class.java.getDeclaredField("draftVisitToken")
+            .apply { isAccessible = true }.get(runtime) as String
+        runtime.onPreSendModelFailure(com.freedom.features.aireply.ai.AiReplyPreSendModelFailure(
+            requestId = "private-technical-failure",
+            requestKey = "private-failed-request-key",
+            conversationKey = conversation,
+            windowSessionKey = sessionKey,
+            visitToken = visit,
+            taskLease = null,
+            reasonCode = "MODEL_DECISION_MODEL_CALL_FAILED",
+            attempts = 2,
+            retryDelayMs = 30_000L,
+            readyToDefer = true
+        ))
+        runUntil(scheduler, 40) { logs.any { it.contains("PRE_SEND_FAILURE_RECORDED") } }
+        assertEquals(0, port.navigateBackCalls)
+        runUntil(scheduler, 60) { logs.any { it.contains("READ_ONLY_WAIT") } }
+        assertEquals(1, draftCalls)
+        assertTrue(verificationCalls > 0)
+        assertEquals(0, port.navigateBackCalls)
+        emptyComposerVerified = true
+        runUntil(scheduler, 80) { logs.any { it.contains("RETRY_ADMITTED") } }
+        runUntil(scheduler, 80) { draftCalls > 1 }
+        assertEquals(2, draftCalls)
+        assertTrue(logs.any { it.contains("DRAFT_RESTARTED") })
+        assertEquals(0, port.navigateBackCalls)
+        assertTrue(logs.none { it.contains("GREETING_REPLY_DEFERRED") })
+    }
+
+    @Test
     fun retryableOcrFailureAfterBoundedReadsNeverCompletesSessionOrNavigatesBack() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)

@@ -589,6 +589,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             verifyGreetingPreSendModelFailure = { failure, snapshot ->
                 aiReplyDraftCoordinator.verifyGreetingPreSendFailure(failure, snapshot)
             },
+            verifyPrivatePreSendModelFailure = { failure, snapshot ->
+                aiReplyDraftCoordinator.rearmVerifiedPrivatePreSendFailure(failure, snapshot)
+            },
             onGreetingModelFailureDeferred = { failure ->
                 aiReplyDraftCoordinator.releaseDeferredGreetingModelFailure(failure)
             },
