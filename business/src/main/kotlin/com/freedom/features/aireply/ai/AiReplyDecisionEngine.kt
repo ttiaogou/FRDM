@@ -48,7 +48,7 @@ class AiReplyDecisionEngine(
         val schemaPromptSuffix = when (responseMode) {
             ModelResponseMode.SIMPLE_JSON -> SIMPLE_JSON_INSTRUCTION + "\n$jsonSchema"
             ModelResponseMode.PROMPT_ONLY_JSON -> PROMPT_ONLY_JSON_INSTRUCTION + "\n$jsonSchema"
-            ModelResponseMode.PLAIN_TEXT -> PLAIN_TEXT_INSTRUCTION
+            ModelResponseMode.PLAIN_TEXT -> PLAIN_TEXT_INSTRUCTION + "\n请严格匹配以下 JSON Schema：\n$jsonSchema"
             else -> STRICT_JSON_INSTRUCTION
         }
         val request = AiModelRequest(
