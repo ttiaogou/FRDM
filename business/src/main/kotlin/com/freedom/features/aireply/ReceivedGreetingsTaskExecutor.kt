@@ -159,6 +159,12 @@ internal class ReceivedGreetingsTaskExecutor(
         return runCatching { pagePort.deferReceivedGreetingAfterModelFailure() }.getOrDefault(false)
     }
 
+    /** Defers an unconfirmed greeting after manual return while retaining its durable record. */
+    fun deferReceivedGreetingAfterManualReturn(): Boolean {
+        if (!ownsTask()) return false
+        return runCatching { pagePort.deferReceivedGreetingAfterManualReturn() }.getOrDefault(false)
+    }
+
     /** Returns from a verified greetings boundary only when this task still owns UI operations. */
     fun returnForPriorityCheck(): ReceivedGreetingsBackResult {
         if (!ownsTask()) return ReceivedGreetingsBackResult.OWNERSHIP_REJECTED
