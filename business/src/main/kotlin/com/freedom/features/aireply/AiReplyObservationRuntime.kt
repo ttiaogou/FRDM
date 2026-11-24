@@ -169,6 +169,7 @@ class AiReplyObservationRuntime(
         private const val SESSION_OPEN_VERIFY_DELAY_MS = 2_200L
         private const val SESSION_RETURN_DELAY_MS = 1_500L
         private const val SESSION_RETURN_VERIFY_DELAY_MS = 900L
+        private const val CONFIRMED_PRIVATE_RETURN_DETAIL_GATE = "AI_REPLY_CONFIRMED_PRIVATE_RETURN_DETAIL"
         private const val DRAFT_PENDING_POLL_DELAY_MS = 500L
         private const val SEND_CONFIRMATION_RECHECK_DELAY_MS = 500L
         private const val GREETING_UNKNOWN_SEND_READ_ONLY_RECHECK_DELAY_MS = 5_000L
@@ -528,6 +529,10 @@ class AiReplyObservationRuntime(
         get() = privateMessagesTraversalTaskExecutor.headerMismatchRecordedForCurrentAttempt
         set(value) { privateMessagesTraversalTaskExecutor.headerMismatchRecordedForCurrentAttempt = value }
     private var sessionTransitionTask: ScheduledTask? = null
+    /** Count only re-dispatched BACK actions, never the read-only verification samples. */
+    private var confirmedPrivateReturnBackRetryCount = 0
+    /** A unified list recovery after confirmed send must finish the old return before traversal. */
+    private var confirmedPrivateReturnAwaitingRecovery = false
     /** Retains the scroll direction while the live mf_view exclusion leaves no safe rectangle. */
     private var sessionSafeViewportRetryTask: ScheduledTask? = null
     private var sessionSafeViewportRetryCount = 0
@@ -1896,7 +1901,13 @@ class AiReplyObservationRuntime(
                 }
                 readVisibleMessages(inspection)
             } else if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
-                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                sessionManagerState = if (confirmedPrivateReturnAwaitingRecovery &&
+                    currentSessionSendConfirmed
+                ) {
+                    onLog("AI 私聊发送返回[INBOX_RECOVERY_VERIFIED]：列表检查点与操作权已复核；完成原会话返回，不重复发送")
+                    SessionManagerState.RETURNING_TO_SESSION_LIST
+                } else SessionManagerState.WAITING_FOR_SESSION_LIST
+                confirmedPrivateReturnAwaitingRecovery = false
                 reanchorRestoredMessageList(inspection)
                 lastPageInspection = inspection
                 handleSessionListPage(inspection)
@@ -2867,6 +2878,8 @@ class AiReplyObservationRuntime(
         pageInspectionTask = null
         regionRefreshTask = null
         sessionTransitionTask = null
+        confirmedPrivateReturnBackRetryCount = 0
+        confirmedPrivateReturnAwaitingRecovery = false
         lastPageInspection = null
         lastConfirmedChatListInspection = null
         recoveryTransaction.reset()
@@ -3025,6 +3038,16 @@ class AiReplyObservationRuntime(
     /** Single pause/checkpoint entry used by page-route changes and UNKNOWN observations. */
     private fun requestUnifiedPauseAndCheckpoint(taskId: String, reason: String): Boolean {
         if (recoveryContext.pending) return false
+        if (taskId == PRIVATE_MESSAGES_TASK_ID &&
+            sessionManagerState == SessionManagerState.RETURNING_TO_SESSION_LIST &&
+            currentSessionSendConfirmed
+        ) {
+            // An uncertain post-BACK page must resume through the saved list checkpoint.
+            // The confirmed send is not retried; its old session is cleared only on a
+            // subsequently verified inbox, using the existing return-to-list handler.
+            confirmedPrivateReturnAwaitingRecovery = true
+            pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
+        }
         // A submitted but unconfirmed private send must keep its chat-detail recovery
         // destination across any route change. A list checkpoint cannot authorize new
         // traversal while the original send still requires read-only verification.
@@ -4518,6 +4541,9 @@ class AiReplyObservationRuntime(
         if (sessionManagerState == SessionManagerState.RETURNING_TO_SESSION_LIST) {
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
+            pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
+            confirmedPrivateReturnBackRetryCount = 0
+            confirmedPrivateReturnAwaitingRecovery = false
             val observationCompleted = currentSessionReadCaptured
             val sendAlreadyRecorded = currentSessionSendConfirmed
             onLog(
@@ -5453,6 +5479,9 @@ class AiReplyObservationRuntime(
     private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) {
         if (!isAiReplyActive() || !sessionRunStarted || !canPerformPrivateMessagesUiAction()) return
         currentSessionSendConfirmed = false
+        confirmedPrivateReturnBackRetryCount = 0
+        confirmedPrivateReturnAwaitingRecovery = false
+        pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
 
         // Persist only the business identity used for recovery re-anchoring. The next recovery
         // pass will reacquire the row and coordinates from a fresh page snapshot.
@@ -5864,6 +5893,121 @@ class AiReplyObservationRuntime(
     private fun normalizeSessionTitle(value: String?): String =
         ChatSessionManagementPolicy.normalizeSessionTitle(value)
 
+    /**
+     * A confirmed private send owns its BACK recovery until a fresh inbox is recognized.
+     * Submission success alone is not navigation success; a no-op/rejected BACK may only be
+     * retried after two independently read, same-window, same-session detail snapshots.
+     * UNKNOWN or foreign pages use the existing durable list-checkpoint recovery instead.
+     */
+    private fun scheduleConfirmedPrivateReturnVerification(
+        reason: String,
+        delayMs: Long = SESSION_RETURN_VERIFY_DELAY_MS
+    ) {
+        sessionTransitionTask?.cancel()
+        sessionTransitionTask = scheduler.schedule(delayMs) {
+            sessionTransitionTask = null
+            verifyConfirmedPrivateReturn(reason)
+        }
+    }
+
+    private fun verifyConfirmedPrivateReturn(reason: String) {
+        if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
+            sessionManagerState != SessionManagerState.RETURNING_TO_SESSION_LIST ||
+            !currentSessionSendConfirmed || recoveryContext.pending
+        ) return
+        if (!canPerformPrivateMessagesUiAction()) {
+            pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
+            onLog("AI 私聊发送返回[LEASE_NOT_HELD]：原任务失去操作权；进入检查点恢复，不派发 BACK")
+            recoverRetryablePrivateList("PRIVATE_SEND_RETURN_LEASE_NOT_HELD")
+            return
+        }
+
+        // A fresh page read is mandatory after the last BACK. Never treat the gesture
+        // submission result or a cached source snapshot as proof of successful navigation.
+        val observed = inspectFreshPageSnapshot()
+        if (observed?.pageKind == ChatPageKind.CHAT_LIST &&
+            observed.packageName == targetPackage() && !isSemanticallyUnconfirmed(observed)
+        ) {
+            pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
+            onLog("AI 私聊发送返回[INBOX_VERIFIED]：Back 后重新获取到私聊列表；恢复原遍历游标")
+            handleSessionListPage(observed)
+            return
+        }
+
+        val stillOriginalDetail = observed != null &&
+            observed.packageName == targetPackage() &&
+            observed.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            currentSessionWindowKey != null &&
+            currentSessionWindowKey == windowSessionKey(observed) &&
+            hasBoundPrivateDetailRecoverySession() &&
+            isExpectedPrivateSessionDetail(observed) &&
+            currentSessionHeaderMatchMode(observed) != null &&
+            !isSemanticallyUnconfirmed(observed)
+        if (!stillOriginalDetail || observed == null) {
+            pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
+            onLog("AI 私聊发送返回[PAGE_UNVERIFIED]：reason=$reason；" +
+                "page=${observed?.pageKind?.name ?: "NO_SNAPSHOT"}；停止额外 BACK；转入原消息列表检查点恢复")
+            recoverRetryablePrivateList("PRIVATE_SEND_RETURN_PAGE_UNVERIFIED")
+            return
+        }
+
+        if (userInteractionActive || isSendConfirmationPending() ||
+            runCatching { isConversationDraftPending() }.getOrDefault(true)
+        ) {
+            pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
+            onLog("AI 私聊发送返回[TRANSACTION_WAIT]：仍有用户操作或发送事务待核验；只读等待，不重新 BACK")
+            scheduleConfirmedPrivateReturnVerification(
+                "TRANSACTION_WAIT", RecoveryScheduler.readOnlyRetryDelayMs(1)
+            )
+            return
+        }
+
+        if (!pageRecoveryVerificationGate.observe(
+                CONFIRMED_PRIVATE_RETURN_DETAIL_GATE, recoveryStructuralKey(observed)
+            )
+        ) {
+            onLog("AI 私聊发送返回[DETAIL_STABILITY_WAIT]：第" +
+                "${pageRecoveryVerificationGate.stableSamples(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)}/2次原会话新鲜快照；不直接重试 BACK")
+            scheduleConfirmedPrivateReturnVerification("DETAIL_STABILITY_WAIT", 350L)
+            return
+        }
+
+        val readiness = runCatching { inspectAndroidRecoveryReadiness(observed) }.getOrNull()
+        val admission = AndroidRecoveryExecutionGate.assess(
+            snapshot = observed, expectedPackage = targetPackage(), evidence = readiness
+        )
+        if (!admission.allowed || !canPerformPrivateMessagesUiAction() ||
+            isSendConfirmationPending() ||
+            runCatching { isConversationDraftPending() }.getOrDefault(true)
+        ) {
+            pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
+            onLog("AI 私聊发送返回[RETRY_DEFERRED]：Android、操作权或发送状态尚未就绪；只读复核，不派发 BACK")
+            scheduleConfirmedPrivateReturnVerification(
+                "RETRY_DEFERRED", RecoveryScheduler.readOnlyRetryDelayMs(1)
+            )
+            return
+        }
+
+        // No old coordinates or node paths are reused. The adapter keeps ownership of
+        // the same global BACK operation, including its existing platform safety gates.
+        pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
+        confirmedPrivateReturnBackRetryCount += 1
+        val accepted = runCatching {
+            chatSessionManagementPort.navigateBackToSessionList()
+        }.getOrDefault(false)
+        onLog(
+            if (accepted) "AI 私聊发送返回[BACK_RETRY_ACCEPTED]：原会话双快照已验证；等待列表新快照"
+            else "AI 私聊发送返回[BACK_RETRY_REJECTED]：适配器未接受本次 BACK；保留确认发送记录并继续只读复核"
+        )
+        // Keep the existing 900ms post-BACK verification floor; apply unbounded recovery
+        // backoff after repeated failures instead of rapidly dispatching global BACK.
+        val delayMs = maxOf(
+            SESSION_RETURN_VERIFY_DELAY_MS,
+            RecoveryScheduler.readOnlyRetryDelayMs(confirmedPrivateReturnBackRetryCount)
+        )
+        scheduleConfirmedPrivateReturnVerification("BACK_RETRY", delayMs)
+    }
+
     private fun scheduleReturnToSessionList(
         snapshot: ChatPageSnapshot,
         draftPendingWaitedMs: Long = 0L
@@ -5928,6 +6072,19 @@ class AiReplyObservationRuntime(
             val accepted = runCatching {
                 chatSessionManagementPort.navigateBackToSessionList()
             }.getOrDefault(false)
+            if (currentSessionSendConfirmed) {
+                if (!accepted) {
+                    onLog("AI 私聊发送返回[INITIAL_BACK_REJECTED]：系统未接受 BACK；保留发送检查点并重新确认页面")
+                } else {
+                    onLog("AI 会话管理：确认发送后已提交系统返回动作；等待独立页面验证")
+                }
+                // A rejected BACK may already have caused a transition; first observe the
+                // fresh route, then decide whether the original detail permits a safe retry.
+                scheduleConfirmedPrivateReturnVerification(
+                    if (accepted) "BACK_SUBMITTED" else "BACK_REJECTED"
+                )
+                return@schedule
+            }
             if (!accepted) {
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话管理已暂停：系统未接受返回会话列表动作")

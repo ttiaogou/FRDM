@@ -6564,6 +6564,159 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun confirmedPrivateBackRecoversFromRejectedOrNoOpNavigationWithoutResending() {
+        for (scenario in listOf("REJECTED", "ACCEPTED_NO_NAVIGATION")) {
+            val scheduler = FakeScheduler()
+            val candidate = sessionCandidate(completeBoundaryEvidence = true)
+            val inbox = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                resolvedTapBounds = candidate.rowBounds
+                page = inbox
+                pageAfterBack = inbox
+                rejectBackAttempts = if (scenario == "REJECTED") 1 else 0
+                backNoOpAttempts = if (scenario == "ACCEPTED_NO_NAVIGATION") 1 else 0
+            }
+            val logs = ArrayList<String>()
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = object : TestGestureApi {
+                    override fun execute(
+                        command: GestureIntentRequest,
+                        listener: GestureExecutionListener
+                    ): GestureSubmission {
+                        if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                        listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                        return GestureSubmission.ACCEPTED
+                    }
+                },
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L,
+                onDraftConversationObserved = { _, _, _, _ -> true }
+            )
+            runtime.scheduleInitialObservation()
+            runUntil(scheduler, 180) { logs.any { it.contains("聊天样本已保存") } }
+            val handler = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+                "handleSendConfirmationResult",
+                com.freedom.features.aireply.ai.ReplySendTransactionOutcome::class.java,
+                ChatMessageBatch::class.java,
+                ChatPageSnapshot::class.java
+            ).apply { isAccessible = true }
+            val confirmed = com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED,
+                "p1-back-recovery-send-id"
+            )
+            assertTrue(handler.invoke(runtime, confirmed, requireNotNull(port.lastPersistedBatch), port.page) as Boolean)
+            runUntil(scheduler, 200) { port.navigateBackCalls >= 2 }
+            assertEquals("scenario=$scenario only two safe BACK submissions", 2, port.navigateBackCalls)
+            assertTrue("scenario=$scenario logs=$logs", logs.any { it.contains("DETAIL_STABILITY_WAIT") })
+            assertTrue("scenario=$scenario logs=$logs", logs.any { it.contains("BACK_RETRY_ACCEPTED") })
+            runUntil(scheduler, 80) { logs.any { it.contains("INBOX_VERIFIED") } }
+            assertEquals("scenario=$scenario must not re-submit BACK after inbox", 2, port.navigateBackCalls)
+            assertFalse("scenario=$scenario must not start an unsafe recovery", logs.any {
+                it.contains("PRIVATE_SEND_RETURN_PAGE_UNVERIFIED")
+            })
+        }
+    }
+
+    @Test
+    fun confirmedPrivateBackOnDifferentChatRoutesToCheckpointWithoutSecondBack() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            page = inbox
+            pageAfterBack = chatDetailSnapshot().copy(chatTitleText = "与Another Contact对话")
+        }
+        val logs = ArrayList<String>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            onDraftConversationObserved = { _, _, _, _ -> true }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) { logs.any { it.contains("聊天样本已保存") } }
+        val handler = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+            "handleSendConfirmationResult",
+            com.freedom.features.aireply.ai.ReplySendTransactionOutcome::class.java,
+            ChatMessageBatch::class.java,
+            ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        assertTrue(handler.invoke(
+            runtime,
+            com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED,
+                "p1-different-chat-send-id"
+            ),
+            requireNotNull(port.lastPersistedBatch),
+            port.page
+        ) as Boolean)
+        runUntil(scheduler, 100) { logs.any { it.contains("PAGE_UNVERIFIED") } }
+        assertEquals(1, port.navigateBackCalls)
+        assertTrue(logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") && it.contains("PRIVATE_SEND_RETURN_PAGE_UNVERIFIED") })
+        assertFalse(logs.any { it.contains("BACK_RETRY_ACCEPTED") })
+    }
+
+    @Test
     fun delayedBackRechecksDraftTransactionBeforeDispatch() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)
@@ -6809,6 +6962,8 @@ class AiReplyObservationRuntimeTest {
         var lastExpectedSessionCandidate: ChatListCandidateSnapshot? = null
         var pageAfterBack: ChatPageSnapshot? = null
         var navigateBackCalls: Int = 0
+        var rejectBackAttempts = 0
+        var backNoOpAttempts = 0
         var receivedGreetingsWorkflowEnabled: Boolean = false
         var receivedGreetingsIdleSteps: Int = 0
         var receivedGreetingsNavigationTaskStarts: Int = 0
@@ -6890,7 +7045,8 @@ class AiReplyObservationRuntimeTest {
         }
         override fun navigateBackToSessionList(): Boolean {
             navigateBackCalls++
-            pageAfterBack?.let { page = it }
+            if (navigateBackCalls <= rejectBackAttempts) return false
+            if (navigateBackCalls > backNoOpAttempts) pageAfterBack?.let { page = it }
             return true
         }
 
