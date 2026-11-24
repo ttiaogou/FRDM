@@ -86,6 +86,20 @@ class AiReplyDecisionEngine(
             outputContentState = if (result.text == null) "NULL" else "BLANK"
         )
         if (responseMode == ModelResponseMode.PLAIN_TEXT) {
+            // Providers may still return a valid structured decision during the fallback
+            // response mode. Preserve WAIT/DO_NOT_REPLY semantics before trying plain text.
+            val structuredDecision = AiReplyDecisionJsonParser.parseWithDiagnostics(raw, maxDraftChars)
+                .decision
+            if (structuredDecision != null) {
+                return AiReplyEvaluation.Model(
+                    structuredDecision.copy(
+                        provider = result.provider,
+                        model = result.model,
+                        finishReason = result.finishReason,
+                        usage = result.usage
+                    )
+                )
+            }
             val draft = AiReplyDecisionJsonParser.extractPlainTextDraft(raw, maxDraftChars)
                 ?.takeIf { AiReplyLocalSafety.isSafeDraft(it) }
             return if (draft == null) AiReplyEvaluation.Execution(
