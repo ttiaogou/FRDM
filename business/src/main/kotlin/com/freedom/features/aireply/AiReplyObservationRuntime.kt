@@ -1762,7 +1762,27 @@ class AiReplyObservationRuntime(
                 lastPageInspection = inspection
                 return
             }
-            val verificationKey = listOf(targetRoute, recoveryStructuralKey(inspection)).joinToString("|")
+            val privateListFaultEvidence = if (recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+                targetRoute == messageListRecoveryRoute.routeId && !receivedGreetingsTaskActive
+            ) assessPrivateListRecoveryFault(
+                loadedMessageCheckpoint ?: privateMessagesTraversalTaskExecutor.checkpoint(),
+                recoveryContext.reason, inspection
+            ) else PrivateListRecoveryFaultEvidence.NOT_APPLICABLE
+            // Legacy/no-repository callers must not bypass the same business gate.
+            if (!sharedMessageListRecovery && !privateListFaultEvidence.allowsResume) {
+                recoveryContext.invalidateFingerprint()
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("消息列表统一检查点[ORIGINAL_FAULT_WAIT]：reason=${recoveryContext.reason}；" +
+                    "evidence=${privateListFaultEvidence.name}；保留原恢复事务")
+                scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                lastPageInspection = inspection
+                return
+            }
+            // Compare the business decision independently of the page fingerprint.
+            // A changed scope must not borrow a prior positive sample.
+            val verificationKey = listOf(targetRoute, recoveryStructuralKey(inspection),
+                privateListFaultEvidence.name).joinToString("|")
             val sharedProof: RecoveryCheckpointVerificationResult.ResumeReady? =
                 if (sharedMessageListRecovery) {
                     val checkpoint = requireNotNull(loadedMessageCheckpoint)
@@ -1775,7 +1795,8 @@ class AiReplyObservationRuntime(
                             snapshot = inspection,
                             pageFingerprint = recoveryStructuralKey(inspection),
                             routeVerified = targetRoute == messageListRecoveryRoute.routeId,
-                            observationGeneration = observation.observationGeneration
+                            observationGeneration = observation.observationGeneration,
+                            originalFaultEvidence = privateListFaultEvidence
                         )
                     }.onFailure {
                         onLog("消息列表统一检查点[ADAPTER_REJECTED]：原因=${it.javaClass.simpleName}；保持暂停")
@@ -1945,6 +1966,18 @@ class AiReplyObservationRuntime(
                 lastPageInspection = inspection
                 return
             }
+            if (privateListFaultEvidence != PrivateListRecoveryFaultEvidence.NOT_APPLICABLE) {
+                // Only after two admissible samples and the existing Android/lease gate
+                // may the current observation reconcile the real business checkpoint.
+                // The first sample was a disposable probe and never mutated the cursor.
+                val executor = privateMessagesTraversalTaskExecutor
+                executor.observeUnreadBlockers(inspection)
+                executor.observeIncompleteUnreadEvidence(inspection)
+                privateMessagesCheckpointRepository?.save(executor.checkpoint())
+                onLog("消息列表统一检查点[ORIGINAL_FAULT_RECHECKED]：evidence=${privateListFaultEvidence.name}；" +
+                    "unresolvedRows=${executor.unresolvedIncompleteUnreadKeys.size}；" +
+                    "仅确认全局恢复准入，待复核会话不计入完成")
+            }
             recoveryContext.markUiOwnershipTransferred()
             val completedRecoveryIdentity = recoveryTransaction.currentIdentity()
             val sourceTaskId = recoveryContext.sourceTaskId
@@ -1969,7 +2002,8 @@ class AiReplyObservationRuntime(
             }
             onLog(
                 "统一页面恢复[RECOVERY_EXECUTION_READY]：目标路由=$targetRoute；" +
-                    "Android=READY；双快照=$fingerprintVerified；UI操作权=$uiOwnershipTransferred"
+                    "Android=READY；双快照=$fingerprintVerified；UI操作权=$uiOwnershipTransferred；" +
+                    "originalFault=${privateListFaultEvidence.name}"
             )
             onLog(
                 "统一页面恢复[RECOVERY_VERIFIED]：目标路由=$targetRoute；" +
@@ -4564,7 +4598,18 @@ class AiReplyObservationRuntime(
     private fun handleSessionListPage(snapshot: ChatPageSnapshot) {
         if (messageListRecoveryVerificationPending && sessionRunStarted && !receivedGreetingsTaskActive) {
             if (!ensureAndroidRecoveryReady(snapshot, "MESSAGE_LIST_RECOVERY")) return
-            if (!pageRecoveryVerificationGate.observe(MESSAGE_LIST_RECOVERY_ROUTE_ID, recoveryStructuralKey(snapshot))) {
+            val originalFault = assessPrivateListRecoveryFault(
+                privateMessagesTraversalTaskExecutor.checkpoint(), recoveryContext.reason, snapshot
+            )
+            if (!originalFault.allowsResume) {
+                pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
+                recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
+                onLog("消息列表恢复[ORIGINAL_FAULT_WAIT]：evidence=${originalFault.name}；原始业务阻塞未解除")
+                scheduleSessionListStabilityRetry("原始业务故障尚未解除")
+                return
+            }
+            val verificationKey = listOf(recoveryStructuralKey(snapshot), originalFault.name).joinToString("|")
+            if (!pageRecoveryVerificationGate.observe(MESSAGE_LIST_RECOVERY_ROUTE_ID, verificationKey)) {
                 sessionManagerState = SessionManagerState.PAUSED
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
                 onLog("消息列表恢复[RECOVERY_VERIFYING]：等待第二次独立稳定页面快照；保持暂停")
@@ -4573,6 +4618,11 @@ class AiReplyObservationRuntime(
             }
             recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
             recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            if (originalFault != PrivateListRecoveryFaultEvidence.NOT_APPLICABLE) {
+                privateMessagesTraversalTaskExecutor.observeUnreadBlockers(snapshot)
+                privateMessagesTraversalTaskExecutor.observeIncompleteUnreadEvidence(snapshot)
+                privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            }
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
             messageListRecoveryVerificationPending = false

@@ -900,6 +900,48 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun p2OriginalIncompleteFaultRequiresItsOwnEvidenceWithoutMutatingCheckpoint() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val damaged = candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD, previewBoundsValid = false)
+        val healthy = candidate(1, "Healthy B", ChatUnreadStatus.READ)
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(damaged)))
+        val checkpoint = executor.checkpoint()
+        fun assess(vararg rows: ChatListCandidateSnapshot) = assessPrivateListRecoveryFault(
+            checkpoint, "PRIVATE_INCOMPLETE_UNREAD_ROW", snapshot(*rows)
+        )
+        assertEquals(PrivateListRecoveryFaultEvidence.ORIGINAL_INCOMPLETE_STILL_BLOCKED, assess(damaged))
+        assertEquals(PrivateListRecoveryFaultEvidence.LOCAL_REMEDIATION, assess(damaged, healthy))
+        assertEquals(PrivateListRecoveryFaultEvidence.LOCAL_REMEDIATION, assess(healthy))
+        assertEquals(PrivateListRecoveryFaultEvidence.CLEARED,
+            assess(candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD)))
+        assertEquals(checkpoint.unresolvedIncompleteUnreadKeys, executor.unresolvedIncompleteUnreadKeys)
+        assertEquals(PrivateListRecoveryFaultEvidence.ORIGINAL_EVIDENCE_MISSING,
+            assessPrivateListRecoveryFault(checkpoint.copy(unresolvedIncompleteUnreadKeys = emptySet()),
+                "PRIVATE_INCOMPLETE_UNREAD_ROW", snapshot(healthy)))
+    }
+
+    @Test
+    fun p2OriginalUnknownCannotBeClearedByDifferentCleanViewport() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val unknown = candidate(0, "Unknown A", ChatUnreadStatus.UNKNOWN)
+        assertTrue(executor.observeUnreadBlockers(snapshot(unknown)))
+        val checkpoint = executor.checkpoint()
+        fun assess(vararg rows: ChatListCandidateSnapshot) = assessPrivateListRecoveryFault(
+            checkpoint, "INITIAL_UNREAD_STATE_UNKNOWN", snapshot(*rows)
+        )
+        assertEquals(PrivateListRecoveryFaultEvidence.ORIGINAL_UNKNOWN_STILL_BLOCKED, assess(unknown))
+        assertEquals(PrivateListRecoveryFaultEvidence.ORIGINAL_UNKNOWN_STILL_BLOCKED,
+            assess(candidate(1, "Different B", ChatUnreadStatus.READ)))
+        assertEquals(PrivateListRecoveryFaultEvidence.CLEARED,
+            assess(candidate(0, "Unknown A", ChatUnreadStatus.READ)))
+        assertEquals(PrivateListRecoveryFaultEvidence.LIST_STRUCTURE_INCOMPLETE,
+            assessPrivateListRecoveryFault(checkpoint, "SERVICE_RECONNECT_CHECKPOINT",
+                snapshot(candidate(0, "Unknown A", ChatUnreadStatus.READ)).copy(chatListExtractionTruncated = true)))
+        assertTrue(executor.normalInboxUnreadStateUnknown)
+        assertEquals(checkpoint.unresolvedUnknownUnreadKeys, executor.unresolvedUnknownUnreadKeys)
+    }
+
+    @Test
     fun p1RelocationPreservesRoundAndPersistsFullScanRequirement() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val damaged = candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD, previewBoundsValid = false)

@@ -63,6 +63,58 @@ internal enum class PrivateMessagesScrollObservationDecision {
     BOTTOM_VIEWPORT_CHANGED
 }
 
+/**
+ * Page identity and the original business blocker are independent evidence.
+ * LOCAL_REMEDIATION permits the existing P0/P1 safe traversal, not resolution of the row.
+ */
+internal enum class PrivateListRecoveryFaultEvidence(val allowsResume: Boolean) {
+    NOT_APPLICABLE(true),
+    CLEARED(true),
+    LOCAL_REMEDIATION(true),
+    ORIGINAL_UNKNOWN_STILL_BLOCKED(false),
+    ORIGINAL_INCOMPLETE_STILL_BLOCKED(false),
+    ORIGINAL_EVIDENCE_MISSING(false),
+    LIST_STRUCTURE_INCOMPLETE(false)
+}
+
+/** Reuse the traversal's exact blocker rules on a disposable checkpoint copy. */
+internal fun assessPrivateListRecoveryFault(
+    checkpoint: PrivateMessagesTraversalCheckpoint,
+    recoveryReason: String?,
+    snapshot: ChatPageSnapshot
+): PrivateListRecoveryFaultEvidence {
+    val unknownReason = recoveryReason == "INITIAL_UNREAD_STATE_UNKNOWN" ||
+        recoveryReason == "PRIVATE_POLL_FULL_SCAN_UNKNOWN"
+    val incompleteReason = recoveryReason == "PRIVATE_INCOMPLETE_UNREAD_ROW"
+    val savedUnknown = checkpoint.normalInboxUnreadStateUnknown ||
+        checkpoint.unresolvedUnknownUnreadKeys.isNotEmpty()
+    val savedIncomplete = checkpoint.unresolvedIncompleteUnreadKeys.isNotEmpty()
+    if (!unknownReason && !incompleteReason && !savedUnknown && !savedIncomplete) {
+        return PrivateListRecoveryFaultEvidence.NOT_APPLICABLE
+    }
+    // A missing original checkpoint cannot be replaced by proof that some other row is clean.
+    if ((unknownReason && !savedUnknown) || (incompleteReason && !savedIncomplete)) {
+        return PrivateListRecoveryFaultEvidence.ORIGINAL_EVIDENCE_MISSING
+    }
+    if (snapshot.pageKind != ChatPageKind.CHAT_LIST || snapshot.chatListExtractionTruncated ||
+        snapshot.chatListViewport == null || snapshot.windowIdentityKey() == null ||
+        snapshot.chatListCandidates.isEmpty()
+    ) return PrivateListRecoveryFaultEvidence.LIST_STRUCTURE_INCOMPLETE
+
+    val probe = PrivateMessagesTraversalTaskExecutor().apply { restore(checkpoint) }
+    // Preserve the original checkpoint through every unsuccessful observation; neither
+    // a first sample nor a different viewport can retire pending identities.
+    if (probe.observeUnreadBlockers(snapshot) || probe.unresolvedUnknownUnreadKeys.isNotEmpty()) {
+        return PrivateListRecoveryFaultEvidence.ORIGINAL_UNKNOWN_STILL_BLOCKED
+    }
+    if (probe.observeIncompleteUnreadEvidence(snapshot)) {
+        return if (probe.canContinueWithIncompleteUnread(snapshot)) {
+            PrivateListRecoveryFaultEvidence.LOCAL_REMEDIATION
+        } else PrivateListRecoveryFaultEvidence.ORIGINAL_INCOMPLETE_STILL_BLOCKED
+    }
+    return PrivateListRecoveryFaultEvidence.CLEARED
+}
+
 private const val UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS = 2
 
 /** A complete, read-only decision packet for one fresh inbox snapshot. */

@@ -578,6 +578,9 @@ class AiReplyObservationRuntimeTest {
     @Test
     fun p1RelocationTimerIsIntentOnlyAndReusesExistingScrollAfterFreshProof() {
         val fixture = preScrollPageRecoveryFixture()
+        // The startup observation and the relocation timer both use 500ms. Isolate
+        // the manually constructed top-of-list state from the fixture's startup probe.
+        cancelFixtureStartupObservation(fixture)
         val executor = fixture.runtime.javaClass.getDeclaredField(
             "privateMessagesTraversalTaskExecutor"
         ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
@@ -617,9 +620,17 @@ class AiReplyObservationRuntimeTest {
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
     }
 
+    private fun cancelFixtureStartupObservation(fixture: PreScrollPageRecoveryFixture) {
+        val field = fixture.runtime.javaClass.getDeclaredField("pageInspectionTask")
+            .apply { isAccessible = true }
+        (field.get(fixture.runtime) as? ScheduledTask)?.cancel()
+        field.set(fixture.runtime, null)
+    }
+
     @Test
     fun p1RelocationCannotReuseExpiredWindowIntent() {
         val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
         val executor = fixture.runtime.javaClass.getDeclaredField(
             "privateMessagesTraversalTaskExecutor"
         ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
@@ -655,6 +666,44 @@ class AiReplyObservationRuntimeTest {
         assertEquals(2, fixture.logs.count { it.contains("RELOCATION_WAIT") })
         assertTrue(requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys.isNotEmpty())
         assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+    }
+
+    @Test
+    fun p2OriginalIncompleteFaultKeepsSameRecoveryUntilFreshRepair() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        val blocked = fixture.listPage.copy(chatListCandidates = listOf(damaged))
+        fixture.port.page = blocked
+        val handle = fixture.runtime.javaClass.getDeclaredMethod(
+            "handleSessionListPage", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        handle.invoke(fixture.runtime, blocked)
+        val saved = requireNotNull(fixture.checkpoint())
+        assertTrue(saved.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        var steps = 0
+        while (fixture.logs.count { it.contains("ORIGINAL_FAULT_WAIT") } < 2 &&
+            steps < 80 && fixture.scheduler.pendingCount() > 0
+        ) {
+            fixture.scheduler.runNextShortestDelay()
+            steps++
+        }
+        assertTrue("Original fault wait not observed: ${fixture.logs.takeLast(25)}",
+            fixture.logs.count { it.contains("ORIGINAL_FAULT_WAIT") } >= 2)
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+            it.contains("PRIVATE_INCOMPLETE_UNREAD_ROW") })
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertEquals(saved.unresolvedIncompleteUnreadKeys, requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys)
+        assertEquals(0, fixture.dispatchedGestures())
+
+        fixture.port.page = fixture.listPage.copy(chatListCandidates = listOf(
+            sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true)
+        ))
+        awaitPreScrollRecovery(fixture)
+        assertTrue(fixture.logs.any { it.contains("ORIGINAL_FAULT_RECHECKED") &&
+            it.contains("evidence=CLEARED") })
+        assertTrue(requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys.isEmpty())
     }
 
     @Test

@@ -35,7 +35,8 @@ internal class MessageListCheckpointVerification(
         val savedAtEpochMs: Long,
         val phase: String,
         val runGeneration: Long,
-        val pageFingerprint: String
+        val pageFingerprint: String,
+        val admittedFaultEvidence: PrivateListRecoveryFaultEvidence?
     )
 
     private val adapter = PrivateMessagesRecoveryCheckpointAdapter()
@@ -52,7 +53,9 @@ internal class MessageListCheckpointVerification(
         snapshot: ChatPageSnapshot,
         pageFingerprint: String,
         routeVerified: Boolean,
-        observationGeneration: Long
+        observationGeneration: Long,
+        originalFaultEvidence: PrivateListRecoveryFaultEvidence =
+            assessPrivateListRecoveryFault(checkpoint, recoveryReason, snapshot)
     ): RecoveryCheckpointVerificationResult {
         if (observationGeneration <= lastObservationGeneration) {
             return RecoveryCheckpointVerificationResult.StaleEvidence
@@ -69,7 +72,10 @@ internal class MessageListCheckpointVerification(
             savedAtEpochMs = checkpoint.savedAtEpochMs,
             phase = checkpoint.phase,
             runGeneration = currentRunGeneration(),
-            pageFingerprint = pageFingerprint
+            pageFingerprint = pageFingerprint,
+            // A scope transition (local remediation vs fully cleared) requires its
+            // own two samples without changing the adapter's actual page fingerprint.
+            admittedFaultEvidence = originalFaultEvidence.takeIf { it.allowsResume }
         )
         if (verifier == null || binding != newBinding) {
             // A fresh binding invalidates only this checkpoint's verification lane.
@@ -103,6 +109,18 @@ internal class MessageListCheckpointVerification(
                 onLog = onLog
             ).also { it.restore(unified, restoreSource) }
             binding = newBinding
+        }
+        if (!originalFaultEvidence.allowsResume) {
+            // Keep the original checkpoint identity and read-only schedule. A
+            // blocked business sample must invalidate prior positive page evidence.
+            onLog("消息列表统一检查点[ORIGINAL_FAULT_WAIT]：reason=$recoveryReason；" +
+                "evidence=${originalFaultEvidence.name}；原始业务阻塞未解除，不确认恢复")
+            return requireNotNull(verifier).observe(
+                CheckpointVerificationWiring.rejectedEvidence(
+                    runGeneration = currentRunGeneration(),
+                    observationGeneration = observationGeneration
+                )
+            )
         }
         return requireNotNull(verifier).observe(
             CheckpointVerificationWiring.verifiedEvidence(
