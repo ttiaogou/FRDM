@@ -85,7 +85,22 @@ class TaskLeaseLifecycleVerificationTest {
         val flow = ReceivedGreetingsTaskFlowController(ownership, FakePagePort())
         assertTrue(flow.claimOwnership("test"))
         flow.markStarted()
-        flow.markCompletedAwaitingUserExit()
+        flow.markTraversalCompleted()
+        assertTrue(flow.isActive)
+        assertTrue(flow.awaitingNormalInboxAfterReturn)
+        assertTrue(flow.ownsTask())
+        assertEquals(ReceivedGreetingsTaskController.TASK_ID, coordinator.activeTaskId())
+
+        assertTrue(flow.returnForPriorityCheck())
+        flow.markReturnRequested()
+        assertTrue(flow.isActive)
+        assertTrue(flow.returnRequested)
+        assertTrue(flow.ownsTask())
+
+        flow.markTraversalReturnedToInbox()
+        assertFalse(flow.isActive)
+        assertFalse(flow.awaitingNormalInboxAfterReturn)
+        assertFalse(flow.returnRequested)
 
         assertTrue(flow.releaseOwnership("completed"))
         assertFalse(flow.ownsTask())
