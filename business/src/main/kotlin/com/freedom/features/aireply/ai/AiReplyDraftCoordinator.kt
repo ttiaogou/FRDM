@@ -145,7 +145,7 @@ class AiReplyDraftCoordinator(
     /** Requests the existing read-only page observer after a correlated platform completion. */
     private val onSendConfirmationObservationRequested: () -> Unit = {},
     /** Greeting flow can provide the last verified message observation immediately before send. */
-    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null },
+    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
     /** Private-message flow uses the same pre-send diff baseline contract. */
     private val capturePrivatePreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
 ) {
@@ -1578,6 +1578,11 @@ class AiReplyDraftCoordinator(
         if (!valid || candidate == null || segments == null || targetNode == null ||
             windowIdentity == null || currentWindowKey == null || requestKey == null || startedAt == null
         ) {
+            if (activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS && candidate != null) {
+                archiveGreetingUnconfirmedAttempt(candidate, segments.orEmpty())
+                onLog("收到招呼历史发送[ARCHIVED_UNCONFIRMED]：补登记证据不足；本轮跳过历史发送，仅继续处理新消息")
+                return SendConfirmationResult.NOT_PENDING
+            }
             candidate?.let {
                 recordSendTrace(
                     "MESSAGE_SEND_UNCERTAIN", it.requestId, generation.get(),
@@ -1635,6 +1640,35 @@ class AiReplyDraftCoordinator(
         onLog("AI 发送只读恢复[REHYDRATED]：requestId=${candidate.requestId.take(12)}；" +
             "segmentIndex=${candidate.segmentIndex}；仅核验新鲜己方气泡，不重新输入或发送")
         return SendConfirmationResult.WAITING
+    }
+
+    /** Treats an unprovable historical greeting send as handled for this round, never as resent. */
+    private fun archiveGreetingUnconfirmedAttempt(
+        candidate: ReplySegmentTaskRecord,
+        segments: List<ReplySegmentTaskRecord>
+    ) {
+        val archiveId = fingerprint("${candidate.requestId}|${candidate.conversationKey}|UNCERTAIN_ARCHIVED")
+        replySegmentTaskRepository?.let { repository ->
+            segments.filter {
+                it.status in setOf(
+                    ReplySegmentTaskStatus.SENDING,
+                    ReplySegmentTaskStatus.SENT_UNCONFIRMED,
+                    ReplySegmentTaskStatus.UNKNOWN
+                )
+            }.forEach { record ->
+                repository.update(record.copy(
+                    status = ReplySegmentTaskStatus.SENT,
+                    sentAt = record.sentAt ?: nowMillis(),
+                    confirmationId = record.confirmationId ?: archiveId
+                ))
+            }
+        }
+        replyTaskRepository?.updateStatus(
+            candidate.requestKey,
+            candidate.requestId,
+            ReplyTaskStatus.SENT,
+            nowMillis()
+        )
     }
 
     fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): SendConfirmationResult {
