@@ -6480,6 +6480,90 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun confirmedPrivateSendReturnsEvenWhenSamplePersistenceFails() {
+        for (confirmationId in listOf<String?>(null, "confirmed-private-send-id")) {
+            val scheduler = FakeScheduler()
+            val candidate = sessionCandidate(completeBoundaryEvidence = true)
+            val inbox = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                resolvedTapBounds = candidate.rowBounds
+                persistChatSampleResult = 0
+                page = inbox
+                pageAfterBack = inbox
+            }
+            val logs = ArrayList<String>()
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = object : TestGestureApi {
+                    override fun execute(
+                        command: GestureIntentRequest,
+                        listener: GestureExecutionListener
+                    ): GestureSubmission {
+                        if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                        listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                        return GestureSubmission.ACCEPTED
+                    }
+                },
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L,
+                onDraftConversationObserved = { _, _, _, _ -> true }
+            )
+            runtime.scheduleInitialObservation()
+            runUntil(scheduler, 180) {
+                logs.any { it.contains("聊天样本保存失败或当前存储会话不可用") }
+            }
+            assertEquals(1, port.persistedChatSamples)
+            assertEquals(0, port.navigateBackCalls)
+
+            // Simulate the final outgoing-bubble receipt after the sample store failed.
+            // The exact production confirmation handler must retain the stable-ID gate.
+            val handler = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+                "handleSendConfirmationResult",
+                com.freedom.features.aireply.ai.ReplySendTransactionOutcome::class.java,
+                ChatMessageBatch::class.java,
+                ChatPageSnapshot::class.java
+            ).apply { isAccessible = true }
+            val confirmed = com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED,
+                confirmationId
+            )
+            assertTrue(handler.invoke(runtime, confirmed, requireNotNull(port.lastPersistedBatch), port.page) as Boolean)
+            if (confirmationId == null) {
+                assertTrue(logs.any { it.contains("缺少稳定 sendConfirmationId") })
+                assertEquals("Missing receipt must never authorize BACK", 0, port.navigateBackCalls)
+                continue
+            }
+            assertTrue(logs.any { it.contains("CHAT_SAMPLE_NOT_PERSISTED") })
+            runUntil(scheduler, 80) { port.navigateBackCalls == 1 }
+            assertTrue(logs.any { it.contains("已提交系统返回动作") })
+        }
+    }
+
+    @Test
     fun delayedBackRechecksDraftTransactionBeforeDispatch() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)
@@ -6695,6 +6779,7 @@ class AiReplyObservationRuntimeTest {
         var messageContentQuality = MessageContentQuality.VERIFIED
         var messageDirection = ChatMessageDirection.INCOMING
         var persistedChatSamples = 0
+        var persistChatSampleResult = 1
         var lastPersistedChatSessionName: String? = "UNSET"
         var lastPersistedBatch: ChatMessageBatch? = null
         var throwOnMessageRead = false
@@ -6791,7 +6876,7 @@ class AiReplyObservationRuntimeTest {
             persistedChatSamples++
             lastPersistedChatSessionName = sessionName
             lastPersistedBatch = batch
-            return 1
+            return persistChatSampleResult
         }
         override fun persistChatHeaderValidationDiagnostic(
             snapshot: ChatPageSnapshot,

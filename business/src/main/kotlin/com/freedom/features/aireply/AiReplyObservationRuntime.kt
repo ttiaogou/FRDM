@@ -3775,10 +3775,15 @@ class AiReplyObservationRuntime(
                     if (!checkpointWritten) return true
                     onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
                 }
-                if (!currentSessionSendConfirmed || !currentSessionReadCaptured) {
+                if (!currentSessionSendConfirmed) {
                     sessionManagerState = SessionManagerState.PAUSED
-                    onLog("AI 会话返回被阻止：发送确认或当前段确认状态不完整")
+                    onLog("AI 会话返回被阻止：最终消息段尚未确认；不返回列表")
                     return true
+                }
+                if (!currentSessionReadCaptured) {
+                    // A confirmed outgoing bubble and recorded send checkpoint are the return
+                    // proof; optional chat-sample archiving is not part of the send safety gate.
+                    onLog("AI 会话返回门禁[CHAT_SAMPLE_NOT_PERSISTED]：发送已确认；样本归档失败不阻止安全返回")
                 }
                 scheduleReturnToSessionList(snapshot)
                 return true
