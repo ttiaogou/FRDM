@@ -1953,6 +1953,11 @@ class AiReplyObservationRuntime(
         // 模型请求和分段填入期间，不让遍历任务抢走页面。
         if (isConversationDraftPending()) {
             lastPageInspection = inspection
+            // The idle timer may already have fired. Preserve the due round without
+            // starting traversal or requiring another accessibility event to wake it.
+            if (pollingRoundPending && pollingRoundDue && !receivedGreetingsTaskActive) {
+                waitForPollingRoundEvidence("DRAFT_PENDING")
+            }
             return
         }
 
@@ -4691,9 +4696,14 @@ class AiReplyObservationRuntime(
             // permission to click a row.
             if (privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.add(structuralFingerprint)) {
                 sessionManagerState = SessionManagerState.CAPTURING_SESSION_LIST
+                val captureRunGeneration = currentRunGeneration()
+                val captureActionGeneration = sessionActionGeneration
                 chatSessionManagementPort.captureSessionListSample(snapshot) { screenshotPath ->
                     scheduler.schedule(0L) {
                         if (!isAiReplyActive() || !sessionRunStarted ||
+                            captureRunGeneration != currentRunGeneration() ||
+                            captureActionGeneration != sessionActionGeneration ||
+                            !canPerformPrivateMessagesUiAction() || receivedGreetingsTaskActive ||
                             sessionManagerState != SessionManagerState.CAPTURING_SESSION_LIST
                         ) return@schedule
                         onLog(
@@ -4735,9 +4745,14 @@ class AiReplyObservationRuntime(
 
         if (privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.add(structuralFingerprint)) {
             sessionManagerState = SessionManagerState.CAPTURING_SESSION_LIST
+            val captureRunGeneration = currentRunGeneration()
+            val captureActionGeneration = sessionActionGeneration
             chatSessionManagementPort.captureSessionListSample(snapshot) { screenshotPath ->
                 scheduler.schedule(0L) {
                     if (!isAiReplyActive() || !sessionRunStarted ||
+                        captureRunGeneration != currentRunGeneration() ||
+                        captureActionGeneration != sessionActionGeneration ||
+                        !canPerformPrivateMessagesUiAction() || receivedGreetingsTaskActive ||
                         sessionManagerState != SessionManagerState.CAPTURING_SESSION_LIST
                     ) return@schedule
                     onLog(

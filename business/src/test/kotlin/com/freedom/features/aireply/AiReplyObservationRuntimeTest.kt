@@ -5103,6 +5103,8 @@ class AiReplyObservationRuntimeTest {
             pageAfterReceivedGreetingsReturn = ordinaryList
         }
         val logs = ArrayList<String>()
+        var active = true
+        var draftPending = false
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
@@ -5119,7 +5121,8 @@ class AiReplyObservationRuntimeTest {
                 }
             },
             targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
+            isAiReplyActive = { active },
+            isConversationDraftPending = { draftPending },
             onLog = logs::add,
             inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
@@ -5168,12 +5171,18 @@ class AiReplyObservationRuntimeTest {
 
         // No user event and no unread are required for the second round.
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        draftPending = true
         repeat(4) {
             if (logs.none { it.contains("自主轮询[ROUND_DUE]") }) {
                 scheduler.runNextWithDelay(60_000L)
             }
         }
         assertTrue(logs.any { it.contains("自主轮询[ROUND_DUE]") })
+        runUntilLog(scheduler, logs, "reason=DRAFT_PENDING")
+        assertEquals(1, port.receivedGreetingsNavigationTaskStarts)
+        assertFalse(logs.any { it.contains("自主轮询[ROUND_STARTED]") })
+        draftPending = false
+        // No new page event: the read-only retry must resume the due round.
         runUntilLog(scheduler, logs, "自主轮询[ROUND_VERIFYING]")
         assertEquals(1, port.receivedGreetingsNavigationTaskStarts)
         runUntilLog(scheduler, logs, "自主轮询[ROUND_STARTED]")
@@ -5182,6 +5191,28 @@ class AiReplyObservationRuntimeTest {
         }
         assertEquals(2, port.receivedGreetingsNavigationTaskStarts)
         assertEquals(1, port.receivedGreetingsPriorityReturns)
+
+        // Complete a second full pair, rather than merely entering its greeting task.
+        port.page = nonChat
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
+        repeat(100) {
+            if (port.receivedGreetingsConfirmedReturns < 2) scheduler.runNextShortestDelay()
+        }
+        assertEquals(2, port.receivedGreetingsConfirmedReturns)
+        assertEquals(2, port.receivedGreetingsPriorityReturns)
+        assertEquals(2, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(2, logs.count { it.contains("跨任务交接[PRIVATE_LEASE_TRANSFERRED]") })
+
+        // Stopping with a pending next-round timer must not start a third round.
+        assertTrue(scheduler.hasPendingDelay(60_000L))
+        active = false
+        runtime.reset("P5 explicit stop")
+        repeat(20) {
+            if (scheduler.pendingCount() > 0) scheduler.runNextShortestDelay()
+        }
+        assertEquals(2, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(2, port.receivedGreetingsPriorityReturns)
+        assertEquals(1, logs.count { it.contains("自主轮询[ROUND_STARTED]") })
     }
 
     @Test
