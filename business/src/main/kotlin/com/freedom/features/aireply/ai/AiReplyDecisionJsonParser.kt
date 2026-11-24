@@ -107,13 +107,20 @@ internal object AiReplyDecisionJsonParser {
     }
 
     fun extractPlainTextDraft(raw: String, maxDraftChars: Int): String? {
-        val candidate = raw.trim().removePrefix("```").removeSuffix("```").trim()
-            .removePrefix("json").trim()
+        var candidate = raw.trim()
+        if (candidate.startsWith("```") && candidate.endsWith("```")) {
+            candidate = candidate.removePrefix("```").removeSuffix("```").trim()
+            if (candidate.startsWith("json", ignoreCase = true)) candidate = candidate.substring(4).trim()
+        }
         if (candidate.isBlank() || candidate.length > maxDraftChars) return null
         if (candidate.startsWith("{") && candidate.endsWith("}")) {
             parseWithDiagnostics(candidate, maxDraftChars).decision?.draft?.let { return it }
+            return null
         }
-        return null
+        candidate = candidate.removePrefix("回复：").removePrefix("回复:")
+            .removePrefix("draft:").removePrefix("Draft:").trim()
+        if (candidate.isBlank() || candidate.startsWith("{") || candidate.contains("```")) return null
+        return candidate.takeIf { it.length <= maxDraftChars }
     }
 
     private fun normalizeJsonCandidate(raw: String): String {
