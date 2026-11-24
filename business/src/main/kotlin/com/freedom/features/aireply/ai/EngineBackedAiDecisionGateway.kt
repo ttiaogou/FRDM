@@ -24,7 +24,8 @@ class EngineBackedAiDecisionGateway(
                 requestId = request.requestId,
                 personalization = request.constraints.personalization,
                 promptOnlyJsonSchema = request.responseMode == ModelResponseMode.PROMPT_ONLY_JSON,
-                responseMode = request.responseMode
+                responseMode = request.responseMode,
+                attemptIndex = request.attemptIndex
             )
         )
     }

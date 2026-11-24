@@ -794,7 +794,8 @@ class AiReplyDraftCoordinator(
                         personalization = personalizationRepository.load()
                     ),
                     outputContract = policy.modelContract(),
-                    responseMode = modelResponseMode
+                    responseMode = modelResponseMode,
+                    attemptIndex = emptyRetryAttempt
                 )
             )
         } catch (error: Throwable) {

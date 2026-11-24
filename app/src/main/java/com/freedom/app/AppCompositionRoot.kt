@@ -449,7 +449,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             onLog = addLog,
             createGateway = { configuration ->
                 val transport = when (configuration.provider) {
-                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration)
+                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration).also { it.diagnosticLog = addLog }
                     AiModelServiceProvider.OPENAI,
                     AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport(configuration)
                 }

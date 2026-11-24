@@ -3790,6 +3790,9 @@ class AiReplyObservationRuntimeTest {
         assertEquals("Exactly one OCR read from the restored chat", 1, port.ocrAsyncReadRequests)
         assertTrue("Draft must have verified OCR content", draftHadOcrEvidence)
         assertTrue("Draft must keep the platform-confirmed identity", draftIdentityVerified)
+        assertTrue("Verified identity writeback must preserve the send-confirmation binding",
+            runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
+                .apply { isAccessible = true }.invoke(runtime) as Boolean)
         assertTrue(logs.any { it.contains("AI 身份回接[REQUEST_NOT_CONSUMED]") &&
             it.contains("reason=RECOVERY_TRANSACTION_PENDING") })
         assertTrue(logs.any { it.contains("AI 身份回接[RECOVERY_HANDOFF]") })

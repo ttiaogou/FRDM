@@ -61,6 +61,7 @@ class AiReplyDecisionEngine(
             temperature = DEFAULT_TEMPERATURE,
             maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
             requestId = input.requestId,
+            attemptIndex = input.attemptIndex,
             responseFormat = when (responseMode) {
                 ModelResponseMode.PLAIN_TEXT -> AiModelResponseFormat.PlainText
                 ModelResponseMode.PROMPT_ONLY_JSON -> AiModelResponseFormat.PlainText
@@ -162,7 +163,8 @@ data class AiReplyDecisionInput(
     val requestId: String,
     val personalization: AiReplyPersonalization = AiReplyPersonalization(),
     val promptOnlyJsonSchema: Boolean = false,
-    val responseMode: ModelResponseMode = ModelResponseMode.STRICT_JSON
+    val responseMode: ModelResponseMode = ModelResponseMode.STRICT_JSON,
+    val attemptIndex: Int = 0
 )
 
 enum class AiReplyAction { REPLY, DO_NOT_REPLY, WAIT }

@@ -24,7 +24,12 @@ class DeepSeekAiModelTransportTest {
             """{"model":"deepseek-flash","choices":[{"message":{"content":"{\"action\":\"REPLY\",\"reason\":\"READY\",\"draft\":\"你好\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":18,"completion_tokens":9}}"""
         )
         val transport = DeepSeekAiModelTransport(configuration()) { connection }
-        val result = transport.execute(request()).getOrThrow()
+        val logs = mutableListOf<String>()
+        transport.diagnosticLog = { logs.add(it) }
+        val result = transport.execute(request().copy(attemptIndex = 1)).getOrThrow()
+        assertTrue(logs.single { it.contains("DeepSeek REQUEST") }.contains("schemaCopies=1"))
+        assertTrue(logs.single { it.contains("DeepSeek RESPONSE") }.contains("contentState=PRESENT"))
+        assertTrue(logs.all { it.contains("attemptIndex=1") && !it.contains("你好") })
 
         assertEquals("{\"action\":\"REPLY\",\"reason\":\"READY\",\"draft\":\"你好\"}", result.text)
         assertEquals("deepseek-flash", result.model)

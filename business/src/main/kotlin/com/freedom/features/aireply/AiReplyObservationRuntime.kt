@@ -4401,7 +4401,18 @@ class AiReplyObservationRuntime(
                                 return
                             }
                         } else {
-                            candidate!!.contactIdentity = verifiedIdentity
+                            val before = ChatSessionManagementPolicy.stableSessionKey(candidate!!)
+                            val expected = expectedPrivateSessionDetailNavigation
+                            val boundBefore = hasBoundPrivateDetailRecoverySession()
+                            candidate.contactIdentity = verifiedIdentity
+                            val after = ChatSessionManagementPolicy.stableSessionKey(candidate)
+                            if (before != after && boundBefore && expected != null) {
+                                currentSessionKey = after
+                                expectedPrivateSessionDetailNavigation = expected.copy(sessionKey = after)
+                            }
+                            onLog("AI 身份升级：keyChanged=${before != after}；boundBefore=$boundBefore；" +
+                                "currentKeyMatches=${currentSessionKey == after}；" +
+                                "expectedKeyMatches=${expectedPrivateSessionDetailNavigation?.sessionKey == after}")
                             identityJustVerified = true
                             onLog(
                                 "AI 联系人身份绑定完成：已写回当前私人会话候选；" +

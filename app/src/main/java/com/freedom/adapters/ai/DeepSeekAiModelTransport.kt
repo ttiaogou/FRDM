@@ -23,6 +23,8 @@ class DeepSeekAiModelTransport(
     }
 ) : AiModelTransport {
 
+    internal var diagnosticLog: (String) -> Unit = {}
+
     override fun execute(request: AiModelRequest): Result<AiModelResult> = AiModelHttpCallTrace().capture { trace ->
         val config = configuration.normalized()
         require(config.provider == AiModelServiceProvider.DEEPSEEK) { "AI_MODEL_PROVIDER_MISMATCH" }
@@ -62,7 +64,7 @@ class DeepSeekAiModelTransport(
                 String(readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8)
             }
             trace.stage = AiModelCallStage.RESPONSE_PARSE
-            parseResponse(responseText, config.modelName)
+            parseResponse(responseText, config.modelName, request, connection.getHeaderField("x-request-id"))
         } catch (timeout: SocketTimeoutException) {
             throw AiModelHttpException("HTTP_TIMEOUT", retryable = true, cause = timeout)
         } catch (failure: AiModelHttpException) {
@@ -96,6 +98,12 @@ class DeepSeekAiModelTransport(
                 append(format.schema)
             }
         }
+        val schema = (request.responseFormat as? AiModelResponseFormat.JsonSchema)?.schema
+        val copies = schema?.let { systemInstruction.windowedSequence(it.length).count { part -> part == it } } ?: 0
+        diagnosticLog("DeepSeek REQUEST requestId=${request.requestId} attemptIndex=${request.attemptIndex} " +
+            "responseFormat=${if (schema == null) "absent" else "json_object"} thinking=disabled " +
+            "maxTokens=${request.maxOutputTokens} systemChars=${systemInstruction.length} schemaCopies=$copies " +
+            "conversationMessages=${request.conversation.size} templateVersion=context-select-v1")
         messages += mapOf("role" to "system", "content" to systemInstruction)
         request.conversation.forEach { message ->
             messages += mapOf(
@@ -126,7 +134,7 @@ class DeepSeekAiModelTransport(
         return MiniJson.stringify(payload)
     }
 
-    private fun parseResponse(body: String, configuredModel: String): AiModelResult {
+    private fun parseResponse(body: String, configuredModel: String, request: AiModelRequest, providerId: String?): AiModelResult {
         val root = MiniJson.parse(body) as? Map<*, *>
             ?: throw AiModelHttpException("HTTP_RESPONSE_INVALID")
         val choices = root["choices"] as? List<*>
@@ -137,7 +145,12 @@ class DeepSeekAiModelTransport(
             ?: throw AiModelHttpException("HTTP_RESPONSE_MISSING_MESSAGE")
         val contentValue = message["content"]
         val content = contentValue as? String
-        val reasoningContent = message["reasoning_content"] as? String
+        fun state(key: String): String = when (val value = message[key]) {
+            null -> if (key in message) "NULL" else "ABSENT"
+            is String -> if (value.isBlank()) "BLANK" else "PRESENT"
+            else -> "NON_STRING"
+        }
+        val reasoningState = state("reasoning_content")
         val usageMap = root["usage"] as? Map<*, *>
         val usage = usageMap?.let {
             val input = (it["prompt_tokens"] as? Number)?.toInt()
@@ -147,6 +160,13 @@ class DeepSeekAiModelTransport(
             } else null
         }
         val finishReason = firstChoice["finish_reason"] as? String
+        val safeProviderId = providerId?.takeIf { it.matches(Regex("[a-zA-Z0-9_-]{1,100}")) }
+        diagnosticLog("DeepSeek RESPONSE requestId=${request.requestId} attemptIndex=${request.attemptIndex} " +
+            "providerRequestId=${safeProviderId ?: "UNKNOWN"} contentState=${state("content")} " +
+            "contentChars=${content?.length} spaces=${content?.count { it == ' ' }} " +
+            "lineFeeds=${content?.count { it == '\n' }} reasoningContentState=$reasoningState " +
+            "finishReason=${com.freedom.features.aireply.ai.AiModelCallDiagnostics.safeFinishReason(finishReason)} " +
+            "inputTokens=${usage?.inputTokens} outputTokens=${usage?.outputTokens}")
         if (content.isNullOrBlank()) {
             val state = when {
                 !message.containsKey("content") -> "ABSENT"
@@ -161,11 +181,7 @@ class DeepSeekAiModelTransport(
                 responseFinishReason = finishReason,
                 responseInputTokens = usage?.inputTokens,
                 responseOutputTokens = usage?.outputTokens,
-                responseReasoningContentState = when {
-                    reasoningContent == null -> "ABSENT"
-                    reasoningContent.isBlank() -> "BLANK"
-                    else -> "PRESENT"
-                }
+                responseReasoningContentState = reasoningState
             )
         }
         return AiModelResult(

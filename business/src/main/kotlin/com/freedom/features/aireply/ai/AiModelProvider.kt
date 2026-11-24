@@ -14,7 +14,8 @@ data class AiModelRequest(
     val temperature: Double = 0.3,
     val maxOutputTokens: Int = 512,
     val requestId: String,
-    val responseFormat: AiModelResponseFormat = AiModelResponseFormat.PlainText
+    val responseFormat: AiModelResponseFormat = AiModelResponseFormat.PlainText,
+    val attemptIndex: Int = 0
 ) {
     init {
         require(systemInstruction.isNotBlank())

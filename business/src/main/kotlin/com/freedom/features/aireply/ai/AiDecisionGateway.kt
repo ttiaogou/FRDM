@@ -54,7 +54,8 @@ data class ModelDecisionRequest(
     val context: ConversationContext,
     val constraints: ModelDecisionConstraints,
     val outputContract: ModelOutputContract,
-    val responseMode: ModelResponseMode = ModelResponseMode.STRICT_JSON
+    val responseMode: ModelResponseMode = ModelResponseMode.STRICT_JSON,
+    val attemptIndex: Int = 0
 ) {
     init {
         require(taskId.isNotBlank())
