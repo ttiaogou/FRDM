@@ -44,6 +44,7 @@ import com.freedom.core.runtime.TargetAppPageReadiness
 import com.freedom.features.accountbrowse.ports.*
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.domain.message.MessageReadStatus
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatPageNodeEvidence
@@ -319,6 +320,8 @@ internal class MomoSocialAdapter(
     @Volatile private var manualReceivedGreetingsArrivalProbeActive: Boolean = false
     @Volatile private var sayHiCardListTapPending: Boolean = false
     @Volatile private var sayHiGestureInFlight: Boolean = false
+    private enum class CompletionBackStage { NONE, LIST_SUBMITTED, CARD_SUBMITTED }
+    @Volatile private var completionBackStage = CompletionBackStage.NONE
     @Volatile private var receivedGreetingsEntryTapAtMs: Long = 0L
     @Volatile private var sayHiCardListTapAtMs: Long = 0L
     @Volatile private var lastSayHiCardListTapAtMs: Long = 0L
@@ -1059,6 +1062,7 @@ internal class MomoSocialAdapter(
             return false
         }
 
+        completionBackStage = CompletionBackStage.NONE
         resetReceivedGreetingsEntrySearch()
         sayHiAutonomousBrowseController.reset()
         clearSayHiSelectedGreeting()
@@ -1099,6 +1103,7 @@ internal class MomoSocialAdapter(
     }
 
     override fun beginReceivedGreetingsNavigationTask() {
+        completionBackStage = CompletionBackStage.NONE
         resetReceivedGreetingsEntrySearch()
     }
 
@@ -3952,38 +3957,109 @@ internal class MomoSocialAdapter(
         }
     }
 
-    override fun returnFromReceivedGreetingsForPriorityCheck(): Boolean {
-        val currentActivity = activityClass()
-        val isReceivedList = isReceivedGreetingsListStructureVisible()
-        val isCardHost = currentActivity == MomoSayHiPageContract.CARD_ACTIVITY
-        if (!isReceivedList && !isCardHost) return false
-        val confirmedWindow = rootAccess.withActiveTargetRoot { _, window ->
-            window.packageName == targetPackage && accessibilityGateway.isWindowCurrent(window)
-        } ?: false
-        if (!confirmedWindow) return false
-        if (sayHiGestureInFlight) {
-            onLog("收到的招呼任务让出执行权：等待当前已提交手势完成，暂不并发执行返回操作")
-            return true
+    /** Source proof is read-only and uses the existing card fingerprint policy. */
+    override fun isReceivedGreetingsCompletionReturnIntermediate(): Boolean {
+        if (completionBackStage == CompletionBackStage.NONE) return false
+        return inspectSayHiCardListTapTarget() is SayHiCardListTapInspection.Ready
+    }
+
+    @Synchronized
+    override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult {
+        if (sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight) {
+            onLog("收到的招呼任务返回[GESTURE_IN_FLIGHT]：等待已提交手势终态；未提交BACK")
+            return ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT
+        }
+        // Use one current-window structural proof, not a cached activity or old list target.
+        val listWindow = rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName == targetPackage && window.windowId >= 0 &&
+                accessibilityGateway.isWindowCurrent(window) &&
+                sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage) &&
+                accessibilityGateway.isWindowCurrent(window)
+            ) window else null
+        }
+        val nextStage: CompletionBackStage
+        val sourceWindow: WindowRef
+        if (listWindow != null) {
+            if (completionBackStage != CompletionBackStage.NONE) {
+                return ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
+            }
+            if (!sayHiNavigationFlowController.isReceivedListConfirmed() ||
+                !sayHiAutonomousBrowseController.isFinished() || sayHiTraversalState.hasDeferredRows ||
+                sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE
+            ) return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+            nextStage = CompletionBackStage.LIST_SUBMITTED
+            sourceWindow = listWindow
+        } else {
+            // Only the verified entry-card host reached after a list BACK permits a second step.
+            // Never use an arbitrary profile Activity or an Activity hint as authorization.
+            if (completionBackStage == CompletionBackStage.NONE) {
+                return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+            }
+            val card = inspectSayHiCardListTapTarget() as? SayHiCardListTapInspection.Ready
+                ?: return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+            if (completionBackStage == CompletionBackStage.CARD_SUBMITTED) {
+                return ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
+            }
+            nextStage = CompletionBackStage.CARD_SUBMITTED
+            sourceWindow = card.tree.window
+        }
+        if (sourceWindow.packageName != targetPackage || sourceWindow.windowId < 0 ||
+            !accessibilityGateway.isWindowCurrent(sourceWindow)
+        ) {
+            return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+        }
+        if (sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight) {
+            return ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT
         }
         val accepted = accessibilityGateway.performGlobalAction(GlobalAccessibilityAction.BACK)
-        if (accepted) {
-            receivedGreetingsEntryTapPending = false
-            sayHiCardListTapPending = false
-            sayHiNavigationFlowController.reset()
-            sayHiAutonomousBrowseController.reset()
-            resetReceivedGreetingsEntrySearch()
-            resetSayHiListSnapshotState()
-            clearSayHiSelectedGreeting()
-            sayHiTraversalState.clear()
-            sayHiStableCandidateKey = ""
-            sayHiStableCandidateTarget = null
-            sayHiStableCandidateWindow = null
+        if (!accepted) {
+            onLog("收到的招呼任务返回[REJECTED]：系统未受理BACK；保留遍历检查点")
+            return ReceivedGreetingsBackResult.REJECTED
         }
-        onLog(
-            if (accepted) "收到的招呼任务让出执行权：已从确认的招呼页面请求返回普通聊天列表"
-            else "收到的招呼任务让出执行权失败：系统拒绝返回操作"
-        )
-        return accepted
+        completionBackStage = nextStage
+        onLog("收到的招呼任务返回[BACK_SUBMITTED]：stage=$nextStage；保留遍历检查点，等待独立页面确认")
+        return ReceivedGreetingsBackResult.BACK_SUBMITTED
+    }
+
+    @Synchronized
+    override fun confirmReceivedGreetingsCompletionReturn(): Boolean {
+        // The Runtime has independently confirmed the ordinary inbox and retains the greeting
+        // lease. Recheck the target window before retiring the completed adapter transaction.
+        // Do not invoke the general chat inspection path here: it can advance a separate
+        // identity transaction. Use the same existing root-based page classifier read-only.
+        if (sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight ||
+            pendingInboxIdentityCapture != null
+        ) return false
+        val inboxConfirmed = rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(window) ||
+                sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage)
+            ) return@withActiveTargetRoot false
+            val inspection = chatComponents.pageInspector.inspectRoot(
+                root = AccessibilityNodeInfo.obtain(root),
+                targetPackage = targetPackage,
+                activityClass = window.activityClass.ifBlank { activityClass() }
+            )
+            inspection.pageType == MomoChatPageType.CHAT_LIST &&
+                accessibilityGateway.isWindowCurrent(window)
+        } == true
+        if (!inboxConfirmed || sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight) {
+            return false
+        }
+        receivedGreetingsEntryTapPending = false
+        sayHiCardListTapPending = false
+        sayHiNavigationFlowController.reset()
+        sayHiAutonomousBrowseController.reset()
+        resetReceivedGreetingsEntrySearch()
+        resetSayHiListSnapshotState()
+        clearSayHiSelectedGreeting()
+        sayHiTraversalState.clear()
+        sayHiStableCandidateKey = ""
+        sayHiStableCandidateTarget = null
+        sayHiStableCandidateWindow = null
+        completionBackStage = CompletionBackStage.NONE
+        onLog("收到的招呼任务返回[INBOX_CONFIRMED]：普通消息列表已复核；退休本轮遍历状态")
+        return true
     }
 
     /**
@@ -5985,6 +6061,7 @@ internal class MomoSocialAdapter(
      */
     private fun resetReceivedGreetingsRunState(reason: String) {
         val newGeneration = sayHiRunGenerationGuard.invalidatePreviousRun()
+        completionBackStage = CompletionBackStage.NONE
         val previousStage = sayHiReadOnlyStage.name
         val previousGestureInFlight = sayHiGestureInFlight
         val previousEntrySearchInFlight = receivedGreetingsEntrySearchGestureInFlight

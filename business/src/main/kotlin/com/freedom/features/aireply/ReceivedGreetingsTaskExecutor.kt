@@ -3,6 +3,7 @@ package com.freedom.features.aireply
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 
@@ -159,10 +160,18 @@ internal class ReceivedGreetingsTaskExecutor(
     }
 
     /** Returns from a verified greetings boundary only when this task still owns UI operations. */
-    fun returnForPriorityCheck(): Boolean {
-        if (!ownsTask()) return false
+    fun returnForPriorityCheck(): ReceivedGreetingsBackResult {
+        if (!ownsTask()) return ReceivedGreetingsBackResult.OWNERSHIP_REJECTED
         return runCatching { pagePort.returnFromReceivedGreetingsForPriorityCheck() }
-            .getOrDefault(false)
+            .getOrDefault(ReceivedGreetingsBackResult.REJECTED)
+    }
+
+    fun isCompletionReturnIntermediate(): Boolean =
+        runCatching { pagePort.isReceivedGreetingsCompletionReturnIntermediate() }.getOrDefault(false)
+
+    fun confirmCompletionReturn(): Boolean {
+        if (!ownsTask()) return false
+        return runCatching { pagePort.confirmReceivedGreetingsCompletionReturn() }.getOrDefault(false)
     }
 
     /** Completing detail inspection can navigate back to the greetings list, so it is lease-gated. */

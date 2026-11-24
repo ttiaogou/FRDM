@@ -3,6 +3,7 @@ package com.freedom.features.aireply
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 
@@ -118,7 +119,14 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun performInitialIdleStep(): Boolean = executor.performIdleStep()
 
-    fun returnForPriorityCheck(): Boolean = executor.returnForPriorityCheck()
+    fun returnForPriorityCheck(): ReceivedGreetingsBackResult = executor.returnForPriorityCheck()
+
+    fun isCompletionReturnIntermediate(): Boolean =
+        lifecycle.awaitingNormalInboxAfterReturn && lifecycle.returnRequested &&
+            executor.isCompletionReturnIntermediate()
+
+    fun confirmCompletionReturn(): Boolean =
+        lifecycle.awaitingNormalInboxAfterReturn && executor.confirmCompletionReturn()
 
     fun completeDetailInspection(success: Boolean): Boolean =
         executor.completeDetailInspection(success)

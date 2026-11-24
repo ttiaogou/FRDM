@@ -33,6 +33,7 @@ import com.freedom.features.aireply.domain.contact.ContactSendCountUpdate
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPagePort
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
@@ -1390,6 +1391,15 @@ class AiReplyObservationRuntime(
             inspection.pageKind == ChatPageKind.CHAT_LIST &&
             inspection.messageTabPositionKey() != null &&
             inspection.messageTabAnchorPositionKey() != null
+        // A list BACK may first reveal its verified entry-card surface. Only this
+        // transaction-scoped adapter proof can admit that normal intermediate transition.
+        val verifiedGreetingsReturnIntermediate = sessionRunStarted &&
+            receivedGreetingsTaskActive && awaitingNormalInboxAfterGreetingsReturn &&
+            ownsTask(RECEIVED_GREETINGS_TASK_ID) && !recoveryContext.pending &&
+            !isSendConfirmationPending() && !isConversationDraftPending() &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE &&
+            inspection.packageName == targetPackage() && inspection.pageKind == ChatPageKind.NON_CHAT &&
+            receivedGreetingsTaskFlow.isCompletionReturnIntermediate()
         val activeTaskId = taskOwnership.activeTaskId()
         val activeRouteId = recoveryRouteIdForTask(activeTaskId)
         // Route recovery is allowed to suppress PAGE_ROUTE_CHANGED only when the
@@ -1485,7 +1495,7 @@ class AiReplyObservationRuntime(
         val shouldCreateRouteRecovery = sessionRunStarted && activeTaskId != null &&
             !recoveryContext.pending && selfInitiatedTransition == null &&
             !openingPrivateSessionDetail && !activePrivateChatDetail && !receivedGreetingsWorkflowTransition &&
-            !verifiedGreetingsInboxReturn &&
+            !verifiedGreetingsInboxReturn && !verifiedGreetingsReturnIntermediate &&
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
         if ((shouldCreateRouteRecovery || unmatchedReturnToOwnedRoute) && activeTaskId != null) {
@@ -2046,11 +2056,16 @@ class AiReplyObservationRuntime(
             ChatPageKind.CHAT_LIST -> {
                 when {
                     verifiedGreetingsInboxReturn -> {
+                        if (!receivedGreetingsTaskFlow.confirmCompletionReturn()) {
+                            scheduleReceivedGreetingsRecoveryRetry("普通消息列表已确认，但招呼返回事务尚未完成清理")
+                            return
+                        }
                         if (!ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
                             !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "收到的招呼流程返回普通消息列表后恢复私人消息任务")
                         ) {
                             sessionManagerState = SessionManagerState.PAUSED
                             onLog("私人消息任务恢复[OWNERSHIP_REJECTED]：返回消息列表后未取得UI操作租约")
+                            scheduleReceivedGreetingsRecoveryRetry("返回已确认，等待原有跨任务租约交接")
                             return
                         }
                         receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
@@ -2506,6 +2521,10 @@ class AiReplyObservationRuntime(
         ) {
             onLog("跨任务恢复[PRIVATE_CHECKPOINT_UNAVAILABLE]：原持久化检查点无法与当前缓存对齐；禁止恢复旧滚动")
             scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
+            return true
+        }
+        if (!receivedGreetingsTaskFlow.confirmCompletionReturn()) {
+            scheduleReceivedGreetingsRecoveryRetry("原私聊路由已确认，但招呼返回事务尚未完成清理")
             return true
         }
         if (!restoreSuspendedPrivateRecovery(suspended)) {
@@ -4978,12 +4997,6 @@ class AiReplyObservationRuntime(
         }
         receivedGreetingsTaskFlow.markTraversalCompleted()
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-        if (receivedGreetingsTaskFlow.returnRequested) {
-            // The existing Boolean port cannot distinguish an accepted BACK from a deferred
-            // gesture. Keep observing; P0 must not replay a potentially submitted action.
-            scheduleReceivedGreetingsRecoveryRetry("返回步骤已受理；继续独立确认普通消息列表，不重复提交")
-            return
-        }
         if (observation.status != ObservationStatus.CONFIRMED_PAGE ||
             inspection.packageName != targetPackage() ||
             inspection.pageKind == ChatPageKind.CHAT_LIST ||
@@ -4993,13 +5006,20 @@ class AiReplyObservationRuntime(
             return
         }
         onLog("收到的招呼任务[RETURN_PENDING]：列表遍历完成；保留任务及UI操作权；进入自动返回流程")
-        val returned = runCatching { receivedGreetingsTaskFlow.returnForPriorityCheck() }.getOrDefault(false)
-        if (returned) {
-            receivedGreetingsTaskFlow.markReturnRequested()
-            onLog("收到的招呼任务：返回步骤已受理；等待普通消息列表独立确认")
-            scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
-        } else {
-            scheduleReceivedGreetingsRecoveryRetry("列表完整性已确认，但安全返回暂未通过")
+        when (val result = receivedGreetingsTaskFlow.returnForPriorityCheck()) {
+            ReceivedGreetingsBackResult.BACK_SUBMITTED -> {
+                receivedGreetingsTaskFlow.markReturnRequested()
+                onLog("收到的招呼任务[BACK_SUBMITTED]：返回步骤已受理；等待普通消息列表独立确认")
+                scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
+            }
+            ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT,
+            ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION,
+            ReceivedGreetingsBackResult.SOURCE_UNVERIFIED,
+            ReceivedGreetingsBackResult.REJECTED,
+            ReceivedGreetingsBackResult.OWNERSHIP_REJECTED -> {
+                onLog("收到的招呼任务[BACK_WAIT]：result=$result；未新增返回提交；保留任务现场")
+                scheduleReceivedGreetingsRecoveryRetry("完成后的安全返回尚未确认：$result")
+            }
         }
     }
 

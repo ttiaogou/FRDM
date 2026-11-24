@@ -48,6 +48,7 @@ import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.features.aireply.ports.ChatPageNodeEvidence
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.MessageWorkAreaNavigationOutcome
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatPageSnapshot
@@ -941,6 +942,14 @@ class AiReplyObservationRuntimeTest {
         runUntilLog(scheduler, logs, "收到的招呼任务[RETURN_PENDING]")
         assertEquals(1, port.receivedGreetingsPriorityReturns)
         assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+
+        // A second observation of the unchanged source must not submit another BACK or
+        // retire the traversal checkpoint before the independently confirmed destination.
+        runUntilLog(scheduler, logs, "result=WAITING_FOR_PAGE_CONFIRMATION")
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
 
         port.receivedGreetingsCheckpointFingerprint = null
         port.page = ChatPageSnapshot(
@@ -968,6 +977,7 @@ class AiReplyObservationRuntimeTest {
         )
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
         runUntilLog(scheduler, logs, "跨任务恢复[PRIVATE_CHECKPOINT_REARMED]")
+        assertEquals(1, port.receivedGreetingsConfirmedReturns)
         assertEquals(null, ownership.activeTaskId())
         assertEquals(original, repository.load())
         assertTrue(manager.snapshot("AI_REPLY_PRIVATE_MESSAGES") != null)
@@ -5108,8 +5118,17 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("GREETING_DEFERRED_EVIDENCE_ONLY") })
         port.greetingAwaitingSafeTargetEvidenceOnly = false
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
-        runUntilLog(scheduler, logs, "收到的招呼任务[RETURN_PENDING]")
+        port.receivedGreetingsBackDeferred = true
+        runUntilLog(scheduler, logs, "result=GESTURE_IN_FLIGHT")
+        assertEquals(0, port.receivedGreetingsPriorityReturns)
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals(nonChat, port.page)
+
+        port.receivedGreetingsBackDeferred = false
+        runUntilLog(scheduler, logs, "收到的招呼任务[BACK_SUBMITTED]")
         assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertTrue(port.receivedGreetingsBackAttempts >= 2)
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
         assertEquals(ordinaryList, port.page)
         assertTrue(logs.any { it.contains("返回步骤已受理") })
         assertFalse(logs.any { it.contains("模拟回复人数") })
@@ -6637,6 +6656,9 @@ class AiReplyObservationRuntimeTest {
         var receivedGreetingsPageObservations: Int = 0
         var receivedGreetingsPageObservationResult: Boolean = true
         var receivedGreetingsPriorityReturns: Int = 0
+        var receivedGreetingsBackAttempts: Int = 0
+        var receivedGreetingsConfirmedReturns: Int = 0
+        var receivedGreetingsBackDeferred: Boolean = false
         var greetingDetailCompletionCalls = 0
         var greetingDetailSuccessfulCompletions = 0
         var greetingDetailReturnAccepted = true
@@ -6775,9 +6797,18 @@ class AiReplyObservationRuntimeTest {
             receivedGreetingsCheckpointFingerprint
         override fun synchronizeReceivedGreetingsRecoveryConfirmation(): Boolean =
             receivedGreetingsRecoverySyncAccepted
-        override fun returnFromReceivedGreetingsForPriorityCheck(): Boolean {
+        override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult {
+            receivedGreetingsBackAttempts++
+            if (receivedGreetingsBackDeferred) return ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT
+            if (receivedGreetingsPriorityReturns > receivedGreetingsConfirmedReturns) {
+                return ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
+            }
             receivedGreetingsPriorityReturns++
             pageAfterReceivedGreetingsReturn?.let { page = it }
+            return ReceivedGreetingsBackResult.BACK_SUBMITTED
+        }
+        override fun confirmReceivedGreetingsCompletionReturn(): Boolean {
+            receivedGreetingsConfirmedReturns++
             return true
         }
 

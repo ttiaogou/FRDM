@@ -7,6 +7,7 @@ import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.ChatRegionSnapshot
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -205,7 +206,8 @@ class ReceivedGreetingsTaskFlowControllerTest {
             currentListStarts++
             return currentListStartAccepted
         }
-        override fun returnFromReceivedGreetingsForPriorityCheck(): Boolean = true
+        override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult =
+            ReceivedGreetingsBackResult.BACK_SUBMITTED
         override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean = true
         override fun observeManuallyOpenedReceivedGreetingsPage(): ReceivedGreetingsPageArrivalStatus =
             ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED

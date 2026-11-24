@@ -520,6 +520,16 @@ enum class ReceivedGreetingsTraversalStatus {
     UNKNOWN
 }
 
+/** One completed-list BACK step; acceptance is never evidence of inbox arrival. */
+enum class ReceivedGreetingsBackResult {
+    BACK_SUBMITTED,
+    GESTURE_IN_FLIGHT,
+    WAITING_FOR_PAGE_CONFIRMATION,
+    SOURCE_UNVERIFIED,
+    REJECTED,
+    OWNERSHIP_REJECTED
+}
+
 /** Result of observing a page the user may be opening manually as the Received Greetings list. */
 enum class ReceivedGreetingsPageArrivalStatus {
     /** Momo is open, but the user has not reached the Received Greetings surface yet. */
@@ -669,6 +679,13 @@ interface ChatPagePort {
      */
     fun deferReceivedGreetingAfterModelFailure(): Boolean = false
 
-    /** Returns from a confirmed received-greetings page so ordinary chat can regain priority. */
-    fun returnFromReceivedGreetingsForPriorityCheck(): Boolean = false
+    /** One lease-gated completed-list BACK step from independently verified source evidence. */
+    fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult =
+        ReceivedGreetingsBackResult.REJECTED
+
+    /** Read-only proof of the intermediate greeting card reached by a submitted list BACK. */
+    fun isReceivedGreetingsCompletionReturnIntermediate(): Boolean = false
+
+    /** Finalizes adapter traversal state only after the business layer confirms inbox arrival. */
+    fun confirmReceivedGreetingsCompletionReturn(): Boolean = true
 }
