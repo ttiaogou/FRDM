@@ -113,8 +113,7 @@ internal object AiReplyDecisionJsonParser {
         if (candidate.startsWith("{") && candidate.endsWith("}")) {
             parseWithDiagnostics(candidate, maxDraftChars).decision?.draft?.let { return it }
         }
-        return candidate.takeIf { it.none { c -> c.code < 0x20 && c != '\n' && c != '\r' && c != '\t' } }
-            ?.trim()?.takeIf(String::isNotBlank)
+        return null
     }
 
     private fun normalizeJsonCandidate(raw: String): String {

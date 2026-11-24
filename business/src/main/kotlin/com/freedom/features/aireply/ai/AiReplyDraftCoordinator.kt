@@ -764,7 +764,8 @@ class AiReplyDraftCoordinator(
         val callStartedAt = nowMillis()
         // Each empty-output retry changes the protocol before the final plain-text fallback.
         val modelResponseMode = when {
-            emptyRetryAttempt >= MAX_EMPTY_MODEL_RETRIES -> ModelResponseMode.PLAIN_TEXT
+            configuration.provider == AiModelServiceProvider.DEEPSEEK &&
+                emptyRetryAttempt >= MAX_EMPTY_MODEL_RETRIES -> ModelResponseMode.PLAIN_TEXT
             emptyRetryAttempt == 1 -> ModelResponseMode.SIMPLE_JSON
             else -> ModelResponseMode.STRICT_JSON
         }
@@ -859,7 +860,11 @@ class AiReplyDraftCoordinator(
                         else SECOND_EMPTY_MODEL_RETRY_DELAY_MS
                     val nextMode = when (emptyRetryAttempt + 1) {
                         1 -> ModelResponseMode.SIMPLE_JSON.name
-                        else -> ModelResponseMode.PLAIN_TEXT.name
+                        else -> if (configuration.provider == AiModelServiceProvider.DEEPSEEK) {
+                            ModelResponseMode.PLAIN_TEXT.name
+                        } else {
+                            ModelResponseMode.STRICT_JSON.name
+                        }
                     }
                     onLog("AI 模型空输出有限恢复：requestId=$requestId；" +
                         "attempt=${emptyRetryAttempt + 1}/$MAX_EMPTY_MODEL_RETRIES；" +
