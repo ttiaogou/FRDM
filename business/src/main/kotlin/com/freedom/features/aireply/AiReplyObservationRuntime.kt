@@ -1596,7 +1596,11 @@ class AiReplyObservationRuntime(
                 ReceivedGreetingsPageArrivalStatus.UNKNOWN -> {
                     if (receivedGreetingsOwnershipRecheckPending) {
                         val privateInboxConfirmed =
-                            observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                            arrivalStatus in setOf(
+                                ReceivedGreetingsPageArrivalStatus.NOT_TARGET,
+                                ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION
+                            ) &&
+                                observation.status == ObservationStatus.CONFIRMED_PAGE &&
                                 inspection.packageName == targetPackage() &&
                                 inspection.pageKind == ChatPageKind.CHAT_LIST &&
                                 matchedRouteId == messageListRecoveryRoute.routeId
