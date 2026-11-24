@@ -1740,6 +1740,99 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun verifiedGreetingChatDetailRemainsInOwnedWorkflowAndStartsDraft() {
+        val scheduler = FakeScheduler()
+        val listActivity = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
+        val verified = ContactRowIdentity(
+            snapshotId = "greeting-avatar-proof",
+            temporaryUserId = "greeting-row",
+            contactId = "greeting-platform-id",
+            confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            manualGreetingsArrivalStatuses = listOf(
+                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
+                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+            )
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = listActivity,
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 32,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                windowGeneration = 12L
+            )
+        }
+        val logs = ArrayList<String>()
+        val owner = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var greetingDrafts = 0
+        var privateDrafts = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            onDraftConversationObserved = { _, _, _, _ ->
+                privateDrafts++
+                true
+            },
+            onGreetingDraftConversationObserved = { batch, _, identity, _ ->
+                greetingDrafts++
+                assertTrue(batch.ocrAttempted)
+                assertEquals(verified, identity)
+                true
+            },
+            taskCoordinator = owner,
+            currentRunGeneration = { 5L }
+        )
+
+        runtime.scheduleInitialObservation()
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", owner.activeTaskId())
+
+        // The adapter reports DETAIL_READY only after the selected row tap and fresh
+        // chat-detail structure are both verified. The list fingerprint is absent here.
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.DETAIL_READY
+        port.receivedGreetingsContactIdentity = verified
+        port.receivedGreetingsRowKeyHash = "greeting-row-hash"
+        port.receivedGreetingsDisplayName = "Sample Contact"
+        port.simulateStructureThenOcr = true
+        port.ocrDebugTextByRowIndex = mapOf(1 to "CURRENT_GREETING_OCR")
+        port.page = chatDetailSnapshot()
+
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        runUntil(scheduler, 40) { greetingDrafts == 1 }
+
+        assertEquals(1, greetingDrafts)
+        assertEquals(0, privateDrafts)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", owner.activeTaskId())
+        assertEquals(1, port.persistedChatSamples)
+        assertTrue(logs.any { it.contains("CHAT_DETAIL_VERIFIED") })
+        assertFalse(logs.any { it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") })
+        assertFalse(logs.any { it.contains("收到招呼通用检查点[ROUTE_WAIT]") })
+    }
+
+    @Test
     fun unverifiedOrNonNavigatingGreetingProfileMustKeepRouteRecoveryGate() {
         listOf(
             false to ReceivedGreetingsTraversalStatus.NAVIGATING,

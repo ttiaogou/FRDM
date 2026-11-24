@@ -1667,8 +1667,29 @@ class AiReplyObservationRuntime(
             runCatching {
                 chatPagePort.isReceivedGreetingsIdentityProfileNavigationActive(inspection)
             }.getOrDefault(false)
+        // A verified greeting-row tap opens its chat directly from the greetings workflow.
+        // Admit that destination only after the existing ID, header, window, and task-lease proof
+        // succeeds; this preserves the greeting task instead of routing the chat through recovery.
+        val receivedGreetingsChatDetailTransition =
+            activeTaskId == RECEIVED_GREETINGS_TASK_ID &&
+                receivedGreetingsTaskActive &&
+                ownsTask(RECEIVED_GREETINGS_TASK_ID) &&
+                observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                previous != null && previous.packageName == targetPackage() &&
+                previous.pageKind == ChatPageKind.NON_CHAT &&
+                inspection.packageName == targetPackage() &&
+                inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+                inspectGreetingChatAdmission(inspection, requireDetailReady = true) is GreetingChatAdmission.Ready
         val receivedGreetingsWorkflowTransition =
-            receivedGreetingsEntryCardTransition || receivedGreetingsIdentityProfileTransition
+            receivedGreetingsEntryCardTransition ||
+                receivedGreetingsIdentityProfileTransition ||
+                receivedGreetingsChatDetailTransition
+        if (receivedGreetingsChatDetailTransition) {
+            onLog(
+                "收到招呼业务导航[CHAT_DETAIL_VERIFIED]：联系人ID、聊天标题、窗口和任务租约已复核；" +
+                    "保留收到招呼任务继续读取消息"
+            )
+        }
         if (receivedGreetingsIdentityProfileTransition && previous != null && pageIdentityChanged(previous, inspection)) {
             // A source ticket may be valid but unmatchable after a dialog.h window change.
             // Discard only a ticket for this *independently verified* destination; it is
