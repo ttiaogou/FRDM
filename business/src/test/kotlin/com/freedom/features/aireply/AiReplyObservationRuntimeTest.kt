@@ -502,6 +502,58 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p6TimedPollingWakeupSchedulesReadOnlyInspectionWithoutNewMessages() {
+        val fixture = preScrollPageRecoveryFixture()
+        val enterWait = fixture.runtime.javaClass.getDeclaredMethod(
+            "enterUnreadWait", String::class.java
+        ).apply { isAccessible = true }
+        enterWait.invoke(fixture.runtime, "P6_TIMER_ONLY")
+        val scheduleLog = fixture.logs.last { it.contains("AI Reply 低频待机：") }
+        val waitSeconds = requireNotNull(
+            Regex("低频待机：(\\d+) 秒后").find(scheduleLog)
+        ).groupValues[1].toInt()
+        assertTrue("Existing idle polling interval must remain 60-120 seconds",
+            waitSeconds in 60..120)
+        assertTrue(fixture.scheduler.hasPendingDelay(waitSeconds * 1_000L))
+        assertEquals(0, fixture.dispatchedGestures())
+
+        // No accessibility event or unread callback is delivered. The saved timer alone
+        // must request a new, read-only inbox snapshot.
+        fixture.scheduler.runNextWithDelay(waitSeconds * 1_000L)
+        assertTrue(fixture.logs.any { it.contains("自主轮询[ROUND_DUE]") })
+        assertTrue(fixture.scheduler.hasPendingDelay(0L))
+        assertEquals(0, fixture.dispatchedGestures())
+    }
+
+    @Test
+    fun p6TimedFullScanCannotHandoffOnOneViewportWithNoUnread() {
+        val fixture = preScrollPageRecoveryFixture()
+        val executor = fixture.runtime.javaClass.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+
+        // The timed round begins after the verified inbox wakeup in production.
+        // Recreate its pure traversal state, including the original first-swipe proof.
+        executor.beginNextPollingRound()
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        assertTrue(executor.fullListPollingRoundRequired)
+        assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
+        assertFalse(executor.normalInboxHadUnread)
+
+        val handoff = fixture.runtime.javaClass.getDeclaredMethod(
+            "startReceivedGreetingsTask", String::class.java
+        ).apply { isAccessible = true }
+        handoff.invoke(fixture.runtime, "P6_ONE_EMPTY_VIEWPORT")
+
+        assertTrue("A full polling scan may not skip unobserved lower viewports",
+            fixture.logs.any { it.contains("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF") })
+        assertTrue(fixture.checkpoint()?.fullListPollingRoundRequired == true)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.dispatchedGestures())
+    }
+
+    @Test
     fun p4IncompletePrivateScanDoesNotHandOffToGreetingsOrTerminate() {
         val fixture = preScrollPageRecoveryFixture()
         val beginGreetings = fixture.runtime.javaClass.getDeclaredMethod(

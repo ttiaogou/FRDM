@@ -4658,6 +4658,17 @@ class AiReplyObservationRuntime(
                 snapshot,
                 receivedGreetingsActive = receivedGreetingsTaskActive
             )
+            if (!receivedGreetingsTaskActive &&
+                privateMessagesTraversalTaskExecutor.fullListPollingRoundRequired &&
+                privateMessagesTraversalTaskExecutor.observeUnreadBlockers(snapshot)
+            ) {
+                // UNKNOWN on any scanned viewport is not a completed empty-inbox scan.
+                // The existing unified checkpoint keeps the blocked identities and round.
+                privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+                onLog("自主轮询[FULL_SCAN_UNKNOWN_BLOCKED]：定时全列表扫描发现未确认未读；保留本轮检查点，转入统一页面恢复")
+                recoverRetryablePrivateList("PRIVATE_POLL_FULL_SCAN_UNKNOWN")
+                return
+            }
         }
 
         var allowExpectedSessionReturnViewportChange = false
@@ -5200,7 +5211,8 @@ class AiReplyObservationRuntime(
         privateMessagesCheckpointRepository?.save(executor.checkpoint())
         onLog("自主轮询[ROUND_STATE_REBUILT]：旧已尝试=$previousAttempted；旧未读锁定=$previousLockedUnread；" +
             "旧视口去重=$previousViewportSamples；本轮候选与视口记录已清空；" +
-            "确认发送审计保留=$previousSendReceiptPreserved；下一轮只以新鲜列表证据锁定未读")
+            "确认发送审计保留=$previousSendReceiptPreserved；" +
+            "fullScan=${executor.fullListPollingRoundRequired}；下一轮需验证列表底部及顶部，不以单一视口判定无未读")
         onLog("自主轮询[ROUND_STARTED]：上一轮已完成；重新执行现有顶部定位与未读准入，再自动切换收到招呼任务")
         scheduleFullInspectionAfter(0L)
     }
@@ -5212,8 +5224,11 @@ class AiReplyObservationRuntime(
      */
     private fun startReceivedGreetingsTask(reason: String) {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
-        val noUnreadFastPath = privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted && privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.isEmpty() &&
-            !privateMessagesTraversalTaskExecutor.normalInboxHadUnread && !privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown
+        val noUnreadFastPath = !privateMessagesTraversalTaskExecutor.fullListPollingRoundRequired &&
+            privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted &&
+            privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.isEmpty() &&
+            !privateMessagesTraversalTaskExecutor.normalInboxHadUnread &&
+            !privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown
         if ((!noUnreadFastPath &&
                 (privateMessagesTraversalTaskExecutor.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP || !privateMessagesTraversalTaskExecutor.atTop)) ||
             privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown

@@ -25,7 +25,9 @@ data class PrivateMessagesTraversalCheckpoint(
     /** Opaque keys of still-unresolved, previously eligible UNKNOWN private rows. */
     val unresolvedUnknownUnreadKeys: Set<String> = emptySet(),
     /** Identity + geometry of the viewport that originally produced the UNKNOWN block. */
-    val unknownUnreadViewportKeys: List<String> = emptyList()
+    val unknownUnreadViewportKeys: List<String> = emptyList(),
+    /** True only for a timed full-inbox polling round; absent in older checkpoints. */
+    val fullListPollingRoundRequired: Boolean = false
 )
 
 interface PrivateMessagesTraversalCheckpointRepository {

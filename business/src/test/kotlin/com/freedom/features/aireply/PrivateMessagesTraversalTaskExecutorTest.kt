@@ -761,6 +761,85 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun timedFullPollingRoundDiscoversUnreadBelowInitiallyReadViewport() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val visibleRead = candidate(0, "Visible read A", ChatUnreadStatus.READ)
+        val furtherRead = candidate(1, "Visible read B", ChatUnreadStatus.READ)
+        val offscreenUnread = candidate(2, "Offscreen unread C", ChatUnreadStatus.UNREAD)
+
+        // Preserve the original first-run fast-path; P6 applies to VERIFIED timed rounds.
+        executor.initialUnreadGateSwipeCompleted = true
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.NO_UNREAD,
+            executor.evaluateUnreadAdmission(snapshot(visibleRead)))
+        executor.beginNextPollingRound()
+        assertTrue(executor.fullListPollingRoundRequired)
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+
+        // The same apparently empty viewport is NOT proof that the whole list is read.
+        executor.recordViewportUnreadEvidence(snapshot(visibleRead), false)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            executor.evaluateUnreadAdmission(snapshot(visibleRead)))
+        assertEquals(SessionListTraversalPhase.POSITIONING_AT_BOTTOM, executor.phase)
+        assertFalse(executor.lockedUnreadSetFinalized)
+
+        // New evidence from a lower viewport locks a formerly offscreen unread row.
+        executor.recordViewportUnreadEvidence(snapshot(offscreenUnread), false)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            executor.evaluateUnreadAdmission(snapshot(offscreenUnread)))
+        assertEquals(setOf(key(offscreenUnread)), executor.lockedUnreadSessionKeys)
+        assertTrue(executor.normalInboxHadUnread)
+
+        // A later READ viewport must not erase the C evidence or end the round early.
+        executor.recordViewportUnreadEvidence(snapshot(furtherRead), false)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            executor.evaluateUnreadAdmission(snapshot(furtherRead)))
+        assertTrue(executor.normalInboxHadUnread)
+        assertFalse(executor.lockedUnreadSetFinalized)
+
+        // The existing separately verified bottom-boundary transition owns scan admission.
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.lockedUnreadSetFinalized = true
+        val evaluation = executor.evaluateListSnapshot(snapshot(offscreenUnread), false, 2)
+        assertEquals(offscreenUnread, evaluation.nextCandidate)
+        assertTrue(executor.fullListPollingRoundRequired)
+    }
+
+    @Test
+    fun timedFullPollingCheckpointRestoresScanModeAndUnknownBlocksCompletion() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        executor.checkpointLastSuccessfulTaskId = "confirmed-send-prior-round"
+        executor.beginNextPollingRound()
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        val read = candidate(0, "Read only here", ChatUnreadStatus.READ)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            executor.evaluateUnreadAdmission(snapshot(read)))
+
+        val saved = executor.checkpoint()
+        assertTrue(saved.fullListPollingRoundRequired)
+        val resumed = PrivateMessagesTraversalTaskExecutor().apply { restore(saved) }
+        assertTrue(resumed.fullListPollingRoundRequired)
+        assertEquals("confirmed-send-prior-round", resumed.checkpointLastSuccessfulTaskId)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            resumed.evaluateUnreadAdmission(snapshot(read)))
+
+        val unknown = candidate(1, "Unread evidence unknown", ChatUnreadStatus.UNKNOWN)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED,
+            resumed.evaluateUnreadAdmission(snapshot(unknown)))
+        assertTrue(resumed.normalInboxUnreadStateUnknown)
+        assertEquals(setOf(key(unknown)), resumed.unresolvedUnknownUnreadKeys)
+        assertTrue(runCatching { resumed.beginNextPollingRound() }.isFailure)
+        assertTrue(resumed.fullListPollingRoundRequired)
+        assertEquals("confirmed-send-prior-round", resumed.checkpointLastSuccessfulTaskId)
+
+        // Older serialized checkpoints omit this optional field and retain original behavior.
+        assertFalse(saved.copy(fullListPollingRoundRequired = false).fullListPollingRoundRequired)
+        executor.reset()
+        assertFalse(executor.fullListPollingRoundRequired)
+    }
+
+    @Test
     fun restoredViewportMismatchReanchorsBySessionNameWithoutReusingCoordinates() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val saved = candidate(0, "Alice", ChatUnreadStatus.UNREAD, top = 100)

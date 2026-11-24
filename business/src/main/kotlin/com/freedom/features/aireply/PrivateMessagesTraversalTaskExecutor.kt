@@ -106,7 +106,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         nextCursorKey = checkpointNextCursorKey,
         traversalDirection = checkpointTraversalDirection,
         unresolvedUnknownUnreadKeys = unresolvedUnknownUnreadKeys.toSet(),
-        unknownUnreadViewportKeys = unknownUnreadViewportKeys.toList()
+        unknownUnreadViewportKeys = unknownUnreadViewportKeys.toList(),
+        fullListPollingRoundRequired = fullListPollingRoundRequired
     )
 
     fun restore(checkpoint: PrivateMessagesTraversalCheckpoint) {
@@ -160,6 +161,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         checkpointLastSuccessfulTaskId = checkpoint.lastSuccessfulTaskId
         checkpointNextCursorKey = checkpoint.nextCursorKey
         checkpointTraversalDirection = checkpoint.traversalDirection
+        fullListPollingRoundRequired = checkpoint.fullListPollingRoundRequired
     }
 
     internal enum class RestoreReanchorStatus { REANCHORED, NOT_FOUND, AMBIGUOUS }
@@ -317,6 +319,13 @@ internal class PrivateMessagesTraversalTaskExecutor {
     val ambiguousSessionIdentityKeys: MutableSet<String> = LinkedHashSet()
     val lockedUnreadSessionKeys: MutableSet<String> = LinkedHashSet()
     var lockedUnreadSetFinalized: Boolean = false
+    /**
+     * Set only when a verified timed polling round starts. The original first-run
+     * fast admission remains unchanged; a timed scan must reach the list bottom
+     * before it can conclude there are no offscreen unread conversations.
+     */
+    var fullListPollingRoundRequired: Boolean = false
+        private set
     private var unreadBoundarySignature: String = ""
     private var unreadBoundaryStabilityCount: Int = 0
 
@@ -510,7 +519,11 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val evidence = unreadEvidence(snapshot)
         if (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM) {
             if (!lockedUnreadSetFinalized) {
-                normalInboxHadUnread = evidence.hasUnread
+                // During a full polling scan, a later read-only viewport must not
+                // erase unread evidence collected on an earlier offscreen viewport.
+                normalInboxHadUnread = if (fullListPollingRoundRequired) {
+                    normalInboxHadUnread || evidence.hasUnread
+                } else evidence.hasUnread
                 // A clean *different* viewport must not erase an unresolved historic UNKNOWN.
                 // The admission gate below owns revalidation of saved blocked identities.
                 if (evidence.hasUnknown) normalInboxUnreadStateUnknown = true
@@ -541,6 +554,14 @@ internal class PrivateMessagesTraversalTaskExecutor {
         if (observeUnreadBlockers(snapshot)) {
             resetUnreadBoundaryObservation()
             return PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
+        }
+        if (fullListPollingRoundRequired) {
+            // A 60-120s wakeup is not a one-viewport poll: scan to the independently
+            // confirmed bottom, collecting only explicit unread identities. Existing
+            // safe scroll/boundary verification is unchanged.
+            phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
         }
         if (lockedUnreadSessionKeys.isEmpty()) {
             resetUnreadBoundaryObservation()
@@ -725,6 +746,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         ambiguousSessionIdentityKeys.clear()
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
+        fullListPollingRoundRequired = false
         resetUnreadBoundaryObservation()
         normalInboxHadUnread = false
         normalInboxUnreadStateUnknown = false
@@ -757,6 +779,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         clearCurrentSession()
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
+        fullListPollingRoundRequired = false
         resetUnreadBoundaryObservation()
         attemptedSessionKeys.clear()
         initialInboxPositionCheckCompleted = true
@@ -786,6 +809,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         // Without this clear, repeated A/B viewport fingerprints are silently treated
         // as already captured in the next complete scan.
         resetForReturnedInbox()
+        fullListPollingRoundRequired = true
         capturedSessionListFingerprints.clear()
         initialInboxPositionCheckCompleted = false
         initialInboxTopPositioningCompleted = false
