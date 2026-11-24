@@ -153,19 +153,27 @@ class ReceivedGreetingsTaskFlowControllerTest {
     }
 
     @Test
-    fun lifecycleOwnsExitLatchIndependentlyOfRecoveryScheduling() {
+    fun lifecycleOwnsReturnPendingIndependentlyOfRecoveryScheduling() {
         val port = FakePagePort()
         val flow = createFlow(port)
+        assertTrue(flow.claimOwnership("start"))
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
 
-        flow.markCompletedAwaitingUserExit()
-        assertTrue(flow.completedAwaitingUserExit)
-        flow.acknowledgeCompletedTaskExit()
-        assertFalse(flow.completedAwaitingUserExit)
-
-        flow.markAwaitingNormalInboxAfterReturn()
+        flow.markTraversalCompleted()
+        assertTrue(flow.isActive)
         assertTrue(flow.awaitingNormalInboxAfterReturn)
+        assertTrue(flow.ownsTask())
+        assertFalse(flow.returnRequested)
+        flow.markReturnRequested()
+        port.status = ReceivedGreetingsTraversalStatus.UNKNOWN
+        assertEquals(ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE,
+            flow.evaluatePageSnapshot(ChatPageKind.NON_CHAT).kind)
+        assertTrue(flow.returnRequested)
+        assertEquals(0, port.idleSteps)
         flow.markTraversalReturnedToInbox()
+        assertFalse(flow.isActive)
         assertFalse(flow.awaitingNormalInboxAfterReturn)
+        assertFalse(flow.returnRequested)
     }
 
     private fun createFlow(port: FakePagePort): ReceivedGreetingsTaskFlowController {

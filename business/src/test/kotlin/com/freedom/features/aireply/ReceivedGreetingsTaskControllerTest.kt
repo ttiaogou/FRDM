@@ -8,59 +8,67 @@ import org.junit.Test
 
 class ReceivedGreetingsTaskControllerTest {
     @Test
-    fun confirmedListTaskTransitionsToCompletedWaitingForUserExit() {
-        val controller = ReceivedGreetingsTaskController(
-            AiReplyTaskOwnership(TaskCoordinator(UiOperationOwnershipCoordinator()), { 3L }, {})
-        )
+    fun confirmedListTaskTransitionsToActiveReturnPending() {
+        val ownership = AiReplyTaskOwnership(TaskCoordinator(UiOperationOwnershipCoordinator()), { 3L }, {})
+        ownership.beginRun(3L)
+        val controller = ReceivedGreetingsTaskController(ownership)
 
+        assertTrue(controller.claimOwnership("start"))
         controller.markStarted()
         assertTrue(controller.isActive)
-        assertFalse(controller.completedAwaitingUserExit)
-
-        controller.markCompletedAwaitingUserExit()
-
-        assertFalse(controller.isActive)
-        assertTrue(controller.completedAwaitingUserExit)
         assertFalse(controller.awaitingNormalInboxAfterReturn)
+
+        controller.markTraversalCompleted()
+
+        assertTrue(controller.isActive)
+        assertTrue(controller.awaitingNormalInboxAfterReturn)
+        assertFalse(controller.returnRequested)
+        assertTrue(controller.ownsTask())
     }
 
     @Test
     fun traversalReturnClearsOnlyItsOwnTaskState() {
         val controller = ReceivedGreetingsTaskController(AiReplyTaskOwnership(null, { 1L }, {}))
         controller.markStarted()
-        controller.markAwaitingNormalInboxAfterReturn()
+        controller.markTraversalCompleted()
+        controller.markReturnRequested()
 
         controller.markTraversalReturnedToInbox()
 
         assertFalse(controller.isActive)
         assertFalse(controller.awaitingNormalInboxAfterReturn)
+        assertFalse(controller.returnRequested)
     }
 
     @Test
-    fun confirmedUserExitClearsOnlyTheCompletedPageLatch() {
+    fun repeatedCompletionDoesNotEndTaskOrRestartTraversal() {
         val controller = ReceivedGreetingsTaskController(AiReplyTaskOwnership(null, { 1L }, {}))
-        controller.markCompletedAwaitingUserExit()
+        controller.markStarted()
+        controller.markTraversalCompleted()
+        controller.markReturnRequested()
 
-        controller.markAwaitingNormalInboxAfterReturn()
-        controller.acknowledgeCompletedTaskExit()
+        controller.markTraversalCompleted()
+        controller.markNavigationStarted()
 
-        assertFalse(controller.isActive)
-        assertFalse(controller.completedAwaitingUserExit)
+        assertTrue(controller.isActive)
         assertTrue(controller.awaitingNormalInboxAfterReturn)
+        assertTrue(controller.returnRequested)
     }
 
     @Test
     fun resetClearsLifecycleFlagsWithoutRestoringCompletedTask() {
         val controller = ReceivedGreetingsTaskController(AiReplyTaskOwnership(null, { 1L }, {}))
         controller.markStarted()
-        controller.markCompletedAwaitingUserExit()
-        controller.markAwaitingNormalInboxAfterReturn()
-        assertFalse(controller.isActive)
-        assertTrue(controller.completedAwaitingUserExit)
+        controller.markTraversalCompleted()
+        controller.markReturnRequested()
+        assertTrue(controller.isActive)
         assertTrue(controller.awaitingNormalInboxAfterReturn)
+        assertTrue(controller.returnRequested)
         controller.reset()
+        controller.markTraversalCompleted()
+        controller.markReturnRequested()
         assertFalse(controller.isActive)
-        assertFalse(controller.completedAwaitingUserExit)
         assertFalse(controller.awaitingNormalInboxAfterReturn)
+        assertFalse(controller.returnRequested)
     }
 }

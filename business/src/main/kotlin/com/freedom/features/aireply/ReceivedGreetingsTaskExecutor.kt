@@ -10,7 +10,7 @@ import com.freedom.features.conversation.domain.contact.ContactRowIdentity
  * 收到招呼任务的适配器执行边界。
  *
  * 所有可能推进页面或列表遍历的适配器调用都在这里统一检查当前任务租约；只读状态查询
- * 保持可用。具体重试节律、状态转换和完成后留在当前页面（A 方案）仍由上层任务协调逻辑负责。
+ * 保持可用。具体重试节律、状态转换和完成后的安全返回调度仍由上层任务协调逻辑负责。
  */
 internal class ReceivedGreetingsTaskExecutor(
     private val pagePort: ChatPagePort,

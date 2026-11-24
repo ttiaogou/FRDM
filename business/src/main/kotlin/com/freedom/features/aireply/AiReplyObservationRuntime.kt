@@ -242,8 +242,6 @@ class AiReplyObservationRuntime(
     }
     private val receivedGreetingsTaskActive: Boolean
         get() = receivedGreetingsTaskFlow.isActive
-    private val receivedGreetingsTaskCompletedAwaitingUserExit: Boolean
-        get() = receivedGreetingsTaskFlow.completedAwaitingUserExit
     private val awaitingNormalInboxAfterGreetingsReturn: Boolean
         get() = receivedGreetingsTaskFlow.awaitingNormalInboxAfterReturn
 
@@ -1037,7 +1035,6 @@ class AiReplyObservationRuntime(
      */
     private fun requestReceivedGreetingsFallbackCheck() {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
-            receivedGreetingsTaskCompletedAwaitingUserExit ||
             !receivedGreetingsTaskFlow.supportsWorkflow()
         ) return
         receivedGreetingsPageProbePending = true
@@ -1054,7 +1051,6 @@ class AiReplyObservationRuntime(
     /** Requests a fresh unified snapshot for a bounded arrival retry; no adapter probe is run here. */
     private fun requestReceivedGreetingsSnapshot() {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
-            receivedGreetingsTaskCompletedAwaitingUserExit ||
             !receivedGreetingsTaskFlow.supportsWorkflow()
         ) return
         receivedGreetingsPageProbePending = true
@@ -1383,6 +1379,17 @@ class AiReplyObservationRuntime(
             scheduleFullInspectionAfter(0L)
             return
         }
+        // A completed traversal is still an active greetings task. Only independently
+        // confirmed ordinary inbox evidence may authorize its existing return handoff.
+        val verifiedGreetingsInboxReturn = sessionRunStarted && receivedGreetingsTaskActive &&
+            awaitingNormalInboxAfterGreetingsReturn && ownsTask(RECEIVED_GREETINGS_TASK_ID) &&
+            !recoveryContext.pending && !isSendConfirmationPending() && !isConversationDraftPending() &&
+            matchedRouteId == messageListRecoveryRoute.routeId &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE &&
+            inspection.packageName == targetPackage() &&
+            inspection.pageKind == ChatPageKind.CHAT_LIST &&
+            inspection.messageTabPositionKey() != null &&
+            inspection.messageTabAnchorPositionKey() != null
         val activeTaskId = taskOwnership.activeTaskId()
         val activeRouteId = recoveryRouteIdForTask(activeTaskId)
         // Route recovery is allowed to suppress PAGE_ROUTE_CHANGED only when the
@@ -1478,6 +1485,7 @@ class AiReplyObservationRuntime(
         val shouldCreateRouteRecovery = sessionRunStarted && activeTaskId != null &&
             !recoveryContext.pending && selfInitiatedTransition == null &&
             !openingPrivateSessionDetail && !activePrivateChatDetail && !receivedGreetingsWorkflowTransition &&
+            !verifiedGreetingsInboxReturn &&
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
         if ((shouldCreateRouteRecovery || unmatchedReturnToOwnedRoute) && activeTaskId != null) {
@@ -1869,46 +1877,6 @@ class AiReplyObservationRuntime(
                     onLog("页面结构调度[OWNERSHIP_REJECTED]：收到的招呼任务未持有UI操作租约；仅保留只读观察")
                     return
                 }
-                receivedGreetingsTaskCompletedAwaitingUserExit -> {
-                    val returnedToInbox = inspection.pageKind == ChatPageKind.CHAT_LIST &&
-                        inspection.messageTabPositionKey() != null &&
-                        inspection.messageTabAnchorPositionKey() != null
-                    if (!returnedToInbox) {
-                        sessionManagerState = SessionManagerState.PAUSED
-                        lastPageInspection = inspection
-                        return
-                    }
-                    if (!claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "页面结构确认已离开收到的招呼列表并返回普通消息列表")) {
-                        sessionManagerState = SessionManagerState.PAUSED
-                        onLog("私人消息任务恢复[OWNERSHIP_REJECTED]：普通消息列表已确认，但未取得UI操作租约")
-                        return
-                    }
-                    receivedGreetingsTaskFlow.acknowledgeCompletedTaskExit()
-                    sessionActionGeneration += 1L
-                    privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
-                    privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted = false
-                    privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = false
-                    privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.clear()
-                    privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized = false
-                    privateMessagesTraversalTaskExecutor.normalInboxHadUnread = false
-                    privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = false
-                    privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
-                    privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount = 0
-                    privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
-                    privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
-                    privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
-                    privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
-                    privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
-                    privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
-                    privateMessagesTraversalTaskExecutor.cancelledScrollRecoveryCount = 0
-                    currentSessionKey = null
-                    currentSessionName = null
-                    currentSessionCandidate = null
-                    currentSessionReadCaptured = false
-                    currentSessionWindowKey = null
-                    sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
-                    onLog("收到的招呼任务[PAGE_RETURN_CONFIRMED]：普通消息列表结构已重新确认；重新取得私人消息任务租约并执行原有未读准入流程")
-                }
                 !receivedGreetingsTaskActive && inspection.pageKind == ChatPageKind.CHAT_LIST &&
                     !ownsTask(PRIVATE_MESSAGES_TASK_ID) -> {
                     if (!claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "页面结构确认普通消息列表符合私人消息任务条件")) {
@@ -1962,7 +1930,7 @@ class AiReplyObservationRuntime(
         // the arrival scheduler owns one stability retry and one low-frequency fallback timer.
         // Only unified page-observation confirmation can transfer ownership to the task.
         if (receivedGreetingsPageProbePending && sessionRunStarted &&
-            !receivedGreetingsTaskActive && !receivedGreetingsTaskCompletedAwaitingUserExit &&
+            !receivedGreetingsTaskActive &&
             receivedGreetingsTaskFlow.supportsWorkflow()
         ) {
             receivedGreetingsPageProbePending = false
@@ -1988,7 +1956,7 @@ class AiReplyObservationRuntime(
             }
         }
 
-        if (sessionRunStarted && receivedGreetingsTaskActive) {
+        if (sessionRunStarted && receivedGreetingsTaskActive && !verifiedGreetingsInboxReturn) {
             val decision = receivedGreetingsTaskFlow.evaluatePageSnapshot(inspection.pageKind)
             when (decision.kind) {
                 ReceivedGreetingsTaskFlowController.DecisionKind.ENTRY_NOT_FOUND -> {
@@ -1997,26 +1965,7 @@ class AiReplyObservationRuntime(
                     return
                 }
                 ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE -> {
-                    if (completeReceivedGreetingsTaskAtCurrentPage()) return
-                    val returned = runCatching {
-                        receivedGreetingsTaskFlow.returnForPriorityCheck()
-                    }.getOrDefault(false)
-                    if (returned) {
-                        receivedGreetingsTaskFlow.markAwaitingNormalInboxAfterReturn()
-                        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                        if (decision.origin == ReceivedGreetingsTaskFlowController.DecisionOrigin.PAGE_PROGRESS) {
-                            onLog("收到的招呼遍历已通过适配器完整性检查；已请求返回普通消息页，等待页面身份复核")
-                        } else {
-                            onLog("收到的招呼导航：适配器报告列表边界候选；仍需完成安全返回与普通列表页面复核")
-                        }
-                        scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
-                    } else {
-                        scheduleReceivedGreetingsRecoveryRetry(
-                            if (decision.origin == ReceivedGreetingsTaskFlowController.DecisionOrigin.PAGE_PROGRESS)
-                                "遍历已确认到达边界，但本轮未通过安全返回检查；保留完成快照和任务现场"
-                            else "列表完整性刚刚确认，但安全返回暂未通过"
-                        )
-                    }
+                    requestCompletedGreetingsReturn(observation, inspection)
                     return
                 }
                 ReceivedGreetingsTaskFlowController.DecisionKind.WAIT_FOR_DETAIL_PAGE -> {
@@ -2096,7 +2045,7 @@ class AiReplyObservationRuntime(
         when (businessPageKind) {
             ChatPageKind.CHAT_LIST -> {
                 when {
-                    sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn -> {
+                    verifiedGreetingsInboxReturn -> {
                         if (!ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
                             !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "收到的招呼流程返回普通消息列表后恢复私人消息任务")
                         ) {
@@ -2105,6 +2054,7 @@ class AiReplyObservationRuntime(
                             return
                         }
                         receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
+                        sessionActionGeneration += 1L
                         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
                         // The greeting branch returned to the already-established inbox context.
                         // Preserve the existing traversal memory; only the open conversation and
@@ -2221,18 +2171,7 @@ class AiReplyObservationRuntime(
                     )
                         }
                         ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE -> {
-                            if (completeReceivedGreetingsTaskAtCurrentPage()) return
-                            val returned = runCatching {
-                                receivedGreetingsTaskFlow.returnForPriorityCheck()
-                            }.getOrDefault(false)
-                            if (returned) {
-                                receivedGreetingsTaskFlow.markAwaitingNormalInboxAfterReturn()
-                                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                                onLog("收到的招呼测试遍历：列表扫描到达边界；已请求返回普通消息页，等待页面身份复核")
-                                scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
-                            } else {
-                                scheduleReceivedGreetingsRecoveryRetry("列表边界已确认，但返回普通消息页暂未通过安全检查")
-                            }
+                            requestCompletedGreetingsReturn(observation, inspection)
                         }
                         ReceivedGreetingsTaskFlowController.DecisionKind.PROFILE_CARD_PENDING -> {
                             scheduleReceivedGreetingsRecoveryRetry(
@@ -2357,7 +2296,7 @@ class AiReplyObservationRuntime(
         ) return false
         val gate = CROSS_TASK_GREETING_HANDOFF_GATE
         if (!sessionRunStarted || !isAiReplyActive() ||
-            receivedGreetingsTaskActive || receivedGreetingsTaskCompletedAwaitingUserExit ||
+            receivedGreetingsTaskActive ||
             matchedRouteId != receivedGreetingsRecoveryRoute.routeId ||
             inspection.packageName != targetPackage() ||
             inspection.pageKind != ChatPageKind.NON_CHAT ||
@@ -2549,8 +2488,9 @@ class AiReplyObservationRuntime(
         matchedRouteId: String?
     ): Boolean {
         val suspended = suspendedPrivateRecovery ?: return false
-        if (!sessionRunStarted || recoveryContext.pending || receivedGreetingsTaskActive ||
-            !receivedGreetingsTaskCompletedAwaitingUserExit ||
+        if (!sessionRunStarted || recoveryContext.pending || !receivedGreetingsTaskActive ||
+            !awaitingNormalInboxAfterGreetingsReturn || !ownsTask(RECEIVED_GREETINGS_TASK_ID) ||
+            isSendConfirmationPending() || isConversationDraftPending() ||
             matchedRouteId != messageListRecoveryRoute.routeId ||
             inspection.packageName != targetPackage() ||
             inspection.pageKind != ChatPageKind.CHAT_LIST ||
@@ -2573,7 +2513,9 @@ class AiReplyObservationRuntime(
             return true
         }
         privateMessagesTraversalTaskExecutor.restore(checkpoint)
-        receivedGreetingsTaskFlow.acknowledgeCompletedTaskExit()
+        receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
+        sessionActionGeneration += 1L
+        releaseTaskOwnership("收到的招呼任务已确认返回普通消息路由；恢复原私聊检查点")
         suspendedPrivateRecovery = null
         sessionManagerState = SessionManagerState.PAUSED
         pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
@@ -3336,7 +3278,7 @@ class AiReplyObservationRuntime(
         // operation ownership. The debouncer merges bursts before the read-only adapter probe.
         val receivedGreetingsPageChangeSignal = event.type in PAGE_CHANGE_RECHECK_EVENT_TYPES
         if (sessionRunStarted &&
-            !receivedGreetingsTaskActive && !receivedGreetingsTaskCompletedAwaitingUserExit &&
+            !receivedGreetingsTaskActive &&
             receivedGreetingsTaskFlow.supportsWorkflow() && receivedGreetingsPageChangeSignal
         ) {
             pageObservationCoordinator.onPageChangeEvent()
@@ -4929,10 +4871,6 @@ class AiReplyObservationRuntime(
             return
         }
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
-        if (receivedGreetingsTaskCompletedAwaitingUserExit) {
-            onLog("收到的招呼页面监听：当前列表本轮已经处理完成；保持页面不动，等待用户离开后再次进入")
-            return
-        }
         val start = claimAndBeginReceivedGreetingsTask(
             reason = "接管人工打开的收到招呼列表",
             begin = { receivedGreetingsTaskFlow.beginFromConfirmedList() }
@@ -5026,22 +4964,43 @@ class AiReplyObservationRuntime(
     }
 
     /**
-     * Option A: a greetings task ends in place. It releases automation
-     * ownership and waits for the user to leave the list; it never issues BACK or tab navigation.
+     * Traversal completion is a pending return, not a stopped task. Reuse the existing
+     * lease-gated adapter BACK path; a submission result is not inbox confirmation.
      */
-    private fun completeReceivedGreetingsTaskAtCurrentPage(): Boolean {
-        if (!receivedGreetingsTaskActive) return false
-        if (!ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("收到的招呼任务完成检查被阻止：租约已失效；按安全原则保持当前页面，不执行返回导航")
-            return true
+    private fun requestCompletedGreetingsReturn(
+        observation: ObservationResult,
+        inspection: ChatPageSnapshot
+    ) {
+        if (!sessionRunStarted || !receivedGreetingsTaskActive) return
+        if (!ownsTask(RECEIVED_GREETINGS_TASK_ID) || recoveryContext.pending) {
+            scheduleReceivedGreetingsRecoveryRetry("完成状态仍需有效任务租约与恢复授权")
+            return
         }
-        receivedGreetingsTaskFlow.markCompletedAwaitingUserExit()
-        sessionActionGeneration += 1L
-        releaseTaskOwnership("收到的招呼任务完成；保持当前页面等待用户离开")
-        sessionManagerState = SessionManagerState.PAUSED
-        onLog("收到的招呼任务[COMPLETE_STAY_ON_PAGE]：列表遍历已完成；保持当前页面；待页面结构重新确认普通消息列表后再申请私人消息任务租约")
-        return true
+        receivedGreetingsTaskFlow.markTraversalCompleted()
+        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+        if (receivedGreetingsTaskFlow.returnRequested) {
+            // The existing Boolean port cannot distinguish an accepted BACK from a deferred
+            // gesture. Keep observing; P0 must not replay a potentially submitted action.
+            scheduleReceivedGreetingsRecoveryRetry("返回步骤已受理；继续独立确认普通消息列表，不重复提交")
+            return
+        }
+        if (observation.status != ObservationStatus.CONFIRMED_PAGE ||
+            inspection.packageName != targetPackage() ||
+            inspection.pageKind == ChatPageKind.CHAT_LIST ||
+            inspection.pageKind == ChatPageKind.UNKNOWN
+        ) {
+            scheduleReceivedGreetingsRecoveryRetry("完成后返回尚未通过新鲜页面确认；不执行盲目导航")
+            return
+        }
+        onLog("收到的招呼任务[RETURN_PENDING]：列表遍历完成；保留任务及UI操作权；进入自动返回流程")
+        val returned = runCatching { receivedGreetingsTaskFlow.returnForPriorityCheck() }.getOrDefault(false)
+        if (returned) {
+            receivedGreetingsTaskFlow.markReturnRequested()
+            onLog("收到的招呼任务：返回步骤已受理；等待普通消息列表独立确认")
+            scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
+        } else {
+            scheduleReceivedGreetingsRecoveryRetry("列表完整性已确认，但安全返回暂未通过")
+        }
     }
 
     private fun formatUnreadAudit(

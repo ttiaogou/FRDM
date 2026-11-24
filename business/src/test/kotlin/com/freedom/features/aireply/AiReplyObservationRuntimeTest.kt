@@ -938,8 +938,9 @@ class AiReplyObservationRuntimeTest {
         assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
 
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
-        runUntilLog(scheduler, logs, "收到的招呼任务[COMPLETE_STAY_ON_PAGE]")
-        assertEquals(null, ownership.activeTaskId())
+        runUntilLog(scheduler, logs, "收到的招呼任务[RETURN_PENDING]")
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
 
         port.receivedGreetingsCheckpointFingerprint = null
         port.page = ChatPageSnapshot(
@@ -1192,12 +1193,12 @@ class AiReplyObservationRuntimeTest {
             it.contains("GREETING_LIST_READY") && it.contains("source=PAGE_OBSERVATION")
         })
 
-        // Option A: completion releases automation ownership but never navigates away.
+        // Completion retains the task lease and requests the existing safe return path.
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
         scheduler.runNextWithDelay(1_300L)
-        assertEquals(0, port.receivedGreetingsPriorityReturns)
-        assertNull(taskCoordinator.activeTaskId())
-        assertTrue(logs.any { it.contains("收到的招呼任务[COMPLETE_STAY_ON_PAGE]") })
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", taskCoordinator.activeTaskId())
+        assertTrue(logs.any { it.contains("收到的招呼任务[RETURN_PENDING]") })
     }
 
 
@@ -5032,7 +5033,7 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun receivedGreetingsListTraversalCompletesAndStaysOnCurrentPage() {
+    fun receivedGreetingsListTraversalCompletesAndRequestsReturn() {
         val scheduler = FakeScheduler()
         val readCandidate = sessionCandidate(
             completeBoundaryEvidence = true,
@@ -5107,11 +5108,10 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("GREETING_DEFERRED_EVIDENCE_ONLY") })
         port.greetingAwaitingSafeTargetEvidenceOnly = false
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
-        runUntilLog(scheduler, logs, "收到的招呼任务[COMPLETE_STAY_ON_PAGE]")
-        assertEquals(0, port.receivedGreetingsPriorityReturns)
-        assertEquals(nonChat, port.page)
-        assertTrue(logs.any { it.contains("保持当前页面") })
-        assertFalse(logs.any { it.contains("已请求返回普通消息页") })
+        runUntilLog(scheduler, logs, "收到的招呼任务[RETURN_PENDING]")
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals(ordinaryList, port.page)
+        assertTrue(logs.any { it.contains("返回步骤已受理") })
         assertFalse(logs.any { it.contains("模拟回复人数") })
     }
 
