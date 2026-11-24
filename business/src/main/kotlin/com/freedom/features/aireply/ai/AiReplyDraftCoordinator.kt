@@ -1663,12 +1663,14 @@ class AiReplyDraftCoordinator(
                 ))
             }
         }
-        replyTaskRepository?.updateStatus(
-            candidate.requestKey,
-            candidate.requestId,
-            ReplyTaskStatus.SENT,
-            nowMillis()
-        )
+        candidate.sendRequestKey?.let { requestKey ->
+            replyTaskRepository?.updateStatus(
+                requestKey,
+                candidate.requestId,
+                ReplyTaskStatus.SENT,
+                nowMillis()
+            )
+        }
     }
 
     fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): SendConfirmationResult {
