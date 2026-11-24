@@ -482,6 +482,43 @@ class AiReplyObservationRuntimeTest {
     )
 
     @Test
+    fun p4RecoverablePrivatePauseUsesSharedCheckpointAndWaitsForFreshInboxProof() {
+        val fixture = preScrollPageRecoveryFixture()
+        fixture.port.page = desktopPage()
+        invokePreScrollPageValidation(fixture)
+        assertTrue(fixture.logs.any {
+            it.contains("PAUSED_CHECKPOINT_SAVED") &&
+                it.contains("MESSAGE_LIST_PRE_SCROLL_PAGE_IDENTITY_MISMATCH")
+        })
+        assertTrue(fixture.logs.any {
+            it.contains("AI 私聊暂停分类[RETRYABLE]") &&
+                it.contains("MESSAGE_LIST_PRE_SCROLL_PAGE_IDENTITY_MISMATCH")
+        })
+        assertTrue("Retryable pause must save the original traversal cursor", fixture.checkpoint() != null)
+        assertEquals("No stale gesture can be submitted during a pause", 0, fixture.dispatchedGestures())
+        fixture.port.page = fixture.listPage
+        awaitPreScrollRecovery(fixture)
+        assertTrue(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+    }
+
+    @Test
+    fun p4ExplicitUserStopDoesNotRearmRecoverablePrivatePause() {
+        val fixture = preScrollPageRecoveryFixture()
+        fixture.port.page = desktopPage()
+        invokePreScrollPageValidation(fixture)
+        val savedPauses = fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") }
+        assertTrue(savedPauses > 0)
+        fixture.runtime.reset("用户主动停止")
+        val invoke = fixture.runtime.javaClass.getDeclaredMethod(
+            "recoverRetryablePrivateList", String::class.java
+        ).apply { isAccessible = true }
+        invoke.invoke(fixture.runtime, "PRIVATE_STOPPED_CALLBACK")
+        assertEquals(savedPauses, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        assertEquals(0, fixture.dispatchedGestures())
+        assertTrue(fixture.logs.none { it.contains("PRIVATE_STOPPED_CALLBACK") })
+    }
+
+    @Test
     fun preScrollDesktopReturnUsesCheckpointRecoveryWithoutOldGesture() {
         val fixture = preScrollPageRecoveryFixture()
         fixture.port.page = desktopPage()
@@ -3879,6 +3916,10 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "AI 会话管理已暂停：延迟边界复核未能确认同一会话列表页面")
 
+        assertTrue(logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+            it.contains("PRIVATE_LIST_BOUNDARY_PAGE_CHANGED") })
+        assertTrue(logs.any { it.contains("AI 私聊暂停分类[RETRYABLE]") &&
+            it.contains("PRIVATE_LIST_BOUNDARY_PAGE_CHANGED") })
         assertTrue(logs.none { it.contains("底部边界经延迟独立快照复核通过") })
     }
 

@@ -377,7 +377,14 @@ class AiReplyObservationRuntime(
                     )
                 )
             },
-            onTimedOut = { sessionManagerState = SessionManagerState.PAUSED },
+            onTimedOut = {
+                if (sessionRunStarted && !receivedGreetingsTaskActive) {
+                    onLog("AI 私聊启动恢复[READINESS_TIMEOUT]：启动超时转入已有列表检查点只读恢复")
+                    recoverRetryablePrivateList("PRIVATE_STARTUP_READINESS_TIMEOUT")
+                } else {
+                    sessionManagerState = SessionManagerState.PAUSED
+                }
+            },
             onLog = onLog
         )
     }
@@ -1889,6 +1896,7 @@ class AiReplyObservationRuntime(
                         sessionManagerState = SessionManagerState.PAUSED
                         onLog("消息列表统一检查点[COMPLETE_REJECTED]：尚未完成恢复事务确认；保持暂停")
                         messageListCheckpointVerifier.deferOwnership()
+                        scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
                         lastPageInspection = inspection
                         return
                     }
@@ -2060,8 +2068,8 @@ class AiReplyObservationRuntime(
                 !receivedGreetingsTaskActive && inspection.pageKind == ChatPageKind.CHAT_LIST &&
                     !ownsTask(PRIVATE_MESSAGES_TASK_ID) -> {
                     if (!claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "页面结构确认普通消息列表符合私人消息任务条件")) {
-                        sessionManagerState = SessionManagerState.PAUSED
                         onLog("私人消息任务[OWNERSHIP_REJECTED]：页面结构符合普通消息列表，但暂未取得UI操作租约")
+                        recoverRetryablePrivateList("PRIVATE_LIST_OWNERSHIP_WAIT")
                         return
                     }
                 }
@@ -2091,8 +2099,8 @@ class AiReplyObservationRuntime(
             // newly verified window; the next read must use this fresh observation.
             invalidatePendingMessageRead()
             if (!rebindVerifiedPrivateChat(inspection)) {
-                sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 身份回接[CHAT_REBIND_WAIT]：已确认返回信号，但原会话绑定未复核；不启动 OCR 或草稿")
+                recoverRetryablePrivateList("PRIVATE_DETAIL_IDENTITY_REBIND_WAIT")
                 return
             }
             lastIdentityReturnNotConsumedReason = null
@@ -2398,10 +2406,10 @@ class AiReplyObservationRuntime(
                 if (sessionRunStarted && currentSessionKey != null &&
                     sessionManagerState == SessionManagerState.OPENING_SESSION
                 ) {
-                    // Unexpected Activity after an attempted session click is a hard pause.
+                    // Preserve OPENING_SESSION through checkpoint creation so that the
+                    // provisional attempted key is rolled back before it becomes durable.
                     sessionTransitionTask?.cancel()
                     sessionTransitionTask = null
-                    sessionManagerState = SessionManagerState.PAUSED
                     onLog("AI 会话管理已暂停：点击后进入非预期页面；不继续点击或盲目返回")
                     recoverRetryablePrivateList("OPEN_SESSION_UNEXPECTED_PAGE")
                 }
@@ -3146,9 +3154,9 @@ class AiReplyObservationRuntime(
         // bound detail fallback for a transient empty snapshot.
         val recoverCurrentChatDetail = pendingPrivateSend ||
             (taskId == PRIVATE_MESSAGES_TASK_ID &&
-                reason == "EMPTY_SNAPSHOT" &&
                 sessionManagerState == SessionManagerState.READING_SESSION &&
-                hasBoundPrivateDetailRecoverySession())
+                hasBoundPrivateDetailRecoverySession() &&
+                (reason == "EMPTY_SNAPSHOT" || reason.startsWith("PRIVATE_DETAIL_")))
         val route = if (recoverCurrentChatDetail) chatDetailRecoveryRoute
             else (recoveryRouteForTask(taskId) ?: return false)
         route.saveCheckpoint()
@@ -3234,6 +3242,7 @@ class AiReplyObservationRuntime(
         if (requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, reason) ||
             recoveryContext.pending
         ) {
+            onLog("AI 私聊暂停分类[RETRYABLE]：reason=$reason；统一检查点恢复；禁止旧节点、手势和未证实的发送")
             scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
         }
     }
@@ -4599,14 +4608,14 @@ class AiReplyObservationRuntime(
                         scheduleFullInspectionAfter(500L)
                     } else {
                         privateMessagesTraversalTaskExecutor.clearIdentityReturn()
-                        sessionManagerState = SessionManagerState.PAUSED
                         onLog("AI 会话身份复核暂停：未能确认原行平台身份；保留现场")
+                        recoverRetryablePrivateList("PRIVATE_IDENTITY_RETURN_EVIDENCE_WAIT")
                     }
                 }
                 PrivateMessagesTraversalTaskExecutor.IdentityReturnStatus.REJECTED -> {
                     privateMessagesTraversalTaskExecutor.clearIdentityReturn()
-                    sessionManagerState = SessionManagerState.PAUSED
                     onLog("AI 会话身份复核暂停：返回页面、原行、未读或列表位置不一致；保留现场")
+                    recoverRetryablePrivateList("PRIVATE_IDENTITY_RETURN_PAGE_UNVERIFIED")
                 }
                 PrivateMessagesTraversalTaskExecutor.IdentityReturnStatus.RESTORED -> {
                     val candidate = result.candidate ?: return
@@ -4977,8 +4986,8 @@ class AiReplyObservationRuntime(
             ) {
                 privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
                 privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
-                sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话管理已暂停：延迟边界复核未能确认同一会话列表页面；不判定遍历完成")
+                recoverRetryablePrivateList("PRIVATE_LIST_BOUNDARY_PAGE_CHANGED")
                 return@schedule
             }
             val currentKeys = privateMessagesTraversalTaskExecutor.visibleSessionKeys(fresh)
@@ -5773,8 +5782,8 @@ class AiReplyObservationRuntime(
     ) {
         if (sessionManagerState != SessionManagerState.OPENING_SESSION) return
         if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-            sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话点击回调[STALE_CALLBACK_IGNORED]：私人消息任务租约已失效；不推进旧会话状态")
+            recoverTransientPrivateGesture("PRIVATE_TAP_CALLBACK_LEASE_LOST")
             return
         }
         if (result.status == GestureExecutionStatus.DEFERRED) {
@@ -5821,8 +5830,8 @@ class AiReplyObservationRuntime(
         // The accessibility window event may arrive before or after this callback. The delayed
         // verification is intentionally independent and always reacquires the active page.
         if (!hasSameTargetPackage(snapshot)) {
-            sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话管理已暂停：点击完成后目标窗口身份不一致")
+            recoverTransientPrivateGesture("PRIVATE_TAP_CALLBACK_WINDOW_CHANGED")
         } else {
             startupReadinessCoordinator.markInitializationComplete("首个自主会话点击已由 Android 完成")
         }
@@ -5834,8 +5843,8 @@ class AiReplyObservationRuntime(
             sessionManagerState != SessionManagerState.OPENING_SESSION
         ) return
         if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-            sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话打开复核被阻止：私人消息任务租约已失效；不处理旧页面状态")
+            recoverTransientPrivateGesture("PRIVATE_OPEN_VERIFY_LEASE_LOST")
             return
         }
         val current = runCatching { readPageSnapshot(AiReplyPageReadPurpose.ACTIVITY_TRANSITION) }.getOrNull()
@@ -5944,16 +5953,16 @@ class AiReplyObservationRuntime(
      */
     private fun scheduleRejectedSessionReturn(snapshot: ChatPageSnapshot) {
         if (!canPerformPrivateMessagesUiAction()) {
-            sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话安全返回被阻止：私人消息任务未持有 UI 操作权")
+            recoverRetryablePrivateList("PRIVATE_REJECTED_RETURN_LEASE_LOST")
             return
         }
         val rejectedWindowKey = windowSessionKey(snapshot)
         if (snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
             snapshot.packageName != targetPackage() || rejectedWindowKey == null || currentSessionKey == null
         ) {
-            sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话管理已暂停：身份不匹配后无法确认当前聊天窗口；不执行返回或继续点击")
+            recoverRetryablePrivateList("PRIVATE_REJECTED_RETURN_WINDOW_UNVERIFIED")
             return
         }
 
@@ -5966,8 +5975,8 @@ class AiReplyObservationRuntime(
                 sessionManagerState != SessionManagerState.RETURNING_TO_SESSION_LIST
             ) return@rejectedReturn
             if (!canPerformPrivateMessagesUiAction()) {
-                sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话安全返回[STALE_TASK_IGNORED]：私人消息任务租约或恢复门禁已失效；不提交返回动作")
+                recoverRetryablePrivateList("PRIVATE_REJECTED_RETURN_LEASE_CHANGED")
                 return@rejectedReturn
             }
 
@@ -5975,8 +5984,8 @@ class AiReplyObservationRuntime(
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 current.packageName != targetPackage() || windowSessionKey(current) != rejectedWindowKey
             ) {
-                sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话管理已暂停：身份不匹配后的返回前复核失败；不执行全局返回")
+                recoverRetryablePrivateList("PRIVATE_REJECTED_RETURN_PRECHECK_UNVERIFIED")
                 return@rejectedReturn
             }
 
@@ -5984,8 +5993,8 @@ class AiReplyObservationRuntime(
                 chatSessionManagementPort.navigateBackToSessionList()
             }.getOrDefault(false)
             if (!accepted) {
-                sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话管理已暂停：身份不匹配后系统未接受返回动作；不尝试其它会话")
+                recoverRetryablePrivateList("PRIVATE_REJECTED_RETURN_BACK_REJECTED")
                 return@rejectedReturn
             }
 
@@ -6000,8 +6009,8 @@ class AiReplyObservationRuntime(
                     lastPageInspection = returned
                     handleSessionListPage(returned)
                 } else {
-                    sessionManagerState = SessionManagerState.PAUSED
                     onLog("AI 会话管理已暂停：身份不匹配后的返回未能确认会话列表；不继续点击")
+                    recoverRetryablePrivateList("PRIVATE_REJECTED_RETURN_LIST_UNVERIFIED")
                 }
             }
         }
@@ -6159,8 +6168,8 @@ class AiReplyObservationRuntime(
     ) {
         if (sessionManagerState != SessionManagerState.READING_SESSION) return
         if (!canPerformPrivateMessagesUiAction()) {
-            sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话返回被阻止：私人消息任务未持有 UI 操作权")
+            recoverRetryablePrivateList("PRIVATE_RETURN_LEASE_LOST")
             return
         }
         if (privateModelFailureRecovery != null || privateModelRetryAwaitingDraft) {
@@ -6174,10 +6183,18 @@ class AiReplyObservationRuntime(
             if (draftPendingWaitedMs >= MAX_DRAFT_PENDING_WAIT_MS &&
                 !runCatching { isSendControlRecoveryPending() }.getOrDefault(false)
             ) {
+                // The timed-out draft is not a send result. Continue low-frequency
+                // read-only status checks without releasing the original chat or lease.
                 sessionTransitionTask?.cancel()
-                sessionTransitionTask = null
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog("AI 会话管理已暂停：模型请求/草稿校验超过等待上限；保持当前聊天页面，不执行返回动作")
+                onLog("AI 私聊暂停分类[RETRYABLE_DRAFT_WAIT]：草稿等待超过快速轮询上限；保持原聊天，不执行返回")
+                sessionTransitionTask = scheduler.schedule(RecoveryScheduler.longWaitDelayMs) {
+                    sessionTransitionTask = null
+                    if (!isAiReplyActive() || !sessionRunStarted ||
+                        sessionManagerState != SessionManagerState.READING_SESSION ||
+                        !canPerformPrivateMessagesUiAction()
+                    ) return@schedule
+                    scheduleReturnToSessionList(snapshot, draftPendingWaitedMs)
+                }
                 return
             }
             sessionTransitionTask?.cancel()
@@ -6200,8 +6217,8 @@ class AiReplyObservationRuntime(
                 sessionManagerState != SessionManagerState.READING_SESSION
             ) return@schedule
             if (!canPerformPrivateMessagesUiAction()) {
-                sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话返回[STALE_TASK_IGNORED]：私人消息任务租约或恢复门禁已失效；不提交返回动作")
+                recoverRetryablePrivateList("PRIVATE_RETURN_LEASE_CHANGED")
                 return@schedule
             }
             // A model request or technical pre-send failure can arrive after scheduling.
@@ -6219,8 +6236,8 @@ class AiReplyObservationRuntime(
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 current.packageName != snapshot.packageName || !hasSameWindowSession(snapshot, current)
             ) {
-                sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话管理已暂停：返回前聊天窗口身份已变化；不执行全局返回")
+                recoverRetryablePrivateList("PRIVATE_RETURN_DETAIL_UNVERIFIED")
                 return@schedule
             }
             sessionManagerState = SessionManagerState.RETURNING_TO_SESSION_LIST
@@ -6241,8 +6258,8 @@ class AiReplyObservationRuntime(
                 return@schedule
             }
             if (!accepted) {
-                sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 会话管理已暂停：系统未接受返回会话列表动作")
+                recoverRetryablePrivateList("PRIVATE_RETURN_BACK_REJECTED")
                 return@schedule
             }
             onLog("AI 会话管理：消息采集完成，已提交系统返回动作；等待会话列表页面验证")
@@ -6252,8 +6269,8 @@ class AiReplyObservationRuntime(
                 if (returned?.pageKind == ChatPageKind.CHAT_LIST && returned.packageName == targetPackage()) {
                     handleSessionListPage(returned)
                 } else {
-                    sessionManagerState = SessionManagerState.PAUSED
                     onLog("AI 会话管理已暂停：返回动作后未确认会话列表；不执行下一次点击")
+                    recoverRetryablePrivateList("PRIVATE_RETURN_LIST_UNVERIFIED")
                 }
             }
         }
@@ -6367,8 +6384,8 @@ class AiReplyObservationRuntime(
         val executionContext = sourceWindow?.let { gesturePolicy.captureContext(it) } ?: run {
             privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
             privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
-            sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话管理已暂停：列表滚动坐标缺少匹配的窗口/显示上下文；不使用旧坐标")
+            recoverRetryablePrivateList("PRIVATE_SCROLL_CONTEXT_UNAVAILABLE")
             return
         }
         val request = GestureIntentRequest(
@@ -6391,8 +6408,8 @@ class AiReplyObservationRuntime(
             executionContext = executionContext
         )
         if (!canPerformPrivateMessagesUiAction()) {
-            sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 会话滚动[OWNERSHIP_REJECTED]：构造手势后任务租约或恢复门禁已变化；拒绝派发旧滑动")
+            recoverRetryablePrivateList("PRIVATE_SCROLL_LEASE_LOST")
             return
         }
         val freshAmbiguousIdentityKeys = privateMessagesTraversalTaskExecutor.ambiguousIdentityKeys(
@@ -6439,8 +6456,8 @@ class AiReplyObservationRuntime(
                         return@schedule
                     }
                     if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-                        sessionManagerState = SessionManagerState.PAUSED
                         onLog("AI 会话滚动回调[STALE_TASK_IGNORED]：私人消息任务租约已失效；不推进列表状态")
+                        recoverTransientPrivateGesture("PRIVATE_SCROLL_CALLBACK_LEASE_LOST")
                         return@schedule
                     }
                     if (sessionManagerState != SessionManagerState.SCROLLING_SESSION_LIST) return@schedule
