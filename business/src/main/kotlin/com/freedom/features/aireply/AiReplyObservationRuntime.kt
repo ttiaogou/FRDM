@@ -3965,6 +3965,13 @@ class AiReplyObservationRuntime(
             currentSessionWindowKey == windowSessionKey(snapshot) &&
             ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null
         val draftTargetConfirmed = greetingDetail || privateDetail
+        if (privateDetail && privateModelFailureRecovery != null) {
+            // Page events and identity-timeout reads can arrive during model cooldown.
+            // Only the verified private recovery transaction may rearm a failed request.
+            // An ordinary OCR observation cannot bypass the durable no-send/composer gate.
+            onLog("AI 私聊模型恢复[MODEL_FAILURE_READ_HELD]：技术失败等待原会话与空输入框复核；不启动新草稿")
+            return
+        }
         if (batch.ocrAttempted) {
             val mergedOcrCount = batch.ocrTargets.count { target ->
                 batch.messages.any { message -> message.bounds == target.rowBounds }

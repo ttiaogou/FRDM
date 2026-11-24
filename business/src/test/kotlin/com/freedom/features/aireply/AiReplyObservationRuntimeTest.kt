@@ -6694,6 +6694,14 @@ class AiReplyObservationRuntimeTest {
         scheduler.runNextWithDelay(0L)
         runUntil(scheduler, 40) { logs.any { it.contains("PRE_SEND_FAILURE_RECORDED") } }
         assertEquals(0, port.navigateBackCalls)
+        // A separate page read during cooldown must not bypass durable proof and
+        // launch another draft before the private recovery verifier admits it.
+        val readHandler = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+            "handleMessageReadBatch", ChatMessageBatch::class.java, ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        readHandler.invoke(runtime, requireNotNull(port.lastPersistedBatch), port.page)
+        assertTrue(logs.any { it.contains("MODEL_FAILURE_READ_HELD") })
+        assertEquals(1, draftCalls)
         runUntil(scheduler, 60) { logs.any { it.contains("READ_ONLY_WAIT") } }
         assertEquals(1, draftCalls)
         assertTrue(verificationCalls > 0)
