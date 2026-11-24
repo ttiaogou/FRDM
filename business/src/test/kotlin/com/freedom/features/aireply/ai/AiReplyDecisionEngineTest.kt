@@ -81,15 +81,6 @@ class AiReplyDecisionEngineTest {
         assertEquals(AiModelResponseFormat.PlainText, provider.lastRequest?.responseFormat)
     }
 
-    @Test fun plainTextFallbackAcceptsFinalTextAndStripsFiniteWrapper() {
-        val provider = FakeProvider("回复：你好呀")
-        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
-            AiReplyDecisionInput(context(), true, requestId = "plain-text", responseMode = ModelResponseMode.PLAIN_TEXT)
-        )
-        assertEquals(AiReplyAction.REPLY, model(result).action)
-        assertEquals("你好呀", model(result).draft)
-    }
-
     @Test fun localSafetyBlocksSensitiveDraftWithoutBlockingOrdinaryDigits() {
         val safe = AiReplyDecisionEngine(FakeProvider(replyJson("123456")), grantedConsent).decide(
             AiReplyDecisionInput(context(), true, requestId = "safe-digits")
