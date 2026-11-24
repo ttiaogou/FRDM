@@ -1601,12 +1601,12 @@ class AiReplyObservationRuntime(
                             )
                             return
                         }
-                        receivedGreetingsOwnershipRecheckPending = false
                         onLog(
                             "页面操作权仲裁[PRIVATE_MESSAGES_CONFIRMED]：普通消息列表已确认，" +
                                 "收到招呼观察明确返回NOT_TARGET；允许私人消息任务重新申请操作权"
                         )
                         if (startupReadinessCoordinator.resumeAfterPageRecovery()) return
+                        receivedGreetingsOwnershipRecheckPending = false
                     }
                 }
             }
