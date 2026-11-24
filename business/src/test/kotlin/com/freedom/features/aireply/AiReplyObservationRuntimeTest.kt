@@ -669,6 +669,32 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p3RepeatedPrivateRecoveryRequestsKeepCheckpointAndOneInitialRetry() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        val blocked = fixture.listPage.copy(chatListCandidates = listOf(damaged))
+        fixture.port.page = blocked
+        val handle = fixture.runtime.javaClass.getDeclaredMethod(
+            "handleSessionListPage", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        handle.invoke(fixture.runtime, blocked)
+        val original = requireNotNull(fixture.checkpoint())
+        val retry = fixture.runtime.javaClass.getDeclaredMethod(
+            "recoverRetryablePrivateList", String::class.java
+        ).apply { isAccessible = true }
+        repeat(4) { retry.invoke(fixture.runtime, "PRIVATE_INCOMPLETE_UNREAD_ROW") }
+        assertEquals(original, fixture.checkpoint())
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+            it.contains("PRIVATE_INCOMPLETE_UNREAD_ROW") })
+        assertEquals(4, fixture.logs.count { it.contains("TRANSACTION_REUSED") })
+        assertEquals(1, fixture.logs.count { it.contains("READ_ONLY_RETRY_RETAINED") })
+        assertEquals(0, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+    }
+
+    @Test
     fun p2OriginalIncompleteFaultKeepsSameRecoveryUntilFreshRepair() {
         val fixture = preScrollPageRecoveryFixture()
         cancelFixtureStartupObservation(fixture)

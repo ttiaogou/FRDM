@@ -189,6 +189,55 @@ class RecoverySchedulerTest {
     }
 
     @Test
+    fun p3SameTransactionRebindDoesNotReloadStaleDurablePlanOrPostponeDeadline() {
+        val scheduler = FakeScheduler()
+        val repository = FakeRecoveryScheduleRepository()
+        var now = 1_000L
+        val recovery = RecoveryScheduler(scheduler, { now }, {}, scheduleRepository = repository)
+        val id = identity()
+        val initial = recovery.begin(id)
+        scheduler.runNext(500L)
+        scheduler.runNext(1_000L)
+        val before = requireNotNull(recovery.currentPlan())
+        repository.save(initial) // emulate a lagging durable copy
+        now += 100L
+        val rebound = recovery.restorePersisted(id.copy(
+            observationGeneration = 8L, unknownReason = "SERVICE_RECONNECT"
+        ))
+        assertEquals(before, rebound)
+        assertEquals(2L, rebound.observationCount)
+        assertEquals(2, rebound.backoffStage)
+        assertEquals(listOf(2_000L), scheduler.pendingDelays())
+        scheduler.runNext(2_000L)
+        assertEquals(3L, recovery.currentPlan()?.observationCount)
+        assertEquals(listOf(5_000L), scheduler.pendingDelays())
+    }
+
+    @Test
+    fun p3SuspendedSameCheckpointRearmsRemainingDelayWithoutReset() {
+        val scheduler = FakeScheduler()
+        var now = 1_000L
+        val observed = mutableListOf<RecoveryScheduleSnapshot>()
+        val recovery = RecoveryScheduler(scheduler, { now }, observed::add)
+        val id = identity()
+        recovery.begin(id)
+        scheduler.runNext(500L)
+        scheduler.runNext(1_000L)
+        val before = requireNotNull(recovery.currentPlan())
+        recovery.suspendForServiceDisconnect()
+        assertTrue(scheduler.pendingDelays().isEmpty())
+        scheduler.runCancelled(2_000L)
+        assertEquals(2, observed.size)
+        now += 250L
+        val resumed = recovery.begin(id.copy(observationGeneration = 9L))
+        assertEquals(before, resumed)
+        assertEquals(listOf(1_750L), scheduler.pendingDelays())
+        scheduler.runNext(1_750L)
+        assertEquals(3L, observed.last().observationCount)
+        assertEquals(listOf(5_000L), scheduler.pendingDelays())
+    }
+
+    @Test
     fun restoresSavedBackoffWithNewRunGenerationOnlyForMatchingRouteAndCheckpoint() {
         val scheduler = FakeScheduler()
         val repository = FakeRecoveryScheduleRepository()

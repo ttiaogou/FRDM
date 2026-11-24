@@ -26,7 +26,18 @@ class RecoveryScheduler(
         if (current != null && current.matchesTransaction(identity)) {
             val previous = current.snapshot()
             if (identity.observationGeneration >= current.identity.observationGeneration) {
-                current.identity = identity
+                current.identity = identity.copy(
+                    unknownReason = current.identity.unknownReason ?: identity.unknownReason
+                )
+            }
+            // A suspended same-transaction plan resumes from its original deadline.
+            // Rebinding an already armed plan must not cancel/repost its timer.
+            if (current.pendingTask == null) {
+                val maxDelay = if (current.touchActive) TOUCH_ACTIVE_OBSERVATION_DELAY_MS
+                    else BACKOFF_DELAYS_MS[current.backoffStage]
+                val remaining = (current.nextObservationAtEpochMs - nowEpochMs()).coerceIn(0L, maxDelay)
+                scheduleNext(current, current.backoffStage, remaining)
+                return current.snapshot()
             }
             return current.snapshot().also { updated ->
                 if (updated != previous) scheduleRepository?.save(updated)
@@ -58,6 +69,10 @@ class RecoveryScheduler(
      */
     @Synchronized
     fun restorePersisted(identity: RecoveryEventIdentity): RecoveryScheduleSnapshot {
+        // In-memory state is authoritative for the same transaction, including when
+        // another verification lane is bound after a scope or fingerprint change.
+        // A persisted copy may lag the already scheduled deadline or observation count.
+        if (active?.matchesTransaction(identity) == true) return begin(identity)
         val saved = scheduleRepository?.load()?.takeIf {
             it.taskId == identity.taskId &&
                 it.routeId == identity.routeId &&

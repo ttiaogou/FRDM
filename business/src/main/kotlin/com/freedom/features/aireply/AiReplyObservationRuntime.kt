@@ -1775,7 +1775,7 @@ class AiReplyObservationRuntime(
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("消息列表统一检查点[ORIGINAL_FAULT_WAIT]：reason=${recoveryContext.reason}；" +
                     "evidence=${privateListFaultEvidence.name}；保留原恢复事务")
-                scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                schedulePendingPrivateListObservation()
                 lastPageInspection = inspection
                 return
             }
@@ -1965,6 +1965,9 @@ class AiReplyObservationRuntime(
                 scheduleFullInspectionAfter(350L)
                 lastPageInspection = inspection
                 return
+            }
+            if (targetTaskId == PRIVATE_MESSAGES_TASK_ID && targetRoute == messageListRecoveryRoute.routeId) {
+                messageRecoveryRetryAttempt = 0
             }
             if (privateListFaultEvidence != PrivateListRecoveryFaultEvidence.NOT_APPLICABLE) {
                 // Only after two admissible samples and the existing Android/lease gate
@@ -2644,7 +2647,7 @@ class AiReplyObservationRuntime(
 
         // Verification is complete, but NO private ResumeCompleted is dispatched. The original
         // manager lane and persisted cursor remain unresolved until the inbox is seen again.
-        messageListCheckpointVerifier.deferOwnership()
+        messageListCheckpointVerifier.suspendForTaskHandoff()
         if (ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
             releaseTaskOwnership("已双快照验证收到招呼列表；保留私人消息检查点并安全让出操作权")
         }
@@ -2869,7 +2872,8 @@ class AiReplyObservationRuntime(
             RecoveryTransactionEvent.Source.PAGE_OBSERVATION
         ))
         recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
-        messageListCheckpointVerifier.reset()
+        // The suspended verifier must revalidate, but its original plan survives.
+        messageListCheckpointVerifier.deferOwnership()
         return true
     }
 
@@ -3172,7 +3176,13 @@ class AiReplyObservationRuntime(
 
     /** Single pause/checkpoint entry used by page-route changes and UNKNOWN observations. */
     private fun requestUnifiedPauseAndCheckpoint(taskId: String, reason: String): Boolean {
-        if (recoveryContext.pending) return false
+        if (recoveryContext.pending) {
+            if (taskId == recoveryContext.sourceTaskId) {
+                onLog("统一恢复[TRANSACTION_REUSED]：task=$taskId；checkpointId=${recoveryContext.checkpointId}；" +
+                    "originalReason=${recoveryContext.reason}；observedReason=$reason；不覆盖原检查点")
+            }
+            return false
+        }
         if (taskId == PRIVATE_MESSAGES_TASK_ID &&
             sessionManagerState == SessionManagerState.OPENING_SESSION
         ) {
@@ -3291,8 +3301,29 @@ class AiReplyObservationRuntime(
             recoveryContext.pending
         ) {
             onLog("AI 私聊暂停分类[RETRYABLE]：reason=$reason；统一检查点恢复；禁止旧节点、手势和未证实的发送")
-            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            if (recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+                recoveryContext.routeId == messageListRecoveryRoute.routeId
+            ) {
+                schedulePendingPrivateListObservation()
+            } else {
+                scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            }
         }
+    }
+
+    /**
+     * Before a route verifier is bound (or with no persisted checkpoint), retain the
+     * existing one-shot cadence instead of replacing its deadline on every event.
+     * Once the shared plan exists it owns autonomous observations exclusively.
+     */
+    private fun schedulePendingPrivateListObservation() {
+        if (messageListCheckpointVerifier.hasRetainedObservationPlan() || pageInspectionTask != null) return
+        messageRecoveryRetryAttempt = (messageRecoveryRetryAttempt + 1)
+            .coerceAtMost(RecoveryScheduler.fastRetryCount + 1)
+        val delay = RecoveryScheduler.readOnlyRetryDelayMs(messageRecoveryRetryAttempt)
+        onLog("统一恢复[READ_ONLY_RETRY_RETAINED]：checkpointId=${recoveryContext.checkpointId}；" +
+            "attempt=$messageRecoveryRetryAttempt；delayMs=$delay")
+        scheduleFullInspectionAfter(delay)
     }
 
     /** Pending-send UNKNOWN may recover only onto the same semantic chat-detail surface. */
@@ -3569,6 +3600,22 @@ class AiReplyObservationRuntime(
     /** Reloads the message-list checkpoint and accepts it only with a fresh list-page check. */
     fun reloadPrivateMessagesCheckpointAfterServiceReconnect(): Boolean {
         val checkpoint = privateMessagesCheckpointRepository?.load() ?: return false
+        val retained = messageListCheckpointForUnified
+        if (recoveryContext.pending && recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+            recoveryContext.routeId == messageListRecoveryRoute.routeId && retained != null
+        ) {
+            // Do not let a duplicate reconnect overwrite a pending business cursor,
+            // checkpoint identity or the active retry deadline with a newer save.
+            if (retained.savedAtEpochMs != checkpoint.savedAtEpochMs) {
+                onLog("消息列表服务重连[CHECKPOINT_MISMATCH]：保留原待恢复检查点，不覆盖运行中的事务")
+                return false
+            }
+            messageListCheckpointVerifier.deferOwnership()
+            recoveryContext.invalidateFingerprint()
+            onLog("消息列表服务重连[TRANSACTION_REUSED]：原检查点身份及退避计划保留；重新验证页面")
+            scheduleFullInspectionAfter(0L)
+            return true
+        }
         privateMessagesTraversalTaskExecutor.restore(checkpoint)
         messageListCheckpointVerifier.reset()
         messageListCheckpointRestored = true

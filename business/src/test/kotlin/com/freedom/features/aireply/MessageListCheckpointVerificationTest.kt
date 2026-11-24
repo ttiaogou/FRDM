@@ -120,6 +120,40 @@ class MessageListCheckpointVerificationTest {
     }
 
     @Test
+    fun p3BlockedSamplesAndChangedScopePreserveSameBackoffAcrossRebinds() {
+        val (verifier, scheduler) = fixture()
+        fun sample(gen: Long, fingerprint: String, evidence: PrivateListRecoveryFaultEvidence) =
+            verifier.observe(
+                checkpoint = original,
+                checkpointId = "P3_SAME_CHECKPOINT",
+                recoveryReason = "PRIVATE_INCOMPLETE_UNREAD_ROW",
+                restoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION,
+                snapshot = page(),
+                pageFingerprint = fingerprint,
+                routeVerified = true,
+                observationGeneration = gen,
+                originalFaultEvidence = evidence
+            )
+        val blocked = PrivateListRecoveryFaultEvidence.ORIGINAL_INCOMPLETE_STILL_BLOCKED
+        val cleared = PrivateListRecoveryFaultEvidence.CLEARED
+        assertTrue(sample(1L, "A", blocked) is RecoveryCheckpointVerificationResult.Recovering)
+        scheduler.runNext(500L)
+        assertEquals(listOf(1_000L), scheduler.pendingDelays())
+        assertTrue(sample(2L, "B", blocked) is RecoveryCheckpointVerificationResult.Recovering)
+        assertEquals(listOf(1_000L), scheduler.pendingDelays())
+        scheduler.runNext(1_000L)
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), sample(3L, "B", cleared))
+        assertEquals(listOf(2_000L), scheduler.pendingDelays())
+        verifier.deferOwnership()
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), sample(4L, "B", cleared))
+        assertEquals(listOf(2_000L), scheduler.pendingDelays())
+        assertFalse(verifier.completeResume())
+        assertTrue(sample(5L, "B", cleared) is RecoveryCheckpointVerificationResult.ResumeReady)
+        assertTrue(verifier.completeResume())
+        assertTrue(scheduler.pendingDelays().isEmpty())
+    }
+
+    @Test
     fun p2ClearedAndLocalRemediationProofsCannotShareStableSamples() {
         val (verifier, _) = fixture()
         fun sample(gen: Long, evidence: PrivateListRecoveryFaultEvidence) = verifier.observe(
@@ -424,6 +458,12 @@ class MessageListCheckpointVerificationTest {
 
         fun runCancelled(delay: Long) {
             val entry = entries.first { it.cancelled && it.delay == delay }
+            entry.callback()
+        }
+
+        fun runNext(delay: Long) {
+            val entry = entries.first { !it.cancelled && it.delay == delay }
+            entry.cancelled = true
             entry.callback()
         }
     }

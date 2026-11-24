@@ -110,26 +110,21 @@ internal class MessageListCheckpointVerification(
             ).also { it.restore(unified, restoreSource) }
             binding = newBinding
         }
-        if (!originalFaultEvidence.allowsResume) {
-            // Keep the original checkpoint identity and read-only schedule. A
-            // blocked business sample must invalidate prior positive page evidence.
+        val evidence = if (!originalFaultEvidence.allowsResume) {
+            // Both outcomes must cross the same shared observation boundary.
             onLog("消息列表统一检查点[ORIGINAL_FAULT_WAIT]：reason=$recoveryReason；" +
                 "evidence=${originalFaultEvidence.name}；原始业务阻塞未解除，不确认恢复")
-            return requireNotNull(verifier).observe(
-                CheckpointVerificationWiring.rejectedEvidence(
-                    runGeneration = currentRunGeneration(),
-                    observationGeneration = observationGeneration
-                )
-            )
-        }
-        return requireNotNull(verifier).observe(
-            CheckpointVerificationWiring.verifiedEvidence(
-                snapshot = snapshot,
-                pageFingerprint = pageFingerprint,
+            CheckpointVerificationWiring.rejectedEvidence(
                 runGeneration = currentRunGeneration(),
                 observationGeneration = observationGeneration
             )
+        } else CheckpointVerificationWiring.verifiedEvidence(
+            snapshot = snapshot,
+            pageFingerprint = pageFingerprint,
+            runGeneration = currentRunGeneration(),
+            observationGeneration = observationGeneration
         )
+        return requireNotNull(verifier).observe(evidence)
     }
 
     /** A new non-matching observation invalidates earlier stable samples, not the checkpoint. */
@@ -153,6 +148,14 @@ internal class MessageListCheckpointVerification(
         verifier = null
         binding = null
     }
+
+    /** A verified cross-task handoff suspends callbacks, not the original retry plan. */
+    fun suspendForTaskHandoff() {
+        deferOwnership()
+        schedule?.suspendForServiceDisconnect()
+    }
+
+    fun hasRetainedObservationPlan(): Boolean = schedule?.currentPlan() != null
 
     /** Only the task owner can acknowledge the shared proof after reclaiming its UI lease. */
     fun completeResume(): Boolean {
