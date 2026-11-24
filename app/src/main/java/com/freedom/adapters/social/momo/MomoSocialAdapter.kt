@@ -4995,7 +4995,14 @@ internal class MomoSocialAdapter(
         } ?: false
     }
 
-    override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+    override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
+        sendDraft(target, expectedText) {}
+
+    override fun sendDraft(
+        target: ChatDraftInputTarget,
+        expectedText: String,
+        onGestureCompleted: () -> Unit
+    ): ChatDraftInputResult {
         if (!isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease)) {
             return ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "TASK_OWNERSHIP_LOST")
         }
@@ -5122,6 +5129,9 @@ internal class MomoSocialAdapter(
                 }
                 val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
                     onLog("AI 发送手势回调：status=${result.status}; reason=${result.reason}")
+                    if (result.status == GestureExecutionStatus.COMPLETED) {
+                        onGestureCompleted()
+                    }
                 })
                 if (submission == GestureSubmission.ACCEPTED) {
                     ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)

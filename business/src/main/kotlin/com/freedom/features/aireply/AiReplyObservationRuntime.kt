@@ -284,7 +284,7 @@ class AiReplyObservationRuntime(
             regionRefreshDebounceMs = regionRefreshDebounceMs,
             maxEventBurstInspectionWaitMs = MAX_EVENT_BURST_INSPECTION_WAIT_MS,
             runFullInspection = {
-                if (!hasProtectedPrivateInspection()) runFullInspection()
+                if (!hasProtectedPrivateInspection() && !hasProtectedSendInspection()) runFullInspection()
             },
             runRegionRefresh = ::runRegionRefresh,
             onFallbackCheckRequested = ::requestReceivedGreetingsFallbackCheck,
@@ -1152,7 +1152,7 @@ class AiReplyObservationRuntime(
         // The watchdog callback is already a fresh-observation request. Schedule it through
         // the runtime-owned inspection slot so a stale/coalesced full-inspection channel cannot
         // swallow the probe while an earlier page inspection is still being retired.
-        if (hasProtectedPrivateInspection()) return
+        if (hasProtectedPrivateInspection() || hasProtectedSendInspection()) return
         scheduleFullInspectionAfter(
             fullInspectionDebounceMs,
             AiReplyPageReadPurpose.RECEIVED_GREETINGS
@@ -1169,7 +1169,7 @@ class AiReplyObservationRuntime(
         // snapshot immediately; adding another full-page debounce here changes the contract
         // from 350ms to 350ms + debounce and leaves LIST_CONFIRMED behind the test/runtime
         // retry boundary.
-        if (hasProtectedPrivateInspection()) return
+        if (hasProtectedPrivateInspection() || hasProtectedSendInspection()) return
         pendingPageReadPurpose = AiReplyPageReadPurpose.RECEIVED_GREETINGS
         runFullInspection()
     }
@@ -1484,6 +1484,18 @@ class AiReplyObservationRuntime(
                 scheduleFullInspectionAfter(0L)
             }
         }
+    }
+
+    /**
+     * Called on the runtime scheduler for the original, still-pending send attempt.
+     * This is an intent for a fresh read, not confirmation or UI operation authority.
+     */
+    fun onSendConfirmationObservationRequested() {
+        if (!isAiReplyActive() || !sessionRunStarted || !isSendConfirmationPending() ||
+            recoveryContext.pending
+        ) return
+        onLog("AI 发送确认[ACTIVE_RECHECK_REQUESTED]：发送手势完成；立即安排现有只读页面观察")
+        scheduleFullInspectionAfter(0L, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
     }
 
     /** Applies a newly acquired page snapshot after ordinary debounce or verified user stability. */
@@ -3741,6 +3753,12 @@ class AiReplyObservationRuntime(
             regionRefreshTask?.cancel()
             regionRefreshTask = null
             pageObservationCoordinator.cancelRegionRefresh()
+            if (hasProtectedSendInspection()) {
+                // Window/route invalidation above is still mandatory. Only the
+                // pending fresh read survives; it cannot reuse the old snapshot.
+                onLog("AI 发送确认[ACTIVE_RECHECK_RETAINED]：保留已排定的只读核验；event=${event.type}")
+                return
+            }
             if (hasProtectedPrivateInspection()) {
                 // Route/window invalidation above still runs for every event. The
                 // explicit fresh read must not be replaced by a sliding debounce.
@@ -3918,7 +3936,7 @@ class AiReplyObservationRuntime(
         val attempt = ++deferredSendProofRetryAttempt
         val delayMs = RecoveryScheduler.readOnlyRetryDelayMs(attempt)
         onLog("AI 发送确认[READ_ONLY_RETRY_SCHEDULED] reason=$reason；attempt=$attempt；delayMs=$delayMs；保留发送检查点，不重发")
-        scheduleFullInspectionAfter(delayMs)
+        scheduleFullInspectionAfter(delayMs, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
     }
 
     /**
@@ -4052,7 +4070,7 @@ class AiReplyObservationRuntime(
                 deferredSendProofRetryAttempt = 0
                 if (isSendConfirmationPending() && isAiReplyActive() && sessionRunStarted && !recoveryContext.pending) {
                     onLog("AI 发送确认[RECHECK_SCHEDULED]：等待下一次新鲜聊天快照和只读消息核验；不重发")
-                    scheduleFullInspectionAfter(SEND_CONFIRMATION_RECHECK_DELAY_MS)
+                    scheduleFullInspectionAfter(SEND_CONFIRMATION_RECHECK_DELAY_MS, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
                 }
                 return true
             }
@@ -7038,6 +7056,11 @@ class AiReplyObservationRuntime(
                 recoveryContext.reason == "PRIVATE_SCROLL_CALLBACK_LEASE_LOST")
         return pendingPageReadPurpose == AiReplyPageReadPurpose.SCROLL_AFTER || gestureRecovery
     }
+
+    /** Passive events may not replace an already queued send-proof read with debounce. */
+    private fun hasProtectedSendInspection(): Boolean =
+        pageInspectionTask != null && sessionRunStarted && !recoveryContext.pending &&
+            isSendConfirmationPending() && pendingPageReadPurpose == AiReplyPageReadPurpose.MESSAGE_READ_RETRY
 
     private fun scheduleFullInspection() {
         scheduleFullInspectionAfter(fullInspectionDebounceMs, AiReplyPageReadPurpose.FULL_INSPECTION)

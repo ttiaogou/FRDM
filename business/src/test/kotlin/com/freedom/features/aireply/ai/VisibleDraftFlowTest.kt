@@ -29,6 +29,7 @@ class VisibleDraftFlowTest {
         val inputWriteTargets = mutableListOf<ChatDraftInputTarget>()
         val logs = mutableListOf<String>()
         val preSendFailures = mutableListOf<AiReplyPreSendModelFailure>()
+        var completionObservationRequests = 0
         var configuredModelName = "test"
         var modelOutput = """{"action":"REPLY","reason":"OK","draft":"你好呀"}"""
         var calls = 0
@@ -104,7 +105,8 @@ class VisibleDraftFlowTest {
             replySegmentTaskRepository = segmentRepository,
             replyTaskRepository = taskRepository,
             onPreSendModelFailure = { preSendFailures.add(it) },
-            policyRegistry = policyRegistry)
+            policyRegistry = policyRegistry,
+            onSendConfirmationObservationRequested = { completionObservationRequests++ })
         fun drain() { while (tasks.isNotEmpty()) tasks.removeAt(0).invoke() }
         fun step() { assertTrue("Expected a scheduled task", tasks.isNotEmpty()); tasks.removeAt(0).invoke() }
     }
@@ -1462,6 +1464,62 @@ class VisibleDraftFlowTest {
         assertFalse(f.coordinator.isPending)
         assertTrue(f.coordinator.isConversationReturnBlocked)
         assertTrue(f.logs.any { it.contains("DRAFT_SEND_SEND_PORT_UNAVAILABLE") })
+    }
+
+    @Test fun platformCompletionRequestsOneReadOnlyObservationWithoutConfirmingOrResending() {
+        var sends = 0
+        lateinit var completed: () -> Unit
+        val ledger = SegmentLedger()
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
+                error("Completion-capable send port must be used")
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String,
+                onGestureCompleted: () -> Unit): ChatDraftInputResult {
+                sends++
+                completed = onGestureCompleted
+                // Exercise a platform callback delivered before the submission returns.
+                onGestureCompleted()
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, ledger, TaskLedger())
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(1, sends)
+        assertEquals(1, f.completionObservationRequests)
+        assertTrue(f.coordinator.isSendConfirmationPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, ledger.records.values.single().status)
+        completed()
+        f.drain()
+        assertEquals(1, f.completionObservationRequests)
+        val outgoing = ChatMessage("new-outgoing", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        assertEquals(SendConfirmationResult.CONFIRMED, f.coordinator.confirmSendResult(
+            f.batch.copy(messages = listOf(outgoing), capturedAtMillis = f.now + 1L), f.snapshot))
+        assertEquals(1, sends)
+        assertEquals(ReplySegmentTaskStatus.SENT, ledger.records.values.single().status)
+    }
+
+    @Test fun platformCompletionAfterRuntimeResetCannotRequestObservation() {
+        lateinit var completed: () -> Unit
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
+                error("Completion-capable send port must be used")
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String,
+                onGestureCompleted: () -> Unit): ChatDraftInputResult {
+                completed = onGestureCompleted
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, SegmentLedger(), TaskLedger())
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertTrue(f.coordinator.isSendConfirmationPending)
+        assertEquals(0, f.completionObservationRequests)
+        f.coordinator.resetForRuntimeReset()
+        completed()
+        f.drain()
+        assertEquals(0, f.completionObservationRequests)
     }
 
     @Test fun returnGateOpensOnlyAfterNewOutgoingBubbleConfirmsSend() {

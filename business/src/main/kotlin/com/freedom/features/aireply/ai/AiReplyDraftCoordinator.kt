@@ -141,7 +141,9 @@ class AiReplyDraftCoordinator(
     /** Delivered after a durable, no-send technical failure to the task-specific runtime. */
     private val onPreSendModelFailure: (AiReplyPreSendModelFailure) -> Unit = {},
     /** Same immutable registry used by the composition root; never grants UI ownership. */
-    private val policyRegistry: PolicyRegistry = AiReplyPolicyRegistry
+    private val policyRegistry: PolicyRegistry = AiReplyPolicyRegistry,
+    /** Requests the existing read-only page observer after a correlated platform completion. */
+    private val onSendConfirmationObservationRequested: () -> Unit = {}
 ) {
     private val pending = AtomicBoolean(false)
     private val awaitingUserSend = AtomicBoolean(false)
@@ -1091,7 +1093,9 @@ class AiReplyDraftCoordinator(
             return
         }
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.SENDING, requestGeneration)
-        val sent = runCatching { sendPort?.sendDraft(target, message) ?: ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_UNAVAILABLE") }
+        val sendAttemptId = UUID.randomUUID().toString()
+        val completion = sendCompletionObservation(sendAttemptId, requestGeneration)
+        val sent = runCatching { sendPort?.sendDraft(target, message, completion) ?: ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_UNAVAILABLE") }
             .getOrElse { ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_EXCEPTION") }
         if (sent.status == ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND &&
             sent.reasonCode == "SEND_CONTROL_NOT_READY"
@@ -1134,7 +1138,7 @@ class AiReplyDraftCoordinator(
         synchronized(lock) { pendingSendControl = null }
         val submittedAt = nowMillis()
         synchronized(lock) {
-            pendingSendConfirmation = PendingSendConfirmation(UUID.randomUUID().toString(), activeRequestId.orEmpty(), target.conversationIdentityKey, segmentIndex, activeMessageSegments.size, fingerprint(message), submittedAt, submittedAt + SEND_CONFIRMATION_TIMEOUT_MILLIS, requestGeneration, target, message, activeExistingOutgoingKeys)
+            pendingSendConfirmation = PendingSendConfirmation(sendAttemptId, activeRequestId.orEmpty(), target.conversationIdentityKey, segmentIndex, activeMessageSegments.size, fingerprint(message), submittedAt, submittedAt + SEND_CONFIRMATION_TIMEOUT_MILLIS, requestGeneration, target, message, activeExistingOutgoingKeys)
             sendConfirmationChecks = 0
         }
         updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.SENT_UNCONFIRMED)
@@ -1142,6 +1146,35 @@ class AiReplyDraftCoordinator(
         pending.set(false)
         synchronized(lock) { pendingSendConfirmation }?.let {
             recordSendTrace("MESSAGE_SEND_SUBMITTED", it, "SENT_UNCONFIRMED")
+        }
+    }
+
+    /**
+     * The adapter may call back before sendDraft returns. Queue the notification on
+     * the existing runtime scheduler, where SEND_SUBMITTED has installed its pending
+     * record. A duplicate/old completion cannot wake a different send attempt.
+     * No confirmation, count, retry-send or UI permission is granted here.
+     */
+    private fun sendCompletionObservation(sendAttemptId: String, requestGeneration: Long): () -> Unit {
+        val delivered = AtomicBoolean(false)
+        return {
+            if (delivered.compareAndSet(false, true)) {
+                runCatching {
+                    scheduler.schedule(0L) {
+                        if (!isAiReplyActive() || !isCurrentGeneration(requestGeneration)) return@schedule
+                        val matches = synchronized(lock) {
+                            pendingSendConfirmation?.let {
+                                it.sendAttemptId == sendAttemptId && it.requestGeneration == requestGeneration
+                            } == true
+                        }
+                        if (!matches) return@schedule
+                        onLog("AI 发送确认[GESTURE_COMPLETED_RECHECK]：sendAttemptId=${sendAttemptId.take(12)}；主动请求新鲜只读观察；不标记发送成功")
+                        onSendConfirmationObservationRequested()
+                    }
+                }.onFailure {
+                    onLog("AI 发送确认[COMPLETION_OBSERVATION_UNAVAILABLE]：保留待确认发送；不重发")
+                }
+            }
         }
     }
 
@@ -1355,12 +1388,13 @@ class AiReplyDraftCoordinator(
                 finish("DRAFT_SEND_REQUEST_GENERATION_INVALID", requestGeneration)
                 return
             }
-            val sent = runCatching { configuredSendPort.sendDraft(target, draft) }
+            val sendAttemptId = UUID.randomUUID().toString()
+            val completion = sendCompletionObservation(sendAttemptId, requestGeneration)
+            val sent = runCatching { configuredSendPort.sendDraft(target, draft, completion) }
                 .getOrElse {
                     ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "SEND_PORT_EXCEPTION")
                 }
             if (sent.status == ChatDraftInputStatus.SEND_SUBMITTED) {
-                val sendAttemptId = UUID.randomUUID().toString()
                 val submittedAt = nowMillis()
                 synchronized(lock) {
                     pendingSendConfirmation = PendingSendConfirmation(

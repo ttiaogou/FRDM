@@ -476,6 +476,9 @@ internal class AccessibilityServiceDependencies internal constructor(
                 // This callback is dispatched asynchronously onto the runtime scheduler.
                 // It cannot grant a new task lease or authorize a stale greeting BACK.
                 aiReplyObservationRuntime.onPreSendModelFailure(failure)
+            },
+            onSendConfirmationObservationRequested = {
+                aiReplyObservationRuntime.onSendConfirmationObservationRequested()
             }
         )
     }

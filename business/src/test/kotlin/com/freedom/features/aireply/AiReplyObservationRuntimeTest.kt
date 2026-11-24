@@ -3497,7 +3497,13 @@ class AiReplyObservationRuntimeTest {
         pendingSend = true
         bindingField.set(runtime, null)
         val gesturesBefore = gestureCalls
-        inspect.invoke(runtime)
+        runtime.onSendConfirmationObservationRequested()
+        assertTrue(logs.any { it.contains("ACTIVE_RECHECK_REQUESTED") })
+        assertTrue(scheduler.hasPendingDelay(0L))
+        // No accessibility event or manual resume is needed for the initial proof.
+        runUntilShortestDelay(scheduler, 40) {
+            logs.any { it.contains("AI 发送确认[READ_DEFERRED] reason=SOURCE_CHAT_BINDING_NOT_VERIFIED") }
+        }
         assertTrue(logs.any {
             it.contains("AI 发送确认[READ_DEFERRED] reason=SOURCE_CHAT_BINDING_NOT_VERIFIED")
         })
@@ -3508,6 +3514,9 @@ class AiReplyObservationRuntimeTest {
         assertTrue(scheduler.hasPendingDelay(500L))
         assertEquals(0, confirmationCalls)
         assertEquals(gesturesBefore, gestureCalls)
+        repeat(4) { runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED)) }
+        assertTrue("Ordinary events cannot cancel the queued send-proof retry",
+            scheduler.hasPendingDelay(500L))
 
         scheduler.runNextWithDelay(500L)
         assertTrue("An unverified binding must remain on autonomous read-only backoff",
