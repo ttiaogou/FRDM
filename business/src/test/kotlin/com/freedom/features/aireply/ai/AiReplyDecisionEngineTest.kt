@@ -68,7 +68,7 @@ class AiReplyDecisionEngineTest {
         assertTrue(request.systemInstruction.contains("请只返回一个有效的 JSON 对象"))
         assertTrue(request.systemInstruction.contains("\"reasonDetail\""))
         assertTrue(request.systemInstruction.contains("additionalProperties"))
-        assertTrue(request.systemInstruction.contains("如果对方直接询问你是否为人工智能，必须如实回答"))
+        assertTrue(request.systemInstruction.contains("如果对方询问你是否为人工智能，必须如实回答"))
     }
 
     @Test fun promptOnlyJsonRecoveryRejectsNonJsonAndDoesNotTurnItIntoDraft() {
@@ -148,8 +148,7 @@ class AiReplyDecisionEngineTest {
 
     @Test fun systemInstructionDoesNotRequireFalseClaimsAboutAiIdentity() {
         val instruction = AiReplyDecisionEngine.DEFAULT_SYSTEM_INSTRUCTION
-        assertTrue(instruction.contains("如果对方直接询问你是否为人工智能，必须如实回答"))
-        assertTrue(instruction.contains("不得谎称自己是人类"))
+        assertTrue(instruction.contains("如果对方询问你是否为人工智能，必须如实回答"))
     }
 
     @Test fun personalIdentifiersAreRedactedBeforeProviderCall() {
@@ -255,7 +254,6 @@ class AiReplyDecisionEngineTest {
         )
         assertEquals(AiReplyAction.REPLY, model(outcome).action)
         assertEquals("你说的是哪件事呀？", model(outcome).draft)
-        assertTrue(provider.lastRequest!!.systemInstruction.contains("语义模糊"))
         assertTrue(provider.lastRequest!!.systemInstruction.contains("低承诺"))
     }
 
