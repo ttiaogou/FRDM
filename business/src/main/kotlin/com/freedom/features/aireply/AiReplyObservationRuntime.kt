@@ -6751,7 +6751,7 @@ class AiReplyObservationRuntime(
         // accessibility tree must not reset the budget and turn retries into an unbounded loop.
         if (messageReadRetryTask != null) return
         if (messageReadRetryCount >= MAX_MESSAGE_LIST_RETRIES) {
-            onLog("AI 模式消息列表连续不可用；已完成 $MAX_MESSAGE_LIST_RETRIES 次快速延迟重试")
+            onLog("AI 模式消息列表连续不可用；已完成 $MAX_MESSAGE_LIST_RETRIES 次延迟重试，等待下一次界面事件")
             cancelMessageReadRetry()
             schedulePrivatePreSendReadRetry("MESSAGE_LIST_UNAVAILABLE")
             return

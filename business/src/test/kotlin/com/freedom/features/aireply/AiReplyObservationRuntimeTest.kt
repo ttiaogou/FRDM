@@ -6688,6 +6688,10 @@ class AiReplyObservationRuntimeTest {
             retryDelayMs = 30_000L,
             readyToDefer = true
         ))
+        // The legacy fake scheduler is FIFO, not deadline-prioritized. Deliver the
+        // zero-delay model failure callback before the previously queued delayed BACK,
+        // matching runtime scheduling without changing its actual delay algorithm.
+        scheduler.runNextWithDelay(0L)
         runUntil(scheduler, 40) { logs.any { it.contains("PRE_SEND_FAILURE_RECORDED") } }
         assertEquals(0, port.navigateBackCalls)
         runUntil(scheduler, 60) { logs.any { it.contains("READ_ONLY_WAIT") } }
