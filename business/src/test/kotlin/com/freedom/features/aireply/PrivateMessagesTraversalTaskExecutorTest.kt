@@ -633,6 +633,50 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun pollingWakeupUsesExistingUnreadUnknownViewportLatch() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val unknown = candidate(0, "Alice", ChatUnreadStatus.UNKNOWN, top = 100)
+        val explicit = candidate(0, "Alice", ChatUnreadStatus.READ, top = 100)
+        val different = candidate(1, "Bob", ChatUnreadStatus.READ, top = 100)
+
+        assertTrue(executor.observeUnreadBlockers(snapshot(unknown)))
+        assertTrue(executor.observeUnreadBlockers(snapshot(different)))
+        assertTrue(executor.unresolvedUnknownUnreadKeys.isNotEmpty())
+        assertFalse(executor.observeUnreadBlockers(snapshot(explicit)))
+        assertTrue(executor.unresolvedUnknownUnreadKeys.isEmpty())
+    }
+
+    @Test
+    fun newPollingRoundRetiresOnlyRoundSelectionAndRequiresFreshAdmission() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.attemptedSessionKeys += "old-attempt"
+        executor.lockedUnreadSessionKeys += "old-unread"
+        executor.ambiguousSessionIdentityKeys += "run-blocked"
+        executor.pendingBoundaryConfirmationKeys = listOf("old-boundary")
+        executor.checkpointLastSuccessfulTaskId = "verified-send"
+        executor.checkpointRunGeneration = 7L
+        executor.checkpointNextCursorKey = "old-cursor"
+
+        executor.beginNextPollingRound()
+
+        assertFalse(executor.initialInboxPositionCheckCompleted)
+        assertFalse(executor.initialInboxTopPositioningCompleted)
+        assertFalse(executor.initialUnreadGateSwipeCompleted)
+        assertFalse(executor.lockedUnreadSetFinalized)
+        assertTrue(executor.attemptedSessionKeys.isEmpty())
+        assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
+        assertEquals(null, executor.pendingBoundaryConfirmationKeys)
+        assertEquals(null, executor.checkpointNextCursorKey)
+        assertEquals(setOf("run-blocked"), executor.ambiguousSessionIdentityKeys)
+        assertEquals("verified-send", executor.checkpointLastSuccessfulTaskId)
+        assertEquals(7L, executor.checkpointRunGeneration)
+    }
+
+    @Test
     fun restoredViewportMismatchReanchorsBySessionNameWithoutReusingCoordinates() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val saved = candidate(0, "Alice", ChatUnreadStatus.UNREAD, top = 100)

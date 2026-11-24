@@ -207,6 +207,7 @@ class AiReplyObservationRuntime(
         private const val CROSS_TASK_GREETING_HANDOFF_GATE = "AI_REPLY_PRIVATE_TO_GREETINGS_HANDOFF"
         private const val GREETINGS_RETURN_RECOVERY_REASON = "GREETING_COMPLETION_RETURN"
         private const val GREETINGS_TO_PRIVATE_HANDOFF_GATE = "AI_REPLY_GREETINGS_TO_PRIVATE_HANDOFF"
+        private const val NEXT_POLLING_ROUND_GATE = "AI_REPLY_NEXT_POLLING_ROUND"
         private val PAGE_CHANGE_RECHECK_EVENT_TYPES = setOf(
             AccessibilityEventType.WINDOW_STATE_CHANGED,
             AccessibilityEventType.WINDOWS_CHANGED,
@@ -453,6 +454,11 @@ class AiReplyObservationRuntime(
     /** Archive lifecycle is independent from the optional automatic session traversal state. */
     private var sampleCaptureActive = false
     private var sessionRunStarted = false
+    // Only a verified private completion can retire the previous round's selection state.
+    private var privateRoundCompletedForGreetings = false
+    private var pollingRoundPending = false
+    private var pollingRoundDue = false
+    private var pollingRoundRetryAttempt = 0
     /** Startup stays provisional until the first autonomous gesture is accepted by Android. */
     // Compatibility accessors keep this large coordinator readable while the executor owns the
     // actual traversal/session state. All writes still cross the same single owner.
@@ -1079,6 +1085,13 @@ class AiReplyObservationRuntime(
                 holdGreetingsCompletionReturn("EXTERNAL_PAGE")
                 return
             }
+            if (sessionRunStarted && pollingRoundPending && !receivedGreetingsTaskActive &&
+                !recoveryContext.pending
+            ) {
+                invalidatePollingRoundEvidence()
+                recoverRetryablePrivateList("POLLING_INBOX_EXTERNAL_PAGE")
+                return
+            }
             if (recoveryContext.pending) {
                 onLog("统一页面恢复[EXTERNAL_PAGE_WAIT]：当前前台不是目标应用；${EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS}ms后继续观察")
                 scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
@@ -1110,6 +1123,7 @@ class AiReplyObservationRuntime(
         )
         diagnosePendingIdentityReturn(observationDecision, inspection)
         if (observationDecision.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) {
+            if (pollingRoundPending) invalidatePollingRoundEvidence()
             if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
                 holdGreetingsCompletionReturn("EMPTY_SNAPSHOT")
                 return
@@ -1331,7 +1345,7 @@ class AiReplyObservationRuntime(
     /** System touch boundaries pause received-greetings recovery without becoming page evidence. */
     fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
         if (!sessionRunStarted) return
-        val recoveryContextActive = receivedGreetingsTaskActive ||
+        val recoveryContextActive = receivedGreetingsTaskActive || pollingRoundPending ||
             messageListRecoveryVerificationPending ||
             recoveryContext.pending
         if (!recoveryContextActive) return
@@ -1340,6 +1354,7 @@ class AiReplyObservationRuntime(
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionStarted)
         // A user touch breaks the continuity of the private-to-greetings two-snapshot handoff.
         pageRecoveryVerificationGate.reset(CROSS_TASK_GREETING_HANDOFF_GATE)
+        if (pollingRoundPending) pageRecoveryVerificationGate.reset(NEXT_POLLING_ROUND_GATE)
         if (awaitingNormalInboxAfterGreetingsReturn) {
             holdGreetingsCompletionReturn("USER_INTERACTION")
         }
@@ -1385,6 +1400,14 @@ class AiReplyObservationRuntime(
                 pageFingerprint, setOf(PRIVATE_MESSAGES_TASK_ID, RECEIVED_GREETINGS_TASK_ID)
             )?.routeId
         } else null
+
+        if (sessionRunStarted && pollingRoundPending && !receivedGreetingsTaskActive &&
+            !recoveryContext.pending && !messageListRecoveryVerificationPending &&
+            !isSendConfirmationPending() && !isConversationDraftPending()
+        ) {
+            observeNextPollingRound(observation, inspection, matchedRouteId)
+            return
+        }
 
         if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
             if (isGreetingsCompletionReturnRecovery()) {
@@ -2146,21 +2169,16 @@ class AiReplyObservationRuntime(
                         }
                         onLog("跨任务交接[PRIVATE_LEASE_TRANSFERRED]：普通消息列表已双快照确认；私聊任务取得唯一操作权")
                         onLog("AI Reply 测试遍历：收到的招呼列表已返回普通消息页；当前位置明确未读=$eligibleUnread；未知=$eligibleUnknown")
-                        when {
-                            eligibleUnknown > 0 -> {
-                                privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = true
-                                sessionManagerState = SessionManagerState.PAUSED
-                                onLog("AI Reply 测试遍历暂停：返回普通消息页存在 UNKNOWN 未读状态；不将未知判定为无消息")
-                                recoverRetryablePrivateList("INBOX_UNREAD_UNKNOWN_AFTER_GREETINGS")
+                        if (!privateRoundCompletedForGreetings) {
+                            // A manually admitted greeting list may have interrupted a private
+                            // round. Do not retire its cursor as if the round had completed.
+                            recoverRetryablePrivateList("PRIVATE_RESUME_AFTER_GREETINGS")
+                        } else {
+                            enterUnreadWait("本轮私聊与招呼任务均已完成；安排下一轮自主复查")
+                            if (eligibleUnread > 0 || eligibleUnknown > 0) {
+                                pollingRoundDue = true
+                                scheduleFullInspectionAfter(0L)
                             }
-                            eligibleUnread > 0 -> {
-                                privateMessagesTraversalTaskExecutor.normalInboxHadUnread = true
-                                privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-                                privateMessagesTraversalTaskExecutor.atTop = false
-                                sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
-                                handleSessionListPage(inspection)
-                            }
-                            else -> enterUnreadWait("从收到的招呼返回普通消息页，当前位置没有符合条件的新消息")
                         }
                     }
                     sessionRunStarted -> handleSessionListPage(inspection)
@@ -2878,6 +2896,7 @@ class AiReplyObservationRuntime(
         }
         sampleCaptureActive = false
         sessionRunStarted = false
+        resetPollingRound()
         startupReadinessCoordinator.resetState(sessionStarted = false)
         sessionManagerState = SessionManagerState.STOPPED
         taskOwnership.reset("运行时重置：$reason")
@@ -3254,6 +3273,7 @@ class AiReplyObservationRuntime(
             onLog("AI Reply 启动暂停：私人消息任务未取得唯一 UI 操作权；不会执行自动滚动或打开会话")
         }
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
+        resetPollingRound()
         receivedGreetingsTaskFlow.reset()
         receivedGreetingsRecoveryRetryAttempt = 0
         privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
@@ -3436,6 +3456,9 @@ class AiReplyObservationRuntime(
             // A window transition during an outstanding list gesture is not proof of success.
             // Do not run its old callback or replay its old coordinates after the window changes.
             recoverTransientPrivateGesture("GESTURE_WINDOW_CHANGED")
+        }
+        if (windowTransition && pollingRoundPending) {
+            pageRecoveryVerificationGate.reset(NEXT_POLLING_ROUND_GATE)
         }
         if (windowTransition && awaitingNormalInboxAfterGreetingsReturn) {
             pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
@@ -4389,6 +4412,13 @@ class AiReplyObservationRuntime(
             pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
             onLog("消息列表恢复[RECOVERY_VERIFIED]：连续两次独立页面快照一致；恢复原有遍历算法")
         }
+        // A recovery handoff may invoke the list handler directly. Only the next unified
+        // observation may start the pending new round, never the old traversal cursor.
+        if (pollingRoundPending && !receivedGreetingsTaskActive) {
+            pollingRoundDue = true
+            scheduleFullInspectionAfter(0L)
+            return
+        }
         if (privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys != null) {
             // The delayed boundary verifier owns this interval. Ignore ordinary page events so
             // an early accessibility callback cannot turn a provisional no-motion result into
@@ -4885,58 +4915,117 @@ class AiReplyObservationRuntime(
         scrollSessionList(snapshot, toTop = true)
     }
 
-    /**
-     * Test mode waits only after both list branches have been checked. A single randomized
-     * 60–120 second timer performs a fresh, read-only current-page check.
-     */
+    /** A completed pair of tasks schedules another round even if the inbox is quiet. */
     private fun enterUnreadWait(message: String) {
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
+        pollingRoundPending = true
+        pollingRoundDue = false
+        pollingRoundRetryAttempt = 0
+        pageRecoveryVerificationGate.reset(NEXT_POLLING_ROUND_GATE)
         sessionManagerState = SessionManagerState.WAITING_FOR_UNREAD
         onLog(message)
         val seconds = chooseRandomInt(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS)
             .coerceIn(LOW_FREQUENCY_IDLE_MIN_SECONDS, LOW_FREQUENCY_IDLE_MAX_SECONDS)
-        onLog("AI Reply 低频待机：$seconds 秒后重新检查普通消息当前位置")
+        val runGeneration = currentRunGeneration()
+        val actionGeneration = sessionActionGeneration
+        onLog("AI Reply 低频待机：$seconds 秒后重新启动私聊与招呼完整轮询")
         sessionTransitionTask = scheduler.schedule(seconds * 1_000L) {
-            sessionTransitionTask = null
-            if (!isAiReplyActive() || !sessionRunStarted ||
-                sessionManagerState != SessionManagerState.WAITING_FOR_UNREAD
+            if (!isAiReplyActive() || !sessionRunStarted || !pollingRoundPending ||
+                runGeneration != currentRunGeneration() || actionGeneration != sessionActionGeneration
             ) return@schedule
-            val fresh = runCatching { readPageSnapshot(AiReplyPageReadPurpose.SESSION_LIST_RETRY) }.getOrNull()
-            if (fresh == null || fresh.pageKind != ChatPageKind.CHAT_LIST || fresh.packageName != targetPackage()) {
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog("AI Reply 低频待机复查暂停：未能确认普通消息列表页面；不把未知页面当作无未读，也不执行点击或滑动")
-                recoverRetryablePrivateList("IDLE_INBOX_PAGE_UNCONFIRMED")
-                return@schedule
-            }
-            val unread = fresh.chatListCandidates.count {
-                it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
-            }
-            val unknown = fresh.chatListCandidates.count {
-                it.unreadStatus == ChatUnreadStatus.UNKNOWN && ChatSessionManagementPolicy.isEligible(it)
-            }
-            onLog("AI Reply 低频待机复查：当前位置明确未读=$unread；未读状态未知=$unknown；页面行数=${fresh.chatListCandidates.size}")
-            if (unknown > 0) {
-                privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = true
-                sessionManagerState = SessionManagerState.PAUSED
-                onLog("AI Reply 低频待机复查暂停：当前列表存在 UNKNOWN 未读状态，不能按无消息处理")
-                recoverRetryablePrivateList("IDLE_INBOX_UNREAD_UNKNOWN")
-            } else if (unread > 0) {
-                privateMessagesTraversalTaskExecutor.normalInboxHadUnread = true
-                privateMessagesTraversalTaskExecutor.attemptedSessionKeys.clear()
-                privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
-                privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
-                privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
-                privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
-                privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount = 0
-                privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-                privateMessagesTraversalTaskExecutor.atTop = false
-                sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
-                handleSessionListPage(fresh)
-            } else {
-                enterUnreadWait("待机复查后当前位置仍无明确未读；继续 60–120 秒静默待机")
-            }
+            sessionTransitionTask = null
+            pollingRoundDue = true
+            onLog("自主轮询[ROUND_DUE]：定时到期；无须未读或页面事件触发，仅请求新鲜页面观察")
+            scheduleFullInspectionAfter(0L)
         }
+    }
+
+    private fun invalidatePollingRoundEvidence() {
+        pageRecoveryVerificationGate.reset(NEXT_POLLING_ROUND_GATE)
+        // A recovery may cancel the old idle timer. Preserve its next-round intent.
+        pollingRoundDue = true
+    }
+
+    private fun resetPollingRound() {
+        privateRoundCompletedForGreetings = false
+        pollingRoundPending = false
+        pollingRoundDue = false
+        pollingRoundRetryAttempt = 0
+        pageRecoveryVerificationGate.reset(NEXT_POLLING_ROUND_GATE)
+    }
+
+    private fun waitForPollingRoundEvidence(reason: String) {
+        pageRecoveryVerificationGate.reset(NEXT_POLLING_ROUND_GATE)
+        pollingRoundDue = true
+        pollingRoundRetryAttempt += 1
+        val delay = RecoveryScheduler.readOnlyRetryDelayMs(pollingRoundRetryAttempt)
+        onLog("自主轮询[READ_ONLY_WAIT]：reason=$reason；delayMs=$delay；保留原轮次状态")
+        scheduleFullInspectionAfter(delay)
+    }
+
+    /** A wakeup is intent only: fresh route, unread proof, Android READY and lease are required. */
+    private fun observeNextPollingRound(
+        observation: ObservationResult,
+        snapshot: ChatPageSnapshot,
+        matchedRouteId: String?
+    ) {
+        if (!pollingRoundPending || !sessionRunStarted || !isAiReplyActive()) return
+        if (observation.status != ObservationStatus.CONFIRMED_PAGE ||
+            snapshot.packageName != targetPackage() || snapshot.pageKind != ChatPageKind.CHAT_LIST ||
+            matchedRouteId != messageListRecoveryRoute.routeId || !ownsTask(PRIVATE_MESSAGES_TASK_ID)
+        ) {
+            invalidatePollingRoundEvidence()
+            recoverRetryablePrivateList("POLLING_INBOX_UNCONFIRMED")
+            return
+        }
+        val key = snapshot.messageTabPositionKey()
+        if (key.isNullOrBlank() || snapshot.chatListExtractionTruncated || snapshot.chatListCandidates.isEmpty()) {
+            waitForPollingRoundEvidence("INBOX_STRUCTURE_INCOMPLETE")
+            return
+        }
+        if (!ensureAndroidRecoveryReady(snapshot, "NEXT_POLLING_ROUND")) {
+            invalidatePollingRoundEvidence()
+            return
+        }
+        // Reuse the existing UNKNOWN identity/viewport latch; a clean different viewport
+        // must not erase a blocker observed while waiting between rounds.
+        val executor = privateMessagesTraversalTaskExecutor
+        if (executor.observeUnreadBlockers(snapshot) || executor.unresolvedUnknownUnreadKeys.isNotEmpty()) {
+            privateMessagesCheckpointRepository?.save(executor.checkpoint())
+            waitForPollingRoundEvidence("UNREAD_UNKNOWN")
+            return
+        }
+        val unread = executor.unreadEvidence(snapshot).hasUnread
+        if (!pollingRoundDue && !unread) return
+        pollingRoundDue = true
+        if (userInteractionActive || activeSessionGestureRequestId != null ||
+            isSendConfirmationPending() || isConversationDraftPending()
+        ) {
+            waitForPollingRoundEvidence("BUSINESS_BUSY")
+            return
+        }
+        if (!pageRecoveryVerificationGate.observe(NEXT_POLLING_ROUND_GATE, key)) {
+            onLog("自主轮询[ROUND_VERIFYING]：第1/2次新鲜消息列表快照；尚未开启下一轮")
+            scheduleFullInspectionAfter(350L)
+            return
+        }
+        if (!ensureAndroidRecoveryReady(snapshot, "NEXT_POLLING_ROUND_BEFORE_START") ||
+            !ownsTask(PRIVATE_MESSAGES_TASK_ID)
+        ) {
+            waitForPollingRoundEvidence("LEASE_OR_ANDROID_NOT_READY")
+            return
+        }
+        sessionTransitionTask?.cancel()
+        sessionTransitionTask = null
+        sessionActionGeneration += 1L
+        invalidatePendingMessageRead()
+        resetPollingRound()
+        executor.beginNextPollingRound()
+        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+        privateMessagesCheckpointRepository?.save(executor.checkpoint())
+        onLog("自主轮询[ROUND_STARTED]：上一轮已完成；重新执行现有顶部定位与未读准入，再自动切换收到招呼任务")
+        scheduleFullInspectionAfter(0L)
     }
 
     /**
@@ -4967,6 +5056,7 @@ class AiReplyObservationRuntime(
             recoverRetryablePrivateList("GREETING_HANDOFF_${start.name}")
             return
         }
+        privateRoundCompletedForGreetings = true
         sessionActionGeneration += 1L
         pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
         sessionTransitionTask?.cancel()

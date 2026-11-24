@@ -537,6 +537,57 @@ internal class PrivateMessagesTraversalTaskExecutor {
             lockedUnreadSessionKeys += viewportUnread.map(ChatSessionManagementPolicy::stableSessionKey)
             normalInboxHadUnread = lockedUnreadSessionKeys.isNotEmpty()
         }
+        if (observeUnreadBlockers(snapshot)) {
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
+        }
+        if (lockedUnreadSessionKeys.isEmpty()) {
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.NO_UNREAD
+        }
+
+        if (viewportUnread.isNotEmpty()) {
+            phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
+        }
+
+        if (phase != SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) {
+            phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
+            resetUnreadBoundaryObservation()
+        }
+
+        val eligibleRows = snapshot.chatListCandidates.filter(ChatSessionManagementPolicy::isEligible)
+        val visibleReadSuffix = eligibleRows.isNotEmpty() &&
+            eligibleRows.all { it.unreadStatus == ChatUnreadStatus.READ }
+        if (!visibleReadSuffix) {
+            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
+        }
+
+        val signature = buildUnreadBoundarySignature(snapshot)
+        if (signature.isBlank()) {
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
+        }
+
+        if (signature == unreadBoundarySignature) {
+            unreadBoundaryStabilityCount++
+        } else {
+            unreadBoundarySignature = signature
+            unreadBoundaryStabilityCount = 1
+        }
+        if (unreadBoundaryStabilityCount < UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS) {
+            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
+        }
+
+        phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        lockedUnreadSetFinalized = true
+        resetUnreadBoundaryObservation()
+        return PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED
+    }
+
+    /** Shared existing UNKNOWN blocker policy, also used by the round wakeup gate. */
+    fun observeUnreadBlockers(snapshot: ChatPageSnapshot): Boolean {
         val currentUnknown = snapshot.chatListCandidates.filter {
             ChatSessionManagementPolicy.isEligible(it) && it.unreadStatus == ChatUnreadStatus.UNKNOWN
         }
@@ -583,52 +634,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
             }
         }
 
-        if (normalInboxUnreadStateUnknown) {
-            resetUnreadBoundaryObservation()
-            return PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
-        }
-        if (lockedUnreadSessionKeys.isEmpty()) {
-            resetUnreadBoundaryObservation()
-            return PrivateMessagesUnreadAdmissionDecision.NO_UNREAD
-        }
-
-        if (viewportUnread.isNotEmpty()) {
-            phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
-            resetUnreadBoundaryObservation()
-            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
-        }
-
-        if (phase != SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) {
-            phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
-            resetUnreadBoundaryObservation()
-        }
-
-        val eligibleRows = snapshot.chatListCandidates.filter(ChatSessionManagementPolicy::isEligible)
-        val visibleReadSuffix = eligibleRows.isNotEmpty() &&
-            eligibleRows.all { it.unreadStatus == ChatUnreadStatus.READ }
-        if (!visibleReadSuffix) {
-            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
-        }
-
-        val signature = buildUnreadBoundarySignature(snapshot)
-        if (signature.isBlank()) {
-            resetUnreadBoundaryObservation()
-            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
-        }
-        if (signature == unreadBoundarySignature) {
-            unreadBoundaryStabilityCount++
-        } else {
-            unreadBoundarySignature = signature
-            unreadBoundaryStabilityCount = 1
-        }
-        if (unreadBoundaryStabilityCount < UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS) {
-            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
-        }
-
-        phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
-        lockedUnreadSetFinalized = true
-        resetUnreadBoundaryObservation()
-        return PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED
+        return normalInboxUnreadStateUnknown
     }
 
     /**
@@ -766,6 +772,28 @@ internal class PrivateMessagesTraversalTaskExecutor {
         unresolvedUnknownUnreadKeys.clear()
         unknownUnreadViewportKeys.clear()
         legacyUnknownUnreadViewportKeys = null
+    }
+
+    /**
+     * Start only after a completed pair of tasks and new inbox proof. Re-run the
+     * established admission sequence, preserving run-scoped identity blocks and send audit.
+     */
+    fun beginNextPollingRound() {
+        check(!normalInboxUnreadStateUnknown && unresolvedUnknownUnreadKeys.isEmpty())
+        resetForReturnedInbox()
+        initialInboxPositionCheckCompleted = false
+        initialInboxTopPositioningCompleted = false
+        initialUnreadGateSwipeCompleted = false
+        pendingBoundaryConfirmationKeys = null
+        pendingBoundaryConfirmationToTop = false
+        boundaryStabilityConfirmationCount = 0
+        sessionListStabilityRetryCount = 0
+        cancelledScrollRecoveryCount = 0
+        sessionActionCount = 0
+        headerMismatchRecordedForCurrentAttempt = false
+        checkpointNextCursorKey = null
+        lastUnreadAuditFingerprint = ""
+        executionState = SessionManagerState.WAITING_FOR_SESSION_LIST
     }
 
     /**

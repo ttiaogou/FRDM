@@ -5165,6 +5165,23 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.receivedGreetingsConfirmedReturns)
         assertEquals(1, port.receivedGreetingsPriorityReturns)
         assertTrue(logs.any { it.contains("AI Reply 低频待机") })
+
+        // No user event and no unread are required for the second round.
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        repeat(4) {
+            if (logs.none { it.contains("自主轮询[ROUND_DUE]") }) {
+                scheduler.runNextWithDelay(60_000L)
+            }
+        }
+        assertTrue(logs.any { it.contains("自主轮询[ROUND_DUE]") })
+        runUntilLog(scheduler, logs, "自主轮询[ROUND_VERIFYING]")
+        assertEquals(1, port.receivedGreetingsNavigationTaskStarts)
+        runUntilLog(scheduler, logs, "自主轮询[ROUND_STARTED]")
+        repeat(100) {
+            if (port.receivedGreetingsNavigationTaskStarts < 2) scheduler.runNextShortestDelay()
+        }
+        assertEquals(2, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
     }
 
     @Test
