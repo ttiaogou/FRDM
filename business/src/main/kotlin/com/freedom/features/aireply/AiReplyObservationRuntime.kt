@@ -4728,6 +4728,17 @@ class AiReplyObservationRuntime(
             )
         }
 
+        if (listEvaluation.incompleteUnreadEvidenceBlocked) {
+            // Keep the exact original round and persisted opaque anomaly hints. A row
+            // which is visible but not safely selectable cannot be counted as READ,
+            // attempted, or completed. No gesture or chat-header shortcut is allowed.
+            onLog("AI 私聊异常会话[INCOMPLETE_UNREAD_RETRYABLE]：" +
+                "unresolved=${privateMessagesTraversalTaskExecutor.unresolvedIncompleteUnreadKeys.size}；" +
+                "cacheWrite=false；保持检查点，待原行新鲜可操作证据确认")
+            recoverRetryablePrivateList("PRIVATE_INCOMPLETE_UNREAD_ROW")
+            return
+        }
+
         // The traversal executor owns the snapshot-to-decision sequence. This runtime performs
         // only the side effects selected by that decision packet.
         if (listEvaluation.unreadAuditChanged) {
@@ -5170,9 +5181,14 @@ class AiReplyObservationRuntime(
         // Reuse the existing UNKNOWN identity/viewport latch; a clean different viewport
         // must not erase a blocker observed while waiting between rounds.
         val executor = privateMessagesTraversalTaskExecutor
-        if (executor.observeUnreadBlockers(snapshot) || executor.unresolvedUnknownUnreadKeys.isNotEmpty()) {
+        val incompleteUnreadBlocked = executor.observeIncompleteUnreadEvidence(snapshot)
+        if (executor.observeUnreadBlockers(snapshot) || executor.unresolvedUnknownUnreadKeys.isNotEmpty() ||
+            incompleteUnreadBlocked
+        ) {
             privateMessagesCheckpointRepository?.save(executor.checkpoint())
-            waitForPollingRoundEvidence("UNREAD_UNKNOWN")
+            waitForPollingRoundEvidence(
+                if (incompleteUnreadBlocked) "INCOMPLETE_PRIVATE_UNREAD_EVIDENCE" else "UNREAD_UNKNOWN"
+            )
             return
         }
         val unread = executor.unreadEvidence(snapshot).hasUnread

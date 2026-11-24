@@ -502,6 +502,29 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p7IncompleteUnreadRowCheckpointsAndBlocksGesturesWithoutPermanentIdentityBlacklist() {
+        val fixture = preScrollPageRecoveryFixture()
+        // Full-size visible private row, but it lacks a readable identity; a confirmed
+        // UNREAD badge alone must not turn it into an eligible, completed or ignored row.
+        val incomplete = sessionCandidate(nameText = "", completeBoundaryEvidence = true)
+        val altered = fixture.listPage.copy(chatListCandidates = listOf(incomplete))
+        val handle = fixture.runtime.javaClass.getDeclaredMethod(
+            "handleSessionListPage", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        handle.invoke(fixture.runtime, altered)
+
+        assertTrue(fixture.logs.any { it.contains("INCOMPLETE_UNREAD_RETRYABLE") })
+        assertTrue(fixture.logs.any { it.contains("PRIVATE_INCOMPLETE_UNREAD_ROW") &&
+            it.contains("PAUSED_CHECKPOINT_SAVED") })
+        assertEquals(0, fixture.dispatchedGestures())
+        val saved = requireNotNull(fixture.checkpoint())
+        assertTrue(saved.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertTrue(saved.ambiguousSessionIdentityKeys.isEmpty())
+        assertTrue(saved.attemptedSessionKeys.isEmpty())
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+    }
+
+    @Test
     fun p6TimedPollingWakeupSchedulesReadOnlyInspectionWithoutNewMessages() {
         val fixture = preScrollPageRecoveryFixture()
         val enterWait = fixture.runtime.javaClass.getDeclaredMethod(

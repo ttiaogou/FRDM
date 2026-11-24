@@ -69,6 +69,8 @@ private const val UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS = 2
 internal data class PrivateMessagesListSnapshotEvaluation(
     val snapshotAmbiguousKeys: Set<String>,
     val newlyAmbiguousKeys: Set<String>,
+    /** Durable, retryable evidence from fully visible but structurally incomplete unread rows. */
+    val incompleteUnreadEvidenceBlocked: Boolean,
     val unreadAuditChanged: Boolean,
     val wasWaitingForUnread: Boolean,
     val visibleKeys: List<String>,
@@ -107,7 +109,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         traversalDirection = checkpointTraversalDirection,
         unresolvedUnknownUnreadKeys = unresolvedUnknownUnreadKeys.toSet(),
         unknownUnreadViewportKeys = unknownUnreadViewportKeys.toList(),
-        fullListPollingRoundRequired = fullListPollingRoundRequired
+        fullListPollingRoundRequired = fullListPollingRoundRequired,
+        unresolvedIncompleteUnreadKeys = unresolvedIncompleteUnreadKeys.toSet()
     )
 
     fun restore(checkpoint: PrivateMessagesTraversalCheckpoint) {
@@ -162,6 +165,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         checkpointNextCursorKey = checkpoint.nextCursorKey
         checkpointTraversalDirection = checkpoint.traversalDirection
         fullListPollingRoundRequired = checkpoint.fullListPollingRoundRequired
+        unresolvedIncompleteUnreadKeys.clear()
+        unresolvedIncompleteUnreadKeys += checkpoint.unresolvedIncompleteUnreadKeys
     }
 
     internal enum class RestoreReanchorStatus { REANCHORED, NOT_FOUND, AMBIGUOUS }
@@ -334,6 +339,11 @@ internal class PrivateMessagesTraversalTaskExecutor {
     /** Keys are already SHA-256 opaque traversal hints, not user IDs or message text. */
     val unresolvedUnknownUnreadKeys: MutableSet<String> = LinkedHashSet()
     val unknownUnreadViewportKeys: MutableList<String> = ArrayList()
+    /**
+     * Retryable list-row evidence. Opaque title keys (or geometry-only hints for unnamed
+     * rows) survive checkpoints, but never enter the permanent identity-conflict cache.
+     */
+    val unresolvedIncompleteUnreadKeys: MutableSet<String> = LinkedHashSet()
     private var legacyUnknownUnreadViewportKeys: List<String>? = null
     var resumeSessionKey: String? = null
     var resumeSessionName: String? = null
@@ -367,8 +377,71 @@ internal class PrivateMessagesTraversalTaskExecutor {
                 "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
         }
 
-    fun ambiguousIdentityKeys(candidates: List<ChatListCandidateSnapshot>): Set<String> =
-        ChatSessionManagementPolicy.ambiguousSessionIdentityKeys(candidates)
+    fun ambiguousIdentityKeys(candidates: List<ChatListCandidateSnapshot>): Set<String> {
+        val fullyVisible = candidates.filter {
+            it.selectionClass == "PRIVATE_CHAT" && it.rowVisibleToUser &&
+                it.intersectsViewport && it.fullyInsideViewport && it.hasReadableName
+        }
+        // An incomplete second row is still evidence of a title collision: it must not
+        // disappear from collision detection simply because its preview/bounds are invalid.
+        // Keep the existing fully-verified/eligible policy otherwise unchanged.
+        val incompleteTitleCollisions = fullyVisible
+            .groupBy { ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) }
+            .filter { (key, rows) ->
+                key.isNotBlank() && rows.map { it.rowIndex }.distinct().size > 1 &&
+                    rows.any { !ChatSessionManagementPolicy.isEligible(it) }
+            }
+            .values.flatMap { rows ->
+                rows.map(ChatSessionManagementPolicy::stableSessionKey).filter(String::isNotBlank)
+            }.toSet()
+        return ChatSessionManagementPolicy.ambiguousSessionIdentityKeys(candidates) +
+            incompleteTitleCollisions
+    }
+
+    /**
+     * Identify incomplete *fully-visible* private rows with unread/unknown evidence.
+     * Clipped edge rows are excluded: scrolling, not a failure cache, handles them.
+     *
+     * Resolve a saved anomaly only when the same opaque identity (or exact anonymous
+     * geometry hint) is uniquely present and now eligible with explicit READ/UNREAD.
+     * Missing rows in other viewports must NOT release a past anomaly.
+     */
+    fun observeIncompleteUnreadEvidence(snapshot: ChatPageSnapshot): Boolean {
+        val rows = snapshot.chatListCandidates.filter {
+            it.selectionClass == "PRIVATE_CHAT" && it.rowVisibleToUser &&
+                it.intersectsViewport && it.fullyInsideViewport
+        }
+        val incomplete = rows.filter {
+            it.unreadStatus != ChatUnreadStatus.READ &&
+                !ChatSessionManagementPolicy.isEligible(it)
+        }
+        val activeIncompleteHints = incomplete.map(::incompleteUnreadHint).toSet()
+        unresolvedIncompleteUnreadKeys += activeIncompleteHints
+        if (!snapshot.chatListExtractionTruncated && unresolvedIncompleteUnreadKeys.isNotEmpty()) {
+            unresolvedIncompleteUnreadKeys.removeAll { saved ->
+                if (saved in activeIncompleteHints) return@removeAll false
+                val matches = rows.filter { row ->
+                    if (saved.startsWith("unnamed:")) anonymousUnreadHint(row) == saved
+                    else incompleteUnreadHint(row) == saved
+                }
+                matches.size == 1 && ChatSessionManagementPolicy.isEligible(matches.single()) &&
+                    matches.single().unreadStatus != ChatUnreadStatus.UNKNOWN
+            }
+        }
+        return unresolvedIncompleteUnreadKeys.isNotEmpty()
+    }
+
+    private fun incompleteUnreadHint(row: ChatListCandidateSnapshot): String {
+        val key = ChatSessionManagementPolicy.stableSessionKey(row)
+        return if (key.isNotBlank()) "identity:$key" else anonymousUnreadHint(row)
+    }
+
+    private fun anonymousUnreadHint(row: ChatListCandidateSnapshot): String {
+        // An unnamed row may acquire a readable title later. Match its original
+        // geometry only to lift the read-only block, never to select or click it.
+        val bounds = row.rowBounds
+        return "unnamed:${row.rowIndex}@${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}"
+    }
 
     fun selectNextCandidate(
         candidates: List<ChatListCandidateSnapshot>,
@@ -432,6 +505,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         allowExpectedSessionReturnViewportChange: Boolean = false
     ): PrivateMessagesListSnapshotEvaluation {
         val snapshotAmbiguousKeys = ambiguousIdentityKeys(snapshot.chatListCandidates)
+        val incompleteUnreadEvidenceBlocked = observeIncompleteUnreadEvidence(snapshot)
         val newlyAmbiguousKeys = snapshotAmbiguousKeys - ambiguousSessionIdentityKeys
         if (snapshotAmbiguousKeys.isNotEmpty()) {
             ambiguousSessionIdentityKeys += snapshotAmbiguousKeys
@@ -500,6 +574,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         return PrivateMessagesListSnapshotEvaluation(
             snapshotAmbiguousKeys = snapshotAmbiguousKeys,
             newlyAmbiguousKeys = newlyAmbiguousKeys,
+            incompleteUnreadEvidenceBlocked = incompleteUnreadEvidenceBlocked,
             unreadAuditChanged = unreadAuditChanged,
             wasWaitingForUnread = wasWaitingForUnread,
             visibleKeys = visibleKeys,
@@ -752,6 +827,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         normalInboxUnreadStateUnknown = false
         unresolvedUnknownUnreadKeys.clear()
         unknownUnreadViewportKeys.clear()
+        unresolvedIncompleteUnreadKeys.clear()
         legacyUnknownUnreadViewportKeys = null
         sessionListStabilityRetryCount = 0
         sessionActionCount = 0
@@ -795,6 +871,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         normalInboxUnreadStateUnknown = false
         unresolvedUnknownUnreadKeys.clear()
         unknownUnreadViewportKeys.clear()
+        unresolvedIncompleteUnreadKeys.clear()
         legacyUnknownUnreadViewportKeys = null
     }
 
@@ -803,7 +880,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * established admission sequence, preserving run-scoped identity blocks and send audit.
      */
     fun beginNextPollingRound() {
-        check(!normalInboxUnreadStateUnknown && unresolvedUnknownUnreadKeys.isEmpty())
+        check(!normalInboxUnreadStateUnknown && unresolvedUnknownUnreadKeys.isEmpty() &&
+            unresolvedIncompleteUnreadKeys.isEmpty())
         // Only an admitted NEW round retires old viewport capture deduplication.
         // A resumeAfterReturnedInbox() or restored same-round checkpoint must keep it.
         // Without this clear, repeated A/B viewport fingerprints are silently treated

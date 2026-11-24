@@ -840,6 +840,88 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun incompleteUnreadPrivateRowIsRetryableAndSurvivesCheckpointUntilOriginalRowRepairs() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val damaged = candidate(0, "Unread but incomplete", ChatUnreadStatus.UNREAD,
+            previewBoundsValid = false)
+        val damagedResult = executor.evaluateListSnapshot(snapshot(damaged), false, 2)
+        assertTrue(damagedResult.incompleteUnreadEvidenceBlocked)
+        assertEquals(null, damagedResult.nextCandidate)
+        assertTrue("Incomplete unread is not a permanent identity conflict",
+            executor.ambiguousSessionIdentityKeys.isEmpty())
+        assertTrue("Never count an incomplete row as attempted", executor.attemptedSessionKeys.isEmpty())
+        val checkpoint = executor.checkpoint()
+        assertEquals(1, checkpoint.unresolvedIncompleteUnreadKeys.size)
+
+        val recovered = PrivateMessagesTraversalTaskExecutor().apply { restore(checkpoint) }
+        // Looking at another clean viewport must not erase the unverified row.
+        assertTrue(recovered.observeIncompleteUnreadEvidence(snapshot(
+            candidate(3, "Other safe row", ChatUnreadStatus.READ)
+        )))
+        assertTrue(runCatching { recovered.beginNextPollingRound() }.isFailure)
+        assertEquals(checkpoint.unresolvedIncompleteUnreadKeys, recovered.unresolvedIncompleteUnreadKeys)
+        assertTrue(recovered.ambiguousSessionIdentityKeys.isEmpty())
+
+        val repaired = candidate(0, "Unread but incomplete", ChatUnreadStatus.UNREAD,
+            previewBoundsValid = true)
+        assertFalse("The original row becomes retryable when fresh structure is complete",
+            recovered.observeIncompleteUnreadEvidence(snapshot(repaired)))
+        assertTrue(recovered.unresolvedIncompleteUnreadKeys.isEmpty())
+        assertTrue(recovered.attemptedSessionKeys.isEmpty())
+        assertEquals(repaired, recovered.selectNextCandidate(snapshot(repaired).chatListCandidates))
+    }
+
+    @Test
+    fun unnamedIncompleteRowResolvesOnlyWithMatchingFreshGeometryAndReadableEvidence() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val unknownName = candidate(0, "", ChatUnreadStatus.UNKNOWN)
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(unknownName)))
+        val savedHints = executor.unresolvedIncompleteUnreadKeys.toSet()
+        assertEquals(1, savedHints.size)
+        assertTrue(savedHints.single().startsWith("unnamed:"))
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(executor.checkpoint()) }
+        assertTrue(restored.observeIncompleteUnreadEvidence(snapshot(
+            candidate(0, "Repaired name", ChatUnreadStatus.UNREAD, top = 500)
+        )))
+        assertEquals(savedHints, restored.unresolvedIncompleteUnreadKeys)
+        assertFalse(restored.observeIncompleteUnreadEvidence(snapshot(
+            candidate(0, "Repaired name", ChatUnreadStatus.UNREAD)
+        )))
+        assertTrue(restored.unresolvedIncompleteUnreadKeys.isEmpty())
+    }
+
+    @Test
+    fun duplicateTitleWithOneIncompleteRowIsDurablyBlockedButOtherUnreadRemainsEligible() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val complete = candidate(0, "Shared Nickname", ChatUnreadStatus.UNREAD)
+        val incomplete = candidate(1, "Shared Nickname", ChatUnreadStatus.UNREAD,
+            previewBoundsValid = false)
+        val unaffected = candidate(2, "Distinct Nickname", ChatUnreadStatus.UNREAD)
+        val conflictingKey = key(complete)
+        val result = executor.evaluateListSnapshot(snapshot(complete, incomplete, unaffected),
+            wasWaitingForUnread = false, maxNoProgressScrolls = 2)
+        assertTrue(result.incompleteUnreadEvidenceBlocked)
+        assertTrue(result.newlyAmbiguousKeys.contains(conflictingKey))
+        assertTrue(executor.ambiguousSessionIdentityKeys.contains(conflictingKey))
+        assertEquals(unaffected, executor.selectNextCandidate(
+            listOf(complete, incomplete, unaffected)
+        ))
+
+        val recovered = PrivateMessagesTraversalTaskExecutor().apply { restore(executor.checkpoint()) }
+        assertTrue(recovered.ambiguousSessionIdentityKeys.contains(conflictingKey))
+        assertTrue(recovered.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        val repaired = candidate(1, "Shared Nickname", ChatUnreadStatus.UNREAD,
+            previewBoundsValid = true)
+        assertFalse(recovered.observeIncompleteUnreadEvidence(snapshot(complete, repaired, unaffected)))
+        // Identity collision stays isolated even after the transient geometry is repaired.
+        assertEquals(unaffected, recovered.selectNextCandidate(
+            listOf(complete, repaired, unaffected)
+        ))
+        recovered.beginNextPollingRound()
+        assertTrue(recovered.ambiguousSessionIdentityKeys.contains(conflictingKey))
+    }
+
+    @Test
     fun restoredViewportMismatchReanchorsBySessionNameWithoutReusingCoordinates() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val saved = candidate(0, "Alice", ChatUnreadStatus.UNREAD, top = 100)
