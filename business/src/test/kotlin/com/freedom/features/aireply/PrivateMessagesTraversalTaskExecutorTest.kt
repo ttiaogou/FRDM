@@ -536,6 +536,26 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun mixedBadgeRowRemainsPendingAcrossReadBoundaryAndReturnTraversal() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+        }
+        val known = candidate(0, "Known", ChatUnreadStatus.UNREAD)
+        val edge = candidate(1, "Edge", ChatUnreadStatus.UNKNOWN, badgePresent = true)
+        val mixed = executor.evaluateListSnapshot(snapshot(known, edge), false, 2)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING, mixed.unreadAdmissionDecision)
+        assertEquals(null, mixed.nextCandidate)
+        val suffix = snapshot(candidate(2, "Read", ChatUnreadStatus.READ), candidate(3, "Read2", ChatUnreadStatus.READ))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+            executor.evaluateListSnapshot(suffix, false, 2).unreadAdmissionDecision)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED,
+            executor.evaluateListSnapshot(suffix, false, 2).unreadAdmissionDecision)
+        assertTrue(executor.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertEquals(known, executor.evaluateListSnapshot(snapshot(known, edge), false, 2).nextCandidate)
+    }
+
+    @Test
     fun boundaryPhaseDoesNotExposeCandidateUntilReadSuffixIsStable() {
         val executor = PrivateMessagesTraversalTaskExecutor().apply {
             initialInboxTopPositioningCompleted = true
@@ -1226,7 +1246,8 @@ class PrivateMessagesTraversalTaskExecutorTest {
         name: String,
         unread: ChatUnreadStatus,
         top: Int = 100 + rowIndex * 150,
-        previewBoundsValid: Boolean = true
+        previewBoundsValid: Boolean = true,
+        badgePresent: Boolean = false
     ): ChatListCandidateSnapshot {
         val row = ScreenRect(0, top, 720, top + 140)
         val nameBounds = ScreenRect(150, top + 10, 380, top + 40)
@@ -1266,6 +1287,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
             timestampNodePath = null,
             timestampBounds = null,
             timestampNodeVisibleToUser = false,
+            statusNewNodePresent = badgePresent,
             unreadStatus = unread
         )
     }

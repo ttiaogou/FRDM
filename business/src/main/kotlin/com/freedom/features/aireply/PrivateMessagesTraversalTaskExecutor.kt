@@ -769,7 +769,13 @@ internal class PrivateMessagesTraversalTaskExecutor {
             resetUnreadBoundaryObservation()
             return PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
         }
-        if (canContinueWithIncompleteUnread(snapshot)) {
+        val privateRows = snapshot.chatListCandidates.filter { it.selectionClass == "PRIVATE_CHAT" }
+        val cleanReadViewport = privateRows.isNotEmpty() && !snapshot.chatListExtractionTruncated &&
+            privateRows.all { it.unreadStatus == ChatUnreadStatus.READ &&
+                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport) }
+        if (canContinueWithIncompleteUnread(snapshot) &&
+            (lockedUnreadSessionKeys.isEmpty() || !cleanReadViewport)
+        ) {
             // Pending named evidence is not an empty inbox or a proven read suffix.
             // Continue only the existing list positioning path; the completion gate
             // retains the unresolved row until it is independently re-observed.
@@ -804,8 +810,10 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val eligibleRows = snapshot.chatListCandidates.filter(ChatSessionManagementPolicy::isEligible)
         val visibleReadSuffix = eligibleRows.isNotEmpty() &&
             eligibleRows.all { it.unreadStatus == ChatUnreadStatus.READ }
-        if (!visibleReadSuffix) {
-            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
+        if (snapshot.chatListExtractionTruncated || !visibleReadSuffix || !cleanReadViewport) {
+            resetUnreadBoundaryObservation()
+            phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
+            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
         }
 
         val signature = buildUnreadBoundarySignature(snapshot)
@@ -834,6 +842,21 @@ internal class PrivateMessagesTraversalTaskExecutor {
     fun observeUnreadBlockers(snapshot: ChatPageSnapshot): Boolean {
         val currentUnknown = snapshot.chatListCandidates.filter {
             ChatSessionManagementPolicy.isEligible(it) && it.unreadStatus == ChatUnreadStatus.UNKNOWN
+        }
+        // Keep identifiable badge rows with unusable unread evidence in the same
+        // durable row ledger as structurally incomplete rows. A fresh independent
+        // unread target permits scanning but never authorizes clicking the unknown.
+        if (!normalInboxUnreadStateUnknown && currentUnknown.isNotEmpty() &&
+            !snapshot.chatListExtractionTruncated && snapshot.chatListViewport != null &&
+            currentUnknown.all { it.statusNewNodePresent && it.hasReadableName &&
+                ChatSessionManagementPolicy.stableSessionKey(it) !in ambiguousSessionIdentityKeys } &&
+            (currentUnknown.all(::isPendingIncompleteRow) || snapshot.chatListCandidates.any { it.unreadStatus == ChatUnreadStatus.UNREAD &&
+                ChatSessionManagementPolicy.isEligible(it) &&
+                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport) &&
+                ChatSessionManagementPolicy.stableSessionKey(it) !in ambiguousSessionIdentityKeys })
+        ) {
+            unresolvedIncompleteUnreadKeys += currentUnknown.map(::incompleteUnreadHint)
+            return false
         }
         if (currentUnknown.isNotEmpty()) {
             if (unresolvedUnknownUnreadKeys.isEmpty()) {
