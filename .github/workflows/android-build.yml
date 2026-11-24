@@ -87,10 +87,10 @@ jobs:
 
       - name: Run all module unit tests
         run: |
-          gradle --no-daemon --build-cache \
-            --stacktrace --info \
+          gradle --no-daemon --build-cache --stacktrace --info \
+            :business:test
+          gradle --no-daemon --build-cache --stacktrace --info --continue \
             :core:test \
-            :business:test \
             :gesture-core:test \
             :gesture-runtime:test \
             :app:testDebugUnitTest
