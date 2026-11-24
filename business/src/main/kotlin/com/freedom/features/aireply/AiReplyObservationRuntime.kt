@@ -686,6 +686,8 @@ class AiReplyObservationRuntime(
         val taskLease: TaskLease?
     )
     private var greetingChatBinding: GreetingChatBinding? = null
+    /** Latest verified greeting-detail message observation used to build a pre-send diff baseline. */
+    private var latestGreetingMessageBatch: ChatMessageBatch? = null
 
     /** A complete greeting send is not a completed row until its final chat sample and safe BACK. */
     private data class ConfirmedGreetingSend(
@@ -1496,6 +1498,21 @@ class AiReplyObservationRuntime(
         ) return
         onLog("AI 发送确认[ACTIVE_RECHECK_REQUESTED]：发送手势完成；立即安排现有只读页面观察")
         scheduleFullInspectionAfter(0L, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
+    }
+
+    /** Returns the latest verified greeting observation as the immediate pre-send diff baseline. */
+    fun captureGreetingPreSendOutgoingKeys(expectedWindowSessionKey: String): Set<String>? {
+        if (!receivedGreetingsTaskActive || !sessionRunStarted ||
+            !ownsTask(RECEIVED_GREETINGS_TASK_ID)
+        ) return null
+        val batch = latestGreetingMessageBatch
+            ?.takeIf { it.windowSessionKey == expectedWindowSessionKey }
+            ?: return null
+        return batch.messages
+            ?.asSequence()
+            ?.filter { it.direction == com.freedom.features.aireply.domain.message.ChatMessageDirection.OUTGOING }
+            ?.map { "${it.stableLogicalMessageId}|${it.effectiveContentRevision}" }
+            ?.toSet()
     }
 
     /** Applies a newly acquired page snapshot after ordinary debounce or verified user stability. */
@@ -4117,6 +4134,7 @@ class AiReplyObservationRuntime(
                 onLog("GREETING_CHAT_BATCH_REJECTED reason=${reason ?: "MESSAGE_WINDOW_MISMATCH"}")
                 return
             }
+            latestGreetingMessageBatch = batch
         }
         if (receivedGreetingsTaskActive && confirmedGreetingSend != null) {
             completeConfirmedGreetingSend(batch, snapshot)

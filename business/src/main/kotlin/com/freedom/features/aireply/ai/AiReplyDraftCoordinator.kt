@@ -143,7 +143,9 @@ class AiReplyDraftCoordinator(
     /** Same immutable registry used by the composition root; never grants UI ownership. */
     private val policyRegistry: PolicyRegistry = AiReplyPolicyRegistry,
     /** Requests the existing read-only page observer after a correlated platform completion. */
-    private val onSendConfirmationObservationRequested: () -> Unit = {}
+    private val onSendConfirmationObservationRequested: () -> Unit = {},
+    /** Greeting flow can provide the last verified message observation immediately before send. */
+    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
 ) {
     private val pending = AtomicBoolean(false)
     private val awaitingUserSend = AtomicBoolean(false)
@@ -256,6 +258,7 @@ class AiReplyDraftCoordinator(
     private var activeDraftTarget: ChatDraftInputTarget? = null
     private var activeDraftVisitToken: String? = null
     private var activeExistingOutgoingKeys: Set<String> = emptySet()
+    private var activeTaskId: String? = null
     private var pendingSendConfirmation: PendingSendConfirmation? = null
     /** A confirmed segment must obtain a fresh chat/composer observation before the next one starts. */
     private var pendingNextMessageSegment: PendingNextMessageSegment? = null
@@ -423,6 +426,7 @@ class AiReplyDraftCoordinator(
             activeDraftTarget = null
             activeDraftVisitToken = null
             activeExistingOutgoingKeys = emptySet()
+            activeTaskId = null
             pendingSendConfirmation = null
             pendingNextMessageSegment = null
             readOnlyRecoveredMatch = null
@@ -667,6 +671,7 @@ class AiReplyDraftCoordinator(
             activeRequestId = requestId
             activeDraftTarget = target
             activeDraftVisitToken = visitToken
+            activeTaskId = taskId
             // Old successful requests may have retained their in-memory segment list.
             // Starting a new model request must not inherit that prior queue.
             activeMessageSegments = emptyList()
@@ -1059,6 +1064,15 @@ class AiReplyDraftCoordinator(
     private fun sendMessageSegment(target: ChatDraftInputTarget, message: String, segmentIndex: Int, requestGeneration: Long) {
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || !hasActiveTaskOwner()) return
         if (synchronized(lock) { pendingSendConfirmation != null }) return
+        // For received greetings, refresh the outgoing baseline immediately before the
+        // local gesture. The model-request observation may be stale while the remote call
+        // was in flight; only messages appearing after this baseline can prove this send.
+        if (synchronized(lock) { activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS }) {
+            captureGreetingPreSendOutgoingKeys(target)?.let { keys ->
+                synchronized(lock) { activeExistingOutgoingKeys = keys.toSet() }
+                onLog("收到招呼发送前快照[BASELINE_CAPTURED]：己方消息=${keys.size}；发送前重新建立差分基线")
+            }
+        }
         updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.PENDING_SEND)
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
         // 保留手势提交前持久化的 SENDING 安全标记；只有明确返回
@@ -1618,12 +1632,17 @@ class AiReplyDraftCoordinator(
             onLog("AI 发送结果核验：WAITING；当前批次不属于发送后的稳定聊天观察；检查次数=$checks")
             return SendConfirmationResult.WAITING
         }
+        val greetingTransaction = synchronized(lock) {
+            activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS
+        }
         val eligibleMatches = batch.messages.filter { message ->
             message.direction == ChatMessageDirection.OUTGOING &&
-                message.contentQuality == MessageContentQuality.VERIFIED &&
-                fingerprint(message.content.orEmpty()) == pending.segmentContentHash &&
                 messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys &&
                 fingerprint(messageKey(message.stableLogicalMessageId, message.effectiveContentRevision)) !in pending.previousOutgoingKeyHashes
+                && (greetingTransaction || (
+                    message.contentQuality == MessageContentQuality.VERIFIED &&
+                    fingerprint(message.content.orEmpty()) == pending.segmentContentHash
+                ))
         }
         // A reconstructed transaction needs a single, stable bubble on two fresh reads;
         // a matching string on one OCR pass is never sufficient proof.
