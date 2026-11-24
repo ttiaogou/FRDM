@@ -1571,11 +1571,11 @@ class AiReplyObservationRuntime(
             )
             when (arrivalStatus) {
                 ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
-                    receivedGreetingsOwnershipRecheckPending = false
                     // Page recognition and ownership enter one task admission transaction.
                     startReceivedGreetingsTaskFromConfirmedPage(
                         ConfirmedGreetingsListEvidence.Observed(arrivalStatus)
                     )
+                    receivedGreetingsOwnershipRecheckPending = false
                     return
                 }
                 ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE,
