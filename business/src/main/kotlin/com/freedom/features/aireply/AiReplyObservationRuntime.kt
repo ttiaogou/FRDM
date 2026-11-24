@@ -3636,11 +3636,18 @@ class AiReplyObservationRuntime(
                     "不因断点存在而执行盲目导航"
             )
         }
-        // Startup must identify the currently visible business page before assigning the
-        // exclusive UI-operation lease. The app may already be on Received Greetings; claiming
-        // the private-messages task here would block the correct owner before any page evidence.
+        // Adapters that support Received Greetings must identify the visible business page
+        // before assigning the exclusive UI-operation lease. Legacy adapters without that
+        // workflow retain the existing private-message startup contract.
         privateMessagesTaskController.beginRun(currentRunGeneration())
-        receivedGreetingsPageProbePending = sessionRunStarted
+        val supportsReceivedGreetingsStartup = receivedGreetingsTaskFlow.supportsWorkflow()
+        receivedGreetingsPageProbePending = sessionRunStarted && supportsReceivedGreetingsStartup
+        if (sessionRunStarted && !supportsReceivedGreetingsStartup &&
+            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动私人消息任务")
+        ) {
+            sessionRunStarted = false
+            onLog("AI Reply 启动暂停：私人消息任务未取得唯一 UI 操作权；不会执行自动滚动或打开会话")
+        }
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         resetPollingRound()
         receivedGreetingsTaskFlow.reset()
@@ -3702,16 +3709,29 @@ class AiReplyObservationRuntime(
                         "统一恢复[CHECKPOINT_LOADED]：task=${recoveryContext.sourceTaskId}；" +
                             "已读取检查点，等待目标页面路由和双快照验证；不启动工作区导航"
                     )
-                } else {
+                    scheduleFullInspectionAfter(0L)
+                } else if (supportsReceivedGreetingsStartup) {
                     onLog(
                         "AI Reply 启动页面探针：先读取当前页面并确认任务归属；" +
                             "收到的招呼页面优先由收到招呼任务接管，普通消息列表再申请私人消息租约"
                     )
+                    // The first fresh snapshot decides the visible business owner. No task may
+                    // claim the UI slot before a supported adapter has classified the page.
+                    scheduleFullInspectionAfter(0L, AiReplyPageReadPurpose.RECEIVED_GREETINGS)
+                } else if (chatPagePort.supportsVerifiedMessageWorkAreaNavigation()) {
+                    startupReadinessCoordinator.beginVerification()
+                } else {
+                    // Compatibility path for adapters that do not expose a stable navigation
+                    // anchor. The Momo adapter opts into the stricter, snapshot-verified flow.
+                    val entered = runCatching { chatPagePort.ensureMessageWorkArea() }.getOrDefault(false)
+                    if (!entered) {
+                        onLog("AI Reply 启动暂停：适配器未能通过消息工作区入口；不执行后续滑动或会话点击")
+                        recoverRetryablePrivateList("PRIVATE_STARTUP_WORK_AREA_NOT_READY")
+                        return
+                    }
+                    startupReadinessCoordinator.markWorkAreaConfirmed()
+                    scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
                 }
-                // The first fresh snapshot decides whether the visible page belongs to
-                // Received Greetings or Private Messages. Navigation/readiness work starts only
-                // after that route decision; no task may claim the UI slot in advance.
-                scheduleFullInspectionAfter(0L, AiReplyPageReadPurpose.RECEIVED_GREETINGS)
             }
             else -> {
                 onLog("AI 会话样本归档未启动：本地样本目录创建失败；继续被动页面观察，不执行自主点击")
