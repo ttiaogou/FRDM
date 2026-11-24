@@ -424,8 +424,14 @@ internal class PrivateMessagesTraversalTaskExecutor {
                     if (saved.startsWith("unnamed:")) anonymousUnreadHint(row) == saved
                     else incompleteUnreadHint(row) == saved
                 }
-                matches.size == 1 && ChatSessionManagementPolicy.isEligible(matches.single()) &&
-                    matches.single().unreadStatus != ChatUnreadStatus.UNKNOWN
+                val allExplicit = matches.isNotEmpty() && matches.all {
+                    ChatSessionManagementPolicy.isEligible(it) &&
+                        it.unreadStatus != ChatUnreadStatus.UNKNOWN
+                }
+                val identityConflictStillBlocked = matches.size > 1 && matches.all {
+                    ChatSessionManagementPolicy.stableSessionKey(it) in ambiguousSessionIdentityKeys
+                }
+                allExplicit && (matches.size == 1 || identityConflictStillBlocked)
             }
         }
         return unresolvedIncompleteUnreadKeys.isNotEmpty()
