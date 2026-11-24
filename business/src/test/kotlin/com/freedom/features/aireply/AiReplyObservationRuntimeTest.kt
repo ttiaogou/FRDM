@@ -2255,6 +2255,14 @@ class AiReplyObservationRuntimeTest {
         scheduler.runNextWithDelay(300L)
         assertNull(ownership.activeTaskId())
 
+        // An unknown result after an observed transition does not restore private ownership.
+        port.manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.UNKNOWN
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertNull(ownership.activeTaskId())
+
+        // The lease returns only after both the ordinary inbox and the greetings observer
+        // independently confirm that the transition has ended.
         port.manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
         scheduler.runNextWithDelay(300L)

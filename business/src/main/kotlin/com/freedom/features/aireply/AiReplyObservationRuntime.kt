@@ -569,6 +569,8 @@ class AiReplyObservationRuntime(
     private var sessionSafeViewportRetryGeneration = 0L
     /** Set by relevant target-app page-change events; probe admission never consults InputOrigin. */
     private var receivedGreetingsPageProbePending = false
+    /** Keeps private-message ownership suspended until the transition destination is confirmed. */
+    private var receivedGreetingsOwnershipRecheckPending = false
     /** Short-lived empty accessibility roots are retried without replacing the last confirmed page. */
     private val transientEmptySnapshotRecovery = AiReplySessionTraversalCoordinator(
         RecoveryScheduler.fastRetryDelaysMs()
@@ -1556,6 +1558,60 @@ class AiReplyObservationRuntime(
             )?.routeId
         } else null
 
+        // Resolve a pending Received Greetings transition before polling, recovery, or
+        // private-message ownership can acquire the UI lease from this snapshot.
+        if ((receivedGreetingsPageProbePending || receivedGreetingsOwnershipRecheckPending) &&
+            sessionRunStarted &&
+            !receivedGreetingsTaskActive &&
+            receivedGreetingsTaskFlow.supportsWorkflow()
+        ) {
+            receivedGreetingsPageProbePending = false
+            val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable(
+                observeReceivedGreetingsPageForUnifiedValidation()
+            )
+            when (arrivalStatus) {
+                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
+                    receivedGreetingsOwnershipRecheckPending = false
+                    // Page recognition and ownership enter one task admission transaction.
+                    startReceivedGreetingsTaskFromConfirmedPage(
+                        ConfirmedGreetingsListEvidence.Observed(arrivalStatus)
+                    )
+                    return
+                }
+                ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE,
+                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING -> {
+                    pauseForReceivedGreetingsPageTransition(arrivalStatus)
+                    return
+                }
+                ReceivedGreetingsPageArrivalStatus.NOT_TARGET,
+                ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION,
+                ReceivedGreetingsPageArrivalStatus.UNKNOWN -> {
+                    if (receivedGreetingsOwnershipRecheckPending) {
+                        val privateInboxConfirmed =
+                            arrivalStatus == ReceivedGreetingsPageArrivalStatus.NOT_TARGET &&
+                                observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                                inspection.packageName == targetPackage() &&
+                                inspection.pageKind == ChatPageKind.CHAT_LIST &&
+                                matchedRouteId == messageListRecoveryRoute.routeId
+                        if (!privateInboxConfirmed) {
+                            onLog(
+                                "页面操作权仲裁[WAITING]：收到招呼过渡尚未解除；" +
+                                    "arrival="+arrivalStatus.name+"；page="+inspection.pageKind.name+"；" +
+                                    "只读复查，私人消息任务不取得操作权"
+                            )
+                            return
+                        }
+                        receivedGreetingsOwnershipRecheckPending = false
+                        onLog(
+                            "页面操作权仲裁[PRIVATE_MESSAGES_CONFIRMED]：普通消息列表已确认，" +
+                                "收到招呼观察明确返回NOT_TARGET；允许私人消息任务重新申请操作权"
+                        )
+                        if (startupReadinessCoordinator.resumeAfterPageRecovery()) return
+                    }
+                }
+            }
+        }
+
         if (sessionRunStarted && pollingRoundPending && !receivedGreetingsTaskActive &&
             !recoveryContext.pending && !messageListRecoveryVerificationPending &&
             !isSendConfirmationPending() && !isConversationDraftPending()
@@ -2238,37 +2294,6 @@ class AiReplyObservationRuntime(
             )
             readVisibleMessages(inspection)
             return
-        }
-
-        // Probe after any relevant target-app page-change event. Event provenance never gates
-        // the probe or grants task ownership. Event bursts are coalesced by EventAssistedDebouncer;
-        // the arrival scheduler owns one stability retry and one low-frequency fallback timer.
-        // Only unified page-observation confirmation can transfer ownership to the task.
-        if (receivedGreetingsPageProbePending && sessionRunStarted &&
-            !receivedGreetingsTaskActive &&
-            receivedGreetingsTaskFlow.supportsWorkflow()
-        ) {
-            receivedGreetingsPageProbePending = false
-            val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable(
-                observeReceivedGreetingsPageForUnifiedValidation()
-            )
-            when (arrivalStatus) {
-                ReceivedGreetingsPageArrivalStatus.NOT_TARGET,
-                ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION,
-                ReceivedGreetingsPageArrivalStatus.UNKNOWN -> Unit
-                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
-                    // Page recognition and ownership enter one task admission transaction.
-                    startReceivedGreetingsTaskFromConfirmedPage(
-                        ConfirmedGreetingsListEvidence.Observed(arrivalStatus)
-                    )
-                    return
-                }
-                ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE,
-                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING -> {
-                    pauseForReceivedGreetingsPageTransition(arrivalStatus)
-                    return
-                }
-            }
         }
 
         if (sessionRunStarted && receivedGreetingsTaskActive && !verifiedGreetingsInboxReturn) {
@@ -2996,6 +3021,8 @@ class AiReplyObservationRuntime(
      * which task is eligible to own the UI again.
      */
     private fun pauseForReceivedGreetingsPageTransition(status: ReceivedGreetingsPageArrivalStatus) {
+        receivedGreetingsOwnershipRecheckPending = true
+        startupReadinessCoordinator.suspendForPageRecovery()
         sessionActionGeneration += 1L
         val interruptedGestureRequestId = activeSessionGestureRequestId
         activeSessionGestureRequestId = null
@@ -3009,9 +3036,9 @@ class AiReplyObservationRuntime(
         if (ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
             releaseTaskOwnership("页面结构进入收到招呼过渡态；暂停私人消息任务并让出UI操作租约")
         }
-        // The current page kind itself prevents private-message execution while off the inbox.
-        // Keep the traversal state resumable so a later CHAT_LIST snapshot can reacquire the lease
-        // and continue through the existing page-driven scheduler without a manual-resume phase.
+        // Keep private-message ownership suspended until a fresh ordinary-inbox snapshot and
+        // an explicit NOT_TARGET greeting observation confirm that the transition has ended.
+        // Traversal state remains resumable; only the page owner may hold the UI lease.
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         onLog("收到的招呼页面观察[WAITING]：status=${status.name}；私人消息任务已释放UI操作租约；等待页面结构确认可执行任务")
     }
@@ -3206,7 +3233,8 @@ class AiReplyObservationRuntime(
      * Read-only page observations remain outside the UI-operation lease.
      */
     private fun claimTaskOwnership(taskId: String, reason: String): Boolean = when (taskId) {
-        PrivateMessagesTaskController.TASK_ID -> privateMessagesTaskController.claimOwnership(reason)
+        PrivateMessagesTaskController.TASK_ID -> !receivedGreetingsOwnershipRecheckPending &&
+            privateMessagesTaskController.claimOwnership(reason)
         ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskFlow.claimOwnership(reason)
         else -> false
     }
@@ -3486,7 +3514,8 @@ class AiReplyObservationRuntime(
 
     /** The lease is a reserved task slot; the recovery context gates actual UI actions. */
     private fun canPerformPrivateMessagesUiAction(): Boolean =
-        !recoveryContext.pending && ownsTask(PRIVATE_MESSAGES_TASK_ID)
+        !recoveryContext.pending && !receivedGreetingsOwnershipRecheckPending &&
+            ownsTask(PRIVATE_MESSAGES_TASK_ID)
 
     private fun releaseTaskOwnership(reason: String) {
         when (taskOwnership.activeTaskId()) {
