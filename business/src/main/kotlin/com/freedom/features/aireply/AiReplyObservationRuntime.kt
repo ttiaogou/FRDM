@@ -5188,10 +5188,19 @@ class AiReplyObservationRuntime(
         sessionTransitionTask = null
         sessionActionGeneration += 1L
         invalidatePendingMessageRead()
-        resetPollingRound()
+        val previousAttempted = executor.attemptedSessionKeys.size
+        val previousLockedUnread = executor.lockedUnreadSessionKeys.size
+        val previousViewportSamples = executor.capturedSessionListFingerprints.size
+        val previousSendReceiptPreserved = !executor.checkpointLastSuccessfulTaskId.isNullOrBlank()
+        // Rebuild first. Only a successfully admitted new round can retire the parked
+        // round's intent; a same-round checkpoint resume must never use this path.
         executor.beginNextPollingRound()
+        resetPollingRound()
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         privateMessagesCheckpointRepository?.save(executor.checkpoint())
+        onLog("自主轮询[ROUND_STATE_REBUILT]：旧已尝试=$previousAttempted；旧未读锁定=$previousLockedUnread；" +
+            "旧视口去重=$previousViewportSamples；本轮候选与视口记录已清空；" +
+            "确认发送审计保留=$previousSendReceiptPreserved；下一轮只以新鲜列表证据锁定未读")
         onLog("自主轮询[ROUND_STARTED]：上一轮已完成；重新执行现有顶部定位与未读准入，再自动切换收到招呼任务")
         scheduleFullInspectionAfter(0L)
     }

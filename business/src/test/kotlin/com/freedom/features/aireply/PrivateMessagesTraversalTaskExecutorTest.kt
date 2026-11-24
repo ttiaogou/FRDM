@@ -328,26 +328,32 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
-    fun listSnapshotEvaluationResetsAttemptedRowsOnlyForExplicitUnreadWakeup() {
+    fun listSnapshotEvaluationDoesNotRetireAttemptedRowsBeforeVerifiedNewRound() {
         val executor = PrivateMessagesTraversalTaskExecutor().apply {
             initialInboxTopPositioningCompleted = true
         }
         executor.executionState = SessionManagerState.WAITING_FOR_UNREAD
         executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
         executor.atTop = true
-        executor.attemptedSessionKeys += "previously-attempted"
-        val unread = candidate(0, "New unread", ChatUnreadStatus.UNREAD)
+        val alreadyAttempted = candidate(0, "Already attempted", ChatUnreadStatus.UNREAD)
+        val newlyVisible = candidate(1, "New C", ChatUnreadStatus.UNREAD)
+        executor.attemptedSessionKeys += key(alreadyAttempted)
+        executor.lockedUnreadSessionKeys += key(alreadyAttempted)
+        executor.lockedUnreadSetFinalized = true
 
         val evaluation = executor.evaluateListSnapshot(
-            snapshot(unread),
+            snapshot(alreadyAttempted, newlyVisible),
             wasWaitingForUnread = true,
             maxNoProgressScrolls = 2
         )
 
         assertTrue(evaluation.wasWaitingForUnread)
         assertTrue(evaluation.explicitUnreadWhileWaiting)
-        assertTrue(executor.attemptedSessionKeys.isEmpty())
-        assertEquals(unread, evaluation.nextCandidate)
+        // Merely observing C is not permission to abandon A's original-round receipt.
+        assertEquals(setOf(key(alreadyAttempted)), executor.attemptedSessionKeys)
+        assertEquals(setOf(key(alreadyAttempted)), executor.lockedUnreadSessionKeys)
+        assertEquals(null, evaluation.nextCandidate)
+        assertTrue(key(newlyVisible) !in executor.lockedUnreadSessionKeys)
     }
 
     @Test
@@ -657,6 +663,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         executor.lockedUnreadSessionKeys += "old-unread"
         executor.ambiguousSessionIdentityKeys += "run-blocked"
         executor.pendingBoundaryConfirmationKeys = listOf("old-boundary")
+        executor.capturedSessionListFingerprints += "prior-round-viewport"
         executor.checkpointLastSuccessfulTaskId = "verified-send"
         executor.checkpointRunGeneration = 7L
         executor.checkpointNextCursorKey = "old-cursor"
@@ -670,10 +677,87 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(executor.attemptedSessionKeys.isEmpty())
         assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
         assertEquals(null, executor.pendingBoundaryConfirmationKeys)
+        assertTrue("Prior-round captures cannot suppress new-cycle sampling",
+            executor.capturedSessionListFingerprints.isEmpty())
         assertEquals(null, executor.checkpointNextCursorKey)
         assertEquals(setOf("run-blocked"), executor.ambiguousSessionIdentityKeys)
         assertEquals("verified-send", executor.checkpointLastSuccessfulTaskId)
         assertEquals(7L, executor.checkpointRunGeneration)
+    }
+
+    @Test
+    fun resumedPrivateRoundPreservesOldSelectionWhileNewRoundAdmitsNewC() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val a = candidate(0, "Old A", ChatUnreadStatus.READ)
+        val b = candidate(1, "Old B", ChatUnreadStatus.READ)
+        val c = candidate(2, "New C", ChatUnreadStatus.UNREAD)
+        val staleViewport = executor.visibleSessionKeys(snapshot(a, b))
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.lockedUnreadSetFinalized = true
+        executor.attemptedSessionKeys += setOf(key(a), key(b))
+        executor.lockedUnreadSessionKeys += setOf(key(a), key(b))
+        executor.capturedSessionListFingerprints += "old-snapshot-capture"
+        executor.lastStableSessionListVisibleKeys = staleViewport
+        executor.checkpointRunGeneration = 42L
+        executor.checkpointLastSuccessfulTaskId = "confirmed-a-or-b-receipt"
+        executor.checkpointNextCursorKey = key(b)
+
+        // A verified return from greetings is still the SAME round.
+        executor.resumeAfterReturnedInbox()
+        assertEquals(setOf(key(a), key(b)), executor.attemptedSessionKeys)
+        assertEquals(setOf(key(a), key(b)), executor.lockedUnreadSessionKeys)
+        assertEquals(setOf("old-snapshot-capture"), executor.capturedSessionListFingerprints)
+        assertEquals(key(b), executor.checkpointNextCursorKey)
+        assertEquals(null, executor.selectNextCandidate(
+            snapshot(a, b, c).chatListCandidates, executor.lockedUnreadSessionKeys
+        ))
+
+        // Only a separately verified next-round entry retires frozen membership.
+        executor.beginNextPollingRound()
+        assertTrue(executor.attemptedSessionKeys.isEmpty())
+        assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
+        assertTrue(executor.capturedSessionListFingerprints.isEmpty())
+        assertFalse(executor.lockedUnreadSetFinalized)
+        assertEquals("confirmed-a-or-b-receipt", executor.checkpointLastSuccessfulTaskId)
+        assertEquals(42L, executor.checkpointRunGeneration)
+        assertEquals(null, executor.checkpointNextCursorKey)
+
+        // A/B are read; C arrives unread. Existing first-swipe admission remains mandatory.
+        executor.initialInboxTopPositioningCompleted = true
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.FIRST_SWIPE_REQUIRED,
+            executor.evaluateUnreadAdmission(snapshot(a, b, c)))
+        executor.initialUnreadGateSwipeCompleted = true
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            executor.evaluateUnreadAdmission(snapshot(a, b, c)))
+        assertEquals(setOf(key(c)), executor.lockedUnreadSessionKeys)
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.lockedUnreadSetFinalized = true
+        val next = executor.evaluateListSnapshot(snapshot(a, b, c), false, 2)
+        assertEquals(c, next.nextCandidate)
+        assertTrue(executor.capturedSessionListFingerprints.add(next.structuralFingerprint))
+        assertFalse("A viewport is captured only once within the NEW round",
+            executor.capturedSessionListFingerprints.add(next.structuralFingerprint))
+        assertEquals("confirmed-a-or-b-receipt", executor.checkpoint().lastSuccessfulTaskId)
+    }
+
+    @Test
+    fun unknownUnreadBlocksNewRoundWithoutClearingPreviousCursor() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        executor.attemptedSessionKeys += "previously-attempted"
+        executor.lockedUnreadSessionKeys += "previously-frozen"
+        executor.capturedSessionListFingerprints += "previous-viewport"
+        executor.checkpointLastSuccessfulTaskId = "previous-confirmed-send"
+        executor.normalInboxUnreadStateUnknown = true
+        executor.unresolvedUnknownUnreadKeys += "unresolved"
+
+        assertTrue(runCatching { executor.beginNextPollingRound() }.isFailure)
+        assertEquals(setOf("previously-attempted"), executor.attemptedSessionKeys)
+        assertEquals(setOf("previously-frozen"), executor.lockedUnreadSessionKeys)
+        assertEquals(setOf("previous-viewport"), executor.capturedSessionListFingerprints)
+        assertEquals(setOf("unresolved"), executor.unresolvedUnknownUnreadKeys)
+        assertEquals("previous-confirmed-send", executor.checkpointLastSuccessfulTaskId)
     }
 
     @Test

@@ -470,8 +470,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val explicitUnreadWhileWaiting = wasWaitingForUnread && snapshot.chatListCandidates.any {
             it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
         }
-        if (explicitUnreadWhileWaiting) attemptedSessionKeys.clear()
-
+        // A viewport observation is not a round transition. Keep the previous round's
+        // attempted identities intact until the runtime has independently confirmed
+        // a fresh inbox and explicitly calls beginNextPollingRound().
         val nextCandidate = if (initialInboxTopPositioningCompleted && !candidatesEmpty &&
             (unreadAdmissionDecision == null ||
                 unreadAdmissionDecision == PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED)
@@ -780,7 +781,12 @@ internal class PrivateMessagesTraversalTaskExecutor {
      */
     fun beginNextPollingRound() {
         check(!normalInboxUnreadStateUnknown && unresolvedUnknownUnreadKeys.isEmpty())
+        // Only an admitted NEW round retires old viewport capture deduplication.
+        // A resumeAfterReturnedInbox() or restored same-round checkpoint must keep it.
+        // Without this clear, repeated A/B viewport fingerprints are silently treated
+        // as already captured in the next complete scan.
         resetForReturnedInbox()
+        capturedSessionListFingerprints.clear()
         initialInboxPositionCheckCompleted = false
         initialInboxTopPositioningCompleted = false
         initialUnreadGateSwipeCompleted = false
