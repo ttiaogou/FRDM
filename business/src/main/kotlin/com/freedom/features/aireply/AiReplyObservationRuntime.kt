@@ -3348,6 +3348,7 @@ class AiReplyObservationRuntime(
         if (failure != null) {
             sessionRunStarted = false
             sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 私聊暂停分类[CONFIGURATION_BLOCKED]：配置未就绪，禁止制造无依据恢复检查点")
             onLog("AI 回复启动被阻止：$failure；请修正配置后重新启动；未遍历列表")
             return
         }
@@ -3465,8 +3466,8 @@ class AiReplyObservationRuntime(
                     // anchor. The Momo adapter opts into the stricter, snapshot-verified flow.
                     val entered = runCatching { chatPagePort.ensureMessageWorkArea() }.getOrDefault(false)
                     if (!entered) {
-                        sessionManagerState = SessionManagerState.PAUSED
                         onLog("AI Reply 启动暂停：适配器未能通过消息工作区入口；不执行后续滑动或会话点击")
+                        recoverRetryablePrivateList("PRIVATE_STARTUP_WORK_AREA_NOT_READY")
                         return
                     }
                     startupReadinessCoordinator.markWorkAreaConfirmed()
@@ -3874,6 +3875,7 @@ class AiReplyObservationRuntime(
                     if (sendConfirmationId.isNullOrBlank()) {
                         currentSessionSendConfirmed = false
                         sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 私聊暂停分类[SEND_PROOF_UNAVAILABLE]：发送收据不稳定，禁止返回列表或重发")
                         onLog("AI 发送成功记录被阻止：缺少稳定 sendConfirmationId；不返回列表")
                         return true
                     }
@@ -4596,6 +4598,7 @@ class AiReplyObservationRuntime(
             if (oldKey == null || chatSessionManagementPort.isSessionIdentityBlocked(oldKey)) {
                 privateMessagesTraversalTaskExecutor.clearIdentityReturn()
                 sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 私聊暂停分类[IDENTITY_BLOCKED]：原身份已隔离，禁止重复点击同一目标")
                 onLog("AI 会话身份复核暂停：原身份已被隔离；不打开会话")
                 return
             }
@@ -4621,6 +4624,7 @@ class AiReplyObservationRuntime(
                     val candidate = result.candidate ?: return
                     if (chatSessionManagementPort.isSessionIdentityBlocked(ChatSessionManagementPolicy.stableSessionKey(candidate))) {
                         sessionManagerState = SessionManagerState.PAUSED
+                        onLog("AI 私聊暂停分类[IDENTITY_BLOCKED]：候选身份已隔离，禁止重复点击")
                         onLog("AI 会话身份复核暂停：已验证身份被隔离；不打开会话")
                         return
                     }
@@ -4797,7 +4801,6 @@ class AiReplyObservationRuntime(
                     return
                 }
                 PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED -> {
-                    sessionManagerState = SessionManagerState.PAUSED
                     onLog("AI Reply 启动准入[UNREAD_STATE_UNKNOWN]：首次成功滑动后的视口存在 UNKNOWN；暂停，不把未知当作无未读")
                     recoverRetryablePrivateList("INITIAL_UNREAD_STATE_UNKNOWN")
                     return
@@ -5206,11 +5209,11 @@ class AiReplyObservationRuntime(
                 (privateMessagesTraversalTaskExecutor.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP || !privateMessagesTraversalTaskExecutor.atTop)) ||
             privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown
         ) {
-            sessionManagerState = SessionManagerState.PAUSED
             onLog(
                 "AI Reply 收到的招呼支线暂停：普通会话列表尚未完成底部至顶部的完整复核，" +
                     "或仍存在 UNKNOWN 未读；不提前切换到收到招呼入口"
             )
+            recoverRetryablePrivateList("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF")
             return
         }
         val start = claimAndBeginReceivedGreetingsTask(
@@ -5720,7 +5723,6 @@ class AiReplyObservationRuntime(
                     }
                     GestureSubmission.REJECTED -> {
                         if (activeSessionGestureRequestId == attempt.requestId) activeSessionGestureRequestId = null
-                        sessionManagerState = SessionManagerState.PAUSED
                         currentSessionKey = null
                         currentSessionName = null
                         currentSessionCandidate = null
@@ -6286,7 +6288,6 @@ class AiReplyObservationRuntime(
         val inspectionResult = runCatching { readPageSnapshot(AiReplyPageReadPurpose.SCROLL_BEFORE) }
         val rawFresh = inspectionResult.getOrNull()
         val fresh = rawFresh?.let(::stabilizeIncomingPageSnapshot) ?: run {
-            sessionManagerState = SessionManagerState.PAUSED
             val error = inspectionResult.exceptionOrNull()
             val reason = if (error == null) "INSPECTION_RETURNED_NO_SNAPSHOT"
             else "INSPECTION_EXCEPTION:${error.javaClass.simpleName}"
@@ -6331,7 +6332,6 @@ class AiReplyObservationRuntime(
             return
         }
         if (identityFailureReason != null) {
-            sessionManagerState = SessionManagerState.PAUSED
             onLog(
                 "AI 会话管理已暂停：滚动前页面身份复核失败；原因=$identityFailureReason；" +
                     "目标包名匹配=${fresh.packageName == targetPackage()}；" +

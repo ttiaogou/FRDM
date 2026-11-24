@@ -502,6 +502,22 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p4IncompletePrivateScanDoesNotHandOffToGreetingsOrTerminate() {
+        val fixture = preScrollPageRecoveryFixture()
+        val beginGreetings = fixture.runtime.javaClass.getDeclaredMethod(
+            "startReceivedGreetingsTask", String::class.java
+        ).apply { isAccessible = true }
+        beginGreetings.invoke(fixture.runtime, "P4_INCOMPLETE_PRIVATE_SCAN")
+        assertTrue(fixture.logs.any { it.contains("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF") })
+        assertTrue(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+            it.contains("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF") })
+        assertTrue(fixture.checkpoint() != null)
+        assertEquals("Incomplete private scan must not enter greetings", "AI_REPLY_PRIVATE_MESSAGES",
+            fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.dispatchedGestures())
+    }
+
+    @Test
     fun p4ExplicitUserStopDoesNotRearmRecoverablePrivatePause() {
         val fixture = preScrollPageRecoveryFixture()
         fixture.port.page = desktopPage()
