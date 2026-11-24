@@ -765,7 +765,7 @@ class AiReplyDraftCoordinator(
         // Each empty-output retry changes the protocol before the final plain-text fallback.
         val modelResponseMode = when {
             configuration.provider == AiModelServiceProvider.DEEPSEEK &&
-                emptyRetryAttempt >= MAX_EMPTY_MODEL_RETRIES -> ModelResponseMode.PROMPT_ONLY_JSON
+                emptyRetryAttempt >= MAX_EMPTY_MODEL_RETRIES -> ModelResponseMode.PLAIN_TEXT
             emptyRetryAttempt == 1 -> ModelResponseMode.SIMPLE_JSON
             else -> ModelResponseMode.STRICT_JSON
         }
@@ -861,7 +861,7 @@ class AiReplyDraftCoordinator(
                     val nextMode = when (emptyRetryAttempt + 1) {
                         1 -> ModelResponseMode.SIMPLE_JSON.name
                         else -> if (configuration.provider == AiModelServiceProvider.DEEPSEEK) {
-                            ModelResponseMode.PROMPT_ONLY_JSON.name
+                            ModelResponseMode.PLAIN_TEXT.name
                         } else {
                             ModelResponseMode.STRICT_JSON.name
                         }
