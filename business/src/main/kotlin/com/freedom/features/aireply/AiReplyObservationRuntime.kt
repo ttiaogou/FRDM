@@ -1578,9 +1578,9 @@ class AiReplyObservationRuntime(
                     inspection.packageName == targetPackage() &&
                     inspection.pageKind == ChatPageKind.CHAT_LIST &&
                     matchedRouteId == messageListRecoveryRoute.routeId
+            receivedGreetingsProbePrivateRouteWon = false
             when (arrivalStatus) {
                 ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
-                    receivedGreetingsProbePrivateRouteWon = false
                     startReceivedGreetingsTaskFromConfirmedPage(
                         ConfirmedGreetingsListEvidence.Observed(arrivalStatus)
                     )
