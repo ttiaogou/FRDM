@@ -1572,16 +1572,15 @@ class AiReplyObservationRuntime(
             val arrivalStatus = pageObservationCoordinator.onPageSnapshotAvailable(
                 observeReceivedGreetingsPageForUnifiedValidation()
             )
+            receivedGreetingsProbeOrdinaryInboxConfirmed =
+                receivedGreetingsOwnershipRecheckPending &&
+                    observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                    inspection.packageName == targetPackage() &&
+                    inspection.pageKind == ChatPageKind.CHAT_LIST &&
+                    matchedRouteId == messageListRecoveryRoute.routeId
             when (arrivalStatus) {
                 ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
-                    receivedGreetingsProbeOrdinaryInboxConfirmed =
-                        receivedGreetingsOwnershipRecheckPending &&
-                            observation.status == ObservationStatus.CONFIRMED_PAGE &&
-                            inspection.packageName == targetPackage() &&
-                            inspection.pageKind == ChatPageKind.CHAT_LIST &&
-                            matchedRouteId == messageListRecoveryRoute.routeId
                     receivedGreetingsProbePrivateRouteWon = false
-                    // Page recognition and ownership enter one task admission transaction.
                     startReceivedGreetingsTaskFromConfirmedPage(
                         ConfirmedGreetingsListEvidence.Observed(arrivalStatus)
                     )
