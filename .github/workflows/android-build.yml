@@ -88,11 +88,23 @@ jobs:
       - name: Run all module unit tests
         run: |
           gradle --no-daemon --build-cache \
+            --stacktrace --info \
             :core:test \
             :business:test \
             :gesture-core:test \
             :gesture-runtime:test \
             :app:testDebugUnitTest
+
+      - name: Summarize test reports on failure
+        if: failure()
+        run: |
+          echo "=== test result files ==="
+          find . -path '*/build/test-results/*' -type f -print | sort
+          echo "=== failed test suites ==="
+          grep -RInE 'failures="[1-9]|errors="[1-9]' \
+            core/build/test-results business/build/test-results \
+            gesture/gesture-core/build/test-results gesture/gesture-runtime/build/test-results \
+            app/build/test-results 2>/dev/null || true
 
       - name: Upload Gradle test reports
         if: always()
@@ -100,6 +112,16 @@ jobs:
         with:
           name: Gradle-test-reports-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            core/build/test-results/**
+            core/build/reports/tests/**
+            business/build/test-results/**
+            business/build/reports/tests/**
+            gesture/gesture-core/build/test-results/**
+            gesture/gesture-core/build/reports/tests/**
+            gesture/gesture-runtime/build/test-results/**
+            gesture/gesture-runtime/build/reports/tests/**
+            app/build/test-results/**
+            app/build/reports/tests/**
             **/build/test-results/**/*.xml
             **/build/reports/tests/**
           if-no-files-found: warn
