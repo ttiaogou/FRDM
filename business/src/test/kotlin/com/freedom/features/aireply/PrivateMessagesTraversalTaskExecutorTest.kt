@@ -900,6 +900,48 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun p1RelocationPreservesRoundAndPersistsFullScanRequirement() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val damaged = candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD, previewBoundsValid = false)
+        val healthy = candidate(1, "Healthy B", ChatUnreadStatus.READ)
+        val page = snapshot(damaged, healthy).copy(windowGeneration = 1)
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        executor.lockedUnreadSetFinalized = true
+        executor.attemptedSessionKeys += key(healthy)
+        executor.lockedUnreadSessionKeys += key(healthy)
+        executor.ambiguousSessionIdentityKeys += key(candidate(2, "Collision", ChatUnreadStatus.READ))
+        executor.checkpointLastSuccessfulTaskId = "confirmed-receipt"
+        assertTrue(executor.observeIncompleteUnreadEvidence(page))
+        val before = executor.checkpoint()
+        assertFalse(executor.canBeginIncompleteUnreadRelocation(page.copy(chatListExtractionTruncated = true)))
+        assertTrue(executor.beginIncompleteUnreadRelocation(page))
+        val after = executor.checkpoint()
+        assertEquals(before.attemptedSessionKeys, after.attemptedSessionKeys)
+        assertEquals(before.lockedUnreadSessionKeys, after.lockedUnreadSessionKeys)
+        assertEquals(before.ambiguousSessionIdentityKeys, after.ambiguousSessionIdentityKeys)
+        assertEquals(before.unresolvedIncompleteUnreadKeys, after.unresolvedIncompleteUnreadKeys)
+        assertEquals(before.lastSuccessfulTaskId, after.lastSuccessfulTaskId)
+        assertTrue(after.lockedUnreadSetFinalized)
+        assertTrue(after.fullListPollingRoundRequired)
+        assertFalse(after.atTop)
+        assertEquals(SessionListTraversalPhase.POSITIONING_AT_BOTTOM.name, after.phase)
+        assertFalse(executor.beginIncompleteUnreadRelocation(page))
+
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(after) }
+        val repaired = candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD)
+        val repairedPage = snapshot(repaired, healthy).copy(windowGeneration = 1)
+        assertFalse(restored.observeIncompleteUnreadEvidence(repairedPage))
+        assertTrue(key(repaired) in restored.lockedUnreadSessionKeys)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            restored.evaluateUnreadAdmission(repairedPage))
+        assertEquals(before.attemptedSessionKeys, restored.attemptedSessionKeys)
+    }
+
+    @Test
     fun p0IncompleteRowDoesNotAuthorizeUnsafeOrAnonymousViewport() {
         val named = candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD, previewBoundsValid = false)
         val healthy = candidate(1, "Healthy B", ChatUnreadStatus.READ)

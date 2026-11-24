@@ -576,6 +576,88 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p1RelocationTimerIsIntentOnlyAndReusesExistingScrollAfterFreshProof() {
+        val fixture = preScrollPageRecoveryFixture()
+        val executor = fixture.runtime.javaClass.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        val healthy = sessionCandidate(1, "Healthy B", ChatUnreadStatus.READ, true)
+        val mixed = fixture.listPage.copy(chatListCandidates = listOf(damaged, healthy))
+        fixture.port.page = mixed
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        assertTrue(executor.observeIncompleteUnreadEvidence(mixed))
+
+        val continueList = fixture.runtime.javaClass.getDeclaredMethod(
+            "continueSessionListWithoutCandidate", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        continueList.invoke(fixture.runtime, mixed)
+        continueList.invoke(fixture.runtime, mixed)
+        assertEquals(1, fixture.logs.count { it.contains("RELOCATION_WAIT") })
+        assertEquals(0, fixture.dispatchedGestures())
+        val delay = com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(1)
+        fixture.scheduler.runNextWithDelay(delay)
+        assertEquals("Timer alone cannot dispatch a gesture", 0, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("RELOCATION_STARTED") })
+
+        // Simulate the subsequent confirmed fresh list observation with no candidate.
+        continueList.invoke(fixture.runtime, mixed)
+        assertTrue(fixture.logs.any { it.contains("RELOCATION_STARTED") })
+        assertEquals(1, fixture.dispatchedGestures())
+        val saved = requireNotNull(fixture.checkpoint())
+        assertTrue(saved.fullListPollingRoundRequired)
+        assertTrue(saved.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertTrue(saved.attemptedSessionKeys.isEmpty())
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+    }
+
+    @Test
+    fun p1RelocationCannotReuseExpiredWindowIntent() {
+        val fixture = preScrollPageRecoveryFixture()
+        val executor = fixture.runtime.javaClass.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        fun page(generation: Long) = fixture.listPage.copy(
+            windowGeneration = generation,
+            chatListCandidates = listOf(
+                sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+                    windowGeneration = generation, previewBoundsValid = false),
+                sessionCandidate(1, "Healthy B", ChatUnreadStatus.READ, true, generation)
+            )
+        )
+        val original = page(1L)
+        fixture.port.page = original
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        assertTrue(executor.observeIncompleteUnreadEvidence(original))
+        val continueList = fixture.runtime.javaClass.getDeclaredMethod(
+            "continueSessionListWithoutCandidate", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        continueList.invoke(fixture.runtime, original)
+        fixture.scheduler.runNextWithDelay(
+            com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(1)
+        )
+        val replacement = page(2L)
+        fixture.port.page = replacement
+        continueList.invoke(fixture.runtime, replacement)
+        assertEquals(0, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("RELOCATION_STARTED") })
+        assertEquals(2, fixture.logs.count { it.contains("RELOCATION_WAIT") })
+        assertTrue(requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+    }
+
+    @Test
     fun p6TimedPollingWakeupSchedulesReadOnlyInspectionWithoutNewMessages() {
         val fixture = preScrollPageRecoveryFixture()
         val enterWait = fixture.runtime.javaClass.getDeclaredMethod(

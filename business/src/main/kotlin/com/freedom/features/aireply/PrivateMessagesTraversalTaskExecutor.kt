@@ -488,6 +488,34 @@ internal class PrivateMessagesTraversalTaskExecutor {
         }
     }
 
+    /**
+     * A completed physical scan with unresolved named evidence may revisit the list
+     * in the SAME round. Never treat a saved hint as an actionable row or a coordinate.
+     */
+    fun canBeginIncompleteUnreadRelocation(snapshot: ChatPageSnapshot): Boolean =
+        initialInboxPositionCheckCompleted && initialInboxTopPositioningCompleted &&
+            initialUnreadGateSwipeCompleted && lockedUnreadSetFinalized &&
+            phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP && atTop &&
+            pendingScrollBaseline == null && pendingBoundaryConfirmationKeys == null &&
+            currentSessionKey == null && !identityReturnPending &&
+            !normalInboxUnreadStateUnknown && unresolvedUnknownUnreadKeys.isEmpty() &&
+            snapshot.windowIdentityKey() != null && canContinueWithIncompleteUnread(snapshot)
+
+    fun beginIncompleteUnreadRelocation(snapshot: ChatPageSnapshot): Boolean {
+        if (!canBeginIncompleteUnreadRelocation(snapshot)) return false
+        // Reuse the normal bottom/top traversal and its existing boundary proof. The
+        // full-scan requirement survives the checkpoint even if the target repairs
+        // before the bottom is reached. Do not call beginNextPollingRound(): all
+        // attempted, locked, ambiguous, pending and send receipt keys must survive.
+        fullListPollingRoundRequired = true
+        phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+        atTop = false
+        noProgressScrollCount = 0
+        resetUnreadBoundaryObservation()
+        executionState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
+        return true
+    }
+
     private fun isPendingIncompleteRow(row: ChatListCandidateSnapshot): Boolean =
         incompleteUnreadHint(row) in unresolvedIncompleteUnreadKeys ||
             anonymousUnreadHint(row) in unresolvedIncompleteUnreadKeys

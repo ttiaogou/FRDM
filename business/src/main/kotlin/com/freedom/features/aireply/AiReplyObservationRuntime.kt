@@ -541,6 +541,15 @@ class AiReplyObservationRuntime(
         get() = privateMessagesTraversalTaskExecutor.headerMismatchRecordedForCurrentAttempt
         set(value) { privateMessagesTraversalTaskExecutor.headerMismatchRecordedForCurrentAttempt = value }
     private var sessionTransitionTask: ScheduledTask? = null
+    /** Intent only: the timer never authorizes a gesture or stores a row locator. */
+    private data class IncompleteUnreadRelocationWait(
+        val runGeneration: Long,
+        val actionGeneration: Long,
+        val windowIdentity: String,
+        val visibleKeys: List<String>,
+        var due: Boolean = false
+    )
+    private var incompleteUnreadRelocationWait: IncompleteUnreadRelocationWait? = null
     /** A submitted session tap is not a completed visit until the intended detail is verified. */
     private var missedPrivateSessionTapKey: String? = null
     private var missedPrivateSessionTapCount = 0
@@ -1437,8 +1446,11 @@ class AiReplyObservationRuntime(
         if (!sessionRunStarted) return
         val recoveryContextActive = receivedGreetingsTaskActive || pollingRoundPending ||
             messageListRecoveryVerificationPending ||
-            recoveryContext.pending
+            recoveryContext.pending || incompleteUnreadRelocationWait != null || userInteractionActive
         if (!recoveryContextActive) return
+        // A touch invalidates a parked relocation intent. Only a new confirmed
+        // observation after the existing quiet gate may schedule another one.
+        incompleteUnreadRelocationWait = null
         receivedGreetingsUserActive = true
         userInteractionActive = true
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionStarted)
@@ -2940,6 +2952,7 @@ class AiReplyObservationRuntime(
     fun reset(reason: String = "未指定") {
         runCatching { onDraftRuntimeReset() }
         sessionActionGeneration += 1L
+        incompleteUnreadRelocationWait = null
         startupReadinessCoordinator.cancelRecovery()
         val interruptedGestureRequestId = activeSessionGestureRequestId
         activeSessionGestureRequestId = null
@@ -3197,6 +3210,7 @@ class AiReplyObservationRuntime(
         // Gesture algorithms are unchanged; only stale callback authority is revoked.
         sessionActionGeneration += 1L
         activeSessionGestureRequestId = null
+        incompleteUnreadRelocationWait = null
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
         sessionTransitionTask?.cancel()
@@ -4857,6 +4871,13 @@ class AiReplyObservationRuntime(
         }
 
         val next = listEvaluation.nextCandidate
+        if (next != null || !listEvaluation.incompleteUnreadEvidenceBlocked ||
+            !privateMessagesTraversalTaskExecutor.atTop
+        ) {
+            // A normal candidate, resolved evidence or a changed position supersedes
+            // the parked relocation intent. Existing state/generation checks own callbacks.
+            incompleteUnreadRelocationWait = null
+        }
         val structuralFingerprint = listEvaluation.structuralFingerprint
         if (next == null) {
             // While parked, page-change events are wake-up probes only. A visible page with no
@@ -5098,14 +5119,78 @@ class AiReplyObservationRuntime(
                     sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                     onLog("AI Reply 测试遍历暂停：完整扫描中存在未读状态 UNKNOWN 的会话行，不能将未知当作无未读")
                 }
-                else -> startReceivedGreetingsTask(
-                    if (privateMessagesTraversalTaskExecutor.normalInboxHadUnread) "普通聊天列表已完成由下至上扫描，当前没有剩余符合条件的未读会话"
-                    else "普通聊天列表已完成筛选，没有符合条件的新消息"
-                )
+                else -> {
+                    if (observeIncompleteUnreadRelocation(snapshot)) return
+                    startReceivedGreetingsTask(
+                        if (privateMessagesTraversalTaskExecutor.normalInboxHadUnread) "普通聊天列表已完成由下至上扫描，当前没有剩余符合条件的未读会话"
+                        else "普通聊天列表已完成筛选，没有符合条件的新消息"
+                    )
+                }
             }
             return
         }
         scrollSessionList(snapshot, toTop = true)
+    }
+
+    /**
+     * At an independently confirmed top, revisit a named pending row after the existing
+     * read-only retry delay. The timer produces intent only. A later ordinary observation
+     * (with no selectable candidate) must revalidate the page, ownership and original
+     * pending evidence before the existing traversal is allowed to move again.
+     */
+    private fun observeIncompleteUnreadRelocation(snapshot: ChatPageSnapshot): Boolean {
+        val executor = privateMessagesTraversalTaskExecutor
+        if (!executor.canBeginIncompleteUnreadRelocation(snapshot)) {
+            incompleteUnreadRelocationWait = null
+            return false
+        }
+        if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
+            !canPerformPrivateMessagesUiAction() || userInteractionActive ||
+            activeSessionGestureRequestId != null || isSendConfirmationPending() ||
+            isConversationDraftPending() || snapshot.packageName != targetPackage() ||
+            isSemanticallyUnconfirmed(snapshot)
+        ) {
+            incompleteUnreadRelocationWait = null
+            scheduleSessionListStabilityRetry("异常会话重新定位等待安全页面与空闲任务")
+            return true
+        }
+        val window = snapshot.windowIdentityKey() ?: return false
+        val visibleKeys = executor.visibleSessionKeys(snapshot)
+        val wait = incompleteUnreadRelocationWait?.takeIf {
+            it.runGeneration == currentRunGeneration() &&
+                it.actionGeneration == sessionActionGeneration && it.windowIdentity == window &&
+                it.visibleKeys == visibleKeys
+        }
+        if (wait?.due == true) {
+            incompleteUnreadRelocationWait = null
+            if (!ensureAndroidRecoveryReady(snapshot, "PRIVATE_INCOMPLETE_RELOCATION")) {
+                recoverRetryablePrivateList("PRIVATE_INCOMPLETE_RELOCATION_ANDROID_NOT_READY")
+                return true
+            }
+            if (!canPerformPrivateMessagesUiAction() || !executor.beginIncompleteUnreadRelocation(snapshot)) {
+                scheduleSessionListStabilityRetry("异常会话重新定位准入已变化")
+                return true
+            }
+            privateMessagesCheckpointRepository?.save(executor.checkpoint())
+            onLog("AI 私聊异常会话[RELOCATION_STARTED]：保留原轮次、已处理记录与未决身份；复用原有底部定位和由下至上扫描")
+            scrollSessionList(snapshot, toTop = false)
+            return true
+        }
+        if (wait != null && sessionTransitionTask != null) return true
+
+        val ticket = IncompleteUnreadRelocationWait(
+            currentRunGeneration(), sessionActionGeneration, window, visibleKeys
+        )
+        incompleteUnreadRelocationWait = ticket
+        privateMessagesCheckpointRepository?.save(executor.checkpoint())
+        onLog("AI 私聊异常会话[RELOCATION_WAIT]：已确认顶部但原异常未解决；按现有退避等待下一次新鲜列表观察")
+        scheduleSessionListStabilityRetry("原异常未读会话受控重新定位") {
+            if (incompleteUnreadRelocationWait === ticket &&
+                ticket.runGeneration == currentRunGeneration() &&
+                ticket.actionGeneration == sessionActionGeneration
+            ) ticket.due = true
+        }
+        return true
     }
 
     /** A completed pair of tasks schedules another round even if the inbox is quiet. */
@@ -5615,7 +5700,10 @@ class AiReplyObservationRuntime(
             "；status_new控件缺失判已读=${diagnostics.statusNewAbsentReadCount}"
     }
 
-    private fun scheduleSessionListStabilityRetry(reason: String) {
+    private fun scheduleSessionListStabilityRetry(
+        reason: String,
+        onInspectionDue: (() -> Unit)? = null
+    ) {
         if ((sessionManagerState == SessionManagerState.PAUSED &&
                 !messageListRecoveryVerificationPending) ||
             sessionManagerState == SessionManagerState.STOPPED
@@ -5646,6 +5734,7 @@ class AiReplyObservationRuntime(
                 )
                 return@schedule
             }
+            onInspectionDue?.invoke()
             scheduleFullInspection()
         }
     }
