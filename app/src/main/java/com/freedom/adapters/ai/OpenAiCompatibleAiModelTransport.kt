@@ -28,7 +28,7 @@ class AiModelHttpException(
     override val responseContentState: String? = null,
     override val responseFinishReason: String? = null,
     override val responseInputTokens: Int? = null,
-    override val responseOutputTokens: Int? = null
+    override val responseOutputTokens: Int? = null,
     override val responseReasoningContentState: String? = null
 ) : IOException(safeCode, cause), com.freedom.features.aireply.ai.AiModelCallFailureDetails
 
