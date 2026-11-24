@@ -65,7 +65,7 @@ class AiReplyDecisionEngineTest {
         assertEquals(AiReplyAction.REPLY, model(result).action)
         val request = provider.lastRequest!!
         assertEquals(AiModelResponseFormat.PlainText, request.responseFormat)
-        assertTrue(request.systemInstruction.contains("请严格匹配以下 JSON Schema"))
+        assertTrue(request.systemInstruction.contains("请只返回一个有效的 JSON 对象"))
         assertTrue(request.systemInstruction.contains("\"reasonDetail\""))
         assertTrue(request.systemInstruction.contains("additionalProperties"))
         assertTrue(request.systemInstruction.contains("如果对方直接询问你是否为人工智能，必须如实回答"))
@@ -129,11 +129,11 @@ class AiReplyDecisionEngineTest {
         assertTrue(request.systemInstruction.contains("不要刻意讨好我。"))
     }
 
-    @Test fun multiReplyInstructionUsesOnlySingleNewlines() {
+    @Test fun baseInstructionDoesNotCarryStructuredOutputRules() {
         val instruction = AiReplyDecisionEngine.DEFAULT_SYSTEM_INSTRUCTION
-        assertTrue(instruction.contains("多条回复之间必须采用单一换行分隔"))
-        assertTrue(instruction.contains("在 JSON 字符串中用 \\n 表示换行"))
-        assertFalse(instruction.contains("<MSG>"))
+        assertFalse(instruction.contains("reasonDetail"))
+        assertFalse(instruction.contains("JSON Schema"))
+        assertFalse(instruction.contains("\\n"))
     }
 
     @Test fun jsonEscapedNewlineParsesIntoSeparateMessages() {
