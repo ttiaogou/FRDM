@@ -100,6 +100,12 @@ class AiReplyDecisionEngine(
                     )
                 )
             }
+            if (responseMode == ModelResponseMode.PROMPT_ONLY_JSON) return AiReplyEvaluation.Execution(
+                AiReplyExecutionStatus.MODEL_OUTPUT_INVALID,
+                provider = result.provider, model = result.model,
+                outputInvalidReason = AiReplyOutputInvalidReason.JSON_SYNTAX_INVALID,
+                outputContentState = "PRESENT"
+            )
             val draft = AiReplyDecisionJsonParser.extractPlainTextDraft(raw, maxDraftChars)
                 ?.takeIf { AiReplyLocalSafety.isSafeDraft(it) }
             return if (draft == null) AiReplyEvaluation.Execution(
@@ -123,6 +129,14 @@ class AiReplyDecisionEngine(
             outputInvalidReason = parsed.invalidReason,
             outputContentState = "PRESENT"
         )
+        if (decision.action == AiReplyAction.REPLY &&
+            !decision.draft.isNullOrBlank() &&
+            !AiReplyLocalSafety.isSafeDraft(decision.draft)
+        ) {
+            return AiReplyEvaluation.Model(
+                AiReplyDecision(AiReplyAction.WAIT, "LOCAL_SAFETY_BLOCK", reasonDetail = "本地安全规则阻止自动发送")
+            )
+        }
         return AiReplyEvaluation.Model(
             decision.copy(provider = result.provider, model = result.model, finishReason = result.finishReason, usage = result.usage)
         )
@@ -159,10 +173,14 @@ class AiReplyDecisionEngine(
 /** Local last-mile guard; intentionally narrow so normal colloquial or flirtatious chat is not blocked. */
 internal object AiReplyLocalSafety {
     private val dangerousIncoming = Regex("(验证码|短信码|密码|银行卡|转账|借贷|借钱|收款码|私钥|助记词|身份证号|精确住址|自残|自杀|伤害自己|威胁|勒索)")
-    private val dangerousDraft = Regex("(验证码|密码|银行卡号|卡号|转账给我|收款码|私钥|助记词)")
+    private val sensitiveDraft = Regex(
+        "(验证码|密码|银行卡号|卡号|转账给我|收款码|私钥|助记词|身份证号|精确住址|邮箱|电子邮箱|手机号|" +
+            "(?<!\\d)1[3-9]\\d{9}(?!\\d)|" +
+            "(?<!\\d)\\d{17}[0-9Xx](?!\\d)|[\\w.+-]+@[\\w.-]+\\.[A-Za-z]{2,})"
+    )
 
     fun isDangerous(text: String): Boolean = dangerousIncoming.containsMatchIn(text)
-    fun isSafeDraft(text: String): Boolean = text.isNotBlank() && !dangerousDraft.containsMatchIn(text)
+    fun isSafeDraft(text: String): Boolean = text.isNotBlank() && !sensitiveDraft.containsMatchIn(text)
 }
 
 data class AiReplyDecisionInput(

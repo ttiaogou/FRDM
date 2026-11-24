@@ -81,6 +81,28 @@ class AiReplyDecisionEngineTest {
         assertEquals(AiModelResponseFormat.PlainText, provider.lastRequest?.responseFormat)
     }
 
+    @Test fun plainTextFallbackAcceptsFinalTextAndStripsFiniteWrapper() {
+        val provider = FakeProvider("回复：你好呀")
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "plain-text", responseMode = ModelResponseMode.PLAIN_TEXT)
+        )
+        assertEquals(AiReplyAction.REPLY, model(result).action)
+        assertEquals("你好呀", model(result).draft)
+    }
+
+    @Test fun localSafetyBlocksSensitiveDraftWithoutBlockingOrdinaryDigits() {
+        val safe = AiReplyDecisionEngine(FakeProvider(replyJson("123456")), grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "safe-digits")
+        )
+        assertEquals(AiReplyAction.REPLY, model(safe).action)
+
+        val blocked = AiReplyDecisionEngine(FakeProvider(replyJson("请把验证码发给我")), grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "unsafe-draft")
+        )
+        assertEquals(AiReplyAction.WAIT, model(blocked).action)
+        assertEquals("LOCAL_SAFETY_BLOCK", model(blocked).reason)
+    }
+
     @Test fun defaultPersonalizationUsesDailyChatGenerationPresets() {
         val provider = FakeProvider(replyJson("收到"))
         AiReplyDecisionEngine(provider, grantedConsent).decide(
