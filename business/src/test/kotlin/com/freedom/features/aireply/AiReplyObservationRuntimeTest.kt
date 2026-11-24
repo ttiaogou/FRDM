@@ -525,6 +525,57 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p0MixedListRetainsNamedAnomalyAndAllowsExistingStartupScroll() {
+        val fixture = preScrollPageRecoveryFixture()
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        val healthy = sessionCandidate(1, "Healthy B", completeBoundaryEvidence = true)
+        val mixed = fixture.listPage.copy(chatListCandidates = listOf(damaged, healthy))
+        fixture.port.page = mixed
+        val handle = fixture.runtime.javaClass.getDeclaredMethod(
+            "handleSessionListPage", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        handle.invoke(fixture.runtime, mixed)
+
+        assertTrue(fixture.logs.any { it.contains("ROW_SCOPED_BLOCK") })
+        assertFalse(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+            it.contains("PRIVATE_INCOMPLETE_UNREAD_ROW") })
+        assertEquals(1, fixture.dispatchedGestures())
+        val saved = requireNotNull(fixture.checkpoint())
+        assertEquals(1, saved.unresolvedIncompleteUnreadKeys.size)
+        assertTrue(saved.attemptedSessionKeys.isEmpty())
+        assertTrue(saved.ambiguousSessionIdentityKeys.isEmpty())
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+    }
+
+    @Test
+    fun p0PendingNamedAnomalyCannotCompletePrivateScanOrHandoff() {
+        val fixture = preScrollPageRecoveryFixture()
+        val executor = fixture.runtime.javaClass.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        assertTrue(executor.observeIncompleteUnreadEvidence(
+            fixture.listPage.copy(chatListCandidates = listOf(damaged))
+        ))
+        val handoff = fixture.runtime.javaClass.getDeclaredMethod(
+            "startReceivedGreetingsTask", String::class.java
+        ).apply { isAccessible = true }
+        handoff.invoke(fixture.runtime, "P0_PENDING_INCOMPLETE")
+
+        assertTrue(fixture.logs.any { it.contains("HANDOFF_BLOCKED") })
+        assertFalse(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        assertTrue(requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.dispatchedGestures())
+    }
+
+    @Test
     fun p6TimedPollingWakeupSchedulesReadOnlyInspectionWithoutNewMessages() {
         val fixture = preScrollPageRecoveryFixture()
         val enterWait = fixture.runtime.javaClass.getDeclaredMethod(
@@ -7211,7 +7262,8 @@ class AiReplyObservationRuntimeTest {
         unreadStatus: com.freedom.features.aireply.ports.ChatUnreadStatus =
             com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD,
         completeBoundaryEvidence: Boolean = false,
-        windowGeneration: Long = 1L
+        windowGeneration: Long = 1L,
+        previewBoundsValid: Boolean = true
     ) = ChatListCandidateSnapshot(
         rowIndex = rowIndex,
         rowTarget = NodeTarget(
@@ -7241,7 +7293,7 @@ class AiReplyObservationRuntimeTest {
         previewNodeVisibleToUser = completeBoundaryEvidence,
         previewBoundsIntersectViewport = true,
         previewBoundsFullyInsideViewport = true,
-        previewBoundsValid = true,
+        previewBoundsValid = previewBoundsValid,
         unreadStatus = unreadStatus,
         timestampText = "10:20",
         timestampSource = com.freedom.features.aireply.ports.ChatNodeTextSource.NODE_TEXT,

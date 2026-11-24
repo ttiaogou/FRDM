@@ -71,6 +71,8 @@ internal data class PrivateMessagesListSnapshotEvaluation(
     val newlyAmbiguousKeys: Set<String>,
     /** Durable, retryable evidence from fully visible but structurally incomplete unread rows. */
     val incompleteUnreadEvidenceBlocked: Boolean,
+    /** An isolated named row must not revoke independently complete list evidence. */
+    val incompleteUnreadAllowsIndependentTraversal: Boolean,
     val unreadAuditChanged: Boolean,
     val wasWaitingForUnread: Boolean,
     val visibleKeys: List<String>,
@@ -431,7 +433,23 @@ internal class PrivateMessagesTraversalTaskExecutor {
                 val identityConflictStillBlocked = matches.size > 1 && matches.all {
                     ChatSessionManagementPolicy.stableSessionKey(it) in ambiguousSessionIdentityKeys
                 }
-                allExplicit && (matches.size == 1 || identityConflictStillBlocked)
+                val resolved = allExplicit && (matches.size == 1 || identityConflictStillBlocked)
+                // A named anomaly was never admitted as unread while its row was incomplete.
+                // If it repairs after the ordinary unread set froze, retain that original
+                // pending work in the same round; never admit anonymous geometry as identity.
+                if (resolved && saved.startsWith("identity:") && matches.size == 1 &&
+                    initialUnreadGateSwipeCompleted && lockedUnreadSetFinalized
+                ) {
+                    val repaired = matches.single()
+                    val repairedKey = ChatSessionManagementPolicy.stableSessionKey(repaired)
+                    if (repaired.unreadStatus == ChatUnreadStatus.UNREAD &&
+                        repairedKey.isNotBlank() && repairedKey !in ambiguousSessionIdentityKeys
+                    ) {
+                        lockedUnreadSessionKeys += repairedKey
+                        normalInboxHadUnread = true
+                    }
+                }
+                resolved
             }
         }
         return unresolvedIncompleteUnreadKeys.isNotEmpty()
@@ -449,6 +467,31 @@ internal class PrivateMessagesTraversalTaskExecutor {
         return "unnamed:${row.rowIndex}@${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}"
     }
 
+    /**
+     * A named pending row is not a page failure when the same fresh list contains
+     * independently complete private-row evidence. An anonymous geometry hint cannot
+     * safely survive a viewport move as an identity; retain the existing fail-closed path.
+     * This decision grants no UI lease and never clears the durable pending set.
+     */
+    fun canContinueWithIncompleteUnread(snapshot: ChatPageSnapshot): Boolean {
+        if (unresolvedIncompleteUnreadKeys.isEmpty() ||
+            unresolvedIncompleteUnreadKeys.any { !it.startsWith("identity:") } ||
+            snapshot.pageKind != ChatPageKind.CHAT_LIST || snapshot.chatListExtractionTruncated
+        ) return false
+        val conflicts = ambiguousIdentityKeys(snapshot.chatListCandidates) + ambiguousSessionIdentityKeys
+        return snapshot.chatListCandidates.any { row ->
+            val key = ChatSessionManagementPolicy.stableSessionKey(row)
+            ChatSessionManagementPolicy.isEligible(row) &&
+                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(row, snapshot.chatListViewport) &&
+                row.unreadStatus != ChatUnreadStatus.UNKNOWN && key.isNotBlank() &&
+                key !in conflicts && !isPendingIncompleteRow(row)
+        }
+    }
+
+    private fun isPendingIncompleteRow(row: ChatListCandidateSnapshot): Boolean =
+        incompleteUnreadHint(row) in unresolvedIncompleteUnreadKeys ||
+            anonymousUnreadHint(row) in unresolvedIncompleteUnreadKeys
+
     fun selectNextCandidate(
         candidates: List<ChatListCandidateSnapshot>,
         lockedIdentityKeys: Set<String> = emptySet()
@@ -459,7 +502,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
             candidates
         }
         return ChatSessionManagementPolicy.selectNext(
-            eligibleCandidates,
+            eligibleCandidates.filterNot(::isPendingIncompleteRow),
             attemptedSessionKeys,
             ambiguousSessionIdentityKeys
         )
@@ -517,6 +560,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
             ambiguousSessionIdentityKeys += snapshotAmbiguousKeys
         }
 
+        val incompleteUnreadAllowsIndependentTraversal =
+            incompleteUnreadEvidenceBlocked && canContinueWithIncompleteUnread(snapshot)
+
         // Diagnostic counters are deliberately not part of stableKey(), so audit updates cannot
         // invalidate a pending row or gesture operation.
         val unreadAuditFingerprint =
@@ -563,10 +609,16 @@ internal class PrivateMessagesTraversalTaskExecutor {
         // attempted identities intact until the runtime has independently confirmed
         // a fresh inbox and explicitly calls beginNextPollingRound().
         val nextCandidate = if (initialInboxTopPositioningCompleted && !candidatesEmpty &&
+            (!incompleteUnreadEvidenceBlocked || incompleteUnreadAllowsIndependentTraversal) &&
             (unreadAdmissionDecision == null ||
                 unreadAdmissionDecision == PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED)
         ) {
-            selectNextCandidate(snapshot.chatListCandidates, lockedUnreadSessionKeys)
+            val selectable = if (incompleteUnreadEvidenceBlocked) {
+                snapshot.chatListCandidates.filter {
+                    ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
+                }
+            } else snapshot.chatListCandidates
+            selectNextCandidate(selectable, lockedUnreadSessionKeys)
         } else {
             null
         }
@@ -581,6 +633,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
             snapshotAmbiguousKeys = snapshotAmbiguousKeys,
             newlyAmbiguousKeys = newlyAmbiguousKeys,
             incompleteUnreadEvidenceBlocked = incompleteUnreadEvidenceBlocked,
+            incompleteUnreadAllowsIndependentTraversal = incompleteUnreadAllowsIndependentTraversal,
             unreadAuditChanged = unreadAuditChanged,
             wasWaitingForUnread = wasWaitingForUnread,
             visibleKeys = visibleKeys,
@@ -635,6 +688,14 @@ internal class PrivateMessagesTraversalTaskExecutor {
         if (observeUnreadBlockers(snapshot)) {
             resetUnreadBoundaryObservation()
             return PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
+        }
+        if (canContinueWithIncompleteUnread(snapshot)) {
+            // Pending named evidence is not an empty inbox or a proven read suffix.
+            // Continue only the existing list positioning path; the completion gate
+            // retains the unresolved row until it is independently re-observed.
+            phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
         }
         if (fullListPollingRoundRequired) {
             // A 60-120s wakeup is not a one-viewport poll: scan to the independently

@@ -4729,14 +4729,17 @@ class AiReplyObservationRuntime(
         }
 
         if (listEvaluation.incompleteUnreadEvidenceBlocked) {
-            // Keep the exact original round and persisted opaque anomaly hints. A row
-            // which is visible but not safely selectable cannot be counted as READ,
-            // attempted, or completed. No gesture or chat-header shortcut is allowed.
+            // Preserve the original round and opaque pending hints. A local row fault
+            // cannot authorize a click on that row or count it as READ/attempted/completed.
             onLog("AI 私聊异常会话[INCOMPLETE_UNREAD_RETRYABLE]：" +
                 "unresolved=${privateMessagesTraversalTaskExecutor.unresolvedIncompleteUnreadKeys.size}；" +
                 "cacheWrite=false；保持检查点，待原行新鲜可操作证据确认")
-            recoverRetryablePrivateList("PRIVATE_INCOMPLETE_UNREAD_ROW")
-            return
+            if (!listEvaluation.incompleteUnreadAllowsIndependentTraversal) {
+                onLog("AI 私聊异常会话[LIST_EVIDENCE_INSUFFICIENT]：缺少独立完整行证据或存在无法安全跨视口匹配的匿名行；保持原恢复门禁")
+                recoverRetryablePrivateList("PRIVATE_INCOMPLETE_UNREAD_ROW")
+                return
+            }
+            onLog("AI 私聊异常会话[ROW_SCOPED_BLOCK]：仅隔离待复核会话；其余列表动作仍须通过原有窗口、租约与手势门禁；禁止提前完成本轮")
         }
 
         // The traversal executor owns the snapshot-to-decision sequence. This runtime performs
@@ -5254,6 +5257,15 @@ class AiReplyObservationRuntime(
                     "或仍存在 UNKNOWN 未读；不提前切换到收到招呼入口"
             )
             recoverRetryablePrivateList("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF")
+            return
+        }
+        if (privateMessagesTraversalTaskExecutor.unresolvedIncompleteUnreadKeys.isNotEmpty()) {
+            // A verified page and completed physical scan do not prove that a pending
+            // unread row is resolved. Keep the cursor and retry observations, without
+            // promoting a row-local completion blocker into a new UNKNOWN page.
+            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：存在待复核的不完整未读会话；保留本轮检查点，不切换收到招呼任务")
+            scheduleSessionListStabilityRetry("原异常未读会话尚未重新确认")
             return
         }
         val start = claimAndBeginReceivedGreetingsTask(
@@ -6386,6 +6398,18 @@ class AiReplyObservationRuntime(
             // Recovery will re-acquire all page evidence after the user returns.
             recoverRetryablePrivateList("MESSAGE_LIST_PRE_SCROLL_PAGE_IDENTITY_MISMATCH")
             return
+        }
+        // Row-scoped continuation is not a cached scroll permit. If the independently
+        // complete evidence disappears before dispatch, retain the original fail-closed path.
+        if (privateMessagesTraversalTaskExecutor.unresolvedIncompleteUnreadKeys.isNotEmpty()) {
+            // Preserve new anomaly evidence from the independent pre-scroll read as well.
+            val stillPending = privateMessagesTraversalTaskExecutor.observeIncompleteUnreadEvidence(fresh)
+            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            if (stillPending && !privateMessagesTraversalTaskExecutor.canContinueWithIncompleteUnread(fresh)) {
+                onLog("AI 私聊异常会话[PRE_SCROLL_EVIDENCE_LOST]：滚动前新快照缺少独立完整行证据；不使用旧视口")
+                recoverRetryablePrivateList("PRIVATE_INCOMPLETE_UNREAD_ROW")
+                return
+            }
         }
         val listViewport = fresh.chatListViewport
         if (listViewport == null || listViewport.isEmpty ||

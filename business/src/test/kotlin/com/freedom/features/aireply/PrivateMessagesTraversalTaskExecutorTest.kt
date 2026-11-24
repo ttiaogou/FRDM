@@ -872,6 +872,55 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun p0NamedIncompleteRowIsLocalAndNeverCompletesTheRound() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val damaged = candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD, previewBoundsValid = false)
+        val healthy = candidate(1, "Healthy B", ChatUnreadStatus.UNREAD)
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.lockedUnreadSetFinalized = true
+        executor.lockedUnreadSessionKeys += key(healthy)
+        val result = executor.evaluateListSnapshot(snapshot(damaged, healthy), false, 2)
+        assertTrue(result.incompleteUnreadEvidenceBlocked)
+        assertTrue(result.incompleteUnreadAllowsIndependentTraversal)
+        assertEquals(healthy, result.nextCandidate)
+        assertTrue(executor.attemptedSessionKeys.isEmpty())
+        assertTrue(executor.ambiguousSessionIdentityKeys.isEmpty())
+
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(executor.checkpoint()) }
+        assertTrue(restored.observeIncompleteUnreadEvidence(snapshot(healthy)))
+        assertTrue(restored.canContinueWithIncompleteUnread(snapshot(healthy)))
+        assertTrue(runCatching { restored.beginNextPollingRound() }.isFailure)
+
+        val repaired = candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD)
+        assertFalse(restored.observeIncompleteUnreadEvidence(snapshot(repaired, healthy)))
+        assertTrue(key(repaired) in restored.lockedUnreadSessionKeys)
+        assertEquals(repaired, restored.selectNextCandidate(listOf(repaired), restored.lockedUnreadSessionKeys))
+    }
+
+    @Test
+    fun p0IncompleteRowDoesNotAuthorizeUnsafeOrAnonymousViewport() {
+        val named = candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD, previewBoundsValid = false)
+        val healthy = candidate(1, "Healthy B", ChatUnreadStatus.READ)
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(named)))
+        assertFalse(executor.canContinueWithIncompleteUnread(snapshot(named)))
+        assertFalse(executor.canContinueWithIncompleteUnread(
+            snapshot(named, healthy).copy(chatListExtractionTruncated = true)
+        ))
+        assertFalse(executor.canContinueWithIncompleteUnread(
+            snapshot(named, candidate(1, "Healthy B", ChatUnreadStatus.UNKNOWN))
+        ))
+        val anonymous = candidate(0, "", ChatUnreadStatus.UNREAD)
+        val anonymousExecutor = PrivateMessagesTraversalTaskExecutor()
+        val result = anonymousExecutor.evaluateListSnapshot(snapshot(anonymous, healthy), false, 2)
+        assertTrue(result.incompleteUnreadEvidenceBlocked)
+        assertFalse(result.incompleteUnreadAllowsIndependentTraversal)
+        assertEquals(null, result.nextCandidate)
+    }
+
+    @Test
     fun unnamedIncompleteRowResolvesOnlyWithMatchingFreshGeometryAndReadableEvidence() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val unknownName = candidate(0, "", ChatUnreadStatus.UNKNOWN)
