@@ -1573,7 +1573,6 @@ class AiReplyObservationRuntime(
                 observeReceivedGreetingsPageForUnifiedValidation()
             )
             receivedGreetingsProbeOrdinaryInboxConfirmed =
-                receivedGreetingsOwnershipRecheckPending &&
                     observation.status == ObservationStatus.CONFIRMED_PAGE &&
                     inspection.packageName == targetPackage() &&
                     inspection.pageKind == ChatPageKind.CHAT_LIST &&
