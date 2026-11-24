@@ -571,6 +571,9 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsPageProbePending = false
     /** Keeps private-message ownership suspended until the transition destination is confirmed. */
     private var receivedGreetingsOwnershipRecheckPending = false
+    /** Fresh ordinary-inbox route can overrule a stale dedicated greetings-list result. */
+    private var receivedGreetingsProbeOrdinaryInboxConfirmed = false
+    private var receivedGreetingsProbePrivateRouteWon = false
     /** Short-lived empty accessibility roots are retried without replacing the last confirmed page. */
     private val transientEmptySnapshotRecovery = AiReplySessionTraversalCoordinator(
         RecoveryScheduler.fastRetryDelaysMs()
@@ -1571,29 +1574,19 @@ class AiReplyObservationRuntime(
             )
             when (arrivalStatus) {
                 ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
-                    val ordinaryInboxConfirmed =
-                        observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                    receivedGreetingsProbeOrdinaryInboxConfirmed =
+                        receivedGreetingsOwnershipRecheckPending &&
+                            observation.status == ObservationStatus.CONFIRMED_PAGE &&
                             inspection.packageName == targetPackage() &&
                             inspection.pageKind == ChatPageKind.CHAT_LIST &&
                             matchedRouteId == messageListRecoveryRoute.routeId
-                    if (receivedGreetingsOwnershipRecheckPending && ordinaryInboxConfirmed) {
-                        // The dedicated inbox recognizer can briefly retain its prior list result
-                        // while the fresh unified route already proves the ordinary inbox. The
-                        // route-specific private recovery remains the sole owner of this page.
-                        receivedGreetingsOwnershipRecheckPending = false
-                        onLog(
-                            "页面操作权仲裁[PRIVATE_ROUTE_WINS]：新鲜快照匹配普通消息列表恢复路由；" +
-                                "收到招呼识别结果不覆盖当前页面归属；继续私聊只读恢复"
-                        )
-                        if (startupReadinessCoordinator.resumeAfterPageRecovery()) return
-                    } else {
-                        // Page recognition and ownership enter one task admission transaction.
-                        startReceivedGreetingsTaskFromConfirmedPage(
-                            ConfirmedGreetingsListEvidence.Observed(arrivalStatus)
-                        )
-                        receivedGreetingsOwnershipRecheckPending = false
-                        return
-                    }
+                    receivedGreetingsProbePrivateRouteWon = false
+                    // Page recognition and ownership enter one task admission transaction.
+                    startReceivedGreetingsTaskFromConfirmedPage(
+                        ConfirmedGreetingsListEvidence.Observed(arrivalStatus)
+                    )
+                    if (!receivedGreetingsProbePrivateRouteWon) return
+                    receivedGreetingsProbePrivateRouteWon = false
                 }
                 ReceivedGreetingsPageArrivalStatus.INTERMEDIATE_PAGE,
                 ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING -> {
@@ -5687,6 +5680,17 @@ class AiReplyObservationRuntime(
     }
 
     private fun startReceivedGreetingsTaskFromConfirmedPage(evidence: ConfirmedGreetingsListEvidence) {
+        if (receivedGreetingsProbeOrdinaryInboxConfirmed) {
+            receivedGreetingsProbeOrdinaryInboxConfirmed = false
+            receivedGreetingsOwnershipRecheckPending = false
+            receivedGreetingsProbePrivateRouteWon = true
+            onLog(
+                "页面操作权仲裁[PRIVATE_ROUTE_WINS]：新鲜快照匹配普通消息列表恢复路由；" +
+                    "收到招呼识别结果不覆盖当前页面归属；继续私聊只读恢复"
+            )
+            if (startupReadinessCoordinator.resumeAfterPageRecovery()) return
+            return
+        }
         if (evidence is ConfirmedGreetingsListEvidence.Observed &&
             evidence.arrival != ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
         ) {
