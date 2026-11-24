@@ -85,44 +85,15 @@ class AiReplyDecisionEngine(
             model = result.model,
             outputContentState = if (result.text == null) "NULL" else "BLANK"
         )
-        if (responseMode == ModelResponseMode.PLAIN_TEXT) {
-            // Providers may still return a valid structured decision during the fallback
-            // response mode. Preserve WAIT/DO_NOT_REPLY semantics before trying plain text.
-            val structuredDecision = AiReplyDecisionJsonParser.parseWithDiagnostics(raw, maxDraftChars)
-                .decision
-            if (structuredDecision != null) {
-                return AiReplyEvaluation.Model(
-                    structuredDecision.copy(
-                        provider = result.provider,
-                        model = result.model,
-                        finishReason = result.finishReason,
-                        usage = result.usage
-                    )
-                )
-            }
-            if (responseMode == ModelResponseMode.PROMPT_ONLY_JSON) return AiReplyEvaluation.Execution(
-                AiReplyExecutionStatus.MODEL_OUTPUT_INVALID,
-                provider = result.provider, model = result.model,
-                outputInvalidReason = AiReplyOutputInvalidReason.JSON_SYNTAX_INVALID,
-                outputContentState = "PRESENT"
-            )
-            val draft = AiReplyDecisionJsonParser.extractPlainTextDraft(raw, maxDraftChars)
-                ?.takeIf { AiReplyLocalSafety.isSafeDraft(it) }
-            return if (draft == null) AiReplyEvaluation.Execution(
-                AiReplyExecutionStatus.MODEL_OUTPUT_INVALID,
-                provider = result.provider, model = result.model,
-                outputInvalidReason = AiReplyOutputInvalidReason.JSON_DRAFT_INVALID,
-                outputContentState = "PRESENT"
-            ) else AiReplyEvaluation.Model(
-                AiReplyDecision(AiReplyAction.REPLY, "PLAIN_TEXT_FALLBACK", draft,
-                    provider = result.provider, model = result.model,
-                    finishReason = result.finishReason, usage = result.usage)
-            )
-        }
         val parsed = AiReplyDecisionJsonParser.parseWithDiagnostics(
             raw, maxDraftChars, allowSimple = responseMode == ModelResponseMode.SIMPLE_JSON
         )
-        val decision = parsed.decision ?: return AiReplyEvaluation.Execution(
+        val decision = parsed.decision ?: if (responseMode == ModelResponseMode.PLAIN_TEXT) {
+            AiReplyDecisionJsonParser.extractPlainTextDraft(raw, maxDraftChars)?.let {
+                AiReplyDecision(AiReplyAction.REPLY, "PLAIN_TEXT_FALLBACK", it)
+            }
+        } else null
+        if (decision == null) return AiReplyEvaluation.Execution(
             AiReplyExecutionStatus.MODEL_OUTPUT_INVALID,
             provider = result.provider,
             model = result.model,
@@ -130,8 +101,7 @@ class AiReplyDecisionEngine(
             outputContentState = "PRESENT"
         )
         if (decision.action == AiReplyAction.REPLY &&
-            !decision.draft.isNullOrBlank() &&
-            !AiReplyLocalSafety.isSafeDraft(decision.draft)
+            !AiReplyLocalSafety.isSafeDraft(decision.draft.orEmpty())
         ) {
             return AiReplyEvaluation.Model(
                 AiReplyDecision(AiReplyAction.WAIT, "LOCAL_SAFETY_BLOCK", reasonDetail = "本地安全规则阻止自动发送")

@@ -83,7 +83,7 @@ data class AiModelCallDiagnostics(
             else -> "REDACTED"
         }
         private fun safeContentState(value: String?): String =
-            value?.takeIf { it in setOf("ABSENT", "NULL", "BLANK", "NON_STRING") } ?: "UNKNOWN"
+            value?.takeIf { it in setOf("PRESENT", "ABSENT", "NULL", "BLANK", "NON_STRING") } ?: "UNKNOWN"
         fun safeFinishReason(value: String?): String = when (value) {
             null -> "UNKNOWN"
             "stop", "length", "content_filter", "tool_calls", "function_call" -> value

@@ -265,6 +265,20 @@ class AiModelFailureDiagnosticsTest {
         assertEquals(1, fixture.sendCount)
     }
 
+    @Test fun reasoningOnlyThenStructuredPhoneDraftNeverReachesComposer() {
+        val empty = """{"choices":[{"message":{"content":"","reasoning_content":"$privateText"},"finish_reason":"stop"}]}"""
+        val third = """{"choices":[{"message":{"content":"{\"action\":\"REPLY\",\"reason\":\"READY\",\"reasonDetail\":\"测试\",\"draft\":\"电话13800138000\"}"},"finish_reason":"stop"}]}"""
+        val fixture = EmptyHttpRecoveryFixture(listOf(empty, empty, third))
+        assertTrue(fixture.coordinator.generateVisibleDraft(fixture.batch, fixture.snapshot))
+        fixture.drain()
+        assertEquals(3, fixture.requests.size)
+        assertEquals("", fixture.text)
+        assertEquals(0, fixture.sendCount)
+        assertTrue(fixture.logs.any { it.contains("responseContentState=BLANK") &&
+            it.contains("reasoningContentState=PRESENT") && it.contains("finishReason=stop") })
+        assertFalse(fixture.logs.any { it.contains(privateText) })
+    }
+
     @Test fun realHttp200ThreeEmptyResponsesEndWithoutWritingOrSending() {
         val blank = """{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}"""
         val fixture = EmptyHttpRecoveryFixture(listOf(blank, blank, blank))
