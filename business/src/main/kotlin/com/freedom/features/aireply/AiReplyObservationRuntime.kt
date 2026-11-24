@@ -205,6 +205,7 @@ class AiReplyObservationRuntime(
         private const val RECEIVED_GREETINGS_RECOVERY_ROUTE_ID = "AI_REPLY_RECEIVED_GREETINGS_RECOVERY"
         private const val MESSAGE_LIST_RECOVERY_ROUTE_ID = "AI_REPLY_MESSAGE_LIST_RECOVERY"
         private const val CROSS_TASK_GREETING_HANDOFF_GATE = "AI_REPLY_PRIVATE_TO_GREETINGS_HANDOFF"
+        private const val GREETINGS_RETURN_RECOVERY_REASON = "GREETING_COMPLETION_RETURN"
         private val PAGE_CHANGE_RECHECK_EVENT_TYPES = setOf(
             AccessibilityEventType.WINDOW_STATE_CHANGED,
             AccessibilityEventType.WINDOWS_CHANGED,
@@ -1073,6 +1074,10 @@ class AiReplyObservationRuntime(
         pageInspectionTask = null
         if (!isAiReplyActive()) return
         if (!chatPagePort.supportsTargetPackage(targetPackage())) {
+            if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
+                holdGreetingsCompletionReturn("EXTERNAL_PAGE")
+                return
+            }
             if (recoveryContext.pending) {
                 onLog("统一页面恢复[EXTERNAL_PAGE_WAIT]：当前前台不是目标应用；${EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS}ms后继续观察")
                 scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
@@ -1085,7 +1090,7 @@ class AiReplyObservationRuntime(
             return
         }
         if (sessionRunStarted && receivedGreetingsTaskActive &&
-            !ownsTask(RECEIVED_GREETINGS_TASK_ID)
+            !ownsTask(RECEIVED_GREETINGS_TASK_ID) && !awaitingNormalInboxAfterGreetingsReturn
         ) {
             sessionManagerState = SessionManagerState.PAUSED
             onLog("收到的招呼任务观察被阻止：当前任务已不持有 UI 操作权；等待安全恢复")
@@ -1104,6 +1109,10 @@ class AiReplyObservationRuntime(
         )
         diagnosePendingIdentityReturn(observationDecision, inspection)
         if (observationDecision.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) {
+            if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
+                holdGreetingsCompletionReturn("EMPTY_SNAPSHOT")
+                return
+            }
             if (recoveryContext.pending) {
                 recoveryContext.invalidateFingerprint()
                 if (recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
@@ -1330,6 +1339,9 @@ class AiReplyObservationRuntime(
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionStarted)
         // A user touch breaks the continuity of the private-to-greetings two-snapshot handoff.
         pageRecoveryVerificationGate.reset(CROSS_TASK_GREETING_HANDOFF_GATE)
+        if (awaitingNormalInboxAfterGreetingsReturn) {
+            holdGreetingsCompletionReturn("USER_INTERACTION")
+        }
         receivedGreetingsQuietGeneration++
         receivedGreetingsQuietTask?.cancel()
         receivedGreetingsQuietTask = null
@@ -1372,6 +1384,38 @@ class AiReplyObservationRuntime(
                 pageFingerprint, setOf(PRIVATE_MESSAGES_TASK_ID, RECEIVED_GREETINGS_TASK_ID)
             )?.routeId
         } else null
+
+        if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
+            if (isGreetingsCompletionReturnRecovery()) {
+                recoverGreetingsCompletionReturn(observation, inspection, matchedRouteId)
+                return
+            }
+            if (!recoveryContext.pending) {
+                val confirmedInbox = observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                    inspection.packageName == targetPackage() &&
+                    matchedRouteId == messageListRecoveryRoute.routeId &&
+                    inspection.pageKind == ChatPageKind.CHAT_LIST
+                val verifiedSource = observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                    inspection.packageName == targetPackage() &&
+                    inspection.pageKind == ChatPageKind.NON_CHAT &&
+                    completionReturnSourceFingerprint() != null
+                if ((!confirmedInbox && !verifiedSource) || !ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
+                    // A test/legacy adapter may not expose the optional source proof during
+                    // ordinary traversal. A known unchanged greetings route still uses its
+                    // own independent BACK gate, but an unknown/foreign route must recover.
+                    val knownList = observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                        inspection.packageName == targetPackage() &&
+                        inspection.pageKind == ChatPageKind.NON_CHAT &&
+                        (matchedRouteId == receivedGreetingsRecoveryRoute.routeId ||
+                            (previous?.pageKind == ChatPageKind.NON_CHAT &&
+                                !pageIdentityChanged(previous, inspection)))
+                    if (!knownList || !ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
+                        holdGreetingsCompletionReturn("UNVERIFIED_PAGE")
+                        return
+                    }
+                }
+            }
+        }
 
         // A completed greetings task may reveal the original inbox again. Re-arm its
         // saved private checkpoint BEFORE normal inbox dispatch can claim a lease or scroll.
@@ -1499,6 +1543,11 @@ class AiReplyObservationRuntime(
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
         if ((shouldCreateRouteRecovery || unmatchedReturnToOwnedRoute) && activeTaskId != null) {
+            if (awaitingNormalInboxAfterGreetingsReturn && activeTaskId == RECEIVED_GREETINGS_TASK_ID) {
+                holdGreetingsCompletionReturn("PAGE_ROUTE_CHANGED")
+                unmatchedNavigationObservationPending = false
+                return
+            }
             requestUnifiedPauseAndCheckpoint(activeTaskId!!, "PAGE_ROUTE_CHANGED")
             unmatchedNavigationObservationPending = false
         } else if (unmatchedNavigationObservationPending &&
@@ -2947,7 +2996,7 @@ class AiReplyObservationRuntime(
         sessionTransitionTask = null
         pageInspectionTask?.cancel()
         pageInspectionTask = null
-        if (taskId == RECEIVED_GREETINGS_TASK_ID) {
+        if (taskId == RECEIVED_GREETINGS_TASK_ID && !isGreetingsCompletionReturnRecovery()) {
             receivedGreetingsTaskFlow.pauseForBusinessSwitch()
         }
         sessionManagerState = SessionManagerState.PAUSED
@@ -3322,6 +3371,9 @@ class AiReplyObservationRuntime(
             // A window transition during an outstanding list gesture is not proof of success.
             // Do not run its old callback or replay its old coordinates after the window changes.
             recoverTransientPrivateGesture("GESTURE_WINDOW_CHANGED")
+        }
+        if (windowTransition && awaitingNormalInboxAfterGreetingsReturn) {
+            invalidateGreetingsCompletionReturnEvidence()
         }
         if (windowTransition && recoveryContext.pending) {
             // A window transition interrupts recovery evidence even before the next page read.
@@ -4986,6 +5038,106 @@ class AiReplyObservationRuntime(
      * Traversal completion is a pending return, not a stopped task. Reuse the existing
      * lease-gated adapter BACK path; a submission result is not inbox confirmation.
      */
+    private fun completionReturnSourceFingerprint(): String? =
+        runCatching { chatPagePort.receivedGreetingsCompletionReturnSourceFingerprint() }
+            .getOrNull()?.takeIf { it.isNotBlank() }
+
+    private fun invalidateGreetingsCompletionReturnEvidence() {
+        runCatching { chatPagePort.invalidateReceivedGreetingsCompletionReturnEvidence() }
+    }
+
+    private fun isGreetingsCompletionReturnRecovery(): Boolean =
+        recoveryContext.pending && recoveryContext.sourceTaskId == RECEIVED_GREETINGS_TASK_ID &&
+            recoveryContext.reason?.startsWith(GREETINGS_RETURN_RECOVERY_REASON) == true
+
+    private fun holdGreetingsCompletionReturn(reason: String) {
+        if (!sessionRunStarted || !awaitingNormalInboxAfterGreetingsReturn) return
+        invalidateGreetingsCompletionReturnEvidence()
+        if (!recoveryContext.pending) {
+            requestUnifiedPauseAndCheckpoint(RECEIVED_GREETINGS_TASK_ID, "$GREETINGS_RETURN_RECOVERY_REASON:$reason")
+        }
+        recoveryContext.invalidateFingerprint()
+        sessionManagerState = SessionManagerState.PAUSED
+        onLog("收到的招呼返回恢复[HOLD]：reason=$reason；保留完成状态及检查点，仅只读观察")
+        scheduleReceivedGreetingsRecoveryRetry("返回事务等待新鲜页面证据：$reason")
+    }
+
+    /**
+     * A return recovery is still the original greetings task, not a new list traversal.
+     * Its allowed observations are the independently proven return source or final inbox.
+     * Reuse the shared recovery context, reducer, scheduler and Android/lease gates.
+     */
+    private fun recoverGreetingsCompletionReturn(
+        observation: ObservationResult,
+        inspection: ChatPageSnapshot,
+        matchedRouteId: String?
+    ) {
+        if (recoveryContext.runGeneration != currentRunGeneration() || userInteractionActive ||
+            isSendConfirmationPending() || isConversationDraftPending() ||
+            observation.status != ObservationStatus.CONFIRMED_PAGE ||
+            inspection.packageName != targetPackage()
+        ) {
+            holdGreetingsCompletionReturn("RECOVERY_NOT_READY")
+            return
+        }
+        val fingerprint = when {
+            inspection.pageKind == ChatPageKind.CHAT_LIST &&
+                matchedRouteId == messageListRecoveryRoute.routeId ->
+                inspection.messageTabPositionKey()?.let { "inbox:$it" }
+            inspection.pageKind == ChatPageKind.NON_CHAT ->
+                completionReturnSourceFingerprint()?.let { "source:$it" }
+            else -> null
+        }
+        if (fingerprint == null) {
+            holdGreetingsCompletionReturn("RECOVERY_SOURCE_UNVERIFIED")
+            return
+        }
+        if (!ensureAndroidRecoveryReady(inspection, "GREETINGS_COMPLETION_RETURN")) {
+            invalidateGreetingsCompletionReturnEvidence()
+            return
+        }
+        val route = receivedGreetingsRecoveryRoute.routeId
+        if (!recoveryContext.observeTarget(route, fingerprint)) {
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+            recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+            onLog("收到的招呼返回恢复[VERIFYING]：第1/2次新鲜快照；禁止BACK")
+            scheduleFullInspectionAfter(350L)
+            return
+        }
+        val active = taskOwnership.activeTaskId()
+        if ((active != null && active != RECEIVED_GREETINGS_TASK_ID) ||
+            !ensureAndroidRecoveryReady(inspection, "GREETINGS_RETURN_BEFORE_LEASE") ||
+            !claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, "招呼完成返回双快照已确认") ||
+            !ensureAndroidRecoveryReady(inspection, "GREETINGS_RETURN_BEFORE_RESUME")
+        ) {
+            holdGreetingsCompletionReturn("RECOVERY_LEASE_NOT_READY")
+            return
+        }
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
+        if (recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted) !=
+            com.freedom.features.recovery.RecoveryTransactionState.ACTIVE
+        ) {
+            holdGreetingsCompletionReturn("RECOVERY_ACK_PENDING")
+            return
+        }
+        recoveryContext.markUiOwnershipTransferred()
+        recoveryContext.clear()
+        recoveryTransaction.reset()
+        receivedGreetingsCheckpointForUnified = null
+        receivedGreetingsRecoveryVerificationPending = false
+        receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+        receivedGreetingsRecoveryRetryAttempt = 0
+        pendingNavigationSourceResult = null
+        unmatchedNavigationObservationPending = false
+        lastPageInspection = inspection
+        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+        onLog("收到的招呼返回恢复[RESUMED]：Android READY、双快照、原任务租约已确认；下一次新鲜观察继续返回或确认到达")
+        scheduleFullInspectionAfter(0L)
+    }
+
     private fun requestCompletedGreetingsReturn(
         observation: ObservationResult,
         inspection: ChatPageSnapshot
@@ -5002,7 +5154,7 @@ class AiReplyObservationRuntime(
             inspection.pageKind == ChatPageKind.CHAT_LIST ||
             inspection.pageKind == ChatPageKind.UNKNOWN
         ) {
-            scheduleReceivedGreetingsRecoveryRetry("完成后返回尚未通过新鲜页面确认；不执行盲目导航")
+            holdGreetingsCompletionReturn("RETURN_PAGE_UNVERIFIED")
             return
         }
         onLog("收到的招呼任务[RETURN_PENDING]：列表遍历完成；保留任务及UI操作权；进入自动返回流程")
@@ -5014,11 +5166,14 @@ class AiReplyObservationRuntime(
             }
             ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT,
             ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION,
-            ReceivedGreetingsBackResult.SOURCE_UNVERIFIED,
-            ReceivedGreetingsBackResult.REJECTED,
-            ReceivedGreetingsBackResult.OWNERSHIP_REJECTED -> {
+            ReceivedGreetingsBackResult.REJECTED -> {
                 onLog("收到的招呼任务[BACK_WAIT]：result=$result；未新增返回提交；保留任务现场")
                 scheduleReceivedGreetingsRecoveryRetry("完成后的安全返回尚未确认：$result")
+            }
+            ReceivedGreetingsBackResult.SOURCE_UNVERIFIED,
+            ReceivedGreetingsBackResult.OWNERSHIP_REJECTED -> {
+                onLog("收到的招呼任务[BACK_WAIT]：result=$result；未新增返回提交；保留任务现场")
+                holdGreetingsCompletionReturn(result.name)
             }
         }
     }

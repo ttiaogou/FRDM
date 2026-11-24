@@ -951,7 +951,17 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, port.receivedGreetingsConfirmedReturns)
         assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
 
+        // An empty/UNKNOWN observation during completion must preserve the return lifecycle,
+        // not re-enter the list traversal or strand the original private checkpoint.
+        port.failNextInspection = true
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilLog(scheduler, logs, "收到的招呼返回恢复[HOLD]")
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+
         port.receivedGreetingsCheckpointFingerprint = null
+        port.provideMessageTabPositionEvidence = true
         port.page = ChatPageSnapshot(
             packageName = "com.immomo.momo",
             activityClass = "com.immomo.momo.maintab.MaintabActivity",
@@ -976,6 +986,8 @@ class AiReplyObservationRuntimeTest {
             windowGeneration = 20L
         )
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilLog(scheduler, logs, "收到的招呼返回恢复[RESUMED]")
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
         runUntilLog(scheduler, logs, "跨任务恢复[PRIVATE_CHECKPOINT_REARMED]")
         assertEquals(1, port.receivedGreetingsConfirmedReturns)
         assertEquals(null, ownership.activeTaskId())
@@ -6795,6 +6807,11 @@ class AiReplyObservationRuntimeTest {
                 snapshot.pageKind == ChatPageKind.NON_CHAT
         override fun receivedGreetingsRecoveryFingerprint(): String? =
             receivedGreetingsCheckpointFingerprint
+        override fun receivedGreetingsCompletionReturnSourceFingerprint(): String? =
+            receivedGreetingsCheckpointFingerprint ?: page.takeIf {
+                it.pageKind == ChatPageKind.NON_CHAT &&
+                    it.activityClass.contains("NewSayHi")
+            }?.let { "test-greeting-source:${it.windowGeneration}" }
         override fun synchronizeReceivedGreetingsRecoveryConfirmation(): Boolean =
             receivedGreetingsRecoverySyncAccepted
         override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult {

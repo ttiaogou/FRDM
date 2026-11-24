@@ -322,6 +322,7 @@ internal class MomoSocialAdapter(
     @Volatile private var sayHiGestureInFlight: Boolean = false
     private enum class CompletionBackStage { NONE, LIST_SUBMITTED, CARD_SUBMITTED }
     @Volatile private var completionBackStage = CompletionBackStage.NONE
+    private val completionBackRetryGate = MomoCompletionBackRetryGate(SAYHI_DETAIL_BACK_TIMEOUT_MS)
     @Volatile private var receivedGreetingsEntryTapAtMs: Long = 0L
     @Volatile private var sayHiCardListTapAtMs: Long = 0L
     @Volatile private var lastSayHiCardListTapAtMs: Long = 0L
@@ -1063,6 +1064,7 @@ internal class MomoSocialAdapter(
         }
 
         completionBackStage = CompletionBackStage.NONE
+        completionBackRetryGate.reset()
         resetReceivedGreetingsEntrySearch()
         sayHiAutonomousBrowseController.reset()
         clearSayHiSelectedGreeting()
@@ -1104,6 +1106,7 @@ internal class MomoSocialAdapter(
 
     override fun beginReceivedGreetingsNavigationTask() {
         completionBackStage = CompletionBackStage.NONE
+        completionBackRetryGate.reset()
         resetReceivedGreetingsEntrySearch()
     }
 
@@ -3963,9 +3966,21 @@ internal class MomoSocialAdapter(
         return inspectSayHiCardListTapTarget() is SayHiCardListTapInspection.Ready
     }
 
+    override fun receivedGreetingsCompletionReturnSourceFingerprint(): String? {
+        receivedGreetingsListWindowIdentity()?.let { return it }
+        if (completionBackStage == CompletionBackStage.NONE) return null
+        val card = inspectSayHiCardListTapTarget() as? SayHiCardListTapInspection.Ready ?: return null
+        return MomoWindowPageFingerprint.windowIdentity(card.tree.window, targetPackage, "RECEIVED_GREETINGS_CARD")
+    }
+
+    override fun invalidateReceivedGreetingsCompletionReturnEvidence() {
+        completionBackRetryGate.invalidateSamples()
+    }
+
     @Synchronized
     override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult {
         if (sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight) {
+            completionBackRetryGate.invalidateSamples()
             onLog("收到的招呼任务返回[GESTURE_IN_FLIGHT]：等待已提交手势终态；未提交BACK")
             return ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT
         }
@@ -3980,9 +3995,6 @@ internal class MomoSocialAdapter(
         val nextStage: CompletionBackStage
         val sourceWindow: WindowRef
         if (listWindow != null) {
-            if (completionBackStage != CompletionBackStage.NONE) {
-                return ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
-            }
             if (!sayHiNavigationFlowController.isReceivedListConfirmed() ||
                 !sayHiAutonomousBrowseController.isFinished() || sayHiTraversalState.hasDeferredRows ||
                 sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE
@@ -3997,9 +4009,6 @@ internal class MomoSocialAdapter(
             }
             val card = inspectSayHiCardListTapTarget() as? SayHiCardListTapInspection.Ready
                 ?: return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
-            if (completionBackStage == CompletionBackStage.CARD_SUBMITTED) {
-                return ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
-            }
             nextStage = CompletionBackStage.CARD_SUBMITTED
             sourceWindow = card.tree.window
         }
@@ -4011,12 +4020,25 @@ internal class MomoSocialAdapter(
         if (sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight) {
             return ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT
         }
+        val sourceKey = MomoWindowPageFingerprint.windowIdentity(
+            sourceWindow, targetPackage, nextStage.name
+        ) ?: return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+        // A different verified forward step (list -> card) is not a retry. A replay
+        // of the same step or a return to the list requires the original timeout
+        // and two fresh, spaced observations of that exact source.
+        val forwardCardStep = completionBackStage == CompletionBackStage.LIST_SUBMITTED &&
+            nextStage == CompletionBackStage.CARD_SUBMITTED
+        if (completionBackStage != CompletionBackStage.NONE && !forwardCardStep &&
+            !completionBackRetryGate.mayRetry(sourceKey, SystemClock.uptimeMillis())
+        ) return ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
         val accepted = accessibilityGateway.performGlobalAction(GlobalAccessibilityAction.BACK)
         if (!accepted) {
+            completionBackRetryGate.invalidateSamples()
             onLog("收到的招呼任务返回[REJECTED]：系统未受理BACK；保留遍历检查点")
             return ReceivedGreetingsBackResult.REJECTED
         }
         completionBackStage = nextStage
+        completionBackRetryGate.onSubmitted(SystemClock.uptimeMillis())
         onLog("收到的招呼任务返回[BACK_SUBMITTED]：stage=$nextStage；保留遍历检查点，等待独立页面确认")
         return ReceivedGreetingsBackResult.BACK_SUBMITTED
     }
@@ -4058,6 +4080,7 @@ internal class MomoSocialAdapter(
         sayHiStableCandidateTarget = null
         sayHiStableCandidateWindow = null
         completionBackStage = CompletionBackStage.NONE
+        completionBackRetryGate.reset()
         onLog("收到的招呼任务返回[INBOX_CONFIRMED]：普通消息列表已复核；退休本轮遍历状态")
         return true
     }
@@ -6062,6 +6085,7 @@ internal class MomoSocialAdapter(
     private fun resetReceivedGreetingsRunState(reason: String) {
         val newGeneration = sayHiRunGenerationGuard.invalidatePreviousRun()
         completionBackStage = CompletionBackStage.NONE
+        completionBackRetryGate.reset()
         val previousStage = sayHiReadOnlyStage.name
         val previousGestureInFlight = sayHiGestureInFlight
         val previousEntrySearchInFlight = receivedGreetingsEntrySearchGestureInFlight

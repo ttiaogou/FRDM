@@ -686,6 +686,12 @@ interface ChatPagePort {
     /** Read-only proof of the intermediate greeting card reached by a submitted list BACK. */
     fun isReceivedGreetingsCompletionReturnIntermediate(): Boolean = false
 
+    /** Current verified list/card source for recovery of the completed-list BACK transaction. */
+    fun receivedGreetingsCompletionReturnSourceFingerprint(): String? = null
+
+    /** Breaks stale retry samples on a missing window or user interaction; retains submission state. */
+    fun invalidateReceivedGreetingsCompletionReturnEvidence() {}
+
     /** Finalizes adapter traversal state only after the business layer confirms inbox arrival. */
     fun confirmReceivedGreetingsCompletionReturn(): Boolean = true
 }
