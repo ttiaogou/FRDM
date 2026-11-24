@@ -145,7 +145,7 @@ class AiReplyDraftCoordinator(
     /** Requests the existing read-only page observer after a correlated platform completion. */
     private val onSendConfirmationObservationRequested: () -> Unit = {},
     /** Greeting flow can provide the last verified message observation immediately before send. */
-    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null },
+    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
     /** Private-message flow uses the same pre-send diff baseline contract. */
     private val capturePrivatePreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
 ) {
@@ -410,6 +410,22 @@ class AiReplyDraftCoordinator(
         replyAwaitingConfirmedSend = false
         sendConfirmationChecks = 0
         onLog("收到招呼未确认发送[MANUAL_RETURN_DEFERRED]：保留SENT_UNCONFIRMED记录；释放当前聊天页，不重发")
+        true
+    }
+
+    /** Same handoff for the ordinary private-message traversal. */
+    fun deferPrivateUnconfirmedSendForManualReturn(): Boolean = synchronized(lock) {
+        if (activeTaskId != AiDecisionTaskIds.PRIVATE_MESSAGES ||
+            pendingSendConfirmation == null
+        ) return false
+        pendingSendConfirmation = null
+        pendingNextMessageSegment = null
+        pendingSendControl = null
+        pending.set(false)
+        awaitingUserSend.set(false)
+        replyAwaitingConfirmedSend = false
+        sendConfirmationChecks = 0
+        onLog("私聊未确认发送[MANUAL_RETURN_DEFERRED]：保留SENT_UNCONFIRMED记录；释放当前聊天页，不重发")
         true
     }
 

@@ -97,6 +97,8 @@ class AiReplyObservationRuntime(
     private val isSendConfirmationPending: () -> Boolean = { false },
     /** Releases only a greeting chat hold after a user-returned list; durable proof remains. */
     private val deferGreetingSendForManualReturn: () -> Boolean = { false },
+    /** Releases only a private-chat send hold after a user-returned inbox; durable proof remains. */
+    private val deferPrivateSendForManualReturn: () -> Boolean = { false },
     /** A missing send button after verified draft input is a recoverable wait, not a deadline failure. */
     private val isSendControlRecoveryPending: () -> Boolean = { false },
     /** Current-window draft callback; true reserves the page for generation/review. */
@@ -2425,6 +2427,20 @@ class AiReplyObservationRuntime(
                                 onLog("收到招呼手动返回[CONTINUE_LIST]：未确认发送已落盘；当前行延期，继续处理其他招呼")
                             } else {
                                 onLog("收到招呼手动返回[DEFER_REJECTED]：未确认发送仍由原聊天事务持有；保持只读恢复")
+                                return
+                            }
+                        }
+                        if (!receivedGreetingsTaskActive && isSendConfirmationPending()) {
+                            if (deferPrivateSendForManualReturn()) {
+                                privateMessagesTraversalTaskExecutor.clearCurrentSession()
+                                currentSessionSendConfirmed = false
+                                privateMessagesCheckpointRepository?.save(
+                                    privateMessagesTraversalTaskExecutor.checkpoint()
+                                )
+                                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                                onLog("私聊手动返回[CONTINUE_LIST]：未确认发送已落盘；当前会话延期，继续处理其他会话")
+                            } else {
+                                onLog("私聊手动返回[DEFER_REJECTED]：未确认发送仍由原聊天事务持有；保持只读恢复")
                                 return
                             }
                         }

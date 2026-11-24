@@ -638,6 +638,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             deferGreetingSendForManualReturn = {
                 aiReplyDraftCoordinator.deferUnconfirmedSendForManualReturn()
             },
+            deferPrivateSendForManualReturn = {
+                aiReplyDraftCoordinator.deferPrivateUnconfirmedSendForManualReturn()
+            },
             isSendControlRecoveryPending = { aiReplyDraftCoordinator.isSendControlRecoveryPending },
             onDraftRuntimeReset = {
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {
