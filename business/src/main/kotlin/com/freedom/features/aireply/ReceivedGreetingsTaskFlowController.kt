@@ -140,6 +140,9 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun deferAfterModelFailure(): Boolean = executor.deferAfterModelFailure()
 
+    fun deferReceivedGreetingAfterManualReturn(): Boolean =
+        executor.deferReceivedGreetingAfterManualReturn()
+
     fun markTraversalCompleted() = lifecycle.markTraversalCompleted()
 
     fun markReturnRequested() = lifecycle.markReturnRequested()

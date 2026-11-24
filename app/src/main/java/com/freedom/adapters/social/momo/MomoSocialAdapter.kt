@@ -3864,6 +3864,19 @@ internal class MomoSocialAdapter(
         return completeReceivedGreetingDetailInspectionInternal(false, "DRAFT_MODEL_FAILURE")
     }
 
+    override fun deferReceivedGreetingAfterManualReturn(): Boolean {
+        val selected = sayHiSelectedGreeting ?: return false
+        val priorSend = runCatching { sayHiSendReturnJournal.findByRow(selected.rowKey) }.getOrNull()
+        if (priorSend?.phase == ReceivedGreetingsSendReturnPhase.SEND_CONFIRMED) return false
+        deferSayHiRow(selected.rowKey, "MANUAL_RETURN_BEFORE_SEND_CONFIRMATION")
+        sayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
+        sayHiRowTapFeedbackState = SayHiRowTapFeedbackState.NOT_DISPATCHED
+        pendingSayHiRowTapTarget = null
+        sayHiSelectedGreeting = null
+        onLog("收到招呼手动返回[ROW_DEFERRED]：未确认发送记录保留；当前招呼行延期，不计入成功")
+        return true
+    }
+
     private fun completeReceivedGreetingDetailInspectionInternal(
         success: Boolean, failureReason: String
     ): Boolean {

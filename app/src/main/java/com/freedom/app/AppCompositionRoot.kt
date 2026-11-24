@@ -635,6 +635,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
             isSendConfirmationPending = { aiReplyDraftCoordinator.isSendConfirmationPending },
+            deferGreetingSendForManualReturn = {
+                aiReplyDraftCoordinator.deferUnconfirmedSendForManualReturn()
+            },
             isSendControlRecoveryPending = { aiReplyDraftCoordinator.isSendControlRecoveryPending },
             onDraftRuntimeReset = {
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {

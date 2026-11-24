@@ -145,7 +145,7 @@ class AiReplyDraftCoordinator(
     /** Requests the existing read-only page observer after a correlated platform completion. */
     private val onSendConfirmationObservationRequested: () -> Unit = {},
     /** Greeting flow can provide the last verified message observation immediately before send. */
-    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null },
+    private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
     /** Private-message flow uses the same pre-send diff baseline contract. */
     private val capturePrivatePreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
 ) {
@@ -391,6 +391,26 @@ class AiReplyDraftCoordinator(
     val isConversationReturnBlocked: Boolean get() = synchronized(lock) {
         pending.get() || awaitingUserSend.get() ||
             pendingSendConfirmation != null || replyAwaitingConfirmedSend
+    }
+
+    /**
+     * Releases the in-memory chat hold after the user manually returned to the greeting list.
+     * The durable SENT_UNCONFIRMED segment is deliberately retained for read-only recovery on
+     * the next visit to the same conversation; this method never retries or marks it successful.
+     */
+    fun deferUnconfirmedSendForManualReturn(): Boolean = synchronized(lock) {
+        if (activeTaskId != AiDecisionTaskIds.RECEIVED_GREETINGS ||
+            pendingSendConfirmation == null
+        ) return false
+        pendingSendConfirmation = null
+        pendingNextMessageSegment = null
+        pendingSendControl = null
+        pending.set(false)
+        awaitingUserSend.set(false)
+        replyAwaitingConfirmedSend = false
+        sendConfirmationChecks = 0
+        onLog("收到招呼未确认发送[MANUAL_RETURN_DEFERRED]：保留SENT_UNCONFIRMED记录；释放当前聊天页，不重发")
+        true
     }
 
     /** AI 回复运行环境停止或重建时，使迟到的回调失效。 */

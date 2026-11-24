@@ -95,6 +95,8 @@ class AiReplyObservationRuntime(
     private val isConversationDraftPending: () -> Boolean = { false },
     /** Read-only proof that an already submitted send still needs confirmation. */
     private val isSendConfirmationPending: () -> Boolean = { false },
+    /** Releases only a greeting chat hold after a user-returned list; durable proof remains. */
+    private val deferGreetingSendForManualReturn: () -> Boolean = { false },
     /** A missing send button after verified draft input is a recoverable wait, not a deadline failure. */
     private val isSendControlRecoveryPending: () -> Boolean = { false },
     /** Current-window draft callback; true reserves the page for generation/review. */
@@ -2406,7 +2408,28 @@ class AiReplyObservationRuntime(
                             }
                         }
                     }
-                    sessionRunStarted -> handleSessionListPage(inspection)
+                    sessionRunStarted -> {
+                        if (receivedGreetingsTaskActive && isSendConfirmationPending()) {
+                            val durableHoldReleased = deferGreetingSendForManualReturn()
+                            val rowDeferred = durableHoldReleased && runCatching {
+                                receivedGreetingsTaskFlow.deferReceivedGreetingAfterManualReturn()
+                            }.getOrDefault(false)
+                            if (rowDeferred) {
+                                currentSessionKey = null
+                                currentSessionWindowKey = null
+                                currentSessionName = null
+                                currentSessionCandidate = null
+                                currentSessionReadCaptured = false
+                                messageReadCoordinator.invalidatePending()
+                                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                                onLog("收到招呼手动返回[CONTINUE_LIST]：未确认发送已落盘；当前行延期，继续处理其他招呼")
+                            } else {
+                                onLog("收到招呼手动返回[DEFER_REJECTED]：未确认发送仍由原聊天事务持有；保持只读恢复")
+                                return
+                            }
+                        }
+                        handleSessionListPage(inspection)
+                    }
                 }
             }
             ChatPageKind.CHAT_DETAIL_CANDIDATE -> {

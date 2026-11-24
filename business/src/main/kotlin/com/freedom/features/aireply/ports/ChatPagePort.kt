@@ -679,6 +679,9 @@ interface ChatPagePort {
      */
     fun deferReceivedGreetingAfterModelFailure(): Boolean = false
 
+    /** Records a manually returned, still-unconfirmed greeting row and releases detail state. */
+    fun deferReceivedGreetingAfterManualReturn(): Boolean = false
+
     /** One lease-gated completed-list BACK step from independently verified source evidence. */
     fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult =
         ReceivedGreetingsBackResult.REJECTED
