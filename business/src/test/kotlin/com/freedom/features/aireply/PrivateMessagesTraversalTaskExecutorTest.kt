@@ -552,6 +552,8 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertEquals(PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED,
             executor.evaluateListSnapshot(suffix, false, 2).unreadAdmissionDecision)
         assertTrue(executor.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        executor.pendingScrollBaseline = executor.visibleSessionKeys(suffix)
+        executor.pendingScrollToTop = true
         assertEquals(known, executor.evaluateListSnapshot(snapshot(known, edge), false, 2).nextCandidate)
     }
 

@@ -846,7 +846,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         // Keep identifiable badge rows with unusable unread evidence in the same
         // durable row ledger as structurally incomplete rows. A fresh independent
         // unread target permits scanning but never authorizes clicking the unknown.
-        if (!normalInboxUnreadStateUnknown && currentUnknown.isNotEmpty() &&
+        if (unresolvedUnknownUnreadKeys.isEmpty() && legacyUnknownUnreadViewportKeys == null &&
+            currentUnknown.isNotEmpty() &&
             !snapshot.chatListExtractionTruncated && snapshot.chatListViewport != null &&
             currentUnknown.all { it.statusNewNodePresent && it.hasReadableName &&
                 ChatSessionManagementPolicy.stableSessionKey(it) !in ambiguousSessionIdentityKeys } &&
@@ -855,6 +856,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
                 ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport) &&
                 ChatSessionManagementPolicy.stableSessionKey(it) !in ambiguousSessionIdentityKeys })
         ) {
+            normalInboxUnreadStateUnknown = false
             unresolvedIncompleteUnreadKeys += currentUnknown.map(::incompleteUnreadHint)
             return false
         }
