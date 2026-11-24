@@ -146,6 +146,8 @@ class AiReplyDraftCoordinator(
     private val onSendConfirmationObservationRequested: () -> Unit = {},
     /** Greeting flow can provide the last verified message observation immediately before send. */
     private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
+    /** Private-message flow uses the same pre-send diff baseline contract. */
+    private val capturePrivatePreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
 ) {
     private val pending = AtomicBoolean(false)
     private val awaitingUserSend = AtomicBoolean(false)
@@ -1072,6 +1074,11 @@ class AiReplyDraftCoordinator(
                 synchronized(lock) { activeExistingOutgoingKeys = keys.toSet() }
                 onLog("收到招呼发送前快照[BASELINE_CAPTURED]：己方消息=${keys.size}；发送前重新建立差分基线")
             }
+        } else if (synchronized(lock) { activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES }) {
+            capturePrivatePreSendOutgoingKeys(target)?.let { keys ->
+                synchronized(lock) { activeExistingOutgoingKeys = keys.toSet() }
+                onLog("私聊发送前快照[BASELINE_CAPTURED]：己方消息=${keys.size}；发送前重新建立差分基线")
+            }
         }
         updateSegmentStatus(requestGeneration, segmentIndex, ReplySegmentTaskStatus.PENDING_SEND)
         if (segmentIndex == 0) updateTaskStatus(ReplyTaskStatus.PENDING_SEND, requestGeneration)
@@ -1632,14 +1639,15 @@ class AiReplyDraftCoordinator(
             onLog("AI 发送结果核验：WAITING；当前批次不属于发送后的稳定聊天观察；检查次数=$checks")
             return SendConfirmationResult.WAITING
         }
-        val greetingTransaction = synchronized(lock) {
-            activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS
+        val diffTransaction = synchronized(lock) {
+            activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS ||
+                activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES
         }
         val eligibleMatches = batch.messages.filter { message ->
             message.direction == ChatMessageDirection.OUTGOING &&
                 messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys &&
                 fingerprint(messageKey(message.stableLogicalMessageId, message.effectiveContentRevision)) !in pending.previousOutgoingKeyHashes
-                && (greetingTransaction || (
+                && (diffTransaction || (
                     message.contentQuality == MessageContentQuality.VERIFIED &&
                     fingerprint(message.content.orEmpty()) == pending.segmentContentHash
                 ))

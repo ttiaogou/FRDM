@@ -482,6 +482,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             captureGreetingPreSendOutgoingKeys = { target ->
                 aiReplyObservationRuntime.captureGreetingPreSendOutgoingKeys(target.windowSessionKey)
+            },
+            capturePrivatePreSendOutgoingKeys = { target ->
+                aiReplyObservationRuntime.capturePrivatePreSendOutgoingKeys(target.windowSessionKey)
             }
         )
     }

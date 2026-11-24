@@ -688,6 +688,8 @@ class AiReplyObservationRuntime(
     private var greetingChatBinding: GreetingChatBinding? = null
     /** Latest verified greeting-detail message observation used to build a pre-send diff baseline. */
     private var latestGreetingMessageBatch: ChatMessageBatch? = null
+    /** Latest verified private-detail message observation used to build a pre-send diff baseline. */
+    private var latestPrivateMessageBatch: ChatMessageBatch? = null
 
     /** A complete greeting send is not a completed row until its final chat sample and safe BACK. */
     private data class ConfirmedGreetingSend(
@@ -1513,6 +1515,20 @@ class AiReplyObservationRuntime(
             ?.filter { it.direction == com.freedom.features.aireply.domain.message.ChatMessageDirection.OUTGOING }
             ?.map { "${it.stableLogicalMessageId}|${it.effectiveContentRevision}" }
             ?.toSet()
+    }
+
+    /** Returns the latest verified private-detail observation as the immediate pre-send baseline. */
+    fun capturePrivatePreSendOutgoingKeys(expectedWindowSessionKey: String): Set<String>? {
+        if (receivedGreetingsTaskActive || !sessionRunStarted ||
+            !ownsTask(PRIVATE_MESSAGES_TASK_ID) || sessionManagerState != SessionManagerState.READING_SESSION
+        ) return null
+        val batch = latestPrivateMessageBatch
+            ?.takeIf { it.windowSessionKey == expectedWindowSessionKey }
+            ?: return null
+        return batch.messages.asSequence()
+            .filter { it.direction == com.freedom.features.aireply.domain.message.ChatMessageDirection.OUTGOING }
+            .map { "${it.stableLogicalMessageId}|${it.effectiveContentRevision}" }
+            .toSet()
     }
 
     /** Applies a newly acquired page snapshot after ordinary debounce or verified user stability. */
@@ -4135,6 +4151,12 @@ class AiReplyObservationRuntime(
                 return
             }
             latestGreetingMessageBatch = batch
+        } else if (sessionRunStarted && !receivedGreetingsTaskActive &&
+            snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            currentSessionWindowKey == windowSessionKey(snapshot) &&
+            currentSessionCandidate != null
+        ) {
+            latestPrivateMessageBatch = batch
         }
         if (receivedGreetingsTaskActive && confirmedGreetingSend != null) {
             completeConfirmedGreetingSend(batch, snapshot)
