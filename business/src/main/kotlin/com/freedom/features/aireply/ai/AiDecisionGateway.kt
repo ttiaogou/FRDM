@@ -19,7 +19,7 @@ enum class ModelContextScope {
  * Provider response-mode preference is separate from the required local JSON schema.
  * PROMPT_ONLY_JSON may change the provider request but must not relax local parsing.
  */
-enum class ModelResponseMode { STRICT_JSON, PROMPT_ONLY_JSON }
+enum class ModelResponseMode { STRICT_JSON, SIMPLE_JSON, PLAIN_TEXT, PROMPT_ONLY_JSON }
 
 data class ModelDecisionConstraints(
     val contextScope: ModelContextScope,

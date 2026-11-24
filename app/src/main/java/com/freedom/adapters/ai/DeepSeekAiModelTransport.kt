@@ -137,6 +137,7 @@ class DeepSeekAiModelTransport(
             ?: throw AiModelHttpException("HTTP_RESPONSE_MISSING_MESSAGE")
         val contentValue = message["content"]
         val content = contentValue as? String
+        val reasoningContent = message["reasoning_content"] as? String
         val usageMap = root["usage"] as? Map<*, *>
         val usage = usageMap?.let {
             val input = (it["prompt_tokens"] as? Number)?.toInt()
@@ -159,7 +160,12 @@ class DeepSeekAiModelTransport(
                 responseContentState = state,
                 responseFinishReason = finishReason,
                 responseInputTokens = usage?.inputTokens,
-                responseOutputTokens = usage?.outputTokens
+                responseOutputTokens = usage?.outputTokens,
+                responseReasoningContentState = when {
+                    reasoningContent == null -> "ABSENT"
+                    reasoningContent.isBlank() -> "BLANK"
+                    else -> "PRESENT"
+                }
             )
         }
         return AiModelResult(

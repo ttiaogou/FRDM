@@ -762,10 +762,13 @@ class AiReplyDraftCoordinator(
             return
         }
         val callStartedAt = nowMillis()
-        // Only the final DeepSeek empty-output retry changes the transport response mode.
-        val promptOnlyJsonSchema = configuration.provider == AiModelServiceProvider.DEEPSEEK &&
-            emptyRetryAttempt == MAX_EMPTY_MODEL_RETRIES
-        val responseMode = if (promptOnlyJsonSchema) "PROMPT_ONLY_JSON" else "STRICT_JSON"
+        // Each empty-output retry changes the protocol before the final plain-text fallback.
+        val modelResponseMode = when {
+            emptyRetryAttempt >= MAX_EMPTY_MODEL_RETRIES -> ModelResponseMode.PLAIN_TEXT
+            emptyRetryAttempt == 1 -> ModelResponseMode.SIMPLE_JSON
+            else -> ModelResponseMode.STRICT_JSON
+        }
+        val responseMode = modelResponseMode.name
         recordModelLifecycle(
             requestId, requestGeneration, "MODEL_ATTEMPT_STARTED", emptyRetryAttempt,
             responseMode = responseMode
@@ -790,11 +793,7 @@ class AiReplyDraftCoordinator(
                         personalization = personalizationRepository.load()
                     ),
                     outputContract = policy.modelContract(),
-                    responseMode = if (promptOnlyJsonSchema) {
-                        ModelResponseMode.PROMPT_ONLY_JSON
-                    } else {
-                        ModelResponseMode.STRICT_JSON
-                    }
+                    responseMode = modelResponseMode
                 )
             )
         } catch (error: Throwable) {
@@ -858,9 +857,10 @@ class AiReplyDraftCoordinator(
                 ) {
                     val retryDelayMs = if (emptyRetryAttempt == 0) FIRST_EMPTY_MODEL_RETRY_DELAY_MS
                         else SECOND_EMPTY_MODEL_RETRY_DELAY_MS
-                    val nextMode = if (configuration.provider == AiModelServiceProvider.DEEPSEEK &&
-                        emptyRetryAttempt + 1 == MAX_EMPTY_MODEL_RETRIES
-                    ) "PROMPT_ONLY_JSON" else "STRICT_JSON"
+                    val nextMode = when (emptyRetryAttempt + 1) {
+                        1 -> ModelResponseMode.SIMPLE_JSON.name
+                        else -> ModelResponseMode.PLAIN_TEXT.name
+                    }
                     onLog("AI 模型空输出有限恢复：requestId=$requestId；" +
                         "attempt=${emptyRetryAttempt + 1}/$MAX_EMPTY_MODEL_RETRIES；" +
                         "delayMs=$retryDelayMs；responseMode=$nextMode；不写草稿、不执行发送")

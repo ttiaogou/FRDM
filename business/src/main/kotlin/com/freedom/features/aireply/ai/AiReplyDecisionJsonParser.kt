@@ -9,6 +9,12 @@ enum class AiReplyOutputInvalidReason {
 }
 
 internal object AiReplyDecisionJsonParser {
+    fun simpleSchema(maxDraftChars: Int): String = """
+        {"type":"object","additionalProperties":false,"properties":{
+          "action":{"type":"string","enum":["REPLY","DO_NOT_REPLY","WAIT"]},
+          "draft":{"type":["string","null"],"maxLength":$maxDraftChars}
+        },"required":["action","draft"]}
+    """.trimIndent()
     fun schema(maxDraftChars: Int): String = """
         {
           "type": "object",
@@ -53,13 +59,15 @@ internal object AiReplyDecisionJsonParser {
         parseWithDiagnostics(raw, maxDraftChars).decision
 
     /** Exactly the previous acceptance checks, now with safe rejection subcodes. */
-    fun parseWithDiagnostics(raw: String, maxDraftChars: Int): ParseOutcome = runCatching {
+    fun parseWithDiagnostics(raw: String, maxDraftChars: Int, allowSimple: Boolean = false): ParseOutcome = runCatching {
+        val normalized = normalizeJsonCandidate(raw)
         val values = try {
-            StrictJsonStringObjectReader(raw).read()
+            StrictJsonStringObjectReader(normalized).read()
         } catch (_: Exception) {
             invalid(AiReplyOutputInvalidReason.JSON_SYNTAX_INVALID)
         }
-        if (values.keys != REQUIRED_KEYS && values.keys != REQUIRED_KEYS + "reasonDetail") {
+        val acceptedKeys = if (allowSimple) setOf("action", "draft") else REQUIRED_KEYS
+        if (values.keys != acceptedKeys && values.keys != REQUIRED_KEYS && values.keys != REQUIRED_KEYS + "reasonDetail") {
             invalid(if (!values.keys.containsAll(REQUIRED_KEYS)) {
                 AiReplyOutputInvalidReason.JSON_REQUIRED_FIELD_MISSING
             } else AiReplyOutputInvalidReason.JSON_SCHEMA_MISMATCH)
@@ -71,8 +79,8 @@ internal object AiReplyDecisionJsonParser {
 
         val actionValue = values["action"]
             ?: invalid(AiReplyOutputInvalidReason.JSON_REQUIRED_FIELD_MISSING)
-        val reason = values["reason"]
-            ?: invalid(AiReplyOutputInvalidReason.JSON_REQUIRED_FIELD_MISSING)
+        val reason = values["reason"] ?: if (allowSimple) "SIMPLE_JSON" else
+            invalid(AiReplyOutputInvalidReason.JSON_REQUIRED_FIELD_MISSING)
         if (reason.isBlank() || reason.length > 120 || !REASON_PATTERN.matches(reason)) {
             invalid(AiReplyOutputInvalidReason.JSON_REASON_INVALID)
         }
@@ -96,6 +104,41 @@ internal object AiReplyDecisionJsonParser {
     }.getOrElse { failure ->
         ParseOutcome(invalidReason = (failure as? InvalidDecision)?.code
             ?: AiReplyOutputInvalidReason.JSON_SYNTAX_INVALID)
+    }
+
+    fun extractPlainTextDraft(raw: String, maxDraftChars: Int): String? {
+        val candidate = raw.trim().removePrefix("```").removeSuffix("```").trim()
+            .removePrefix("json").trim()
+        if (candidate.isBlank() || candidate.length > maxDraftChars) return null
+        if (candidate.startsWith("{") && candidate.endsWith("}")) {
+            parseWithDiagnostics(candidate, maxDraftChars).decision?.draft?.let { return it }
+        }
+        return candidate.takeIf { it.none { c -> c.code < 0x20 && c != '\n' && c != '\r' && c != '\t' } }
+            ?.trim()?.takeIf(String::isNotBlank)
+    }
+
+    private fun normalizeJsonCandidate(raw: String): String {
+        var text = raw.trim()
+        if (text.startsWith("```") && text.endsWith("```")) {
+            text = text.removePrefix("```").removeSuffix("```").trim()
+            if (text.startsWith("json", ignoreCase = true)) text = text.substring(4).trim()
+        }
+        val start = text.indexOf('{')
+        if (start <= 0) return text
+        var depth = 0
+        var quoted = false
+        var escaped = false
+        for (i in start until text.length) {
+            val c = text[i]
+            if (quoted) {
+                if (escaped) escaped = false else if (c == '\\') escaped = true else if (c == '"') quoted = false
+            } else when (c) {
+                '"' -> quoted = true
+                '{' -> depth++
+                '}' -> { depth--; if (depth == 0) return text.substring(start, i + 1) }
+            }
+        }
+        return text
     }
 
     private val REQUIRED_KEYS = setOf("action", "reason", "draft")

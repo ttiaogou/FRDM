@@ -433,8 +433,8 @@ class VisibleDraftFlowTest {
             f.drain()
             assertEquals(3, f.calls)
             assertEquals(listOf(taskId, taskId, taskId), f.decisionRequests.map { it.taskId })
-            assertEquals(listOf(ModelResponseMode.STRICT_JSON, ModelResponseMode.STRICT_JSON,
-                ModelResponseMode.PROMPT_ONLY_JSON), f.decisionRequests.map { it.responseMode })
+            assertEquals(listOf(ModelResponseMode.STRICT_JSON, ModelResponseMode.SIMPLE_JSON,
+                ModelResponseMode.PLAIN_TEXT), f.decisionRequests.map { it.responseMode })
             assertEquals("", f.text)
         }
     }
@@ -472,8 +472,8 @@ class VisibleDraftFlowTest {
         assertEquals(3, greeting.decisionRequests.size)
         assertTrue(greeting.decisionRequests.all { it.taskId == AiDecisionTaskIds.RECEIVED_GREETINGS })
         assertEquals(
-            listOf(ModelResponseMode.STRICT_JSON, ModelResponseMode.STRICT_JSON,
-                ModelResponseMode.PROMPT_ONLY_JSON),
+            listOf(ModelResponseMode.STRICT_JSON, ModelResponseMode.SIMPLE_JSON,
+                ModelResponseMode.PLAIN_TEXT),
             greeting.decisionRequests.map { it.responseMode }
         )
         assertTrue(greeting.decisionRequests.all { it.outputContract == AiReplyModelContracts.currentOutput() })

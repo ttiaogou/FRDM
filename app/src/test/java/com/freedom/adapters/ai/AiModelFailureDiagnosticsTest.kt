@@ -251,7 +251,7 @@ class AiModelFailureDiagnosticsTest {
         assertEquals(2, fixture.logs.count { it.startsWith("AI 模型调用失败：") })
         assertTrue(fixture.logs.any { it.contains("responseContentState=BLANK") })
         assertTrue(fixture.logs.any { it.contains("responseContentState=NULL") })
-        assertTrue(fixture.logs.any { it.contains("responseMode=PROMPT_ONLY_JSON") })
+        assertTrue(fixture.logs.any { it.contains("responseMode=PLAIN_TEXT") })
         assertFalse(fixture.logs.joinToString("\n").contains(privateText))
         assertFalse(fixture.logs.joinToString("\n").contains(secret))
 

@@ -25,6 +25,7 @@ interface AiModelCallFailureDetails {
     val responseFinishReason: String? get() = null
     val responseInputTokens: Int? get() = null
     val responseOutputTokens: Int? get() = null
+    val responseReasoningContentState: String? get() = null
 }
 
 data class AiModelCallDiagnostics(
@@ -41,6 +42,7 @@ data class AiModelCallDiagnostics(
     val responseFinishReason: String? = null,
     val responseInputTokens: Int? = null,
     val responseOutputTokens: Int? = null
+    val responseReasoningContentState: String? = null
 ) {
     fun logFields(): String = "safeCode=${safeToken(safeCode)}；failureStage=${stage.name}；" +
         "httpStatus=${httpStatus ?: "UNKNOWN"}；retryable=${retryable ?: "UNKNOWN"}；" +
@@ -49,6 +51,7 @@ data class AiModelCallDiagnostics(
         "providerErrorType=${safeProviderError(providerErrorType)}；providerErrorParam=${safeProviderParam(providerErrorParam)}；" +
         "responseContentState=${safeContentState(responseContentState)}；" +
         "finishReason=${safeFinishReason(responseFinishReason)}；" +
+        "reasoningContentState=${safeContentState(responseReasoningContentState)}；" +
         "inputTokens=${responseInputTokens?.takeIf { it >= 0 } ?: "UNKNOWN"}；" +
         "outputTokens=${responseOutputTokens?.takeIf { it >= 0 } ?: "UNKNOWN"}"
 
@@ -116,7 +119,8 @@ data class AiModelCallDiagnostics(
                 responseContentState = details?.responseContentState?.let(::safeContentState),
                 responseFinishReason = details?.responseFinishReason?.let(::safeFinishReason),
                 responseInputTokens = details?.responseInputTokens?.takeIf { it >= 0 },
-                responseOutputTokens = details?.responseOutputTokens?.takeIf { it >= 0 }
+                responseOutputTokens = details?.responseOutputTokens?.takeIf { it >= 0 },
+                responseReasoningContentState = details?.responseReasoningContentState?.let(::safeContentState)
             )
         }
     }

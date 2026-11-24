@@ -67,6 +67,7 @@ class AiModelEmptyOutputException(
     override val responseFinishReason: String?,
     override val responseInputTokens: Int? = null,
     override val responseOutputTokens: Int? = null
+    override val responseReasoningContentState: String? = null
 ) : IllegalArgumentException("Model provider returned empty output"), AiModelCallFailureDetails {
     override val safeCode = "EMPTY_MODEL_OUTPUT"
     override val retryable = responseFinishReason == null || responseFinishReason == "stop"
