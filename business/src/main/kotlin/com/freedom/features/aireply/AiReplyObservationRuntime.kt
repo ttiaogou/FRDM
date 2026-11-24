@@ -3744,7 +3744,7 @@ class AiReplyObservationRuntime(
             if (hasProtectedPrivateInspection()) {
                 // Route/window invalidation above still runs for every event. The
                 // explicit fresh read must not be replaced by a sliding debounce.
-                onLog("AI 页面观察[ACTIVE_RECHECK_RETAINED]：保留已排定的启动或手势复查；event=${event.type}")
+                onLog("AI 页面观察[ACTIVE_RECHECK_RETAINED]：保留已排定的手势复查；event=${event.type}")
                 return
             }
             pageInspectionTask?.cancel()
@@ -7024,8 +7024,10 @@ class AiReplyObservationRuntime(
         snapshot.packageName == targetPackage()
 
     /**
-     * Protect the existing private startup/scroll follow-up from passive observation
-     * channels. This is only a timer admission decision, never page or gesture proof.
+     * Protect only the critical scroll follow-up/recovery from passive observation.
+     * Ordinary startup probes must still allow the bounded event channel and the
+     * greetings watcher to discover a different route. No event is required for the
+     * original startup timer to run. This grants no page or gesture proof.
      */
     private fun hasProtectedPrivateInspection(): Boolean {
         if (pageInspectionTask == null || !sessionRunStarted || receivedGreetingsTaskActive) return false
@@ -7034,10 +7036,7 @@ class AiReplyObservationRuntime(
             (recoveryContext.reason?.startsWith("GESTURE_SCROLL_") == true ||
                 recoveryContext.reason == "GESTURE_WINDOW_CHANGED" ||
                 recoveryContext.reason == "PRIVATE_SCROLL_CALLBACK_LEASE_LOST")
-        return pendingPageReadPurpose == AiReplyPageReadPurpose.SCROLL_AFTER ||
-            gestureRecovery ||
-            (startupReadinessCoordinator.initializationPending &&
-                startupReadinessCoordinator.workAreaConfirmed && !recoveryContext.pending)
+        return pendingPageReadPurpose == AiReplyPageReadPurpose.SCROLL_AFTER || gestureRecovery
     }
 
     private fun scheduleFullInspection() {

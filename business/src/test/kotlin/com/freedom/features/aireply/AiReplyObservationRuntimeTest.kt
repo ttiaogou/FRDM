@@ -912,11 +912,88 @@ class AiReplyObservationRuntimeTest {
         assertTrue(fixture.logs.any { it.contains("SCROLL_CANCELLED") && it.contains("次数=1") })
         assertEquals(saved, fixture.savedCheckpoint())
         assertEquals(1, fixture.dispatchedGestures())
-        runUntilLog(fixture.scheduler, fixture.logs, "RECOVERY_EXECUTION_READY")
+        // The shared recovery timer posts its next backoff before the immediate
+        // read-only callback. Execute by delay, not the legacy FIFO insertion order.
+        runUntilShortestDelay(fixture.scheduler, 80) {
+            fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") }
+        }
         assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
         // The original command remains cancelled; a later admitted action must be
         // a newly computed request from the recovered list, not a replay.
         assertTrue(fixture.logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+    }
+
+    @Test
+    fun p5ColdStartupCancelledFirstSwipeRecoversAndCompletesFreshSwipeWithoutAnyInputEvent() {
+        // This fixture uses the public startup entry and scheduled reads only.
+        // No accessibility event, touch callback, reflection or manual resume.
+        val fixture = capturedScrollRecoveryFixture()
+        assertEquals(1, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("INITIALIZATION_COMPLETE") })
+        fixture.listener.onResult(GestureExecutionResult(fixture.request.id, GestureExecutionStatus.CANCELLED))
+        runUntilShortestDelay(fixture.scheduler, 80) {
+            fixture.logs.any { it.contains("GESTURE_RECOVERY_REQUESTED") }
+        }
+        val original = requireNotNull(fixture.savedCheckpoint())
+        assertFalse(original.initialUnreadGateSwipeCompleted)
+        assertEquals(1, fixture.dispatchedGestures())
+        fixture.scheduler.runNextWithDelay(180L)
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertEquals(1, fixture.dispatchedGestures())
+
+        runUntilShortestDelay(fixture.scheduler, 80) {
+            fixture.dispatchedGestures() > 1
+        }
+        assertTrue(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        val replacement = requireNotNull(fixture.latestRequest())
+        assertTrue(replacement.id != fixture.request.id)
+        assertTrue(replacement.intent is GestureIntent.VerticalSwipe)
+        assertFalse(fixture.logs.any { it.contains("INITIALIZATION_COMPLETE") })
+
+        // A stale completion cannot certify the first cancelled swipe.
+        fixture.listener.onResult(GestureExecutionResult(fixture.request.id, GestureExecutionStatus.COMPLETED))
+        runUntilShortestDelay(fixture.scheduler, 20) {
+            fixture.logs.any { it.contains("已忽略过期自主滑动回调") }
+        }
+        assertFalse(fixture.logs.any { it.contains("INITIALIZATION_COMPLETE") })
+        requireNotNull(fixture.latestListener()).onResult(
+            GestureExecutionResult(replacement.id, GestureExecutionStatus.COMPLETED)
+        )
+        runUntilShortestDelay(fixture.scheduler, 40) {
+            fixture.logs.any { it.contains("INITIALIZATION_COMPLETE") }
+        }
+        assertEquals(1, fixture.logs.count { it.contains("INITIALIZATION_COMPLETE") })
+    }
+
+    @Test
+    fun p5ColdStartupIncompleteUnreadRemainsBlockedUntilAutonomousRepair() {
+        val fixture = preScrollPageRecoveryFixture()
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        fixture.port.page = fixture.listPage.copy(chatListCandidates = listOf(damaged))
+        // Let the actual startup timer discover the anomaly; no private method calls.
+        runUntilShortestDelay(fixture.scheduler, 80) {
+            fixture.logs.count { it.contains("ORIGINAL_FAULT_WAIT") } >= 2
+        }
+        val original = requireNotNull(fixture.checkpoint())
+        assertTrue(original.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertTrue(original.attemptedSessionKeys.isEmpty())
+        assertEquals(0, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
+
+        // Model the accessibility tree repairing by itself, without signalling an event.
+        fixture.port.page = fixture.listPage.copy(chatListCandidates = listOf(
+            sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true)
+        ))
+        runUntilShortestDelay(fixture.scheduler, 80) { fixture.dispatchedGestures() > 0 }
+        assertTrue(fixture.logs.any { it.contains("ORIGINAL_FAULT_RECHECKED") &&
+            it.contains("evidence=CLEARED") })
+        assertTrue(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertTrue(requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys.isEmpty())
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
     }
 
     @Test
@@ -6857,7 +6934,9 @@ class AiReplyObservationRuntimeTest {
         val listener: GestureExecutionListener,
         val savedCheckpoint: () -> PrivateMessagesTraversalCheckpoint?,
         val dispatchedGestures: () -> Int,
-        val cancelledRequests: List<String>
+        val cancelledRequests: List<String>,
+        val latestRequest: () -> GestureIntentRequest?,
+        val latestListener: () -> GestureExecutionListener?
     )
 
     private fun capturedScrollRecoveryFixture(): CapturedScrollRecoveryFixture {
@@ -6928,7 +7007,7 @@ class AiReplyObservationRuntimeTest {
         runUntil(scheduler, 60) { request?.intent is GestureIntent.VerticalSwipe && listener != null }
         return CapturedScrollRecoveryFixture(
             scheduler, runtime, logs, requireNotNull(request), requireNotNull(listener),
-            { saved }, { dispatchCount }, cancelledRequests
+            { saved }, { dispatchCount }, cancelledRequests, { request }, { listener }
         )
     }
 
@@ -6975,6 +7054,15 @@ class AiReplyObservationRuntimeTest {
             steps++
         }
         assertTrue("Expected log marker not reached: $marker; recent logs=${logs.takeLast(12)}", logs.any { it.contains(marker) })
+    }
+
+    private fun runUntilShortestDelay(scheduler: FakeScheduler, maxSteps: Int, condition: () -> Boolean) {
+        var steps = 0
+        while (!condition() && steps < maxSteps && scheduler.pendingCount() > 0) {
+            scheduler.runNextShortestDelay()
+            steps++
+        }
+        assertTrue("Condition not reached after $steps delay-ordered scheduler steps", condition())
     }
 
     private fun runUntil(scheduler: FakeScheduler, maxSteps: Int, condition: () -> Boolean) {
