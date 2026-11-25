@@ -13,7 +13,9 @@ internal class AiReplyModeRuntimeAdapter(
     private val runtime: () -> AiReplyObservationRuntime,
     private val onLog: (String) -> Unit = {},
     private val onReadinessStarting: (RunMode, String) -> Unit = { _, _ -> },
-    private val onReadinessInvalidated: (String) -> Unit = {}
+    private val onReadinessInvalidated: (String) -> Unit = {},
+    private val currentRunGeneration: () -> Long = { 0L },
+    private val onPageRuntimeReady: (Long) -> Unit = {}
 ) : ModeRuntimePort, PageObservationSnapshotClassifier {
     override val mode: RunMode = RunMode.AI_REPLY
 
