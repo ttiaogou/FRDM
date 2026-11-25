@@ -6940,6 +6940,19 @@ internal class MomoSocialAdapter(
         page: ChatPageSnapshot,
         limit: Int,
         onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesWithOcr(page, limit, false, onResult)
+
+    override fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesWithOcr(page, limit, true, onResult)
+
+    private fun readRecentMessagesWithOcr(
+        page: ChatPageSnapshot,
+        limit: Int,
+        reuseVerifiedIncoming: Boolean,
+        onResult: (ChatMessageBatch) -> Unit
     ) {
         // Hide the monitor before the structural node read, not only before the screenshot.
         // The nested screenshot lease in AndroidAccessibilityGateway keeps the same hidden
@@ -6987,7 +7000,8 @@ internal class MomoSocialAdapter(
                 messageComponents.ocrProcessor.recognize(
                     batch = structuralBatch,
                     expectedPackage = page.packageName,
-                    expectedActivity = page.activityClass
+                    expectedActivity = page.activityClass,
+                    reuseVerifiedIncoming = reuseVerifiedIncoming
                 ) { ocrResult ->
                     if (ocrResult.admissionDeferred) {
                         // The worker gate belongs to actual worker exit, not caller timeout.

@@ -14,6 +14,24 @@ import org.junit.Test
 
 class ChatMessageReadCoordinatorTest {
     @Test
+    fun onlySendConfirmationUsesTheDedicatedReadPurpose() {
+        val scheduler = FakeScheduler()
+        val page = snapshot("send-proof")
+        val port = TestMessagePort()
+        val coordinator = coordinator(scheduler, port, inspect = { page })
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {}) { _, _ -> })
+        assertEquals(0, port.sendProofReads)
+        requireNotNull(port.pendingCallback)(batch())
+        scheduler.runNext(0L)
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {},
+            sendConfirmation = true) { _, _ -> })
+        assertEquals(1, port.sendProofReads)
+        requireNotNull(port.pendingCallback)(batch())
+        scheduler.runNext(0L)
+        assertFalse(coordinator.isInFlight)
+    }
+
+    @Test
     fun structuralContinuationOwnsOcrUntilSchedulerDeliveryWithoutReplayingPendingSnapshots() {
         val page = snapshot("same-chat")
         val scheduler = FakeScheduler()
@@ -356,6 +374,14 @@ class ChatMessageReadCoordinatorTest {
     )
 
     private class TestMessagePort : ChatMessagePort {
+        var sendProofReads = 0
+        override fun readRecentMessagesForSendConfirmationAsync(
+            page: ChatPageSnapshot, limit: Int, onResult: (ChatMessageBatch) -> Unit
+        ) {
+            sendProofReads++
+            readRecentMessagesAsync(page, limit, onResult)
+        }
+
         var synchronousResult: ChatMessageBatch? = null
         var throwOnRead = false
         var pendingCallback: ((ChatMessageBatch) -> Unit)? = null

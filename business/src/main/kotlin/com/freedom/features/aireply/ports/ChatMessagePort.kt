@@ -24,6 +24,13 @@ interface ChatMessagePort {
         readRecentMessagesAsync(page, limit, onResult)
     }
 
+    /** Send-proof read: adapters may reuse unchanged incoming image recognition, never outgoing proof. */
+    fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int = 10,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesAsync(page, limit, onResult)
+
     /**
      * Async extension for adapters that need a screenshot or an on-device recognizer. The default
      * keeps existing providers synchronous and source-compatible. Implementations must return

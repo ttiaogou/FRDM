@@ -4408,6 +4408,7 @@ class AiReplyObservationRuntime(
             snapshot = snapshot,
             limit = 10,
             forceScheduledDelivery = true,
+            sendConfirmation = true,
             onTimeout = { scheduleDeferredSendProofRecheck("OCR_CALLBACK_TIMEOUT") },
             onFailure = {
                 onLog("AI 发送确认[OCR_REQUEST_FAILED]：只读采集无法启动；保留待核验发送")

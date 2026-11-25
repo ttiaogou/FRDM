@@ -26,6 +26,33 @@ class MomoOcrP4PipelineRegressionTest {
             listOf(target), mapOf(target.rowIndex to text), listBounds, ChatMessageParser(), 10
         ).single()
 
+    @Test fun sendProofReuseRequiresExactIncomingCropWindowAndStructure() {
+        val incoming = target().copy(
+            explicitDirectionHint = ChatMessageDirection.INCOMING,
+            identityDirectionHint = ChatMessageDirection.INCOMING,
+            structureSignature = "verified-row"
+        )
+        val batch = ChatMessageBatch(MessageReadStatus.SUCCESS, "momo|1|13|conversation=42",
+            emptyList(), 1, 1, false, 1L)
+        val png = byteArrayOf(1, 2, 3)
+        val key = MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, incoming, png)
+        assertNotNull(key)
+        assertEquals(key, MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, incoming, png.copyOf()))
+        assertNotEquals(key, MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, incoming, byteArrayOf(1, 2, 4)))
+        assertNotEquals(key, MomoChatMessageOcrProcessor.incomingCropReuseKey(
+            batch.copy(windowSessionKey = "momo|1|14|conversation=42"), incoming, png))
+        assertNotEquals(key, MomoChatMessageOcrProcessor.incomingCropReuseKey(batch,
+            incoming.copy(structureSignature = "different-row"), png))
+        assertNull(MomoChatMessageOcrProcessor.incomingCropReuseKey(batch,
+            incoming.copy(explicitDirectionHint = ChatMessageDirection.OUTGOING,
+                identityDirectionHint = ChatMessageDirection.OUTGOING), png))
+        assertNull(MomoChatMessageOcrProcessor.incomingCropReuseKey(batch,
+            incoming.copy(identityDirectionHint = null), png))
+        assertNull(MomoChatMessageOcrProcessor.incomingCropReuseKey(batch.copy(truncated = true), incoming, png))
+        assertNull(MomoChatMessageOcrProcessor.incomingCropReuseKey(
+            batch.copy(windowSessionKey = "momo|1|13|conversation=unknown"), incoming, png))
+    }
+
     @Test fun pureTextKeepsOriginalContentTypeDirectionAndCompleteProjection() {
         val result = MomoOcrVisualSymbolGuard.reconcileWithTokens(
             listOf(line("今晚有空吗")), emptyList()

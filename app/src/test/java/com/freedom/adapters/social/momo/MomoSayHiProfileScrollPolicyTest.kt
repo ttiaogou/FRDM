@@ -130,7 +130,7 @@ class MomoSayHiProfileScrollPolicyTest {
         val horizontal = node(listOf(1), "androidx.viewpager.widget.ViewPager",
             bounds = ScreenRect(0, 478, 720, 1600), scrollable = true)
         val decision = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(listOf(vertical, horizontal), 720, 1554)
-        assertEquals(ScreenRect(0, 478, 720, 1554), decision.viewport)
+        assertEquals(ScreenRect(0, 478, 720, 1274), decision.viewport)
         assertEquals(listOf(0), decision.targetPath)
         assertNull(MomoSayHiProfileScrollPolicy.resolveIdentityViewport(listOf(horizontal), 720, 1554).viewport)
         assertNull(MomoSayHiProfileScrollPolicy.resolveIdentityViewport(
@@ -139,6 +139,24 @@ class MomoSayHiProfileScrollPolicyTest {
         assertNull(MomoSayHiProfileScrollPolicy.resolveIdentityViewport(
             listOf(vertical.copy(bounds = ScreenRect(0, 1500, 720, 1600))), 720, 1554
         ).viewport)
+    }
+
+    @Test fun identitySwipeUsesNameBandAndStopsAboveAnnotatedLowerBoundary() {
+        val decision = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(observedProfileNodes(), 720, 1554)
+        assertEquals(ScreenRect(0, 758, 720, 1274), decision.viewport)
+        assertEquals(listOf(2, 0), decision.targetPath)
+        assertEquals("PROFILE_VIEWPORT_FINGERPRINT_CONFIRMED", decision.reason)
+    }
+
+    @Test fun identitySwipeExcludesEarlierFixedActionAndRejectsInsufficientSpace() {
+        val action = node(listOf(3), "android.widget.TextView", text = "对话",
+            bounds = ScreenRect(100, 1190, 300, 1260))
+        val safe = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(observedProfileNodes() + action, 720, 1554)
+        assertEquals(ScreenRect(0, 758, 720, 1190), safe.viewport)
+        val noHeader = observedProfileNodes().filterNot { it.viewId.endsWith("/personal_profile_name") }
+        val unsafe = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(noHeader, 720, 1554)
+        assertNull(unsafe.viewport)
+        assertEquals("IDENTITY_SCROLL_SAFE_SPACE_INSUFFICIENT", unsafe.reason)
     }
 
     @Test fun selectsObservedProfileRecyclerViewAndClipsAccessibilityBoundsToDisplay() {
