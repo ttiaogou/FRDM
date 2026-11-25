@@ -29,10 +29,6 @@ internal class ConfigurationHome(
     data class Callbacks(
         val dp: (Int) -> Int,
         val targetLabel: () -> String,
-        val browseEnabled: () -> Boolean,
-        val onBrowseChanged: (Boolean) -> Unit,
-        val aiEnabled: () -> Boolean,
-        val onAiChanged: (Boolean) -> Unit,
         val taskParameters: () -> TaskLaunchParameters,
         val onTaskParametersChanged: (TaskLaunchParameters) -> Unit,
         val onTargetClick: () -> Unit,
@@ -100,7 +96,6 @@ internal class ConfigurationHome(
             orientation = LinearLayout.VERTICAL
         }
         content.addView(buildTargetSection())
-        content.addView(buildModeSection(), spaced(20))
         content.addView(buildPersonalizationRow(), spaced(18))
         content.addView(buildFilterPanel(), spaced(20))
         scroll.addView(content)
@@ -234,48 +229,6 @@ internal class ConfigurationHome(
         section.addView(row)
         section.addView(divider(), LinearLayout.LayoutParams(-1, dp(1)))
         return section
-    }
-
-    private fun buildModeSection(): View {
-        val section = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-        section.addView(sectionLabel("运行模式"))
-        val browseSwitch = styledSwitch().apply {
-            isChecked = callbacks.browseEnabled()
-            contentDescription = "自动浏览"
-        }
-        val aiSwitch = styledSwitch().apply {
-            isChecked = callbacks.aiEnabled() && !callbacks.browseEnabled()
-            contentDescription = "AI Agent"
-        }
-        browseSwitch.setOnCheckedChangeListener { _, checked ->
-            if (checked && aiSwitch.isChecked) aiSwitch.isChecked = false
-            callbacks.onBrowseChanged(checked)
-        }
-        aiSwitch.setOnCheckedChangeListener { _, checked ->
-            if (checked && browseSwitch.isChecked) browseSwitch.isChecked = false
-            callbacks.onAiChanged(checked)
-        }
-        section.addView(modeSwitchRow("自动浏览", browseSwitch), LinearLayout.LayoutParams(-1, dp(58)))
-        section.addView(divider(), LinearLayout.LayoutParams(-1, dp(1)))
-        section.addView(modeSwitchRow("AI Agent", aiSwitch), LinearLayout.LayoutParams(-1, dp(58)))
-        section.addView(divider(), LinearLayout.LayoutParams(-1, dp(1)))
-        return section
-    }
-
-    private fun modeSwitchRow(title: String, toggle: Switch): View {
-        val row = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(2), 0, dp(2), 0)
-        }
-        row.addView(TextView(activity).apply {
-            text = title
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(TEXT)
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        row.addView(toggle)
-        return row
     }
 
     private fun buildPersonalizationRow(): View {
