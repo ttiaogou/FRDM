@@ -104,8 +104,6 @@ internal class MomoSocialAdapter(
     private val receivedGreetingsSendReturnRepository: ReceivedGreetingsSendReturnRepository,
     private val ocrReviewRepository: OcrReviewRepository,
     private val sampleArchivePort: SessionSampleArchivePort,
-    /** Registers the imminent profile-to-chat return in the unified navigation provenance layer. */
-    private val registerSelfNavigation: (String) -> Unit = {},
     /** The AI task lease must still be current when a send gesture is admitted. */
     private val isAiReplyUiOperationOwned: () -> Boolean = { true },
     /** Exact lease captured at model admission; task handoff revokes old async callbacks. */
@@ -3544,6 +3542,7 @@ internal class MomoSocialAdapter(
     private fun requestChatActivityBack(
         reason: String,
         expectedWindow: WindowRef? = null,
+        targetActivityClass: String = MomoSayHiPageContract.LIST_ACTIVITY,
         onSubmitted: (WindowRef) -> Unit = {}
     ): Boolean {
         val dialogObservation = latestDialogWindowObservation()
@@ -3679,7 +3678,8 @@ internal class MomoSocialAdapter(
         }
         val accepted = accessibilityGateway.performVerifiedNavigationBack(
             inspection.window,
-            inspection.window.activityClass
+            inspection.window.activityClass,
+            targetActivityClass
         )
         onLog(
             "ChatActivity 安全 BACK 派发：windowId=${inspection.window.windowId}；" +
@@ -3843,7 +3843,9 @@ internal class MomoSocialAdapter(
      * Shared verified profile return used by Received Greetings and inbox identity capture.
      * Keeps the existing active-window, dialog.h, popup-blocker and WindowRef checks in one path.
      */
-    private fun submitVerifiedProfileBackNavigation(): SayHiProfileBackInspection? {
+    private fun submitVerifiedProfileBackNavigation(
+        targetActivityClass: String = MomoSayHiPageContract.LIST_ACTIVITY
+    ): SayHiProfileBackInspection? {
         val dialogObservation = latestDialogWindowObservation()
         val inspection = rootAccess.withTargetWindowRoots { windows ->
             if (windows.isEmpty()) return@withTargetWindowRoots null
@@ -3922,7 +3924,8 @@ internal class MomoSocialAdapter(
         }
         val accepted = accessibilityGateway.performVerifiedNavigationBack(
             inspection.window,
-            inspection.window.activityClass
+            inspection.window.activityClass,
+            targetActivityClass.takeUnless { inspection.dialogHPresent }
         )
         if (!accepted) return null
         return inspection
@@ -6095,8 +6098,7 @@ internal class MomoSocialAdapter(
                 if (dialogObservation != null &&
                     rootAccess.isTargetWindowPresent(dialogObservation.windowId) != false
                 ) {
-                    registerSelfNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
-                    val back = submitVerifiedProfileBackNavigation() ?: return true
+                    val back = submitVerifiedProfileBackNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS) ?: return true
                     pending.backAttempts++
                     pending.lastTransitionAtMs = System.currentTimeMillis()
                     // As in Received Greetings, dismiss a verified overlay first; only the next
@@ -6151,8 +6153,7 @@ internal class MomoSocialAdapter(
                     }
                 }
 
-                registerSelfNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
-                val back = submitVerifiedProfileBackNavigation() ?: return true
+                val back = submitVerifiedProfileBackNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS) ?: return true
                 pending.backAttempts++
                 pending.lastTransitionAtMs = System.currentTimeMillis()
                 if (!back.dialogHPresent) {
@@ -6226,8 +6227,7 @@ internal class MomoSocialAdapter(
                 ) {
                     // A submitted BACK is not proof that the profile was left. Allow one more
                     // independently revalidated, popup-safe attempt after the bounded wait.
-                    registerSelfNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
-                    val back = submitVerifiedProfileBackNavigation() ?: return true
+                    val back = submitVerifiedProfileBackNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS) ?: return true
                     pending.backAttempts++
                     pending.lastTransitionAtMs = System.currentTimeMillis()
                     if (back.dialogHPresent) {
@@ -6854,7 +6854,7 @@ internal class MomoSocialAdapter(
     }
 
     override fun navigateBackToSessionList(): Boolean =
-        requestChatActivityBack("普通聊天消息采集完成")
+        requestChatActivityBack("普通聊天消息采集完成", targetActivityClass = MomoAppDescriptor.MAIN_ACTIVITY_CLASS)
 
     private fun resolveLocalPath(
         root: AccessibilityNodeInfo,

@@ -462,10 +462,12 @@ interface AccessibilityGateway :
      * normal global-action path, this does not require the page to be a chat page; the adapter must
      * first complete its dedicated overlay-safety inspection and pass the fresh WindowRef plus
      * the expected page Activity. Implementations must revalidate package, Activity, window ID,
-     * generation and run mode.
+     * generation and run mode. The caller provides the expected destination Activity for
+     * provenance only; a null destination means no page transition can be claimed.
      */
     fun performVerifiedNavigationBack(
         expectedWindow: WindowRef,
-        expectedActivityClass: String
+        expectedActivityClass: String,
+        targetActivityClass: String?
     ): Boolean = false
 }

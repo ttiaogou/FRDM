@@ -475,6 +475,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             targetAppReadinessController = targetAppReadinessController,
             inputOriginClassifier = inputOriginClassifier,
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             uiWriteAuthorization = uiWriteAuthorization,
             onReadinessDiagnostic = addLog,
             onActivityBindingMissing = {
@@ -538,12 +539,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             receivedGreetingsSendReturnRepository = root.receivedGreetingsSendReturnRepository,
             ocrReviewRepository = root.ocrReviewRepository,
             sampleArchivePort = root.sampleArchivePort,
-            registerSelfNavigation = { targetActivityClass ->
-                inputOriginClassifier.registerExpectedSelfNavigation(
-                    packageName = monitorRepository.targetPackage(),
-                    targetActivityClass = targetActivityClass
-                )
-            },
             isAiReplyUiOperationOwned = {
                 uiWriteAuthorization.permits(UiWriteScope.AI_COMPOSER) ||
                     uiWriteAuthorization.permits(UiWriteScope.VERIFIED_GREETING_COMPOSER)

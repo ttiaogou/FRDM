@@ -5,6 +5,9 @@ import com.freedom.core.accessibility.api.GesturePoint
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSpec
 import com.freedom.core.accessibility.api.ScreenRect
+import com.freedom.core.accessibility.api.WindowRef
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -744,6 +747,85 @@ class InputOriginClassifierTest {
 
         assertEquals(InputOrigin.UNKNOWN, decision.origin)
         assertTrue(decision.shouldYieldAutomation)
+    }
+
+    @Test
+    fun verifiedBackMatchesOnlyItsExpectedDestinationAndConsumesOnce() {
+        val classifier = InputOriginClassifier()
+        val source = WindowRef(TARGET_PACKAGE, ACTIVITY, 7L, 12)
+        val destination = "com.example.ReturnActivity"
+        val id = classifier.registerExpectedSelfNavigation(source, destination, 3L, 10_000L)
+        assertNotNull(id)
+        classifier.noteActivityTransition(TARGET_PACKAGE, destination, 7L, 9L, 21, 10_180L, 3L)
+        val attached = classifier.takeAttachedSelfNavigation()
+        assertEquals(id, attached?.actionId)
+        assertEquals(7L, attached?.sourcePageGeneration)
+        assertEquals(9L, attached?.targetPageGeneration)
+        assertEquals(21, attached?.targetWindowId)
+        classifier.noteActivityTransition(TARGET_PACKAGE, destination, 7L, 9L, 21, 10_200L, 3L)
+        assertNull(classifier.takeAttachedSelfNavigation())
+    }
+
+    @Test
+    fun verifiedBackRejectsWrongSourceRunDestinationTimeAndUnknownWindow() {
+        val source = WindowRef(TARGET_PACKAGE, ACTIVITY, 7L, 12)
+        val destination = "com.example.ReturnActivity"
+        fun check(sourceGeneration: Long = 7L, run: Long = 3L, activity: String = destination,
+                  eventTime: Long = 10_180L, window: Int = 21, generation: Long = 9L) {
+            val classifier = InputOriginClassifier()
+            assertNotNull(classifier.registerExpectedSelfNavigation(source, destination, 3L, 10_000L))
+            classifier.noteActivityTransition(TARGET_PACKAGE, activity, sourceGeneration,
+                generation, window, eventTime, run)
+            assertNull(classifier.takeAttachedSelfNavigation())
+        }
+        check(sourceGeneration = 8L)
+        check(run = 4L)
+        check(activity = ACTIVITY)
+        check(eventTime = 9_999L)
+        check(eventTime = 12_501L)
+        check(window = -1)
+        check(generation = 7L)
+    }
+
+    @Test
+    fun rejectedBackAndOverlappingTouchCannotAttachLaterNavigation() {
+        val source = WindowRef(TARGET_PACKAGE, ACTIVITY, 7L, 12)
+        val destination = "com.example.ReturnActivity"
+        val classifier = InputOriginClassifier()
+        val rejected = requireNotNull(classifier.registerExpectedSelfNavigation(source, destination, 3L, 10_000L))
+        classifier.rejectExpectedSelfNavigation(rejected, "PLATFORM_BACK_REJECTED")
+        classifier.noteActivityTransition(TARGET_PACKAGE, destination, 7L, 8L, 21, 10_100L, 3L)
+        assertNull(classifier.takeAttachedSelfNavigation())
+        classifier.registerExpectedSelfNavigation(source, destination, 3L, 11_000L)
+        classifier.noteExpectedNavigationTouch(11_010L)
+        classifier.noteActivityTransition(TARGET_PACKAGE, destination, 7L, 8L, 21, 11_100L, 3L)
+        assertNull(classifier.takeAttachedSelfNavigation())
+    }
+
+    @Test
+    fun dialogOnlyBackReplacesPendingTicketWithoutClaimingPageTransition() {
+        val classifier = InputOriginClassifier()
+        val source = WindowRef(TARGET_PACKAGE, ACTIVITY, 7L, 12)
+        val destination = "com.example.ReturnActivity"
+        classifier.registerExpectedSelfNavigation(source, destination, 3L, 10_000L)
+        assertNull(classifier.registerExpectedSelfNavigation(source, null, 3L, 10_010L))
+        classifier.noteActivityTransition(TARGET_PACKAGE, destination, 7L, 8L, 21, 10_100L, 3L)
+        assertNull(classifier.takeAttachedSelfNavigation())
+    }
+
+    @Test
+    fun competingTapAndBackRemainAmbiguousAndCannotReuseBackTicket() {
+        val classifier = InputOriginClassifier()
+        val source = WindowRef(TARGET_PACKAGE, ACTIVITY, 7L, 12)
+        val destination = "com.example.ReturnActivity"
+        classifier.registerDispatchGesture("tap", TARGET_PACKAGE, ACTIVITY, 7L, 12,
+            tap(20f, 20f, GestureFeedbackIntent.NAVIGATION_ENTRY), 10_000L)
+        classifier.registerExpectedSelfNavigation(source, destination, 3L, 10_020L)
+        classifier.noteActivityTransition(TARGET_PACKAGE, destination, 7L, 8L, 21, 10_100L, 3L)
+        assertNull(classifier.takeAttachedSelfNavigation())
+        classifier.rejectDispatchGesture("tap", "test")
+        classifier.noteActivityTransition(TARGET_PACKAGE, destination, 7L, 8L, 21, 10_150L, 3L)
+        assertNull(classifier.takeAttachedSelfNavigation())
     }
 
     private fun tap(

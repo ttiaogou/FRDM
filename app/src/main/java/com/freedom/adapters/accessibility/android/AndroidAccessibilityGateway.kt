@@ -61,6 +61,7 @@ internal class AndroidAccessibilityGateway(
     private val targetPackage: () -> String,
     private val windowActivityClass: (Int, Long) -> String,
     private val inputOriginClassifier: InputOriginClassifier,
+    private val currentRunGeneration: () -> Long,
     private val activeRunMode: () -> RunMode?,
     private val inspectPageReadiness: (AccessibilityNodeInfo, String, RunMode) -> TargetAppPageReadiness,
     private val targetAppReadinessController: TargetAppReadinessController,
@@ -497,7 +498,8 @@ internal class AndroidAccessibilityGateway(
 
     override fun performVerifiedNavigationBack(
         expectedWindow: WindowRef,
-        expectedActivityClass: String
+        expectedActivityClass: String,
+        targetActivityClass: String?
     ): Boolean {
         if (!uiWriteAuthorization.permits(UiWriteScope.VERIFIED_AI_BACK)) return false
         val expectedPackage = targetPackage().trim()
@@ -526,9 +528,19 @@ internal class AndroidAccessibilityGateway(
                 false
             } else {
                 val accepted = uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.VERIFIED_AI_BACK) {
-                    runCatching {
+                    val actionId = inputOriginClassifier.registerExpectedSelfNavigation(
+                        sourceWindow = expectedWindow,
+                        targetActivityClass = targetActivityClass,
+                        runGeneration = currentRunGeneration(),
+                        registeredAtUptimeMs = SystemClock.uptimeMillis()
+                    )
+                    val platformAccepted = runCatching {
                         service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
                     }.getOrDefault(false)
+                    if (!platformAccepted && actionId != null) {
+                        inputOriginClassifier.rejectExpectedSelfNavigation(actionId, "PLATFORM_BACK_REJECTED")
+                    }
+                    platformAccepted
                 } ?: false
                 onReadinessDiagnostic(
                     "经验证导航返回派发：windowId=$actualWindowId；generation=$windowGeneration；" +

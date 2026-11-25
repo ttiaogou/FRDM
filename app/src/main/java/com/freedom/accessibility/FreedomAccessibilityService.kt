@@ -91,6 +91,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             onLog = ::addLog,
             onGlobalTouch = { type, eventTimeMs, callbackUptimeMs, packageName, windowId ->
                 touchInteractionMonitor.record(type, eventTimeMs, callbackUptimeMs, packageName, windowId)
+                inputOriginClassifier.noteExpectedNavigationTouch(eventTimeMs)
             },
             onWindowTransition = ::handleAccessibilityWindowTransition,
             pipeline = accessibilityEventPipeline,
@@ -491,7 +492,8 @@ class FreedomAccessibilityService : AccessibilityService() {
                 sourcePageGeneration = pairedSource ?: sourcePageGeneration,
                 targetPageGeneration = accessibilityGateway.currentWindowGeneration(),
                 targetWindowId = runCatching { event.windowId }.getOrDefault(-1),
-                transitionAtUptimeMs = event.eventTime
+                transitionAtUptimeMs = event.eventTime,
+                runGeneration = runSessionCoordinator.currentRunGeneration()
             )
             val attachedSelfNavigation = inputOriginClassifier.takeAttachedSelfNavigation()
             // Business-facing navigation attribution now crosses the same normalized entry.
