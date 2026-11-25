@@ -330,7 +330,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                         if (decision.classification ==
                             com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE
                         ) com.freedom.core.runtime.RunMode.ACCOUNT_BROWSE
-                        else com.freedom.core.runtime.RunMode.AI_REPLY
+                        else com.freedom.core.runtime.RunMode.AI_REPLY,
+                        targetTask
                     )
                     val current = taskCoordinator.currentLease()
                     val transferred = if (current == null) {
