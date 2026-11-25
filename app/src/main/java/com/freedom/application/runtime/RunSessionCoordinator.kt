@@ -91,8 +91,11 @@ class RunSessionCoordinator(
     }
 
     private fun logPageLifecycle(state: PageRuntimeSessionState, reason: String) {
-        log.append("页面运行时[${state.lifecycle}]：taskId=${state.taskId}；mode=${state.mode}；" +
-            "runGeneration=${state.runGeneration}；routeRevision=${state.routeRevision}；reason=$reason")
+        // Diagnostic failures must not interrupt lease revocation or page teardown.
+        runCatching {
+            log.append("页面运行时[${state.lifecycle}]：taskId=${state.taskId}；mode=${state.mode}；" +
+                "runGeneration=${state.runGeneration}；routeRevision=${state.routeRevision}；reason=$reason")
+        }
     }
 
     private fun beginPageRuntime(generation: Long, taskId: String, mode: RunMode): PageRuntimeSessionState {
@@ -136,7 +139,7 @@ class RunSessionCoordinator(
             // explicit (its dedicated cleanup callback); an ordinary page switch is not one.
             // STOPPING already closes UI authority while the writer reads the old task identity.
             runCatching { runtime.saveProgressBeforeExit(reason, serviceBoundary = cleanup != null) }.onFailure {
-                log.recordException("RunSessionCoordinator", "page_runtime_checkpoint_failed", reason, it)
+                runCatching { log.recordException("RunSessionCoordinator", "page_runtime_checkpoint_failed", reason, it) }
             }
         }
         advanceRunGeneration()
@@ -156,11 +159,11 @@ class RunSessionCoordinator(
         val operation = pendingCleanup ?: return false
         return try {
             operation()
-            pendingCleanup = null
             publishPageRuntime(null)
+            pendingCleanup = null
             true
         } catch (error: Throwable) {
-            log.recordException("RunSessionCoordinator", "page_runtime_stop_failed", reason, error)
+            runCatching { log.recordException("RunSessionCoordinator", "page_runtime_stop_failed", reason, error) }
             false
         }
     }
@@ -175,7 +178,7 @@ class RunSessionCoordinator(
         try {
             val cleaned = executePendingCleanup("STOPPING_READ_ONLY_RETRY")
             if (cleaned) {
-                log.append("页面运行时[CLEANUP_RECOVERED]：旧运行时已清理；等待新鲜页面")
+                runCatching { log.append("页面运行时[CLEANUP_RECOVERED]：旧运行时已清理；等待新鲜页面") }
                 onObserveCurrentPage()
             }
             return cleaned
@@ -225,15 +228,6 @@ class RunSessionCoordinator(
         } else publishPageRuntime(ready)
         if (current.lifecycle != PageRuntimeLifecycle.READY) logPageLifecycle(ready, "运行时准备完成且任务租约已确认")
         return ready
-    }
-
-    /** Called only by the task controller after obtaining its existing verified capability. */
-    @Synchronized
-    fun confirmPageTaskOwnership(lease: TaskLease): PageRuntimeSessionState? {
-        if (taskCoordinator?.isCurrent(lease) != true) return null
-        val current = pageRuntime ?: return null
-        if (current.taskId != lease.taskId || current.runGeneration != lease.runGeneration) return null
-        return tryCompletePageStart(current)
     }
 
     /**
@@ -438,9 +432,7 @@ class RunSessionCoordinator(
             retryPendingPageCleanup()
             return pageRuntime
         }
-        if (currentPage != null && currentPage.mode == mode && currentPage.taskId == taskId &&
-            currentPage.lifecycle != PageRuntimeLifecycle.STOPPING
-        ) {
+        if (currentPage != null && currentPage.mode == mode && currentPage.taskId == taskId) {
             if (tryCompletePageStart(currentPage) == null) {
                 val runtime = runtimes[currentPage.mode]
                 if (!runtimePrepared) {
@@ -472,10 +464,7 @@ class RunSessionCoordinator(
             }
             // Private messages and greetings share one runtime and a verified atomic
             // business handoff. Do not reset it, invent a lease or bypass its page checks.
-            if (currentPage != null && currentPage.mode == mode &&
-                currentPage.lifecycle != PageRuntimeLifecycle.STOPPING &&
-                runtimePrepared
-            ) {
+            if (currentPage != null && currentPage.mode == mode && runtimePrepared) {
                 markPageStopping(currentPage)?.let { logPageLifecycle(it, "同运行时任务切换") }
                 val next = beginPageRuntime(runGeneration, taskId, mode)
                 if (currentPage.lifecycle == PageRuntimeLifecycle.UNCLASSIFIED) {

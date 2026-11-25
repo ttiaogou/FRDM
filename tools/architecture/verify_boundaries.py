@@ -869,6 +869,7 @@ RETIRED_PAGE_CONTROL_SYMBOLS = {
     "PageRuntimeSession", "onPageRuntimeStarted", "onPageRuntimePreparationRetry", "preparedRuntimeMode",
     "writeRoute", "publishWriteRoute", "lastBusinessAdmissionLease", "unclassifiedWriteHold",
     "onPageRuntimeWillSuspend", "onPageRuntimeSuspended", "suspendRecoveryOnServiceDisconnect",
+    "confirmPageTaskOwnership",
 }
 
 

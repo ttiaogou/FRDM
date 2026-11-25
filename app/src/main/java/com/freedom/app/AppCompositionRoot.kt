@@ -835,8 +835,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                     },
                     onReadinessInvalidated = { reason ->
                         targetAppReadinessController.invalidate(reason, SystemClock.uptimeMillis())
-                    },
-                    currentRunGeneration = { runSessionCoordinator.currentRunGeneration() }
+                    }
                 )
             ),
             log = monitorRepository,
