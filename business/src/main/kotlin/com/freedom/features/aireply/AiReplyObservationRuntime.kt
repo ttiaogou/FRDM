@@ -5568,56 +5568,26 @@ class AiReplyObservationRuntime(
             // Archive every distinct viewport even when all visible rows are blocked, read,
             // unknown, or otherwise ineligible. Sampling is observation-only and never grants
             // permission to click a row.
-            if (privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.add(structuralFingerprint)) {
-                sessionManagerState = SessionManagerState.CAPTURING_SESSION_LIST
-                val captureRunGeneration = currentRunGeneration()
-                val captureActionGeneration = sessionActionGeneration
-                chatSessionManagementPort.captureSessionListSample(snapshot) { screenshotPath ->
-                    scheduler.schedule(0L) {
-                        if (!isAiReplyActive() || !sessionRunStarted ||
-                            captureRunGeneration != currentRunGeneration() ||
-                            captureActionGeneration != sessionActionGeneration ||
-                            !canPerformPrivateMessagesUiAction() || receivedGreetingsTaskActive ||
-                            sessionManagerState != SessionManagerState.CAPTURING_SESSION_LIST
-                        ) return@schedule
-                        onLog(
-                            "AI 会话管理：列表视口样本已累计；识别行=${snapshot.chatListCandidates.size}；" +
-                                "私人聊天=${snapshot.chatListCandidates.count { it.selectionClass == "PRIVATE_CHAT" }}；" +
-                                "系统入口=${snapshot.chatListCandidates.count { it.selectionClass == "SYSTEM_ENTRY" }}；" +
-                                "未分类=${snapshot.chatListCandidates.count { it.selectionClass == "UNCLASSIFIED" }}；" +
-                                "未读=${snapshot.chatListCandidates.count { it.unreadStatus.name == "UNREAD" }}；" +
-                                "未知=${snapshot.chatListCandidates.count { it.unreadStatus.name == "UNKNOWN" }}；" +
-                                "身份冲突键数=${snapshotAmbiguousKeys.size}；" +
-                                "累计不同视口=${privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.size}；" +
-                                "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}"
-                        )
-                        continueSessionListWithoutCandidate(snapshot)
-                    }
-                }
-            } else {
-                continueSessionListWithoutCandidate(snapshot)
-            }
-            return
-        }
-
-        if (wasWaitingForUnread) {
-            sessionTransitionTask?.cancel()
-            sessionTransitionTask = null
-            privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-            privateMessagesTraversalTaskExecutor.atTop = false
-            privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
-            privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
-            privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
-            privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
-            sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
-            onLog("AI Reply 低频待机结束：当前页发现明确未读；继续搜索未读区域边界并由下往上处理")
-            scrollSessionList(snapshot, toTop = false)
-            return
-        } else {
-            sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
-        }
-
+            val selectedKey = ChatSessionManagementPolicy.stableSessionKey(next)
+        val selectedWindow = next.rowTarget.window
+        val selectedName = next.nameText
         if (privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.add(structuralFingerprint)) {
+            // A verified-only viewport does not need weak-identity avatar conflict evidence.
+            // Preserve its structured sample without waiting for a diagnostic screenshot.
+            val eligibleRows = snapshot.chatListCandidates.filter(ChatSessionManagementPolicy::isEligible)
+            val verifiedOnly = eligibleRows.isNotEmpty() && eligibleRows.all {
+                it.contactIdentity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                    !it.contactIdentity?.contactId.isNullOrBlank()
+            }
+            if (verifiedOnly && chatSessionManagementPort.persistVerifiedSessionListMetadata(snapshot)) {
+                onLog("AI 会话管理：列表视口样本已累计；已验证身份视口仅保存结构化样本，不等待诊断截图")
+                attemptOpenSession(selectedKey, selectedWindow, selectedName)
+                return
+            }
+
+            // Weak identities still need the existing visual conflict quarantine before
+            // navigation. The callback carries only identity/window hints, never a row
+            // object or coordinates. openSession independently reacquires live evidence.
             sessionManagerState = SessionManagerState.CAPTURING_SESSION_LIST
             val captureRunGeneration = currentRunGeneration()
             val captureActionGeneration = sessionActionGeneration
@@ -5630,21 +5600,16 @@ class AiReplyObservationRuntime(
                         sessionManagerState != SessionManagerState.CAPTURING_SESSION_LIST
                     ) return@schedule
                     onLog(
-                        "AI 会话管理：列表视口样本已累计；识别行=${snapshot.chatListCandidates.size}；" +
-                            "私人聊天=${snapshot.chatListCandidates.count { it.selectionClass == "PRIVATE_CHAT" }}；" +
-                            "系统入口=${snapshot.chatListCandidates.count { it.selectionClass == "SYSTEM_ENTRY" }}；" +
-                            "未分类=${snapshot.chatListCandidates.count { it.selectionClass == "UNCLASSIFIED" }}；" +
-                            "未读=${snapshot.chatListCandidates.count { it.unreadStatus.name == "UNREAD" }}；" +
-                            "未知=${snapshot.chatListCandidates.count { it.unreadStatus.name == "UNKNOWN" }}；" +
-                            "身份冲突键数=${snapshotAmbiguousKeys.size}；" +
+                        "AI 会话管理：列表视口样本已累计；身份诊断完成；" +
                             "累计不同视口=${privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.size}；" +
-                            "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}"
+                            "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}；使用身份提示重新采集当前会话行"
                     )
-                    attemptOpenSession(next)
+                    sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
+                    attemptOpenSession(selectedKey, selectedWindow, selectedName)
                 }
             }
         } else {
-            attemptOpenSession(next)
+            attemptOpenSession(selectedKey, selectedWindow, selectedName)
         }
     }
 
@@ -6472,7 +6437,14 @@ class AiReplyObservationRuntime(
         return missedPrivateSessionTapCount
     }
 
-    private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) {
+    private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) =
+        attemptOpenSession(ChatSessionManagementPolicy.stableSessionKey(candidate), candidate.rowTarget.window, candidate.nameText)
+
+    private fun attemptOpenSession(
+        selectedKey: String,
+        sourceWindow: com.freedom.core.accessibility.api.WindowRef,
+        selectedName: String?
+    ) {
         if (!isAiReplyActive() || !sessionRunStarted || !canPerformPrivateMessagesUiAction()) return
         currentSessionSendConfirmed = false
         confirmedPrivateReturnBackRetryCount = 0
@@ -6481,16 +6453,17 @@ class AiReplyObservationRuntime(
 
         // Persist only the business identity used for recovery re-anchoring. The next recovery
         // pass will reacquire the row and coordinates from a fresh page snapshot.
-        privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(candidate)
+        privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(selectedKey, selectedName)
         privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
 
-        if (candidate.contactIdentity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) {
+        if (selectedKey == ChatSessionManagementPolicy.stableSessionKeyForTitle(selectedName)) {
             onLog("AI 会话身份：未确认平台 ID；使用本次访问临时上下文，不前置跳转资料采集；仍复核同名歧义、目标行及聊天标题")
         }
 
         val actionGeneration = sessionActionGeneration
         val attempt = privateMessagesTaskExecutor.openSession(
-            candidate = candidate,
+            selectedKey = selectedKey,
+            sourceWindow = sourceWindow,
             blockedIdentityKeys = privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys
         ) { requestId, snapshot, selectedKey, result ->
             scheduler.schedule(0L) {
@@ -6525,7 +6498,8 @@ class AiReplyObservationRuntime(
                                 "AI 会话管理：点击前复核发现页面已变化；取消本次会话操作"
                             PrivateMessagesTaskExecutor.RejectionReason.AMBIGUOUS_SESSION_IDENTITY -> {
                                 privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys += attempt.selectedKey
-                                "AI 会话管理：点击前复核发现目标昵称已被本轮阻止或当前快照存在重复行；拒绝点击"
+                                chatSessionManagementPort.blockSessionIdentityKey(attempt.selectedKey)
+                                "AI 会话管理：点击前复核发现目标身份已被本轮阻止或当前快照存在重复行；拒绝点击"
                             }
                             PrivateMessagesTaskExecutor.RejectionReason.SESSION_ROW_NOT_FOUND ->
                                 "AI 会话管理：点击前未能重新匹配目标会话行；拒绝使用旧节点路径"
@@ -6533,7 +6507,7 @@ class AiReplyObservationRuntime(
                                 "AI 会话管理：点击前准入复核失败；仅允许明确未读且会话行、昵称、预览均完整可见的私人会话；" +
                                     "当前未读状态=${attempt.unreadStatus?.name ?: ChatUnreadStatus.UNKNOWN.name}；拒绝点击"
                             PrivateMessagesTaskExecutor.RejectionReason.UNSAFE_TAP_BOUNDS ->
-                                "AI 会话管理：目标会话行复核失败或边界不安全；点击未派发、不消耗会话尝试次数，目标序号=${candidate.rowIndex}"
+                                "AI 会话管理：目标会话行复核失败或边界不安全；点击未派发、不消耗会话尝试次数，目标键=${attempt.selectedKey.take(12)}"
                             PrivateMessagesTaskExecutor.RejectionReason.MISSING_LIST_VIEWPORT ->
                                 "AI 会话管理：点击前缺少当前列表视口边界；点击未派发、不消耗会话尝试次数，拒绝使用行中心或旧坐标"
                             PrivateMessagesTaskExecutor.RejectionReason.WINDOW_CONTEXT_CHANGED ->
@@ -6562,7 +6536,7 @@ class AiReplyObservationRuntime(
                         onLog("AI 会话管理[DEFERRED_NOT_READY]：启动保护期间不打开会话、不消耗尝试次数；保留目标意图并等待全新列表快照")
                         scheduleAiReadinessRetry("会话行点击等待目标页面就绪") {
                             if (actionGeneration == sessionActionGeneration && sessionRunStarted) {
-                                attemptOpenSession(candidate)
+                                attemptOpenSession(selectedKey, sourceWindow, selectedName)
                             }
                         }
                         return
@@ -6613,7 +6587,7 @@ class AiReplyObservationRuntime(
         }
 
         onLog(
-            "AI 会话管理：已提交会话行点击；序号=${candidate.rowIndex + 1}；" +
+            "AI 会话管理：已提交会话行点击；序号=${currentSessionCandidate?.rowIndex?.plus(1)}；" +
                 "触摸落点由统一手势策略在安全区域内生成；等待验证页面跳转"
         )
         sessionTransitionTask?.cancel()

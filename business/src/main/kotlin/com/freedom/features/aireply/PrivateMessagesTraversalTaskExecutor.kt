@@ -271,9 +271,12 @@ internal class PrivateMessagesTraversalTaskExecutor {
     }
 
     /** Keeps the most recent business identity as a recovery search hint. */
-    fun rememberRecoveryAnchor(candidate: ChatListCandidateSnapshot) {
-        resumeSessionKey = ChatSessionManagementPolicy.stableSessionKey(candidate).takeIf(String::isNotBlank)
-        resumeSessionName = candidate.nameText?.takeIf(String::isNotBlank)
+    fun rememberRecoveryAnchor(candidate: ChatListCandidateSnapshot) =
+        rememberRecoveryAnchor(ChatSessionManagementPolicy.stableSessionKey(candidate), candidate.nameText)
+
+    fun rememberRecoveryAnchor(identityKey: String, displayName: String?) {
+        resumeSessionKey = identityKey.takeIf(String::isNotBlank)
+        resumeSessionName = displayName?.takeIf(String::isNotBlank)
     }
 
     /**

@@ -116,6 +116,13 @@ interface ChatSessionManagementPort {
     /** Stores the visible session rows and captures their screen state before navigation. */
     fun captureSessionListSample(snapshot: ChatPageSnapshot, onComplete: (String?) -> Unit)
 
+    /**
+     * Optional metadata-only capture for an entirely verified viewport. It must not
+     * request a screenshot/overlay lease or start a deferred UI operation. A false
+     * result preserves the existing full capture path for unsupported adapters.
+     */
+    fun persistVerifiedSessionListMetadata(snapshot: ChatPageSnapshot): Boolean = false
+
     /** Returns safe current screen bounds only when the exact row still matches the snapshot. */
     fun resolveSessionTapBounds(
         snapshot: ChatPageSnapshot,

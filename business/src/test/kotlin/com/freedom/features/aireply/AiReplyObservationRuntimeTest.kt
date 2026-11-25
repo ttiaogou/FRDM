@@ -3942,6 +3942,88 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.sessionListSamples)
     }
 
+    @Test
+    fun p3DelayedVisualEvidenceReacquiresMovedRowAndVerifiedViewportDoesNotWaitForScreenshot() {
+        for (verified in listOf(false, true)) {
+            val scheduler = FakeScheduler()
+            val candidate = sessionCandidate(completeBoundaryEvidence = true).apply {
+                if (verified) contactIdentity = ContactRowIdentity(
+                    snapshotId = "sample", temporaryUserId = "temp",
+                    contactId = "verified-contact", confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                )
+            }
+            val inbox = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                resolveTapBoundsFromCandidate = true
+                deferSessionListSample = true
+                supportVerifiedListMetadata = true
+                page = inbox
+            }
+            val commands = ArrayList<GestureIntentRequest>()
+            val logs = ArrayList<String>()
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = object : TestGestureApi {
+                    override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                        commands += command
+                        if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                        listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                        return GestureSubmission.ACCEPTED
+                    }
+                },
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L
+            )
+            runtime.scheduleInitialObservation()
+            if (verified) {
+                runUntil(scheduler, 80) { commands.any { it.kind == GestureKind.TAP } }
+                assertEquals(1, port.verifiedListMetadataSamples)
+                assertNull(port.pendingSessionListSample)
+                assertEquals(candidate.rowBounds,
+                    (commands.single { it.kind == GestureKind.TAP }.intent as GestureIntent.Tap).targetBounds)
+            } else {
+                runUntil(scheduler, 80) { port.pendingSessionListSample != null }
+                assertTrue(commands.none { it.kind == GestureKind.TAP })
+                assertEquals(0, port.verifiedListMetadataSamples)
+                val moved = sessionCandidate(rowIndex = 3, completeBoundaryEvidence = true)
+                port.page = inbox.copy(chatListCandidates = listOf(moved))
+                val callback = requireNotNull(port.pendingSessionListSample)
+                port.pendingSessionListSample = null
+                callback(null)
+                runUntil(scheduler, 40) { commands.any { it.kind == GestureKind.TAP } }
+                val tap = commands.single { it.kind == GestureKind.TAP }
+                assertEquals(moved.rowBounds, (tap.intent as GestureIntent.Tap).targetBounds)
+                assertTrue(tap.description.contains("会话行 4"))
+                assertEquals(1, port.sessionTapResolutions)
+            }
+            assertEquals(1, port.sessionListSamples)
+        }
+    }
+
     /** A no-op gesture must not poison the traverser's attempted-session checkpoint. */
     @Test
     fun acceptedTapThatNeverNavigatesRetriesSameUnreadSessionAfterFreshListRecovery() {
@@ -8775,6 +8857,10 @@ class AiReplyObservationRuntimeTest {
         var sessionSwipeViewportResolutions = 0
         var sessionTapResolutions = 0
         var sessionListSamples = 0
+        var verifiedListMetadataSamples = 0
+        var supportVerifiedListMetadata = false
+        var deferSessionListSample = false
+        var pendingSessionListSample: ((String?) -> Unit)? = null
         var headerValidationDiagnostics = 0
         var lastHeaderValidationDiagnostic: ChatHeaderNodeDiagnostic? = null
         var lastExpectedSessionCandidate: ChatListCandidateSnapshot? = null
@@ -8827,9 +8913,15 @@ class AiReplyObservationRuntimeTest {
             identityCaptureOutcomeOverride
                 ?: super<ChatSessionManagementPort>.observeContactIdentityCapture(candidate)
         override fun finishSessionManagement(): String? = "test-run.zip"
+        override fun persistVerifiedSessionListMetadata(snapshot: ChatPageSnapshot): Boolean {
+            if (!supportVerifiedListMetadata) return false
+            verifiedListMetadataSamples++
+            sessionListSamples++
+            return true
+        }
         override fun captureSessionListSample(snapshot: ChatPageSnapshot, onComplete: (String?) -> Unit) {
             sessionListSamples++
-            onComplete(null)
+            if (deferSessionListSample) pendingSessionListSample = onComplete else onComplete(null)
         }
         override fun resolveSessionTapBounds(snapshot: ChatPageSnapshot, candidate: ChatListCandidateSnapshot): ScreenRect? {
             sessionTapResolutions++

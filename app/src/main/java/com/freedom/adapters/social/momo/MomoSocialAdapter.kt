@@ -6463,6 +6463,21 @@ internal class MomoSocialAdapter(
     override fun isSessionIdentityBlocked(sessionKey: String): Boolean =
         sessionComponents.sampleStore.isSessionIdentityBlocked(sessionKey)
 
+    override fun persistVerifiedSessionListMetadata(snapshot: ChatPageSnapshot): Boolean {
+        // The same sample store and schema are used. Do not skip visual evidence
+        // when any selectable row still has a weak or missing platform identity.
+        if (snapshot.chatListCandidates.none(ChatSessionManagementPolicy::isEligible) ||
+            snapshot.chatListCandidates.any {
+                ChatSessionManagementPolicy.isEligible(it) &&
+                    (it.contactIdentity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED ||
+                        it.contactIdentity?.contactId.isNullOrBlank())
+            }
+        ) return false
+        return runCatching {
+            sessionComponents.sampleStore.persistSessionList(snapshot) > 0
+        }.getOrDefault(false)
+    }
+
     override fun captureSessionListSample(
         snapshot: ChatPageSnapshot,
         onComplete: (String?) -> Unit
