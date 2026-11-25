@@ -186,7 +186,7 @@ class AndroidAccessibilityEventPipelineTest {
             updateAppPage = { _, _ -> },
             appendLog = { trace += "append-log" },
             currentActivityClass = { currentActivity },
-            updateCurrentActivityClass = { currentActivity = it },
+            observeWindowStateEvent = { clazz, _, _ -> if (isActivityWindowClassName(clazz)) currentActivity = clazz },
             onBrowseEventLogged = { },
             onActivityWindowEventDiagnostic = { clazz, window, generation, tracked ->
                 diagnoses += "$clazz|$window|$generation|$tracked"
@@ -229,13 +229,13 @@ class AndroidAccessibilityEventPipelineTest {
     fun clearedActivityAfterReconnectRequiresANewTargetWindowStateEvent() {
         val trace = mutableListOf<String>()
         val tracker = AndroidWindowContextTracker(uptimeMillis = { 0L })
-        tracker.updateActivityClass(ACTIVITY)
+        tracker.observeWindowStateEvent(ACTIVITY, 12, 0L)
         tracker.clearActivityClass()
 
         val pipeline = pipeline(
             trace,
             currentActivityClass = tracker::currentActivityClass,
-            updateCurrentActivityClass = tracker::updateActivityClass
+            observeWindowStateEvent = tracker::observeWindowStateEvent
         )
         // A fresh content or scroll event does not prove which Activity owns the window.
         pipeline.processNormalized(
@@ -259,7 +259,7 @@ class AndroidAccessibilityEventPipelineTest {
 
         // When Android actually emits a new target Activity event, the existing pipeline records it.
         pipeline.processNormalized(
-            event(AccessibilityEventType.WINDOW_STATE_CHANGED, TARGET_PACKAGE, ACTIVITY),
+            event(AccessibilityEventType.WINDOW_STATE_CHANGED, TARGET_PACKAGE, ACTIVITY).copy(windowId = 12),
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.AI_REPLY, 3_100L
         )
         assertEquals(ACTIVITY, tracker.currentActivityClass())
@@ -430,7 +430,7 @@ class AndroidAccessibilityEventPipelineTest {
         val pipeline = pipeline(
             trace,
             currentActivityClass = { currentActivity },
-            updateCurrentActivityClass = { currentActivity = it; trace += "update-activity" }
+            observeWindowStateEvent = { clazz, _, _ -> currentActivity = clazz; trace += "update-activity" }
         )
         val event = event(AccessibilityEventType.WINDOW_STATE_CHANGED, TARGET_PACKAGE,
             "com.immomo.momo.maintab.MaintabActivity")
@@ -439,10 +439,40 @@ class AndroidAccessibilityEventPipelineTest {
         pipeline.processNormalized(event, AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.AI_REPLY, 5_100L)
 
         assertEquals("com.immomo.momo.maintab.MaintabActivity", currentActivity)
-        assertEquals(3, trace.count { it == "update-activity" })
+        assertEquals(2, trace.count { it == "update-activity" })
         assertEquals(1, trace.count { it == "activity-transition" })
         assertTrue(trace.indexOf("update-activity") < trace.indexOf("append-log"))
         assertTrue(trace.indexOf("append-log") < trace.indexOf("dispatch-target"))
+    }
+
+    @Test
+    fun duplicateWindowEventsRefreshBoundActivityExactlyOnceBeforeBusinessDelivery() {
+        val trace = mutableListOf<String>()
+        val tracker = AndroidWindowContextTracker(uptimeMillis = { 0L })
+        var generation = 5L
+        val pipeline = pipeline(
+            trace,
+            currentActivityClass = tracker::currentActivityClass,
+            currentWindowGeneration = { generation },
+            observeWindowStateEvent = { clazz, windowId, pageGeneration ->
+                tracker.observeWindowStateEvent(clazz, windowId, pageGeneration)
+                trace += "bound:$windowId:$pageGeneration"
+            }
+        )
+        val event = event(AccessibilityEventType.WINDOW_STATE_CHANGED, TARGET_PACKAGE, ACTIVITY)
+        pipeline.processNormalized(event.copy(windowId = 12),
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.ACCOUNT_BROWSE, 1_000L)
+        assertEquals(ACTIVITY, tracker.activityForWindow(12, 5L))
+        assertTrue(trace.indexOf("bound:12:5") < trace.indexOf("dispatch-target"))
+        generation = 6L
+        pipeline.processNormalized(event.copy(windowId = 13),
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, RunMode.ACCOUNT_BROWSE, 1_100L)
+        assertEquals("", tracker.activityForWindow(12, 6L))
+        assertEquals(ACTIVITY, tracker.activityForWindow(13, 6L))
+        assertEquals(1, trace.count { it == "bound:12:5" })
+        assertEquals(1, trace.count { it == "bound:13:6" })
+        assertEquals(2, trace.count { it == "dispatch-target" })
+        assertEquals(1, trace.count { it == "activity-transition" })
     }
 
     @Test
@@ -452,7 +482,7 @@ class AndroidAccessibilityEventPipelineTest {
         val pipeline = pipeline(
             trace,
             currentActivityClass = { currentActivity },
-            updateCurrentActivityClass = { currentActivity = it; trace += "update-activity" }
+            observeWindowStateEvent = { clazz, _, _ -> currentActivity = clazz; trace += "update-activity" }
         )
         val profileActivity = "com.immomo.momo.personalprofile.presentation.activity.PersonalProfileActivityK"
 
@@ -509,7 +539,7 @@ class AndroidAccessibilityEventPipelineTest {
             updateAppPage = { _, _ -> },
             appendLog = { trace += "append-log" },
             currentActivityClass = { "" },
-            updateCurrentActivityClass = {},
+            observeWindowStateEvent = { _, _, _ -> },
             onBrowseEventLogged = {},
             unifiedAccessibilityEntry = unified
         )
@@ -542,7 +572,7 @@ class AndroidAccessibilityEventPipelineTest {
             updateAppPage = { _, _ -> },
             appendLog = {},
             currentActivityClass = { "" },
-            updateCurrentActivityClass = {},
+            observeWindowStateEvent = { _, _, _ -> },
             onBrowseEventLogged = {},
             unifiedAccessibilityEntry = com.freedom.core.accessibility.api.UnifiedAccessibilityEntry { received += it }
         )
@@ -582,7 +612,7 @@ class AndroidAccessibilityEventPipelineTest {
         appendLog: (String) -> Unit = { trace += "append-log" },
         updateAppPage: (String, String) -> Unit = { _, _ -> trace += "update-app-page" },
         currentActivityClass: () -> String = { "" },
-        updateCurrentActivityClass: (String) -> Unit = { trace += "update-activity" },
+        observeWindowStateEvent: (String, Int, Long) -> Unit = { _, _, _ -> trace += "update-activity" },
         dispatchGlobalTouchEvent: (AccessibilityEventEnvelope) -> Unit = { trace += "dispatch-global-touch" },
         currentWindowGeneration: () -> Long = { 0L },
         inputOriginClassifier: InputOriginClassifier = InputOriginClassifier(),
@@ -609,7 +639,7 @@ class AndroidAccessibilityEventPipelineTest {
         updateAppPage = updateAppPage,
         appendLog = appendLog,
         currentActivityClass = currentActivityClass,
-        updateCurrentActivityClass = updateCurrentActivityClass,
+        observeWindowStateEvent = observeWindowStateEvent,
         onBrowseEventLogged = { trace += "schedule-scan" },
         currentWindowGeneration = currentWindowGeneration,
         inputOriginClassifier = inputOriginClassifier

@@ -434,10 +434,12 @@ internal class AccessibilityServiceDependencies internal constructor(
             isRunRequested = {
                 monitorRepository.isRunRequested()
             },
-            currentActivityClass = windowContextTracker::currentActivityClass,
+            currentActivityClass = { accessibilityGateway.currentTargetActivityClass() },
             readEvidence = activityEvidenceReader::probe,
             acceptEvidence = { evidence ->
-                accessibilityGateway.currentWindowGeneration() == evidence.windowGeneration &&
+                val live = accessibilityGateway.currentGestureWindow()
+                live != null && live.packageName == monitorRepository.targetPackage() &&
+                    live.windowId == evidence.windowId && live.generation == evidence.windowGeneration &&
                     windowContextTracker.restoreActivityClass(
                         evidence.activityClass, evidence.windowId, evidence.windowGeneration
                     )
@@ -464,7 +466,7 @@ internal class AccessibilityServiceDependencies internal constructor(
         AndroidAccessibilityGateway(
             service = service,
             targetPackage = { monitorRepository.targetPackage() },
-            activityClass = windowContextTracker::currentActivityClass,
+            windowActivityClass = windowContextTracker::activityForWindow,
             activeRunMode = {
                 if (monitorRepository.isRunRequested()) runSessionCoordinator.activeMode() else null
             },
@@ -475,9 +477,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             inputOriginClassifier = inputOriginClassifier,
             uiWriteAuthorization = uiWriteAuthorization,
             onReadinessDiagnostic = addLog,
-            recoveredActivityBindingCurrent = windowContextTracker::recoveredActivityMatches,
-            onRecoveredActivityBindingMismatch = {
-                windowContextTracker.invalidateRecoveredActivity()
+            onActivityBindingMissing = {
                 activityRecoveryCoordinator.ensureStarted()
             }
         )
@@ -522,7 +522,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             rootAccess = accessibilityGateway,
             accessibilityGateway = accessibilityGateway,
             targetPackage = MomoAppDescriptor.PACKAGE_NAME,
-            activityClass = windowContextTracker::currentActivityClass,
+            activityClass = accessibilityGateway::currentTargetActivityClass,
             dp = dp,
             onLog = addLog,
             gestureSettingsRepository = root.gestureSettingsRepository,
@@ -886,12 +886,11 @@ internal class AccessibilityServiceDependencies internal constructor(
             updateAppPage = { appLabel, pageLabel -> monitorRepository.updateAppPage(appLabel, pageLabel) },
             appendLog = addLog,
             currentActivityClass = windowContextTracker::currentActivityClass,
-            updateCurrentActivityClass = windowContextTracker::updateActivityClass,
+            observeWindowStateEvent = windowContextTracker::observeWindowStateEvent,
             onBrowseEventLogged = { monitorPreviewScheduler.scheduleBrowseScan() },
             unifiedAccessibilityEntry = unifiedAccessibilityEntry,
             currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() },
             inputOriginClassifier = inputOriginClassifier,
-            observeWindowStateEvent = windowContextTracker::observeWindowStateEvent,
             pageObservationCoordinator = pageObservationCoordinator,
             onActivityWindowEventDiagnostic = { className, windowId, generation, tracked ->
                 addLog(

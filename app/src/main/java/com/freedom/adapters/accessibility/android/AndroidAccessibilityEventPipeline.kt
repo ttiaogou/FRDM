@@ -32,13 +32,12 @@ internal class AndroidAccessibilityEventPipeline(
     private val updateAppPage: (appLabel: String, pageLabel: String) -> Unit,
     private val appendLog: (String) -> Unit,
     private val currentActivityClass: () -> String,
-    private val updateCurrentActivityClass: (String) -> Unit,
+    private val observeWindowStateEvent: (className: String, windowId: Int, generation: Long) -> Unit,
     private val onBrowseEventLogged: () -> Unit,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val currentWindowGeneration: () -> Long = { 0L },
     private val inputOriginClassifier: InputOriginClassifier = InputOriginClassifier(),
     private val onDuplicateSuppressed: (AccessibilityEventEnvelope) -> Unit = {},
-    private val observeWindowStateEvent: (className: String, windowId: Int) -> Unit = { _, _ -> },
     private val pageObservationCoordinator: PageObservationCoordinator? = null,
     private val onActivityWindowEventDiagnostic: (
         className: String, windowId: Int, generation: Long, tracked: Boolean
@@ -147,21 +146,18 @@ internal class AndroidAccessibilityEventPipeline(
 
         val routedTargetEvent = eventForRouting
 
-        pageObservationCoordinator?.signal(routedTargetEvent.type)
-
+        // Publish window-bound Activity evidence before waking page readers or delivering
+        // a target event. Visible-log dedup must not suppress fresh evidence.
         if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && className.isNotBlank()) {
-            runCatching { observeWindowStateEvent(className, eventForRouting.windowId) }
+            observeWindowStateEvent(className, eventForRouting.windowId, currentWindowGeneration())
         }
+        pageObservationCoordinator?.signal(routedTargetEvent.type)
 
         // AccountBrowse consumes target events before visible-log de-duplication. This updates
         // scroll counters and refresh verification even when the matching log line is suppressed.
         if (runMode == RunMode.ACCOUNT_BROWSE) {
             // AccountBrowse must receive this before the visible-log dedup gate.
             unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.TargetApplication(normalizedEvent))
-        } else if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            classNameEndsWithActivity(className)
-        ) {
-            updateCurrentActivityClass(className)
         }
 
         // Report activity clue classification before visible-log deduplication. This callback
@@ -195,7 +191,6 @@ internal class AndroidAccessibilityEventPipeline(
         }
 
         if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && className.isNotBlank()) {
-            if (classNameEndsWithActivity(className)) updateCurrentActivityClass(className)
             if (runMode != null) unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.ActivityTransition(className))
         }
 
@@ -266,9 +261,6 @@ internal class AndroidAccessibilityEventPipeline(
         AccessibilityEventType.VIEW_CONTEXT_CLICKED -> true
         else -> false
     }
-
-    private fun classNameEndsWithActivity(className: String): Boolean =
-        isActivityWindowClassName(className)
 
     private companion object {
         const val LOG_DETAIL_SEPARATOR = "\u001F"

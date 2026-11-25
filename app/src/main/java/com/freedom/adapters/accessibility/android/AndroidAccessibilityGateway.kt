@@ -59,15 +59,14 @@ private const val MAX_TARGET_WINDOWS_PER_CAPTURE = 8
 internal class AndroidAccessibilityGateway(
     private val service: AccessibilityService,
     private val targetPackage: () -> String,
-    private val activityClass: () -> String,
+    private val windowActivityClass: (Int, Long) -> String,
     private val inputOriginClassifier: InputOriginClassifier,
     private val activeRunMode: () -> RunMode?,
     private val inspectPageReadiness: (AccessibilityNodeInfo, String, RunMode) -> TargetAppPageReadiness,
     private val targetAppReadinessController: TargetAppReadinessController,
     private val uiWriteAuthorization: UiWriteAuthorization,
     private val onReadinessDiagnostic: (String) -> Unit = {},
-    private val recoveredActivityBindingCurrent: (Int, Long) -> Boolean = { _, _ -> true },
-    private val onRecoveredActivityBindingMismatch: () -> Unit = {}
+    private val onActivityBindingMissing: () -> Unit = {}
 ) : AccessibilityGateway, GestureExecutionPort, AndroidActiveWindowRootAccess, AndroidScreenshotCapture {
 
     @Volatile
@@ -89,7 +88,7 @@ internal class AndroidAccessibilityGateway(
         AndroidGestureDispatcher(
             service = service,
             targetPackage = targetPackage,
-            activityClass = activityClass,
+            activityClass = ::currentTargetActivityClass,
             inputOriginClassifier = inputOriginClassifier,
             targetAppReadinessController = targetAppReadinessController,
             onReadinessDiagnostic = onReadinessDiagnostic,
@@ -103,7 +102,7 @@ internal class AndroidAccessibilityGateway(
         AndroidScreenshotCaptureCoordinator(
             service = service,
             targetPackage = targetPackage,
-            activityClass = activityClass,
+            activityClass = ::currentTargetActivityClass,
             mainHandler = mainHandler
         )
     }
@@ -152,21 +151,30 @@ internal class AndroidAccessibilityGateway(
     override fun currentGestureWindow(): WindowRef? {
         // Refresh first so a rotation/resolution change also advances the captured generation.
         displayContextTracker.snapshot()
+        val generation = windowGeneration
         val root = runCatching { service.rootInActiveWindow }.getOrNull() ?: return null
         return try {
             val packageName = safeString { root.packageName?.toString().orEmpty() }
             if (packageName.isBlank()) return null
             val currentWindowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: -1
+            val activity = if (packageName == targetPackage()) {
+                windowActivityClass(currentWindowId, generation)
+            } else ""
+            if (generation != windowGeneration) return null
             WindowRef(
                 packageName = packageName,
-                activityClass = activityForWindow(currentWindowId),
-                generation = windowGeneration,
+                activityClass = activity,
+                generation = generation,
                 windowId = currentWindowId
             )
         } finally {
             recycle(root)
         }
     }
+
+    /** Current target Activity evidence, never the cached class of another window. */
+    fun currentTargetActivityClass(): String =
+        currentGestureWindow()?.takeIf { it.packageName == targetPackage() }?.activityClass.orEmpty()
 
     /** Rechecks package, Activity, window ID and page generation immediately before dispatch. */
     override fun isGestureWindowCurrent(window: WindowRef): Boolean {
@@ -180,12 +188,14 @@ internal class AndroidAccessibilityGateway(
     }
 
     override fun inspectActiveWindow(request: TreeInspectionRequest): AccessibilityTreeSnapshot? {
+        displayContextTracker.snapshot()
+        val generation = windowGeneration
         val deadlineNanos = inspectionDeadline(request.maxDurationMs)
         return nodeSnapshotReader.inspectRoot(
             acquireTargetRoot(request.allowVisibleWindowFallback),
             request,
             deadlineNanos = deadlineNanos
-        )
+        )?.takeIf { it.window.generation == generation && windowGeneration == generation }
     }
 
     /**
@@ -242,7 +252,7 @@ internal class AndroidAccessibilityGateway(
                 deadlineNanos,
                 initialPath = target.path.childIndices
             ) ?: return null
-            if (!isWindowCurrent(target.window)) return null
+            if (!isWindowCurrent(target.window) || snapshot.window.generation != target.window.generation) return null
             val resolvedWindowId = target.window.windowId.takeIf { it >= 0 } ?: snapshot.windowId
             return snapshot.copy(
                 window = target.window.copy(windowId = resolvedWindowId),
@@ -264,6 +274,8 @@ internal class AndroidAccessibilityGateway(
             val root: AccessibilityNodeInfo
         )
 
+        displayContextTracker.snapshot()
+        val generation = windowGeneration
         val deadlineNanos = inspectionDeadline(request.maxDurationMs)
         val candidates = ArrayList<WindowRootCandidate>()
         val seenWindowIds = HashSet<Int>()
@@ -354,7 +366,9 @@ internal class AndroidAccessibilityGateway(
                 }
             )
         }
-        return snapshots
+        return if (windowGeneration == generation && snapshots.all { it.window.generation == generation }) {
+            snapshots
+        } else emptyList()
     }
 
     private fun inspectionDeadline(maxDurationMs: Long): Long {
@@ -366,9 +380,8 @@ internal class AndroidAccessibilityGateway(
     override fun isWindowCurrent(window: WindowRef): Boolean {
         if (window.generation != windowGeneration) return false
         if (window.packageName != targetPackage()) return false
-        val currentActivity = activityClass()
-        if (window.activityClass.isNotBlank() && currentActivity.isNotBlank() &&
-            window.activityClass != currentActivity
+        if (window.activityClass.isNotBlank() &&
+            window.activityClass != windowActivityClass(window.windowId, window.generation)
         ) return false
         if (window.windowId < 0) {
             return withActiveTargetRoot { root, _ ->
@@ -491,7 +504,7 @@ internal class AndroidAccessibilityGateway(
         if (expectedActivityClass.isBlank() || expectedPackage.isBlank() ||
             expectedWindow.packageName != expectedPackage ||
             expectedWindow.activityClass != expectedActivityClass ||
-            activityClass() != expectedActivityClass ||
+            windowActivityClass(expectedWindow.windowId, expectedWindow.generation) != expectedActivityClass ||
             expectedWindow.windowId < 0 || expectedWindow.generation != windowGeneration ||
             runCatching { activeRunMode() }.getOrNull() != RunMode.AI_REPLY
         ) return false
@@ -500,7 +513,7 @@ internal class AndroidAccessibilityGateway(
         return try {
             val actualPackage = safeString { root.packageName?.toString().orEmpty() }
             val actualWindowId = safeInt { root.windowId }
-            val actualActivity = activityClass()
+            val actualActivity = windowActivityClass(actualWindowId, windowGeneration)
             val stillCurrent = actualPackage == expectedPackage &&
                 actualWindowId == expectedWindow.windowId &&
                 windowGeneration == expectedWindow.generation &&
@@ -599,7 +612,7 @@ internal class AndroidAccessibilityGateway(
                 TargetAppReadinessEvidence(
                     targetPackage = expectedPackage,
                     foregroundPackage = "",
-                    activityClass = activityClass(),
+                    activityClass = "",
                     runMode = mode,
                     windowId = -1,
                     pageGeneration = windowGeneration,
@@ -614,11 +627,13 @@ internal class AndroidAccessibilityGateway(
         try {
             val foregroundPackage = safeString { root.packageName?.toString().orEmpty() }
             val windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: -1
-            val currentActivity = activityForWindow(windowId)
-            if (currentActivity.isBlank() && activityClass().isNotBlank()) {
-                // The recovered identity was tied to a different window or generation.
-                // Revoke that provisional clue and re-enter read-only evidence collection.
-                onRecoveredActivityBindingMismatch()
+            val generation = windowGeneration
+            val currentActivity = if (foregroundPackage == expectedPackage) {
+                windowActivityClass(windowId, generation)
+            } else ""
+            if (foregroundPackage == expectedPackage && currentActivity.isBlank()) {
+                // A missing or mismatched clue may only wake the existing read-only recovery.
+                onActivityBindingMissing()
             }
             val pageReadiness = if (mode != null && foregroundPackage == expectedPackage) {
                 runCatching { inspectPageReadiness(root, currentActivity, mode) }
@@ -641,8 +656,8 @@ internal class AndroidAccessibilityGateway(
                     activityClass = currentActivity,
                     runMode = mode,
                     windowId = windowId,
-                    pageGeneration = windowGeneration,
-                    activeWindowAvailable = foregroundPackage.isNotBlank(),
+                    pageGeneration = generation,
+                    activeWindowAvailable = foregroundPackage.isNotBlank() && windowGeneration == generation,
                     // An incomplete safety scan is transient: let the dispatcher defer the
                     // still-pending task and reacquire a fresh root. The per-window retry count
                     // is diagnostic only; exhaustion never authorizes an action or ends the task.
@@ -690,6 +705,8 @@ internal class AndroidAccessibilityGateway(
     ): T? {
         val expectedPackage = targetPackage().trim()
         if (expectedPackage.isBlank()) return null
+        displayContextTracker.snapshot()
+        val generation = windowGeneration
         val roots = ArrayList<AndroidTargetWindowRoot>()
         val seenIds = HashSet<Int>()
         val windows = runCatching { service.windows }.getOrNull().orEmpty()
@@ -747,6 +764,7 @@ internal class AndroidAccessibilityGateway(
             }
             val ordered = roots.sortedWith(compareByDescending<AndroidTargetWindowRoot> { it.active }
                 .thenByDescending { it.focused })
+            if (windowGeneration != generation || ordered.any { it.window.generation != generation }) return null
             return block(ordered)
         } finally {
             roots.forEach { recycle(it.root) }
@@ -827,9 +845,12 @@ internal class AndroidAccessibilityGateway(
     }
 
     override fun <T> withActiveTargetRoot(block: (AccessibilityNodeInfo, WindowRef) -> T): T? {
+        displayContextTracker.snapshot()
+        val generation = windowGeneration
         val root = acquireTargetRoot(allowVisibleWindowFallback = false) ?: return null
         return try {
             val window = createWindowRef(root) ?: return null
+            if (window.generation != generation || windowGeneration != generation) return null
             block(root, window)
         } finally {
             recycle(root)
@@ -996,18 +1017,18 @@ internal class AndroidAccessibilityGateway(
         }
     }
 
-    private fun activityForWindow(windowId: Int): String =
-        if (recoveredActivityBindingCurrent(windowId, windowGeneration)) activityClass() else ""
-
     private fun createWindowRef(root: AccessibilityNodeInfo, windowIdFallback: Int = -1): WindowRef? {
         displayContextTracker.snapshot()
         val packageName = safeString { root.packageName?.toString().orEmpty() }
         if (packageName.isBlank() || packageName != targetPackage()) return null
+        val generation = windowGeneration
         val windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: windowIdFallback
+        val activity = windowActivityClass(windowId, generation)
+        if (generation != windowGeneration) return null
         return WindowRef(
             packageName = packageName,
-            activityClass = activityForWindow(windowId),
-            generation = windowGeneration,
+            activityClass = activity,
+            generation = generation,
             windowId = windowId
         )
     }
