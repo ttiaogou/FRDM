@@ -92,8 +92,9 @@ internal class AndroidAccessibilityEventForwarder(
         val runRequested = isRunRequested()
         logWindowEvent(runRequested)
         if (!runRequested) return
-        if (mode == null) pipeline.processWithoutRuntime(event)
-        else pipeline.process(event, mode)
+        val runMode = mode
+        if (runMode == null) pipeline.processWithoutRuntime(event)
+        else pipeline.process(event, runMode)
     }
 }
 
