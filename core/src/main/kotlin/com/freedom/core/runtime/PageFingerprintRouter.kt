@@ -220,6 +220,7 @@ fun interface PageObservationSnapshotSource {
  */
 class UnifiedPageObservationBus(
     private val currentRunGeneration: () -> Long = { 0L },
+    private val currentWindowSessionKey: () -> String? = { null },
     private val onDecision: (PageObservationSnapshot, UnifiedPageObservationMerger.Decision) -> Unit = { _, _ -> }
 ) {
     private val classifiers = mutableListOf<PageObservationSnapshotClassifier>()
@@ -233,7 +234,10 @@ class UnifiedPageObservationBus(
 
     @Synchronized
     fun observe(snapshot: PageObservationSnapshot): UnifiedPageObservationMerger.Decision {
-        val stale = snapshot.runGeneration != currentRunGeneration()
+        val currentWindow = currentWindowSessionKey()
+        val stale = snapshot.runGeneration != currentRunGeneration() ||
+            (snapshot.windowSessionKey != null && currentWindow != null &&
+                snapshot.windowSessionKey != currentWindow)
         val incomplete = snapshot.fingerprint.semanticPage.isBlank() ||
             snapshot.fingerprint.packageName.isBlank()
         val decision = if (stale || incomplete) {
