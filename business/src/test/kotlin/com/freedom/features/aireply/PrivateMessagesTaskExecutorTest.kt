@@ -138,6 +138,21 @@ class PrivateMessagesTaskExecutorTest {
     }
 
     @Test
+    fun repeatedExtractionOfSameRowRejectsClickWithoutConfirmingIdentityConflict() {
+        val selected = candidate()
+        var dispatches = 0
+        val executor = executor(
+            snapshotProvider = { validSnapshot().copy(chatListCandidates = listOf(selected, selected)) },
+            onDispatch = { dispatches++ }
+        )
+        val result = executor.openSession(key(selected), selected.rowTarget.window, emptySet()) { _, _, _, _ -> }
+        val rejected = result as PrivateMessagesTaskExecutor.Attempt.Rejected
+        assertEquals(PrivateMessagesTaskExecutor.RejectionReason.AMBIGUOUS_SESSION_IDENTITY, rejected.reason)
+        assertFalse(rejected.confirmedIdentityBlock)
+        assertEquals(0, dispatches)
+    }
+
+    @Test
     fun rejectsFreshDuplicateEvenWhenOneRowHasIncompletePreviewOrVerifiedIdentity() {
         val selected = candidate()
         val moved = candidate(rowIndex = 2, top = 500)
@@ -154,6 +169,7 @@ class PrivateMessagesTaskExecutorTest {
             val result = executor.openSession(key(selected), selected.rowTarget.window, emptySet()) { _, _, _, _ -> }
             assertEquals(PrivateMessagesTaskExecutor.RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
                 (result as PrivateMessagesTaskExecutor.Attempt.Rejected).reason)
+            assertTrue(result.confirmedIdentityBlock)
             assertEquals(0, dispatches)
         }
     }

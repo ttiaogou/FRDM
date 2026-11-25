@@ -6574,9 +6574,14 @@ class AiReplyObservationRuntime(
                             PrivateMessagesTaskExecutor.RejectionReason.PAGE_CHANGED ->
                                 "AI 会话管理：点击前复核发现页面已变化；取消本次会话操作"
                             PrivateMessagesTaskExecutor.RejectionReason.AMBIGUOUS_SESSION_IDENTITY -> {
-                                privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys += attempt.selectedKey
-                                chatSessionManagementPort.blockSessionIdentityKey(attempt.selectedKey)
-                                "AI 会话管理：点击前复核发现目标身份已被本轮阻止或当前快照存在重复行；拒绝点击"
+                                if (attempt.confirmedIdentityBlock) {
+                                    privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys += attempt.selectedKey
+                                    chatSessionManagementPort.blockSessionIdentityKey(attempt.selectedKey)
+                                    privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+                                    "AI 会话管理[IDENTITY_CONFLICT]：目标身份已有阻止证据或存在不同同名行；cacheWrite=true；拒绝点击"
+                                } else {
+                                    "AI 会话管理[IDENTITY_RETRYABLE]：当前快照身份重复观察；cacheWrite=false；拒绝点击，等待新鲜行证据"
+                                }
                             }
                             PrivateMessagesTaskExecutor.RejectionReason.SESSION_ROW_NOT_FOUND ->
                                 "AI 会话管理：点击前未能重新匹配目标会话行；拒绝使用旧节点路径"

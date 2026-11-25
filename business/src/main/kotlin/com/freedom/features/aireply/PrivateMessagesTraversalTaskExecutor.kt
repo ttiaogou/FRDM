@@ -981,9 +981,20 @@ internal class PrivateMessagesTraversalTaskExecutor {
      */
     private fun isNonContributingClippedEdge(snapshot: ChatPageSnapshot, row: ChatListCandidateSnapshot): Boolean {
         val viewport = snapshot.chatListViewport ?: return false
+        val touchesTop = row.rowBounds.top <= viewport.top
+        val touchesBottom = row.rowBounds.bottom >= viewport.bottom
+        // Android can clamp a holder to the viewport yet expose a child whose
+        // vertical bounds extend beyond (or invert at) that edge. That is direct
+        // clipping evidence even when the outer holder claims full visibility.
+        val childClipping = listOfNotNull(row.nameBounds, row.previewBounds).any { child ->
+            child.right > child.left && child.left >= row.rowBounds.left &&
+                child.right <= row.rowBounds.right &&
+                ((touchesTop && (child.top < viewport.top || child.bottom <= viewport.top)) ||
+                    (touchesBottom && (child.bottom > viewport.bottom || child.top >= viewport.bottom)))
+        }
         return row.rowBoundsValid && row.intersectsViewport && row.rowVisibleToUser &&
-            (!row.fullyInsideViewport || row.rowClippedAtViewportEdge) &&
-            (row.rowBounds.top <= viewport.top || row.rowBounds.bottom >= viewport.bottom) &&
+            (!row.fullyInsideViewport || row.rowClippedAtViewportEdge || childClipping) &&
+            (touchesTop || touchesBottom) &&
             row.unreadStatus != ChatUnreadStatus.UNREAD &&
             (row.unreadStatus == ChatUnreadStatus.READ ||
                 (!row.statusNewNodePresent && row.statusNewNodeObservationCount == 0 &&

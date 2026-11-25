@@ -46,7 +46,8 @@ internal class PrivateMessagesTaskExecutor(
         data class Rejected(
             val selectedKey: String,
             val reason: RejectionReason,
-            val unreadStatus: ChatUnreadStatus? = null
+            val unreadStatus: ChatUnreadStatus? = null,
+            val confirmedIdentityBlock: Boolean = false
         ) : Attempt
 
         data class Submitted(
@@ -90,7 +91,8 @@ internal class PrivateMessagesTaskExecutor(
         if (selectedKey in blockedIdentityKeys || selectedKey in refreshedAmbiguousKeys ||
             sessionPort.isSessionIdentityBlocked(selectedKey)
         ) {
-            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY)
+            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
+                confirmedIdentityBlock = true)
         }
 
         // The original child index, path and bounds are never part of reacquisition.
@@ -103,17 +105,23 @@ internal class PrivateMessagesTaskExecutor(
             return Attempt.Rejected(selectedKey, RejectionReason.SESSION_ROW_NOT_FOUND)
         }
         if (matches.size != 1) {
-            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY)
+            // Repeated extraction of one row is unsafe to click, but does not prove
+            // a collision between two different rows and must remain retryable.
+            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
+                confirmedIdentityBlock = matches.map { it.rowIndex }.distinct().size > 1)
         }
         val currentCandidate = matches.single()
         // A weak title cannot become unique merely because a second same-title row
         // has a verified ID, incomplete evidence, or is temporarily unclassified.
         val titleKey = ChatSessionManagementPolicy.stableSessionKeyForTitle(currentCandidate.nameText)
-        if (selectedKey == titleKey && refreshed.chatListCandidates.count {
-                it.selectionClass != "SYSTEM_ENTRY" &&
-                    ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) == titleKey
-            } != 1
-        ) return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY)
+        val sameTitleRows = refreshed.chatListCandidates.filter {
+            it.selectionClass != "SYSTEM_ENTRY" &&
+                ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) == titleKey
+        }
+        if (selectedKey == titleKey && sameTitleRows.size != 1) {
+            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
+                confirmedIdentityBlock = sameTitleRows.map { it.rowIndex }.distinct().size > 1)
+        }
         val currentWindow = currentCandidate.rowTarget.window
         if (currentWindow.packageName != sourceWindow.packageName ||
             currentWindow.windowId != sourceWindow.windowId ||
@@ -174,7 +182,8 @@ internal class PrivateMessagesTaskExecutor(
         }
 
         if (selectedKey in blockedIdentityKeys || sessionPort.isSessionIdentityBlocked(selectedKey)) {
-            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY)
+            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
+                confirmedIdentityBlock = true)
         }
         val submission = runCatching {
             gesturePolicy.execute(request) { result -> onGestureResult(request.id, refreshed, selectedKey, result) }

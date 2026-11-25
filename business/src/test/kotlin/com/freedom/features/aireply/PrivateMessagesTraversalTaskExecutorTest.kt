@@ -1015,6 +1015,34 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun clampedEdgeWithoutBadgeDoesNotCreateDurableUnreadCandidate() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val edge = candidate(1, "Edge", ChatUnreadStatus.UNKNOWN, top = 1540,
+            rowHeight = 60, previewBoundsValid = false).copy(
+            previewBounds = ScreenRect(150, 1620, 620, 1600),
+            previewBoundsIntersectViewport = false,
+            previewBoundsFullyInsideViewport = false
+        )
+        val healthy = candidate(0, "Healthy", ChatUnreadStatus.UNREAD)
+        assertFalse(executor.observeIncompleteUnreadEvidence(snapshot(healthy, edge)))
+        assertTrue(executor.unresolvedIncompleteUnreadKeys.isEmpty())
+        assertTrue(executor.ambiguousSessionIdentityKeys.isEmpty())
+        assertEquals(healthy, executor.selectNextCandidate(listOf(healthy, edge)))
+        assertTrue(executor.attemptedSessionKeys.isEmpty())
+
+        // Positive badge evidence must still retain the clipped row for reinspection.
+        val unreadEdge = edge.copy(unreadStatus = ChatUnreadStatus.UNREAD, statusNewNodePresent = true)
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(healthy, unreadEdge)))
+        assertEquals(1, executor.unresolvedIncompleteUnreadKeys.size)
+        assertEquals(healthy, executor.selectNextCandidate(listOf(healthy, unreadEdge)))
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(healthy)))
+        val repaired = candidate(1, "Edge", ChatUnreadStatus.UNREAD)
+        assertFalse(executor.observeIncompleteUnreadEvidence(snapshot(healthy, repaired)))
+        assertTrue(executor.unresolvedIncompleteUnreadKeys.isEmpty())
+        assertTrue(executor.attemptedSessionKeys.isEmpty())
+    }
+
+    @Test
     fun incompleteUnreadPrivateRowIsRetryableAndSurvivesCheckpointUntilOriginalRowRepairs() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val damaged = candidate(0, "Unread but incomplete", ChatUnreadStatus.UNREAD,

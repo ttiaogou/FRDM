@@ -24,6 +24,14 @@ class ArchitectureBoundaryTest {
 
     private fun projectFile(path: String): File = TestSourceResolver.resolve(projectRoot, path)
 
+    @Test
+    fun avatarScreenshotDiagnosticsCannotWriteIdentityBlockCache() {
+        val imageStore = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoChatSampleImageStore.kt").readText()
+        assertTrue("Avatar difference evidence must remain observable", imageStore.contains("visualConflictCandidate"))
+        assertFalse("Screenshot diagnostics cannot quarantine a business identity", imageStore.contains("blockSessionIdentityKey"))
+        assertFalse("A visual warning is not a confirmed identity conflict", imageStore.contains("BLOCKED_NAME_ONLY_IDENTITY"))
+    }
+
     private fun kotlinFiles(relativeDirectory: String): List<File> =
         TestSourceResolver.resolveAll(projectRoot, relativeDirectory)
             .flatMap { directory ->
