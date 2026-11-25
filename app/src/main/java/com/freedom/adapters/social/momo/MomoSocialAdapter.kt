@@ -1009,7 +1009,16 @@ internal class MomoSocialAdapter(
                     val labels = visible.map { it.text?.toString().orEmpty() }
                     if (!accessibilityGateway.isWindowCurrent(window)) {
                         ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED)
-                    } else ImageIndexReadResult.fromVisibleLabels(labels, fingerprint, window)
+                    } else {
+                        val bounds = Rect()
+                        root.getBoundsInScreen(bounds)
+                        val result = ImageIndexReadResult.fromVisibleLabels(labels, fingerprint, window)
+                        if (!accessibilityGateway.isWindowCurrent(window)) {
+                            ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED)
+                        } else if (result is ImageIndexReadResult.Confirmed && !bounds.isEmpty) {
+                            result.copy(viewport = bounds.toScreenRect())
+                        } else result
+                    }
                 } finally {
                     nodes.forEach { node -> runCatching { node.recycle() } }
                 }

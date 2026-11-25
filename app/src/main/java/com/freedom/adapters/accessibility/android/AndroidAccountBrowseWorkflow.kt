@@ -40,6 +40,7 @@ import com.freedom.features.accountbrowse.FeedRefreshVerificationPolicy
 import com.freedom.features.accountbrowse.FeedReturnStability
 import com.freedom.features.accountbrowse.FeedReturnVerificationPolicy
 import com.freedom.features.accountbrowse.ImageBrowsePlanningPolicy
+import com.freedom.features.accountbrowse.ImagePagingProgress
 import com.freedom.features.accountbrowse.ports.*
 
 /**
@@ -582,6 +583,11 @@ internal class AndroidAccountBrowseWorkflow(
             },
             observationHint = observationHint
         )
+        // Invalidate a queued or running image command on entry into recovery; the
+        // shared executor owns cancellation and the result still requires fresh evidence.
+        activeBrowseGestureRequestId?.takeIf { it.startsWith("accountbrowse-image-") }?.let {
+            gesturePolicy.cancelActive(it, "account_browse_image_recovery")
+        }
     }
 
     internal fun performAccountBrowseStep() {
@@ -2360,6 +2366,7 @@ internal class AndroidAccountBrowseWorkflow(
         accountBrowseRuntime.cancelScheduledStep()
         accountBrowseSession.imageBrowserActive = false
         accountBrowseSession.imageBrowserReturnActivityClass = ""
+        accountBrowseSession.imagePagingProgress = null
         // No BACK was issued by this reconciliation. A late detail arrival must
         // be admitted as a fresh visit rather than treated as a failed BACK.
         accountBrowseSession.detailFingerprint = ""
@@ -2372,6 +2379,9 @@ internal class AndroidAccountBrowseWorkflow(
         accountBrowseSession.deadlineAt = System.currentTimeMillis() + LIST_RETURN_TIMEOUT_MS
         val previous = accountBrowsePhase
         accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_LIST_RETURN
+        activeBrowseGestureRequestId?.takeIf { it.startsWith("accountbrowse-image-") }?.let {
+            gesturePolicy.cancelActive(it, "account_browse_image_feed_return")
+        }
         addLog("动态浏览阶段续接[FEED_RETURN]：$previous → WAIT_FOR_LIST_RETURN；新鲜动态列表已确认；保留原列表位置快照，不执行 BACK")
         scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
         return true
@@ -2409,8 +2419,8 @@ internal class AndroidAccountBrowseWorkflow(
                 accountBrowseSession.detailDwellStartedAt = System.currentTimeMillis()
                 accountBrowseSession.detailDwellDueAt = accountBrowseSession.detailDwellStartedAt + dwell
                 addLog("动态详情已确认载入；内容类型=${page.pageKind.name}；本次阅读停留 ${dwell / 1000.0} 秒")
+                initializeImagePaging(page)
                 scheduleAccountBrowseStep(dwell)
-                logImageIndexReadOnly(page)
                 return
             }
         } else {
@@ -2426,32 +2436,168 @@ internal class AndroidAccountBrowseWorkflow(
         }
     }
 
-    /** Stages one and two: collect evidence and preview a bounded plan without executing it. */
-    private fun logImageIndexReadOnly(page: BrowsePageEvidence) {
-        if (page.pageKind != BrowsePageKind.IMAGE_VIEWER) return
-        val result = runCatching { socialBrowsePort.readImageIndex(page.fingerprint) }
+    private fun readImagePosition(page: BrowsePageEvidence): ImageIndexReadResult =
+        runCatching { socialBrowsePort.readImageIndex(page.fingerprint) }
             .getOrElse { ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.NODE_READ_FAILED) }
-        when (result) {
-            is ImageIndexReadResult.Confirmed -> {
-                addLog("图片序号[CONFIRMED]：current=${result.position.current}；total=${result.position.total}；仅取证")
-                val plan = ImageBrowsePlanningPolicy.plan(result.position)
-                if (plan == null) {
-                    addLog("图片翻阅计划[NO_SWIPE]：current=1；total=1；单张图片；不执行横向滑动")
-                } else {
-                    addLog(
-                        "图片翻阅计划[PREVIEW]：current=${plan.startPosition.current}；total=${plan.startPosition.total}；" +
-                            "direction=${plan.direction.name}；count=${plan.swipeCount}；max=${plan.maxSwipes}；" +
-                            "expectedEnd=${plan.expectedEndIndex}；仅决策，不执行手势"
-                    )
-                }
-            }
-            is ImageIndexReadResult.Unavailable -> addLog(
-                "图片序号[UNAVAILABLE]：reason=${result.reason.name}；保持原有阅读和返回流程"
-            )
+
+    private fun initializeImagePaging(page: BrowsePageEvidence) {
+        accountBrowseSession.imagePagingProgress = null
+        if (page.pageKind != BrowsePageKind.IMAGE_VIEWER) return
+        val evidence = readImagePosition(page) as? ImageIndexReadResult.Confirmed
+        val plan = evidence?.let { ImageBrowsePlanningPolicy.plan(it.position) }
+        accountBrowseSession.imagePagingProgress = ImagePagingProgress(
+            fingerprint = page.fingerprint, plan = plan,
+            deadlineAt = accountBrowseSession.detailDwellDueAt + NAVIGATION_ACTION_VERIFY_TIMEOUT_MS,
+            finished = evidence?.position?.total == 1
+        )
+        addLog("图片翻阅计划[INIT]：direction=${plan?.direction}；count=${plan?.swipeCount}；保留原详情停留")
+    }
+
+    /** True means this detail step is waiting for fresh evidence or one gesture result.
+     * False permits ONLY the already verified, original BACK path.
+     */
+    private fun advanceImagePaging(page: BrowsePageEvidence): Boolean {
+        var progress = accountBrowseSession.imagePagingProgress ?: return false
+        if (progress.finished) return false
+        if (page.pageKind != BrowsePageKind.IMAGE_VIEWER || page.fingerprint != progress.fingerprint) {
+            accountBrowseSession.imagePagingProgress = progress.copy(finished = true)
+            addLog("图片翻阅[SKIP]：原图片窗口已变化；不重放旧计划")
+            return false
         }
+        if (!accountBrowseRuntime.canExecuteAutomaticStep() || accountBrowseSession.touchActive) return true
+        if (activeBrowseGestureRequestId != null || accountBrowseSession.gestureInFlight) {
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return true
+        }
+        val now = System.currentTimeMillis()
+        val metrics = displayMetrics
+        val evidence = readImagePosition(page) as? ImageIndexReadResult.Confirmed
+        when (progress.observe(evidence?.position, now)) {
+            ImagePagingProgress.Decision.WAIT -> {
+                scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+                return true
+            }
+            ImagePagingProgress.Decision.FINISH -> {
+                accountBrowseSession.imagePagingProgress = progress.copy(finished = true)
+                addLog("图片翻阅[FINISH]：verified=${progress.confirmedSwipes}；不盲滑，沿用原有返回验证")
+                return false
+            }
+            ImagePagingProgress.Decision.VERIFIED -> {
+                progress = progress.markVerified(now + NAVIGATION_ACTION_VERIFY_TIMEOUT_MS)
+                accountBrowseSession.imagePagingProgress = progress
+                addLog("图片翻阅[VERIFIED]：index=${evidence?.position?.current}；verified=${progress.confirmedSwipes}/${progress.plan?.swipeCount}")
+                // Even the last verified swipe returns via a new ordinary detail step.
+                scheduleAccountBrowseStep(SCROLL_SETTLE_MS)
+                return true
+            }
+            ImagePagingProgress.Decision.READY -> Unit
+        }
+        val current = evidence ?: return true
+        if (progress.plan == null) {
+            val plan = ImageBrowsePlanningPolicy.plan(current.position) ?: run {
+                accountBrowseSession.imagePagingProgress = progress.copy(finished = true)
+                return false
+            }
+            progress = progress.copy(plan = plan, deadlineAt = now + NAVIGATION_ACTION_VERIFY_TIMEOUT_MS)
+            accountBrowseSession.imagePagingProgress = progress
+        }
+        val viewport = current.viewport
+        if (viewport == null || viewport.isEmpty) {
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return true
+        }
+        val direction = requireNotNull(progress.plan).direction
+        if (!enableMonitorOverlayTouchPassthrough("图片横向滑动")) {
+            pauseAccountBrowse("图片滑动前浮动按钮无法切换触摸穿透")
+            return true
+        }
+        // Overlay changes may invalidate the window: reacquire both position and viewport.
+        val freshPage = socialBrowsePort.inspectPage()
+        val fresh = if (freshPage.pageKind == BrowsePageKind.IMAGE_VIEWER &&
+            freshPage.confidence >= 80 && !isRetainedObstructionEvidence(freshPage.reason) &&
+            freshPage.fingerprint == progress.fingerprint && socialBrowsePort.inspectPopup() == null
+        ) readImagePosition(freshPage) as? ImageIndexReadResult.Confirmed else null
+        val freshViewport = fresh?.viewport
+        val context = if (fresh != null && fresh.position == current.position &&
+            fresh.targetWindow == current.targetWindow && freshViewport != null && !freshViewport.isEmpty
+        ) gesturePolicy.captureContext(fresh.targetWindow, metrics.toGestureCoordinateContext()) else null
+        if (context == null || freshViewport == null || !accountBrowseRuntime.canExecuteAutomaticStep() ||
+            accountBrowseSession.touchActive
+        ) {
+            if (!restoreMonitorOverlayTouchPassthrough("图片滑动上下文失效")) {
+                pauseAccountBrowse("图片滑动上下文失效且触摸穿透恢复失败")
+                return true
+            }
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return true
+        }
+        val request = GestureIntentRequest(
+            id = "accountbrowse-image-${System.nanoTime()}",
+            intent = scrollExecutor.imagePagingSwipeIntent(freshViewport, direction),
+            description = "动态图片单次横向翻阅",
+            executionContext = context
+        )
+        val generation = currentRunGeneration()
+        val epoch = browseCallbackEpoch
+        val pending = progress.copy(awaitingVerification = true)
+        accountBrowseSession.imagePagingProgress = pending
+        activeBrowseGestureRequestId = request.id
+        accountBrowseSession.gestureInFlight = true
+        accountBrowseSession.touchStartedDuringGesture = false
+        accountBrowseSession.touchEndedDuringGesture = false
+        accountBrowseSession.programmaticActionLabel = "Freedom 图片横向滑动"
+        accountBrowseSession.lastProgrammaticScrollAt = now
+        accountBrowseSession.lastProgrammaticScrollLabel = accountBrowseSession.programmaticActionLabel
+        accountBrowseSession.ignoreManualEventsUntil = now + SCROLL_SETTLE_MS + NAVIGATION_ACTION_VERIFY_TIMEOUT_MS
+
+        fun settle(deferred: Boolean, completed: Boolean) {
+            if (!isCurrentBrowseCallback(generation, epoch) || activeBrowseGestureRequestId != request.id) return
+            activeBrowseGestureRequestId = null
+            val touchStarted = accountBrowseSession.touchStartedDuringGesture
+            val touchEnded = accountBrowseSession.touchEndedDuringGesture
+            accountBrowseSession.gestureInFlight = false
+            accountBrowseSession.touchStartedDuringGesture = false
+            accountBrowseSession.touchEndedDuringGesture = false
+            val restored = restoreMonitorOverlayTouchPassthrough("图片滑动结果")
+            val live = accountBrowseSession.imagePagingProgress
+            if (live != pending || accountBrowsePhase != AccountBrowsePhase.DETAIL_DWELL) return
+            accountBrowseSession.imagePagingProgress = if (deferred) {
+                // Known not dispatched: do not count or extend the original readiness window.
+                pending.copy(awaitingVerification = false)
+            } else {
+                pending.copy(
+                    deadlineAt = System.currentTimeMillis() + NAVIGATION_ACTION_VERIFY_TIMEOUT_MS,
+                    stopAfterVerification = !completed
+                )
+            }
+            addLog("图片翻阅[RESULT]：completed=$completed；deferred=$deferred；等待新序号，不按回调扣次数")
+            if (!restored || (!completed && !deferred)) {
+                if (touchStarted && !touchEnded) accountBrowseSession.touchActive = true
+                pauseAccountBrowse("图片滑动中断或触摸穿透恢复失败；等待统一观察")
+                if (touchStarted && !touchEnded) accountBrowseRuntime.onUserInteractionStarted()
+                if (touchEnded) {
+                    accountBrowseSession.touchActive = false
+                    accountBrowseRuntime.onUserInteractionEnded()
+                }
+                return
+            }
+            scheduleAccountBrowseStep(if (deferred) PAGE_STATE_POLL_MS else SCROLL_SETTLE_MS)
+        }
+
+        val submission = runCatching {
+            gesturePolicy.execute(request) { result ->
+                settle(result.status == GestureExecutionStatus.DEFERRED, result.status == GestureExecutionStatus.COMPLETED)
+            }
+        }.getOrDefault(GestureSubmission.REJECTED)
+        if (submission != GestureSubmission.ACCEPTED) {
+            settle(submission == GestureSubmission.DEFERRED_NOT_READY, false)
+        }
+        return true
     }
 
     private fun returnFromDetailPage() {
+        // An accepted or queued image command must settle before another gesture or BACK.
+        if (activeBrowseGestureRequestId?.startsWith("accountbrowse-image-") == true) return
         val identity = socialBrowsePort.inspectDetail(accountBrowseSession.detailFingerprint)
         if (identity.isFeedPage) {
             val page = socialBrowsePort.inspectPage()
@@ -2471,6 +2617,18 @@ internal class AndroidAccountBrowseWorkflow(
         if (identity.fingerprint != accountBrowseSession.detailFingerprint) {
             addLog("动态详情内容发生变化（可见锚点=${identity.nodeCount}）；页面指纹仍确认在同一窗口代次的动态详情页，按正常内容更新处理")
             accountBrowseSession.detailFingerprint = identity.fingerprint
+        }
+        if (accountBrowseSession.imagePagingProgress?.finished == false) {
+            val pagingPage = socialBrowsePort.inspectPage()
+            if (resumeFeedReturnIfConfirmed(pagingPage)) return
+            if (!pagingPage.pageKind.isDynamicContent || pagingPage.confidence < 80 ||
+                isRetainedObstructionEvidence(pagingPage.reason) || pagingPage.fingerprint.isBlank() ||
+                pagingPage.fingerprint != identity.fingerprint
+            ) {
+                awaitContentPageEvidence(pagingPage, "图片翻阅前详情身份复核失败；保留当前访问上下文")
+                return
+            }
+            if (advanceImagePaging(pagingPage)) return
         }
         // Reacquire the active page immediately before BACK. The inspector's fingerprint already
         // contains package/windowId/generation, so an intervening dialog or Activity/window switch
@@ -2646,7 +2804,7 @@ internal class AndroidAccountBrowseWorkflow(
                     "内容节点变化不影响页面身份；继续剩余阅读时间 ${remaining / 1000.0} 秒"
             )
             scheduleAccountBrowseStep(remaining.coerceAtLeast(300L))
-            logImageIndexReadOnly(currentDetailPage)
+            // Preserve an admitted visit across restabilization; never generate a second random plan.
             return
         }
         if (System.currentTimeMillis() >= accountBrowseSession.deadlineAt) {
@@ -2841,6 +2999,7 @@ internal class AndroidAccountBrowseWorkflow(
             FeedReturnVerificationPolicy.Decision.RESTORED -> {
                 accountBrowseSession.detailActivityClass = ""
                 accountBrowseSession.detailFingerprint = ""
+                accountBrowseSession.imagePagingProgress = null
                 accountBrowseSession.programmaticActionLabel = ""
                 accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_LIST_SCROLL
                 accountBrowseSession.returnedStableSamples = 0

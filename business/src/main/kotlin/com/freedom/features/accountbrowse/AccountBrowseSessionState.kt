@@ -38,6 +38,7 @@ interface AccountBrowseSessionStatePort {
     var detailDwellDueAt: Long
     var detailDwellStartedAt: Long
     var detailDwellRemainingMs: Long
+    var imagePagingProgress: ImagePagingProgress?
     var ignoreManualEventsUntil: Long
     var programmaticActionLabel: String
     var safeCardRecheckCount: Int
@@ -111,6 +112,7 @@ data class AccountBrowseSessionSnapshot(
     val detailDwellDueAt: Long = 0L,
     val detailDwellStartedAt: Long = 0L,
     val detailDwellRemainingMs: Long = 0L,
+    val imagePagingProgress: ImagePagingProgress? = null,
     val ignoreManualEventsUntil: Long = 0L,
     val programmaticActionLabel: String = "",
     val safeCardRecheckCount: Int = 0,
@@ -252,6 +254,9 @@ internal class AccountBrowseSessionStateOwner {
         override var detailDwellRemainingMs: Long
             get() = snapshot().detailDwellRemainingMs
             set(value) = update { it.copy(detailDwellRemainingMs = value) }
+        override var imagePagingProgress: ImagePagingProgress?
+            get() = snapshot().imagePagingProgress
+            set(value) = update { it.copy(imagePagingProgress = value) }
         override var ignoreManualEventsUntil: Long
             get() = snapshot().ignoreManualEventsUntil
             set(value) = update { it.copy(ignoreManualEventsUntil = value) }
@@ -423,6 +428,7 @@ internal class AccountBrowseSessionStateOwner {
             detailDwellDueAt = 0L,
             detailDwellStartedAt = 0L,
             detailDwellRemainingMs = 0L,
+            imagePagingProgress = null,
             ignoreManualEventsUntil = 0L,
             programmaticActionLabel = "",
             safeCardRecheckCount = 0,

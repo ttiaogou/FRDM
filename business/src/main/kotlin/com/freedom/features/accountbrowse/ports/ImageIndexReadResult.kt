@@ -1,6 +1,7 @@
 package com.freedom.features.accountbrowse.ports
 
 import com.freedom.core.accessibility.api.WindowRef
+import com.freedom.core.accessibility.api.ScreenRect
 
 /** A 1-based position in a photo sequence; never a page fingerprint. */
 data class ImageSequencePosition(val current: Int, val total: Int) {
@@ -35,7 +36,9 @@ sealed interface ImageIndexReadResult {
     data class Confirmed(
         val position: ImageSequencePosition,
         val pageFingerprint: String,
-        val targetWindow: WindowRef
+        val targetWindow: WindowRef,
+        /** Fresh viewport from the same verified root; not part of page identity. */
+        val viewport: ScreenRect? = null
     ) : ImageIndexReadResult
 
     data class Unavailable(val reason: ImageIndexUnavailableReason) : ImageIndexReadResult
