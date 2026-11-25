@@ -57,6 +57,54 @@ class AndroidWindowContextTrackerTest {
     }
 
     @Test
+    fun returningToOriginalWindowRequiresExplicitRevalidationOfRealPlatformEvidence() {
+        val tracker = AndroidWindowContextTracker()
+        val list = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
+        val chat = "com.immomo.momo.message.activity.ChatActivity"
+        tracker.observeWindowStateEvent(list, 3083, 23L)
+        tracker.observeWindowStateEvent(chat, 3097, 24L)
+
+        assertEquals("", tracker.activityForWindow(3083, 24L))
+        assertEquals(null, tracker.platformRecoveryCandidate(4000, 24L))
+        assertEquals(null, tracker.platformRecoveryCandidate(3083, 22L))
+        assertEquals(PlatformActivityWindowEvidence(list, 3083, 23L), tracker.platformRecoveryCandidate(3083, 24L))
+        val proof = ActivityReadOnlyEvidence(list, 3083, 24L, null, 23L)
+        assertEquals(false, tracker.restorePlatformActivity(proof.copy(activityClass = chat)))
+        assertEquals(false, tracker.restorePlatformActivity(proof.copy(platformEventGeneration = 22L)))
+        assertEquals(true, tracker.restorePlatformActivity(proof))
+        assertEquals(list, tracker.activityForWindow(3083, 24L))
+        assertEquals("", tracker.activityForWindow(3097, 24L))
+        assertEquals("", tracker.activityForWindow(3083, 25L))
+        tracker.invalidateRecoveredActivity()
+        assertEquals("", tracker.currentActivityClass())
+
+        // Returning a second time without a list Activity callback still uses the real original event.
+        tracker.observeWindowStateEvent(chat, 3101, 26L)
+        assertEquals(PlatformActivityWindowEvidence(list, 3083, 23L), tracker.platformRecoveryCandidate(3083, 26L))
+        tracker.clearActivityClass()
+        assertEquals(null, tracker.platformRecoveryCandidate(3083, 26L))
+        assertEquals(false, tracker.restorePlatformActivity(proof))
+    }
+
+    @Test
+    fun onlyRealPlatformEventsBecomeCandidatesAndNewEventsReplaceOldEvidence() {
+        val tracker = AndroidWindowContextTracker()
+        val list = "com.immomo.momo.maintab.MaintabActivity"
+        val chat = "com.immomo.momo.message.activity.ChatActivity"
+        tracker.restoreActivityClass(list, 116, 1L)
+        tracker.observeWindowStateEvent(chat, 117, 2L)
+        assertEquals(null, tracker.platformRecoveryCandidate(116, 2L))
+        tracker.observeWindowStateEvent(list, 116, 3L)
+        tracker.observeWindowStateEvent(chat, 116, 4L)
+        tracker.observeWindowStateEvent(list, 117, 5L)
+        assertEquals(PlatformActivityWindowEvidence(chat, 116, 4L), tracker.platformRecoveryCandidate(116, 5L))
+        assertEquals(false, tracker.restorePlatformActivity(ActivityReadOnlyEvidence(list, 116, 5L, null, 3L)))
+        tracker.discardPlatformRecoveryEvidence()
+        assertEquals(null, tracker.platformRecoveryCandidate(116, 5L))
+        assertEquals(list, tracker.activityForWindow(117, 5L))
+    }
+
+    @Test
     fun missingWindowIdentityDoesNotAuthorizeAnyRootAndRecoveryCanReplaceStaleClue() {
         val tracker = AndroidWindowContextTracker(uptimeMillis = { 100L })
         val list = "com.immomo.momo.maintab.MaintabActivity"

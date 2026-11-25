@@ -51,6 +51,43 @@ class AndroidForegroundActivityRecoveryCoordinatorTest {
     }
 
     @Test
+    fun platformWindowReturnUsesExistingTwoSamplesWithoutUsageAccessAndRetainsExactGeneration() {
+        val scheduler = FakeScheduler()
+        val tracker = AndroidWindowContextTracker()
+        val list = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
+        val chat = "com.immomo.momo.message.activity.ChatActivity"
+        tracker.observeWindowStateEvent(list, 3083, 23L)
+        tracker.observeWindowStateEvent(chat, 3097, 24L)
+        var generation = 24L
+        var reads = 0
+        val logs = mutableListOf<String>()
+        val recovery = AndroidForegroundActivityRecoveryCoordinator(
+            scheduler, { true }, { tracker.activityForWindow(3083, generation) },
+            {
+                reads++
+                val prior = requireNotNull(tracker.platformRecoveryCandidate(3083, generation))
+                ActivityIdentityProbeResult.Proven(
+                    ActivityReadOnlyEvidence(prior.activityClass, 3083, generation, null, prior.eventGeneration)
+                )
+            },
+            tracker::restorePlatformActivity,
+            logs::add
+        )
+        recovery.ensureStarted()
+        scheduler.runNext()
+        assertEquals("", tracker.activityForWindow(3083, 24L))
+        generation = 25L
+        scheduler.runNext()
+        assertEquals("", tracker.activityForWindow(3083, 25L))
+        scheduler.runNext()
+        assertEquals(list, tracker.activityForWindow(3083, 25L))
+        assertEquals(3, reads)
+        assertEquals(0, scheduler.pendingCount)
+        assertTrue(logs.any { it.contains("activityEvidenceSource=ACCESSIBILITY_WINDOW_STATE_REVALIDATED") })
+        assertEquals("", tracker.activityForWindow(3083, 26L))
+    }
+
+    @Test
     fun noUsageAccessNeverRestoresActivityAndUsesReadOnlyBackoff() {
         val scheduler = FakeScheduler()
         val logs = mutableListOf<String>()

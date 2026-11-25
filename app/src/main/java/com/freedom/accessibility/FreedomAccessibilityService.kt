@@ -533,6 +533,7 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         activityRecoveryCoordinator.stop()
+        windowContextTracker.discardPlatformRecoveryEvidence()
         diagnostics.recordStructured(
             eventType = "accessibility_service_interrupted",
             category = RunLogCategory.LIFECYCLE,

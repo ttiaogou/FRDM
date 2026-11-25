@@ -425,7 +425,8 @@ internal class AccessibilityServiceDependencies internal constructor(
         com.freedom.adapters.accessibility.android.AndroidUsageActivityEvidenceReader(
             service = service,
             targetPackage = monitorRepository::targetPackage,
-            currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() }
+            currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() },
+            platformRecoveryCandidate = windowContextTracker::platformRecoveryCandidate
         )
     }
     val activityRecoveryCoordinator by lazy(LazyThreadSafetyMode.NONE) {
@@ -440,9 +441,13 @@ internal class AccessibilityServiceDependencies internal constructor(
                 val live = accessibilityGateway.currentGestureWindow()
                 live != null && live.packageName == monitorRepository.targetPackage() &&
                     live.windowId == evidence.windowId && live.generation == evidence.windowGeneration &&
-                    windowContextTracker.restoreActivityClass(
-                        evidence.activityClass, evidence.windowId, evidence.windowGeneration
-                    )
+                    if (evidence.platformEventGeneration != null) {
+                        windowContextTracker.restorePlatformActivity(evidence)
+                    } else {
+                        windowContextTracker.restoreActivityClass(
+                            evidence.activityClass, evidence.windowId, evidence.windowGeneration
+                        )
+                    }
             },
             onLog = addLog
         )

@@ -54,35 +54,70 @@ internal data class ActivityReadOnlyEvidence(
     val activityClass: String,
     val windowId: Int,
     val windowGeneration: Long,
-    val activityResumedAtEpochMs: Long
-)
+    val activityResumedAtEpochMs: Long?,
+    val platformEventGeneration: Long? = null
+) {
+    val evidenceSource: String
+        get() = if (platformEventGeneration != null) "ACCESSIBILITY_WINDOW_STATE_REVALIDATED"
+        else "USAGE_ACTIVITY_RESUMED"
+}
 
 internal sealed interface ActivityIdentityProbeResult {
     data class Proven(val evidence: ActivityReadOnlyEvidence) : ActivityIdentityProbeResult
-    data class Pending(val reason: String) : ActivityIdentityProbeResult
+    data class Pending(
+        val reason: String,
+        val evidenceSource: String = "USAGE_ACTIVITY_RESUMED"
+    ) : ActivityIdentityProbeResult
 }
 
 /**
  * Android does not expose the hosting Activity through AccessibilityNodeInfo.
  * Read-only usage events can provide a separate Activity clue when the user has explicitly
- * enabled Usage Access. It is accepted only with the same live, active APPLICATION window
- * before and after the query and with an unchanged service-local window generation.
+ * enabled Usage Access. An earlier real accessibility Activity event for the identical
+ * window can also be revalidated without that permission. Both paths require the same live,
+ * active APPLICATION window before and after the query and unchanged window generation.
+ * Neither path infers an Activity from a node-tree fingerprint or expected navigation.
  */
 internal class AndroidUsageActivityEvidenceReader(
     private val service: AccessibilityService,
     private val targetPackage: () -> String,
     private val currentWindowGeneration: () -> Long,
-    private val nowEpochMs: () -> Long = System::currentTimeMillis
+    private val nowEpochMs: () -> Long = System::currentTimeMillis,
+    private val platformRecoveryCandidate: (Int, Long) -> PlatformActivityWindowEvidence? = { _, _ -> null }
 ) {
     fun probe(): ActivityIdentityProbeResult {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            return ActivityIdentityProbeResult.Pending("ACTIVITY_USAGE_EVENTS_UNAVAILABLE")
-        }
         val target = targetPackage().trim()
         if (target.isBlank()) return ActivityIdentityProbeResult.Pending("TARGET_PACKAGE_EMPTY")
         val generation = currentWindowGeneration()
         val beforeWindowId = activeTargetApplicationWindowId(target)
             ?: return ActivityIdentityProbeResult.Pending("ACTIVE_TARGET_WINDOW_UNCONFIRMED")
+
+        val platform = platformRecoveryCandidate(beforeWindowId, generation)
+        if (platform != null) {
+            if (platform.windowId != beforeWindowId || platform.eventGeneration > generation ||
+                !isActivityWindowClassName(platform.activityClass) ||
+                activeTargetApplicationWindowId(target) != beforeWindowId ||
+                currentWindowGeneration() != generation || targetPackage().trim() != target ||
+                platformRecoveryCandidate(beforeWindowId, generation) != platform
+            ) {
+                return ActivityIdentityProbeResult.Pending(
+                    "WINDOW_CHANGED_DURING_PLATFORM_ACTIVITY_RECHECK",
+                    evidenceSource = "ACCESSIBILITY_WINDOW_STATE_REVALIDATED"
+                )
+            }
+            return ActivityIdentityProbeResult.Proven(
+                ActivityReadOnlyEvidence(
+                    activityClass = platform.activityClass,
+                    windowId = beforeWindowId,
+                    windowGeneration = generation,
+                    activityResumedAtEpochMs = null,
+                    platformEventGeneration = platform.eventGeneration
+                )
+            )
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return ActivityIdentityProbeResult.Pending("ACTIVITY_USAGE_EVENTS_UNAVAILABLE")
+        }
 
         val appOps = service.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
             ?: return ActivityIdentityProbeResult.Pending("APP_OPS_UNAVAILABLE")
