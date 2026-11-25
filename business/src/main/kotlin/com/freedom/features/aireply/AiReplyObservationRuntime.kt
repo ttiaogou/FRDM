@@ -3647,11 +3647,16 @@ class AiReplyObservationRuntime(
         // Keep the existing lease lifecycle for compatibility, but do not perform any UI action
         // until the first fresh page event has classified the visible business route.
         receivedGreetingsPageProbePending = sessionRunStarted && supportsReceivedGreetingsStartup
-        if (sessionRunStarted &&
-            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "等待首次页面事件确认任务归属")
+        if (sessionRunStarted && !supportsReceivedGreetingsStartup &&
+            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "启动私人消息任务")
         ) {
             sessionRunStarted = false
             onLog("AI Reply 启动暂停：私人消息任务未取得唯一 UI 操作权；不会执行自动滚动或打开会话")
+        } else if (sessionRunStarted && supportsReceivedGreetingsStartup) {
+            onLog(
+                "AI Reply 启动仲裁：暂不申请私人消息操作权；" +
+                    "等待首个页面快照确认收到的招呼或私人消息列表"
+            )
         }
         receivedGreetingsRecoveryRetryAttempt = 0
         privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
