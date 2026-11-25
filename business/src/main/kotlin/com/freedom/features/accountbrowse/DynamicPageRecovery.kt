@@ -240,8 +240,8 @@ class DynamicPageRecovery(
         if (!unknown) return dispatcher.state
 
         val reason = page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
-        val eventIdentity = identity(reason)
-        dispatcher.activate(eventIdentity)
+        dispatcher.activate(identity(reason))
+        val eventIdentity = requireNotNull(dispatcher.currentIdentity())
         dispatcher.dispatch(RecoveryTransactionEvent.UnknownPage(reason), eventIdentity)
         // Both the reducer and the observation plan must accept the same touch edges.
         recoveryScheduler.begin(eventIdentity)
