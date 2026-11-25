@@ -124,6 +124,11 @@ class TaskCoordinator(
         return action()
     }
 
+    /** Serialize publication/revocation of page-write authority with final UI submissions.
+     * The callback must only publish immutable state; it must not invoke a runtime. */
+    @Synchronized
+    fun withOwnershipBarrier(action: () -> Unit) = action()
+
     @Synchronized
     fun activeTaskId(): String? = currentLease()?.taskId
 

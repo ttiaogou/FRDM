@@ -57,6 +57,17 @@ internal class AccountBrowseModeRuntimeAdapter(
         }
     }
 
+    override fun onPageRuntimeStarted(
+        session: com.freedom.core.runtime.PageRuntimeSessionState,
+        onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit
+    ) {
+        // A recreated Service has no in-memory reconnect flag. Existing persisted browse
+        // checkpoints still require the same fresh-page verification on the selected route.
+        awaitingServiceReconnect = true
+        onRunStarted()
+        onPrepared(session)
+    }
+
     override fun onPageRuntimeSuspended(reason: String) {
         // Preserve the suspended recovery plan instead of treating page exit as user stop.
         onAccessibilityServiceDisconnected()

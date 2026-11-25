@@ -197,6 +197,104 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun productionWriteRouteFollowsVerifiedBusinessHandoffAndBlocksOrdinaryMismatchedClaim() {
+        val state = FakeState().apply { requested = true }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai), RuntimeLogSink { },
+            taskCoordinator = tasks, onObserveCurrentPage = {})
+        coordinator.synchronizeRunRequest()
+        val first = requireNotNull(coordinator.routePageTask(ai.mode, "AI_REPLY_PRIVATE_MESSAGES"))
+        assertNull(coordinator.currentWriteRoute())
+        val privateLease = requireNotNull(tasks.tryAcquire(first.taskId, first.runGeneration))
+        assertTrue(coordinator.admitBusinessPageTaskOwnership(privateLease, false))
+        assertTrue(coordinator.isRuntimeReady(ai.mode))
+        val greetingLease = requireNotNull(tasks.transfer(privateLease, "AI_REPLY_RECEIVED_GREETINGS"))
+        assertFalse(coordinator.admitBusinessPageTaskOwnership(greetingLease, false))
+        assertFalse(coordinator.isRuntimeReady(ai.mode))
+        assertTrue(coordinator.admitBusinessPageTaskOwnership(greetingLease, true))
+        val current = requireNotNull(coordinator.currentWriteRoute())
+        assertEquals(greetingLease.taskId, current.taskId)
+        assertTrue(current.routeRevision > first.routeRevision)
+        assertFalse(coordinator.admitBusinessPageTaskOwnership(privateLease, true))
+        assertEquals(listOf("start"), ai.calls)
+        coordinator.stop("user")
+        assertNull(coordinator.currentWriteRoute())
+        assertNull(tasks.currentLease())
+    }
+
+    @Test
+    fun disconnectedServiceCannotRouteUntilReconnectAndStopClearsSuspendedPlans() {
+        val state = FakeState().apply { requested = true }
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        var reads = 0
+        var cancellations = 0
+        var ended = 0
+        val coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai), RuntimeLogSink { },
+            onObserveCurrentPage = { reads++ }, cancelCurrentPageObservation = { cancellations++ },
+            onUserRunEnded = { ended++ }, initiallyServiceConnected = false)
+        coordinator.synchronizeRunRequest()
+        assertFalse(coordinator.isPageObservationAllowed())
+        assertNull(coordinator.routePageTask(ai.mode, "PRIVATE"))
+        coordinator.onAccessibilityServiceConnected()
+        assertEquals(1, reads)
+        coordinator.routePageTask(ai.mode, "PRIVATE")
+        coordinator.onAccessibilityServiceDisconnected()
+        assertNull(coordinator.currentWriteRoute())
+        assertFalse(coordinator.isPageObservationAllowed())
+        assertNull(coordinator.routePageTask(ai.mode, "PRIVATE"))
+        assertTrue(state.requested)
+        assertEquals(0, ended)
+        state.requested = false
+        coordinator.onExternalRefresh()
+        assertEquals(1, ended)
+        coordinator.onAccessibilityServiceConnected()
+        assertNull(coordinator.currentPageRuntimeSession())
+        assertEquals(1, reads)
+        assertTrue(cancellations > 0)
+        coordinator.onServiceDestroyed()
+        assertFalse(coordinator.isPageObservationAllowed())
+        assertEquals(listOf("start", "disconnected"), ai.calls)
+    }
+
+    @Test
+    fun pageDrivenServiceDestroyRevokesAuthorityBeforeExactlyOneActiveRuntimeCleanup() {
+        val state = FakeState().apply { requested = true }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        lateinit var coordinator: RunSessionCoordinator
+        var destroyed = 0
+        val ai = object : ModeRuntimePort {
+            override val mode = RunMode.AI_REPLY
+            override fun onRunStarted() = Unit
+            override fun onRunStopped(reason: String) = error("not a user stop")
+            override fun onAccessibilityServiceConnected() = Unit
+            override fun onAccessibilityServiceDisconnected() = error("duplicate disconnect cleanup")
+            override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = Unit
+            override fun onServiceDestroyed() {
+                assertNull(coordinator.currentWriteRoute())
+                assertNull(tasks.currentLease())
+                destroyed++
+            }
+        }
+        val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
+        coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai, browse.mode to browse),
+            RuntimeLogSink { }, taskCoordinator = tasks, onObserveCurrentPage = {})
+        coordinator.synchronizeRunRequest()
+        val session = requireNotNull(coordinator.routePageTask(ai.mode, "AI_REPLY_PRIVATE_MESSAGES"))
+        val lease = requireNotNull(tasks.tryAcquire(session.taskId, session.runGeneration))
+        assertTrue(coordinator.admitBusinessPageTaskOwnership(lease, false))
+        assertTrue(coordinator.isRuntimeReady(ai.mode))
+        coordinator.onServiceDestroyed()
+        coordinator.onAccessibilityServiceDisconnected()
+        coordinator.onServiceDestroyed()
+        assertEquals(1, destroyed)
+        assertTrue(browse.calls.isEmpty())
+        assertTrue(state.requested)
+        assertFalse(coordinator.isPageObservationAllowed())
+        assertNull(coordinator.routePageTask(ai.mode, session.taskId))
+    }
+
+    @Test
     fun synchronizationStartsOnlyThePersistedActiveRuntime() {
         val state = FakeState()
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)

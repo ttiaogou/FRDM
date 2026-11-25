@@ -101,12 +101,7 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     private val targetChangedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (!monitorRepository.isRunRequested() ||
-                runSessionCoordinator.activeMode() == RunMode.ACCOUNT_BROWSE
-            ) {
-                runSessionCoordinator.resetRuntime(RunMode.ACCOUNT_BROWSE, "监听目标已更新")
-            }
-            runSessionCoordinator.resetRuntime(RunMode.AI_REPLY, "监听目标已更新")
+            runSessionCoordinator.onTargetPackageChanged("监听目标已更新")
             activityRecoveryCoordinator.stop()
             windowContextTracker.clearActivityClass()
             LatestAccessibilityNodeDump.clear()
@@ -580,7 +575,8 @@ class FreedomAccessibilityService : AccessibilityService() {
             "无障碍服务销毁；应用就绪状态失效",
             android.os.SystemClock.uptimeMillis()
         )
-        // Release leases before shutting down OCR and clearing the main Handler queue.
+        // Seal the route and release its lease before shutting down adapters and callbacks.
+        runSessionCoordinator.onServiceDestroyed()
         MonitorOverlay.releaseAllObservationVisibility("AccessibilityService.onDestroy")
         overlayPort.clearNodeBoundsHighlight()
         NodeHierarchyOverlay.clear()
@@ -593,8 +589,6 @@ class FreedomAccessibilityService : AccessibilityService() {
             serviceRecoveryCoordinator.onServiceDestroyed()
         }
         mainHandler.removeCallbacksAndMessages(null)
-        runSessionCoordinator.onAccessibilityServiceDisconnected()
-        runSessionCoordinator.onServiceDestroyed()
         if (accessibilityEventPipelineDelegate.isInitialized()) {
             accessibilityEventPipeline.resetDuplicateWindow()
         }

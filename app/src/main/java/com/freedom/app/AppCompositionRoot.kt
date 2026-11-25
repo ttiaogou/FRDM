@@ -326,7 +326,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                 // Only the independent entry reader may select a different runtime.
                 // A business observer may complete its own verified handoff, but an UNKNOWN
                 // nested page is handled by that runtime's existing checkpoint/recovery gates.
-                if (monitorRepository.isRunRequested() &&
+                if (runSessionCoordinator.isPageObservationAllowed() &&
                     snapshot.runGeneration == runSessionCoordinator.currentRunGeneration()
                 ) {
                     if (targetTask != null && !decision.conflict) {
@@ -335,7 +335,11 @@ internal class AccessibilityServiceDependencies internal constructor(
                         ) RunMode.ACCOUNT_BROWSE else RunMode.AI_REPLY
                         val verifiedOwnTask = runSessionCoordinator.activeMode() == mode &&
                             root.taskCoordinator.currentLease()?.taskId == targetTask
-                        if (snapshot.entryObservation || verifiedOwnTask) {
+                        val verifiedGreetingNavigation = snapshot.entryObservation &&
+                            targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
+                            runSessionCoordinator.currentPageRuntimeSession()?.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                            aiReplyObservationRuntime.isVerifiedGreetingsNavigationPending()
+                        if (!verifiedGreetingNavigation && (snapshot.entryObservation || verifiedOwnTask)) {
                             runSessionCoordinator.routePageTask(mode, targetTask)
                         }
                     } else if (snapshot.entryObservation && decision.conflict) {
@@ -356,20 +360,20 @@ internal class AccessibilityServiceDependencies internal constructor(
      * Existing runtime channels retain their detail/checkpoint observation responsibility.
      */
     private var entryObservationGeneration = 0L
-    private val entryPageObservation by lazy(LazyThreadSafetyMode.NONE) {
+    private val entryPageObservationDelegate = lazy(LazyThreadSafetyMode.NONE) {
         pageObservationCoordinator.registerChannel(
             channelId = "UNIFIED_ENTRY_PAGE",
             quietPeriodMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             maxWaitMs = 1_200L,
-            isEnabled = monitorRepository::isRunRequested,
+            isEnabled = { runSessionCoordinator.isPageObservationAllowed() },
             onObservationRequested = {
-                if (monitorRepository.isRunRequested()) {
+                if (runSessionCoordinator.isPageObservationAllowed()) {
                     val generation = runSessionCoordinator.currentRunGeneration()
                     val snapshot = runCatching {
                         momoSocialAdapter.inspectUnifiedEntryPage(generation, ++entryObservationGeneration)
                     }.getOrNull()
                     if (snapshot != null && generation == runSessionCoordinator.currentRunGeneration() &&
-                        monitorRepository.isRunRequested()
+                        runSessionCoordinator.isPageObservationAllowed()
                     ) {
                         // An entry observer cannot assign or revoke a nested detail/profile transaction.
                         // Existing task-specific observers retain their detail/recovery responsibility.
@@ -381,6 +385,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             }
         )
     }
+    private val entryPageObservation by entryPageObservationDelegate
+
     /** Service-scoped Activity recovery; no gesture or page-action capability is injected. */
     val activityEvidenceReader by lazy(LazyThreadSafetyMode.NONE) {
         com.freedom.adapters.accessibility.android.AndroidUsageActivityEvidenceReader(
@@ -409,10 +415,9 @@ internal class AccessibilityServiceDependencies internal constructor(
     val uiWriteAuthorization: UiWriteAuthorization by lazy(LazyThreadSafetyMode.NONE) {
         UiWriteAuthorization(
             taskCoordinator = root.taskCoordinator,
-            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
-            activeRunMode = {
-                if (monitorRepository.isRunRequested()) runSessionCoordinator.activeMode() else null
-            }
+            currentRunGeneration = root.runGenerationClock::current,
+            activeRunMode = { runSessionCoordinator.currentWriteRoute()?.mode },
+            currentPageRuntime = { runSessionCoordinator.currentWriteRoute() }
         )
     }
     val accessibilityGateway: AndroidAccessibilityGateway by lazy(LazyThreadSafetyMode.NONE) {
@@ -518,9 +523,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             inputPort = momoSocialAdapter,
             sendPort = momoSocialAdapter,
             scheduler = taskScheduler,
-            isAiReplyActive = {
-                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
-            },
+            isAiReplyActive = { runSessionCoordinator.isRuntimeReady(RunMode.AI_REPLY) },
             onLog = addLog,
             createGateway = { configuration ->
                 val transport = when (configuration.provider) {
@@ -576,9 +579,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             chatSessionManagementPort = momoSocialAdapter,
             gesturePolicy = gesturePolicy,
             targetPackage = { monitorRepository.targetPackage() },
-            isAiReplyActive = {
-                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
-            },
+            isAiReplyActive = { runSessionCoordinator.isRuntimeObserving(RunMode.AI_REPLY) },
             inspectAndroidRecoveryReadiness = { _ -> accessibilityGateway.inspectRecoveryReadiness() },
             onLog = addLog,
             pageObservationSnapshotSource = { snapshot ->
@@ -710,8 +711,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
-            onPageTaskOwnershipConfirmed = { lease ->
-                runSessionCoordinator.confirmPageTaskOwnership(lease)
+            onPageTaskOwnershipConfirmed = { lease, verifiedHandoff ->
+                runSessionCoordinator.admitBusinessPageTaskOwnership(lease, verifiedHandoff)
             },
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
@@ -747,7 +748,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             accessibilityGateway = accessibilityGateway,
             gesturePolicy = gesturePolicy,
             taskScheduler = taskScheduler,
-            isBrowseModeActive = { runSessionCoordinator.activeMode() == RunMode.ACCOUNT_BROWSE },
+            isBrowseModeActive = { runSessionCoordinator.isRuntimeObserving(RunMode.ACCOUNT_BROWSE) },
             socialBrowsePort = momoSocialAdapter,
             overlayPort = overlayPort,
             isMonitoringRunning = { monitorRepository.isRunRequested() },
@@ -802,7 +803,17 @@ internal class AccessibilityServiceDependencies internal constructor(
             log = monitorRepository,
             generationClock = root.runGenerationClock,
             taskCoordinator = root.taskCoordinator,
-            onObserveCurrentPage = { entryPageObservation.requestSnapshot() }
+            onObserveCurrentPage = { entryPageObservation.requestSnapshot() },
+            cancelCurrentPageObservation = {
+                if (entryPageObservationDelegate.isInitialized()) entryPageObservation.cancel()
+            },
+            onUserRunEnded = {
+                root.recoveryScheduleRepository.clear()
+                root.privateMessagesRecoveryScheduleRepository.clear()
+                root.receivedGreetingsRecoveryScheduleRepository.clear()
+                root.accountBrowseCheckpointRepository.clear()
+            },
+            initiallyServiceConnected = false
         )
     }
     // Service-scoped platform-neutral routing gateway. Existing runtime dispatch order
@@ -817,9 +828,11 @@ internal class AccessibilityServiceDependencies internal constructor(
                 is UnifiedAccessibilityEvent.ActivityTransition ->
                     runSessionCoordinator.dispatchActivityTransition(notification.activityClass)
                 is UnifiedAccessibilityEvent.NavigationObservation -> {
-                    val attached = notification.attachedSelfNavigation
-                    if (attached != null) aiReplyObservationRuntime.onSelfNavigationAttached(attached)
-                    else aiReplyObservationRuntime.onUnmatchedNavigationObserved(notification.activityClass)
+                    if (runSessionCoordinator.isRuntimeObserving(RunMode.AI_REPLY)) {
+                        val attached = notification.attachedSelfNavigation
+                        if (attached != null) aiReplyObservationRuntime.onSelfNavigationAttached(attached)
+                        else aiReplyObservationRuntime.onUnmatchedNavigationObserved(notification.activityClass)
+                    }
                 }
             }
         }
@@ -893,7 +906,7 @@ internal class AccessibilityServiceDependencies internal constructor(
         AndroidMonitorPreviewScheduler(
             scheduler = taskScheduler,
             isBrowseRunActive = {
-                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.ACCOUNT_BROWSE
+                runSessionCoordinator.isRuntimeReady(RunMode.ACCOUNT_BROWSE)
             },
             scanActiveWindow = { accessibilityTreePreviewUseCase.scanActiveWindow() }
         )

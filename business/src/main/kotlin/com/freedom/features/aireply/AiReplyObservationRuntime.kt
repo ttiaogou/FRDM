@@ -151,7 +151,7 @@ class AiReplyObservationRuntime(
     /** Injected from the process composition root; null only in isolated test fixtures. */
     private val recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null,
     /** Reports the exact verified capability; the route coordinator never acquires it for us. */
-    private val onPageTaskOwnershipConfirmed: (com.freedom.core.runtime.TaskLease) -> Unit = {}
+    private val onPageTaskOwnershipConfirmed: (com.freedom.core.runtime.TaskLease, Boolean) -> Boolean = { _, _ -> true }
 ) {
     companion object {
         /**
@@ -2044,7 +2044,7 @@ class AiReplyObservationRuntime(
                 lastPageInspection = inspection
                 return
             }
-            if (targetTaskId == null || !claimTaskOwnership(targetTaskId, "统一页面路由双快照验证完成")) {
+            if (targetTaskId == null || !claimTaskOwnership(targetTaskId, "统一页面路由双快照验证完成", verifiedHandoff = true)) {
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("统一页面恢复[OWNERSHIP_REJECTED]：目标路由=$targetRoute；未取得UI操作权")
                 if (sharedProof != null) {
@@ -2429,7 +2429,7 @@ class AiReplyObservationRuntime(
                             return
                         }
                         if (!ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
-                            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "收到的招呼流程返回普通消息列表后恢复私人消息任务")
+                            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "收到的招呼流程返回普通消息列表后恢复私人消息任务", verifiedHandoff = true)
                         ) {
                             sessionManagerState = SessionManagerState.PAUSED
                             onLog("私人消息任务恢复[OWNERSHIP_REJECTED]：返回消息列表后未取得UI操作租约")
@@ -3260,17 +3260,21 @@ class AiReplyObservationRuntime(
      * Route ownership requests through the controller that owns the requested business task.
      * Read-only page observations remain outside the UI-operation lease.
      */
-    private fun claimTaskOwnership(taskId: String, reason: String): Boolean {
+    private fun claimTaskOwnership(taskId: String, reason: String, verifiedHandoff: Boolean = false): Boolean {
         val claimed = when (taskId) {
             PrivateMessagesTaskController.TASK_ID -> !receivedGreetingsOwnershipRecheckPending &&
                 privateMessagesTaskController.claimOwnership(reason)
             ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskFlow.claimOwnership(reason)
             else -> false
         }
-        if (claimed) {
-            taskCoordinator?.currentLease()?.takeIf {
+        if (claimed && taskCoordinator != null) {
+            val lease = taskCoordinator.currentLease()?.takeIf {
                 it.taskId == taskId && it.runGeneration == currentRunGeneration()
-            }?.let(onPageTaskOwnershipConfirmed)
+            } ?: return false
+            if (!onPageTaskOwnershipConfirmed(lease, verifiedHandoff)) {
+                taskOwnership.release(taskId, "页面任务归属未确认：$reason")
+                return false
+            }
         }
         return claimed
     }
@@ -3656,6 +3660,14 @@ class AiReplyObservationRuntime(
 
     /** Request a fresh observation for page-driven startup/handoff without replacing
      * protected send or gesture verification reads. Business admission gates remain unchanged. */
+    /** The established greeting navigation/return transaction owns its verified source page
+     * until the existing completion gate transfers the lease. A transient inbox snapshot
+     * must not cancel that transaction or grant the private task a competing capability. */
+    fun isVerifiedGreetingsNavigationPending(): Boolean =
+        receivedGreetingsTaskActive && ownsTask(RECEIVED_GREETINGS_TASK_ID) &&
+            (awaitingNormalInboxAfterGreetingsReturn ||
+                receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING)
+
     fun requestPageRouteObservation() {
         if (!isAiReplyActive() || !sessionRunStarted ||
             hasProtectedPrivateInspection() || hasProtectedSendInspection()
@@ -5885,7 +5897,7 @@ class AiReplyObservationRuntime(
             )
             return ReceivedGreetingsTaskFlowController.StartResult.NOT_SUPPORTED
         }
-        if (recoveryContext.pending || !claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, reason)) {
+        if (recoveryContext.pending || !claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, reason, verifiedHandoff = true)) {
             sessionManagerState = SessionManagerState.PAUSED
             onLog("收到的招呼任务启动[OWNERSHIP_REJECTED]：恢复门禁尚未解除或未取得唯一 UI 操作权；不执行启动动作")
             return ReceivedGreetingsTaskFlowController.StartResult.OWNERSHIP_REJECTED
@@ -5974,7 +5986,7 @@ class AiReplyObservationRuntime(
         val active = taskOwnership.activeTaskId()
         if ((active != null && active != RECEIVED_GREETINGS_TASK_ID) ||
             !ensureAndroidRecoveryReady(inspection, "GREETINGS_RETURN_BEFORE_LEASE") ||
-            !claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, "招呼完成返回双快照已确认") ||
+            !claimTaskOwnership(RECEIVED_GREETINGS_TASK_ID, "招呼完成返回双快照已确认", verifiedHandoff = true) ||
             !ensureAndroidRecoveryReady(inspection, "GREETINGS_RETURN_BEFORE_RESUME")
         ) {
             holdGreetingsCompletionReturn("RECOVERY_LEASE_NOT_READY")

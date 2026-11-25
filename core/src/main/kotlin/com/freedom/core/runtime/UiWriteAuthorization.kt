@@ -26,14 +26,25 @@ enum class UiWriteScope {
 class UiWriteAuthorization(
     private val taskCoordinator: TaskCoordinator,
     private val currentRunGeneration: () -> Long,
-    private val activeRunMode: () -> RunMode?
+    private val activeRunMode: () -> RunMode?,
+    /** Production supplies an immutable, lock-free READY route snapshot. Null provider is
+     * retained for legacy mode-only fixtures, not for a missing production route. */
+    private val currentPageRuntime: (() -> PageRuntimeSessionState?)? = null
 ) {
+    private fun routeMatches(route: PageRuntimeSessionState?, mode: RunMode?, lease: TaskLease): Boolean =
+        currentPageRuntime == null || (route != null &&
+            route.lifecycle == PageRuntimeLifecycle.READY &&
+            route.runGeneration == lease.runGeneration && route.taskId == lease.taskId &&
+            route.mode == mode)
+
+    private fun currentRoute() = currentPageRuntime?.invoke()
     /** Advisory preflight only. The final mutation MUST call [withAuthorizedWrite]. */
     fun permits(scope: UiWriteScope): Boolean {
         val runGeneration = currentRunGeneration()
         val mode = activeRunMode()
         val lease = taskCoordinator.currentLease() ?: return false
-        return lease.runGeneration == runGeneration && accepts(scope, mode, lease.taskId)
+        return lease.runGeneration == runGeneration && accepts(scope, mode, lease.taskId) &&
+            routeMatches(currentRoute(), mode, lease)
     }
 
     /** Holds the exact current task lease across the actual platform submission. */
@@ -41,11 +52,16 @@ class UiWriteAuthorization(
         val runGeneration = currentRunGeneration()
         val mode = activeRunMode()
         val lease = taskCoordinator.currentLease() ?: return null
-        if (lease.runGeneration != runGeneration || !accepts(scope, mode, lease.taskId)) return null
+        val route = currentRoute()
+        if (lease.runGeneration != runGeneration || !accepts(scope, mode, lease.taskId) ||
+            !routeMatches(route, mode, lease)) return null
         return taskCoordinator.withCurrentLease(lease) {
-            // TaskCoordinator owns the authoritative lease revocation barrier. In particular,
-            // no callback may reuse a capability after its mode or generation changes.
-            action()
+            // Production route publication uses the same ownership monitor. Revalidate the
+            // captured route (including its revision) inside the final submission barrier.
+            if (currentPageRuntime != null &&
+                (currentRoute() != route || !routeMatches(route, mode, lease) ||
+                    currentRunGeneration() != runGeneration || activeRunMode() != mode)
+            ) null else action()
         }
     }
 
@@ -53,8 +69,9 @@ class UiWriteAuthorization(
     fun permitsBound(scope: UiWriteScope, expectedLease: TaskLease?): Boolean {
         val expected = expectedLease ?: return false
         return expected.runGeneration == currentRunGeneration() &&
-            accepts(scope, activeRunMode(), expected.taskId) &&
-            taskCoordinator.isCurrent(expected)
+            activeRunMode().let { mode ->
+                accepts(scope, mode, expected.taskId) && routeMatches(currentRoute(), mode, expected)
+            } && taskCoordinator.isCurrent(expected)
     }
 
     /** Final mutation barrier: ownership transfers cannot revive an old asynchronous draft. */
@@ -62,10 +79,13 @@ class UiWriteAuthorization(
         val expected = expectedLease ?: return null
         val runGeneration = currentRunGeneration()
         val mode = activeRunMode()
-        if (expected.runGeneration != runGeneration || !accepts(scope, mode, expected.taskId)) return null
+        val route = currentRoute()
+        if (expected.runGeneration != runGeneration || !accepts(scope, mode, expected.taskId) ||
+            !routeMatches(route, mode, expected)) return null
         return taskCoordinator.withCurrentLease(expected) {
-            if (currentRunGeneration() != runGeneration || activeRunMode() != mode) null
-            else action()
+            if (currentRunGeneration() != runGeneration || activeRunMode() != mode ||
+                (currentPageRuntime != null && currentRoute() != route)
+            ) null else action()
         }
     }
 

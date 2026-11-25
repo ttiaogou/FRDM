@@ -37,6 +37,9 @@ internal class AiReplyModeRuntimeAdapter(
         onPrepared: (PageRuntimeSessionState) -> Unit
     ) {
         onRunStarted()
+        // Rebind only after the fresh page selected this runtime. The existing recovery
+        // methods retain their checkpoint identity and double-snapshot verification.
+        onAccessibilityServiceConnected()
         onPrepared(session)
         runtime().requestPageRouteObservation()
     }
