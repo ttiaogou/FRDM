@@ -3188,11 +3188,16 @@ class AiReplyObservationRuntime(
      * must still pass the existing Android READY and two-fresh-snapshot checkpoints.
      * The same boundary may be reported twice (interrupt, disconnect, destroy).
      */
-    fun persistCheckpointBeforeServiceInterruption(reason: String) {
-        if (!sessionRunStarted || serviceInterruptionCheckpointPersisted) return
+    fun persistCheckpointBeforeServiceInterruption(reason: String) =
+        persistTaskProgressBeforeExit(reason, serviceBoundary = true)
+
+    /** Passive progress persistence at the existing lifecycle boundary, not a recovery request. */
+    fun persistTaskProgressBeforeExit(reason: String, serviceBoundary: Boolean) {
+        if (!sessionRunStarted || (serviceBoundary && serviceInterruptionCheckpointPersisted)) return
+        val boundary = if (serviceBoundary) "SERVICE_BOUNDARY" else "PAGE_PAUSE"
         if (recoveryContext.pending) {
             // An UNKNOWN transaction already saved its original route checkpoint.
-            onLog("统一恢复[SERVICE_BOUNDARY_PRESERVED]：reason=$reason；沿用待恢复检查点，不覆盖已保存凭据")
+            onLog("业务进度[${boundary}_PRESERVED]：reason=$reason；沿用待恢复检查点，不覆盖已保存凭据")
             return
         }
         val taskId = taskOwnership.activeTaskId()
@@ -3210,13 +3215,13 @@ class AiReplyObservationRuntime(
                 else -> false
             }
         }.onFailure {
-            onLog("统一恢复[SERVICE_BOUNDARY_CHECKPOINT_ERROR]：reason=$reason；type=${it.javaClass.simpleName}；未改变手势或任务状态")
+            onLog("业务进度[${boundary}_CHECKPOINT_ERROR]：reason=$reason；type=${it.javaClass.simpleName}；未改变手势或任务状态")
         }.getOrDefault(false)
         if (persisted) {
-            serviceInterruptionCheckpointPersisted = true
-            onLog("统一恢复[SERVICE_BOUNDARY_CHECKPOINT_SAVED]：task=$taskId；reason=$reason；中断前业务进度已保存；等待服务重连后只读验证")
+            if (serviceBoundary) serviceInterruptionCheckpointPersisted = true
+            onLog("业务进度[${boundary}_CHECKPOINT_SAVED]：task=$taskId；reason=$reason；仅保存进度；所属任务下次进入时再验证")
         } else {
-            onLog("统一恢复[SERVICE_BOUNDARY_CHECKPOINT_UNAVAILABLE]：task=${taskId ?: "NONE"}；reason=$reason；未生成未经验证的检查点")
+            onLog("业务进度[${boundary}_CHECKPOINT_UNAVAILABLE]：task=${taskId ?: "NONE"}；reason=$reason；未生成未经验证的检查点")
         }
     }
 
@@ -3231,7 +3236,7 @@ class AiReplyObservationRuntime(
         receivedGreetingsRecoveryScheduleRepository?.clear()
     }
 
-    fun reset(reason: String = "未指定") {
+    fun reset(reason: String = "未指定", preservePendingRecovery: Boolean = true) {
         runCatching { onDraftRuntimeReset() }
         sessionActionGeneration += 1L
         incompleteUnreadRelocationWait = null
@@ -3270,7 +3275,7 @@ class AiReplyObservationRuntime(
         receivedGreetingsCheckpointVerifier.reset()
         receivedGreetingsCheckpointForUnified = null
         suspendedPrivateRecovery = null
-        if (!recoveryContext.pending) recoveryContext.clear()
+        if (!preservePendingRecovery || !recoveryContext.pending) recoveryContext.clear()
         messageListRecoveryVerificationPending = false
         messageListCheckpointRestored = false
         messageListCheckpointForUnified = null

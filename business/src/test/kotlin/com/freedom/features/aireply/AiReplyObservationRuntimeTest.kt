@@ -494,6 +494,48 @@ class AiReplyObservationRuntimeTest {
     }
 
 
+    @Test
+    fun ordinaryPagePauseSavesProgressWithoutServiceRecoveryAndPreservesDurableRecord() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply { sessionRunEnabled = true }
+        val logs = ArrayList<String>()
+        var saved: PrivateMessagesTraversalCheckpoint? = null
+        var saveCount = 0
+        val repo = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = saved
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) {
+                saved = checkpoint
+                saveCount++
+            }
+            override fun clear() = Unit
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator()),
+            currentRunGeneration = { 6L },
+            privateMessagesCheckpointRepository = repo
+        )
+        runtime.scheduleInitialObservation()
+        runtime.persistTaskProgressBeforeExit("PAGE_SWITCH", serviceBoundary = false)
+        assertEquals(1, saveCount)
+        assertTrue(logs.any { it.contains("PAGE_PAUSE_CHECKPOINT_SAVED") })
+        assertFalse(logs.any { it.contains("SERVICE_BOUNDARY_CHECKPOINT_SAVED") })
+        runtime.reset("页面任务暂停", preservePendingRecovery = false)
+        assertEquals(1, saveCount)
+        assertTrue(saved != null)
+    }
+
     private data class PreScrollPageRecoveryFixture(
         val scheduler: FakeScheduler,
         val runtime: AiReplyObservationRuntime,

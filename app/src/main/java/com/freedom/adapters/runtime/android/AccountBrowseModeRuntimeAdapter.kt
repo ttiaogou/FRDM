@@ -53,12 +53,18 @@ internal class AccountBrowseModeRuntimeAdapter(
         }
     }
 
-    override fun onPageRuntimeWillSuspend(reason: String) {
+    override fun saveProgressBeforeExit(reason: String, serviceBoundary: Boolean) {
         workflow().saveCheckpointBeforePageExit()
     }
 
-    override fun onPageRuntimeSuspended(reason: String) {
-        onAccessibilityServiceDisconnected()
+    override fun onRunPaused(reason: String) {
+        onReadinessInvalidated("AccountBrowse 页面任务暂停：$reason")
+        awaitingServiceReconnect = false
+        try {
+            workflow().suspendForPageExit()
+        } finally {
+            releaseTaskOwnership("页面任务暂停；撤销旧 UI 操作租约")
+        }
     }
 
     override fun onRunStopped(reason: String) {

@@ -111,12 +111,12 @@ class RunSessionCoordinator(
             ?.also(::publishPageRuntime)
 
     /** STOPPING is visible throughout cleanup; revocation precedes any teardown callback. */
-    private fun stopPageRuntime(reason: String, preserveRecovery: Boolean,
+    private fun stopPageRuntime(reason: String, preserveProgress: Boolean,
                                 cleanup: ((ModeRuntimePort) -> Unit)? = null): Boolean {
         val previous = pageRuntime
         if (previous?.lifecycle == PageRuntimeLifecycle.STOPPING && pendingCleanup != null) {
             // The old lease and generation have already been revoked.
-            if (!preserveRecovery) {
+            if (!preserveProgress) {
                 val runtime = runtimes[previous.mode]
                 pendingCleanup = { runtime?.onRunStopped(reason) }
             }
@@ -131,10 +131,11 @@ class RunSessionCoordinator(
         logPageLifecycle(stopping, reason)
         runtimePrepared = false
         val runtime = runtimes[previous.mode]
-        if (preserveRecovery && runtime != null) {
-            // The checkpoint writer needs the still-current task identity, but STOPPING
-            // has already closed runtime dispatch. No UI work is authorized here.
-            runCatching { runtime.onPageRuntimeWillSuspend(reason) }.onFailure {
+        if (preserveProgress && runtime != null) {
+            // Save only the source's durable progress. The actual service boundary is
+            // explicit (its dedicated cleanup callback); an ordinary page switch is not one.
+            // STOPPING already closes UI authority while the writer reads the old task identity.
+            runCatching { runtime.saveProgressBeforeExit(reason, serviceBoundary = cleanup != null) }.onFailure {
                 log.recordException("RunSessionCoordinator", "page_runtime_checkpoint_failed", reason, it)
             }
         }
@@ -142,7 +143,7 @@ class RunSessionCoordinator(
         pendingCleanup = {
             if (runtime != null) {
                 if (cleanup != null) cleanup(runtime)
-                else if (preserveRecovery) runtime.onPageRuntimeSuspended(reason)
+                else if (preserveProgress) runtime.onRunPaused(reason)
                 else runtime.onRunStopped(reason)
             }
         }
@@ -164,7 +165,7 @@ class RunSessionCoordinator(
         }
     }
 
-    /** Called by the independent entry before taking a new page snapshot. */
+    /** Retry only a failed runtime teardown, never a source task's business recovery. */
     @Synchronized
     fun retryPendingPageCleanup(): Boolean {
         if (!isPageObservationAllowed() || pageTransitionInProgress ||
@@ -305,7 +306,7 @@ class RunSessionCoordinator(
         if (current != null && (current.mode != mode || current.taskId != taskId)) {
             pageTransitionInProgress = true
             try {
-                val suspended = stopPageRuntime("独立页面业务交接：${current.taskId} -> $taskId", preserveRecovery = true)
+                val suspended = stopPageRuntime("独立页面业务交接：${current.taskId} -> $taskId", preserveProgress = true)
                 if (suspended && isPageObservationAllowed()) onObserveCurrentPage()
                 return pageRuntime
             } finally {
@@ -357,7 +358,7 @@ class RunSessionCoordinator(
         pageTransitionInProgress = true
         try {
             cancelCurrentPageObservation()
-            val stopped = stopPageRuntime(reason, preserveRecovery = false)
+            val stopped = stopPageRuntime(reason, preserveProgress = false)
             finishPageUserRun(stopped, reason)
         } finally {
             pageTransitionInProgress = false
@@ -379,7 +380,7 @@ class RunSessionCoordinator(
         pageTransitionInProgress = true
         try {
             cancelCurrentPageObservation()
-            val stopped = stopPageRuntime("运行请求已变化", preserveRecovery = false)
+            val stopped = stopPageRuntime("运行请求已变化", preserveProgress = false)
             if (requestedRun) {
                 if (isPageObservationAllowed()) onObserveCurrentPage.invoke()
             } else finishPageUserRun(stopped, "运行请求状态变化")
@@ -420,7 +421,7 @@ class RunSessionCoordinator(
         cancelCurrentPageObservation()
         pageTransitionInProgress = true
         try {
-            stopPageRuntime("SERVICE_DISCONNECTED", preserveRecovery = true) {
+            stopPageRuntime("SERVICE_DISCONNECTED", preserveProgress = true) {
                 it.onAccessibilityServiceDisconnected()
             }
         } finally {
@@ -453,7 +454,7 @@ class RunSessionCoordinator(
                     } catch (error: Throwable) {
                         log.recordException("RunSessionCoordinator", "page_runtime_prepare_retry_failed",
                             "页面运行时重新准备失败；继续只读等待", error)
-                        stopPageRuntime("页面运行时重新准备失败", preserveRecovery = true)
+                        stopPageRuntime("页面运行时重新准备失败", preserveProgress = true)
                     } finally {
                         pageTransitionInProgress = false
                     }
@@ -466,7 +467,7 @@ class RunSessionCoordinator(
         pageTransitionInProgress = true
         try {
             if (mode == null || taskId == null) {
-                if (currentPage != null) stopPageRuntime("页面路由未确认", preserveRecovery = true)
+                if (currentPage != null) stopPageRuntime("页面路由未确认", preserveProgress = true)
                 return null
             }
             // Private messages and greetings share one runtime and a verified atomic
@@ -485,7 +486,7 @@ class RunSessionCoordinator(
                 return pageRuntime
             }
             if (currentPage != null &&
-                !stopPageRuntime("页面任务路由切换", preserveRecovery = true)
+                !stopPageRuntime("页面任务路由切换", preserveProgress = true)
             ) return pageRuntime
             val runtime = runtimes[mode] ?: return null
             val next = beginPageRuntime(runGeneration, taskId, mode)
@@ -497,7 +498,7 @@ class RunSessionCoordinator(
             } catch (error: Throwable) {
                 log.recordException("RunSessionCoordinator", "page_runtime_start_failed",
                     "页面运行时启动失败；保持只读等待", error)
-                stopPageRuntime("页面运行时启动失败", preserveRecovery = true)
+                stopPageRuntime("页面运行时启动失败", preserveProgress = true)
             }
             return pageRuntime
         } finally {
@@ -587,7 +588,7 @@ class RunSessionCoordinator(
         cancelCurrentPageObservation()
         pageTransitionInProgress = true
         try {
-            stopPageRuntime(reason, preserveRecovery = true)
+            stopPageRuntime(reason, preserveProgress = true)
         } finally {
             pageTransitionInProgress = false
         }
@@ -600,7 +601,7 @@ class RunSessionCoordinator(
         cancelCurrentPageObservation()
         pageTransitionInProgress = true
         try {
-            stopPageRuntime(reason, preserveRecovery = true) { it.onAccessibilityServiceInterrupted(reason) }
+            stopPageRuntime(reason, preserveProgress = true) { it.onAccessibilityServiceInterrupted(reason) }
         } finally {
             pageTransitionInProgress = false
         }
@@ -618,7 +619,7 @@ class RunSessionCoordinator(
         pageTransitionInProgress = true
         try {
             val requested = state.isRunRequested()
-            val stopped = stopPageRuntime("SERVICE_DESTROYED", preserveRecovery = requested) {
+            val stopped = stopPageRuntime("SERVICE_DESTROYED", preserveProgress = requested) {
                 if (requested) it.onServiceDestroyed() else it.onRunStopped("用户运行授权已关闭")
             }
             if (!requested) finishPageUserRun(stopped, "SERVICE_DESTROYED")

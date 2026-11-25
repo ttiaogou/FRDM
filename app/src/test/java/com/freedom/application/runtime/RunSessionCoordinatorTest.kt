@@ -86,16 +86,17 @@ class RunSessionCoordinatorTest {
                 override val mode = runtimeMode
                 override fun onRunStopped(reason: String) = error("switch is not user stop")
                 override fun onAccessibilityServiceConnected() = Unit
-                override fun onAccessibilityServiceDisconnected() = Unit
+                override fun onAccessibilityServiceDisconnected() = error("page switch is not service loss")
                 override fun onRunStarted(taskId: String, retry: Boolean): Boolean {
                     trace += "start:$taskId"
                     return true
                 }
-                override fun onPageRuntimeWillSuspend(reason: String) {
+                override fun saveProgressBeforeExit(reason: String, serviceBoundary: Boolean) {
+                    assertFalse(serviceBoundary)
                     assertNull(coordinator.currentWriteRoute())
                     trace += "save:${tasks.activeTaskId()}"
                 }
-                override fun onPageRuntimeSuspended(reason: String) {
+                override fun onRunPaused(reason: String) {
                     assertNull(tasks.currentLease())
                     assertNull(coordinator.currentWriteRoute())
                     trace += "isolated"
@@ -158,11 +159,12 @@ class RunSessionCoordinatorTest {
                 trace += "start:$taskId"
                 return true
             }
-            override fun onPageRuntimeWillSuspend(reason: String) {
+            override fun saveProgressBeforeExit(reason: String, serviceBoundary: Boolean) {
+                assertFalse(serviceBoundary)
                 assertNull(coordinator.currentWriteRoute())
                 trace += "save:${tasks.currentLease()?.taskId}"
             }
-            override fun onPageRuntimeSuspended(reason: String) {
+            override fun onRunPaused(reason: String) {
                 assertNull(tasks.currentLease())
                 assertNull(coordinator.currentWriteRoute())
                 trace += "isolate"
@@ -359,7 +361,7 @@ class RunSessionCoordinatorTest {
             override val mode = RunMode.AI_REPLY
             override fun onRunStarted(taskId: String, retry: Boolean): Boolean { trace += "ai:start"; return true }
             override fun onRunStopped(reason: String) { error("page exit is not user stop") }
-            override fun onPageRuntimeSuspended(reason: String) {
+            override fun onRunPaused(reason: String) {
                 assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING,
                     coordinator.currentPageRuntimeSession()?.lifecycle)
                 assertNull(tasks.currentLease())
@@ -398,6 +400,60 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun ordinaryPageExitDoesNotWaitForProgressPersistenceAndServiceLossUsesItsOwnHook() {
+        val state = FakeState().apply { requested = true }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val trace = mutableListOf<String>()
+        lateinit var coordinator: RunSessionCoordinator
+        val ai = object : ModeRuntimePort {
+            override val mode = RunMode.AI_REPLY
+            override fun onRunStarted(taskId: String, retry: Boolean): Boolean {
+                trace += "start:$taskId"
+                return true
+            }
+            override fun onRunStopped(reason: String) = error("not a user stop")
+            override fun saveProgressBeforeExit(reason: String, serviceBoundary: Boolean) {
+                assertNull(coordinator.currentWriteRoute())
+                trace += "save:$serviceBoundary:${tasks.activeTaskId()}"
+                if (!serviceBoundary) error("source checkpoint unavailable")
+            }
+            override fun onRunPaused(reason: String) {
+                assertNull(tasks.currentLease())
+                trace += "pause"
+            }
+            override fun onAccessibilityServiceDisconnected() {
+                assertNull(tasks.currentLease())
+                trace += "disconnect"
+            }
+            override fun onAccessibilityServiceConnected() = Unit
+            override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = Unit
+        }
+        coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai), RuntimeLogSink { },
+            taskCoordinator = tasks)
+        coordinator.synchronizeRunRequest()
+        val first = requireNotNull(coordinator.routeIndependentPageTask(ai.mode, "AI_REPLY_PRIVATE_MESSAGES"))
+        val firstLease = requireNotNull(tasks.tryAcquire(first.taskId, first.runGeneration))
+        assertTrue(coordinator.admitBusinessPageTaskOwnership(firstLease, false))
+        assertNull(coordinator.routeIndependentPageTask(ai.mode, "AI_REPLY_RECEIVED_GREETINGS"))
+        assertNull(tasks.currentLease())
+        assertNull(coordinator.currentPageRuntimeSession())
+        assertFalse(coordinator.retryPendingPageCleanup())
+        assertFalse(tasks.isCurrent(firstLease))
+        assertNull(coordinator.routeIndependentPageTask(ai.mode, "AI_REPLY_RECEIVED_GREETINGS", first.runGeneration))
+
+        val next = requireNotNull(coordinator.routeIndependentPageTask(ai.mode, "AI_REPLY_RECEIVED_GREETINGS"))
+        val nextLease = requireNotNull(tasks.tryAcquire(next.taskId, next.runGeneration))
+        assertTrue(coordinator.admitBusinessPageTaskOwnership(nextLease, false))
+        assertEquals(next.taskId, coordinator.currentWriteRoute()?.taskId)
+        coordinator.onAccessibilityServiceDisconnected()
+        assertEquals(listOf("start:${first.taskId}", "save:false:${first.taskId}", "pause",
+            "start:${next.taskId}", "save:true:${next.taskId}", "disconnect"), trace)
+        assertNull(tasks.currentLease())
+        assertNull(coordinator.currentWriteRoute())
+        assertTrue(state.requested)
+    }
+
+    @Test
     fun pageDrivenFailedCleanupKeepsStoppingAndDoesNotStartReplacement() {
         val state = FakeState().apply { requested = true }
         val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
@@ -409,8 +465,11 @@ class RunSessionCoordinatorTest {
             override val mode = RunMode.AI_REPLY
             override fun onRunStarted(taskId: String, retry: Boolean) = true
             override fun onRunStopped(reason: String) = Unit
-            override fun onPageRuntimeWillSuspend(reason: String) { checkpointSaves++ }
-            override fun onPageRuntimeSuspended(reason: String) {
+            override fun saveProgressBeforeExit(reason: String, serviceBoundary: Boolean) {
+                assertFalse(serviceBoundary)
+                checkpointSaves++
+            }
+            override fun onRunPaused(reason: String) {
                 cleanupAttempts++
                 if (failCleanup) error("cleanup failed")
             }

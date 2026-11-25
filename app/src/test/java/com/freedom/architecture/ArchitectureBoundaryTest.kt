@@ -1285,7 +1285,7 @@ class ArchitectureBoundaryTest {
     fun pageSelectedBrowseStartupDoesNotPublishPreparationWhileWorkflowIsIdle() {
         val source = projectFile("app/src/main/java/com/freedom/adapters/runtime/android/AccountBrowseModeRuntimeAdapter.kt").readText()
         val start = source.substringAfter("override fun onRunStarted(taskId: String, retry: Boolean): Boolean")
-            .substringBefore("override fun onPageRuntimeWillSuspend(")
+            .substringBefore("override fun saveProgressBeforeExit(")
         val retry = start.substringAfter("if (retry) {")
             .substringBefore("taskExecutionController.beginRun(")
         assertTrue(start.contains("require(taskId == TASK_ID)"))
@@ -1298,6 +1298,24 @@ class ArchitectureBoundaryTest {
             .contains("return workflow().phase != AccountBrowsePhase.IDLE"))
         assertFalse(source.contains("override fun onPageRuntimeStarted("))
         assertFalse(source.contains("override fun onPageRuntimePreparationRetry("))
+    }
+
+    @Test
+    fun ordinaryPagePauseDoesNotInvokeServiceInterruptionOrUserStop() {
+        val browse = projectFile("app/src/main/java/com/freedom/adapters/runtime/android/AccountBrowseModeRuntimeAdapter.kt").readText()
+        val ai = projectFile("app/src/main/java/com/freedom/adapters/runtime/android/AiReplyModeRuntimeAdapter.kt").readText()
+        for (source in listOf(browse, ai)) {
+            val pause = source.substringAfter("override fun onRunPaused(")
+                .substringBefore("override fun onRunStopped(")
+            assertFalse(pause.contains("onAccessibilityServiceDisconnected("))
+            assertFalse(pause.contains("persistCheckpointBeforeServiceInterruption("))
+            assertFalse(pause.contains("clearRecoverySchedulesAfterRunStop("))
+            assertTrue(pause.contains("awaitingServiceReconnect = false"))
+        }
+        assertTrue(browse.substringAfter("override fun onRunPaused(")
+            .substringBefore("override fun onRunStopped(").contains("workflow().suspendForPageExit()"))
+        assertTrue(ai.substringAfter("override fun onRunPaused(")
+            .substringBefore("override fun onRunStopped(").contains("preservePendingRecovery = false"))
     }
 
     @Test

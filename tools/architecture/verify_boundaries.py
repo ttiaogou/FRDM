@@ -868,6 +868,7 @@ RETIRED_PAGE_CONTROL_SYMBOLS = {
     "classifyPageObservation", "classifyUnifiedPage", "hasFreshOwnedPageEvidence",
     "PageRuntimeSession", "onPageRuntimeStarted", "onPageRuntimePreparationRetry", "preparedRuntimeMode",
     "writeRoute", "publishWriteRoute", "lastBusinessAdmissionLease", "unclassifiedWriteHold",
+    "onPageRuntimeWillSuspend", "onPageRuntimeSuspended", "suspendRecoveryOnServiceDisconnect",
 }
 
 

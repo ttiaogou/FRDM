@@ -34,13 +34,14 @@ internal class AiReplyModeRuntimeAdapter(
         runtime().requestPageRouteObservation()
     }
 
-    override fun onPageRuntimeWillSuspend(reason: String) {
-        runtime().persistCheckpointBeforeServiceInterruption(reason)
+    override fun saveProgressBeforeExit(reason: String, serviceBoundary: Boolean) {
+        runtime().persistTaskProgressBeforeExit(reason, serviceBoundary)
     }
 
-    override fun onPageRuntimeSuspended(reason: String) {
-        onReadinessInvalidated("AI Reply 页面运行时退出：$reason")
-        runtime().reset("页面运行时退出：$reason")
+    override fun onRunPaused(reason: String) {
+        onReadinessInvalidated("AI Reply 页面任务暂停：$reason")
+        awaitingServiceReconnect = false
+        runtime().reset("页面任务暂停：$reason", preservePendingRecovery = false)
     }
 
     override fun onRunStopped(reason: String) {

@@ -130,7 +130,8 @@ class AccountBrowseRuntime(
         return true
     }
 
-    fun suspendRecoveryOnServiceDisconnect() = dynamicPageRecovery.suspendForServiceDisconnect()
+    /** Cancel read-only recovery observations without starting another recovery transaction. */
+    fun suspendRecoveryObservation() = dynamicPageRecovery.suspendForServiceDisconnect()
 
     /** Reset transient execution state; persisted progress and recovery schedule survive. */
     fun suspendSession() {

@@ -13,11 +13,11 @@ interface ModeRuntimePort {
     /** Same-runtime task handoff: request verification without resetting existing transactions. */
     fun onPageTaskChanged(session: PageRuntimeSessionState) = Unit
 
-    /** Persist only existing checkpoint evidence before the coordinator revokes the lease. */
-    fun onPageRuntimeWillSuspend(reason: String) = Unit
+    /** Save existing business progress, without activating recovery or granting UI authority. */
+    fun saveProgressBeforeExit(reason: String, serviceBoundary: Boolean) = Unit
 
-    /** Page exit is not a user stop. Implementations can preserve durable recovery state. */
-    fun onPageRuntimeSuspended(reason: String) = onRunStopped(reason)
+    /** Normal page exit: cancel transient work, preserve durable progress, do not simulate service loss. */
+    fun onRunPaused(reason: String) = onRunStopped(reason)
 
     fun onAccessibilityServiceConnected()
     fun onAccessibilityServiceDisconnected()

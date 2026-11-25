@@ -129,7 +129,7 @@ internal class AndroidAccountBrowseWorkflow(
     }
 
     internal fun suspendRecoveryForServiceDisconnect() =
-        accountBrowseRuntime.suspendRecoveryOnServiceDisconnect()
+        accountBrowseRuntime.suspendRecoveryObservation()
 
     internal fun restoreRecoveryAfterServiceReconnect(): Boolean {
         if (!isMonitoringRunning() || !isBrowseModeActive()) return false
@@ -242,12 +242,15 @@ internal class AndroidAccountBrowseWorkflow(
 
     internal fun suspendForPageExit() {
         invalidateBrowseCallbacks()
-        accountBrowseRuntime.suspendRecoveryOnServiceDisconnect()
-        // A failed overlay restoration is a real cleanup failure: keep STOPPING.
+        accountBrowseRuntime.suspendRecoveryObservation()
+        // A failed touchability restoration is a real safety failure: keep STOPPING.
         check(restoreMonitorOverlayTouchPassthrough()) { "AccountBrowse overlay restoration failed" }
-        overlayPort.clearGestureTrail()
         hideFirstSwipeCountdown()
         accountBrowseTask.suspendForPageExit()
+        // A non-interactive gesture trail is presentation only, not a reason to retain ownership.
+        runCatching { overlayPort.clearGestureTrail() }.onFailure {
+            runCatching { addLog("动态浏览暂停：轨迹清理失败；业务已隔离；type=${it.javaClass.simpleName}") }
+        }
     }
 
     private fun addLog(message: String) = onLog(message)

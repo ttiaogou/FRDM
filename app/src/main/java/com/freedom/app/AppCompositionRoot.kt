@@ -349,11 +349,12 @@ internal class AccessibilityServiceDependencies internal constructor(
             isEnabled = { runSessionCoordinator.isPageObservationAllowed() },
             onObservationRequested = entryObservation@{
                 if (runSessionCoordinator.isPageObservationAllowed()) {
-                    // No destination read or startup may race failed old-runtime cleanup.
+                    // A failed safety teardown still forbids writes. Once it succeeds,
+                    // read the destination now; do not wait through another retry interval.
                     if (runSessionCoordinator.currentPageRuntimeSession()?.lifecycle ==
-                        com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING
+                        com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING &&
+                        !runSessionCoordinator.retryPendingPageCleanup()
                     ) {
-                        runSessionCoordinator.retryPendingPageCleanup()
                         entryPageRetry.update(true)
                         return@entryObservation
                     }
