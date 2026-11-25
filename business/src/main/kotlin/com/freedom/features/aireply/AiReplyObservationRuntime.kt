@@ -3455,10 +3455,15 @@ class AiReplyObservationRuntime(
         val created = requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, reason)
         if (created || recoveryContext.pending) {
             onLog("统一恢复[GESTURE_RECOVERY_REQUESTED]：task=$PRIVATE_MESSAGES_TASK_ID；reason=$reason；保留检查点，继续只读观察")
-            if (created) scheduleFullInspectionAfter(delayMs)
-            else if (recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+            if (created) {
+                scheduleFullInspectionAfter(delayMs)
+            } else if (recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
                 recoveryContext.routeId == messageListRecoveryRoute.routeId
-            ) schedulePendingPrivateListObservation()
+            ) {
+                // A cancelled cold-start gesture still needs the same bounded retry delay;
+                // do not replace it with the slower checkpoint poll when the page is unchanged.
+                scheduleFullInspectionAfter(delayMs)
+            }
         } else {
             sessionManagerState = SessionManagerState.PAUSED
             onLog("统一恢复[GESTURE_RECOVERY_UNAVAILABLE]：reason=$reason；无法建立恢复检查点，禁止继续手势")
