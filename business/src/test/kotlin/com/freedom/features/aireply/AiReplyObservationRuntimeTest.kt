@@ -1945,6 +1945,35 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("CHAT_DETAIL_VERIFIED") })
         assertFalse(logs.any { it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") })
         assertFalse(logs.any { it.contains("收到招呼通用检查点[ROUTE_WAIT]") })
+
+        // Reproduce the composer/scroll refresh from the device log: the cached
+        // paths are cleared, but the next full read confirms the original binding.
+        val bindingCount = logs.count { it.contains("GREETING_CHAT_BINDING_CREATED") }
+        val originalLease = owner.currentLease()
+        val refresh = runtime.javaClass.getDeclaredMethod("runRegionRefresh").apply {
+            isAccessible = true
+        }
+        val inspect = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
+            isAccessible = true
+        }
+        port.regionResult = ChatRegionSnapshot(true, 0, 0, 0, 0, false)
+        refresh.invoke(runtime)
+        assertTrue(logs.any { it.contains("聊天区域定位已失效") })
+        inspect.invoke(runtime)
+        assertTrue(logs.any { it.contains("CHAT_DETAIL_REVALIDATED") })
+        assertFalse(logs.any { it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") })
+        assertFalse(logs.any { it.contains("收到招呼通用检查点[ROUTE_WAIT]") })
+        assertEquals(bindingCount, logs.count { it.contains("GREETING_CHAT_BINDING_CREATED") })
+        assertEquals(originalLease, owner.currentLease())
+
+        // A different window generation is NOT the same bound conversation.
+        // Keep the pre-existing recovery path instead of suppressing all detail changes.
+        port.page = chatDetailSnapshot(windowGeneration = 2L)
+        inspect.invoke(runtime)
+        assertTrue(logs.any {
+            it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") && it.contains("PAGE_ROUTE_CHANGED")
+        })
+        assertEquals(bindingCount, logs.count { it.contains("GREETING_CHAT_BINDING_CREATED") })
     }
 
     @Test

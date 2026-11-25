@@ -1818,10 +1818,21 @@ class AiReplyObservationRuntime(
                 inspection.packageName == targetPackage() &&
                 inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
                 inspectGreetingChatAdmission(inspection, requireDetailReady = true) is GreetingChatAdmission.Ready
+        // A region refresh may clear the previous snapshot's node locators without
+        // leaving the chat. Use the existing binding and fresh identity/window/lease
+        // proof, not the missing previous locator, to distinguish that from a route change.
+        val activeReceivedGreetingsChatDetail =
+            activeTaskId == RECEIVED_GREETINGS_TASK_ID &&
+                observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                greetingBindingRejectReason(inspection) == null
         val receivedGreetingsWorkflowTransition =
             receivedGreetingsEntryCardTransition ||
                 receivedGreetingsIdentityProfileTransition ||
-                receivedGreetingsChatDetailTransition
+                receivedGreetingsChatDetailTransition ||
+                activeReceivedGreetingsChatDetail
+        if (activeReceivedGreetingsChatDetail && previous != null && pageIdentityChanged(previous, inspection)) {
+            onLog("收到招呼业务导航[CHAT_DETAIL_REVALIDATED]：原会话身份、窗口和任务租约仍有效；不创建列表恢复")
+        }
         if (receivedGreetingsChatDetailTransition) {
             onLog(
                 "收到招呼业务导航[CHAT_DETAIL_VERIFIED]：联系人ID、聊天标题、窗口和任务租约已复核；" +
@@ -2304,7 +2315,8 @@ class AiReplyObservationRuntime(
                 }
             }
         }
-        if (previous != null && inboxPageRecognizer.isChatDetail(previous) &&
+        if (!activeReceivedGreetingsChatDetail &&
+            previous != null && inboxPageRecognizer.isChatDetail(previous) &&
             (!inboxPageRecognizer.isChatDetail(inspection) ||
                 !hasSameWindowSession(previous, inspection))
         ) {
