@@ -42,6 +42,8 @@ import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.PageFingerprint
 import com.freedom.core.runtime.TargetAppPageReadiness
+import com.freedom.core.runtime.TargetAppReadinessSnapshot
+import com.freedom.core.runtime.TargetAppReadinessStatus
 import com.freedom.features.accountbrowse.ports.*
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.domain.message.MessageReadStatus
@@ -104,6 +106,8 @@ internal class MomoSocialAdapter(
     private val receivedGreetingsSendReturnRepository: ReceivedGreetingsSendReturnRepository,
     private val ocrReviewRepository: OcrReviewRepository,
     private val sampleArchivePort: SessionSampleArchivePort,
+    /** Fresh observation from the existing Android READY owner; not a UI write grant. */
+    private val inspectReceivedGreetingsReadiness: () -> TargetAppReadinessSnapshot,
     /** The AI task lease must still be current when a send gesture is admitted. */
     private val isAiReplyUiOperationOwned: () -> Boolean = { true },
     /** Exact lease captured at model admission; task handoff revokes old async callbacks. */
@@ -2490,7 +2494,13 @@ internal class MomoSocialAdapter(
         }
         // New users are isolated from one user's transient failures. Deferred users get a
         // bounded retry opportunity only after currently visible fresh candidates are handled.
-        val candidate = (unprocessedCandidates.firstOrNull() ?: deferredRetryCandidates.firstOrNull()) ?: run {
+        // Retain the pending row identity across a pre-dispatch deferral, but never its
+        // coordinates. If it is still eligible and visible, prefer it on the fresh snapshot.
+        val candidate = (unprocessedCandidates.firstOrNull {
+            MomoSayHiIdentityFingerprintPolicy.rowKey(it) == sayHiStableCandidateKey
+        } ?: deferredRetryCandidates.firstOrNull {
+            MomoSayHiIdentityFingerprintPolicy.rowKey(it) == sayHiStableCandidateKey
+        } ?: unprocessedCandidates.firstOrNull() ?: deferredRetryCandidates.firstOrNull()) ?: run {
             sayHiStableCandidateKey = ""
             sayHiStableCandidateTarget = null
             sayHiStableCandidateWindow = null
@@ -2678,6 +2688,7 @@ internal class MomoSocialAdapter(
                     onLog("收到招呼头像导航：精确头像手势完成；等待用户资料页与明确身份字段，不点击消息行")
                 } else if (result.status == GestureExecutionStatus.DEFERRED) {
                     clearSayHiSelectedGreeting()
+                    sayHiStableCandidateKey = selected.rowKey
                     onLog("收到招呼头像导航[DEFERRED]：平台未派发头像点击；不标记跳过，等待新列表快照重新识别")
                     scheduleSayHiListSnapshotInspection(
                         delayMs = 500L,
@@ -2700,6 +2711,7 @@ internal class MomoSocialAdapter(
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
             sayHiGestureInFlight = false
             clearSayHiSelectedGreeting()
+            sayHiStableCandidateKey = selected.rowKey
             onLog("收到招呼头像导航[DEFERRED_NOT_READY]：弹窗/页面准入暂未放行；未点击、未标记跳过；下一轮使用新列表快照重新识别原用户行")
             scheduleSayHiListSnapshotInspection(
                 delayMs = 500L,
@@ -2823,10 +2835,9 @@ internal class MomoSocialAdapter(
                             onLog("收到招呼详情导航：用户行安全区域手势已完成；等待行级点击事件核验和目标聊天页验证后才允许读取")
                         }
                     } else if (result.status == GestureExecutionStatus.DEFERRED) {
-                        clearSayHiSelectedGreeting()
                         resetSayHiRowTapTransaction()
-                        sayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
-                        onLog("收到招呼详情点击[DEFERRED]：平台尚未派发用户行点击；不记为未验证或跳过，等待新鲜列表快照重新识别")
+                        sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_BACK_PENDING
+                        onLog("收到招呼详情点击[DEFERRED]：平台尚未派发用户行点击；保留已验证身份和原始行，等待新鲜列表快照重新识别")
                         scheduleSayHiListSnapshotInspection(
                             delayMs = 500L,
                             reason = "ROW_TAP_CALLBACK_DEFERRED",
@@ -2875,10 +2886,9 @@ internal class MomoSocialAdapter(
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
             sayHiGestureInFlight = false
-            clearSayHiSelectedGreeting()
-            pendingSayHiRowTapTarget = null
             resetSayHiRowTapTransaction()
-            onLog("收到招呼消息行点击[DEFERRED_NOT_READY]：平台手势未派发；不标记本行跳过、不进入详情；重新扫描后再确认")
+            sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_BACK_PENDING
+            onLog("收到招呼消息行点击[DEFERRED_NOT_READY]：平台手势未派发；保留已验证身份和原始行，不进入详情；重新扫描后再确认")
             scheduleSayHiListSnapshotInspection(
                 delayMs = 500L,
                 reason = "ROW_TAP_SUBMISSION_DEFERRED",
@@ -4399,6 +4409,31 @@ internal class MomoSocialAdapter(
         ) return true
         val now = System.currentTimeMillis()
         if (!forceFresh && now - lastSayHiInspectionAtMs < minimumIntervalMs) return true
+        // Read-only list observations and BACK confirmation must remain available while
+        // Activity evidence is missing. Only the task-owned action pass consults READY.
+        val listActionReadiness = if (allowAutonomousScroll && confirmedList &&
+            (sayHiReadOnlyStage == SayHiReadOnlyStage.IDLE ||
+                sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_BACK_PENDING)
+        ) {
+            val readiness = runCatching(inspectReceivedGreetingsReadiness).getOrNull()
+            if (readiness == null || readiness.status != TargetAppReadinessStatus.READY ||
+                readiness.runMode != RunMode.AI_REPLY ||
+                readiness.targetPackage != targetPackage ||
+                readiness.foregroundPackage != targetPackage ||
+                readiness.activityClass.isBlank() || readiness.windowId < 0 || readiness.pageGeneration < 0L
+            ) {
+                // Keep business row identity, cursor, and send proof. A previously observed
+                // target is not a valid locator after Activity/window recovery.
+                sayHiStableCandidateTarget = null
+                sayHiStableCandidateWindow = null
+                sayHiConfirmedListTarget = null
+                lastSayHiInspectionAtMs = now
+                // false uses the existing task executor RETRY_REQUIRED / read-only backoff.
+                // Do not create another polling loop or reserve any gesture.
+                return false
+            }
+            readiness
+        } else null
         var listSnapshotLeaseAcquired = false
         if (listPipelineCandidate) {
             when (val admission = sayHiListSnapshotRecoveryPolicy.tryBeginSnapshot(
@@ -4441,7 +4476,10 @@ internal class MomoSocialAdapter(
         lastSayHiInspectionAtMs = now
 
         val confirmedTarget = if (confirmedList && !sayHiSnapshotCoordinator.forceFullListSnapshot) {
-            sayHiConfirmedListTarget?.takeIf { accessibilityGateway.isWindowCurrent(it.window) }
+            sayHiConfirmedListTarget?.takeIf {
+                accessibilityGateway.isWindowCurrent(it.window) &&
+                    (listActionReadiness == null || listActionReadiness.isReadyForWindow(it.window, RunMode.AI_REPLY))
+            }
         } else null
         if (confirmedList && confirmedTarget == null) sayHiSnapshotCoordinator.requestFullListFallback()
         val usedListSubtree = confirmedTarget != null
@@ -4712,6 +4750,20 @@ internal class MomoSocialAdapter(
         if (allowAutonomousScroll && result.kind == MomoSayHiPageKind.RECEIVED_GREETINGS_LIST &&
             sayHiNavigationFlowController.isReceivedListConfirmed()
         ) {
+            if (sayHiReadOnlyStage == SayHiReadOnlyStage.IDLE ||
+                sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_BACK_PENDING
+            ) {
+                // READY must match the freshly acquired tree, not the old list locator.
+                // A transition during preparation restarts the existing observation path.
+                if (listActionReadiness?.isReadyForWindow(tree.window, RunMode.AI_REPLY) != true ||
+                    !accessibilityGateway.isWindowCurrent(tree.window)
+                ) {
+                    sayHiStableCandidateTarget = null
+                    sayHiStableCandidateWindow = null
+                    sayHiConfirmedListTarget = null
+                    return false
+                }
+            }
             greetingRowActionHandled = processReceivedGreetingRows(tree, result)
             if (!greetingRowActionHandled) {
                 // Empty visible rows are not by themselves proof of completion. Route them

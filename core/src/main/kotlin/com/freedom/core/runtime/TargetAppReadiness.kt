@@ -1,5 +1,7 @@
 package com.freedom.core.runtime
 
+import com.freedom.core.accessibility.api.WindowRef
+
 /**
  * Formal readiness of the target application for autonomous screen interaction.
  * This is deliberately separate from AccessibilityService connection/initialization state.
@@ -42,7 +44,16 @@ data class TargetAppReadinessSnapshot(
     val pageGeneration: Long = -1L,
     val observedAtUptimeMs: Long = 0L,
     val reason: String = "尚未执行目标应用就绪检查"
-)
+) {
+    /** Match a freshly evaluated observation to an exact action window; never a reusable write permit. */
+    fun isReadyForWindow(window: WindowRef, mode: RunMode): Boolean =
+        status == TargetAppReadinessStatus.READY && runMode == mode &&
+            targetPackage.isNotBlank() && targetPackage == foregroundPackage &&
+            targetPackage == window.packageName &&
+            activityClass.isNotBlank() && activityClass == window.activityClass &&
+            windowId >= 0 && windowId == window.windowId &&
+            pageGeneration >= 0L && pageGeneration == window.generation
+}
 
 /**
  * Owns the last observed readiness state. A fresh evidence evaluation is required for every

@@ -544,6 +544,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             receivedGreetingsSendReturnRepository = root.receivedGreetingsSendReturnRepository,
             ocrReviewRepository = root.ocrReviewRepository,
             sampleArchivePort = root.sampleArchivePort,
+            inspectReceivedGreetingsReadiness = accessibilityGateway::inspectRecoveryReadiness,
             isAiReplyUiOperationOwned = {
                 uiWriteAuthorization.permits(UiWriteScope.AI_COMPOSER) ||
                     uiWriteAuthorization.permits(UiWriteScope.VERIFIED_GREETING_COMPOSER)

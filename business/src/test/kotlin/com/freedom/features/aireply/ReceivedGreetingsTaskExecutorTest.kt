@@ -136,6 +136,32 @@ class ReceivedGreetingsTaskExecutorTest {
     }
 
     @Test
+    fun deferredListStepRemainsRetryableAndContinuesAfterReadinessWithoutRestartingTask() {
+        val port = FakePagePort()
+        var ownsTask = true
+        val executor = ReceivedGreetingsTaskExecutor(port) { ownsTask }
+        port.traversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        port.stepAccepted = false
+
+        repeat(6) {
+            val observation = executor.performIdleStepAndInspect()
+            assertFalse(observation.accepted)
+            assertEquals(ReceivedGreetingsTaskExecutor.StepDecision.RETRY_REQUIRED, observation.decision)
+        }
+        port.stepAccepted = true
+        val resumed = executor.performIdleStepAndInspect()
+        assertTrue(resumed.accepted)
+        assertEquals(ReceivedGreetingsTaskExecutor.StepDecision.LIST_CONTINUES, resumed.decision)
+        assertEquals(0, port.navigationStarts)
+        assertEquals(0, port.currentListStarts)
+        assertEquals(0, port.priorityReturns)
+
+        ownsTask = false
+        assertFalse(executor.performIdleStepAndInspect().accepted)
+        assertEquals(7, port.idleSteps)
+    }
+
+    @Test
     fun readOnlyStatusAndManualPageObservationRemainAvailableWithoutUiLease() {
         val port = FakePagePort()
         val executor = ReceivedGreetingsTaskExecutor(port) { false }
