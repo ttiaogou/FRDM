@@ -38,6 +38,7 @@ internal class AiReplyStartupReadinessCoordinator(
     private var generation = 0L
     private var retryCount = 0
     private var suspendedForRecovery = false
+    private var verificationStarted = false
     private var tapAttempts = 0
     private var tapAttemptSequence = 0L
     private var pendingTapAttemptId: Long? = null
@@ -59,6 +60,7 @@ internal class AiReplyStartupReadinessCoordinator(
     fun resetState(sessionStarted: Boolean) {
         initializationPending = sessionStarted
         suspendedForRecovery = false
+        verificationStarted = false
         workAreaConfirmed = !sessionStarted
         retryCount = 0
         tapAttempts = 0
@@ -111,6 +113,7 @@ internal class AiReplyStartupReadinessCoordinator(
             !isSessionRunStarted() || !isAiReplyActive()
         ) return false
         suspendedForRecovery = false
+        verificationStarted = true
         timedOut = false
         retryCount = 0
         onLog("AI 启动导航[RECOVERY_REVERIFY]：原启动工作区尚未确认；重新采集三次新鲜证据，保留原点击额度")
@@ -118,8 +121,15 @@ internal class AiReplyStartupReadinessCoordinator(
         return true
     }
 
+    /** Page-selected startup may receive repeated observations; never reset an active probe. */
+    fun beginVerificationIfNeeded() {
+        if (verificationStarted || suspendedForRecovery || !initializationPending || workAreaConfirmed) return
+        beginVerification()
+    }
+
     /** Starts bounded Activity readiness and Message-tab verification. */
     fun beginVerification() {
+        verificationStarted = true
         retryCount = 0
         tapAttempts = 0
         timedOut = false

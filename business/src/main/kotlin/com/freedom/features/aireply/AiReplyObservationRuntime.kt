@@ -580,6 +580,9 @@ class AiReplyObservationRuntime(
     private var sessionSafeViewportRetryGeneration = 0L
     /** Set by relevant target-app page-change events; probe admission never consults InputOrigin. */
     private var receivedGreetingsPageProbePending = false
+    // Only a cold, page-selected private startup needs to connect the original
+    // work-area verification after its fresh page and lease have been admitted.
+    private var pageSelectedPrivateStartupVerificationPending = false
     /** Keeps private-message ownership suspended until the transition destination is confirmed. */
     private var receivedGreetingsOwnershipRecheckPending = false
     /** Fresh ordinary-inbox route can overrule a stale dedicated greetings-list result. */
@@ -2404,6 +2407,19 @@ class AiReplyObservationRuntime(
         if (sessionRunStarted && startupReadinessCoordinator.initializationPending &&
             chatPagePort.supportsVerifiedMessageWorkAreaNavigation() && !startupReadinessCoordinator.workAreaConfirmed
         ) {
+            // Start the existing verification only after fresh private-list evidence and
+            // successful lease admission. Do not substitute classification for its proof.
+            if (pageSelectedPrivateStartupVerificationPending &&
+                !receivedGreetingsTaskActive && !recoveryContext.pending &&
+                observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                inspection.packageName == targetPackage() &&
+                inspection.pageKind == ChatPageKind.CHAT_LIST &&
+                matchedRouteId == messageListRecoveryRoute.routeId &&
+                ownsTask(PRIVATE_MESSAGES_TASK_ID)
+            ) {
+                pageSelectedPrivateStartupVerificationPending = false
+                startupReadinessCoordinator.beginVerificationIfNeeded()
+            }
             // Startup page events are useful readiness signals, but a raw CHAT_LIST classification
             // must not bypass the Message-tab/viewport proof owned by the startup gate.
             return
@@ -3236,6 +3252,7 @@ class AiReplyObservationRuntime(
         }
         sampleCaptureActive = false
         sessionRunStarted = false
+        pageSelectedPrivateStartupVerificationPending = false
         resetPollingRound()
         startupReadinessCoordinator.resetState(sessionStarted = false)
         sessionManagerState = SessionManagerState.STOPPED
@@ -3707,6 +3724,7 @@ class AiReplyObservationRuntime(
     fun scheduleInitialObservation() = scheduleInitialObservation(null)
 
     private fun scheduleInitialObservation(selectedTaskId: String?) {
+        pageSelectedPrivateStartupVerificationPending = false
         resetCrossTaskGreetingsHandoffRetry()
         val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
         if (failure != null) {
@@ -3844,6 +3862,9 @@ class AiReplyObservationRuntime(
             // task's durable checkpoint verification before its first sample.
             receivedGreetingsPageProbePending = false
         }
+        pageSelectedPrivateStartupVerificationPending =
+            selectedTaskId == PRIVATE_MESSAGES_TASK_ID && sessionRunStarted &&
+                !recoveryContext.pending && chatPagePort.supportsVerifiedMessageWorkAreaNavigation()
         sessionManagerState = if (sessionRunStarted && !recoveryContext.pending) {
             SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP
         } else {

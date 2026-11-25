@@ -1158,6 +1158,26 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
+    fun pageSelectedBrowseStartupDoesNotPublishPreparationWhileWorkflowIsIdle() {
+        val source = projectFile("app/src/main/java/com/freedom/adapters/runtime/android/AccountBrowseModeRuntimeAdapter.kt").readText()
+        val start = source.substringAfter("override fun onPageRuntimeStarted(")
+            .substringBefore("override fun onPageRuntimePreparationRetry(")
+        val retry = source.substringAfter("override fun onPageRuntimePreparationRetry(")
+            .substringBefore("private fun reportPreparedIfInitialized(")
+        val report = source.substringAfter("private fun reportPreparedIfInitialized(")
+            .substringBefore("override fun onPageRuntimeWillSuspend(")
+        assertTrue(start.contains("onRunStarted()"))
+        assertTrue(start.contains("reportPreparedIfInitialized(session, onPrepared)"))
+        assertFalse(start.contains("onPrepared(session)"))
+        assertTrue(retry.contains("ensureTaskOwnership("))
+        assertTrue(retry.contains("if (workflow().phase == AccountBrowsePhase.IDLE) workflow().startIfIdle()"))
+        assertTrue(retry.contains("reportPreparedIfInitialized(session, onPrepared)"))
+        assertFalse(retry.contains("onRunStarted()"))
+        assertFalse(retry.contains("restoreRecoveryAfterServiceReconnect()"))
+        assertTrue(report.contains("if (workflow().phase != AccountBrowsePhase.IDLE) onPrepared(session)"))
+    }
+
+    @Test
     fun presentationRefreshCannotWakeTheBusinessRuntime() {
         val root = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
         val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()

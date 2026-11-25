@@ -2124,6 +2124,80 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun pageSelectedGreetingsStartupRunsFirstTraversalWithoutAnotherTargetEvent() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            verifiedMessageWorkAreaNavigationSupported = true
+            receivedGreetingsWorkflowEnabled = true
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity",
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 24,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null
+            )
+            manualGreetingsArrivalStatuses = listOf(
+                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
+                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+            )
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var gestures = 0
+        val logs = ArrayList<String>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    gestures++
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L },
+            pageSelectedStartup = true
+        )
+
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_RECEIVED_GREETINGS"))
+        assertNull(tasks.currentLease())
+        runtime.requestPageRouteObservation()
+        scheduler.runNextWithDelay(300L) // A debounced fresh page snapshot probes the manual arrival.
+
+        assertEquals(1, port.manualGreetingsArrivalObservations)
+        assertTrue(scheduler.hasPendingDelay(350L))
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, gestures)
+        scheduler.runNextWithDelay(350L) // A second fresh same-window list snapshot confirms arrival.
+
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", tasks.activeTaskId())
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        assertEquals(0, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(0, gestures)
+        assertTrue(logs.any { it.contains("收到的招呼任务[STARTED]") })
+    }
+
+    @Test
     fun receivedGreetingsWatcherAcceptsPageChangeEventsRegardlessOfInputOrigin() {
         InputOrigin.values().forEach { origin ->
             val scheduler = FakeScheduler()
@@ -2500,6 +2574,93 @@ class AiReplyObservationRuntimeTest {
             "首次向上准入前的所有滑动都必须是向下回顶",
             directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN }
         )
+        assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
+        assertTrue(logs.any { it.contains("首次向上滑动；完成后才检查未读") })
+    }
+
+    @Test
+    fun pageSelectedPrivateStartupRunsOriginalWorkAreaProofBeforeFirstGesture() {
+        val scheduler = FakeScheduler()
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(sessionCandidate(
+                unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD,
+                completeBoundaryEvidence = true
+            )),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            provideMessageTabPositionEvidence = true
+            verifiedMessageWorkAreaNavigationSupported = true
+            receivedGreetingsWorkflowEnabled = true
+            sessionRunEnabled = true
+            page = inbox
+        }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val logs = mutableListOf<String>()
+        val submittedCommands = mutableListOf<GestureIntentRequest>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    assertTrue(logs.any { it.contains("AI 启动导航[CONFIRMED]") })
+                    assertEquals("AI_REPLY_PRIVATE_MESSAGES", tasks.activeTaskId())
+                    submittedCommands += command
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L },
+            pageSelectedStartup = true
+        )
+
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
+        assertNull(tasks.currentLease())
+        runtime.requestPageRouteObservation()
+        // No target event or presentation refresh is required to start.
+        runUntilShortestDelay(scheduler, 20) { logs.any { it.contains("AI 启动导航[INBOX_ALREADY_VISIBLE]") } }
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", tasks.activeTaskId())
+        assertTrue(submittedCommands.isEmpty())
+        // A second route observation must not restart the original verification.
+        runtime.requestPageRouteObservation()
+        runUntilShortestDelay(scheduler, 80) {
+            submittedCommands.any {
+                (it.intent as? GestureIntent.VerticalSwipe)?.direction == VerticalSwipeDirection.UP
+            }
+        }
+
+        val directions = submittedCommands.mapNotNull {
+            (it.intent as? GestureIntent.VerticalSwipe)?.direction
+        }
+        val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
+        assertTrue("启动阶段必须先产生向下回顶手势", firstUpwardSwipe > 0)
+        assertTrue(
+            "首次向上准入前的所有滑动都必须是向下回顶",
+            directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN }
+        )
+        assertEquals(1, logs.count { it.contains("AI 启动导航[WAITING]") })
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
         assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
         assertTrue(logs.any { it.contains("首次向上滑动；完成后才检查未读") })
     }

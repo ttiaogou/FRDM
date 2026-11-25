@@ -11,6 +11,7 @@ import com.freedom.core.runtime.PageClassification
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.TaskExecutionController
+import com.freedom.features.accountbrowse.AccountBrowsePhase
 
 /** Routes normalized lifecycle and accessibility events into the AccountBrowse Android adapter. */
 internal class AccountBrowseModeRuntimeAdapter(
@@ -63,7 +64,27 @@ internal class AccountBrowseModeRuntimeAdapter(
         // checkpoints still require the same fresh-page verification on the selected route.
         awaitingServiceReconnect = true
         onRunStarted()
-        onPrepared(session)
+        reportPreparedIfInitialized(session, onPrepared)
+    }
+
+    override fun onPageRuntimePreparationRetry(
+        session: com.freedom.core.runtime.PageRuntimeSessionState,
+        onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit
+    ) {
+        // Retry only the existing startup entry on a fresh matching route. Do not
+        // reload checkpoints or reset an already initialized browse workflow.
+        if (!ensureTaskOwnership("动态浏览启动复核")) return
+        if (workflow().phase == AccountBrowsePhase.IDLE) workflow().startIfIdle()
+        reportPreparedIfInitialized(session, onPrepared)
+    }
+
+    private fun reportPreparedIfInitialized(
+        session: com.freedom.core.runtime.PageRuntimeSessionState,
+        onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit
+    ) {
+        // A transient missing foreground/root can leave the original startup in IDLE.
+        // Keep the entry observer's provisional-start retry alive until it initializes.
+        if (workflow().phase != AccountBrowsePhase.IDLE) onPrepared(session)
     }
 
     override fun onPageRuntimeWillSuspend(reason: String) {
