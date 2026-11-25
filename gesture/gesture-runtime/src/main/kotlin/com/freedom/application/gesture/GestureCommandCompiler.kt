@@ -226,13 +226,18 @@ internal class GestureCommandCompiler(
         executionContext: com.freedom.core.accessibility.gesture.GestureExecutionContext
     ): GestureCommand? {
         val region = GestureGeometryPolicy.validationRegion(viewport) ?: return null
+        val config = HorizontalSwipeConfig(
+            direction = if (direction == ImagePagingDirection.RIGHT)
+                HorizontalDirection.LEFT_TO_RIGHT else HorizontalDirection.RIGHT_TO_LEFT,
+            minX = region.left, maxX = region.right,
+            minY = region.top, maxY = region.bottom,
+            baseY = region.top + (region.bottom - region.top) / 2f
+        )
+        // Image paging needs a substantial displacement across the safe viewport.
+        // Preserve the independent policy's absolute minimum for narrow regions.
         val stroke = HorizontalSwipePolicy.createSwipe(
-            HorizontalSwipeConfig(
-                direction = if (direction == ImagePagingDirection.RIGHT)
-                    HorizontalDirection.LEFT_TO_RIGHT else HorizontalDirection.RIGHT_TO_LEFT,
-                minX = region.left, maxX = region.right,
-                minY = region.top, maxY = region.bottom,
-                baseY = region.top + (region.bottom - region.top) / 2f
+            config.copy(
+                minSwipeDistance = maxOf(config.minSwipeDistance, (region.right - region.left) * 0.80f)
             ), random
         ) ?: return null
         val strokes = adaptHorizontalStroke(stroke) ?: return null

@@ -221,10 +221,18 @@ class GesturePolicyPipelineTest {
             val end = (gesture.additionalStrokes.last().commands.last() as GesturePathCommand.CubicTo).end
             val displacement = if (direction.name == "RIGHT") end.x - start.x else start.x - end.x
             assertTrue(displacement >= 260f)
+            val region = requireNotNull(executor.lastCommand).validationRegion
+            assertTrue(displacement >= (region.right - region.left) * 0.80f)
             assertTrue(gesture.durationMs + gesture.additionalStrokes.sumOf { it.durationMs } in 120L..1200L)
             assertTrue(diagnostics.any { "algorithm=IMAGE_PAGING_HORIZONTAL" in it })
             val narrow = request.copy(intent = GestureIntent.ImagePagingSwipe(ScreenRect(100, 100, 200, 1800), direction))
             assertEquals(GestureSubmission.REJECTED, pipeline.execute(narrow) {})
+            assertEquals(1, executor.executeCount)
+            val belowOriginalMinimum = request.copy(
+                id = "image-paging-below-minimum-${direction.name}",
+                intent = GestureIntent.ImagePagingSwipe(ScreenRect(100, 100, 350, 1800), direction)
+            )
+            assertEquals(GestureSubmission.REJECTED, pipeline.execute(belowOriginalMinimum) {})
             assertEquals(1, executor.executeCount)
         }
     }
