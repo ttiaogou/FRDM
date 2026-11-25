@@ -316,6 +316,20 @@ internal class AccessibilityServiceDependencies internal constructor(
                         ";conflict=" + decision.conflict +
                         ";generation=" + snapshot.observationGeneration
                 )
+                val targetTask = when (decision.classification) {
+                    com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE -> "ACCOUNT_BROWSE"
+                    com.freedom.core.runtime.PageClassification.PRIVATE_MESSAGES -> "AI_REPLY_PRIVATE_MESSAGES"
+                    com.freedom.core.runtime.PageClassification.RECEIVED_GREETINGS -> "AI_REPLY_RECEIVED_GREETINGS"
+                    else -> null
+                }
+                if (targetTask != null && !decision.conflict) {
+                    val current = taskCoordinator.currentLease()
+                    if (current == null) {
+                        taskCoordinator.tryAcquire(targetTask, snapshot.observationGeneration)
+                    } else if (current.taskId != targetTask) {
+                        taskCoordinator.transfer(current, targetTask)
+                    }
+                }
             }
         ).also { bus ->
             bus.registerClassifier(aiReplyModeRuntimeAdapter)
