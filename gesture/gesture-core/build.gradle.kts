@@ -10,14 +10,17 @@ kotlin {
             kotlin.srcDir("src/main/kotlin")
             kotlin.include(
                 "com/freedom/core/accessibility/gesture/GestureGeometryPolicy.kt",
-                "com/freedom/core/accessibility/gesture/GestureDynamicsPolicy.kt"
+                "com/freedom/core/accessibility/gesture/GestureDynamicsPolicy.kt",
+                "com/freedom/core/accessibility/gesture/HorizontalSwipeConfig.kt",
+                "com/freedom/core/accessibility/gesture/HorizontalSwipePolicy.kt"
             )
         }
         val test by getting {
             kotlin.srcDir("src/test/kotlin")
             kotlin.include(
                 "com/freedom/core/accessibility/gesture/GestureGeometryPolicyTest.kt",
-                "com/freedom/core/accessibility/gesture/GestureDynamicsPolicyTest.kt"
+                "com/freedom/core/accessibility/gesture/GestureDynamicsPolicyTest.kt",
+                "com/freedom/core/accessibility/gesture/HorizontalSwipePolicyTest.kt"
             )
         }
     }

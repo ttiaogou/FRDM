@@ -462,16 +462,40 @@ class ArchitectureBoundaryTest {
             Regex("\\bGestureGeometryPolicy\\b"),
             Regex("\\.dispatchGesture\\s*\\(")
         )
+        // Horizontal geometry is a narrow, data-only owner, not a command or dispatch owner.
+        // Permit exactly these three existing geometry types in exactly this source file.
+        val horizontalGeometryPath =
+            "gesture/gesture-core/src/main/kotlin/com/freedom/core/accessibility/gesture/HorizontalSwipePolicy.kt"
+        val horizontalGeometryTypes = setOf(
+            Regex("\\bGesturePoint\\b").pattern,
+            Regex("\\bGesturePathCommand\\b").pattern,
+            Regex("\\bGestureStrokeSpec\\b").pattern
+        )
         val unauthorizedGestureApi = sourceFiles.filter { file ->
             file.relativeTo(projectRoot).invariantSeparatorsPath !in trustedGestureInfrastructure
         }.flatMap { file ->
+            val path = file.relativeTo(projectRoot).invariantSeparatorsPath
             val code = maskKotlinNonCode(file.readText())
-            rawGestureApi.filter { it.containsMatchIn(code) }
-                .map { "${file.relativeTo(projectRoot)}: ${it.pattern}" }
+            rawGestureApi.filter { pattern ->
+                pattern.containsMatchIn(code) &&
+                    !(path == horizontalGeometryPath && pattern.pattern in horizontalGeometryTypes)
+            }.map { "$path: " + it.pattern }
         }
         assertTrue(
             "Raw gesture construction and dispatch APIs are restricted to the trusted gesture infrastructure:\n${unauthorizedGestureApi.joinToString("\n")}",
             unauthorizedGestureApi.isEmpty()
+        )
+
+        // Independent geometry may not become an alternate public business entry.
+        val directHorizontalConsumers = (sourceFiles + businessFiles).distinct().filter { file ->
+            val path = file.relativeTo(projectRoot).invariantSeparatorsPath
+            path != horizontalGeometryPath && path !in trustedGestureInfrastructure &&
+                Regex("\\bHorizontalSwipePolicy\\b").containsMatchIn(maskKotlinNonCode(file.readText()))
+        }
+        assertTrue(
+            "Horizontal geometry must remain behind trusted gesture infrastructure: " +
+                directHorizontalConsumers.map { it.relativeTo(projectRoot) },
+            directHorizontalConsumers.isEmpty()
         )
 
         val rawCommandConstruction = sourceFiles.filter { file ->
@@ -1044,6 +1068,10 @@ class ArchitectureBoundaryTest {
         assertTrue("GestureDynamicsPolicy tests must not compile in :core", coreBuild.contains("GestureDynamicsPolicyTest.kt"))
         assertTrue("GestureDynamicsPolicy and its tests must compile in :gesture-core",
             gestureCoreBuild.contains("GestureDynamicsPolicy.kt") && gestureCoreBuild.contains("GestureDynamicsPolicyTest.kt"))
+        listOf("HorizontalSwipeConfig.kt", "HorizontalSwipePolicy.kt", "HorizontalSwipePolicyTest.kt").forEach { name ->
+            assertTrue("Independent horizontal geometry and tests must compile in :gesture-core: $name",
+                gestureCoreBuild.contains(name))
+        }
     }
 
     @Test
