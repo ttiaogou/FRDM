@@ -63,6 +63,7 @@ import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import com.freedom.core.runtime.UiWriteAuthorization
 import com.freedom.core.runtime.UiWriteScope
+import com.freedom.core.runtime.UnifiedPageObservationBus
 import com.freedom.core.runtime.TargetAppReadinessController
 import com.freedom.data.MonitorStoreRepository
 import com.freedom.data.MonitorStoreSnapshotRepository
@@ -305,6 +306,12 @@ internal class AccessibilityServiceDependencies internal constructor(
     /** One service-scoped page-observation coordinator shared by AI Reply and AccountBrowse. */
     val pageObservationCoordinator: PageObservationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
         PageObservationCoordinator(taskScheduler)
+    }
+    val unifiedPageObservationBus: UnifiedPageObservationBus by lazy(LazyThreadSafetyMode.NONE) {
+        UnifiedPageObservationBus().also { bus ->
+            bus.registerClassifier(aiReplyModeRuntimeAdapter)
+            bus.registerClassifier(accountBrowseRuntimeAdapter)
+        }
     }
     /** Service-scoped Activity recovery; no gesture or page-action capability is injected. */
     val activityEvidenceReader by lazy(LazyThreadSafetyMode.NONE) {
