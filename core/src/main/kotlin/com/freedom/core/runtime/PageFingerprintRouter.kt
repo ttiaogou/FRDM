@@ -102,3 +102,41 @@ class PageFingerprintRouter {
     @Synchronized
     fun registeredRouteIds(): Set<String> = routes.keys.toSet()
 }
+
+
+/**
+ * Read-only unified page-task entry point. It classifies a complete
+ * provider-neutral fingerprint and never performs UI actions or grants ownership.
+ */
+class UnifiedPageTaskRouter(
+    private val fingerprintRouter: PageFingerprintRouter = PageFingerprintRouter()
+) {
+    data class PageTaskRoute(val routeId: String, val taskId: String)
+    data class Observation(val fingerprint: PageFingerprint, val route: PageTaskRoute?)
+
+    private val registeredRoutes = LinkedHashMap<String, PageTaskRoute>()
+
+    @Synchronized
+    fun register(route: PageTaskRoute, matches: (PageFingerprint) -> Boolean) {
+        require(route.routeId.isNotBlank()) { "routeId must not be blank" }
+        require(route.taskId.isNotBlank()) { "taskId must not be blank" }
+        registeredRoutes[route.routeId] = route
+        fingerprintRouter.register(PageFingerprintRoute(route.routeId, matches))
+    }
+
+    @Synchronized
+    fun unregister(routeId: String) {
+        registeredRoutes.remove(routeId)
+        fingerprintRouter.unregister(routeId)
+    }
+
+    @Synchronized
+    fun observe(fingerprint: PageFingerprint): Observation =
+        Observation(
+            fingerprint = fingerprint,
+            route = fingerprintRouter.match(fingerprint)?.let(registeredRoutes::get)
+        )
+
+    @Synchronized
+    fun registeredRouteIds(): Set<String> = fingerprintRouter.registeredRouteIds()
+}
