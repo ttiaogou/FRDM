@@ -759,27 +759,40 @@ internal class PrivateMessagesTraversalTaskExecutor {
 
     fun selectNextCandidate(
         candidates: List<ChatListCandidateSnapshot>,
-        lockedIdentityKeys: Set<String> = emptySet()
+        lockedIdentityKeys: Set<String> = emptySet(),
+        preferredRetryKey: String? = null,
+        provisionalAttemptKey: String? = null
     ): ChatListCandidateSnapshot? {
         val eligibleCandidates = if (lockedIdentityKeys.isNotEmpty()) {
             candidates.filter { ChatSessionManagementPolicy.stableSessionKey(it) in lockedIdentityKeys }
         } else {
             candidates
         }
-        return ChatSessionManagementPolicy.selectNext(
-            eligibleCandidates.filterNot {
-                isPendingIncompleteRow(it) || it.rowClippedAtViewportEdge ||
-                    ChatSessionManagementPolicy.stableSessionKey(it) in unresolvedUnknownUnreadKeys
-            },
-            attemptedSessionKeys,
-            ambiguousSessionIdentityKeys
-        )
+        val selectable = eligibleCandidates.filterNot {
+            isPendingIncompleteRow(it) || it.rowClippedAtViewportEdge ||
+                ChatSessionManagementPolicy.stableSessionKey(it) in unresolvedUnknownUnreadKeys
+        }
+        val attempts = if (provisionalAttemptKey == null) attemptedSessionKeys
+            else attemptedSessionKeys - provisionalAttemptKey
+        // A cancelled/no-op target is only a preference among currently safe rows.
+        // If missing or no longer admitted, ordinary bottom-to-top selection continues.
+        val retry = preferredRetryKey?.let { key ->
+            ChatSessionManagementPolicy.selectNext(
+                selectable.filter { ChatSessionManagementPolicy.stableSessionKey(it) == key },
+                attempts, ambiguousSessionIdentityKeys
+            )
+        }
+        return retry ?: ChatSessionManagementPolicy.selectNext(selectable, attempts, ambiguousSessionIdentityKeys)
     }
 
     /** Reuse the existing admission/identity checks on the latest return viewport.
      * Newly visible unread rows may precede the old selection after list reflow.
      * This is a read-only ordering check, not a gesture or a new round. */
-    fun nextFreshReturnCandidate(snapshot: ChatPageSnapshot): ChatListCandidateSnapshot? {
+    fun nextFreshReturnCandidate(
+        snapshot: ChatPageSnapshot,
+        preferredRetryKey: String? = null,
+        provisionalAttemptKey: String? = null
+    ): ChatListCandidateSnapshot? {
         if (phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
             !lockedUnreadSetFinalized || snapshot.pageKind != ChatPageKind.CHAT_LIST ||
             snapshot.chatListExtractionTruncated || snapshot.windowIdentityKey() == null
@@ -787,7 +800,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val conflicts = ambiguousIdentityKeys(snapshot.chatListCandidates) + ambiguousSessionIdentityKeys
         return selectNextCandidate(snapshot.chatListCandidates.filter {
             isUniqueCompletePrivateRow(snapshot, it, conflicts)
-        })
+        }, preferredRetryKey = preferredRetryKey, provisionalAttemptKey = provisionalAttemptKey)
     }
 
     /** A fully visible unresolved private row must be reobserved before leaving this
@@ -882,7 +895,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         wasWaitingForUnread: Boolean,
         maxNoProgressScrolls: Int,
         allowExpectedSessionReturnViewportChange: Boolean = false,
-        allowCollectionTopConfirmation: Boolean = true
+        allowCollectionTopConfirmation: Boolean = true,
+        preferredRetryKey: String? = null
     ): PrivateMessagesListSnapshotEvaluation {
         val snapshotAmbiguousKeys = ambiguousIdentityKeys(snapshot.chatListCandidates)
         val incompleteUnreadEvidenceBlocked = observeIncompleteUnreadEvidence(snapshot)
@@ -981,7 +995,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
             }.filter {
                 isUniqueCompletePrivateRow(snapshot, it, ambiguousSessionIdentityKeys)
             }
-            selectNextCandidate(selectable, lockedUnreadSessionKeys)
+            selectNextCandidate(selectable, lockedUnreadSessionKeys, preferredRetryKey = preferredRetryKey)
         } else {
             null
         }

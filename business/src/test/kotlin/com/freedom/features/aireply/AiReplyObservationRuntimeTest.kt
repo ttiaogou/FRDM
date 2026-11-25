@@ -4160,6 +4160,82 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p6cCancelledTapReacquiresOriginalRowAfterReorderWithoutLosingRound() {
+        val scheduler = FakeScheduler()
+        val original = sessionCandidate(1, "Sample Contact", completeBoundaryEvidence = true)
+        val other = sessionCandidate(0, "Other Contact", completeBoundaryEvidence = true)
+        val moved = sessionCandidate(0, "Sample Contact", completeBoundaryEvidence = true)
+        val reorderedOther = sessionCandidate(1, "Other Contact", completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(other, original),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolveTapBoundsFromCandidate = true
+            page = inbox
+        }
+        val logs = ArrayList<String>()
+        val taps = ArrayList<GestureIntentRequest>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) {
+                        taps += command
+                        if (taps.size == 1) {
+                            port.page = inbox.copy(chatListCandidates = listOf(moved, reorderedOther))
+                            listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.CANCELLED))
+                            return GestureSubmission.ACCEPTED
+                        }
+                        port.page = chatDetailSnapshot()
+                    }
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) { logs.any { it.contains("UNVERIFIED_TAP_ROLLBACK") && it.contains("GESTURE_TAP_CANCELLED") } }
+        val traversal = AiReplyObservationRuntime::class.java.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(runtime) as PrivateMessagesTraversalTaskExecutor
+        val originalKey = com.freedom.features.aireply.ports.ChatSessionManagementPolicy.stableSessionKey(original)
+        val otherKey = com.freedom.features.aireply.ports.ChatSessionManagementPolicy.stableSessionKey(other)
+        assertEquals(1, taps.size)
+        assertFalse(originalKey in traversal.checkpoint().attemptedSessionKeys)
+        assertTrue(originalKey in traversal.pendingKnownUnreadKeys())
+        assertTrue(otherKey in traversal.pendingKnownUnreadKeys())
+        assertTrue(traversal.lockedUnreadSetFinalized)
+        runUntil(scheduler, 220) { taps.size == 2 }
+        assertEquals(original.rowBounds, (taps[0].intent as GestureIntent.Tap).targetBounds)
+        assertEquals(moved.rowBounds, (taps[1].intent as GestureIntent.Tap).targetBounds)
+        assertTrue(otherKey in traversal.pendingKnownUnreadKeys())
+    }
+
+    @Test
     fun repeatedNoOpSessionTapsUseIncreasingRecoveryBackoff() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)

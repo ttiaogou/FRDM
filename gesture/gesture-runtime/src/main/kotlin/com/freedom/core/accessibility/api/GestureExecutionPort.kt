@@ -18,4 +18,15 @@ interface GestureExecutionPort {
         if (submission == GestureSubmission.ACCEPTED) onPlatformDispatch()
         return submission
     }
+
+    /** Optional read-only guard at the first platform dispatch. Never recompiles or moves a gesture. */
+    fun dispatchGesture(
+        spec: GestureSpec,
+        listener: GestureResultListener,
+        canDispatch: () -> Boolean,
+        onPlatformDispatch: () -> Unit
+    ): GestureSubmission {
+        if (!runCatching(canDispatch).getOrDefault(false)) return GestureSubmission.REJECTED
+        return dispatchGesture(spec, listener, onPlatformDispatch)
+    }
 }

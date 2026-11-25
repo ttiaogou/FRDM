@@ -1552,6 +1552,33 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun p6cRetryOriginalOnlyWhenFreshAndProvisionalAttemptDoesNotSuppressIt() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        }
+        val original = candidate(0, "Original", ChatUnreadStatus.UNREAD)
+        val other = candidate(1, "Other", ChatUnreadStatus.UNREAD)
+        val done = candidate(2, "Done", ChatUnreadStatus.UNREAD)
+        val page = snapshot(original, other, done)
+        executor.recordReturnViewportBeforeOpen(page)
+        executor.attemptedSessionKeys += key(done)
+        assertEquals(original, executor.evaluateListSnapshot(page, false, 2,
+            preferredRetryKey = key(original)).nextCandidate)
+        executor.attemptedSessionKeys += key(original)
+        assertEquals(original, executor.nextFreshReturnCandidate(page,
+            preferredRetryKey = key(original), provisionalAttemptKey = key(original)))
+        assertEquals(other, executor.nextFreshReturnCandidate(page, preferredRetryKey = key(original)))
+        executor.attemptedSessionKeys.remove(key(original))
+        assertEquals(other, executor.nextFreshReturnCandidate(snapshot(other, done), preferredRetryKey = key(original)))
+        assertTrue(key(original) in executor.pendingKnownUnreadKeys())
+        assertEquals(setOf(key(done)), executor.attemptedSessionKeys)
+        assertTrue(executor.lockedUnreadSetFinalized)
+    }
+
+    @Test
     fun p6bReorderedReturnUsesFreshBottomMostAndPreservesOriginalRound() {
         val executor = PrivateMessagesTraversalTaskExecutor().apply {
             initialInboxTopPositioningCompleted = true

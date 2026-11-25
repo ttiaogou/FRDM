@@ -605,6 +605,16 @@ internal class AndroidAccessibilityGateway(
             gestureDispatcher.dispatchGesture(spec, listener, onPlatformDispatch)
         }
 
+    override fun dispatchGesture(
+        spec: GestureSpec,
+        listener: GestureResultListener,
+        canDispatch: () -> Boolean,
+        onPlatformDispatch: () -> Unit
+    ): GestureSubmission =
+        authorizedGestureDispatch(spec) {
+            gestureDispatcher.dispatchGesture(spec, listener, canDispatch, onPlatformDispatch)
+        }
+
     /**
      * Forces the same read-only Android safety evaluation used before dispatch.
      * This does not dispatch a gesture or grant UI ownership. The cached current()

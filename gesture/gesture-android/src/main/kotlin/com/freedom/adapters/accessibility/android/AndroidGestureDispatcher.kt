@@ -48,6 +48,13 @@ class AndroidGestureDispatcher(
         spec: GestureSpec,
         listener: GestureResultListener,
         onPlatformDispatch: () -> Unit
+    ): GestureSubmission = dispatchGesture(spec, listener, { true }, onPlatformDispatch)
+
+    override fun dispatchGesture(
+        spec: GestureSpec,
+        listener: GestureResultListener,
+        canDispatch: () -> Boolean,
+        onPlatformDispatch: () -> Unit
     ): GestureSubmission {
         var dispatchTimestampReported = false
         fun reportPlatformDispatch() {
@@ -153,6 +160,10 @@ class AndroidGestureDispatcher(
                 inputOriginClassifier.rejectDispatchGesture(actionId, "android_gesture_build_failed")
                 return GestureSubmission.REJECTED
             }
+            if (!runCatching(canDispatch).getOrDefault(false)) {
+                inputOriginClassifier.rejectDispatchGesture(actionId, "dispatch_target_unverified")
+                return GestureSubmission.REJECTED
+            }
             reportPlatformDispatch()
             val accepted = runCatching {
                 service.dispatchGesture(description, object : AccessibilityService.GestureResultCallback() {
@@ -227,7 +238,10 @@ class AndroidGestureDispatcher(
                 if (previousStroke != null) releaseContinuedPointer(previousStroke, index - 1)
                 return false
             }
-            if (index == 0) reportPlatformDispatch()
+            if (index == 0) {
+                if (!runCatching(canDispatch).getOrDefault(false)) return false
+                reportPlatformDispatch()
+            }
             val accepted = runCatching {
                 service.dispatchGesture(description, object : AccessibilityService.GestureResultCallback() {
                     override fun onCompleted(gestureDescription: GestureDescription?) {

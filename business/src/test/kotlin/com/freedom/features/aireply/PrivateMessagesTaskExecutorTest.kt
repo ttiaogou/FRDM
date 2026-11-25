@@ -208,6 +208,29 @@ class PrivateMessagesTaskExecutorTest {
     }
 
     @Test
+    fun delayedDispatchRejectsMovedReadDuplicateOrMissingTargetAndAcceptsUnchangedRow() {
+        val selected = candidate()
+        var current = validSnapshot(selected)
+        var listener: GestureExecutionListener? = null
+        val executor = executor(snapshotProvider = { current },
+            onListener = { listener = it }, onDispatch = {})
+        val attempt = executor.openSession(key(selected), selected.rowTarget.window, emptySet()) { _, _, _, _ -> }
+        val result = attempt as PrivateMessagesTaskExecutor.Attempt.Submitted
+        val guard = requireNotNull(listener)
+        assertTrue(guard.isDispatchTargetCurrent(result.requestId))
+        current = validSnapshot(candidate(rowIndex = 3, top = 650))
+        assertFalse(guard.isDispatchTargetCurrent(result.requestId))
+        current = validSnapshot(candidate(unreadStatus = ChatUnreadStatus.READ))
+        assertFalse(guard.isDispatchTargetCurrent(result.requestId))
+        current = validSnapshot().copy(chatListCandidates = listOf(selected, candidate(rowIndex = 1, top = 500)))
+        assertFalse(guard.isDispatchTargetCurrent(result.requestId))
+        current = validSnapshot().copy(chatListCandidates = listOf(candidate(name = "Other")))
+        assertFalse(guard.isDispatchTargetCurrent(result.requestId))
+        current = validSnapshot(selected)
+        assertTrue(guard.isDispatchTargetCurrent(result.requestId))
+    }
+
+    @Test
     fun rejectsStaleTraversalOrderWithoutSubmittingGesture() {
         val selected = candidate()
         var dispatches = 0
@@ -244,6 +267,7 @@ class PrivateMessagesTaskExecutorTest {
         snapshotProvider: () -> ChatPageSnapshot?,
         ownsTask: () -> Boolean = { true },
         blocked: (String) -> Boolean = { false },
+        onListener: (GestureExecutionListener) -> Unit = {},
         onDispatch: (GestureIntentRequest) -> Unit
     ) = PrivateMessagesTaskExecutor(
         sessionPort = object : ChatSessionManagementPort {
@@ -283,6 +307,7 @@ class PrivateMessagesTaskExecutorTest {
                 request: GestureIntentRequest,
                 listener: GestureExecutionListener
             ): GestureSubmission {
+                onListener(listener)
                 onDispatch(request)
                 listener.onResult(GestureExecutionResult(request.id, GestureExecutionStatus.COMPLETED))
                 return GestureSubmission.ACCEPTED

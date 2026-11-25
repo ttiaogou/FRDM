@@ -1117,8 +1117,10 @@ class AiReplyObservationRuntime(
                 chatSurfaceKey = chatSurfaceKey(snapshot).orEmpty()
             )
             // Only a verified detail binding retires a no-navigation retry sequence.
-            missedPrivateSessionTapKey = null
-            missedPrivateSessionTapCount = 0
+            if (missedPrivateSessionTapKey == currentSessionKey) {
+                missedPrivateSessionTapKey = null
+                missedPrivateSessionTapCount = 0
+            }
             onLog("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定；昵称仅作辅助校验")
         }
     }
@@ -5384,7 +5386,8 @@ class AiReplyObservationRuntime(
             wasWaitingForUnread = wasWaitingForUnread,
             maxNoProgressScrolls = MAX_NO_PROGRESS_SCROLLS,
             allowExpectedSessionReturnViewportChange = allowExpectedSessionReturnViewportChange,
-            allowCollectionTopConfirmation = !receivedGreetingsTaskActive
+            allowCollectionTopConfirmation = !receivedGreetingsTaskActive,
+            preferredRetryKey = missedPrivateSessionTapKey
         )
         privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
         if (hadUnknownUnreadBeforeFreshSnapshot &&
@@ -6512,6 +6515,15 @@ class AiReplyObservationRuntime(
      * existing traversal checkpoint; only the attempted marker and tentative detail
      * binding are rolled back, before the unified read-only recovery is saved.
      */
+    private fun rememberUnverifiedPrivateTap(selectedKey: String) {
+        missedPrivateSessionTapCount = if (missedPrivateSessionTapKey == selectedKey) {
+            missedPrivateSessionTapCount + 1
+        } else {
+            missedPrivateSessionTapKey = selectedKey
+            1
+        }
+    }
+
     private fun rollbackUnverifiedPrivateSessionTap(reason: String): Int {
         if (sessionManagerState != SessionManagerState.OPENING_SESSION) return 0
         val selectedKey = currentSessionKey ?: return 0
@@ -6519,12 +6531,7 @@ class AiReplyObservationRuntime(
             privateMessagesTraversalTaskExecutor.sessionActionCount =
                 (privateMessagesTraversalTaskExecutor.sessionActionCount - 1).coerceAtLeast(0)
         }
-        missedPrivateSessionTapCount = if (missedPrivateSessionTapKey == selectedKey) {
-            missedPrivateSessionTapCount + 1
-        } else {
-            missedPrivateSessionTapKey = selectedKey
-            1
-        }
+        rememberUnverifiedPrivateTap(selectedKey)
         privateMessagesTraversalTaskExecutor.clearCurrentSession()
         expectedPrivateSessionDetailNavigation = null
         currentSessionBinding = null
@@ -6564,22 +6571,39 @@ class AiReplyObservationRuntime(
             blockedIdentityKeys = privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys,
             isCurrentTraversalSelection = { fresh, key ->
                 val traversal = privateMessagesTraversalTaskExecutor
-                !traversal.lockedUnreadSetFinalized ||
-                    traversal.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
-                    traversal.nextFreshReturnCandidate(fresh)?.let {
-                        ChatSessionManagementPolicy.stableSessionKey(it) == key
-                    } == true
+                actionGeneration == sessionActionGeneration &&
+                    (!traversal.lockedUnreadSetFinalized ||
+                        traversal.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
+                        traversal.nextFreshReturnCandidate(
+                            fresh, preferredRetryKey = missedPrivateSessionTapKey,
+                            provisionalAttemptKey = key.takeIf {
+                                sessionManagerState == SessionManagerState.OPENING_SESSION && currentSessionKey == it
+                            }
+                        )?.let { ChatSessionManagementPolicy.stableSessionKey(it) == key } == true)
+            },
+            onGestureDispatched = { requestId, uptime ->
+                scheduler.schedule(0L) {
+                    if (actionGeneration != sessionActionGeneration ||
+                        activeSessionGestureRequestId != requestId ||
+                        sessionManagerState != SessionManagerState.OPENING_SESSION
+                    ) return@schedule
+                    expectedPrivateSessionDetailNavigation = expectedPrivateSessionDetailNavigation?.copy(
+                        startedAtUptimeMs = uptime
+                    )
+                    scheduleOpenedSessionVerification()
+                    onLog("AI 会话点击[PLATFORM_DISPATCHED]：实际派发已确认，开始原有页面跳转复核计时")
+                }
             }
         ) { requestId, snapshot, selectedKey, result ->
             scheduler.schedule(0L) {
-                if (activeSessionGestureRequestId == requestId) activeSessionGestureRequestId = null
-                if (actionGeneration != sessionActionGeneration) {
+                if (activeSessionGestureRequestId != requestId || actionGeneration != sessionActionGeneration) {
                     onLog(
                         "已忽略过期自主点击回调：commandId=$requestId；" +
                             "提交代次=$actionGeneration；当前代次=$sessionActionGeneration；结果=${result.status}"
                     )
                     return@schedule
                 }
+                activeSessionGestureRequestId = null
                 handleSessionTapResult(result, snapshot, selectedKey, actionGeneration)
             }
         }
@@ -6658,6 +6682,7 @@ class AiReplyObservationRuntime(
                         currentSessionKey = null
                         currentSessionName = null
                         currentSessionCandidate = null
+                        rememberUnverifiedPrivateTap(attempt.selectedKey)
                         onLog("AI 会话管理：系统拒绝会话点击派发；未确认目标聊天已打开，转入安全恢复")
                         recoverTransientPrivateGesture("GESTURE_TAP_SUBMISSION_REJECTED")
                         return
@@ -6705,6 +6730,13 @@ class AiReplyObservationRuntime(
                 "触摸落点由统一手势策略在安全区域内生成；等待验证页面跳转"
         )
         sessionTransitionTask?.cancel()
+        sessionTransitionTask = null
+        // ACCEPTED may mean FIFO/pre-delay only. The real dispatch callback owns
+        // the verification timer; a completed terminal callback is the fallback.
+    }
+
+    private fun scheduleOpenedSessionVerification() {
+        if (sessionTransitionTask != null || sessionManagerState != SessionManagerState.OPENING_SESSION) return
         sessionTransitionTask = scheduler.schedule(SESSION_OPEN_VERIFY_DELAY_MS) {
             verifyOpenedSession()
         }
@@ -6751,15 +6783,8 @@ class AiReplyObservationRuntime(
         if (result.status != GestureExecutionStatus.COMPLETED) {
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
-            privateMessagesTraversalTaskExecutor.attemptedSessionKeys.remove(selectedKey)
-            privateMessagesTraversalTaskExecutor.sessionActionCount =
-                (privateMessagesTraversalTaskExecutor.sessionActionCount - 1).coerceAtLeast(0)
-            currentSessionKey = null
-            currentSessionName = null
-            currentSessionCandidate = null
-            currentSessionReadCaptured = false
-            currentSessionWindowKey = null
-            onLog("AI 会话管理：会话点击未完成（${result.status}）；不判定已打开或已处理，转入安全恢复")
+            rollbackUnverifiedPrivateSessionTap("GESTURE_TAP_${result.status}")
+            onLog("AI 会话管理：会话点击未完成（${result.status}）；reason=${result.reason}；保留原目标和遍历检查点，转入安全恢复")
             recoverTransientPrivateGesture("GESTURE_TAP_${result.status}")
             return
         }
@@ -6770,6 +6795,7 @@ class AiReplyObservationRuntime(
             recoverTransientPrivateGesture("PRIVATE_TAP_CALLBACK_WINDOW_CHANGED")
         } else {
             startupReadinessCoordinator.markInitializationComplete("首个自主会话点击已由 Android 完成")
+            scheduleOpenedSessionVerification()
         }
     }
 
