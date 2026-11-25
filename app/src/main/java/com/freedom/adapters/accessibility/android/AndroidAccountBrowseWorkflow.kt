@@ -115,6 +115,25 @@ internal class AndroidAccountBrowseWorkflow(
     private val session: AccountBrowseSessionStatePort
         get() = accountBrowseRuntime.session
 
+    internal fun classifyUnifiedPage(fingerprint: PageFingerprint): com.freedom.core.runtime.PageClassification {
+        if (fingerprint.packageName != targetPackage()) {
+            return com.freedom.core.runtime.PageClassification.UNKNOWN
+        }
+        val pageKind = runCatching {
+            BrowsePageKind.valueOf(fingerprint.semanticPage)
+        }.getOrNull() ?: return com.freedom.core.runtime.PageClassification.UNKNOWN
+        return when (pageKind) {
+            BrowsePageKind.DYNAMIC_FEED ->
+                if (dynamicFeedRecoveryRoute.matches(fingerprint)) {
+                    com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE
+                } else {
+                    com.freedom.core.runtime.PageClassification.UNKNOWN
+                }
+            BrowsePageKind.DETAIL -> com.freedom.core.runtime.PageClassification.CHAT_DETAIL
+            else -> com.freedom.core.runtime.PageClassification.UNKNOWN
+        }
+    }
+
     internal fun startIfIdle() {
         accountBrowseTask.start()
         if (accountBrowsePhase == AccountBrowsePhase.IDLE) {
