@@ -1764,7 +1764,7 @@ class MainActivity : Activity() {
             actions += "导出已封存采集归档 ZIP（${sealedArchives.size}）" to {
                 showSessionSampleArchiveExportPicker()
             }
-        } else if (activeRunIds.isEmpty() && !aiReplyRequested) {
+        } else if (activeRunIds.isEmpty() && !runRequested) {
             actions += "暂无已封存的采集归档" to {
                 Toast.makeText(this, "暂无已封存的采集归档", Toast.LENGTH_LONG).show()
             }
