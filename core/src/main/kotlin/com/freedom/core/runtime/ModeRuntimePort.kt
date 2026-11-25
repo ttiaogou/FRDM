@@ -14,6 +14,13 @@ interface ModeRuntimePort {
         onPrepared(session)
     }
 
+    /** A fresh observation of the same route may retry a provisional startup.
+     * Implementations with pending asynchronous preparation must not restart it. */
+    fun onPageRuntimePreparationRetry(
+        session: PageRuntimeSessionState,
+        onPrepared: (PageRuntimeSessionState) -> Unit
+    ) = Unit
+
     /** Same-runtime task handoff: request verification without resetting existing transactions. */
     fun onPageTaskChanged(session: PageRuntimeSessionState) = Unit
 

@@ -49,6 +49,7 @@ import com.freedom.application.ports.TaskLaunchParametersRepository
 import com.freedom.application.runtime.RunSessionCommandUseCase
 import com.freedom.application.runtime.RunGenerationClock
 import com.freedom.application.runtime.RunSessionCoordinator
+import com.freedom.application.runtime.EntryPageObservationRetry
 import com.freedom.core.accessibility.api.UnifiedAccessibilityEntry
 import com.freedom.core.accessibility.api.UnifiedAccessibilityEvent
 import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
@@ -360,7 +361,16 @@ internal class AccessibilityServiceDependencies internal constructor(
      * Existing runtime channels retain their detail/checkpoint observation responsibility.
      */
     private var entryObservationGeneration = 0L
-    private val entryPageObservationDelegate = lazy(LazyThreadSafetyMode.NONE) {
+    private val entryPageRetryDelegate: Lazy<EntryPageObservationRetry> = lazy(LazyThreadSafetyMode.NONE) {
+        EntryPageObservationRetry(
+            scheduler = taskScheduler,
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+            isObservationAllowed = { runSessionCoordinator.isPageObservationAllowed() },
+            onRetry = { entryPageObservation.requestSnapshot() }
+        )
+    }
+    private val entryPageRetry: EntryPageObservationRetry by entryPageRetryDelegate
+    private val entryPageObservationDelegate: Lazy<com.freedom.core.runtime.PageObservationSubscription> = lazy(LazyThreadSafetyMode.NONE) {
         pageObservationCoordinator.registerChannel(
             channelId = "UNIFIED_ENTRY_PAGE",
             quietPeriodMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
@@ -369,23 +379,38 @@ internal class AccessibilityServiceDependencies internal constructor(
             onObservationRequested = {
                 if (runSessionCoordinator.isPageObservationAllowed()) {
                     val generation = runSessionCoordinator.currentRunGeneration()
-                    val snapshot = runCatching {
-                        momoSocialAdapter.inspectUnifiedEntryPage(generation, ++entryObservationGeneration)
-                    }.getOrNull()
-                    if (snapshot != null && generation == runSessionCoordinator.currentRunGeneration() &&
-                        runSessionCoordinator.isPageObservationAllowed()
-                    ) {
-                        // An entry observer cannot assign or revoke a nested detail/profile transaction.
-                        // Existing task-specific observers retain their detail/recovery responsibility.
-                        if (snapshot.fingerprint.semanticPage != "UNKNOWN" ||
-                            runSessionCoordinator.currentPageRuntimeSession() == null
-                        ) unifiedPageObservationBus.observe(snapshot)
-                    }
+                    val recognized = runCatching {
+                        val snapshot = momoSocialAdapter.inspectUnifiedEntryPage(generation, ++entryObservationGeneration)
+                        if (snapshot == null || generation != runSessionCoordinator.currentRunGeneration() ||
+                            !runSessionCoordinator.isPageObservationAllowed()
+                        ) false else {
+                            // Do not revoke a nested transaction just because the top-level reader
+                            // cannot classify it. Its existing business recovery remains responsible.
+                            if (snapshot.fingerprint.semanticPage != "UNKNOWN" ||
+                                runSessionCoordinator.currentPageRuntimeSession() == null
+                            ) {
+                                val decision = unifiedPageObservationBus.observe(snapshot)
+                                !decision.conflict && decision.classification in setOf(
+                                    com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE,
+                                    com.freedom.core.runtime.PageClassification.PRIVATE_MESSAGES,
+                                    com.freedom.core.runtime.PageClassification.RECEIVED_GREETINGS
+                                )
+                            } else false
+                        }
+                    }.onFailure {
+                        addLog("统一入口观察[READ_RETRY]：type=${it.javaClass.simpleName}；保留运行授权")
+                    }.getOrDefault(false)
+                    val session = runSessionCoordinator.currentPageRuntimeSession()
+                    // One bounded-backoff timer covers missing roots, UNKNOWN and provisional
+                    // startup. A healthy selected route is still event-driven.
+                    val shouldRetry = session?.lifecycle != com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING &&
+                        (!recognized || session == null || !runSessionCoordinator.isRuntimeReady(session.mode))
+                    entryPageRetry.update(shouldRetry)
                 }
             }
         )
     }
-    private val entryPageObservation by entryPageObservationDelegate
+    private val entryPageObservation: com.freedom.core.runtime.PageObservationSubscription by entryPageObservationDelegate
 
     /** Service-scoped Activity recovery; no gesture or page-action capability is injected. */
     val activityEvidenceReader by lazy(LazyThreadSafetyMode.NONE) {
@@ -714,6 +739,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             onPageTaskOwnershipConfirmed = { lease, verifiedHandoff ->
                 runSessionCoordinator.admitBusinessPageTaskOwnership(lease, verifiedHandoff)
             },
+            pageSelectedStartup = true,
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
             isSendConfirmationPending = { aiReplyDraftCoordinator.isSendConfirmationPending },
@@ -806,6 +832,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             onObserveCurrentPage = { entryPageObservation.requestSnapshot() },
             cancelCurrentPageObservation = {
                 if (entryPageObservationDelegate.isInitialized()) entryPageObservation.cancel()
+                if (entryPageRetryDelegate.isInitialized()) entryPageRetry.cancel()
             },
             onUserRunEnded = {
                 root.recoveryScheduleRepository.clear()

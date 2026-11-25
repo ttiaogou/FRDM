@@ -151,7 +151,9 @@ class AiReplyObservationRuntime(
     /** Injected from the process composition root; null only in isolated test fixtures. */
     private val recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null,
     /** Reports the exact verified capability; the route coordinator never acquires it for us. */
-    private val onPageTaskOwnershipConfirmed: (com.freedom.core.runtime.TaskLease, Boolean) -> Boolean = { _, _ -> true }
+    private val onPageTaskOwnershipConfirmed: (com.freedom.core.runtime.TaskLease, Boolean) -> Boolean = { _, _ -> true },
+    /** Service composition selects the startup task before any durable checkpoint is activated. */
+    private val pageSelectedStartup: Boolean = false
 ) {
     companion object {
         /**
@@ -440,7 +442,8 @@ class AiReplyObservationRuntime(
         sharedPageObservationCoordinator.registerRecoveryAdapter(messageListRecoveryRoute)
         sharedPageObservationCoordinator.registerRecoveryAdapter(receivedGreetingsRecoveryRoute)
         sharedPageObservationCoordinator.registerRecoveryAdapter(chatDetailRecoveryRoute)
-        privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
+        // Creating the classifier must not activate an unrelated task or recovery lane.
+        if (!pageSelectedStartup) privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             messageListCheckpointRestored = true
             messageListCheckpointForUnified = checkpoint
@@ -1225,13 +1228,8 @@ class AiReplyObservationRuntime(
             scheduleFullInspectionAfter(RECEIVED_GREETINGS_USER_ACTIVE_RECHECK_DELAY_MS)
             return
         }
-        if (sessionRunStarted && receivedGreetingsTaskActive &&
-            !ownsTask(RECEIVED_GREETINGS_TASK_ID) && !awaitingNormalInboxAfterGreetingsReturn
-        ) {
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("收到的招呼任务观察被阻止：当前任务已不持有 UI 操作权；等待安全恢复")
-            return
-        }
+        // Losing the UI lease forbids mutations, not fresh observation. The semantic
+        // snapshot handler establishes the existing recovery transaction before any action.
         val pageRead = pageReadCoordinator.read(purpose)
         val inspection = pageRead.snapshot
         val observationDecision = pageObservationSemantics.classify(
@@ -1577,6 +1575,20 @@ class AiReplyObservationRuntime(
                 pageFingerprint, setOf(PRIVATE_MESSAGES_TASK_ID, RECEIVED_GREETINGS_TASK_ID)
             )?.routeId
         } else null
+
+        if (sessionRunStarted && receivedGreetingsTaskActive &&
+            !ownsTask(RECEIVED_GREETINGS_TASK_ID) && !awaitingNormalInboxAfterGreetingsReturn &&
+            !recoveryContext.pending
+        ) {
+            // Establish a checkpoint for the known interrupted task, never claim a lease
+            // directly from this observation. Existing recovery gates collect fresh proof.
+            requestUnifiedPauseAndCheckpoint(RECEIVED_GREETINGS_TASK_ID, "GREETING_TASK_LEASE_LOST")
+            sessionManagerState = SessionManagerState.PAUSED
+            lastPageInspection = inspection
+            onLog("收到的招呼恢复[LEASE_LOST_READ_ONLY]：已读取当前页面；等待既有恢复验证重新确认操作权")
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return
+        }
 
         // Resolve a pending Received Greetings transition before polling, recovery, or
         // private-message ownership can acquire the UI lease from this snapshot.
@@ -2274,6 +2286,7 @@ class AiReplyObservationRuntime(
                 receivedGreetingsTaskActive && !ownsTask(RECEIVED_GREETINGS_TASK_ID) -> {
                     sessionManagerState = SessionManagerState.PAUSED
                     onLog("页面结构调度[OWNERSHIP_REJECTED]：收到的招呼任务未持有UI操作租约；仅保留只读观察")
+                    scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
                     return
                 }
                 !receivedGreetingsTaskActive && inspection.pageKind == ChatPageKind.CHAT_LIST &&
@@ -3676,14 +3689,23 @@ class AiReplyObservationRuntime(
         scheduleFullInspection()
     }
 
-    fun scheduleInitialObservation() {
+    /** Return true only after the selected AI business runtime has really initialized. */
+    fun preparePageSelectedStartup(taskId: String): Boolean {
+        require(taskId == PRIVATE_MESSAGES_TASK_ID || taskId == RECEIVED_GREETINGS_TASK_ID)
+        if (!sessionRunStarted) scheduleInitialObservation(taskId)
+        return sessionRunStarted
+    }
+
+    fun scheduleInitialObservation() = scheduleInitialObservation(null)
+
+    private fun scheduleInitialObservation(selectedTaskId: String?) {
         resetCrossTaskGreetingsHandoffRetry()
         val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
         if (failure != null) {
             sessionRunStarted = false
             sessionManagerState = SessionManagerState.PAUSED
             onLog("AI 私聊暂停分类[CONFIGURATION_BLOCKED]：配置未就绪，禁止制造无依据恢复检查点")
-            onLog("AI 回复启动被阻止：$failure；请修正配置后重新启动；未遍历列表")
+            onLog("AI 回复启动被阻止：$failure；请修正配置后重新验证；未遍历列表")
             return
         }
         cancelAiReadinessRetry(resetCount = true)
@@ -3702,8 +3724,27 @@ class AiReplyObservationRuntime(
         }.getOrNull()
         sampleCaptureActive = !directory.isNullOrBlank()
         sessionRunStarted = sampleCaptureActive
-        if (sessionRunStarted && chatPagePort.hasRestorableReceivedGreetingsCheckpoint()) {
-            val greetingsRecord = receivedGreetingsCheckpointRepository?.load()
+        if (selectedTaskId != null && !sessionRunStarted) {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 页面运行时[PREPARATION_PENDING]：样本目录暂不可用；保持运行授权并等待新鲜入口复查")
+            return
+        }
+        if (selectedTaskId != null) {
+            receivedGreetingsOwnershipRecheckPending = false
+            receivedGreetingsProbeOrdinaryInboxConfirmed = false
+            receivedGreetingsProbePrivateRouteWon = false
+            onLog("AI 页面启动[SELECTED_TASK]：task=$selectedTaskId；仅激活当前任务检查点")
+        }
+        val selectedGreetingsRecord = if (selectedTaskId == RECEIVED_GREETINGS_TASK_ID && sessionRunStarted)
+            receivedGreetingsCheckpointRepository?.load() else null
+        if (sessionRunStarted && (selectedTaskId == null || selectedTaskId == RECEIVED_GREETINGS_TASK_ID) &&
+            (chatPagePort.hasRestorableReceivedGreetingsCheckpoint() || selectedGreetingsRecord != null)
+        ) {
+            if (selectedTaskId == RECEIVED_GREETINGS_TASK_ID) {
+                // Rehydrate adapter evidence only for the selected greetings task.
+                chatPagePort.reloadReceivedGreetingsCheckpointAfterServiceReconnect()
+            }
+            val greetingsRecord = selectedGreetingsRecord ?: receivedGreetingsCheckpointRepository?.load()
             if (!recoveryContext.pending && greetingsRecord != null) {
                 receivedGreetingsCheckpointForUnified = greetingsRecord
                 receivedGreetingsCheckpointRestoreSource = RecoveryCheckpointRestoreSource.SERVICE_RECONNECT
@@ -3730,9 +3771,8 @@ class AiReplyObservationRuntime(
         // before assigning the exclusive UI-operation lease. Legacy adapters without that
         // workflow retain the existing private-message startup contract.
         privateMessagesTaskController.beginRun(currentRunGeneration())
-        val supportsReceivedGreetingsStartup =
-            receivedGreetingsTaskFlow.supportsWorkflow() &&
-                pageObservationSnapshotSource != null
+        val supportsReceivedGreetingsStartup = selectedTaskId != null ||
+            (receivedGreetingsTaskFlow.supportsWorkflow() && pageObservationSnapshotSource != null)
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         resetPollingRound()
         receivedGreetingsTaskFlow.reset()
@@ -3773,7 +3813,7 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
         messageListRecoveryVerificationPending = false
         messageRecoveryRetryAttempt = 0
-        privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
+        if (selectedTaskId == null || selectedTaskId == PRIVATE_MESSAGES_TASK_ID) privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             messageListCheckpointRestored = true
             messageListCheckpointForUnified = checkpoint
@@ -3790,6 +3830,11 @@ class AiReplyObservationRuntime(
                 RecoveryTransactionEvent.CheckpointLoaded(RecoveryTransactionEvent.Source.SERVICE_RECONNECT)
             )
             onLog("消息列表任务恢复：已重新装载检查点；等待连续两次消息列表结构快照确认")
+        }
+        if (selectedTaskId != null && recoveryContext.pending) {
+            // Do not let the optional greeting startup probe intercept the selected
+            // task's durable checkpoint verification before its first sample.
+            receivedGreetingsPageProbePending = false
         }
         sessionManagerState = if (sessionRunStarted && !recoveryContext.pending) {
             SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP

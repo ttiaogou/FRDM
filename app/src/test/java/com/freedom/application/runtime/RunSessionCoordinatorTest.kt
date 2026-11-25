@@ -71,6 +71,62 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun freshMatchingPageRetriesUnpreparedStartupButNotPreparedRuntimeWaitingForLease() {
+        val state = FakeState().apply { requested = true }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var initialStarts = 0
+        var retries = 0
+        var observations = 0
+        var canPrepare = false
+        val ai = object : ModeRuntimePort {
+            override val mode = RunMode.AI_REPLY
+            override fun onRunStarted() = error("page route is required")
+            override fun onRunStopped(reason: String) = Unit
+            override fun onAccessibilityServiceConnected() = Unit
+            override fun onAccessibilityServiceDisconnected() = Unit
+            override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = Unit
+            override fun onPageRuntimeStarted(session: com.freedom.core.runtime.PageRuntimeSessionState,
+                onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit) {
+                initialStarts++
+                if (canPrepare) onPrepared(session)
+            }
+            override fun onPageRuntimePreparationRetry(session: com.freedom.core.runtime.PageRuntimeSessionState,
+                onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit) {
+                retries++
+                if (canPrepare) onPrepared(session)
+            }
+            override fun onPageTaskChanged(session: com.freedom.core.runtime.PageRuntimeSessionState) {
+                observations++
+            }
+        }
+        val coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai), RuntimeLogSink { },
+            taskCoordinator = tasks, onObserveCurrentPage = {})
+        coordinator.synchronizeRunRequest()
+        val id = "AI_REPLY_PRIVATE_MESSAGES"
+        val first = requireNotNull(coordinator.routePageTask(ai.mode, id))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STARTING, first.lifecycle)
+        assertNull(coordinator.currentWriteRoute())
+        coordinator.routePageTask(ai.mode, id)
+        assertEquals(1, retries)
+        canPrepare = true
+        coordinator.routePageTask(ai.mode, id)
+        assertEquals(2, retries)
+        assertNull(coordinator.currentWriteRoute())
+        coordinator.routePageTask(ai.mode, id)
+        assertEquals(2, retries)
+        assertEquals(1, observations)
+        val lease = requireNotNull(tasks.tryAcquire(id, first.runGeneration))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.READY,
+            coordinator.confirmPageTaskOwnership(lease)?.lifecycle)
+        assertEquals(first.routeRevision, coordinator.currentWriteRoute()?.routeRevision)
+        coordinator.routePageTask(ai.mode, id)
+        assertEquals(1, initialStarts)
+        assertEquals(2, retries)
+        assertEquals(1, observations)
+        assertTrue(state.requested)
+    }
+
+    @Test
     fun pageDrivenHandoffWaitsForExactTargetLeaseAndDoesNotRestartSameRuntime() {
         val state = FakeState().apply { requested = true }
         val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())

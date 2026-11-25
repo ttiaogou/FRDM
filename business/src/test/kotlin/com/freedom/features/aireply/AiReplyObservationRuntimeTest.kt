@@ -173,6 +173,112 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun pageSelectedStartupLoadsOnlyTheSelectedCheckpointAndRetriesConfigurationAndArchiveAdmission() {
+        for (selected in listOf("AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS")) {
+            val scheduler = FakeScheduler()
+            val port = FakeChatPort().apply { receivedGreetingsWorkflowEnabled = true }
+            val logs = ArrayList<String>()
+            val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+            var configFailure: String? = "MODEL_CONFIGURATION_NOT_READY"
+            var privateLoads = 0
+            var greetingLoads = 0
+            val privateCheckpoint = PrivateMessagesTraversalTaskExecutor().checkpoint()
+            val greetingCheckpoint = MomoSayHiTraversalCheckpointRecord(
+                processedRowKeys = setOf("retained-row"),
+                processedContactIdHashes = emptySet(),
+                deferredRows = emptyMap(),
+                deferredReturnToTopActive = false,
+                deferredReplayStarted = false
+            )
+            val privateRepo = object : PrivateMessagesTraversalCheckpointRepository {
+                override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint {
+                    privateLoads++
+                    return privateCheckpoint
+                }
+                override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) = Unit
+                override fun clear() = error("must retain private checkpoint")
+            }
+            val greetingRepo = object : MomoSayHiTraversalCheckpointRepository {
+                override fun load(nowEpochMs: Long): MomoSayHiTraversalCheckpointRecord {
+                    greetingLoads++
+                    return greetingCheckpoint
+                }
+                override fun save(checkpoint: MomoSayHiTraversalCheckpointRecord) = Unit
+                override fun clear() = error("must retain greeting checkpoint")
+            }
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port, chatMessagePort = port, chatSessionManagementPort = port,
+                gesturePolicy = NoOpGestureApi, targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true }, onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L, regionRefreshDebounceMs = 500L,
+                draftStartupFailure = { configFailure },
+                taskCoordinator = tasks, currentRunGeneration = { 9L },
+                privateMessagesCheckpointRepository = privateRepo,
+                receivedGreetingsCheckpointRepository = greetingRepo,
+                pageSelectedStartup = true
+            )
+            assertEquals(0, privateLoads)
+            assertEquals(0, greetingLoads)
+            assertFalse(runtime.preparePageSelectedStartup(selected))
+            assertEquals(0, privateLoads + greetingLoads)
+            configFailure = null
+            port.sessionRunEnabled = false
+            assertFalse(runtime.preparePageSelectedStartup(selected))
+            assertEquals(0, privateLoads + greetingLoads)
+            port.sessionRunEnabled = true
+            assertTrue(runtime.preparePageSelectedStartup(selected))
+            assertEquals(if (selected == "AI_REPLY_PRIVATE_MESSAGES") 1 else 0, privateLoads)
+            assertEquals(if (selected == "AI_REPLY_RECEIVED_GREETINGS") 1 else 0, greetingLoads)
+            assertTrue(logs.any { it.contains("CHECKPOINT_LOADED") && it.contains("task=$selected") })
+            assertNull(tasks.currentLease())
+            assertEquals(0, port.receivedGreetingsIdleSteps)
+            // Duplicate preparation must not reopen the archive or reload a checkpoint.
+            assertTrue(runtime.preparePageSelectedStartup(selected))
+            assertEquals(1, privateLoads + greetingLoads)
+        }
+    }
+
+    @Test
+    fun revokedGreetingsLeaseDoesNotPreventFreshReadAndSchedulesRecoveryWithoutGesture() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            receivedGreetingsCheckpointFingerprint = "greetings-current-window"
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            page = page.copy(pageKind = ChatPageKind.NON_CHAT, scannedNodeCount = 40)
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port, chatMessagePort = port, chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi, targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true }, onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L, regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 5L },
+            pageSelectedStartup = true
+        )
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_RECEIVED_GREETINGS"))
+        val flow = activateGreetingTestFlow(runtime)
+        assertTrue(flow.releaseOwnership("temporary lease loss"))
+        val readsBefore = port.fullInspections
+        val stepsBefore = port.receivedGreetingsIdleSteps
+        runtime.requestPageRouteObservation()
+        scheduler.runNextWithDelay(300L)
+        assertTrue(port.fullInspections > readsBefore)
+        assertEquals(stepsBefore, port.receivedGreetingsIdleSteps)
+        assertNull(tasks.currentLease())
+        assertTrue(logs.any { it.contains("LEASE_LOST_READ_ONLY") })
+        assertTrue(scheduler.hasPendingDelay(500L))
+    }
+
+    @Test
     fun receivedGreetingsRestoredCheckpointRequiresSharedProofAndAdapterConfirmation() {
         val scheduler = FakeScheduler()
         val logs = ArrayList<String>()

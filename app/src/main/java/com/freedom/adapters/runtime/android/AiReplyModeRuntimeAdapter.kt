@@ -34,10 +34,26 @@ internal class AiReplyModeRuntimeAdapter(
         session: PageRuntimeSessionState,
         onPrepared: (PageRuntimeSessionState) -> Unit
     ) {
-        onRunStarted()
-        // Rebind only after the fresh page selected this runtime. The existing recovery
-        // methods retain their checkpoint identity and double-snapshot verification.
-        onAccessibilityServiceConnected()
+        onReadinessStarting(mode, "AI Reply 页面运行时启动；等待目标应用正式就绪")
+        awaitingServiceReconnect = false
+        runtime().reset("开始新页面运行前清理")
+        prepareSelectedTask(session, onPrepared)
+    }
+
+    override fun onPageRuntimePreparationRetry(
+        session: PageRuntimeSessionState,
+        onPrepared: (PageRuntimeSessionState) -> Unit
+    ) {
+        prepareSelectedTask(session, onPrepared)
+    }
+
+    private fun prepareSelectedTask(
+        session: PageRuntimeSessionState,
+        onPrepared: (PageRuntimeSessionState) -> Unit
+    ) {
+        // Configuration/consent and archive admission remain mandatory. A rejected
+        // preparation is not READY and can only be retried on fresh matching pages.
+        if (!runtime().preparePageSelectedStartup(session.taskId)) return
         onPrepared(session)
         runtime().requestPageRouteObservation()
     }

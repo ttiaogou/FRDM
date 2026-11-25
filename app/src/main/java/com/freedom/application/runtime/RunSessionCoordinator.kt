@@ -300,7 +300,27 @@ class RunSessionCoordinator(
         if (currentPage != null && currentPage.mode == mode && currentPage.taskId == taskId &&
             currentPage.lifecycle != PageRuntimeLifecycle.STOPPING
         ) {
-            tryCompletePageStart(currentPage)
+            if (tryCompletePageStart(currentPage) == null) {
+                val runtime = runtimes[currentPage.mode]
+                if (preparedRuntimeMode != currentPage.mode) {
+                    // Only a freshly selected matching page may retry preparation. Do not
+                    // reset a prepared runtime that is merely waiting for its business lease.
+                    pageTransitionInProgress = true
+                    try {
+                        runtime?.onPageRuntimePreparationRetry(currentPage) { prepared ->
+                            markPageRuntimeReady(prepared)
+                        }
+                    } catch (error: Throwable) {
+                        log.recordException("RunSessionCoordinator", "page_runtime_prepare_retry_failed",
+                            "页面运行时重新准备失败；继续只读等待", error)
+                        stopPageRuntime("页面运行时重新准备失败", preserveRecovery = true)
+                    } finally {
+                        pageTransitionInProgress = false
+                    }
+                } else {
+                    runtime?.onPageTaskChanged(currentPage)
+                }
+            }
             return pageRuntimeSession.current()
         }
         pageTransitionInProgress = true
