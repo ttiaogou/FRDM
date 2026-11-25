@@ -39,53 +39,34 @@ class UiWriteAuthorization(
 
     private fun currentRoute() = currentPageRuntime?.invoke()
     /** Advisory preflight only. The final mutation MUST call [withAuthorizedWrite]. */
-    fun permits(scope: UiWriteScope): Boolean {
-        val runGeneration = currentRunGeneration()
+    fun permits(scope: UiWriteScope): Boolean = permitsBound(scope, taskCoordinator.currentLease())
+
+    /** Advisory check for the EXACT lease captured when this draft request was admitted. */
+    fun permitsBound(scope: UiWriteScope, expectedLease: TaskLease?): Boolean {
+        val lease = expectedLease ?: return false
         val mode = activeRunMode()
-        val lease = taskCoordinator.currentLease() ?: return false
-        return lease.runGeneration == runGeneration && accepts(scope, mode, lease.taskId) &&
-            routeMatches(currentRoute(), mode, lease)
+        return lease.runGeneration == currentRunGeneration() &&
+            accepts(scope, mode, lease.taskId) && routeMatches(currentRoute(), mode, lease) &&
+            taskCoordinator.isCurrent(lease)
     }
 
-    /** Holds the exact current task lease across the actual platform submission. */
-    fun <T> withAuthorizedWrite(scope: UiWriteScope, action: () -> T): T? {
+    /** Both direct and bound writes cross the same final exact-lease barrier. */
+    fun <T> withAuthorizedWrite(scope: UiWriteScope, action: () -> T): T? =
+        withBoundAuthorizedWrite(scope, taskCoordinator.currentLease(), action)
+
+    /** Ownership transfers cannot revive an old asynchronous draft. */
+    fun <T> withBoundAuthorizedWrite(scope: UiWriteScope, expectedLease: TaskLease?, action: () -> T): T? {
+        val lease = expectedLease ?: return null
         val runGeneration = currentRunGeneration()
         val mode = activeRunMode()
-        val lease = taskCoordinator.currentLease() ?: return null
         val route = currentRoute()
         if (lease.runGeneration != runGeneration || !accepts(scope, mode, lease.taskId) ||
             !routeMatches(route, mode, lease)) return null
         return taskCoordinator.withCurrentLease(lease) {
-            // Production route publication uses the same ownership monitor. Revalidate the
-            // captured route (including its revision) inside the final submission barrier.
-            if (currentPageRuntime != null &&
-                (currentRoute() != route || !routeMatches(route, mode, lease) ||
-                    currentRunGeneration() != runGeneration || activeRunMode() != mode)
-            ) null else action()
-        }
-    }
-
-    /** Advisory check for the EXACT lease captured when this draft request was admitted. */
-    fun permitsBound(scope: UiWriteScope, expectedLease: TaskLease?): Boolean {
-        val expected = expectedLease ?: return false
-        return expected.runGeneration == currentRunGeneration() &&
-            activeRunMode().let { mode ->
-                accepts(scope, mode, expected.taskId) && routeMatches(currentRoute(), mode, expected)
-            } && taskCoordinator.isCurrent(expected)
-    }
-
-    /** Final mutation barrier: ownership transfers cannot revive an old asynchronous draft. */
-    fun <T> withBoundAuthorizedWrite(scope: UiWriteScope, expectedLease: TaskLease?, action: () -> T): T? {
-        val expected = expectedLease ?: return null
-        val runGeneration = currentRunGeneration()
-        val mode = activeRunMode()
-        val route = currentRoute()
-        if (expected.runGeneration != runGeneration || !accepts(scope, mode, expected.taskId) ||
-            !routeMatches(route, mode, expected)) return null
-        return taskCoordinator.withCurrentLease(expected) {
+            // Revalidate the page revision and run/mode under the same ownership
+            // monitor used for page state publication and lease transfer/release.
             if (currentRunGeneration() != runGeneration || activeRunMode() != mode ||
-                (currentPageRuntime != null && currentRoute() != route)
-            ) null else action()
+                currentRoute() != route) null else action()
         }
     }
 

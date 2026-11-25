@@ -832,7 +832,9 @@ RUNTIME_DEBT_REFERENCE_CEILINGS = {
     _CORE_RUNTIME + "PageObservationCoordinator.kt": {"registerChannel": 3},
     _APP_RUNTIME + "RunSessionCoordinator.kt": {
         # P4 moves the existing lifecycle state from the retired standalone owner.
-        "PageRuntimeSessionState": 18, "PageRuntimeLifecycle": 23,
+        # P5 folds the separate UNKNOWN flag into the existing lifecycle and
+        # derives the write route from its single snapshot and the current lease.
+        "PageRuntimeSessionState": 19, "PageRuntimeLifecycle": 35,
         "routeIndependentPageTask": 1, "admitBusinessPageTaskOwnership": 1,
         "rollbackBusinessPageTaskOwnership": 1,
     },
@@ -865,6 +867,7 @@ RETIRED_PAGE_CONTROL_SYMBOLS = {
     "PageObservationSnapshot", "PageClassification", "pageObservationSnapshotSource",
     "classifyPageObservation", "classifyUnifiedPage", "hasFreshOwnedPageEvidence",
     "PageRuntimeSession", "onPageRuntimeStarted", "onPageRuntimePreparationRetry", "preparedRuntimeMode",
+    "writeRoute", "publishWriteRoute", "lastBusinessAdmissionLease", "unclassifiedWriteHold",
 }
 
 

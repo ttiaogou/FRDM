@@ -105,7 +105,7 @@ class PageFingerprintRouter {
 
 
 enum class PageRuntimeLifecycle {
-    NONE,
+    UNCLASSIFIED,
     STARTING,
     READY,
     STOPPING

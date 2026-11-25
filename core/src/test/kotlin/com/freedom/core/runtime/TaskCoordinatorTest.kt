@@ -43,6 +43,25 @@ class TaskCoordinatorTest {
     }
 
     @Test
+    fun releasedLeaseRollbackEvidenceExpiresAfterAnyNewCapabilityOrGeneration() {
+        val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val first = requireNotNull(coordinator.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", 7L))
+        assertFalse(coordinator.isLatestReleasedLease(first))
+        assertTrue(coordinator.release(first))
+        assertTrue(coordinator.isLatestReleasedLease(first))
+
+        val next = requireNotNull(coordinator.tryAcquire(first.taskId, 7L))
+        assertFalse(coordinator.isLatestReleasedLease(first))
+        assertFalse(coordinator.isLatestReleasedLease(next))
+        assertTrue(coordinator.release(next))
+        assertFalse(coordinator.isLatestReleasedLease(first))
+        assertTrue(coordinator.isLatestReleasedLease(next))
+
+        coordinator.advanceRunGeneration(8L)
+        assertFalse(coordinator.isLatestReleasedLease(next))
+    }
+
+    @Test
     fun currentLeaseAndGuardOnlyExposeTheExactActiveTaskCapability() {
         val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
         val oldLease = requireNotNull(coordinator.tryAcquire("ai.private_messages", 5L))
