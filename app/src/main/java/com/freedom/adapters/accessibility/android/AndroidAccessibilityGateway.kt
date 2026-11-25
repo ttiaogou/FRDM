@@ -601,9 +601,7 @@ internal class AndroidAccessibilityGateway(
         listener: GestureResultListener,
         onPlatformDispatch: () -> Unit
     ): GestureSubmission =
-        authorizedGestureDispatch(spec) {
-            gestureDispatcher.dispatchGesture(spec, listener, onPlatformDispatch)
-        }
+        dispatchGesture(spec, listener, { true }, onPlatformDispatch)
 
     override fun dispatchGesture(
         spec: GestureSpec,
