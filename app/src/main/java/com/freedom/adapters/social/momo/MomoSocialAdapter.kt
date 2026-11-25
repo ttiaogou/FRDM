@@ -1339,16 +1339,11 @@ internal class MomoSocialAdapter(
                         false -> {
                             sayHiProfileBackDialogPending = false
                             sayHiProfileBackDialogWindowId = -1
-                            val activePage = rootAccess.withActiveTargetRoot { root, window ->
-                                window to pageInspectionComponents.gestureReadinessInspector.hasVisibleViewId(
-                                    root,
-                                    setOf(MomoSayHiPageContract.LIST_VIEW_ID)
-                                )
-                            }
+                            val activePage = rootAccess.withActiveTargetRoot { _, window -> window }
                             if (activePage == null) return true
                             if (isReceivedGreetingsListConfirmed()) {
                                 sayHiProfileBackWindowId = -1
-                                onLog("收到招呼资料页返回：dialog.h 已消失；NewSayHiSessionListActivity、活动窗口和可见 listview 均已确认")
+                                onLog("收到招呼资料页返回：dialog.h 已消失；当前窗口与列表结构指纹已确认；Activity 和操作准入由现有 READY 复核")
                                 return inspectSayHiPageAndAutonomousBrowse(
                                     allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
                                 )
@@ -1358,7 +1353,7 @@ internal class MomoSocialAdapter(
                                 return true
                             }
                             if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY &&
-                                activePage.first.activityClass == MomoSayHiPageContract.PROFILE_ACTIVITY
+                                activePage.activityClass == MomoSayHiPageContract.PROFILE_ACTIVITY
                             ) {
                                 onLog("收到招呼资料页返回：已确认 dialog.h 消失且资料页重新活动；重新执行独立安全检查后再返回列表")
                                 return requestSayHiProfileBack()
@@ -1372,7 +1367,7 @@ internal class MomoSocialAdapter(
                 }
                 if (isReceivedGreetingsListConfirmed()) {
                     sayHiProfileBackWindowId = -1
-                    onLog("收到招呼资料页返回确认：NewSayHiSessionListActivity、活动窗口和可见 listview 均已重新验证")
+                    onLog("收到招呼资料页返回确认：当前窗口与列表结构指纹已重新验证；Activity 和操作准入由现有 READY 复核")
                     return inspectSayHiPageAndAutonomousBrowse(
                         allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
                     )
@@ -1511,9 +1506,9 @@ internal class MomoSocialAdapter(
                         onLog("收到招呼单用户隔离：点击来源未核验，仅延期原行；不标记已发送")
                     }
                     onLog(
-                        "收到招呼详情页返回确认：NewSayHiSessionListActivity、当前活动窗口和可见 listview " +
+                        "收到招呼详情页返回确认：当前窗口和列表结构指纹" +
                             "已由连续 ${sayHiDetailBackReturnConfirmation.stableSampleCount} 份新鲜快照确认；" +
-                            "window=$listWindowIdentity"
+                            "Activity 和操作准入由现有 READY 独立复核；window=$listWindowIdentity"
                     )
                     clearSayHiSelectedGreeting()
                     return inspectSayHiPageAndAutonomousBrowse(
@@ -1522,7 +1517,7 @@ internal class MomoSocialAdapter(
                 }
                 if (listWindowIdentity != null && sayHiDetailBackReturnConfirmation.stableSampleCount == 1) {
                     onLog(
-                        "收到招呼详情页返回候选：已识别目标 Activity、当前窗口和可见 listview；" +
+                        "收到招呼详情页返回候选：已识别当前窗口和列表结构指纹；尚非操作准入；" +
                             "等待至少 500ms 后的第二份新鲜快照；window=$listWindowIdentity"
                     )
                 }
@@ -1684,7 +1679,7 @@ internal class MomoSocialAdapter(
                 }
                 sayHiCardListTapPending = false
                 sayHiAutonomousBrowseController.reset()
-                onLog("收到的招呼资料卡‘列表’导航已验证：NewSayHiSessionListActivity 与外层可滚动 listview 连续稳定")
+                onLog("收到的招呼资料卡‘列表’导航已验证：窗口与外层可滚动 listview 结构连续稳定；Activity 和操作准入由现有 READY 复核")
                 return true
             }
             if (!sayHiNavigationFlowController.isReceivedListConfirmed()) {
@@ -3701,13 +3696,7 @@ internal class MomoSocialAdapter(
     }
 
     /** Structural identity confirmation; Activity names and stale list-view events are not enough. */
-    private fun isReceivedGreetingsListConfirmed(): Boolean = rootAccess.withActiveTargetRoot { root, window ->
-        if (window.packageName != targetPackage || window.windowId < 0 ||
-            !accessibilityGateway.isWindowCurrent(window)
-        ) return@withActiveTargetRoot false
-        val confirmed = sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage)
-        confirmed && accessibilityGateway.isWindowCurrent(window)
-    } == true
+    private fun isReceivedGreetingsListConfirmed(): Boolean = isReceivedGreetingsListStructureVisible()
 
     /** Current list identity includes the actual Android window and page generation. */
     private fun receivedGreetingsListWindowIdentity(): String? =

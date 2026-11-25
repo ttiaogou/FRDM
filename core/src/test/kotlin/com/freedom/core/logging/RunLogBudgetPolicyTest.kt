@@ -263,6 +263,23 @@ class RunLogBudgetPolicyTest {
     }
 
     @Test
+    fun routineReadOnlyReadinessWaitIsInfoButActualRejectionAndFailuresRemainVisible() {
+        val waiting = "目标应用就绪状态[TRANSITION]：READY->STARTING；mode=AI_REPLY；" +
+            "package=com.immomo.momo；activity=UNKNOWN；windowId=3083；pageGeneration=24；" +
+            "reason=当前 Activity 身份尚未确认"
+        assertEquals(RunLogLevel.INFO, RunLogBudgetPolicy.inferLevel(waiting))
+        assertEquals(RunLogLevel.WARN, RunLogBudgetPolicy.inferLevel(
+            "自主手势派发拒绝[APP_NOT_READY]：status=STARTING；mode=AI_REPLY；windowId=3083；reason=当前 Activity 身份尚未确认"
+        ))
+        assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("$waiting；读取失败"))
+        assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("$waiting；读取异常：IllegalStateException"))
+        assertEquals(RunLogLevel.WARN, RunLogBudgetPolicy.inferLevel("$waiting；TIMEOUT"))
+        assertEquals(RunLogLevel.WARN, RunLogBudgetPolicy.inferLevel(
+            waiting.replace("READY->STARTING", "READY->BLOCKED")
+        ))
+    }
+
+    @Test
     fun inferLevelAndCategoryAreDeterministic() {
         assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("OCR 解析失败：IllegalStateException"))
         assertEquals(RunLogCategory.ERROR, RunLogBudgetPolicy.inferCategory("节点检索失败"))

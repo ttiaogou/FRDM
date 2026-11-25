@@ -618,12 +618,17 @@ internal class AndroidAccessibilityGateway(
      * This does not dispatch a gesture or grant UI ownership. The cached current()
      * diagnostic alone is insufficient after a service restart.
      */
-    fun inspectRecoveryReadiness(): TargetAppReadinessSnapshot {
-        inspectAutonomousDispatchReadiness()
-        return targetAppReadinessController.current()
-    }
+    fun inspectRecoveryReadiness(): TargetAppReadinessSnapshot = evaluateCurrentReadiness()
 
     private fun inspectAutonomousDispatchReadiness(): String? {
+        val snapshot = evaluateCurrentReadiness()
+        if (snapshot.status == TargetAppReadinessStatus.READY) return null
+        emitReadinessRejection(snapshot.status, snapshot.reason, snapshot.runMode, snapshot.windowId)
+        return snapshot.reason
+    }
+
+    /** Shared live safety evaluation. Observing readiness is not a rejected dispatch. */
+    private fun evaluateCurrentReadiness(): TargetAppReadinessSnapshot {
         val expectedPackage = targetPackage()
         val mode = runCatching { activeRunMode() }.getOrNull()
         val root = runCatching { service.rootInActiveWindow }.getOrNull()
@@ -640,8 +645,7 @@ internal class AndroidAccessibilityGateway(
                 ),
                 SystemClock.uptimeMillis()
             )
-            emitReadinessRejection(snapshot.status, snapshot.reason, mode, -1)
-            return snapshot.reason
+            return snapshot
         }
 
         try {
@@ -687,11 +691,7 @@ internal class AndroidAccessibilityGateway(
                 ),
                 SystemClock.uptimeMillis()
             )
-            if (snapshot.status != TargetAppReadinessStatus.READY) {
-                emitReadinessRejection(snapshot.status, snapshot.reason, mode, windowId)
-                return snapshot.reason
-            }
-            return null
+            return snapshot
         } finally {
             recycle(root)
         }

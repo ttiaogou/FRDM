@@ -25,6 +25,21 @@ class ArchitectureBoundaryTest {
     private fun projectFile(path: String): File = TestSourceResolver.resolve(projectRoot, path)
 
     @Test
+    fun readOnlyReadinessAndActualDispatchShareLiveEvaluationWithoutFalseRejectionLogs() {
+        val source = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt").readText()
+        val readOnly = source.substringAfter("fun inspectRecoveryReadiness()").substringBefore("private fun inspectAutonomousDispatchReadiness()")
+        val dispatch = source.substringAfter("private fun inspectAutonomousDispatchReadiness()").substringBefore("private fun evaluateCurrentReadiness()")
+        val evaluation = source.substringAfter("private fun evaluateCurrentReadiness()").substringBefore("private fun currentActiveWindowPackage()")
+        assertTrue(readOnly.contains("evaluateCurrentReadiness()"))
+        assertFalse(readOnly.contains("emitReadinessRejection"))
+        assertTrue(dispatch.contains("evaluateCurrentReadiness()"))
+        assertTrue(dispatch.contains("emitReadinessRejection("))
+        assertTrue(evaluation.contains("targetAppReadinessController.evaluate("))
+        assertTrue(evaluation.contains("inspectPageReadiness(root, currentActivity, mode)"))
+        assertFalse(evaluation.contains("emitReadinessRejection"))
+    }
+
+    @Test
     fun avatarScreenshotDiagnosticsCannotWriteIdentityBlockCache() {
         val imageStore = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoChatSampleImageStore.kt").readText()
         assertTrue("Avatar difference evidence must remain observable", imageStore.contains("visualConflictCandidate"))
