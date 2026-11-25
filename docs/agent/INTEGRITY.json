@@ -1,8 +1,8 @@
 {
   "repository": "ttiaogou/FRDM",
-  "branch": "P1",
-  "baseline_commit": "bb60bbd1f367d5188555abb8076acef652b42d4f",
-  "method": "current manual = concatenation of active parts in order; original manual/index kept unchanged",
+  "branch": "PP",
+  "baseline_commit": "db7550358df90ced82dbdaa8e256b397784122fe",
+  "method": "current manual = concatenation of active parts in order; original manual/index kept unchanged; approved PP section 0 governs current work",
   "originals": [
     {
       "path": "docs/agent/source/Freedom_按需执行索引.original.md",
@@ -19,72 +19,72 @@
     {
       "path": "docs/agent/parts/01-服务配置权限与生命周期.md",
       "start_line": 1,
-      "end_line": 16,
-      "sha256": "efb0eda2e6d8db5f7affe388b2c77ece571fb4dd4d6b4f7956690e3a6d2660ed",
-      "bytes": 1950
+      "end_line": 28,
+      "sha256": "0ee78f361ef2022b943f467960a904bfce0b773b5e3f89740b2036d96553a0ba",
+      "bytes": 3862
     },
     {
       "path": "docs/agent/parts/02-统一入口指纹与自动恢复.md",
-      "start_line": 17,
-      "end_line": 44,
-      "sha256": "9a5f23c4029dd55954d6837ce5c78848a8f6e1bddf91b4fb5f0c723e0b6762ae",
-      "bytes": 2973
+      "start_line": 29,
+      "end_line": 56,
+      "sha256": "4732c7edee88adc92aa56dc05d2e7380c1b097e21f3bc3f22bab82876cd614aa",
+      "bytes": 3433
     },
     {
       "path": "docs/agent/parts/03-事件与节点检索.md",
-      "start_line": 45,
-      "end_line": 52,
+      "start_line": 57,
+      "end_line": 64,
       "sha256": "bf725a9877023dcefdc27d4dc7968b94b8ef13b97013fdf46a4a7389ad5e5d8e",
       "bytes": 1358
     },
     {
       "path": "docs/agent/parts/04-手势唯一通道与结果闭环.md",
-      "start_line": 53,
-      "end_line": 57,
+      "start_line": 65,
+      "end_line": 69,
       "sha256": "3a832786b57e775f021f372ddd114b80f278859a8131d98fd9aad8cfcc9b663f",
       "bytes": 687
     },
     {
       "path": "docs/agent/parts/05-点击安全区域.md",
-      "start_line": 58,
-      "end_line": 60,
+      "start_line": 70,
+      "end_line": 72,
       "sha256": "19ef7a5cf196729d46025d9e2856caa039356e74f631dc85f8fd2479faeb0c7e",
       "bytes": 474
     },
     {
       "path": "docs/agent/parts/06-滑动轨迹与起止点.md",
-      "start_line": 61,
-      "end_line": 65,
+      "start_line": 73,
+      "end_line": 77,
       "sha256": "a41ac1a2bd1168102fa40f3a2f27033f3fcff110ed9b2043372ea8810ece3b67",
       "bytes": 816
     },
     {
       "path": "docs/agent/parts/07-时间节律.md",
-      "start_line": 66,
-      "end_line": 71,
+      "start_line": 78,
+      "end_line": 83,
       "sha256": "7da966b3c5879d16e58872727e972286c082ed0ef4a2dff1e4b30af5b782b8f0",
       "bytes": 472
     },
     {
       "path": "docs/agent/parts/08-手势可视化.md",
-      "start_line": 72,
-      "end_line": 76,
+      "start_line": 84,
+      "end_line": 88,
       "sha256": "07e73d18004f1cf4dd56dc61a8bbe2d29bcc7ee1ae36aa2dcad26cd5ef889db7",
       "bytes": 1227
     },
     {
       "path": "docs/agent/parts/09-输入节奏与发送检查.md",
-      "start_line": 77,
-      "end_line": 85,
+      "start_line": 89,
+      "end_line": 97,
       "sha256": "07f1a88ea744c79e6ae0e366f2e87a2b12db3e5978c5964e582df4519a6c1e08",
       "bytes": 1062
     },
     {
       "path": "docs/agent/parts/10-AI回复去重与工程验证.md",
-      "start_line": 86,
-      "end_line": 93,
-      "sha256": "f4466abbd548a8c88de64832bb38ada96b06ee5522b6c72071474cc15f0626eb",
-      "bytes": 1534
+      "start_line": 98,
+      "end_line": 105,
+      "sha256": "1811cde39b340e0e7c838738c01171a69522f4ebfee5434850d4e37a560ea265",
+      "bytes": 1541
     }
   ],
   "root_index_original_prefix_sha256": "0d38fbac0a0a18cd8f29aea9b53ed848684a2c8811985ff4f21c30c573c53e28",
@@ -102,12 +102,13 @@
   "old_root_agents_action": "create new AGENTS.md (baseline commit deleted old root file)",
   "active_manual": {
     "path": "docs/agent/source/Android_无障碍落地开发手册.current.md",
-    "sha256": "24b9f1da980abd994338fd443809f2d5c26055904966824ba11a87e4b9163924",
-    "bytes": 12553
+    "sha256": "78dc5758deac5203d45d1ae5fad5a1c41bfe8cb4c479db948ecadd9e222c0e48",
+    "bytes": 14932
   },
   "approved_changes": [
     "删除媒体消息一概禁止自动回复的片语（保留其它安全边界）",
     "局部节点查询上限与外层持续恢复分层",
-    "手势可视化权限、性能和异常闭环补充"
+    "手势可视化权限、性能和异常闭环补充",
+    "PP 新增第 0 节九条架构强制约束，修订 01、02、10 中七处架构职责表述；03–09 与原退避参数逐字不变；导航明确历史目标目录不构成施工授权"
   ]
 }
