@@ -33,12 +33,51 @@ internal object MomoSayHiProfileScrollPolicy {
             pendingOnCurrentWindow && activeWindowId >= 0 &&
             matchesProfileSurface(currentRootViewIds)
 
+    /** Shared permit for both identity tasks; exact window and pending transaction are mandatory. */
+    fun permitsIdentityProfileScroll(
+        mode: com.freedom.core.runtime.RunMode,
+        pendingOnCurrentWindow: Boolean,
+        activeWindowId: Int,
+        expectedWindowId: Int
+    ): Boolean =
+        mode == com.freedom.core.runtime.RunMode.AI_REPLY && pendingOnCurrentWindow &&
+            activeWindowId >= 0 && activeWindowId == expectedWindowId
+
     data class Decision(
         val viewport: ScreenRect?,
         val candidateCount: Int,
         val reason: String,
         val targetPath: List<Int>? = null
     )
+
+    /**
+     * Prefer the previously verified viewport when available. If optional layout
+     * containers are absent, accept only one current, usable vertical content scroller.
+     * Never fall back to fixed coordinates, horizontal pagers, or ambiguous candidates.
+     */
+    fun resolveIdentityViewport(
+        nodes: List<AccessibilityNodeSnapshot>,
+        displayWidth: Int,
+        displayHeight: Int
+    ): Decision {
+        val existing = resolveViewport(nodes, displayWidth, displayHeight)
+        if (existing.viewport != null || displayWidth <= 0 || displayHeight <= 0) return existing
+        val candidates = nodes.mapNotNull { node ->
+            if (!node.visible || !node.enabled || !node.scrollable ||
+                node.className.substringAfterLast('.') !in setOf(
+                    "RecyclerView", "ScrollView", "NestedScrollView", "ListView"
+                )
+            ) return@mapNotNull null
+            val clipped = intersectWithDisplay(node.bounds, displayWidth, displayHeight)
+                ?: return@mapNotNull null
+            if (!hasUsableViewport(clipped, displayWidth, displayHeight)) return@mapNotNull null
+            node to clipped
+        }
+        val selected = candidates.singleOrNull() ?: return Decision(
+            null, candidates.size, "IDENTITY_SCROLL_VIEWPORT_NOT_UNIQUE"
+        )
+        return Decision(selected.second, 1, "IDENTITY_SCROLL_VIEWPORT_UNIQUE", selected.first.path.childIndices)
+    }
 
     fun resolveViewport(
         nodes: List<AccessibilityNodeSnapshot>,

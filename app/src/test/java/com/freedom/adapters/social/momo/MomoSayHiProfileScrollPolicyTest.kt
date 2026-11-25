@@ -114,6 +114,33 @@ class MomoSayHiProfileScrollPolicyTest {
         ))
     }
 
+    @Test fun identitySwipePermitRequiresExactTransactionWindowAndModeWithoutProfileAnchors() {
+        val policy = MomoSayHiProfileScrollPolicy
+        val mode = com.freedom.core.runtime.RunMode.AI_REPLY
+        assertTrue(policy.permitsIdentityProfileScroll(mode, true, 10, 10))
+        assertTrue(!policy.permitsIdentityProfileScroll(mode, true, 10, 11))
+        assertTrue(!policy.permitsIdentityProfileScroll(mode, false, 10, 10))
+        assertTrue(!policy.permitsIdentityProfileScroll(mode, true, -1, -1))
+        assertTrue(!policy.permitsIdentityProfileScroll(com.freedom.core.runtime.RunMode.ACCOUNT_BROWSE, true, 10, 10))
+    }
+
+    @Test fun identityViewportCanUseUniqueVerticalContentWithoutAnyProfileAnchors() {
+        val vertical = node(listOf(0), "android.widget.ScrollView",
+            bounds = ScreenRect(0, 478, 720, 1600), scrollable = true)
+        val horizontal = node(listOf(1), "androidx.viewpager.widget.ViewPager",
+            bounds = ScreenRect(0, 478, 720, 1600), scrollable = true)
+        val decision = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(listOf(vertical, horizontal), 720, 1554)
+        assertEquals(ScreenRect(0, 478, 720, 1554), decision.viewport)
+        assertEquals(listOf(0), decision.targetPath)
+        assertNull(MomoSayHiProfileScrollPolicy.resolveIdentityViewport(listOf(horizontal), 720, 1554).viewport)
+        assertNull(MomoSayHiProfileScrollPolicy.resolveIdentityViewport(
+            listOf(vertical, vertical.copy(path = NodePath(listOf(2)))), 720, 1554
+        ).viewport)
+        assertNull(MomoSayHiProfileScrollPolicy.resolveIdentityViewport(
+            listOf(vertical.copy(bounds = ScreenRect(0, 1500, 720, 1600))), 720, 1554
+        ).viewport)
+    }
+
     @Test fun selectsObservedProfileRecyclerViewAndClipsAccessibilityBoundsToDisplay() {
         val decision = MomoSayHiProfileScrollPolicy.resolveViewport(
             nodes = observedProfileNodes(),
