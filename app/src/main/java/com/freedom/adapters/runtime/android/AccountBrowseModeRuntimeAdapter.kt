@@ -20,7 +20,6 @@ internal class AccountBrowseModeRuntimeAdapter(
     private val taskCoordinator: TaskCoordinator,
     private val currentRunGeneration: () -> Long,
     private val onLog: (String) -> Unit = {},
-    private val currentRunGeneration: () -> Long = { 0L },
     private val onPageRuntimeReady: (Long) -> Unit = {}
 ) : ModeRuntimePort, PageObservationSnapshotClassifier {
     override val mode: RunMode = RunMode.ACCOUNT_BROWSE
