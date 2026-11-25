@@ -106,46 +106,33 @@ internal class MomoSayHiListSnapshotCoordinator(
         visitedNodes: Int,
         targetedSubtree: Boolean
     ) {
-        val wasAlreadyPaused = recoveryPolicy.isPausedForWindow(windowKey)
         val failedScopeLabel = when {
             targetedSubtree -> "LISTVIEW_SUBTREE"
             forceFullListSnapshot -> "ACTIVE_WINDOW_FALLBACK"
             else -> "ACTIVE_WINDOW"
         }
-        when (val decision = recoveryPolicy.onSnapshotIncomplete(windowKey)) {
-            is MomoSayHiListSnapshotRecoveryPolicy.IncompleteSnapshotDecision.Retry -> {
-                if (!targetedSubtree && stopReason == "ACTIVE_WINDOW_ROOT_UNAVAILABLE") {
-                    // Switch the next attempt to all visible Momo windows rather than repeating
-                    // the same active/focused root lookup.
-                    forceFullListSnapshot = true
-                }
-                if (targetedSubtree && decision.attempt >= 2) {
-                    // After two targeted failures, reacquire a full Activity root for fresh
-                    // diagnostics and locator refresh instead of retaining a stale list path.
-                    forceFullListSnapshot = true
-                }
-                onLog(
-                    "收到招呼列表快照[RETRY]：stopReason=$stopReason；visited=$visitedNodes；" +
-                        "scope=$failedScopeLabel；" +
-                        "attempt=${decision.attempt}/${decision.maximumAttempts}；" +
-                        "nextScope=${if (forceFullListSnapshot) "ACTIVE_WINDOW_FALLBACK" else "SAME_SCOPE"}；" +
-                        "delay=${decision.delayMs}ms；等待新快照，不派发滚动手势"
-                )
-                scheduleInspection(
-                    delayMs = decision.delayMs,
-                    reason = stopReason,
-                    retry = true
-                )
-            }
-            is MomoSayHiListSnapshotRecoveryPolicy.IncompleteSnapshotDecision.Exhausted -> {
-                if (!wasAlreadyPaused) {
-                    onLog(
-                        "收到招呼列表快照[PAUSED]：连续${decision.attempts}次恢复仍不完整；" +
-                            "stopReason=$stopReason；scope=$failedScopeLabel；" +
-                            "保留当前位置，不继续滚动、不点击用户行；等待新的完整快照或重新开始任务"
-                    )
-                }
-            }
+        val decision = recoveryPolicy.onSnapshotIncomplete(windowKey)
+        if (!targetedSubtree && stopReason == "ACTIVE_WINDOW_ROOT_UNAVAILABLE") {
+            // Switch the next attempt to all visible Momo windows rather than repeating
+            // the same active/focused root lookup.
+            forceFullListSnapshot = true
         }
+        if (targetedSubtree && decision.attempt >= 2) {
+            // After two targeted failures, reacquire a full Activity root for fresh
+            // diagnostics and locator refresh instead of retaining a stale list path.
+            forceFullListSnapshot = true
+        }
+        onLog(
+            "收到招呼列表快照[RETRY]：stopReason=$stopReason；visited=$visitedNodes；" +
+                "scope=$failedScopeLabel；" +
+                "attempt=${decision.attempt}/${decision.maximumAttempts}；" +
+                "nextScope=${if (forceFullListSnapshot) "ACTIVE_WINDOW_FALLBACK" else "SAME_SCOPE"}；" +
+                "delay=${decision.delayMs}ms；等待新快照，不派发滚动手势"
+        )
+        scheduleInspection(
+            delayMs = decision.delayMs,
+            reason = stopReason,
+            retry = true
+        )
     }
 }

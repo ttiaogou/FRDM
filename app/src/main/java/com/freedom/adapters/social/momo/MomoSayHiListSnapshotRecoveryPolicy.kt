@@ -19,7 +19,6 @@ internal class MomoSayHiListSnapshotRecoveryPolicy(
 ) {
     sealed interface IncompleteSnapshotDecision {
         data class Retry(val attempt: Int, val maximumAttempts: Int, val delayMs: Long) : IncompleteSnapshotDecision
-        data class Exhausted(val attempts: Int) : IncompleteSnapshotDecision
     }
 
     sealed interface SnapshotAdmission {
@@ -34,7 +33,6 @@ internal class MomoSayHiListSnapshotRecoveryPolicy(
     private var quietUntilElapsedMs = 0L
     private var retryWindowKey: String = ""
     private var retryAttempts = 0
-    private var exhaustedWindowKey: String? = null
 
     init {
         require(retryDelayRangesMs.isNotEmpty())
@@ -105,11 +103,10 @@ internal class MomoSayHiListSnapshotRecoveryPolicy(
     fun isSnapshotReadInFlight(): Boolean = snapshotReadInFlight
 
     @Synchronized
-    fun onSnapshotIncomplete(windowKey: String): IncompleteSnapshotDecision {
+    fun onSnapshotIncomplete(windowKey: String): IncompleteSnapshotDecision.Retry {
         if (windowKey != retryWindowKey) {
             retryWindowKey = windowKey
             retryAttempts = 0
-            exhaustedWindowKey = null
         }
         retryAttempts += 1
         val range = retryDelayRangesMs[(retryAttempts - 1).coerceAtMost(retryDelayRangesMs.lastIndex)]
@@ -125,12 +122,7 @@ internal class MomoSayHiListSnapshotRecoveryPolicy(
     fun onSnapshotComplete(windowKey: String) {
         if (windowKey != retryWindowKey) retryWindowKey = windowKey
         retryAttempts = 0
-        exhaustedWindowKey = null
     }
-
-    /** Kept for compatibility; unified recovery no longer exhausts by retry count. */
-    @Synchronized
-    fun isPausedForWindow(windowKey: String): Boolean = exhaustedWindowKey == windowKey
 
     @Synchronized
     fun retryAttemptCount(): Int = retryAttempts
@@ -142,6 +134,5 @@ internal class MomoSayHiListSnapshotRecoveryPolicy(
         quietUntilElapsedMs = 0L
         retryWindowKey = ""
         retryAttempts = 0
-        exhaustedWindowKey = null
     }
 }

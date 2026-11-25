@@ -4377,22 +4377,6 @@ internal class MomoSocialAdapter(
         if (isSayHiChatNavigationInProgress() && !listSurfaceVisible && !cardHostCandidate) return false
         if (!listPipelineCandidate && !cardHostCandidate) return false
         val confirmedList = listSurfaceVisible && sayHiNavigationFlowController.isReceivedListConfirmed()
-        if (confirmedList) {
-            val pausedTarget = sayHiConfirmedListTarget
-            val pausedWindowKey = pausedTarget?.window?.let(::sayHiWindowStabilityKey)
-                ?: "${targetPackage}|$activityHint|WINDOW_UNAVAILABLE"
-            if (sayHiListSnapshotRecoveryPolicy.isPausedForWindow(pausedWindowKey)) {
-                if (pausedTarget == null || accessibilityGateway.isWindowCurrent(pausedTarget.window)) {
-                    // The current page has already exhausted its bounded retry budget. Do not
-                    // trigger another full tree walk for every subsequent accessibility event.
-                    return true
-                }
-                // The paused window identity is no longer current. Drop its locator and allow one
-                // bounded full-window recovery under the new window identity.
-                sayHiConfirmedListTarget = null
-                sayHiSnapshotCoordinator.requestFullListFallback()
-            }
-        }
         if (listPipelineCandidate &&
             sayHiSnapshotCoordinator.isPending && !forceFresh
         ) return true

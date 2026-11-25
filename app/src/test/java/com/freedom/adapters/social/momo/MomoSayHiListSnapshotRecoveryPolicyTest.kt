@@ -82,8 +82,14 @@ class MomoSayHiListSnapshotRecoveryPolicyTest {
             MomoSayHiListSnapshotRecoveryPolicy.IncompleteSnapshotDecision.Retry(1, Int.MAX_VALUE, 500L),
             policy.onSnapshotIncomplete("window-1")
         )
-        repeat(10) { policy.onSnapshotIncomplete("window-2") }
-        assertFalse(policy.isPausedForWindow("window-2"))
+        repeat(10) { attempt ->
+            val expectedDelay = listOf(500L, 1_000L, 2_000L, 5_000L, 10_000L, 30_000L)[attempt.coerceAtMost(5)]
+            assertEquals(
+                MomoSayHiListSnapshotRecoveryPolicy.IncompleteSnapshotDecision.Retry(attempt + 1, Int.MAX_VALUE, expectedDelay),
+                policy.onSnapshotIncomplete("window-2")
+            )
+        }
+        assertEquals(10, policy.retryAttemptCount())
     }
 
     @Test
@@ -132,20 +138,19 @@ class MomoSayHiListSnapshotRecoveryPolicyTest {
                 policy.onSnapshotIncomplete("window-1")
             )
         }
-        assertFalse(policy.isPausedForWindow("window-1"))
-        assertFalse(policy.isPausedForWindow("window-2"))
+        assertEquals(6, policy.retryAttemptCount())
         assertEquals(
             MomoSayHiListSnapshotRecoveryPolicy.IncompleteSnapshotDecision.Retry(7, Int.MAX_VALUE, 30_000L),
             policy.onSnapshotIncomplete("window-1")
         )
-        assertFalse(policy.isPausedForWindow("window-1"))
+        assertEquals(7, policy.retryAttemptCount())
         assertEquals(
             MomoSayHiListSnapshotRecoveryPolicy.IncompleteSnapshotDecision.Retry(1, Int.MAX_VALUE, 500L),
             policy.onSnapshotIncomplete("window-2")
         )
 
         policy.onSnapshotComplete("window-1")
-        assertFalse(policy.isPausedForWindow("window-1"))
+        assertEquals(0, policy.retryAttemptCount())
         assertEquals(
             MomoSayHiListSnapshotRecoveryPolicy.IncompleteSnapshotDecision.Retry(1, Int.MAX_VALUE, 500L),
             policy.onSnapshotIncomplete("window-1")
