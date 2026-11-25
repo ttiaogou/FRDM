@@ -24,16 +24,9 @@ internal class AccountBrowseModeRuntimeAdapter(
 ) : ModeRuntimePort, PageObservationSnapshotClassifier {
     override val mode: RunMode = RunMode.ACCOUNT_BROWSE
 
-    override fun classify(snapshot: PageObservationSnapshot): PageClassification {
-        if (snapshot.fingerprint.packageName.isBlank()) return PageClassification.UNKNOWN
-        return when (snapshot.fingerprint.semanticPage) {
-            "DYNAMIC_FEED" -> if (snapshot.fingerprint.adapterFingerprint.orEmpty().isNotBlank()) {
-                PageClassification.AUTOMATIC_BROWSE
-            } else PageClassification.UNKNOWN
-            "DETAIL" -> PageClassification.CHAT_DETAIL
-            else -> PageClassification.UNKNOWN
-        }
-    }
+    override fun classify(snapshot: PageObservationSnapshot): PageClassification =
+        workflow().classifyUnifiedPage(snapshot.fingerprint)
+
     private var awaitingServiceReconnect = false
     private val taskExecutionController = TaskExecutionController(
         coordinator = taskCoordinator,
