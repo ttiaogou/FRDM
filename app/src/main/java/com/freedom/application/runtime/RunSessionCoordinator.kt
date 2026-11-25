@@ -219,14 +219,20 @@ class RunSessionCoordinator(
             current.mode != expected.mode || !runtimePrepared ||
             current.lifecycle == PageRuntimeLifecycle.STOPPING
         ) return null
-        val ready = current.copy(lifecycle = PageRuntimeLifecycle.READY)
+        val ready = if (current.lifecycle == PageRuntimeLifecycle.READY) current
+            else current.copy(lifecycle = PageRuntimeLifecycle.READY)
         val tasks = taskCoordinator
         if (tasks != null) {
             val lease = tasks.currentLease() ?: return null
             if (lease.taskId != current.taskId || lease.runGeneration != current.runGeneration) return null
-            if (tasks.withCurrentLease(lease) { pageRuntime = ready; true } != true) return null
-        } else publishPageRuntime(ready)
-        if (current.lifecycle != PageRuntimeLifecycle.READY) logPageLifecycle(ready, "运行时准备完成且任务租约已确认")
+            // Revalidate even an unchanged READY route, but publish only a transition.
+            if (tasks.withCurrentLease(lease) {
+                    if (current !== ready) pageRuntime = ready
+                    true
+                } != true
+            ) return null
+        } else if (current !== ready) publishPageRuntime(ready)
+        if (current !== ready) logPageLifecycle(ready, "运行时准备完成且任务租约已确认")
         return ready
     }
 
@@ -502,20 +508,21 @@ class RunSessionCoordinator(
     fun dispatchTargetApplicationEvent(event: AccessibilityEventEnvelope) {
         synchronizeRunRequest()
         val pageSession = pageRuntime
-        if (isPageObservationAllowed() &&
-            pageSession != null &&
-            (pageSession.lifecycle == PageRuntimeLifecycle.STARTING ||
-                pageSession.lifecycle == PageRuntimeLifecycle.UNCLASSIFIED) &&
-            runtimePrepared &&
-            pageSession.runGeneration == runGeneration
-        ) {
-            // The AI observer must receive page signals to finish its existing verification.
-            // The task controller still owns all business admission and lease checks.
-            runtimes[pageSession.mode]?.onTargetApplicationEvent(event)
-            return
+        val mode = when {
+            isPageObservationAllowed() &&
+                pageSession != null &&
+                (pageSession.lifecycle == PageRuntimeLifecycle.STARTING ||
+                    pageSession.lifecycle == PageRuntimeLifecycle.UNCLASSIFIED) &&
+                runtimePrepared &&
+                pageSession.runGeneration == runGeneration -> {
+                // The AI observer must receive page signals to finish its existing verification.
+                // The task controller still owns all business admission and lease checks.
+                pageSession.mode
+            }
+            pageSession != null && pageSession.lifecycle != PageRuntimeLifecycle.READY -> null
+            else -> dispatchMode()
         }
-        if (pageSession != null && pageSession.lifecycle != PageRuntimeLifecycle.READY) return
-        dispatchMode()?.let { runtimes[it]?.onTargetApplicationEvent(event) }
+        mode?.let { runtimes[it]?.onTargetApplicationEvent(event) }
     }
 
     @Synchronized

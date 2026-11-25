@@ -277,7 +277,9 @@ class RunSessionCoordinatorTest {
         assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.READY,
             coordinator.currentWriteRoute()?.lifecycle)
         assertEquals(first.routeRevision, coordinator.currentWriteRoute()?.routeRevision)
-        coordinator.routePageTask(ai.mode, id)
+        val readyRoute = requireNotNull(coordinator.currentWriteRoute())
+        assertTrue(readyRoute === coordinator.routePageTask(ai.mode, id))
+        assertTrue(readyRoute === coordinator.currentWriteRoute())
         assertEquals(1, initialStarts)
         assertEquals(2, retries)
         assertEquals(1, observations)
@@ -854,6 +856,60 @@ class RunSessionCoordinatorTest {
 
         assertTrue(ai.calls.contains("target"))
         assertTrue(ai.calls.none { it.startsWith("preemptive:") })
+    }
+
+    @Test
+    fun targetEventsHaveOneDispatchOutletAcrossObservationAndReadyStates() {
+        val state = FakeState().apply { requested = true }
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val coordinator = RunSessionCoordinator(
+            state, mapOf(ai.mode to ai, browse.mode to browse), RuntimeLogSink { },
+            taskCoordinator = tasks
+        )
+        val event = AccessibilityEventEnvelope(
+            type = com.freedom.core.accessibility.events.AccessibilityEventType.VIEW_CLICKED,
+            packageName = "com.immomo.momo",
+            className = "android.widget.Button",
+            contentChanges = emptySet(),
+            eventTimeMillis = 123L,
+            eventText = emptyList(),
+            contentDescription = null,
+            source = null
+        )
+
+        coordinator.dispatchTargetApplicationEvent(event)
+        assertTrue(ai.calls.isEmpty())
+        val id = "AI_REPLY_PRIVATE_MESSAGES"
+        val starting = requireNotNull(coordinator.routePageTask(ai.mode, id))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STARTING, starting.lifecycle)
+        coordinator.dispatchTargetApplicationEvent(event)
+        assertEquals(1, ai.calls.count { it == "target" })
+        assertNull(coordinator.currentWriteRoute())
+
+        coordinator.reconcileUnclassifiedPage(starting.runGeneration, false)
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.UNCLASSIFIED,
+            coordinator.currentPageRuntimeSession()?.lifecycle)
+        coordinator.dispatchTargetApplicationEvent(event)
+        assertEquals(2, ai.calls.count { it == "target" })
+        assertNull(coordinator.currentWriteRoute())
+
+        val lease = requireNotNull(tasks.tryAcquire(id, starting.runGeneration))
+        coordinator.reconcileUnclassifiedPage(starting.runGeneration, true)
+        val ready = requireNotNull(coordinator.currentWriteRoute())
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.READY, ready.lifecycle)
+        coordinator.dispatchTargetApplicationEvent(event)
+        assertEquals(3, ai.calls.count { it == "target" })
+        assertTrue(ready === coordinator.routePageTask(ai.mode, id))
+
+        assertTrue(tasks.release(lease))
+        coordinator.routePageTask(ai.mode, id)
+        assertNull(coordinator.currentWriteRoute())
+        coordinator.onAccessibilityServiceDisconnected()
+        coordinator.dispatchTargetApplicationEvent(event)
+        assertEquals(3, ai.calls.count { it == "target" })
+        assertTrue(browse.calls.isEmpty())
     }
 
     @Test
