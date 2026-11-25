@@ -252,7 +252,7 @@ class RunSessionCoordinator(
     @Synchronized
     fun dispatchGlobalTouchEvent(event: AccessibilityEventEnvelope) {
         synchronizeRunRequest()
-        val mode = activeMode()
+        val mode = pageRoutedMode ?: activeMode()
         log.append("全局触摸链路[RUN_SESSION_RECEIVED]：事件=${event.type}；eventTime=${event.eventTimeMillis}；模式=${mode ?: "NONE"}")
         val runtime = mode?.let(runtimes::get)
         if (runtime == null) {
@@ -273,7 +273,7 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun dispatchActivityTransition(activityClass: String) {
-        activeMode()?.let { runtimes[it]?.onActivityTransition(activityClass) }
+        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.onActivityTransition(activityClass) }
     }
 
     @Synchronized
@@ -281,20 +281,20 @@ class RunSessionCoordinator(
         // A new session has already received onRunStarted() while synchronizing. Do not run the
         // idle-refresh hook again for the same broadcast; later refreshes still reach the runtime.
         if (synchronizeRunRequest()) return
-        activeMode()?.let { runtimes[it]?.onExternalRefresh() }
+        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.onExternalRefresh() }
     }
 
     @Synchronized
     fun isTrackedInteractionEvent(event: AccessibilityEventEnvelope): Boolean =
-        activeMode()?.let { runtimes[it]?.isTrackedInteractionEvent(event) } ?: false
+        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.isTrackedInteractionEvent(event) } ?: false
 
     @Synchronized
     fun interactionDiagnostics(event: AccessibilityEventEnvelope, nowMillis: Long): List<String> =
-        activeMode()?.let { runtimes[it]?.interactionDiagnostics(event, nowMillis) }.orEmpty()
+        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.interactionDiagnostics(event, nowMillis) }.orEmpty()
 
     @Synchronized
     fun handleManualInteractionFallback(event: AccessibilityEventEnvelope) {
-        activeMode()?.let { runtimes[it]?.handleManualInteractionFallback(event) }
+        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.handleManualInteractionFallback(event) }
     }
 
     @Synchronized
