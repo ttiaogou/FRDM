@@ -5,6 +5,9 @@ import com.freedom.adapters.accessibility.android.AccessibilityEventFormatter
 import com.freedom.adapters.accessibility.android.AndroidAccountBrowseWorkflow
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.runtime.ModeRuntimePort
+import com.freedom.core.runtime.PageObservationSnapshot
+import com.freedom.core.runtime.PageObservationSnapshotClassifier
+import com.freedom.core.runtime.PageClassification
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.TaskExecutionController
@@ -17,8 +20,19 @@ internal class AccountBrowseModeRuntimeAdapter(
     private val taskCoordinator: TaskCoordinator,
     private val currentRunGeneration: () -> Long,
     private val onLog: (String) -> Unit = {}
-) : ModeRuntimePort {
+) : ModeRuntimePort, PageObservationSnapshotClassifier {
     override val mode: RunMode = RunMode.ACCOUNT_BROWSE
+
+    override fun classify(snapshot: PageObservationSnapshot): PageClassification {
+        if (snapshot.fingerprint.packageName.isBlank()) return PageClassification.UNKNOWN
+        return when (snapshot.fingerprint.semanticPage) {
+            "DYNAMIC_FEED" -> if (snapshot.fingerprint.adapterFingerprint.orEmpty().isNotBlank()) {
+                PageClassification.AUTOMATIC_BROWSE
+            } else PageClassification.UNKNOWN
+            "DETAIL" -> PageClassification.CHAT_DETAIL
+            else -> PageClassification.UNKNOWN
+        }
+    }
     private var awaitingServiceReconnect = false
     private val taskExecutionController = TaskExecutionController(
         coordinator = taskCoordinator,
