@@ -174,3 +174,30 @@ data class PageObservationSnapshot(
 interface PageObservationSnapshotClassifier {
     fun classify(snapshot: PageObservationSnapshot): PageClassification
 }
+
+
+/**
+ * Combines independent read-only classifiers for one fresh page snapshot.
+ * A conflict never selects a task and therefore cannot grant UI ownership.
+ */
+class UnifiedPageObservationMerger(
+    private val classifiers: List<PageObservationSnapshotClassifier>
+) {
+    data class Decision(
+        val classification: PageClassification,
+        val matchedClassifications: Set<PageClassification>,
+        val conflict: Boolean
+    )
+
+    fun classify(snapshot: PageObservationSnapshot): Decision {
+        val matches = classifiers
+            .map { it.classify(snapshot) }
+            .filter { it != PageClassification.UNKNOWN }
+            .toSet()
+        return when {
+            matches.isEmpty() -> Decision(PageClassification.UNKNOWN, emptySet(), conflict = false)
+            matches.size == 1 -> Decision(matches.single(), matches, conflict = false)
+            else -> Decision(PageClassification.UNKNOWN, matches, conflict = true)
+        }
+    }
+}
