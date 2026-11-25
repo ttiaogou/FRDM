@@ -361,6 +361,78 @@ class AiReplyDecisionEngineTest {
         assertEquals(AiReplyExecutionStatus.CLOUD_CONSENT_REQUIRED, execution(outcome).status)
     }
 
+    @Test fun contextFormatExperimentUsesTwelveIndependentCallsAndPreservesProductionDecision() {
+        val requests = mutableListOf<AiModelRequest>()
+        val provider = object : AiModelProvider {
+            override fun generate(request: AiModelRequest): AiModelResult {
+                requests += request
+                return AiModelResult(
+                    if (request.responseFormat is AiModelResponseFormat.JsonSchema) replyJson("收到") else "收到",
+                    "fake", "test"
+                )
+            }
+        }
+        val engine = AiReplyDecisionEngine(provider, grantedConsent)
+        val logs = mutableListOf<String>()
+        engine.runContextFormatExperiment("U: 你好\nA: 刚休息\nU: 忙吗", AiReplyPersonalization(), { false }) { logs.add(it) }
+        assertEquals(12, requests.size)
+        assertEquals(12, requests.map { it.requestId }.toSet().size)
+        assertTrue(requests.all { it.attemptIndex == 0 && it.temperature == 0.4 && it.maxOutputTokens == 256 })
+        requests.chunked(4).forEach { (a, b, c, d) ->
+            assertTrue(a.responseFormat is AiModelResponseFormat.JsonSchema)
+            assertEquals(a.responseFormat, b.responseFormat)
+            assertEquals(AiModelResponseFormat.PlainText, c.responseFormat)
+            assertEquals(c.responseFormat, d.responseFormat)
+            assertEquals(a.systemInstruction, b.systemInstruction)
+            assertEquals(c.systemInstruction, d.systemInstruction)
+            assertEquals(a.conversation, c.conversation)
+            assertEquals(b.conversation, d.conversation)
+            assertEquals(listOf(AiModelMessage.Role.USER, AiModelMessage.Role.ASSISTANT, AiModelMessage.Role.USER), a.conversation.map { it.role })
+            assertEquals("对方(USER)：你好\n己方(ASSISTANT)：刚休息\n对方(USER)：忙吗", b.conversation.single().content)
+            assertEquals(AiModelMessage.Role.USER, b.conversation.single().role)
+        }
+        assertEquals(12, logs.count { it.startsWith("AI_CONTEXT_EXPERIMENT_RESULT") })
+        assertFalse(logs.any { it.contains("刚休息") || it.contains("收到") })
+        engine.decide(AiReplyDecisionInput(context(), true, requestId = "normal-after-test"))
+        assertEquals(13, requests.size)
+        assertEquals(listOf(AiModelMessage(AiModelMessage.Role.USER, "你好")), requests.last().conversation)
+        assertTrue(requests.last().responseFormat is AiModelResponseFormat.JsonSchema)
+    }
+
+    @Test fun blankJsonExperimentsDoNotTriggerRetriesOrSkipOtherGroups() {
+        val requests = mutableListOf<AiModelRequest>()
+        val provider = object : AiModelProvider {
+            override fun generate(request: AiModelRequest): AiModelResult {
+                requests += request
+                if (request.responseFormat is AiModelResponseFormat.JsonSchema) {
+                    throw AiModelEmptyOutputException("BLANK", "stop")
+                }
+                return AiModelResult("收到", "fake", "test")
+            }
+        }
+        val logs = mutableListOf<String>()
+        AiReplyDecisionEngine(provider, grantedConsent).runContextFormatExperiment(
+            "A: 你好\nU: 忙吗", AiReplyPersonalization(), { false }
+        ) { logs.add(it) }
+        assertEquals(12, requests.size)
+        assertEquals(6, logs.count { it.startsWith("AI_CONTEXT_EXPERIMENT_RESULT") && it.contains("EMPTY_MODEL_OUTPUT") })
+        assertEquals(6, logs.count { it.startsWith("AI_CONTEXT_EXPERIMENT_RESULT") && it.contains("VALID_DECISION") })
+        assertTrue(requests.all { it.attemptIndex == 0 })
+    }
+
+    @Test fun contextFormatExperimentStopsOnCancellationOrRevokedConsent() {
+        val provider = FakeProvider(" ")
+        val engine = AiReplyDecisionEngine(provider, grantedConsent)
+        val logs = mutableListOf<String>()
+        engine.runContextFormatExperiment("A: 你好\nU: 忙吗", AiReplyPersonalization(), { provider.callCount >= 1 }) { logs.add(it) }
+        assertEquals(1, provider.callCount)
+        assertTrue(logs.any { it.contains("AI_CONTEXT_EXPERIMENT_STOP") })
+        assertFalse(logs.any { it.contains("AI_CONTEXT_EXPERIMENT_END") })
+        val denied = FakeProvider(" ")
+        AiReplyDecisionEngine(denied).runContextFormatExperiment("A: 你好\nU: 忙吗", AiReplyPersonalization(), { false }) {}
+        assertEquals(0, denied.callCount)
+    }
+
     private fun replyJson(draft: String) =
         """{"action":"REPLY","reason":"GREETING","draft":"${draft.replace("\\", "\\\\").replace("\"", "\\\"")}"}"""
 
