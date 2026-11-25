@@ -4771,6 +4771,7 @@ class AiReplyObservationRuntime(
                             candidate.contactIdentity = verifiedIdentity
                             val after = ChatSessionManagementPolicy.stableSessionKey(candidate)
                             if (before != after && boundBefore && expected != null) {
+                                privateMessagesTraversalTaskExecutor.preserveAttemptAfterVerifiedIdentityUpgrade(before, after)
                                 currentSessionKey = after
                                 expectedPrivateSessionDetailNavigation = expected.copy(sessionKey = after)
                             }
@@ -5460,8 +5461,14 @@ class AiReplyObservationRuntime(
                 return
             }
             PrivateMessagesScrollObservationDecision.TOP_BOUNDARY_CANDIDATE -> {
-                beginBoundaryStabilityConfirmation(visibleKeys, toTop = true, snapshot = snapshot)
-                return
+                // Startup still needs the original top proof. On the return scan,
+                // finish visible unread work before starting the completion proof.
+                if (!privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted ||
+                    listEvaluation.nextCandidate == null
+                ) {
+                    beginBoundaryStabilityConfirmation(visibleKeys, toTop = true, snapshot = snapshot)
+                    return
+                }
             }
             PrivateMessagesScrollObservationDecision.BOTTOM_NO_PROGRESS -> {
                 onLog("AI 会话管理：滚动后可见行顺序与身份集合未变化；底部定位无进展计数=${privateMessagesTraversalTaskExecutor.noProgressScrollCount}")
@@ -5590,7 +5597,10 @@ class AiReplyObservationRuntime(
                                 "累计不同视口=${privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.size}；" +
                                 "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}"
                         )
-                        continueSessionListWithoutCandidate(snapshot)
+                        // A diagnostic callback cannot reuse the old no-candidate
+                        // decision: the list may have reordered while capturing.
+                        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                        scheduleFullInspection()
                     }
                 }
             } else {
@@ -5633,9 +5643,8 @@ class AiReplyObservationRuntime(
                 return
             }
 
-            // Weak identities still need the existing visual conflict quarantine before
-            // navigation. The callback carries only identity/window hints, never a row
-            // object or coordinates. openSession independently reacquires live evidence.
+            // Screenshot evidence is diagnostic. After asynchronous collection, let
+            // the existing list observation select the latest bottom-most unread row.
             sessionManagerState = SessionManagerState.CAPTURING_SESSION_LIST
             val captureRunGeneration = currentRunGeneration()
             val captureActionGeneration = sessionActionGeneration
@@ -5652,8 +5661,8 @@ class AiReplyObservationRuntime(
                             "累计不同视口=${privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.size}；" +
                             "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}；使用身份提示重新采集当前会话行"
                     )
-                    sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
-                    attemptOpenSession(selectedKey, selectedWindow, selectedName)
+                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                    scheduleFullInspection()
                 }
             }
         } else {
@@ -5815,6 +5824,11 @@ class AiReplyObservationRuntime(
             ) {
                 privateMessagesTraversalTaskExecutor.atTop = false
                 scheduleSessionListStabilityRetry("顶部完成证据已失效，重新复核")
+                return
+            }
+            if (privateMessagesTraversalTaskExecutor.hasPendingVisibleReturnWork(snapshot)) {
+                onLog("AI 会话遍历[TOP_PENDING]：顶部视口仍有待解决未读行；先重新观察，不切换任务或启动重新定位")
+                scheduleSessionListStabilityRetry("顶部未读候选尚未解决")
                 return
             }
             if (observeIncompleteUnreadRelocation(snapshot)) return
@@ -6541,7 +6555,15 @@ class AiReplyObservationRuntime(
         val attempt = privateMessagesTaskExecutor.openSession(
             selectedKey = selectedKey,
             sourceWindow = sourceWindow,
-            blockedIdentityKeys = privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys
+            blockedIdentityKeys = privateMessagesTraversalTaskExecutor.ambiguousSessionIdentityKeys,
+            isCurrentTraversalSelection = { fresh, key ->
+                val traversal = privateMessagesTraversalTaskExecutor
+                !traversal.lockedUnreadSetFinalized ||
+                    traversal.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
+                    traversal.nextFreshReturnCandidate(fresh)?.let {
+                        ChatSessionManagementPolicy.stableSessionKey(it) == key
+                    } == true
+            }
         ) { requestId, snapshot, selectedKey, result ->
             scheduler.schedule(0L) {
                 if (activeSessionGestureRequestId == requestId) activeSessionGestureRequestId = null
@@ -6588,6 +6610,8 @@ class AiReplyObservationRuntime(
                             PrivateMessagesTaskExecutor.RejectionReason.UNREAD_ADMISSION_CHANGED ->
                                 "AI 会话管理：点击前准入复核失败；仅允许明确未读且会话行、昵称、预览均完整可见的私人会话；" +
                                     "当前未读状态=${attempt.unreadStatus?.name ?: ChatUnreadStatus.UNKNOWN.name}；拒绝点击"
+                            PrivateMessagesTaskExecutor.RejectionReason.TRAVERSAL_ORDER_CHANGED ->
+                                "AI 会话遍历[ORDER_CHANGED]：最新视口的相邻未读目标已变化；不派发旧点击，重新按当前行顺序观察"
                             PrivateMessagesTaskExecutor.RejectionReason.UNSAFE_TAP_BOUNDS ->
                                 "AI 会话管理：目标会话行复核失败或边界不安全；点击未派发、不消耗会话尝试次数，目标键=${attempt.selectedKey.take(12)}"
                             PrivateMessagesTaskExecutor.RejectionReason.MISSING_LIST_VIEWPORT ->
@@ -6659,8 +6683,10 @@ class AiReplyObservationRuntime(
                                 "${attempt.candidate.rowTarget.window.generation}"
                         )
                         sessionManagerState = SessionManagerState.OPENING_SESSION
+                        privateMessagesTraversalTaskExecutor.recordReturnViewportBeforeOpen(attempt.snapshot)
                         privateMessagesTraversalTaskExecutor.attemptedSessionKeys += attempt.selectedKey
                         privateMessagesTraversalTaskExecutor.sessionActionCount += 1
+                        privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
                         readinessDeferredRetryCount = 0
                         readinessDeferredRetryLimitLogged = false
                     }
@@ -7249,6 +7275,13 @@ class AiReplyObservationRuntime(
             recoverRetryablePrivateList("MESSAGE_LIST_PRE_SCROLL_PAGE_IDENTITY_MISMATCH")
             return
         }
+        // The independent read can reveal a newly clipped/unknown row, or prove a
+        // previously pending row READ. Retain that evidence before any return swipe.
+        if (toTop && !receivedGreetingsTaskActive &&
+            privateMessagesTraversalTaskExecutor.refreshReturnViewportWork(fresh)
+        ) {
+            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+        }
         // Row-scoped continuation is not a cached scroll permit. If the independently
         // complete evidence disappears before dispatch, retain the original fail-closed path.
         if (privateMessagesTraversalTaskExecutor.unresolvedIncompleteUnreadKeys.isNotEmpty()) {
@@ -7258,6 +7291,23 @@ class AiReplyObservationRuntime(
             if (stillPending && !privateMessagesTraversalTaskExecutor.canContinueWithIncompleteUnread(fresh)) {
                 onLog("AI 私聊异常会话[PRE_SCROLL_EVIDENCE_LOST]：滚动前新快照缺少独立完整行证据；不使用旧视口")
                 recoverRetryablePrivateList("PRIVATE_INCOMPLETE_UNREAD_ROW")
+                return
+            }
+        }
+        if (toTop && !receivedGreetingsTaskActive &&
+            privateMessagesTraversalTaskExecutor.phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP &&
+            privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized
+        ) {
+            val traversal = privateMessagesTraversalTaskExecutor
+            if (fresh.chatListExtractionTruncated || fresh.windowIdentityKey() == null ||
+                traversal.hasPendingVisibleReturnWork(fresh)
+            ) {
+                // This fresh pre-scroll read may expose rows absent from the old
+                // observation. Reenter the normal candidate path, not a new scan.
+                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                onLog("AI 会话遍历[PRE_SCROLL_PENDING]：当前新鲜视口仍有待处理或待复核行；保留已读边界，不直接滑过")
+                if (traversal.nextFreshReturnCandidate(fresh) != null) scheduleFullInspection()
+                else scheduleSessionListStabilityRetry("当前视口未读候选尚未解决")
                 return
             }
         }

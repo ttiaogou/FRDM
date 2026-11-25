@@ -1552,6 +1552,78 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun p6bReorderedReturnUsesFreshBottomMostAndPreservesOriginalRound() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        }
+        val a = candidate(0, "A", ChatUnreadStatus.UNREAD, top = 100)
+        val b = candidate(1, "B", ChatUnreadStatus.UNREAD, top = 400)
+        val c = candidate(2, "C", ChatUnreadStatus.UNREAD, top = 700)
+        val initial = snapshot(a, b, c)
+        assertEquals(c, executor.evaluateListSnapshot(initial, false, 2).nextCandidate)
+        executor.recordReturnViewportBeforeOpen(initial)
+        executor.attemptedSessionKeys += key(c)
+
+        val cMoved = candidate(0, "C", ChatUnreadStatus.UNREAD, top = 100)
+        val aMoved = candidate(2, "A", ChatUnreadStatus.UNREAD, top = 700)
+        val returned = snapshot(cMoved, b, aMoved)
+        assertEquals(aMoved, executor.nextFreshReturnCandidate(returned))
+        assertEquals(aMoved, executor.evaluateListSnapshot(returned, false, 2,
+            allowExpectedSessionReturnViewportChange = true).nextCandidate)
+        assertTrue(executor.hasPendingVisibleReturnWork(returned))
+        executor.attemptedSessionKeys += key(a)
+        assertEquals(b, executor.nextFreshReturnCandidate(returned))
+        executor.attemptedSessionKeys += key(b)
+        assertFalse(executor.hasPendingVisibleReturnWork(returned))
+        assertTrue(executor.lockedUnreadSetFinalized)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+    }
+
+    @Test
+    fun p6bPreScrollRetainsVisibleUnresolvedAndDoesNotRetireMissingCandidate() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        }
+        val pending = candidate(0, "Pending", ChatUnreadStatus.UNREAD)
+        val incomplete = candidate(1, "Incomplete", ChatUnreadStatus.UNREAD, previewBoundsValid = false)
+        val other = candidate(2, "Other", ChatUnreadStatus.READ)
+        executor.recordReturnViewportBeforeOpen(snapshot(pending, incomplete, other))
+        assertTrue(executor.hasPendingVisibleReturnWork(snapshot(incomplete, other)))
+        assertEquals(null, executor.nextFreshReturnCandidate(snapshot(incomplete, other)))
+        assertTrue(key(pending) in executor.pendingKnownUnreadKeys())
+        assertTrue(executor.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertFalse(executor.hasPendingVisibleReturnWork(snapshot(other)))
+        assertTrue(key(pending) in executor.pendingKnownUnreadKeys())
+        val repaired = candidate(1, "Incomplete", ChatUnreadStatus.UNREAD)
+        val returned = executor.evaluateListSnapshot(snapshot(pending, repaired, other), false, 2,
+            allowExpectedSessionReturnViewportChange = true)
+        assertEquals(repaired, returned.nextCandidate)
+        assertTrue(executor.unresolvedIncompleteUnreadKeys.isEmpty())
+    }
+
+    @Test
+    fun p6bVerifiedIdentityUpgradeKeepsVisitAttemptedUnderBothKeys() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val weak = candidate(0, "A", ChatUnreadStatus.UNREAD)
+        val verified = candidate(0, "A", ChatUnreadStatus.UNREAD).apply {
+            contactIdentity = ContactRowIdentity("snapshot", "temp", "verified", ContactIdentityConfidence.PLATFORM_ID_VERIFIED)
+        }
+        executor.attemptedSessionKeys += key(weak)
+        executor.lockedUnreadSessionKeys += key(weak)
+        executor.preserveAttemptAfterVerifiedIdentityUpgrade(key(weak), key(verified))
+        assertEquals(setOf(key(weak), key(verified)), executor.attemptedSessionKeys)
+        assertTrue(executor.pendingKnownUnreadKeys().isEmpty())
+        assertEquals(null, executor.selectNextCandidate(listOf(verified)))
+        assertEquals(null, executor.selectNextCandidate(listOf(weak)))
+    }
+
+    @Test
     fun p5ReturningScanAdmitsNewUnreadAndNeverReopensAttemptedOrUnknownRows() {
         val executor = PrivateMessagesTraversalTaskExecutor().apply {
             initialInboxTopPositioningCompleted = true

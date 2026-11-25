@@ -37,6 +37,7 @@ internal class PrivateMessagesTaskExecutor(
         AMBIGUOUS_SESSION_IDENTITY,
         SESSION_ROW_NOT_FOUND,
         UNREAD_ADMISSION_CHANGED,
+        TRAVERSAL_ORDER_CHANGED,
         UNSAFE_TAP_BOUNDS,
         MISSING_LIST_VIEWPORT,
         WINDOW_CONTEXT_CHANGED
@@ -67,6 +68,7 @@ internal class PrivateMessagesTaskExecutor(
         selectedKey: String,
         sourceWindow: WindowRef,
         blockedIdentityKeys: Set<String>,
+        isCurrentTraversalSelection: (ChatPageSnapshot, String) -> Boolean = { _, _ -> true },
         onGestureResult: (requestId: String, snapshot: ChatPageSnapshot, selectedKey: String, result: GestureExecutionResult) -> Unit
     ): Attempt {
         if (!ownsTask()) {
@@ -184,6 +186,9 @@ internal class PrivateMessagesTaskExecutor(
         if (selectedKey in blockedIdentityKeys || sessionPort.isSessionIdentityBlocked(selectedKey)) {
             return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
                 confirmedIdentityBlock = true)
+        }
+        if (!isCurrentTraversalSelection(refreshed, selectedKey)) {
+            return Attempt.Rejected(selectedKey, RejectionReason.TRAVERSAL_ORDER_CHANGED)
         }
         val submission = runCatching {
             gesturePolicy.execute(request) { result -> onGestureResult(request.id, refreshed, selectedKey, result) }

@@ -776,6 +776,64 @@ internal class PrivateMessagesTraversalTaskExecutor {
         )
     }
 
+    /** Reuse the existing admission/identity checks on the latest return viewport.
+     * Newly visible unread rows may precede the old selection after list reflow.
+     * This is a read-only ordering check, not a gesture or a new round. */
+    fun nextFreshReturnCandidate(snapshot: ChatPageSnapshot): ChatListCandidateSnapshot? {
+        if (phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
+            !lockedUnreadSetFinalized || snapshot.pageKind != ChatPageKind.CHAT_LIST ||
+            snapshot.chatListExtractionTruncated || snapshot.windowIdentityKey() == null
+        ) return null
+        val conflicts = ambiguousIdentityKeys(snapshot.chatListCandidates) + ambiguousSessionIdentityKeys
+        return selectNextCandidate(snapshot.chatListCandidates.filter {
+            isUniqueCompletePrivateRow(snapshot, it, conflicts)
+        })
+    }
+
+    /** A fully visible unresolved private row must be reobserved before leaving this
+     * viewport. Edge-clipped rows retain the existing pending/relocation lifecycle,
+     * since scrolling may be necessary to expose their full structure. */
+    fun hasPendingVisibleReturnWork(snapshot: ChatPageSnapshot): Boolean {
+        if (phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP || !lockedUnreadSetFinalized) return false
+        return snapshot.chatListCandidates.any { row ->
+            val key = ChatSessionManagementPolicy.stableSessionKey(row)
+            row.selectionClass == "PRIVATE_CHAT" && row.rowVisibleToUser &&
+                row.intersectsViewport && row.fullyInsideViewport &&
+                !isClippedAtViewportEdge(snapshot, row) &&
+                key !in attemptedSessionKeys && key !in ambiguousSessionIdentityKeys &&
+                (row.unreadStatus != ChatUnreadStatus.READ || isPendingIncompleteRow(row) ||
+                    key in unresolvedUnknownUnreadKeys)
+        }
+    }
+
+    /** Reconcile fresh row evidence without moving the viewport cursor.
+     * Missing rows are never retired; clipped unread rows remain pending. */
+    fun refreshReturnViewportWork(snapshot: ChatPageSnapshot): Boolean {
+        if (phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
+            !lockedUnreadSetFinalized || snapshot.pageKind != ChatPageKind.CHAT_LIST ||
+            snapshot.chatListExtractionTruncated || snapshot.windowIdentityKey() == null
+        ) return false
+        observeIncompleteUnreadEvidence(snapshot)
+        observeUnreadBlockers(snapshot)
+        reconcileAdmittedUnread(snapshot)
+        return true
+    }
+
+    /** Preserve the newest pre-navigation viewport and all admitted work. */
+    fun recordReturnViewportBeforeOpen(snapshot: ChatPageSnapshot) {
+        if (refreshReturnViewportWork(snapshot)) recordVerifiedViewport(snapshot)
+    }
+
+    /** A verified upgrade of the currently bound attempted row is the same visit.
+     * Retain the weak attempt alias for a subsequent list with no exposed platform ID. */
+    fun preserveAttemptAfterVerifiedIdentityUpgrade(previousKey: String, verifiedKey: String) {
+        if (previousKey.isBlank() || verifiedKey.isBlank() || previousKey == verifiedKey ||
+            previousKey !in attemptedSessionKeys
+        ) return
+        attemptedSessionKeys += verifiedKey
+        if (previousKey in lockedUnreadSessionKeys) lockedUnreadSessionKeys += verifiedKey
+    }
+
     private fun resetUnreadBoundaryObservation() {
         unreadBoundarySignature = ""
         unreadBoundaryStabilityCount = 0
@@ -979,7 +1037,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * An actually clipped edge holder is not a complete row. It contributes no READ
      * evidence; explicit or ambiguous badge evidence still prevents an all-read viewport.
      */
-    private fun isNonContributingClippedEdge(snapshot: ChatPageSnapshot, row: ChatListCandidateSnapshot): Boolean {
+    private fun isClippedAtViewportEdge(snapshot: ChatPageSnapshot, row: ChatListCandidateSnapshot): Boolean {
         val viewport = snapshot.chatListViewport ?: return false
         val touchesTop = row.rowBounds.top <= viewport.top
         val touchesBottom = row.rowBounds.bottom >= viewport.bottom
@@ -994,13 +1052,16 @@ internal class PrivateMessagesTraversalTaskExecutor {
         }
         return row.rowBoundsValid && row.intersectsViewport && row.rowVisibleToUser &&
             (!row.fullyInsideViewport || row.rowClippedAtViewportEdge || childClipping) &&
-            (touchesTop || touchesBottom) &&
+            (touchesTop || touchesBottom)
+    }
+
+    private fun isNonContributingClippedEdge(snapshot: ChatPageSnapshot, row: ChatListCandidateSnapshot): Boolean =
+        isClippedAtViewportEdge(snapshot, row) &&
             row.unreadStatus != ChatUnreadStatus.UNREAD &&
             (row.unreadStatus == ChatUnreadStatus.READ ||
                 (!row.statusNewNodePresent && row.statusNewNodeObservationCount == 0 &&
                     row.unreadEvidenceSource == com.freedom.features.aireply.ports.ChatUnreadEvidenceSource.NONE &&
                     row.unreadNodeEvidence.isEmpty()))
-    }
 
     /** Admit the current confirmed-top snapshot itself; no compulsory swipe. */
     fun evaluateUnreadAdmission(snapshot: ChatPageSnapshot): PrivateMessagesUnreadAdmissionDecision {

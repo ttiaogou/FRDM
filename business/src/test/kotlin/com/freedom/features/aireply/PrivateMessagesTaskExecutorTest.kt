@@ -208,6 +208,21 @@ class PrivateMessagesTaskExecutorTest {
     }
 
     @Test
+    fun rejectsStaleTraversalOrderWithoutSubmittingGesture() {
+        val selected = candidate()
+        var dispatches = 0
+        val executor = executor(snapshotProvider = { validSnapshot() }, onDispatch = { dispatches++ })
+        val result = executor.openSession(key(selected), selected.rowTarget.window, emptySet(),
+            isCurrentTraversalSelection = { fresh, selectedKey ->
+                assertEquals(selectedKey, key(fresh.chatListCandidates.single()))
+                false
+            }) { _, _, _, _ -> }
+        assertEquals(PrivateMessagesTaskExecutor.RejectionReason.TRAVERSAL_ORDER_CHANGED,
+            (result as PrivateMessagesTaskExecutor.Attempt.Rejected).reason)
+        assertEquals(0, dispatches)
+    }
+
+    @Test
     fun rechecksVisualIdentityQuarantineImmediatelyBeforeDispatch() {
         val selected = candidate()
         var blockedChecks = 0
