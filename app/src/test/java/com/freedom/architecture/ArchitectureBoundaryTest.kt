@@ -1158,6 +1158,25 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
+    fun independentEntryKeepsObservingAndFilteredWindowMetadataNeverDispatchesBusiness() {
+        val root = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        val forwarder = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventForwarder.kt").readText()
+        val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
+        val filtered = forwarder.substringAfter("if (!accepted) {").substringBefore("if (isGlobalTouch) onLog(\"全局触摸链路[SERVICE_ACCEPTED]")
+        assertTrue(filtered.contains("if (isWindowEvent && isRunRequested() && !eventPackage.isNullOrBlank())"))
+        assertTrue(filtered.contains("onFilteredWindowObservation(eventPackage)"))
+        assertTrue(filtered.contains("return"))
+        assertFalse(filtered.contains("pipeline.process"))
+        assertTrue(service.contains("onFilteredWindowObservation = { sourcePackage ->"))
+        assertTrue(service.contains("if (sourcePackage != packageName) dependencies.requestIndependentPageObservation()"))
+        assertTrue(root.contains("entryPageRetry.update(shouldRetry, keepObserving = true)"))
+        assertTrue(root.contains("routeIndependentPageTask(mode, targetTask, snapshot.runGeneration)"))
+        val request = root.substringAfter("fun requestIndependentPageObservation()").substringBefore("val activityEvidenceReader")
+        assertTrue(request.contains("if (runSessionCoordinator.isPageObservationAllowed()) entryPageObservation.requestSnapshot()"))
+        assertFalse(request.contains("routePageTask("))
+    }
+
+    @Test
     fun pageSelectedBrowseStartupDoesNotPublishPreparationWhileWorkflowIsIdle() {
         val source = projectFile("app/src/main/java/com/freedom/adapters/runtime/android/AccountBrowseModeRuntimeAdapter.kt").readText()
         val start = source.substringAfter("override fun onPageRuntimeStarted(")

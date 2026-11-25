@@ -95,7 +95,11 @@ class FreedomAccessibilityService : AccessibilityService() {
             onWindowTransition = ::handleAccessibilityWindowTransition,
             pipeline = accessibilityEventPipeline,
             currentRunGeneration = runSessionCoordinator::currentRunGeneration,
-            currentWindowGeneration = accessibilityGateway::currentWindowGeneration
+            currentWindowGeneration = accessibilityGateway::currentWindowGeneration,
+            onFilteredWindowObservation = { sourcePackage ->
+                // Freedom's own log/overlay refresh cannot wake the entry reader.
+                if (sourcePackage != packageName) dependencies.requestIndependentPageObservation()
+            }
         )
     }
 

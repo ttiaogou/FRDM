@@ -40,6 +40,36 @@ class EntryPageObservationRetryTest {
     }
 
     @Test
+    fun readyRouteKeepsOneLowFrequencyObservationAndFailureRearmsFastRetry() {
+        val scheduler = Scheduler()
+        var reads = 0
+        lateinit var retry: EntryPageObservationRetry
+        retry = EntryPageObservationRetry(scheduler, { 7L }, { true }) {
+            reads++
+            retry.update(false, keepObserving = true)
+        }
+        retry.update(false, keepObserving = true)
+        repeat(100) { retry.update(false, keepObserving = true) }
+        assertEquals(1, scheduler.entries.size)
+        assertEquals(30000L, scheduler.entries[0].delay)
+        scheduler.entries[0].callback()
+        assertEquals(1, reads)
+        assertEquals(30000L, scheduler.entries[1].delay)
+
+        retry.update(true, keepObserving = true)
+        assertEquals(true, scheduler.entries[1].cancelled)
+        assertEquals(500L, scheduler.entries[2].delay)
+        scheduler.entries[1].callback()
+        assertEquals(1, reads)
+        scheduler.entries[2].callback()
+        assertEquals(2, reads)
+        assertEquals(30000L, scheduler.entries[3].delay)
+        retry.cancel()
+        scheduler.entries[3].callback()
+        assertEquals(2, reads)
+    }
+
+    @Test
     fun stopAndGenerationChangeRejectAlreadyQueuedCallbacks() {
         val scheduler = Scheduler()
         var allowed = true

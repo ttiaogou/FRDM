@@ -716,6 +716,14 @@ object MonitorOverlay {
         if (enabled) collapseMenu()
         val applied = applyCurrentVisibility()
         if (!applied) {
+            // Restoring a stale launcher token can fail during task exit. Use the
+            // existing validated window reconstruction before reporting cleanup
+            // failure. Never report success solely because reconstruction was requested.
+            val app = appContext
+            if (!enabled && app != null && repository(app).isFloatingLogEnabled() &&
+                hasOverlayPermission(app) && ensureLauncherAttached(app) &&
+                isAttached() && applyCurrentVisibility(app)
+            ) return true
             touchPassthrough = previous
             applyCurrentVisibility()
             return false

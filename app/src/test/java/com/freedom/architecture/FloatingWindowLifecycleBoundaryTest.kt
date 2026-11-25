@@ -166,6 +166,20 @@ class FloatingWindowLifecycleBoundaryTest {
     }
 
     @Test
+    fun failedPassthroughRestorationRequiresValidatedReconstructionOrReturnsFailure() {
+        val overlay = source("app/src/main/java/com/freedom/adapters/accessibility/android/MonitorOverlay.kt")
+        val restore = overlay.substringAfter("fun setTouchPassthrough(enabled: Boolean)")
+            .substringBefore("fun acquireObservationVisibility(")
+        assertTrue(restore.contains("if (!enabled && app != null"))
+        assertTrue(restore.contains("hasOverlayPermission(app) && ensureLauncherAttached(app)"))
+        assertTrue(restore.contains("isAttached() && applyCurrentVisibility(app)"))
+        assertTrue(restore.contains("touchPassthrough = previous"))
+        assertTrue(restore.contains("return false"))
+        val workflow = source("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
+        assertTrue(workflow.contains("check(restoreMonitorOverlayTouchPassthrough())"))
+    }
+
+    @Test
     fun doubleTapRequestsStopAndReturnsToMainConfiguration() {
         val overlay = source("app/src/main/java/com/freedom/adapters/accessibility/android/MonitorOverlay.kt")
         val main = source("app/src/main/java/com/freedom/MainActivity.kt")

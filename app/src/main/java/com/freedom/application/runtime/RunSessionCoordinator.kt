@@ -283,8 +283,13 @@ class RunSessionCoordinator(
      * Never start the destination using the source generation's snapshot.
      */
     @Synchronized
-    fun routeIndependentPageTask(mode: RunMode, taskId: String): PageRuntimeSessionState? {
+    fun routeIndependentPageTask(
+        mode: RunMode,
+        taskId: String,
+        observedGeneration: Long = runGeneration
+    ): PageRuntimeSessionState? {
         val current = pageRuntimeSession.current()
+        if (observedGeneration != runGeneration) return current
         if (!isPageObservationAllowed() || !observedRunRequested || pageTransitionInProgress)
             return current
         if (current?.lifecycle == PageRuntimeLifecycle.STOPPING) return current

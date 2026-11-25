@@ -71,6 +71,81 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun allSixIndependentPageSwitchesRevokeSourceAndDispatchOnlyToFreshDestination() {
+        val routes = listOf(
+            RunMode.ACCOUNT_BROWSE to "ACCOUNT_BROWSE",
+            RunMode.AI_REPLY to "AI_REPLY_PRIVATE_MESSAGES",
+            RunMode.AI_REPLY to "AI_REPLY_RECEIVED_GREETINGS"
+        )
+        for (source in routes) for (destination in routes.filter { it != source }) {
+            val state = FakeState().apply { requested = true }
+            val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+            val trace = mutableListOf<String>()
+            lateinit var coordinator: RunSessionCoordinator
+            fun runtime(runtimeMode: RunMode) = object : ModeRuntimePort {
+                override val mode = runtimeMode
+                override fun onRunStarted() = error("page route required")
+                override fun onRunStopped(reason: String) = error("switch is not user stop")
+                override fun onAccessibilityServiceConnected() = Unit
+                override fun onAccessibilityServiceDisconnected() = Unit
+                override fun onPageRuntimeStarted(
+                    session: com.freedom.core.runtime.PageRuntimeSessionState,
+                    onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit
+                ) {
+                    trace += "start:${session.taskId}"
+                    onPrepared(session)
+                }
+                override fun onPageRuntimeWillSuspend(reason: String) {
+                    assertNull(coordinator.currentWriteRoute())
+                    trace += "save:${tasks.activeTaskId()}"
+                }
+                override fun onPageRuntimeSuspended(reason: String) {
+                    assertNull(tasks.currentLease())
+                    assertNull(coordinator.currentWriteRoute())
+                    trace += "isolated"
+                }
+                override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) {
+                    trace += "execute:${coordinator.currentWriteRoute()?.taskId}"
+                }
+            }
+            coordinator = RunSessionCoordinator(state,
+                routes.map { it.first }.distinct().associateWith { runtime(it) }, RuntimeLogSink { },
+                taskCoordinator = tasks)
+            coordinator.synchronizeRunRequest()
+            val first = requireNotNull(coordinator.routeIndependentPageTask(source.first, source.second))
+            val sourceLease = requireNotNull(tasks.tryAcquire(source.second, first.runGeneration))
+            assertTrue(coordinator.admitBusinessPageTaskOwnership(sourceLease, false))
+            // An unresolved page hold is not a task stop and must not block a new task.
+            coordinator.reconcileUnclassifiedPage(first.runGeneration, false)
+            assertNull(coordinator.currentWriteRoute())
+
+            assertNull(coordinator.routeIndependentPageTask(destination.first, destination.second, first.runGeneration))
+            assertNull(tasks.currentLease())
+            assertNull(coordinator.currentWriteRoute())
+            assertFalse(coordinator.admitBusinessPageTaskOwnership(sourceLease, true))
+            // The old snapshot cannot start either task after source isolation.
+            assertNull(coordinator.routeIndependentPageTask(destination.first, destination.second, first.runGeneration))
+            assertNull(coordinator.routeIndependentPageTask(source.first, source.second, first.runGeneration))
+            val next = requireNotNull(coordinator.routeIndependentPageTask(destination.first, destination.second,
+                coordinator.currentRunGeneration()))
+            assertTrue(next.runGeneration > first.runGeneration)
+            assertNull(coordinator.currentWriteRoute())
+            val destinationLease = requireNotNull(tasks.tryAcquire(destination.second, next.runGeneration))
+            assertTrue(coordinator.admitBusinessPageTaskOwnership(destinationLease, false))
+            assertEquals(destination.second, coordinator.currentWriteRoute()?.taskId)
+            coordinator.dispatchTargetApplicationEvent(AccessibilityEventEnvelope(
+                type = com.freedom.core.accessibility.events.AccessibilityEventType.VIEW_CLICKED,
+                packageName = "com.immomo.momo", className = "android.widget.Button",
+                contentChanges = emptySet(), eventTimeMillis = 123L, eventText = emptyList(),
+                contentDescription = null, source = null
+            ))
+            assertEquals(listOf("start:${source.second}", "save:${source.second}", "isolated",
+                "start:${destination.second}", "execute:${destination.second}"), trace)
+            assertTrue(state.requested)
+        }
+    }
+
+    @Test
     fun independentSiblingPageSwitchSuspendsOldTaskAndRequiresNewReadInBothDirections() {
         val state = FakeState().apply { requested = true }
         val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())

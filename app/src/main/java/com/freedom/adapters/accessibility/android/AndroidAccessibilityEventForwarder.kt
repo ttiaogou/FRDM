@@ -19,7 +19,8 @@ internal class AndroidAccessibilityEventForwarder(
     private val onWindowTransition: (AccessibilityEvent, RunMode?) -> Unit,
     private val pipeline: AccessibilityEventPipelinePort,
     private val currentRunGeneration: () -> Long = { -1L },
-    private val currentWindowGeneration: () -> Long = { -1L }
+    private val currentWindowGeneration: () -> Long = { -1L },
+    private val onFilteredWindowObservation: (String) -> Unit = {}
 ) {
     private var windowCallbackSequence = 0L
     fun accept(event: AccessibilityEvent?) {
@@ -80,6 +81,12 @@ internal class AndroidAccessibilityEventForwarder(
             }
         }
         if (!accepted) {
+            // Explicit foreign-window metadata is only a wake-up hint. Null-package
+            // window churn is covered by the independent timer, not fed back into it.
+            // Do not normalize foreign events, access nodes or dispatch to a business.
+            if (isWindowEvent && isRunRequested() && !eventPackage.isNullOrBlank()) {
+                onFilteredWindowObservation(eventPackage)
+            }
             logWindowEvent(false)
             if (isGlobalTouch) onLog("全局触摸链路[SERVICE_DROPPED]：回调入口过滤拒绝；事件=$eventTypeName")
             return

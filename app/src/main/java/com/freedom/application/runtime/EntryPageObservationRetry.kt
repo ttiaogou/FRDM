@@ -17,24 +17,33 @@ internal class EntryPageObservationRetry(
     private val onRetry: () -> Unit
 ) {
     private var generation: Long? = null
+    private var retryMode: Boolean? = null
     private var token = 0L
     private var attempt = 0
     private var pending: ScheduledTask? = null
 
-    fun update(shouldRetry: Boolean) {
-        if (!shouldRetry || !isObservationAllowed()) {
+    fun update(shouldRetry: Boolean, keepObserving: Boolean = false) {
+        if ((!shouldRetry && !keepObserving) || !isObservationAllowed()) {
             cancel()
             return
         }
         val current = currentRunGeneration()
-        if (generation != current) {
+        if (generation != current || retryMode != shouldRetry) {
             cancel()
             generation = current
+            retryMode = shouldRetry
         }
         if (pending != null) return
-        attempt = (attempt + 1).coerceAtMost(RecoveryScheduler.fastRetryCount + 1)
+        val delay = if (shouldRetry) {
+            attempt = (attempt + 1).coerceAtMost(RecoveryScheduler.fastRetryCount + 1)
+            RecoveryScheduler.readOnlyRetryDelayMs(attempt)
+        } else {
+            // READY still needs a low-frequency independent page read when no
+            // target event arrives. Reuse the established read-only cadence.
+            RecoveryScheduler.longWaitDelayMs
+        }
         val expectedToken = ++token
-        pending = scheduler.schedule(RecoveryScheduler.readOnlyRetryDelayMs(attempt)) {
+        pending = scheduler.schedule(delay) {
             if (token == expectedToken) {
                 pending = null
                 if (isObservationAllowed() && currentRunGeneration() == current) {
@@ -49,6 +58,7 @@ internal class EntryPageObservationRetry(
         pending?.cancel()
         pending = null
         generation = null
+        retryMode = null
         attempt = 0
     }
 }

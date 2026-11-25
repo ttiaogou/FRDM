@@ -343,7 +343,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                         if (verifiedGreetingNavigation) {
                             runSessionCoordinator.reconcileUnclassifiedPage(snapshot.runGeneration, true)
                         } else if (snapshot.entryObservation) {
-                            runSessionCoordinator.routeIndependentPageTask(mode, targetTask)
+                            runSessionCoordinator.routeIndependentPageTask(mode, targetTask, snapshot.runGeneration)
                         } else if (verifiedOwnTask) {
                             runSessionCoordinator.routePageTask(mode, targetTask)
                         }
@@ -392,6 +392,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                     }
                     val generation = runSessionCoordinator.currentRunGeneration()
                     var entryConflict = false
+                    var greetingNavigationAwaitingHandoff = false
                     val recognized = runCatching {
                         val snapshot = momoSocialAdapter.inspectUnifiedEntryPage(generation, ++entryObservationGeneration)
                         if (snapshot == null || generation != runSessionCoordinator.currentRunGeneration() ||
@@ -404,6 +405,12 @@ internal class AccessibilityServiceDependencies internal constructor(
                             ) {
                                 val decision = unifiedPageObservationBus.observe(snapshot)
                                 entryConflict = decision.conflict
+                                // Preserve the existing verified greeting navigation, but
+                                // keep checking until the independent inbox owns its route.
+                                greetingNavigationAwaitingHandoff =
+                                    !decision.conflict &&
+                                        decision.classification == com.freedom.core.runtime.PageClassification.PRIVATE_MESSAGES &&
+                                        runSessionCoordinator.currentPageRuntimeSession()?.taskId == "AI_REPLY_RECEIVED_GREETINGS"
                                 !decision.conflict && decision.classification in setOf(
                                     com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE,
                                     com.freedom.core.runtime.PageClassification.PRIVATE_MESSAGES,
@@ -421,17 +428,23 @@ internal class AccessibilityServiceDependencies internal constructor(
                         }.getOrDefault(false)
                         runSessionCoordinator.reconcileUnclassifiedPage(generation, ownedNestedPage)
                     }
-                    // Failed cleanup, unknown entry and provisional startup retain an autonomous
-                    // observation timer even if Android emits no further event.
-                    val shouldRetry = !recognized || session == null ||
+                    // Keep the independent observation alive even in READY. Unknown,
+                    // startup, cleanup and a protected greeting handoff use the existing
+                    // retry backoff; a healthy route uses its low-frequency interval.
+                    val shouldRetry = !recognized || session == null || greetingNavigationAwaitingHandoff ||
                         session.lifecycle == com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING ||
                         !runSessionCoordinator.isRuntimeReady(session.mode)
-                    entryPageRetry.update(shouldRetry)
+                    entryPageRetry.update(shouldRetry, keepObserving = true)
                 }
             }
         )
     }
     private val entryPageObservation: com.freedom.core.runtime.PageObservationSubscription by entryPageObservationDelegate
+
+    /** A filtered window callback may wake the independent reader, never a business task. */
+    fun requestIndependentPageObservation() {
+        if (runSessionCoordinator.isPageObservationAllowed()) entryPageObservation.requestSnapshot()
+    }
 
     /** Service-scoped Activity recovery; no gesture or page-action capability is injected. */
     val activityEvidenceReader by lazy(LazyThreadSafetyMode.NONE) {
