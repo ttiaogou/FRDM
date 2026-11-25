@@ -24,8 +24,12 @@ internal class AccountBrowseModeRuntimeAdapter(
 ) : ModeRuntimePort, PageObservationSnapshotClassifier {
     override val mode: RunMode = RunMode.ACCOUNT_BROWSE
 
-    override fun classify(snapshot: PageObservationSnapshot): PageClassification =
-        workflow().classifyUnifiedPage(snapshot.fingerprint)
+    override fun classify(snapshot: PageObservationSnapshot): PageClassification {
+        if (snapshot.fingerprint.semanticPage == "DETAIL" &&
+            snapshot.sourceTaskId != "ACCOUNT_BROWSE"
+        ) return PageClassification.UNKNOWN
+        return workflow().classifyUnifiedPage(snapshot.fingerprint)
+    }
 
     private var awaitingServiceReconnect = false
     private val taskExecutionController = TaskExecutionController(
