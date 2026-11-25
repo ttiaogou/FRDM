@@ -1562,7 +1562,8 @@ class AiReplyObservationRuntime(
         pageObservationSnapshotSource?.publish(
             PageObservationSnapshot(
                 fingerprint = pageFingerprint,
-                observationGeneration = observation.observationGeneration
+                observationGeneration = observation.observationGeneration,
+                runGeneration = currentRunGeneration()
             )
         )
         val matchedRouteId = if (pageFingerprint.packageName == targetPackage()) {
