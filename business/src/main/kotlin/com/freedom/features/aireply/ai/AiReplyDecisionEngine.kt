@@ -9,9 +9,7 @@ class AiReplyDecisionEngine(
 ) {
     init { require(systemInstruction.isNotBlank()); require(maxDraftChars in 1..10_000) }
 
-    fun decide(input: AiReplyDecisionInput): AiReplyEvaluation = decide(input, false)
-
-    private fun decide(input: AiReplyDecisionInput, transcriptMode: Boolean): AiReplyEvaluation {
+    fun decide(input: AiReplyDecisionInput): AiReplyEvaluation {
         if (!input.contactIdentityVerified && !input.context.currentWindowDraft) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.IDENTITY_RETRYABLE)
         if (!input.context.hasVerifiedIncoming && !input.context.currentWindowDraft) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.MESSAGE_EVIDENCE_UNAVAILABLE)
         if (input.context.messages.isEmpty()) return AiReplyEvaluation.Execution(AiReplyExecutionStatus.EMPTY_CONTEXT)
@@ -56,19 +54,11 @@ class AiReplyDecisionEngine(
             ModelResponseMode.PLAIN_TEXT -> PLAIN_TEXT_INSTRUCTION
             else -> STRICT_JSON_INSTRUCTION
         }
-        val redactedConversation = AiModelDataRedactor.redactMessages(safeConversation)
-        val outboundConversation = if (transcriptMode) listOf(AiModelMessage(
-            AiModelMessage.Role.USER,
-            redactedConversation.joinToString("\n") { message ->
-                val label = if (message.role == AiModelMessage.Role.USER) "对方(USER)" else "己方(ASSISTANT)"
-                "$label：${message.content}"
-            }
-        )) else redactedConversation
         val request = AiModelRequest(
             systemInstruction = AiModelDataRedactor.redact(
                 "$systemInstruction\n\n${input.personalization.systemPromptInstructions()}\n\n$schemaPromptSuffix"
             ),
-            conversation = outboundConversation,
+            conversation = AiModelDataRedactor.redactMessages(safeConversation),
             // 保持既有生成参数与个性化偏好解耦；偏好以自然语言提示传递，
             // 不映射为供应商专属参数。
             temperature = DEFAULT_TEMPERATURE,
@@ -124,69 +114,6 @@ class AiReplyDecisionEngine(
         return AiReplyEvaluation.Model(
             decision.copy(provider = result.provider, model = result.model, finishReason = result.finishReason, usage = result.usage)
         )
-    }
-
-    /**
-     * Explicit, read-only replay of one user-entered transcript. Never returns a draft or
-     * invokes the task coordinator. The normal decision entry always uses the original array.
-     */
-    internal fun runContextFormatExperiment(
-        transcript: String,
-        personalization: AiReplyPersonalization,
-        isCancelled: () -> Boolean,
-        onLog: (String) -> Unit
-    ) {
-        val messages = transcript.lineSequence().filter { it.isNotBlank() }.map { line ->
-            val match = Regex("^([UA])[:：]\\s*(.+)$").matchEntire(line.trim())
-                ?: throw IllegalArgumentException("每条消息须以 U:（对方）或 A:（己方）开头")
-            val role = if (match.groupValues[1] == "U") AiModelMessage.Role.USER else AiModelMessage.Role.ASSISTANT
-            AiModelMessage(role, match.groupValues[2])
-        }.toList()
-        require(messages.size in 2..30 && messages.all { it.content.length <= 2_000 }) {
-            "请输入 2～30 条消息，每条不超过 2000 字符"
-        }
-        require(messages.last().role == AiModelMessage.Role.USER && messages.any { it.role == AiModelMessage.Role.ASSISTANT }) {
-            "需包含己方消息，且末条必须为对方消息"
-        }
-        val safe = AiSafeConversationText.outbound(messages)
-        require(safe.size == messages.size && !AiReplyLocalSafety.isDangerous(safe.last().content)) {
-            "样本未通过现有正文或本地安全校验"
-        }
-        require(personalization.validationError() == null) { "个性化配置无效" }
-        val experimentId = java.util.UUID.randomUUID().toString()
-        val context = ConversationContext("diagnostic", "diagnostic", safe, 0, 0, 0, true, currentWindowDraft = true)
-        onLog("AI_CONTEXT_EXPERIMENT_START experimentId=$experimentId messages=${safe.size} roles=${safe.joinToString(",") { it.role.name }} repeats=3")
-        // Interleave groups to reduce time/order effects; each attempt is independent.
-        for (repeat in 1..3) {
-            for ((group, mode, flattened) in listOf(
-                Triple("A", ModelResponseMode.STRICT_JSON, false),
-                Triple("B", ModelResponseMode.STRICT_JSON, true),
-                Triple("C", ModelResponseMode.PLAIN_TEXT, false),
-                Triple("D", ModelResponseMode.PLAIN_TEXT, true)
-            )) {
-                if (isCancelled() || !cloudConsent.isGranted()) {
-                    onLog("AI_CONTEXT_EXPERIMENT_STOP experimentId=$experimentId reason=CANCELLED_OR_CONSENT_REVOKED")
-                    return
-                }
-                val requestId = "$experimentId-$group-$repeat"
-                onLog("AI_CONTEXT_EXPERIMENT_ATTEMPT requestId=$requestId group=$group repeat=$repeat responseMode=${mode.name} flattened=$flattened")
-                val result = decide(AiReplyDecisionInput(
-                    context, contactIdentityVerified = false, requestId = requestId,
-                    personalization = personalization, responseMode = mode, attemptIndex = 0
-                ), flattened)
-                val summary = when (result) {
-                    is AiReplyEvaluation.Model -> if (result.decision.provider == null) {
-                        "outcome=LOCAL_SAFETY_BLOCK"
-                    } else {
-                        "outcome=VALID_DECISION action=${result.decision.action.name}"
-                    }
-                    is AiReplyEvaluation.Execution ->
-                        "outcome=${result.callDiagnostics?.safeCode ?: result.status.reasonCode}"
-                }
-                onLog("AI_CONTEXT_EXPERIMENT_RESULT requestId=$requestId group=$group repeat=$repeat $summary")
-            }
-        }
-        onLog("AI_CONTEXT_EXPERIMENT_END experimentId=$experimentId attempts=12")
     }
 
     companion object {

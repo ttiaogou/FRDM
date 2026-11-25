@@ -10,14 +10,6 @@ class EngineBackedAiDecisionGateway(
 ) : AiDecisionGateway {
     private val engine = AiReplyDecisionEngine(modelProvider = modelProvider, cloudConsent = cloudConsent)
 
-    /** Explicit diagnostics only: no task, composer, or send capabilities. */
-    fun runContextFormatExperiment(
-        transcript: String,
-        personalization: AiReplyPersonalization,
-        isCancelled: () -> Boolean,
-        onLog: (String) -> Unit
-    ) = engine.runContextFormatExperiment(transcript, personalization, isCancelled, onLog)
-
     override fun decide(request: ModelDecisionRequest): ModelDecisionOutcome {
         // The current engine generates exactly this schema and always parses locally.
         // Fail closed rather than silently ignoring a different caller-specified protocol.

@@ -1353,8 +1353,7 @@ class MainActivity : Activity() {
                 initialConfiguration = configuration,
                 onBack = ::showConfigurationPage,
                 onSave = { value -> runCatching { aiModelConfigurationRepository.save(value) } },
-                onCloudConsentChanged = aiModelCloudConsent::setGranted,
-                runContextFormatExperiment = dependencies.runContextFormatExperiment
+                onCloudConsentChanged = aiModelCloudConsent::setGranted
             ).create()
         )
     }

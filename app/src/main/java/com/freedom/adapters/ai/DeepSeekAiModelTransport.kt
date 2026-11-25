@@ -87,7 +87,6 @@ class DeepSeekAiModelTransport(
     }
 
     private fun buildRequestPayload(modelName: String, request: AiModelRequest): String {
-        val messages = ArrayList<Map<String, Any?>>(request.conversation.size + 1)
         val systemInstruction = when (val format = request.responseFormat) {
             AiModelResponseFormat.PlainText -> request.systemInstruction
             is AiModelResponseFormat.JsonSchema -> buildString {
@@ -99,13 +98,31 @@ class DeepSeekAiModelTransport(
             }
         }
         val schema = (request.responseFormat as? AiModelResponseFormat.JsonSchema)?.schema
+        // DeepSeek JSON mode returned only whitespace with mixed USER/ASSISTANT arrays
+        // in two controlled samples (6/6 failures). Role-labelled USER transcripts
+        // retained all dialogue and returned valid JSON (6/6 successes).
+        // Keep all-USER and plain-text requests unchanged; this is wire formatting only.
+        val flatten = schema != null &&
+            request.conversation.any { it.role == AiModelMessage.Role.USER } &&
+            request.conversation.any { it.role == AiModelMessage.Role.ASSISTANT }
+        val conversation = if (flatten) {
+            listOf(AiModelMessage(
+                AiModelMessage.Role.USER,
+                request.conversation.joinToString("\n") { message ->
+                    val label = if (message.role == AiModelMessage.Role.USER) "对方(USER)" else "己方(ASSISTANT)"
+                    "$label：${message.content}"
+                }
+            ))
+        } else request.conversation
+        val messages = ArrayList<Map<String, Any?>>(conversation.size + 1)
         val copies = schema?.let { systemInstruction.windowedSequence(it.length).count { part -> part == it } } ?: 0
         diagnosticLog("DeepSeek REQUEST requestId=${request.requestId} attemptIndex=${request.attemptIndex} " +
             "responseFormat=${if (schema == null) "absent" else "json_object"} thinking=disabled " +
             "maxTokens=${request.maxOutputTokens} systemChars=${systemInstruction.length} schemaCopies=$copies " +
-            "conversationMessages=${request.conversation.size} templateVersion=context-select-v1")
+            "conversationMessages=${conversation.size} templateVersion=context-select-v1 " +
+            "originalConversationMessages=${request.conversation.size} contextEncoding=${if (flatten) "ROLE_LABELED_SINGLE_USER" else "ROLE_ARRAY"}")
         messages += mapOf("role" to "system", "content" to systemInstruction)
-        request.conversation.forEach { message ->
+        conversation.forEach { message ->
             messages += mapOf(
                 "role" to when (message.role) {
                     AiModelMessage.Role.USER -> "user"

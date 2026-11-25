@@ -91,7 +91,6 @@ import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepo
 import com.freedom.features.aireply.domain.contact.ContactMessageLedgerRepository
 import com.freedom.data.samples.MomoChatSampleArchiveDataStore
 import com.freedom.features.aireply.AiReplyObservationRuntime
-import com.freedom.features.aireply.ai.AiModelConfiguration
 import com.freedom.features.aireply.ai.AiModelServiceProvider
 import com.freedom.features.aireply.ai.ConversationContextManager
 import com.freedom.features.aireply.ai.AiModelConfigurationRepository
@@ -232,31 +231,6 @@ class AppCompositionRoot(context: Context) {
         MonitorOverlay.installRepository(monitorRepository)
     }
 
-    internal fun createAiDecisionGateway(
-        configuration: AiModelConfiguration,
-        addLog: (String) -> Unit
-    ): EngineBackedAiDecisionGateway {
-        val transport = when (configuration.provider) {
-            AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration).also { it.diagnosticLog = addLog }
-            AiModelServiceProvider.OPENAI,
-            AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport(configuration)
-        }
-        val providerName = when (configuration.provider) {
-            AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport.PROVIDER_NAME
-            AiModelServiceProvider.OPENAI -> "openai"
-            AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport.PROVIDER_NAME
-        }
-        return EngineBackedAiDecisionGateway(
-            modelProvider = TransportBackedAiModelProvider(
-                providerName = providerName,
-                modelName = configuration.modelName,
-                transport = transport,
-                cloudConsent = aiModelCloudConsent
-            ),
-            cloudConsent = aiModelCloudConsent
-        )
-    }
-
     fun createActivityDependencies(activity: Activity): ActivityDependencies = ActivityDependencies(
         monitorRepository = monitorRepository,
         taskLaunchParametersRepository = taskLaunchParametersRepository,
@@ -270,23 +244,7 @@ class AppCompositionRoot(context: Context) {
         ),
         ocrReviewRepository = ocrReviewRepository,
         diagnostics = diagnostics,
-        sampleArchivePort = sampleArchivePort,
-        runContextFormatExperiment = { transcript, isCancelled, report ->
-            require(!monitorRepository.isRunRequested()) { "请先停止正式自动回复任务" }
-            val config = aiModelConfigurationRepository.load().normalized()
-            require(config.provider == AiModelServiceProvider.DEEPSEEK && config.isReadyForCloudProvider) {
-                "请先保存有效的 DeepSeek 模型配置"
-            }
-            require(aiModelCloudConsent.isGranted()) { "未取得云端处理授权" }
-            val personalization = aiReplyPersonalizationRepository.load()
-            val log: (String) -> Unit = { line ->
-                runCatching { monitorRepository.addLog(line) }
-                runCatching { report(line) }
-            }
-            createAiDecisionGateway(config, log).runContextFormatExperiment(
-                transcript, personalization, { isCancelled() || monitorRepository.isRunRequested() }, log
-            )
-        }
+        sampleArchivePort = sampleArchivePort
     )
 
     internal fun createAccessibilityServiceDependencies(
@@ -318,8 +276,7 @@ class ActivityDependencies internal constructor(
     val runSessionCommands: RunSessionCommandUseCase,
     val ocrReviewRepository: OcrReviewRepository,
     val diagnostics: RunDiagnosticsPort,
-    val sampleArchivePort: SessionSampleArchivePort,
-    val runContextFormatExperiment: (String, () -> Boolean, (String) -> Unit) -> Unit
+    val sampleArchivePort: SessionSampleArchivePort
 )
 
 /** Platform-specific graph created by AppCompositionRoot for one AccessibilityService lifetime. */
@@ -609,7 +566,27 @@ internal class AccessibilityServiceDependencies internal constructor(
             scheduler = taskScheduler,
             isAiReplyActive = { runSessionCoordinator.isRuntimeReady(RunMode.AI_REPLY) },
             onLog = addLog,
-            createGateway = { configuration -> root.createAiDecisionGateway(configuration, addLog) },
+            createGateway = { configuration ->
+                val transport = when (configuration.provider) {
+                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration).also { it.diagnosticLog = addLog }
+                    AiModelServiceProvider.OPENAI,
+                    AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport(configuration)
+                }
+                val providerName = when (configuration.provider) {
+                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport.PROVIDER_NAME
+                    AiModelServiceProvider.OPENAI -> "openai"
+                    AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport.PROVIDER_NAME
+                }
+                EngineBackedAiDecisionGateway(
+                    modelProvider = TransportBackedAiModelProvider(
+                        providerName = providerName,
+                        modelName = configuration.modelName,
+                        transport = transport,
+                        cloudConsent = root.aiModelCloudConsent
+                    ),
+                    cloudConsent = root.aiModelCloudConsent
+                )
+            },
             replyTaskRepository = root.replyTaskRepository,
             replySegmentTaskRepository = root.replySegmentTaskRepository,
             policyRegistry = root.aiReplyPolicyRegistry,

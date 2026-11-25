@@ -31,8 +31,7 @@ internal class AiModelConfigurationScreen(
     initialConfiguration: AiModelConfiguration,
     private val onBack: () -> Unit,
     private val onSave: (AiModelConfiguration) -> Result<Unit>,
-    private val onCloudConsentChanged: (Boolean) -> Unit,
-    private val runContextFormatExperiment: (String, () -> Boolean, (String) -> Unit) -> Unit
+    private val onCloudConsentChanged: (Boolean) -> Unit
 ) {
     private var savedConfiguration = initialConfiguration.normalized()
     private var configuration = savedConfiguration
@@ -46,7 +45,6 @@ internal class AiModelConfigurationScreen(
     private var modelNameValue: TextView? = null
     private var customEndpointInput: EditText? = null
     private var customModelInput: EditText? = null
-    private var contextExperimentRunning = false
 
     fun create(): View {
         val root = LinearLayout(activity).apply {
@@ -262,15 +260,6 @@ internal class AiModelConfigurationScreen(
             setTextColor(FreedomUi.MUTED)
             setPadding(dp(2), dp(6), dp(2), dp(0))
         })
-
-        content.addView(TextView(activity).apply {
-            text = "DeepSeek 四组对照实验（只读）"
-            textSize = 14f
-            setTextColor(FreedomUi.TEXT)
-            gravity = Gravity.CENTER
-            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
-            setOnClickListener { showContextFormatExperiment() }
-        }, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(16) })
 
         val statusMessageView = TextView(activity).apply {
             textSize = 12f
@@ -625,84 +614,6 @@ internal class AiModelConfigurationScreen(
         }
         dialog.show()
         FreedomUi.styleAlertDialog(dialog, activity, dp)
-    }
-
-    private fun showContextFormatExperiment() {
-        if (contextExperimentRunning) {
-            showStatus("已有实验请求运行中。", error = true)
-            return
-        }
-        val input = EditText(activity).apply {
-            hint = "U: 你好\nA: 刚休息\nU: 今天忙吗"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 5
-            maxLines = 10
-            isSaveEnabled = false
-            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
-        }
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("四组模型对照")
-            .setMessage("请先停止正式自动回复任务。按时间顺序粘贴同一会话的脱敏文字，每条消息一行：U: 对方，A: 己方。使用已保存的 DeepSeek 配置，提交 12 次独立请求（可能产生费用），不写草稿、不发送。")
-            .setView(input)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("开始 12 次请求", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val transcript = input.text.toString().trim()
-                if (transcript.isBlank() || transcript.length > 62_000) {
-                    input.error = "请填写有效的聊天记录（最多 62000 字符）"
-                    return@setOnClickListener
-                }
-                dialog.dismiss()
-                startContextFormatExperiment(transcript)
-            }
-        }
-        dialog.show()
-        FreedomUi.styleAlertDialog(dialog, activity, dp)
-    }
-
-    private fun startContextFormatExperiment(transcript: String) {
-        if (contextExperimentRunning) return
-        contextExperimentRunning = true
-        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
-        val report = TextView(activity).apply {
-            text = "正在执行独立模型请求…\n"
-            textSize = 12f
-            setTextIsSelectable(true)
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-        }
-        val scroll = ScrollView(activity).apply { addView(report) }
-        val progress = AlertDialog.Builder(activity)
-            .setTitle("四组实验结果（技术日志）")
-            .setView(scroll)
-            .setNegativeButton("停止后续请求") { _, _ -> cancelled.set(true) }
-            .setOnCancelListener { cancelled.set(true) }
-            .create()
-        progress.show()
-        FreedomUi.styleAlertDialog(progress, activity, dp)
-        Thread {
-            val result = runCatching {
-                runContextFormatExperiment(transcript, { cancelled.get() || activity.isDestroyed }) { line ->
-                    activity.runOnUiThread {
-                        if (progress.isShowing && !activity.isDestroyed) report.append(line + "\n")
-                    }
-                }
-            }
-            activity.runOnUiThread {
-                contextExperimentRunning = false
-                if (!activity.isDestroyed && !activity.isFinishing) {
-                    if (progress.isShowing) {
-                        // Never display arbitrary remote exceptions, request bodies or keys.
-                        report.append(if (result.isSuccess) "\n实验已结束，技术日志可复制或导出。"
-                            else "\n实验未完成：请检查 DeepSeek 配置、授权及输入格式。")
-                        progress.getButton(AlertDialog.BUTTON_NEGATIVE).text = "关闭"
-                    }
-                    showStatus(if (result.isSuccess) "四组实验已结束（含主动停止）。"
-                        else "实验未完成，请检查配置、授权或输入格式。", error = result.isFailure)
-                }
-            }
-        }.start()
     }
 
     private fun apiKeyStatusText(): String =
