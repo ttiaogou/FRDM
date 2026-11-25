@@ -122,7 +122,15 @@ internal class MomoChatListSessionExtractor(
 
             val collectionRowCount = runCatching { listNode.collectionInfo?.rowCount }
                 .getOrNull()?.takeIf { it > 0 }
-            val actions = runCatching { listNode.actionList.map { it.id }.toSet() }.getOrNull()
+            // Project the live action list to read-only booleans; never retain a touch action ID.
+            val scrollCapabilities = runCatching {
+                listNode.actionList.let { actions ->
+                    Pair(
+                        actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD },
+                        actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD }
+                    )
+                }
+            }.getOrNull()
             val visibleCollectionRows = ArrayList<Int>()
             var collectionRowsComplete = true
             val rowCount = safeInt { listNode.childCount }.coerceAtMost(maxRows)
@@ -245,8 +253,8 @@ internal class MomoChatListSessionExtractor(
                 reason = if (snapshots.isEmpty()) "视口内没有提取到会话候选" else null,
                 collectionRowCount = collectionRowCount,
                 visibleCollectionRows = if (collectionRowsComplete && !truncated) visibleCollectionRows.toList() else emptyList(),
-                canScrollForward = actions?.contains(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD),
-                canScrollBackward = actions?.contains(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+                canScrollForward = scrollCapabilities?.first,
+                canScrollBackward = scrollCapabilities?.second
             )
         } finally {
             recycle(listNode)

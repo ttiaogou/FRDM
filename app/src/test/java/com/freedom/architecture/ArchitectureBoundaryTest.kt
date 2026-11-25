@@ -299,12 +299,48 @@ class ArchitectureBoundaryTest {
         )
     }
 
+    private val forbiddenTouchAction = Regex(
+        "(?:AccessibilityNodeInfo\\.)?ACTION_(?:CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD)"
+    )
+
+    // The exact boolean-only projection is a read, not a touch action. Do not exempt
+    // any source file, arbitrary constant reference, action ID, or execution call.
+    private val readOnlyScrollCapabilityProjection = Regex(
+        """(?m)^[ \t]*val scrollCapabilities = runCatching \{\s*listNode\.actionList\.let \{ actions ->\s*Pair\(\s*actions\.any \{ it\.id == AccessibilityNodeInfo\.ACTION_SCROLL_FORWARD \},\s*actions\.any \{ it\.id == AccessibilityNodeInfo\.ACTION_SCROLL_BACKWARD \}\s*\)\s*\}\s*\}\.getOrNull\(\)[ \t]*$"""
+    )
+
+    private fun hasForbiddenAndroidTouchAction(source: String): Boolean =
+        forbiddenTouchAction.containsMatchIn(readOnlyScrollCapabilityProjection.replace(source, ""))
+
+    @Test
+    fun touchActionGuardDistinguishesOnlyBooleanScrollCapabilityReadFromActionUse() {
+        val projection = """
+            val scrollCapabilities = runCatching {
+                listNode.actionList.let { actions ->
+                    Pair(
+                        actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD },
+                        actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD }
+                    )
+                }
+            }.getOrNull()
+        """.trimIndent()
+        assertFalse("A boolean-only capability observation must not be mistaken for dispatch",
+            hasForbiddenAndroidTouchAction(projection))
+        assertTrue("A standalone touch action constant must still be rejected",
+            hasForbiddenAndroidTouchAction("val id = AccessibilityNodeInfo.ACTION_SCROLL_FORWARD"))
+        assertTrue("A touch action import must still be rejected",
+            hasForbiddenAndroidTouchAction("import android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD"))
+        assertTrue("An action invocation must still be rejected next to a capability read",
+            hasForbiddenAndroidTouchAction(projection + "\nnode.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)"))
+        assertTrue("An action ID or action object must not escape through the projection",
+            hasForbiddenAndroidTouchAction(projection.replace("actions.any", "actions.first")))
+        assertTrue("Click action references are never exempt",
+            hasForbiddenAndroidTouchAction(projection.replace("ACTION_SCROLL_FORWARD", "ACTION_CLICK")))
+    }
+
     @Test
     fun allAutomatedScreenTapsAndScrollsUseCoordinateGesturesOnly() {
         val productionFiles = kotlinFiles("app/src/main/java/com/freedom")
-        val forbiddenTouchAction = Regex(
-            "(?:AccessibilityNodeInfo\\.)?ACTION_(?:CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD)"
-        )
         val forbiddenNodeAction = Regex(
             "NodeAction\\.(?:CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD)"
         )
@@ -314,7 +350,7 @@ class ArchitectureBoundaryTest {
         val violations = productionFiles.flatMap { file ->
             val source = file.readText()
             buildList {
-                if (forbiddenTouchAction.containsMatchIn(source)) add("${file.relativeTo(projectRoot)}: Android touch Action")
+                if (hasForbiddenAndroidTouchAction(source)) add("${file.relativeTo(projectRoot)}: Android touch Action")
                 if (forbiddenNodeAction.containsMatchIn(source)) add("${file.relativeTo(projectRoot)}: NodeAction touch enum")
                 if (forbiddenCalls.containsMatchIn(source)) add("${file.relativeTo(projectRoot)}: performAction touch call")
                 if (source.contains("performClickAndRecycle")) add("${file.relativeTo(projectRoot)}: legacy node click helper")
