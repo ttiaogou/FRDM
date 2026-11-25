@@ -36,5 +36,4 @@ interface ModeRuntimePort {
     /** Service lifecycle hooks; platform cleanup remains inside concrete adapters. */
     fun onAccessibilityServiceInterrupted(reason: String) = Unit
     fun onServiceDestroyed() = Unit
-    fun resetRuntime(reason: String) = onRunStopped(reason)
 }

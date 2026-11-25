@@ -160,14 +160,6 @@ internal class AccountBrowseModeRuntimeAdapter(
         }
     }
 
-    override fun resetRuntime(reason: String) {
-        try {
-            workflow().resetAccountBrowseSession()
-        } finally {
-            releaseTaskOwnership("运行时重置：$reason")
-        }
-    }
-
     private fun ensureTaskOwnership(reason: String): Boolean =
         taskExecutionController.claim(TASK_ID, reason)
 

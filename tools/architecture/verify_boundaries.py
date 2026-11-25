@@ -829,7 +829,7 @@ RUNTIME_DEBT_REFERENCE_CEILINGS = {
     },
     _CORE_RUNTIME + "ModeRuntimePort.kt": {"PageRuntimeSessionState": 1},
     _CORE_RUNTIME + "UiWriteAuthorization.kt": {"PageRuntimeSessionState": 2, "PageRuntimeLifecycle": 1},
-    _CORE_RUNTIME + "PageObservationCoordinator.kt": {"registerChannel": 3},
+    _CORE_RUNTIME + "PageObservationCoordinator.kt": {"registerChannel": 1},
     _APP_RUNTIME + "RunSessionCoordinator.kt": {
         # P4 moves the existing lifecycle state from the retired standalone owner.
         # P5 folds the separate UNKNOWN flag into the existing lifecycle and
@@ -870,6 +870,12 @@ RETIRED_PAGE_CONTROL_SYMBOLS = {
     "writeRoute", "publishWriteRoute", "lastBusinessAdmissionLease", "unclassifiedWriteHold",
     "onPageRuntimeWillSuspend", "onPageRuntimeSuspended", "suspendRecoveryOnServiceDisconnect",
     "confirmPageTaskOwnership",
+    # P7-A: the fixed two-channel API and generic external runtime reset are retired.
+    "legacyFullPage", "legacyKnownRegion", "LEGACY_FULL_PAGE_CHANNEL", "LEGACY_KNOWN_REGION_CHANNEL",
+    "requestFullPageSnapshot", "requestKnownRegionSnapshot", "cancelFullPageSnapshot",
+    "cancelKnownRegionSnapshot", "isFullPageSnapshotPending", "isKnownRegionSnapshotPending",
+    "requireLegacyFullPage", "requireLegacyKnownRegion", "runFullPageSnapshot",
+    "runKnownRegionSnapshot", "resetRuntime",
 }
 
 
@@ -889,6 +895,9 @@ def runtime_architecture_reduction_violations(code_by_path: dict[str, str]) -> l
     for rel, code in sorted(code_by_path.items()):
         if "/src/main/" not in rel or not rel.endswith(".kt"):
             continue
+        # reset is a legitimate feature-local name; retire only the shared coordinator alias.
+        if rel == _CORE_RUNTIME + "PageObservationCoordinator.kt" and re.search(r"\bfun\s+reset\s*\(", code):
+            issues.append(f"PP reduction: retired shared observation reset alias: {rel}")
         if rel.startswith(protected):
             allowed = RUNTIME_COMPONENT_CEILINGS.get(rel)
             if allowed is None:

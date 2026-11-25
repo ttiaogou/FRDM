@@ -733,6 +733,18 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
                 self.assertTrue(any("control surface expanded" in item and name in item
                                     for item in guard.runtime_architecture_reduction_violations(changed)))
 
+    def test_pp_reduction_guard_rejects_retired_shared_observation_reset_alias(self):
+        owner = "core/src/main/kotlin/com/freedom/core/runtime/PageObservationCoordinator.kt"
+        changed = dict(self.recovery_code)
+        changed[owner] += "\nfun reset() = resetAll()\n"
+        self.assertTrue(any("retired shared observation reset alias" in item
+                            for item in guard.runtime_architecture_reduction_violations(changed)))
+        # A feature-local reset remains valid and is not a retired global entry.
+        feature = "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt"
+        changed = dict(self.recovery_code)
+        changed[feature] += "\nfun reset() = Unit\n"
+        self.assertEqual(guard.runtime_architecture_reduction_violations(changed), [])
+
     def test_pp_reduction_guard_permits_retiring_debt_and_ignores_comments(self):
         changed = dict(self.recovery_code)
         root = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"

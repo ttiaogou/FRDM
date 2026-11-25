@@ -110,5 +110,4 @@ internal class AiReplyModeRuntimeAdapter(
         activeRuntime.reset("无障碍服务销毁")
     }
 
-    override fun resetRuntime(reason: String) = runtime().reset("运行时外部重置：$reason")
 }
