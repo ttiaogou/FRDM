@@ -316,6 +316,34 @@ internal class AccessibilityServiceDependencies internal constructor(
                         ";conflict=" + decision.conflict +
                         ";generation=" + snapshot.observationGeneration
                 )
+                val targetTask = when (decision.classification) {
+                    com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE -> "ACCOUNT_BROWSE"
+                    com.freedom.core.runtime.PageClassification.PRIVATE_MESSAGES -> "AI_REPLY_PRIVATE_MESSAGES"
+                    com.freedom.core.runtime.PageClassification.RECEIVED_GREETINGS -> "AI_REPLY_RECEIVED_GREETINGS"
+                    else -> null
+                }
+                if (targetTask != null && !decision.conflict &&
+                    monitorRepository.isRunRequested() &&
+                    snapshot.runGeneration == runSessionCoordinator.currentRunGeneration()
+                ) {
+                    val current = taskCoordinator.currentLease()
+                    val transferred = if (current == null) {
+                        taskCoordinator.tryAcquire(targetTask, snapshot.runGeneration) != null
+                    } else if (current.taskId == targetTask) {
+                        true
+                    } else {
+                        taskCoordinator.transfer(current, targetTask) != null
+                    }
+                    addLog(
+                        "统一页面仲裁[OWNERSHIP]：target=" + targetTask +
+                            ";transferred=" + transferred +
+                            ";runGeneration=" + snapshot.runGeneration
+                    )
+                } else if (decision.conflict || decision.classification ==
+                    com.freedom.core.runtime.PageClassification.UNKNOWN
+                ) {
+                    addLog("统一页面仲裁[NO_OWNERSHIP]：未知或冲突页面；保持只读等待")
+                }
             }
         ).also { bus ->
             bus.registerClassifier(aiReplyModeRuntimeAdapter)
