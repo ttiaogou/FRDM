@@ -1564,7 +1564,8 @@ class AiReplyObservationRuntime(
                 fingerprint = pageFingerprint,
                 observationGeneration = observation.observationGeneration,
                 runGeneration = currentRunGeneration(),
-                sourceTaskId = taskCoordinator?.activeTaskId()
+                sourceTaskId = taskCoordinator?.activeTaskId(),
+                windowSessionKey = windowSessionKey(inspection)
             )
         )
         val matchedRouteId = if (pageFingerprint.packageName == targetPackage()) {
