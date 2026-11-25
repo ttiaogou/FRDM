@@ -443,7 +443,8 @@ internal class AndroidAccountBrowseWorkflow(
         // that method can dispatch an action.
         val detailPhase = accountBrowsePhase in setOf(
             AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD, AccountBrowsePhase.DETAIL_DWELL,
-            AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE
+            AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE,
+            AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN, AccountBrowsePhase.WAIT_FOR_LIST_RETURN
         ) && !accountBrowseRuntime.hasPendingCheckpointVerification()
         val recovered = if (detailPhase && page.pageKind.isDynamicContent) {
             val identity = if (!isRetainedObstructionEvidence(page.reason) &&
@@ -467,6 +468,17 @@ internal class AndroidAccountBrowseWorkflow(
                 page = page,
                 routeVerified = verifiedRoute
             )
+        }
+        // Completing recovery is not enough: the phase must agree with the live page.
+        // A feed return still has to pass the existing position/stability verifier.
+        if (recovered && resumeFeedReturnIfConfirmed(page)) return
+        if (recovered && accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_LIST_RETURN &&
+            accountBrowseSession.deadlineAt == 0L
+        ) accountBrowseSession.deadlineAt = System.currentTimeMillis() + LIST_RETURN_TIMEOUT_MS
+        if (recovered && accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE) {
+            accountBrowseSession.lastStableFingerprint = ""
+            accountBrowseSession.stableSamples = 0
+            accountBrowseSession.deadlineAt = System.currentTimeMillis() + DETAIL_RESTABILIZE_TIMEOUT_MS
         }
         if (accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_FEED_STABLE) {
             val samples = if (recovered) REQUIRED_STABLE_FEED_SAMPLES else accountBrowseRuntime.recoveryStableSamples()
@@ -2330,8 +2342,43 @@ internal class AndroidAccountBrowseWorkflow(
         )
     }
 
+    /** Phase reconciliation only: no gesture, BACK, or new list position proof is minted here. */
+    private fun resumeFeedReturnIfConfirmed(page: BrowsePageEvidence): Boolean {
+        if (page.pageKind != BrowsePageKind.DYNAMIC_FEED ||
+            isRetainedObstructionEvidence(page.reason) ||
+            !accountBrowseRuntime.canResumeFeedReturn(page, matchDynamicFeedRoute(page)) ||
+            socialBrowsePort.inspectPopup() != null
+        ) return false
+        accountBrowseRuntime.cancelScheduledStep()
+        accountBrowseSession.imageBrowserActive = false
+        accountBrowseSession.imageBrowserReturnActivityClass = ""
+        // No BACK was issued by this reconciliation. A late detail arrival must
+        // be admitted as a fresh visit rather than treated as a failed BACK.
+        accountBrowseSession.detailFingerprint = ""
+        accountBrowseSession.detailActivityClass = ""
+        accountBrowseSession.lastStableFingerprint = ""
+        accountBrowseSession.stableSamples = 0
+        accountBrowseSession.returnedStableSamples = 0
+        accountBrowseSession.lastReturnedSnapshot = ""
+        accountBrowseSession.returnMismatchLogged = false
+        accountBrowseSession.deadlineAt = System.currentTimeMillis() + LIST_RETURN_TIMEOUT_MS
+        val previous = accountBrowsePhase
+        accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_LIST_RETURN
+        addLog("动态浏览阶段续接[FEED_RETURN]：$previous → WAIT_FOR_LIST_RETURN；新鲜动态列表已确认；保留原列表位置快照，不执行 BACK")
+        scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+        return true
+    }
+
+    /** The existing recovery scheduler owns unconfirmed content observations. */
+    private fun awaitContentPageEvidence(page: BrowsePageEvidence, reason: String) {
+        accountBrowseRuntime.observeRecoveryPage(page.copy(
+            pageKind = BrowsePageKind.UNKNOWN, confidence = 0, reason = reason
+        ))
+    }
+
     private fun checkDetailPageLoaded() {
         val page = obtainTargetPageOrPause() ?: return
+        if (resumeFeedReturnIfConfirmed(page)) return
         val fingerprint = page.fingerprint
         if (page.pageKind.isDynamicContent &&
             page.confidence >= 80 && !isRetainedObstructionEvidence(page.reason) &&
@@ -2360,6 +2407,8 @@ internal class AndroidAccountBrowseWorkflow(
         } else {
             accountBrowseSession.lastStableFingerprint = ""
             accountBrowseSession.stableSamples = 0
+            awaitContentPageEvidence(page, "动态详情载入期间页面尚未确认；保留当前访问上下文")
+            return
         }
         if (System.currentTimeMillis() >= accountBrowseSession.deadlineAt) {
             beginDynamicNavigationRecovery("等待动态详情超时；当前 Activity=${accountBrowseSession.currentActivityClass.ifBlank { "未知" }}，重新分析当前页面层级")
@@ -2371,18 +2420,18 @@ internal class AndroidAccountBrowseWorkflow(
     private fun returnFromDetailPage() {
         val identity = socialBrowsePort.inspectDetail(accountBrowseSession.detailFingerprint)
         if (identity.isFeedPage) {
-            addLog("详情停留结束时重新扫描发现已经回到动态列表；不再重复执行返回，直接验证原列表位置")
-            accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_LIST_RETURN
-            accountBrowseSession.returnedStableSamples = 0
-            accountBrowseSession.lastReturnedSnapshot = ""
-            accountBrowseSession.returnMismatchLogged = false
-            accountBrowseSession.deadlineAt = System.currentTimeMillis() + LIST_RETURN_TIMEOUT_MS
-            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            val page = socialBrowsePort.inspectPage()
+            if (!resumeFeedReturnIfConfirmed(page)) {
+                awaitContentPageEvidence(page, "详情停留结束时列表返回证据尚未复核；不执行 BACK")
+            }
             return
         }
         if (!identity.identityConfirmed) {
-            addLog("详情停留结束时无法确认当前页面仍是原动态详情：${identity.reason}；交由主动导航重新分析页面层级，不执行猜测性返回")
-            beginDynamicNavigationRecovery("详情页面身份验证未通过：${identity.reason}")
+            addLog("详情停留结束时无法确认当前页面仍是原动态详情：${identity.reason}；交由统一只读恢复重新确认页面，不执行猜测性返回")
+            val page = socialBrowsePort.inspectPage()
+            if (!resumeFeedReturnIfConfirmed(page)) {
+                awaitContentPageEvidence(page, "详情页面身份验证未通过：${identity.reason}")
+            }
             return
         }
         if (identity.fingerprint != accountBrowseSession.detailFingerprint) {
@@ -2393,12 +2442,13 @@ internal class AndroidAccountBrowseWorkflow(
         // contains package/windowId/generation, so an intervening dialog or Activity/window switch
         // cannot reuse the earlier positive result.
         val preBackPage = socialBrowsePort.inspectPage()
+        if (resumeFeedReturnIfConfirmed(preBackPage)) return
         if (!preBackPage.pageKind.isDynamicContent || preBackPage.confidence < 80 ||
             isRetainedObstructionEvidence(preBackPage.reason) ||
             preBackPage.fingerprint != identity.fingerprint || preBackPage.fingerprint.isBlank()
         ) {
-            beginDynamicNavigationRecovery(
-                "BACK 前页面身份复核失败：当前页类型=${preBackPage.pageKind}；窗口/代次/结构指纹已变化；取消本次 BACK"
+            awaitContentPageEvidence(
+                preBackPage, "BACK 前页面身份复核失败：当前页类型=${preBackPage.pageKind}；窗口/代次/结构指纹已变化；取消本次 BACK"
             )
             return
         }
@@ -2497,60 +2547,59 @@ internal class AndroidAccountBrowseWorkflow(
                 }
                 return
             }
-            if (returnedToDetail) {
-                accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE
-                accountBrowseSession.deadlineAt = System.currentTimeMillis() + DETAIL_RESTABILIZE_TIMEOUT_MS
-                accountBrowseSession.lastStableFingerprint = ""
-                accountBrowseSession.stableSamples = 0
-                addLog("检测到已退出图片浏览器并通过动态详情结构指纹确认返回；Activity=$activityClass（仅诊断）；正在重新确认详情页面稳定性")
-                scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
-            } else {
-                accountBrowseSession.imageBrowserActive = false
-                pauseAccountBrowse("图片浏览器退出后进入了非原动态详情页面：$activityClass；为避免误返回或误点击，已安全暂停")
-            }
+            // The Activity notification may precede the new root. Do not decide the
+            // return destination from this callback; the existing poll/recovery lane
+            // will re-read the actual page and select the appropriate phase.
+            if (accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN ||
+                accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE
+            ) scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
         }
     }
 
     private fun waitForImageBrowserReturn() {
-        if (!accountBrowseSession.imageBrowserActive) {
+        val page = socialBrowsePort.inspectPage()
+        if (resumeFeedReturnIfConfirmed(page)) return
+        if (page.pageKind.isDynamicContent && page.windowAvailable && page.confidence >= 80 &&
+            !isRetainedObstructionEvidence(page.reason) && page.fingerprint.isNotBlank() &&
+            socialBrowsePort.inspectPopup() == null
+        ) {
+            // A still-open image is normal dynamic content too. Once touch and
+            // recovery gates permit it, use the already saved remaining dwell.
             accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE
             accountBrowseSession.deadlineAt = System.currentTimeMillis() + DETAIL_RESTABILIZE_TIMEOUT_MS
             accountBrowseSession.lastStableFingerprint = ""
             accountBrowseSession.stableSamples = 0
+            addLog("动态浏览阶段续接[DETAIL_RETURN]：已重新识别动态内容；类型=${page.pageKind.name}；复核后继续原有剩余阅读时间")
             scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
             return
         }
-
-        if (System.currentTimeMillis() >= accountBrowseSession.deadlineAt) {
-            pauseAccountBrowse("等待动态图片浏览页面返回原详情超时；没有执行返回或点击操作")
-        } else {
-            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
-        }
+        awaitContentPageEvidence(page, "图片浏览器返回目标尚未确认；等待新鲜页面")
     }
 
     private fun waitForDetailRestabilize() {
-        if (obtainTargetPageOrPause() == null) return
+        val page = obtainTargetPageOrPause() ?: return
+        if (resumeFeedReturnIfConfirmed(page)) return
         val identity = socialBrowsePort.inspectDetail(accountBrowseSession.detailFingerprint)
         val currentDetailPage = socialBrowsePort.inspectPage()
-        if (!identity.identityConfirmed || currentDetailPage.pageKind != BrowsePageKind.DETAIL ||
+        if (resumeFeedReturnIfConfirmed(currentDetailPage)) return
+        if (!identity.identityConfirmed || !currentDetailPage.pageKind.isDynamicContent ||
             currentDetailPage.confidence < 80 || isRetainedObstructionEvidence(currentDetailPage.reason)
         ) {
-            if (identity.isFeedPage) {
-                addLog("退出图片浏览器后已经回到动态列表；直接验证列表状态，不重复返回")
-                accountBrowseSession.imageBrowserActive = false
-                accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_LIST_RETURN
-                accountBrowseSession.deadlineAt = System.currentTimeMillis() + LIST_RETURN_TIMEOUT_MS
-                accountBrowseSession.returnedStableSamples = 0
-                accountBrowseSession.lastReturnedSnapshot = ""
-                scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
-                return
-            }
-            beginDynamicNavigationRecovery("图片浏览器返回后未能确认原动态详情身份：${identity.reason}")
+            awaitContentPageEvidence(currentDetailPage, "图片浏览器返回后未能确认原动态详情身份：${identity.reason}")
             return
         }
-        accountBrowseSession.stableSamples++
+        if (identity.fingerprint != currentDetailPage.fingerprint || identity.fingerprint.isBlank()) {
+            awaitContentPageEvidence(currentDetailPage, "图片浏览器返回详情的窗口代次或结构证据已变化")
+            return
+        }
+        if (accountBrowseSession.lastStableFingerprint == identity.fingerprint) {
+            accountBrowseSession.stableSamples++
+        } else {
+            accountBrowseSession.lastStableFingerprint = identity.fingerprint
+            accountBrowseSession.stableSamples = 1
+        }
         accountBrowseSession.detailFingerprint = identity.fingerprint
-        accountBrowseSession.detailActivityClass = accountBrowseSession.currentActivityClass
+        accountBrowseSession.detailActivityClass = currentDetailPage.activityClass
         if (accountBrowseSession.stableSamples >= REQUIRED_STABLE_PAGE_SAMPLES) {
             accountBrowseSession.imageBrowserActive = false
             accountBrowseSession.imageBrowserReturnActivityClass = ""
@@ -2559,7 +2608,7 @@ internal class AndroidAccountBrowseWorkflow(
             accountBrowsePhase = AccountBrowsePhase.DETAIL_DWELL
             val remaining = accountBrowseSession.detailDwellRemainingMs
             addLog(
-                "图片浏览器已返回原动态详情；页面身份连续 ${REQUIRED_STABLE_PAGE_SAMPLES} 次确认，" +
+                "动态内容已重新确认；页面身份连续 ${REQUIRED_STABLE_PAGE_SAMPLES} 次确认，" +
                     "内容节点变化不影响页面身份；继续剩余阅读时间 ${remaining / 1000.0} 秒"
             )
             scheduleAccountBrowseStep(remaining.coerceAtLeast(300L))
@@ -2699,11 +2748,22 @@ internal class AndroidAccountBrowseWorkflow(
             scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
             return
         }
+        if (!page.windowAvailable || page.confidence < 80 || page.fingerprint.isBlank() ||
+            page.pageKind == BrowsePageKind.UNKNOWN || page.pageKind == BrowsePageKind.OTHER
+        ) {
+            accountBrowseSession.returnedStableSamples = 0
+            accountBrowseSession.lastReturnedSnapshot = ""
+            awaitContentPageEvidence(page, "BACK 后页面尚未确认；保留原列表位置，不重复 BACK")
+            return
+        }
         // BACK from picture content can expose the ordinary detail rather than the feed.
         // Reuse the original detail admission instead of issuing a second blind BACK.
-        if (socialBrowsePort.isImageBrowserActivity(accountBrowseSession.detailActivityClass) &&
-            page.pageKind == BrowsePageKind.DETAIL && page.confidence >= 80 &&
-            page.fingerprint.isNotBlank()
+        val lateContentArrival = accountBrowseSession.detailFingerprint.isBlank() &&
+            accountBrowseSession.sourceFingerprint.isNotBlank() && page.pageKind.isDynamicContent
+        val pictureReturnedToDetail = socialBrowsePort.isImageBrowserActivity(accountBrowseSession.detailActivityClass) &&
+            page.pageKind == BrowsePageKind.DETAIL
+        if ((lateContentArrival || pictureReturnedToDetail) &&
+            page.confidence >= 80 && page.fingerprint.isNotBlank()
         ) {
             accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD
             accountBrowseSession.detailFingerprint = ""
@@ -2711,7 +2771,7 @@ internal class AndroidAccountBrowseWorkflow(
             accountBrowseSession.lastStableFingerprint = ""
             accountBrowseSession.stableSamples = 0
             accountBrowseSession.deadlineAt = System.currentTimeMillis() + DETAIL_LOAD_TIMEOUT_MS
-            addLog("图片动态返回后识别到普通动态详情；进入原有详情载入验证，不重复 BACK")
+            addLog("动态浏览阶段续接[CONTENT_LOAD]：返回验证期间重新识别动态内容；进入原有详情载入验证，不重复 BACK")
             scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
             return
         }

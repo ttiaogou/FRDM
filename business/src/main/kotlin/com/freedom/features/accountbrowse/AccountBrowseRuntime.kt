@@ -291,7 +291,8 @@ class AccountBrowseRuntime(
         if (!isSessionEnabled() || restoredBusinessCheckpoint != null ||
             dynamicPageRecovery.state() == RecoveryTransactionState.ACTIVE ||
             phase !in setOf(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD,
-                AccountBrowsePhase.DETAIL_DWELL, AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE)
+                AccountBrowsePhase.DETAIL_DWELL, AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE,
+                AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN, AccountBrowsePhase.WAIT_FOR_LIST_RETURN)
         ) return false
         val confirmed = identityConfirmed && page.pageKind.isDynamicContent &&
             page.packageName == targetPackage() && page.confidence >= 80 &&
@@ -301,6 +302,20 @@ class AccountBrowseRuntime(
         val fingerprint = if (confirmed) "detail:${page.fingerprint}" else ""
         return dynamicPageRecovery.observeFingerprint(fingerprint)
     }
+
+    /**
+     * A confirmed feed during a live content visit means the visit has ended,
+     * regardless of whether BACK, a user action or the app caused the return.
+     * This permits only the existing list-position verification phase.
+     */
+    fun canResumeFeedReturn(page: BrowsePageEvidence, routeVerified: Boolean): Boolean =
+        restoredBusinessCheckpoint == null && canExecuteAutomaticStep() &&
+            phase in setOf(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD,
+                AccountBrowsePhase.DETAIL_DWELL, AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN,
+                AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE) &&
+            session.sourceFingerprint.isNotBlank() && routeVerified &&
+            page.pageKind == BrowsePageKind.DYNAMIC_FEED && page.packageName == targetPackage() &&
+            page.windowAvailable && page.confidence >= 80 && page.fingerprint.isNotBlank()
 
     /** The AccountBrowse workflow owns all phase transitions. */
     fun transitionTo(nextPhase: AccountBrowsePhase) {

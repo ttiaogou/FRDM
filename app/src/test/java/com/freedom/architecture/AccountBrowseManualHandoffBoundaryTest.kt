@@ -76,6 +76,36 @@ class AccountBrowseManualHandoffBoundaryTest {
     }
 
     @Test
+    fun confirmedFeedReturnReconcilesPhaseWithoutDispatchingBackOrSkippingPositionVerification() {
+        val workflow = source("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
+        val reconcile = workflow.substringAfter("private fun resumeFeedReturnIfConfirmed(")
+            .substringBefore("private fun awaitContentPageEvidence(")
+        assertTrue(reconcile.contains("canResumeFeedReturn(page, matchDynamicFeedRoute(page))"))
+        assertTrue(reconcile.contains("AccountBrowsePhase.WAIT_FOR_LIST_RETURN"))
+        assertTrue(reconcile.contains("socialBrowsePort.inspectPopup() != null"))
+        assertFalse(reconcile.contains("performGlobalAction("))
+        assertFalse(reconcile.contains("sourceSnapshot ="))
+        assertFalse(reconcile.contains("AccountBrowsePhase.WAIT_FOR_LIST_SCROLL"))
+        val load = workflow.substringAfter("private fun checkDetailPageLoaded() {")
+            .substringBefore("private fun returnFromDetailPage()")
+        assertTrue(load.indexOf("resumeFeedReturnIfConfirmed(page)") in 0 until load.indexOf("System.currentTimeMillis() >= accountBrowseSession.deadlineAt"))
+        val recovery = workflow.substringAfter("private fun observeAccountBrowseRecoveryReadOnly() {")
+            .substringBefore("private fun onCoalescedPageObservationRequested()")
+        assertTrue(recovery.contains("if (recovered && resumeFeedReturnIfConfirmed(page)) return"))
+        val verify = workflow.substringAfter("private fun checkFeedListReturned() {")
+        assertTrue(verify.contains("scrollExecutor.isFeedPositionRestored(accountBrowseSession.sourceSnapshot, currentSnapshot)"))
+        assertTrue(verify.contains("FeedReturnStability.update("))
+        assertTrue(verify.contains("FeedReturnVerificationPolicy.Decision.RESTORED"))
+        assertTrue(verify.contains("lateContentArrival"))
+        assertTrue(verify.contains("AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD"))
+        val imageReturn = workflow.substringAfter("private fun waitForImageBrowserReturn() {")
+            .substringBefore("private fun waitForDetailRestabilize()")
+        assertTrue(imageReturn.contains("page.pageKind.isDynamicContent"))
+        assertTrue(imageReturn.contains("AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE"))
+        assertFalse(imageReturn.contains("performGlobalAction("))
+    }
+
+    @Test
     fun overlayWatchdogTimeoutEntersUnifiedRecoveryInsteadOfManualHold() {
         val workflow = source(
             "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"

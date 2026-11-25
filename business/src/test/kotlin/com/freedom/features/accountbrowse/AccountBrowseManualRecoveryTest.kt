@@ -292,6 +292,49 @@ class AccountBrowseManualRecoveryTest {
     }
 
     @Test
+    fun verifiedFeedReturnCanResumeEveryLiveContentPhaseWithoutWaitingForDetailTimeout() {
+        for (phase in listOf(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD, AccountBrowsePhase.DETAIL_DWELL,
+            AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN, AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE)) {
+            val runtime = runtime()
+            runtime.session.sourceFingerprint = "source-feed"
+            runtime.session.sourceSnapshot = "original-list-position"
+            runtime.transitionTo(phase)
+            assertFalse(runtime.canResumeFeedReturn(page(), false))
+            assertFalse(runtime.canResumeFeedReturn(page().copy(confidence = 35), true))
+            assertFalse(runtime.canResumeFeedReturn(page().copy(windowAvailable = false), true))
+            assertFalse(runtime.canResumeFeedReturn(page(BrowsePageKind.IMAGE_VIEWER), true))
+            runtime.requestRecovery("unknown during content visit", {}, {}, {})
+            assertFalse(runtime.canResumeFeedReturn(page(), true))
+            assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+            assertFalse(runtime.canResumeFeedReturn(page(), true))
+            assertTrue(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+            assertTrue(runtime.canResumeFeedReturn(page(), true))
+            assertEquals(phase, runtime.phase)
+            assertEquals("original-list-position", runtime.session.sourceSnapshot)
+            runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_LIST_RETURN)
+            assertFalse(runtime.canResumeFeedReturn(page(), true))
+            runtime.suspendSession()
+            assertFalse(runtime.canResumeFeedReturn(page(), true))
+        }
+    }
+
+    @Test
+    fun contentRecoveryAlsoWorksWhileWaitingForReturnWithoutGrantingBackBeforeActive() {
+        for (phase in listOf(AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN, AccountBrowsePhase.WAIT_FOR_LIST_RETURN)) {
+            val runtime = runtime()
+            runtime.session.sourceFingerprint = "source-feed"
+            runtime.transitionTo(phase)
+            runtime.requestRecovery("return window temporarily unknown", {}, {}, {})
+            val detail = page(BrowsePageKind.DETAIL).copy(fingerprint = "detail-window")
+            assertFalse(runtime.observeDetailFingerprintReadOnly(detail, true))
+            assertFalse(runtime.canExecuteAutomaticStep())
+            assertTrue(runtime.observeDetailFingerprintReadOnly(detail, true))
+            assertEquals(phase, runtime.phase)
+            assertTrue(runtime.canExecuteAutomaticStep())
+        }
+    }
+
+    @Test
     fun detailRecoveryCannotReplacePersistedFeedCheckpointVerification() {
         val runtime = runtime(FakeStore(savedCheckpoint()))
         assertTrue(runtime.beginCheckpointVerification())
