@@ -22,6 +22,10 @@ import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.TargetAppReadinessSnapshot
 import com.freedom.core.runtime.TargetAppReadinessStatus
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
+import com.freedom.core.runtime.UiWriteAuthorization
+import com.freedom.core.runtime.UiWriteScope
+import com.freedom.core.runtime.PageRuntimeSessionState
+import com.freedom.core.runtime.PageRuntimeLifecycle
 import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
@@ -315,6 +319,8 @@ class AiReplyObservationRuntimeTest {
             override fun clear() = Unit
         }
         val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var pendingSend = false
+        var retiredDrafts = 0
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
@@ -330,20 +336,33 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L,
             taskCoordinator = ownership,
             currentRunGeneration = { 12L },
-            receivedGreetingsCheckpointRepository = repository
+            receivedGreetingsCheckpointRepository = repository,
+            isSendConfirmationPending = { pendingSend },
+            onDraftRuntimeReset = { retiredDrafts++; pendingSend = false }
         )
         runtime.scheduleInitialObservation()
         // The existing Momo adapter may report an unconfirmed page at the reconnect moment;
         // the new durable checkpoint path must still enter read-only verification.
         assertFalse(runtime.reloadReceivedGreetingsCheckpointAfterServiceReconnect())
+        // An outstanding send may still exist while recovery samples are collected.
+        // Do not retire that chat on the first sample, or grant a write route early.
+        pendingSend = true
+        val resetsBeforeProof = retiredDrafts
         scheduler.runNextWithDelay(0L)
         assertTrue(logs.any { it.contains("收到招呼通用检查点[VERIFYING]") })
         assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
         assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+        assertTrue(pendingSend)
+        assertEquals(resetsBeforeProof, retiredDrafts)
 
         scheduler.runNextWithDelay(500L)
         scheduler.runNextWithDelay(0L)
         assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertFalse(runtime.isReceivedGreetingsRecoveryPending())
+        assertFalse(pendingSend)
+        assertEquals(resetsBeforeProof + 1, retiredDrafts)
+        assertTrue(logs.any { it.contains("OLD_CHAT_DRAFT_RETIRED") })
         assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
         assertEquals(1, port.receivedGreetingsIdleSteps)
         assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
@@ -1891,6 +1910,7 @@ class AiReplyObservationRuntimeTest {
         val owner = TaskCoordinator(UiOperationOwnershipCoordinator())
         var greetingDrafts = 0
         var privateDrafts = 0
+        var pendingSend = false
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
@@ -1915,7 +1935,8 @@ class AiReplyObservationRuntimeTest {
                 true
             },
             taskCoordinator = owner,
-            currentRunGeneration = { 5L }
+            currentRunGeneration = { 5L },
+            isSendConfirmationPending = { pendingSend }
         )
 
         runtime.scheduleInitialObservation()
@@ -1949,7 +1970,17 @@ class AiReplyObservationRuntimeTest {
         // Reproduce the composer/scroll refresh from the device log: the cached
         // paths are cleared, but the next full read confirms the original binding.
         val bindingCount = logs.count { it.contains("GREETING_CHAT_BINDING_CREATED") }
-        val originalLease = owner.currentLease()
+        val originalLease = requireNotNull(owner.currentLease())
+        val route = PageRuntimeSessionState(
+            5L, originalLease.taskId, RunMode.AI_REPLY, PageRuntimeLifecycle.READY, 1L
+        )
+        val authorization = UiWriteAuthorization(owner, { 5L }, { RunMode.AI_REPLY }, {
+            route.takeUnless { runtime.isReceivedGreetingsRecoveryPending() }
+        })
+        var platformWrites = 0
+        assertEquals(1, authorization.withBoundAuthorizedWrite(
+            UiWriteScope.VERIFIED_GREETING_COMPOSER, originalLease
+        ) { ++platformWrites })
         val refresh = runtime.javaClass.getDeclaredMethod("runRegionRefresh").apply {
             isAccessible = true
         }
@@ -1968,12 +1999,28 @@ class AiReplyObservationRuntimeTest {
 
         // A different window generation is NOT the same bound conversation.
         // Keep the pre-existing recovery path instead of suppressing all detail changes.
+        pendingSend = true
         port.page = chatDetailSnapshot(windowGeneration = 2L)
         inspect.invoke(runtime)
         assertTrue(logs.any {
             it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") && it.contains("PAGE_ROUTE_CHANGED")
         })
         assertEquals(bindingCount, logs.count { it.contains("GREETING_CHAT_BINDING_CREATED") })
+        // The original task slot is still reserved, but neither composer mutation
+        // nor delayed gesture dispatch may cross the final platform write gate.
+        assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+        assertEquals(originalLease, owner.currentLease())
+        assertFalse(authorization.permitsBound(UiWriteScope.VERIFIED_GREETING_COMPOSER, originalLease))
+        assertNull(authorization.withBoundAuthorizedWrite(
+            UiWriteScope.VERIFIED_GREETING_COMPOSER, originalLease
+        ) { ++platformWrites })
+        assertNull(authorization.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE) { ++platformWrites })
+        assertEquals(1, platformWrites)
+        val readsBeforeCompletion = port.ocrAsyncReadRequests
+        runtime.onSendConfirmationObservationRequested()
+        assertTrue(logs.any { it.contains("RECOVERY_READ_ONLY_WAIT") })
+        assertTrue(pendingSend)
+        assertEquals(readsBeforeCompletion, port.ocrAsyncReadRequests)
     }
 
     @Test

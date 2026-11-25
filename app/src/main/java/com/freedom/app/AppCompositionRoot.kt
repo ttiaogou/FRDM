@@ -476,7 +476,14 @@ internal class AccessibilityServiceDependencies internal constructor(
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = root.runGenerationClock::current,
             activeRunMode = { runSessionCoordinator.currentWriteRoute()?.mode },
-            currentPageRuntime = { runSessionCoordinator.currentWriteRoute() }
+            currentPageRuntime = {
+                runSessionCoordinator.currentWriteRoute()?.takeUnless { route ->
+                    // A reserved greeting lease and READY page route do not authorize
+                    // platform mutations while that business is recovering.
+                    route.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                        aiReplyObservationRuntime.isReceivedGreetingsRecoveryPending()
+                }
+            }
         )
     }
     val accessibilityGateway: AndroidAccessibilityGateway by lazy(LazyThreadSafetyMode.NONE) {

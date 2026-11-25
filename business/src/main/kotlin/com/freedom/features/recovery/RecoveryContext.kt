@@ -26,6 +26,8 @@ class RecoveryContext {
 
     var pauseDomain: PauseDomain = PauseDomain.NONE
         private set
+    // The platform write gate also reads this existing recovery veto.
+    @Volatile
     var sourceTaskId: String? = null
         private set
     var targetRouteId: String? = null

@@ -1513,9 +1513,18 @@ class AiReplyObservationRuntime(
      * This is an intent for a fresh read, not confirmation or UI operation authority.
      */
     fun onSendConfirmationObservationRequested() {
-        if (!isAiReplyActive() || !sessionRunStarted || !isSendConfirmationPending() ||
-            recoveryContext.pending
-        ) return
+        if (!isAiReplyActive() || !sessionRunStarted || !isSendConfirmationPending()) return
+        if (recoveryContext.pending) {
+            if (isReceivedGreetingsRecoveryPending()) {
+                // A platform completion is only a read intent. Do not replace the retained
+                // checkpoint verifier or start OCR under the invalidated chat binding.
+                onLog("收到招呼发送确认[RECOVERY_READ_ONLY_WAIT]：保留原发送证据；等待已有恢复验证，不重发")
+                if (!receivedGreetingsCheckpointVerifier.hasActiveVerification()) {
+                    requestPageRouteObservation()
+                }
+            }
+            return
+        }
         onLog("AI 发送确认[ACTIVE_RECHECK_REQUESTED]：发送手势完成；立即安排现有只读页面观察")
         scheduleFullInspectionAfter(0L, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
     }
@@ -1523,7 +1532,7 @@ class AiReplyObservationRuntime(
     /** Returns the latest verified greeting observation as the immediate pre-send diff baseline. */
     fun captureGreetingPreSendOutgoingKeys(expectedWindowSessionKey: String): Set<String>? {
         if (!receivedGreetingsTaskActive || !sessionRunStarted ||
-            !ownsTask(RECEIVED_GREETINGS_TASK_ID)
+            recoveryContext.pending || !ownsTask(RECEIVED_GREETINGS_TASK_ID)
         ) return null
         val batch = latestGreetingMessageBatch
             ?.takeIf { it.windowSessionKey == expectedWindowSessionKey }
@@ -2172,6 +2181,18 @@ class AiReplyObservationRuntime(
             val sourceTaskId = recoveryContext.sourceTaskId
             val fingerprintVerified = recoveryContext.fingerprintVerified
             val uiOwnershipTransferred = recoveryContext.uiOwnershipTransferred
+            if (sourceTaskId == RECEIVED_GREETINGS_TASK_ID &&
+                targetRoute == receivedGreetingsRecoveryRoute.routeId &&
+                inspection.pageKind == ChatPageKind.NON_CHAT &&
+                (isConversationDraftPending() || isSendConfirmationPending() || isSendControlRecoveryPending())
+            ) {
+                // The original chat has genuinely been left and the list has passed
+                // the existing resume gate. Retire its asynchronous draft callbacks
+                // using the existing reset contract; durable uncertain sends remain
+                // non-replayable and are eligible for read-only proof on a later visit.
+                onDraftRuntimeReset()
+                onLog("收到招呼恢复[OLD_CHAT_DRAFT_RETIRED]：列表恢复已验证；旧回调失效，保留持久化发送证据")
+            }
             recoveryContext.clear()
             pageRecoveryVerificationGate.reset()
             if (sharedProof == null) {
@@ -3600,6 +3621,10 @@ class AiReplyObservationRuntime(
         ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskFlow.ownsTask()
         else -> false
     }
+
+    /** Read-only veto for the existing platform write gate; no lease is granted here. */
+    fun isReceivedGreetingsRecoveryPending(): Boolean =
+        recoveryContext.sourceTaskId == RECEIVED_GREETINGS_TASK_ID
 
     /** The lease is a reserved task slot; the recovery context gates actual UI actions. */
     private fun canPerformPrivateMessagesUiAction(): Boolean =
