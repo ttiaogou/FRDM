@@ -19,6 +19,8 @@ import com.freedom.core.accessibility.overlay.OverlayPort
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.PageObservationCoordinator
+import com.freedom.core.runtime.PageObservationSnapshot
+import com.freedom.core.runtime.PageObservationSnapshotSource
 import com.freedom.core.runtime.PageFingerprint
 import com.freedom.features.accountbrowse.DynamicFeedRecoveryRouteAdapter
 import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
@@ -58,6 +60,7 @@ internal class AndroidAccountBrowseWorkflow(
     private val targetPackage: () -> String,
     private val monitorPageContext: () -> String,
     private val onLog: (String) -> Unit,
+    private val pageObservationSnapshotSource: PageObservationSnapshotSource? = null,
     private val onRequestScreenOff: () -> Boolean = { false },
     private val pageObservationCoordinator: PageObservationCoordinator,
     private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null,
@@ -1673,6 +1676,17 @@ internal class AndroidAccountBrowseWorkflow(
             return null
         }
         if (handleMomoPopup()) return null
+        pageObservationSnapshotSource?.publish(
+            PageObservationSnapshot(
+                fingerprint = com.freedom.core.runtime.PageFingerprint(
+                    packageName = page.packageName,
+                    activityClass = page.activityClass,
+                    semanticPage = page.pageKind.name,
+                    adapterFingerprint = page.fingerprint
+                ),
+                observationGeneration = currentRunGeneration()
+            )
+        )
         return page
     }
 
