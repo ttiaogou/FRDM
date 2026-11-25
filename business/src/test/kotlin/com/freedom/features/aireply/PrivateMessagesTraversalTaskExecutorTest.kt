@@ -1017,12 +1017,15 @@ class PrivateMessagesTraversalTaskExecutorTest {
     @Test
     fun clampedEdgeWithoutBadgeDoesNotCreateDurableUnreadCandidate() {
         val executor = PrivateMessagesTraversalTaskExecutor()
-        val edge = candidate(1, "Edge", ChatUnreadStatus.UNKNOWN, top = 1540,
-            rowHeight = 60, previewBoundsValid = false).copy(
+        fun clampedEdge(unread: ChatUnreadStatus, badgePresent: Boolean = false) = candidate(
+            1, "Edge", unread, top = 1540, rowHeight = 60,
+            previewBoundsValid = false,
+            badgePresent = badgePresent,
             previewBounds = ScreenRect(150, 1620, 620, 1600),
             previewBoundsIntersectViewport = false,
             previewBoundsFullyInsideViewport = false
         )
+        val edge = clampedEdge(ChatUnreadStatus.UNKNOWN)
         val healthy = candidate(0, "Healthy", ChatUnreadStatus.UNREAD)
         assertFalse(executor.observeIncompleteUnreadEvidence(snapshot(healthy, edge)))
         assertTrue(executor.unresolvedIncompleteUnreadKeys.isEmpty())
@@ -1031,7 +1034,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(executor.attemptedSessionKeys.isEmpty())
 
         // Positive badge evidence must still retain the clipped row for reinspection.
-        val unreadEdge = edge.copy(unreadStatus = ChatUnreadStatus.UNREAD, statusNewNodePresent = true)
+        val unreadEdge = clampedEdge(ChatUnreadStatus.UNREAD, badgePresent = true)
         assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(healthy, unreadEdge)))
         assertEquals(1, executor.unresolvedIncompleteUnreadKeys.size)
         assertEquals(healthy, executor.selectNextCandidate(listOf(healthy, unreadEdge)))
@@ -1672,11 +1675,13 @@ class PrivateMessagesTraversalTaskExecutorTest {
         badgePresent: Boolean = false,
         rowHeight: Int = 140,
         clippedAtEdge: Boolean = false,
-        selectionClass: String = "PRIVATE_CHAT"
+        selectionClass: String = "PRIVATE_CHAT",
+        previewBounds: ScreenRect = ScreenRect(150, top + 50, 620, top + 90),
+        previewBoundsIntersectViewport: Boolean = true,
+        previewBoundsFullyInsideViewport: Boolean = true
     ): ChatListCandidateSnapshot {
         val row = ScreenRect(0, top, 720, top + rowHeight)
         val nameBounds = ScreenRect(150, top + 10, 380, top + 40)
-        val previewBounds = ScreenRect(150, top + 50, 620, top + 90)
         return ChatListCandidateSnapshot(
             rowIndex = rowIndex,
             rowTarget = NodeTarget(
@@ -1704,8 +1709,8 @@ class PrivateMessagesTraversalTaskExecutorTest {
             previewNodePath = NodePath(listOf(0, rowIndex, 2)),
             previewBounds = previewBounds,
             previewNodeVisibleToUser = true,
-            previewBoundsIntersectViewport = true,
-            previewBoundsFullyInsideViewport = true,
+            previewBoundsIntersectViewport = previewBoundsIntersectViewport,
+            previewBoundsFullyInsideViewport = previewBoundsFullyInsideViewport,
             previewBoundsValid = previewBoundsValid,
             timestampText = "10:20",
             timestampSource = ChatNodeTextSource.NODE_TEXT,
