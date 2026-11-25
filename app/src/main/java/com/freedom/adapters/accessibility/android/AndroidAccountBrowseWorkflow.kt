@@ -66,7 +66,8 @@ internal class AndroidAccountBrowseWorkflow(
     private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null,
     private val recoveryScheduleRepository: RecoveryScheduleRepository? = null,
     private val recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null,
-    private val currentRunGeneration: () -> Long = { 0L }
+    private val currentRunGeneration: () -> Long = { 0L },
+    private val isGlobalTouchActive: () -> Boolean = { false }
 ) {
     private val displayMetrics get() = accessibilityGateway.displayMetrics()
     private val navigationExecutor = AccountBrowseNavigationExecutor(gesturePolicy) { displayMetrics }
@@ -135,7 +136,10 @@ internal class AndroidAccountBrowseWorkflow(
     }
 
     internal fun startIfIdle() {
-        accountBrowseTask.start()
+        if (accountBrowseTask.start()) {
+            // Re-read current touch state; never inherit the departed run's latch.
+            accountBrowseSession.touchActive = isGlobalTouchActive()
+        }
         if (accountBrowsePhase == AccountBrowsePhase.IDLE) {
             startAccountBrowseIfNeeded()
         } else if (accountBrowseRuntime.hasPendingCheckpointVerification()) {
@@ -204,6 +208,7 @@ internal class AndroidAccountBrowseWorkflow(
             recoveryScheduleRepository = recoveryScheduleRepository,
             recoveryTransactionManager = recoveryTransactionManager,
             currentRunGeneration = currentRunGeneration,
+            pageSelectedStartup = true,
             onResetSession = ::resetAccountBrowseSession,
             onReadOnlyRecoveryObservation = ::observeAccountBrowseRecoveryReadOnly,
             actions = AccountBrowseRuntime.Actions(
@@ -233,12 +238,45 @@ internal class AndroidAccountBrowseWorkflow(
     private val interactionEvidenceClassifier = AccountBrowseInteractionEvidenceClassifier(interactionEventClassifier)
     private var gestureDispatchSyncTask: ScheduledTask? = null
     private var overlayPassthroughWatchdogTask: ScheduledTask? = null
+    private var browseCallbackEpoch = 0L
+    private var activeBrowseGestureRequestId: String? = null
+
+    private fun isCurrentBrowseCallback(generation: Long, epoch: Long): Boolean =
+        generation == currentRunGeneration() && epoch == browseCallbackEpoch &&
+            isMonitoringRunning() && isBrowseModeActive()
+
+    private fun invalidateBrowseCallbacks() {
+        browseCallbackEpoch++
+        val requestId = activeBrowseGestureRequestId
+        activeBrowseGestureRequestId = null
+        gestureDispatchSyncTask?.cancel()
+        gestureDispatchSyncTask = null
+        cancelOverlayPassthroughWatchdog()
+        cancelScheduledStep()
+        pageObservationChannel.cancel()
+        if (requestId != null) gesturePolicy.cancelActive(requestId, "account_browse_page_exit")
+    }
+
+    internal fun saveCheckpointBeforePageExit() = accountBrowseRuntime.saveCheckpointBeforePageExit()
+
+    internal fun suspendForPageExit() {
+        invalidateBrowseCallbacks()
+        accountBrowseRuntime.suspendRecoveryOnServiceDisconnect()
+        // A failed overlay restoration is a real cleanup failure: keep STOPPING.
+        check(restoreMonitorOverlayTouchPassthrough()) { "AccountBrowse overlay restoration failed" }
+        overlayPort.clearGestureTrail()
+        hideFirstSwipeCountdown()
+        accountBrowseTask.suspendForPageExit()
+    }
 
     private fun addLog(message: String) = onLog(message)
 
     private fun scheduleOverlayPassthroughWatchdog(delayMs: Long) {
         overlayPassthroughWatchdogTask?.cancel()
+        val generation = currentRunGeneration()
+        val epoch = browseCallbackEpoch
         overlayPassthroughWatchdogTask = taskScheduler.schedule(delayMs) {
+            if (!isCurrentBrowseCallback(generation, epoch)) return@schedule
             overlayPassthroughWatchdogTask = null
             if (accountBrowseSession.overlayPassthroughActive) {
                 restoreMonitorOverlayTouchPassthrough()
@@ -262,6 +300,7 @@ internal class AndroidAccountBrowseWorkflow(
         actionDescription: String = "首次滑动检查结束"
     ): Boolean = restoreMonitorOverlayTouchPassthrough(actionDescription)
     internal fun cleanup() {
+        invalidateBrowseCallbacks()
         overlayPort.clearGestureTrail()
         restoreMonitorOverlayTouchPassthrough()
         cancelScheduledStep()
@@ -335,6 +374,14 @@ internal class AndroidAccountBrowseWorkflow(
                 if (accountBrowseSession.touchActive) {
                     accountBrowseSession.touchActive = false
                     accountBrowseRuntime.onUserInteractionEnded()
+                    if (accountBrowseRuntime.recoveryState() ==
+                        com.freedom.features.recovery.RecoveryTransactionState.ACTIVE
+                    ) {
+                        // A new run may have entered while a touch was already active.
+                        // In that case no prior touch-start recovery transaction exists.
+                        startIfIdle()
+                        scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+                    }
                     addLog("用户已停止操作屏幕；统一恢复调度器已回到快速只读观察，无需人工恢复")
                 } else {
                     addLog("收到 TYPE_TOUCH_INTERACTION_END，但当前没有匹配的触摸开始状态；未推断用户是否完成了实际操作")
@@ -463,9 +510,8 @@ internal class AndroidAccountBrowseWorkflow(
     internal fun resetAccountBrowseSession() {
         accountBrowseTask.stop(
             beforeReset = {
-                restoreMonitorOverlayTouchPassthrough()
-                pageObservationChannel.cancel()
-                accountBrowseRuntime.cancelScheduledStep()
+                invalidateBrowseCallbacks()
+                check(restoreMonitorOverlayTouchPassthrough()) { "AccountBrowse overlay restoration failed" }
             },
             afterReset = ::hideFirstSwipeCountdown
         )
@@ -626,7 +672,13 @@ internal class AndroidAccountBrowseWorkflow(
             accountBrowseSession.ignoreManualEventsUntil = now + POPUP_DISMISS_VERIFY_TIMEOUT_MS
             accountBrowseSession.gestureInFlight = true
             val submission = runCatching {
+                val callbackGeneration = currentRunGeneration()
+                val callbackEpoch = browseCallbackEpoch
+                activeBrowseGestureRequestId = tap.request.id
                 gesturePolicy.execute(tap.request) { result ->
+                    if (!isCurrentBrowseCallback(callbackGeneration, callbackEpoch) ||
+                        activeBrowseGestureRequestId != tap.request.id) return@execute
+                    activeBrowseGestureRequestId = null
                     accountBrowseSession.gestureInFlight = false
                     if (!isMonitoringRunning()) return@execute
                     if (result.status == GestureExecutionStatus.DEFERRED) {
@@ -938,7 +990,13 @@ internal class AndroidAccountBrowseWorkflow(
         accountBrowsePhase = AccountBrowsePhase.VERIFY_NAVIGATION_ACTION
 
         val submission = runCatching {
+            val callbackGeneration = currentRunGeneration()
+            val callbackEpoch = browseCallbackEpoch
+            activeBrowseGestureRequestId = tap.request.id
             gesturePolicy.execute(tap.request) { result ->
+                if (!isCurrentBrowseCallback(callbackGeneration, callbackEpoch) ||
+                    activeBrowseGestureRequestId != tap.request.id) return@execute
+                activeBrowseGestureRequestId = null
                 accountBrowseSession.gestureInFlight = false
                 if (accountBrowsePhase != AccountBrowsePhase.VERIFY_NAVIGATION_ACTION || !isMonitoringRunning()) {
                     return@execute
@@ -1404,7 +1462,13 @@ internal class AndroidAccountBrowseWorkflow(
             executionContext = executionContext
         )
         val submission = runCatching {
+            val callbackGeneration = currentRunGeneration()
+            val callbackEpoch = browseCallbackEpoch
+            activeBrowseGestureRequestId = gestureRequest.id
             gesturePolicy.execute(gestureRequest) { result ->
+                if (!isCurrentBrowseCallback(callbackGeneration, callbackEpoch) ||
+                    activeBrowseGestureRequestId != gestureRequest.id) return@execute
+                activeBrowseGestureRequestId = null
                 if (result.status == GestureExecutionStatus.DEFERRED) {
                     accountBrowseSession.gestureInFlight = false
                     accountBrowseSession.programmaticActionLabel = ""
@@ -1800,7 +1864,9 @@ internal class AndroidAccountBrowseWorkflow(
 
         gestureDispatchSyncTask?.cancel()
         val scheduledRunGeneration = currentRunGeneration()
+        val scheduledEpoch = browseCallbackEpoch
         gestureDispatchSyncTask = taskScheduler.schedule(SWIPE_WINDOW_SYNC_DELAY_MS) {
+            if (!isCurrentBrowseCallback(scheduledRunGeneration, scheduledEpoch)) return@schedule
             gestureDispatchSyncTask = null
             if (accountBrowsePhase != AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE ||
                 accountBrowseSession.touchActive || !isMonitoringRunning() ||
@@ -1834,7 +1900,13 @@ internal class AndroidAccountBrowseWorkflow(
                 executionContext = executionContext
             )
             val submission = runCatching {
+                val callbackGeneration = currentRunGeneration()
+                val callbackEpoch = browseCallbackEpoch
+                activeBrowseGestureRequestId = gestureRequest.id
                 gesturePolicy.execute(gestureRequest) { result ->
+                    if (!isCurrentBrowseCallback(callbackGeneration, callbackEpoch) ||
+                        activeBrowseGestureRequestId != gestureRequest.id) return@execute
+                    activeBrowseGestureRequestId = null
                     if (result.status == GestureExecutionStatus.DEFERRED) {
                         accountBrowseSession.gestureInFlight = false
                         accountBrowseSession.lastProgrammaticScrollAt = 0L
@@ -2005,7 +2077,9 @@ internal class AndroidAccountBrowseWorkflow(
 
             gestureDispatchSyncTask?.cancel()
             val scheduledRunGeneration = currentRunGeneration()
+            val scheduledEpoch = browseCallbackEpoch
             gestureDispatchSyncTask = taskScheduler.schedule(SWIPE_WINDOW_SYNC_DELAY_MS) {
+                if (!isCurrentBrowseCallback(scheduledRunGeneration, scheduledEpoch)) return@schedule
                 gestureDispatchSyncTask = null
                 if (accountBrowseSession.touchActive || !isMonitoringRunning() || !isBrowseModeActive() ||
                     scheduledRunGeneration != currentRunGeneration() ||
@@ -2036,7 +2110,13 @@ internal class AndroidAccountBrowseWorkflow(
                 )
                 accountBrowseSession.gestureInFlight = true
                 val submission = runCatching {
+                    val callbackGeneration = currentRunGeneration()
+                    val callbackEpoch = browseCallbackEpoch
+                    activeBrowseGestureRequestId = gestureRequest.id
                     gesturePolicy.execute(gestureRequest) { result ->
+                        if (!isCurrentBrowseCallback(callbackGeneration, callbackEpoch) ||
+                            activeBrowseGestureRequestId != gestureRequest.id) return@execute
+                        activeBrowseGestureRequestId = null
                         accountBrowseSession.gestureInFlight = false
                         accountBrowseSession.touchStartedDuringGesture = false
                         accountBrowseSession.touchEndedDuringGesture = false
@@ -2158,7 +2238,13 @@ internal class AndroidAccountBrowseWorkflow(
             System.currentTimeMillis() + PROGRAMMATIC_CLICK_EVENT_WINDOW_MS
         accountBrowseSession.gestureInFlight = true
         val submission = runCatching {
+            val callbackGeneration = currentRunGeneration()
+            val callbackEpoch = browseCallbackEpoch
+            activeBrowseGestureRequestId = tap.request.id
             gesturePolicy.execute(tap.request) { result ->
+                if (!isCurrentBrowseCallback(callbackGeneration, callbackEpoch) ||
+                    activeBrowseGestureRequestId != tap.request.id) return@execute
+                activeBrowseGestureRequestId = null
                 accountBrowseSession.gestureInFlight = false
                 if (accountBrowsePhase != AccountBrowsePhase.WAIT_FOR_CARD_OPEN || !isMonitoringRunning()) {
                     return@execute

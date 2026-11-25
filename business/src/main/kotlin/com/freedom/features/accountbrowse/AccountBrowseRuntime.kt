@@ -30,7 +30,9 @@ class AccountBrowseRuntime(
     private val onReadOnlyRecoveryObservation: () -> Unit = {},
     private val onLog: (String) -> Unit = {},
     recoveryScheduleRepository: RecoveryScheduleRepository? = null,
-    recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null
+    recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null,
+    /** Production selects this business before activating any persisted recovery. */
+    pageSelectedStartup: Boolean = false
 ) {
     data class Actions(
         val waitForDynamicTab: () -> Unit,
@@ -86,7 +88,7 @@ class AccountBrowseRuntime(
         get() = stateMachine.phase
 
     init {
-        checkpointRepository?.load()?.let { checkpoint ->
+        if (!pageSelectedStartup) checkpointRepository?.load()?.let { checkpoint ->
             restoredBusinessCheckpoint = checkpoint
             restoredCheckpointPhase = runCatching { AccountBrowsePhase.valueOf(checkpoint.phase) }
                 .getOrDefault(AccountBrowsePhase.PAUSED)
@@ -114,6 +116,9 @@ class AccountBrowseRuntime(
     fun restoreAfterServiceReconnect(): Boolean {
         val checkpoint = checkpointRepository?.load() ?: return false
         restoredBusinessCheckpoint = checkpoint
+        // Restore durable progress only. A new feed read will supply all current locators,
+        // verification samples, window identities and action deadlines.
+        session.swipeCount = checkpoint.swipeCount
         verifiedFeedAwaitingPhaseResume = null
         restoredCheckpointPhase = runCatching { AccountBrowsePhase.valueOf(checkpoint.phase) }
             .getOrDefault(AccountBrowsePhase.PAUSED)
@@ -124,6 +129,21 @@ class AccountBrowseRuntime(
     }
 
     fun suspendRecoveryOnServiceDisconnect() = dynamicPageRecovery.suspendForServiceDisconnect()
+
+    /** Reset transient execution state; persisted progress and recovery schedule survive. */
+    fun suspendSession() {
+        cancelScheduledStep()
+        dynamicPageRecovery.suspendAndResetVolatileState()
+        stateMachine.reset()
+        restoredCheckpointPhase = null
+        restoredBusinessCheckpoint = null
+        verifiedFeedAwaitingPhaseResume = null
+        session.reset()
+    }
+
+    fun saveCheckpointBeforePageExit() {
+        if (phase != AccountBrowsePhase.IDLE && restoredBusinessCheckpoint == null) persistCheckpoint()
+    }
 
     fun hasPendingCheckpointVerification(): Boolean = restoredCheckpointPhase != null
 
@@ -238,6 +258,8 @@ class AccountBrowseRuntime(
     }
 
     private fun persistCheckpoint() {
+        // A provisional recovery phase must not overwrite the original durable cursor.
+        if (restoredBusinessCheckpoint != null) return
         val snapshot = sessionStateOwner.snapshot()
         checkpointRepository?.save(
             AccountBrowseCheckpoint(
@@ -262,12 +284,13 @@ class AccountBrowseRuntime(
     /**
      * Execute the existing phase-to-action mapping.
      *
-     * Keep the gate order identical to the original service implementation: reset when
-     * monitoring/mode is disabled, then stop for active touch or PAUSED, then dispatch.
+     * A disabled or departed runtime cannot execute a step or erase a checkpoint.
+     * Only the explicit lifecycle stop clears persisted state.
      */
     fun performStep() {
         if (!isSessionEnabled()) {
-            onResetSession()
+            // An obsolete scheduled step is not an explicit user stop.
+            cancelScheduledStep()
             return
         }
         if (!interactionPolicy.mayPerformAutomaticStep(
@@ -308,6 +331,7 @@ class AccountBrowseRuntime(
         afterReset: () -> Unit
     ) {
         beforeReset()
+        cancelScheduledStep()
         checkpointRepository?.clear()
         stateMachine.reset()
         restoredCheckpointPhase = null

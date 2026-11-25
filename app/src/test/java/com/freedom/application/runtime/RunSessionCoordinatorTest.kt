@@ -302,11 +302,16 @@ class RunSessionCoordinatorTest {
         val state = FakeState().apply { requested = true }
         val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
         var failCleanup = true
+        var checkpointSaves = 0
+        var cleanupAttempts = 0
+        var reads = 0
         val ai = object : ModeRuntimePort {
             override val mode = RunMode.AI_REPLY
             override fun onRunStarted() = Unit
             override fun onRunStopped(reason: String) = Unit
+            override fun onPageRuntimeWillSuspend(reason: String) { checkpointSaves++ }
             override fun onPageRuntimeSuspended(reason: String) {
+                cleanupAttempts++
                 if (failCleanup) error("cleanup failed")
             }
             override fun onAccessibilityServiceConnected() = Unit
@@ -315,7 +320,7 @@ class RunSessionCoordinatorTest {
         }
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
         val coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai, browse.mode to browse),
-            RuntimeLogSink { }, taskCoordinator = tasks, onObserveCurrentPage = {})
+            RuntimeLogSink { }, taskCoordinator = tasks, onObserveCurrentPage = { reads++ })
         coordinator.synchronizeRunRequest()
         val first = requireNotNull(coordinator.routePageTask(ai.mode, "PRIVATE"))
         val lease = requireNotNull(tasks.tryAcquire("PRIVATE", first.runGeneration))
@@ -327,9 +332,87 @@ class RunSessionCoordinatorTest {
         assertTrue(browse.calls.isEmpty())
         assertTrue(state.requested)
         assertNull(coordinator.markPageRuntimeReady(first))
+        val exitGeneration = coordinator.currentRunGeneration()
+        assertFalse(coordinator.retryPendingPageCleanup())
+        assertFalse(coordinator.retryPendingPageCleanup())
+        assertEquals(3, cleanupAttempts)
+        assertEquals(1, checkpointSaves)
+        assertEquals(exitGeneration, coordinator.currentRunGeneration())
+        assertNull(coordinator.currentWriteRoute())
+        assertTrue(browse.calls.isEmpty())
         failCleanup = false
-        assertEquals("BROWSE", coordinator.routePageTask(browse.mode, "BROWSE")?.taskId)
+        assertTrue(coordinator.retryPendingPageCleanup())
+        assertEquals(4, cleanupAttempts)
+        assertEquals(1, checkpointSaves)
+        assertEquals(exitGeneration, coordinator.currentRunGeneration())
+        assertNull(coordinator.currentPageRuntimeSession())
+        assertTrue(browse.calls.isEmpty())
+        assertEquals(3, reads)
+        // Only a newly read page may select a replacement after successful cleanup.
+        assertEquals("BROWSE", coordinator.routeIndependentPageTask(browse.mode, "BROWSE")?.taskId)
         assertEquals(listOf("start"), browse.calls)
+    }
+
+    @Test
+    fun unknownEntryRevokesWriteTokenButRetainsRuntimeAndRequiresFreshOwnedPageProof() {
+        val state = FakeState().apply { requested = true }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai), RuntimeLogSink { },
+            taskCoordinator = tasks, onObserveCurrentPage = {})
+        coordinator.synchronizeRunRequest()
+        val id = "AI_REPLY_PRIVATE_MESSAGES"
+        val first = requireNotNull(coordinator.routeIndependentPageTask(ai.mode, id))
+        val lease = requireNotNull(tasks.tryAcquire(id, first.runGeneration))
+        assertTrue(coordinator.admitBusinessPageTaskOwnership(lease, false))
+        val ready = requireNotNull(coordinator.currentWriteRoute())
+        coordinator.reconcileUnclassifiedPage(first.runGeneration, false)
+        val held = requireNotNull(coordinator.currentPageRuntimeSession())
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STARTING, held.lifecycle)
+        assertTrue(held.routeRevision > ready.routeRevision)
+        assertTrue(coordinator.isRuntimeObserving(ai.mode))
+        assertTrue(tasks.isCurrent(lease))
+        assertNull(coordinator.currentWriteRoute())
+        assertNull(coordinator.markPageRuntimeReady(ready))
+        assertNull(coordinator.confirmPageTaskOwnership(lease))
+        coordinator.routePageTask(ai.mode, id)
+        assertNull(coordinator.currentWriteRoute())
+        coordinator.reconcileUnclassifiedPage(first.runGeneration - 1L, true)
+        assertNull(coordinator.currentWriteRoute())
+        coordinator.reconcileUnclassifiedPage(first.runGeneration, true)
+        assertEquals(held.routeRevision, coordinator.currentWriteRoute()?.routeRevision)
+        assertEquals(listOf("start"), ai.calls)
+        assertTrue(state.requested)
+        coordinator.reconcileUnclassifiedPage(first.runGeneration, false)
+        coordinator.routeIndependentPageTask(ai.mode, id)
+        assertTrue(coordinator.isRuntimeReady(ai.mode))
+        assertEquals(listOf("start"), ai.calls)
+    }
+
+    @Test
+    fun independentCrossRuntimeSwitchRequiresNewSnapshotAfterOldGenerationEnds() {
+        val state = FakeState().apply { requested = true }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
+        var reads = 0
+        val coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai, browse.mode to browse),
+            RuntimeLogSink { }, taskCoordinator = tasks, onObserveCurrentPage = { reads++ })
+        coordinator.synchronizeRunRequest()
+        val first = requireNotNull(coordinator.routeIndependentPageTask(ai.mode, "AI_REPLY_PRIVATE_MESSAGES"))
+        val lease = requireNotNull(tasks.tryAcquire(first.taskId, first.runGeneration))
+        assertTrue(coordinator.admitBusinessPageTaskOwnership(lease, false))
+        assertNull(coordinator.routeIndependentPageTask(browse.mode, "ACCOUNT_BROWSE"))
+        assertTrue(browse.calls.isEmpty())
+        assertNull(coordinator.currentWriteRoute())
+        assertNull(tasks.currentLease())
+        assertFalse(tasks.isCurrent(lease))
+        assertTrue(coordinator.currentRunGeneration() > first.runGeneration)
+        assertEquals(2, reads)
+        val next = requireNotNull(coordinator.routeIndependentPageTask(browse.mode, "ACCOUNT_BROWSE"))
+        assertEquals(coordinator.currentRunGeneration(), next.runGeneration)
+        assertEquals(listOf("start"), browse.calls)
+        assertNull(coordinator.currentWriteRoute())
     }
 
     @Test

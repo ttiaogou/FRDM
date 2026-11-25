@@ -340,14 +340,16 @@ internal class AccessibilityServiceDependencies internal constructor(
                             targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
                             runSessionCoordinator.currentPageRuntimeSession()?.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
                             aiReplyObservationRuntime.isVerifiedGreetingsNavigationPending()
-                        if (!verifiedGreetingNavigation && snapshot.entryObservation) {
+                        if (verifiedGreetingNavigation) {
+                            runSessionCoordinator.reconcileUnclassifiedPage(snapshot.runGeneration, true)
+                        } else if (snapshot.entryObservation) {
                             runSessionCoordinator.routeIndependentPageTask(mode, targetTask)
-                        } else if (!snapshot.entryObservation && verifiedOwnTask) {
+                        } else if (verifiedOwnTask) {
                             runSessionCoordinator.routePageTask(mode, targetTask)
                         }
                     } else if (snapshot.entryObservation && decision.conflict) {
-                        runSessionCoordinator.routePageTask(null)
-                        addLog("统一页面仲裁[NO_OWNERSHIP]：冲突页面；退出运行时并保持只读等待")
+                        runSessionCoordinator.reconcileUnclassifiedPage(snapshot.runGeneration, false)
+                        addLog("统一页面仲裁[NO_OWNERSHIP]：冲突页面；挂起写入授权并保持只读等待")
                     }
                 }
             }
@@ -378,9 +380,18 @@ internal class AccessibilityServiceDependencies internal constructor(
             quietPeriodMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             maxWaitMs = 1_200L,
             isEnabled = { runSessionCoordinator.isPageObservationAllowed() },
-            onObservationRequested = {
+            onObservationRequested = entryObservation@{
                 if (runSessionCoordinator.isPageObservationAllowed()) {
+                    // No destination read or startup may race failed old-runtime cleanup.
+                    if (runSessionCoordinator.currentPageRuntimeSession()?.lifecycle ==
+                        com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING
+                    ) {
+                        runSessionCoordinator.retryPendingPageCleanup()
+                        entryPageRetry.update(true)
+                        return@entryObservation
+                    }
                     val generation = runSessionCoordinator.currentRunGeneration()
+                    var entryConflict = false
                     val recognized = runCatching {
                         val snapshot = momoSocialAdapter.inspectUnifiedEntryPage(generation, ++entryObservationGeneration)
                         if (snapshot == null || generation != runSessionCoordinator.currentRunGeneration() ||
@@ -392,6 +403,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                                 runSessionCoordinator.currentPageRuntimeSession() == null
                             ) {
                                 val decision = unifiedPageObservationBus.observe(snapshot)
+                                entryConflict = decision.conflict
                                 !decision.conflict && decision.classification in setOf(
                                     com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE,
                                     com.freedom.core.runtime.PageClassification.PRIVATE_MESSAGES,
@@ -403,10 +415,17 @@ internal class AccessibilityServiceDependencies internal constructor(
                         addLog("统一入口观察[READ_RETRY]：type=${it.javaClass.simpleName}；保留运行授权")
                     }.getOrDefault(false)
                     val session = runSessionCoordinator.currentPageRuntimeSession()
-                    // One bounded-backoff timer covers missing roots, UNKNOWN and provisional
-                    // startup. A healthy selected route is still event-driven.
-                    val shouldRetry = session?.lifecycle != com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING &&
-                        (!recognized || session == null || !runSessionCoordinator.isRuntimeReady(session.mode))
+                    if (!recognized && session != null && generation == runSessionCoordinator.currentRunGeneration()) {
+                        val ownedNestedPage = !entryConflict && runCatching {
+                            momoSocialAdapter.hasFreshOwnedPageEvidence(session.taskId)
+                        }.getOrDefault(false)
+                        runSessionCoordinator.reconcileUnclassifiedPage(generation, ownedNestedPage)
+                    }
+                    // Failed cleanup, unknown entry and provisional startup retain an autonomous
+                    // observation timer even if Android emits no further event.
+                    val shouldRetry = !recognized || session == null ||
+                        session.lifecycle == com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING ||
+                        !runSessionCoordinator.isRuntimeReady(session.mode)
                     entryPageRetry.update(shouldRetry)
                 }
             }
@@ -797,7 +816,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository,
             recoveryScheduleRepository = root.recoveryScheduleRepository,
             recoveryTransactionManager = root.recoveryTransactionManager,
-            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() }
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+            isGlobalTouchActive = { touchInteractionMonitor.snapshot().interactionActive }
         )
     }
     val accountBrowseRuntimeAdapter by lazy(LazyThreadSafetyMode.NONE) {

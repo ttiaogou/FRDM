@@ -76,6 +76,26 @@ class AccountBrowseManualHandoffBoundaryTest {
     }
 
     @Test
+    fun everyBrowseGestureCompletionChecksGenerationAndRequestBeforeMutatingState() {
+        val workflow = source(
+            "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+        )
+        val callbacks = Regex("gesturePolicy\\.execute\\((tap\\.request|gestureRequest)\\) \\{ result ->")
+            .findAll(workflow).toList()
+        assertEquals(6, callbacks.size)
+        callbacks.forEach { match ->
+            val callbackStart = workflow.substring(match.range.last + 1).trimStart()
+            assertTrue(callbackStart.startsWith("if (!isCurrentBrowseCallback(callbackGeneration, callbackEpoch)"))
+            assertTrue(callbackStart.substringBefore("activeBrowseGestureRequestId = null").contains("return@execute"))
+        }
+        val exit = workflow.substringAfter("internal fun suspendForPageExit() {")
+            .substringBefore("private fun addLog")
+        assertTrue(exit.contains("invalidateBrowseCallbacks()"))
+        assertTrue(exit.contains("accountBrowseTask.suspendForPageExit()"))
+        assertFalse(exit.contains("resetAccountBrowseSession()"))
+    }
+
+    @Test
     fun cleanupCancelsWatchdogAndPreservesRealUserInteractionSafety() {
         val workflow = source(
             "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"

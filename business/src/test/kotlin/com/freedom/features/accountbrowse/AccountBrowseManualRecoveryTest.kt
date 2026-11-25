@@ -60,6 +60,48 @@ class AccountBrowseManualRecoveryTest {
     }
 
     @Test
+    fun suspendedBrowseDiscardsTransientStateAndPreservesOriginalCheckpointUntilFreshVerification() {
+        val store = FakeStore(null)
+        var generation = 11L
+        val runtime = runtime(store, currentRunGeneration = { generation })
+        val task = AccountBrowseTask(runtime)
+        assertTrue(task.start())
+        runtime.session.touchActive = true
+        runtime.session.gestureInFlight = true
+        runtime.session.overlayPassthroughActive = true
+        runtime.session.sourceFingerprint = "old-source"
+        runtime.session.lastStableFingerprint = "old-stable"
+        runtime.session.stableSamples = 2
+        runtime.session.swipeCount = 3
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE)
+        runtime.saveCheckpointBeforePageExit()
+        val original = requireNotNull(store.value)
+        generation++
+        task.suspendForPageExit()
+        assertEquals(AccountBrowseTask.Status.IDLE, task.status)
+        assertEquals(AccountBrowsePhase.IDLE, runtime.phase)
+        assertFalse(runtime.session.touchActive)
+        assertFalse(runtime.session.gestureInFlight)
+        assertFalse(runtime.session.overlayPassthroughActive)
+        assertEquals("", runtime.session.sourceFingerprint)
+        assertEquals("", runtime.session.lastStableFingerprint)
+        assertEquals(0, runtime.session.stableSamples)
+        assertEquals(original, store.value)
+        assertTrue(task.start())
+        assertTrue(runtime.restoreAfterServiceReconnect())
+        assertEquals(3, runtime.session.swipeCount)
+        assertEquals("", runtime.session.sourceFingerprint)
+        assertTrue(runtime.beginCheckpointVerification())
+        assertEquals(original, store.value)
+        assertFalse(runtime.observeDynamicFeedFingerprint("fresh-feed", page(), routeVerified = true))
+        assertEquals(original, store.value)
+        assertTrue(runtime.observeDynamicFeedFingerprint("fresh-feed", page(), routeVerified = true))
+        assertFalse(runtime.hasPendingCheckpointVerification())
+        task.stop({}, {})
+        assertEquals(null, store.value)
+    }
+
+    @Test
     fun reconnectRequiresCheckpointAndPutsExistingRuntimeBackBehindVerificationGate() {
         val store = object : AccountBrowseCheckpointRepository {
             var checkpoint: AccountBrowseCheckpoint? = null

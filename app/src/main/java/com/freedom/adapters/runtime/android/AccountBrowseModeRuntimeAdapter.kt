@@ -66,10 +66,12 @@ internal class AccountBrowseModeRuntimeAdapter(
         onPrepared(session)
     }
 
+    override fun onPageRuntimeWillSuspend(reason: String) {
+        workflow().saveCheckpointBeforePageExit()
+    }
+
     override fun onPageRuntimeSuspended(reason: String) {
-        // Preserve the suspended recovery plan instead of treating page exit as user stop.
         onAccessibilityServiceDisconnected()
-        workflow().cleanup()
     }
 
     override fun onRunStopped(reason: String) {
@@ -96,9 +98,7 @@ internal class AccountBrowseModeRuntimeAdapter(
         onReadinessInvalidated("无障碍服务断开；目标应用就绪状态失效")
         awaitingServiceReconnect = true
         try {
-            workflow().cancelScheduledStep()
-            workflow().cancelPageObservation()
-            workflow().suspendRecoveryForServiceDisconnect()
+            workflow().suspendForPageExit()
         } finally {
             releaseTaskOwnership("无障碍服务断开；撤销旧 UI 操作租约")
         }
@@ -152,8 +152,7 @@ internal class AccountBrowseModeRuntimeAdapter(
         onReadinessInvalidated("无障碍服务中断；目标应用就绪状态失效：$reason")
         awaitingServiceReconnect = true
         try {
-            workflow().pauseAccountBrowse(reason)
-            workflow().suspendRecoveryForServiceDisconnect()
+            workflow().suspendForPageExit()
         } finally {
             releaseTaskOwnership("无障碍服务中断；撤销旧 UI 操作租约")
         }
@@ -162,7 +161,7 @@ internal class AccountBrowseModeRuntimeAdapter(
     override fun onServiceDestroyed() {
         try {
             onReadinessInvalidated("无障碍服务销毁；目标应用就绪状态失效")
-            workflow().cleanup()
+            workflow().suspendForPageExit()
         } finally {
             releaseTaskOwnership("无障碍服务销毁")
         }

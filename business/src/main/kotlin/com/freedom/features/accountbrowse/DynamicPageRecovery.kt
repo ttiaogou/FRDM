@@ -275,6 +275,16 @@ class DynamicPageRecovery(
         dispatcher.currentIdentity()?.let(recoveryScheduler::onUserInteractionEnded)
     }
 
+    /** Discard volatile verification, never the durable observation plan. */
+    fun suspendAndResetVolatileState() {
+        recoveryScheduler.suspendForServiceDisconnect()
+        checkpointVerifier = null
+        checkpointDispatcher.reset()
+        verifiedCheckpointFingerprint = null
+        checkpointObservationGeneration = 0L
+        dispatcher.reset()
+    }
+
     fun reset() {
         dispatcher.currentIdentity()?.let(recoveryScheduler::stopByUser)
         checkpointVerifier = null

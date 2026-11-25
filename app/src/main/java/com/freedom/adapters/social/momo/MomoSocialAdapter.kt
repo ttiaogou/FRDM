@@ -537,6 +537,54 @@ internal class MomoSocialAdapter(
             )
         }
 
+    /** Read-only nested-page proof using existing structural inspectors, never a cached
+     * page identity. This retains an existing task only; it cannot select or claim one. */
+    internal fun hasFreshOwnedPageEvidence(taskId: String): Boolean =
+        rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(window)
+            ) return@withActiveTargetRoot false
+            // A top-level candidate belongs to independent arbitration, not this fallback.
+            // In particular a conflicting list/feed classification cannot regain write authority
+            // through a broader nested-page inspector.
+            val greetings = sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage)
+            val dynamic = browseComponents.pageInspector.inspectMomoFeedReadiness(root).fingerprint
+            if (greetings || dynamic != null) return@withActiveTargetRoot false
+            val detail = chatComponents.pageInspector.inspectRoot(
+                root = AccessibilityNodeInfo.obtain(root),
+                targetPackage = targetPackage,
+                activityClass = window.activityClass
+            )
+            if (detail.pageType == MomoChatPageType.CHAT_LIST) return@withActiveTargetRoot false
+            val verified = when (taskId) {
+                "ACCOUNT_BROWSE" ->
+                    detail.pageType != MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
+                        inspectGesturePageReadiness(root, window.activityClass, RunMode.ACCOUNT_BROWSE).ready
+                "AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS" -> {
+                    val profileTransaction = if (taskId == "AI_REPLY_PRIVATE_MESSAGES") {
+                        pendingInboxIdentityCapture != null
+                    } else {
+                        sayHiSelectedGreeting != null && sayHiReadOnlyStage in setOf(
+                            SayHiReadOnlyStage.AVATAR_TAP_PENDING, SayHiReadOnlyStage.WAITING_PROFILE,
+                            SayHiReadOnlyStage.PROFILE_SCROLL_PENDING, SayHiReadOnlyStage.PROFILE_BACK_PENDING
+                        )
+                    }
+                    // Page structure is not conversation identity. Existing business header,
+                    // identity, window and per-operation safety checks are still mandatory.
+                    val chatConfirmed = detail.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
+                        detail.hasStableChatDetailFingerprint && !detail.chatTitleText.isNullOrBlank()
+                    val cardConfirmed = taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                        window.activityClass == MomoSayHiPageContract.CARD_ACTIVITY &&
+                        pageInspectionComponents.gestureReadinessInspector.hasVisibleViewId(
+                            root, setOf(MomoSayHiPageContract.CARD_CONTENT_VIEW_ID, MomoSayHiPageContract.CARD_CLOSE_VIEW_ID)
+                        )
+                    chatConfirmed || cardConfirmed || (profileTransaction && isSayHiProfileSurfacePresent())
+                }
+                else -> false
+            }
+            verified && accessibilityGateway.isWindowCurrent(window)
+        } ?: false
+
     override fun inspectPage(): BrowsePageEvidence = rootAccess.withActiveTargetRoot { root, window ->
         val packageName = safeString { root.packageName?.toString().orEmpty() }
         val activity = window.activityClass
