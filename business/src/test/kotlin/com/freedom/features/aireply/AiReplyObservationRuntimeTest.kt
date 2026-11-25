@@ -753,6 +753,38 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p4UnassociatedViewportUsesExistingCheckpointWithoutRestartingBottomSearch() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.attemptedSessionKeys += "previously-processed"
+        executor.lockedUnreadSessionKeys += "retained-pending"
+        executor.recordVerifiedViewport(fixture.listPage)
+        val oldKeys = executor.visibleSessionKeys(fixture.listPage)
+        val fresh = fixture.listPage.copy(chatListCandidates = listOf(
+            sessionCandidate(nameText = "Completely different viewport", completeBoundaryEvidence = true)
+        ))
+        fixture.port.page = fresh
+        val handle = fixture.runtime.javaClass.getDeclaredMethod("handleSessionListPage", ChatPageSnapshot::class.java)
+            .apply { isAccessible = true }
+        handle.invoke(fixture.runtime, fresh)
+        assertTrue(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") && it.contains("PRIVATE_LIST_POSITION_UNVERIFIED") })
+        assertEquals(0, fixture.dispatchedGestures())
+        val saved = requireNotNull(fixture.checkpoint())
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP.name, saved.phase)
+        assertTrue(saved.lockedUnreadSetFinalized)
+        assertEquals(setOf("previously-processed"), saved.attemptedSessionKeys)
+        assertEquals(setOf("retained-pending"), saved.lockedUnreadSessionKeys)
+        assertEquals(oldKeys, saved.lastStableVisibleKeys)
+    }
+
+    @Test
     fun p7IncompleteUnreadRowCheckpointsAndBlocksGesturesWithoutPermanentIdentityBlacklist() {
         val fixture = preScrollPageRecoveryFixture()
         // Full-size visible private row, but it lacks a readable identity; a confirmed

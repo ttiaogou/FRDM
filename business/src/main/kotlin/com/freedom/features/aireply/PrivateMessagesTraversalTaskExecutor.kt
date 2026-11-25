@@ -60,7 +60,8 @@ internal enum class PrivateMessagesScrollObservationDecision {
     TOP_BOUNDARY_CANDIDATE,
     BOTTOM_NO_PROGRESS,
     BOTTOM_BOUNDARY_CANDIDATE,
-    BOTTOM_VIEWPORT_CHANGED
+    BOTTOM_VIEWPORT_CHANGED,
+    POSITION_UNVERIFIED
 }
 
 /**
@@ -238,8 +239,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * clicking still goes through the normal fresh-row validation path.
      */
     fun reanchorRestoredCheckpoint(snapshot: ChatPageSnapshot): RestoreReanchorResult {
-        val visible = visibleSessionKeys(snapshot)
-        if (visible.isNotEmpty()) lastStableSessionListVisibleKeys = visible
+        recordVerifiedViewport(snapshot)
 
         val candidates = snapshot.chatListCandidates.filter { candidate ->
             candidate.selectionClass == "PRIVATE_CHAT" && ChatSessionManagementPolicy.isEligible(candidate)
@@ -412,7 +412,14 @@ internal class PrivateMessagesTraversalTaskExecutor {
     var noProgressScrollCount: Int = 0
     var pendingScrollBaseline: List<String>? = null
     var pendingScrollToTop: Boolean = false
+    // Transient position evidence from the same observation as the existing stable keys.
+    // Never serialize collection positions or reuse them after checkpoint restore.
+    private var lastObservedViewportPosition: Pair<String, IntRange?>? = null
     var lastStableSessionListVisibleKeys: List<String>? = null
+        set(value) {
+            field = value
+            lastObservedViewportPosition = null
+        }
     var cancelledScrollRecoveryCount: Int = 0
 
     val capturedSessionListFingerprints: MutableSet<String> = LinkedHashSet()
@@ -430,8 +437,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         ).mapNotNull { candidate ->
             val identityKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
             if (identityKey.isBlank()) return@mapNotNull null
-            // Stable identity plus physical row geometry measures real viewport movement.
-            // Row indexes are deliberately omitted because dynamic cards can shift row indexes.
+            // Keep exact geometry for boundary, identity-return and checkpoint proof.
+            // Position continuity is evaluated separately; row indexes are not identities.
             "$identityKey@${candidate.rowBounds.left},${candidate.rowBounds.top}," +
                 "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
         }
@@ -455,6 +462,28 @@ internal class PrivateMessagesTraversalTaskExecutor {
         collectionRows(snapshot)?.let { rows ->
             "$COLLECTION_POSITION_PREFIX${snapshot.windowIdentityKey()}:${rows.first()}:${rows.last()}"
         }
+
+    /** Record only an independently observed list, never a stale coordinate or row target. */
+    fun recordVerifiedViewport(snapshot: ChatPageSnapshot) {
+        val keys = visibleSessionKeys(snapshot)
+        if (keys.isEmpty() || snapshot.chatListExtractionTruncated) return
+        lastStableSessionListVisibleKeys = keys
+        val window = snapshot.windowIdentityKey() ?: return
+        lastObservedViewportPosition = window to collectionRows(snapshot)?.let { it.first()..it.last() }
+    }
+
+    private fun collectionPositionFromKey(key: String?): Pair<String, IntRange>? {
+        if (key == null || !key.startsWith(COLLECTION_POSITION_PREFIX)) return null
+        val last = key.substringAfterLast(':').toIntOrNull() ?: return null
+        val prefix = key.substringBeforeLast(':')
+        val first = prefix.substringAfterLast(':').toIntOrNull() ?: return null
+        if (first < 0 || last < first) return null
+        return prefix.substringBeforeLast(':') to (first..last)
+    }
+
+    private fun orderedIdentityKeys(keys: List<String>): List<String> =
+        keys.filterNot { it.startsWith(COLLECTION_POSITION_PREFIX) }
+            .map { it.substringBefore('@') }.filter(String::isNotBlank)
 
     /** Null means no independent boundary evidence; false prevents a false no-motion boundary. */
     fun collectionBoundaryEvidence(snapshot: ChatPageSnapshot, toTop: Boolean): Boolean? {
@@ -721,7 +750,17 @@ internal class PrivateMessagesTraversalTaskExecutor {
             maxNoProgressScrolls = maxNoProgressScrolls,
             boundaryEvidence = collectionBoundaryEvidence(snapshot, toTop = wasScrollingToTop)
         )
-        val viewportPositionInvalidated = if (allowExpectedSessionReturnViewportChange) {
+        val viewportPositionInvalidated = if (
+            observedScrollDecision == PrivateMessagesScrollObservationDecision.POSITION_UNVERIFIED
+        ) {
+            invalidateTraversalPosition(snapshot)
+            true
+        } else if (allowExpectedSessionReturnViewportChange) {
+            // A verified return may reorder the processed row. Preserve the phase,
+            // but do not carry a stale top assertion into the changed viewport.
+            if (atTop && (lastStableSessionListVisibleKeys != visibleKeys ||
+                    collectionBoundaryEvidence(snapshot, toTop = true) == false)
+            ) atTop = false
             false
         } else {
             reconcileUnrequestedViewportChange(
@@ -740,12 +779,12 @@ internal class PrivateMessagesTraversalTaskExecutor {
             collectionBoundaryEvidence(snapshot, toTop = true) == true
         ) PrivateMessagesScrollObservationDecision.TOP_BOUNDARY_CANDIDATE
         else observedScrollDecision
-        if (visibleKeys.isNotEmpty()) lastStableSessionListVisibleKeys = visibleKeys
+        if (!viewportPositionInvalidated) recordVerifiedViewport(snapshot)
 
         val candidatesEmpty = snapshot.chatListCandidates.isEmpty()
         if (!candidatesEmpty) sessionListStabilityRetryCount = 0
 
-        val unreadAdmissionDecision = if (initialInboxTopPositioningCompleted && !candidatesEmpty &&
+        val unreadAdmissionDecision = if (!viewportPositionInvalidated && initialInboxTopPositioningCompleted && !candidatesEmpty &&
             (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM ||
                 phase == SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) && !wasWaitingForUnread
         ) {
@@ -760,7 +799,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         // A viewport observation is not a round transition. Keep the previous round's
         // attempted identities intact until the runtime has independently confirmed
         // a fresh inbox and explicitly calls beginNextPollingRound().
-        val nextCandidate = if (initialInboxTopPositioningCompleted && !candidatesEmpty &&
+        val nextCandidate = if (!viewportPositionInvalidated && initialInboxTopPositioningCompleted && !candidatesEmpty &&
             (!incompleteUnreadEvidenceBlocked || incompleteUnreadAllowsIndependentTraversal) &&
             (unreadAdmissionDecision == null ||
                 unreadAdmissionDecision == PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED)
@@ -1013,17 +1052,37 @@ internal class PrivateMessagesTraversalTaskExecutor {
     ): PrivateMessagesScrollObservationDecision {
         val baseline = pendingScrollBaseline
             ?: return PrivateMessagesScrollObservationDecision.NO_PENDING_SCROLL
-        val previousPosition = baseline.firstOrNull()?.takeIf { it.startsWith(COLLECTION_POSITION_PREFIX) }
-        val currentPosition = visibleKeys.firstOrNull()?.takeIf { it.startsWith(COLLECTION_POSITION_PREFIX) }
-        val positionChanged = if (previousPosition != null && currentPosition != null) {
-            previousPosition != currentPosition
-        } else {
-            baseline.filterNot { it.startsWith(COLLECTION_POSITION_PREFIX) } !=
-                visibleKeys.filterNot { it.startsWith(COLLECTION_POSITION_PREFIX) }
-        }
+        val previousPosition = collectionPositionFromKey(baseline.firstOrNull())
+        val currentPosition = collectionPositionFromKey(visibleKeys.firstOrNull())
         val wasScrollingToTop = pendingScrollToTop
         pendingScrollBaseline = null
         pendingScrollToTop = false
+
+        val positionChanged = if (previousPosition != null && currentPosition != null) {
+            if (previousPosition.first != currentPosition.first) {
+                return PrivateMessagesScrollObservationDecision.POSITION_UNVERIFIED
+            }
+            val before = previousPosition.second
+            val after = currentPosition.second
+            val beforeIdentities = orderedIdentityKeys(baseline)
+            val afterIdentities = orderedIdentityKeys(visibleKeys)
+            val sameIdentitySequence = beforeIdentities.isNotEmpty() && beforeIdentities == afterIdentities
+            // Collection indexes can shift when a card is inserted even though the same
+            // complete private rows remain visible. This alone is not scroll progress.
+            val towardTop = after.first <= before.first && after.last <= before.last && after != before
+            val towardBottom = after.first >= before.first && after.last >= before.last && after != before
+            if (!sameIdentitySequence && (if (wasScrollingToTop) towardBottom else towardTop)) {
+                // The observed movement contradicts the submitted direction. Do not
+                // infer a completed scroll or boundary from the changed range.
+                return PrivateMessagesScrollObservationDecision.POSITION_UNVERIFIED
+            }
+            !sameIdentitySequence && (if (wasScrollingToTop) towardTop else towardBottom)
+        } else {
+            // Preserve the existing conservative legacy evidence when collection
+            // metadata is unavailable on either side.
+            baseline.filterNot { it.startsWith(COLLECTION_POSITION_PREFIX) } !=
+                visibleKeys.filterNot { it.startsWith(COLLECTION_POSITION_PREFIX) }
+        }
 
         if (wasScrollingToTop) {
             if (positionChanged) {
@@ -1069,16 +1128,52 @@ internal class PrivateMessagesTraversalTaskExecutor {
             phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
         ) return false
         val previousVisibleKeys = lastStableSessionListVisibleKeys ?: return false
-        if (previousVisibleKeys == visibleKeys) return false
+        val previousPosition = lastObservedViewportPosition
+        val currentWindow = snapshot.windowIdentityKey()
+        val currentRows = collectionRows(snapshot)?.let { it.first()..it.last() }
+        val sameWindow = previousPosition == null ||
+            (currentWindow != null && currentWindow == previousPosition.first)
+        if (sameWindow && previousVisibleKeys == visibleKeys) {
+            if (atTop && collectionBoundaryEvidence(snapshot, toTop = true) == false) atTop = false
+            return false
+        }
 
-        phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+        val previousIdentities = orderedIdentityKeys(previousVisibleKeys)
+        val currentIdentities = orderedIdentityKeys(visibleKeys)
+        val common = previousIdentities.toSet().intersect(currentIdentities.toSet()).filter { key ->
+            key !in ambiguousSessionIdentityKeys &&
+                previousIdentities.count { it == key } == 1 &&
+                currentIdentities.count { it == key } == 1
+        }
+        val priorRows = previousPosition?.second
+        val overlappingRange = priorRows == null || currentRows == null ||
+            (priorRows.first <= currentRows.last && currentRows.first <= priorRows.last)
+        val orderedAnchors = previousIdentities.filter { it in common } ==
+            currentIdentities.filter { it in common }
+        if (sameWindow && !snapshot.chatListExtractionTruncated &&
+            common.isNotEmpty() && overlappingRange &&
+            (orderedAnchors || (priorRows != null && currentRows == priorRows))
+        ) {
+            // Local reflow: keep the confirmed unread boundary and direction. Rebuild
+            // candidate geometry from this snapshot; do not restart the search below.
+            atTop = false
+            noProgressScrollCount = 0
+            return false
+        }
+
+        invalidateTraversalPosition(snapshot)
+        return true
+    }
+
+    private fun invalidateTraversalPosition(snapshot: ChatPageSnapshot) {
+        // Retain the round, frozen unread boundary and old cursor as checkpoint evidence.
+        // A new position requires the existing independent recovery verification.
         atTop = false
         noProgressScrollCount = 0
         sessionListStabilityRetryCount = 0
         val evidence = unreadEvidence(snapshot)
-        normalInboxHadUnread = evidence.hasUnread
-        normalInboxUnreadStateUnknown = evidence.hasUnknown
-        return true
+        normalInboxHadUnread = normalInboxHadUnread || evidence.hasUnread
+        normalInboxUnreadStateUnknown = normalInboxUnreadStateUnknown || evidence.hasUnknown
     }
 
     /** Clears all traversal state at the AI Reply runtime reset boundary. */

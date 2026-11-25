@@ -492,7 +492,8 @@ class PrivateMessagesTraversalTaskExecutorTest {
         )
 
         assertTrue(changed)
-        assertEquals(SessionListTraversalPhase.POSITIONING_AT_BOTTOM, executor.phase)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+        assertEquals(listOf("old-viewport"), executor.lastStableSessionListVisibleKeys)
         assertFalse(executor.atTop)
         assertEquals(0, executor.noProgressScrollCount)
         assertEquals(0, executor.sessionListStabilityRetryCount)
@@ -521,6 +522,152 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertFalse(evaluation.viewportPositionInvalidated)
         assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
         assertEquals(next, evaluation.nextCandidate)
+    }
+
+    @Test
+    fun localRowReflowAndCardInsertionKeepConfirmedUnreadBoundaryAndCursor() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        }
+        val done = candidate(0, "Already processed", ChatUnreadStatus.READ, top = 100)
+        val pending = candidate(1, "Pending unread", ChatUnreadStatus.UNREAD, top = 300)
+        val before = snapshot(done, pending).copy(
+            windowGeneration = 1L,
+            chatListCollectionRowCount = 67,
+            chatListVisibleCollectionRows = (5..14).toList(),
+            chatListCanScrollForward = true,
+            chatListCanScrollBackward = true
+        )
+        executor.attemptedSessionKeys += key(done)
+        executor.lockedUnreadSessionKeys += setOf(key(done), key(pending))
+        executor.recordVerifiedViewport(before)
+        val moved = candidate(3, "Pending unread", ChatUnreadStatus.UNREAD, top = 340)
+        val refreshed = before.copy(
+            chatListCollectionRowCount = 68,
+            chatListVisibleCollectionRows = (6..15).toList(),
+            chatListCandidates = listOf(candidate(2, "Already processed", ChatUnreadStatus.READ, top = 140), moved)
+        )
+        val result = executor.evaluateListSnapshot(refreshed, false, 2)
+        assertFalse(result.viewportPositionInvalidated)
+        assertEquals(moved, result.nextCandidate)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+        assertTrue(executor.lockedUnreadSetFinalized)
+        assertEquals(setOf(key(done)), executor.attemptedSessionKeys)
+        assertEquals(setOf(key(done), key(pending)), executor.lockedUnreadSessionKeys)
+
+        // Reordering within the same independently observed collection range is
+        // a local content mutation, not a reason to restart the downward search.
+        val reordered = refreshed.copy(chatListCandidates = listOf(
+            candidate(2, "Pending unread", ChatUnreadStatus.UNREAD, top = 140),
+            candidate(3, "Already processed", ChatUnreadStatus.READ, top = 340)
+        ))
+        val afterReorder = executor.evaluateListSnapshot(reordered, false, 2)
+        assertFalse(afterReorder.viewportPositionInvalidated)
+        assertEquals("Pending unread", afterReorder.nextCandidate?.nameText)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+    }
+
+    @Test
+    fun unassociatedCollectionPositionCannotSelectOrReplaceCheckpointBeforeRecovery() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        }
+        val pending = candidate(1, "Pending", ChatUnreadStatus.UNREAD)
+        val old = snapshot(pending).copy(
+            windowGeneration = 1L,
+            chatListCollectionRowCount = 67,
+            chatListVisibleCollectionRows = (13..22).toList(),
+            chatListCanScrollForward = true,
+            chatListCanScrollBackward = true
+        )
+        executor.lockedUnreadSessionKeys += key(pending)
+        executor.attemptedSessionKeys += "processed"
+        executor.recordVerifiedViewport(old)
+        val other = candidate(0, "Unassociated", ChatUnreadStatus.UNREAD)
+        val fresh = old.copy(
+            chatListCandidates = listOf(other),
+            chatListVisibleCollectionRows = (0..7).toList(),
+            chatListCanScrollBackward = false
+        )
+        val decision = executor.evaluateListSnapshot(fresh, false, 2)
+        assertTrue(decision.viewportPositionInvalidated)
+        assertEquals(null, decision.nextCandidate)
+        assertEquals(null, decision.unreadAdmissionDecision)
+        assertFalse(executor.atTop)
+        assertEquals(executor.visibleSessionKeys(old), executor.checkpoint().lastStableVisibleKeys)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+        assertEquals(setOf(key(pending)), executor.lockedUnreadSessionKeys)
+        assertEquals(setOf("processed"), executor.attemptedSessionKeys)
+        // Only the verified checkpoint-resume path may accept this position.
+        executor.recordVerifiedViewport(fresh)
+        assertFalse(executor.evaluateListSnapshot(fresh, false, 2).viewportPositionInvalidated)
+    }
+
+    @Test
+    fun collectionIndexShiftWithoutNewIdentityAndReverseMovementAreNotScrollProgress() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val row = candidate(0, "Same", ChatUnreadStatus.UNREAD)
+        val before = snapshot(row).copy(
+            windowGeneration = 1L,
+            chatListCollectionRowCount = 67,
+            chatListVisibleCollectionRows = (5..14).toList(),
+            chatListCanScrollForward = true,
+            chatListCanScrollBackward = true
+        )
+        val insertedCard = before.copy(
+            chatListCollectionRowCount = 68,
+            chatListVisibleCollectionRows = (6..15).toList(),
+            chatListCandidates = listOf(candidate(1, "Same", ChatUnreadStatus.UNREAD, top = 250))
+        )
+        executor.pendingScrollBaseline = executor.scrollPositionKeys(before)
+        assertEquals(PrivateMessagesScrollObservationDecision.BOTTOM_NO_PROGRESS,
+            executor.consumePendingScrollObservation(executor.scrollPositionKeys(insertedCard), 2, false))
+        executor.pendingScrollBaseline = executor.scrollPositionKeys(before)
+        executor.pendingScrollToTop = true
+        val reverse = before.copy(
+            chatListVisibleCollectionRows = (13..22).toList(),
+            chatListCandidates = listOf(candidate(2, "Other", ChatUnreadStatus.UNREAD))
+        )
+        assertEquals(PrivateMessagesScrollObservationDecision.POSITION_UNVERIFIED,
+            executor.consumePendingScrollObservation(executor.scrollPositionKeys(reverse), 2, false))
+        assertEquals(null, executor.pendingScrollBaseline)
+    }
+
+    @Test
+    fun verifiedChatReturnKeepsDirectionButRevokesOldTopEvidence() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+            atTop = true
+        }
+        val previous = candidate(0, "Processed", ChatUnreadStatus.READ)
+        val next = candidate(1, "Remaining", ChatUnreadStatus.UNREAD)
+        executor.recordVerifiedViewport(snapshot(previous))
+        executor.attemptedSessionKeys += key(previous)
+        executor.lockedUnreadSessionKeys += setOf(key(previous), key(next))
+        val fresh = snapshot(next).copy(
+            windowGeneration = 1L,
+            chatListCollectionRowCount = 67,
+            chatListVisibleCollectionRows = (5..14).toList(),
+            chatListCanScrollForward = true,
+            chatListCanScrollBackward = true
+        )
+        val result = executor.evaluateListSnapshot(fresh, false, 2,
+            allowExpectedSessionReturnViewportChange = true)
+        assertFalse(result.viewportPositionInvalidated)
+        assertFalse(executor.atTop)
+        assertEquals(next, result.nextCandidate)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+        assertEquals(setOf(key(previous)), executor.attemptedSessionKeys)
+        assertTrue(executor.lockedUnreadSetFinalized)
     }
 
     @Test
@@ -1292,7 +1439,10 @@ class PrivateMessagesTraversalTaskExecutorTest {
             executor.consumePendingScrollObservation(executor.scrollPositionKeys(jitter), 2, false)
         )
         executor.pendingScrollBaseline = executor.scrollPositionKeys(jitter)
-        val moved = jitter.copy(chatListVisibleCollectionRows = (13..22).toList())
+        val moved = jitter.copy(
+            chatListVisibleCollectionRows = (13..22).toList(),
+            chatListCandidates = listOf(candidate(2, "Newly exposed", ChatUnreadStatus.UNREAD))
+        )
         assertEquals(
             PrivateMessagesScrollObservationDecision.BOTTOM_VIEWPORT_CHANGED,
             executor.consumePendingScrollObservation(executor.scrollPositionKeys(moved), 2, false)

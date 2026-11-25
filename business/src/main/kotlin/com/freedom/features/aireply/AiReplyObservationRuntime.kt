@@ -1498,6 +1498,13 @@ class AiReplyObservationRuntime(
     /** Uses the original checkpoint re-anchor algorithm; never reuses saved row coordinates. */
     private fun reanchorRestoredMessageList(inspection: ChatPageSnapshot) {
         if (!messageListCheckpointRestored) return
+        if (recoveryContext.reason == "PRIVATE_LIST_POSITION_UNVERIFIED") {
+            // Position recovery is not identity migration. Preserve the entire round ledger.
+            privateMessagesTraversalTaskExecutor.recordVerifiedViewport(inspection)
+            messageListCheckpointRestored = false
+            onLog("消息列表检查点恢复[POSITION_REANCHORED]：新鲜页面已验证；保留本轮身份与原遍历方向")
+            return
+        }
         val compatible = privateMessagesTraversalTaskExecutor.isRestoredViewportCompatible(inspection)
         if (!compatible) {
             val reanchor = privateMessagesTraversalTaskExecutor.reanchorRestoredCheckpoint(inspection)
@@ -1508,6 +1515,7 @@ class AiReplyObservationRuntime(
                     "目标会话=${if (reanchor.matchedCandidate != null) "已定位" else "未定位，继续按原方向扫描"}"
             )
         } else {
+            privateMessagesTraversalTaskExecutor.recordVerifiedViewport(inspection)
             onLog("消息列表检查点恢复[CONTINUE]：页面已验证；保留原检查点和遍历游标继续处理")
         }
         messageListCheckpointRestored = false
@@ -2310,6 +2318,11 @@ class AiReplyObservationRuntime(
                 return
             }
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID && targetRoute == messageListRecoveryRoute.routeId) {
+                // The fallback verifier must consume the same position-only recovery
+                // before recoveryContext.clear() retires the original reason.
+                if (recoveryContext.reason == "PRIVATE_LIST_POSITION_UNVERIFIED") {
+                    reanchorRestoredMessageList(inspection)
+                }
                 messageRecoveryRetryAttempt = 0
             }
             if (privateListFaultEvidence != PrivateListRecoveryFaultEvidence.NOT_APPLICABLE) {
@@ -5239,6 +5252,7 @@ class AiReplyObservationRuntime(
             messageListRecoveryVerificationPending = false
             messageRecoveryRetryAttempt = 0
             pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
+            reanchorRestoredMessageList(snapshot)
             onLog("消息列表恢复[RECOVERY_VERIFIED]：连续两次独立页面快照一致；恢复原有遍历算法")
         }
         // A recovery handoff may invoke the list handler directly. Only the next unified
@@ -5429,6 +5443,15 @@ class AiReplyObservationRuntime(
         }
 
         val visibleKeys = listEvaluation.visibleKeys
+        if (listEvaluation.viewportPositionInvalidated) {
+            // Do not accept the unassociated viewport as a new cursor or dispatch a
+            // downward search. Reuse the existing checkpoint/independent page proof.
+            sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+            messageListCheckpointRestored = true
+            onLog("AI 会话遍历[POSITION_UNVERIFIED]：当前位置无法关联原遍历锚点；保留方向、已读边界和本轮身份记录；通过原检查点重新定位")
+            recoverRetryablePrivateList("PRIVATE_LIST_POSITION_UNVERIFIED")
+            return
+        }
         when (listEvaluation.scrollDecision) {
             PrivateMessagesScrollObservationDecision.NO_PENDING_SCROLL -> Unit
             PrivateMessagesScrollObservationDecision.TOP_VIEWPORT_CHANGED -> {
@@ -5467,19 +5490,7 @@ class AiReplyObservationRuntime(
                 }
             }
             PrivateMessagesScrollObservationDecision.BOTTOM_VIEWPORT_CHANGED -> Unit
-        }
-
-        if (listEvaluation.viewportPositionInvalidated) {
-            sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
-            onLog(
-                "AI 会话管理：未发出滚动手势时可见会话身份序列发生变化；当前列表位置不可信；" +
-                    "以最新视口重新核对未读状态；保留本轮已处理身份，重新定位底部后继续审视"
-            )
-            // A snapshot taken after an external list movement must never be used to
-            // select or open a row. Re-establish the bottom anchor first, then inspect
-            // the fresh viewport under the normal admission rules.
-            scrollSessionList(snapshot, toTop = false)
-            return
+            PrivateMessagesScrollObservationDecision.POSITION_UNVERIFIED -> return
         }
 
         if (listEvaluation.candidatesEmpty) {
