@@ -2344,6 +2344,100 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun confirmedGreetingsListWaitsForFreshAndroidReadyBeforeFirstTraversal() {
+        for (pageSelected in listOf(false, true)) {
+            val scheduler = FakeScheduler()
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                verifiedMessageWorkAreaNavigationSupported = true
+                receivedGreetingsWorkflowEnabled = true
+                page = ChatPageSnapshot(
+                    packageName = "com.immomo.momo",
+                    activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity",
+                    pageKind = ChatPageKind.NON_CHAT,
+                    scannedNodeCount = 24,
+                    editableInputCount = 0,
+                    messageListCount = 0,
+                    sendActionCount = 0,
+                    messageRelatedViewIdCount = 0,
+                    hasChatTab = false,
+                    messageListTarget = null,
+                    inputFieldTarget = null,
+                    windowGeneration = 7L
+                )
+                manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+                receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            }
+            val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+            val logs = ArrayList<String>()
+            var readinessStatus = TargetAppReadinessStatus.STARTING
+            var staleGeneration = false
+            var readinessReads = 0
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = NoOpGestureApi,
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = logs::add,
+                inspectAndroidRecoveryReadiness = { page ->
+                    readinessReads++
+                    testAndroidRecoveryReadiness(page).copy(
+                        status = readinessStatus,
+                        pageGeneration = if (staleGeneration) 6L else page.windowGeneration
+                    )
+                },
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L,
+                taskCoordinator = tasks,
+                currentRunGeneration = { 1L },
+                pageSelectedStartup = pageSelected
+            )
+
+            if (pageSelected) {
+                assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_RECEIVED_GREETINGS"))
+                runtime.requestPageRouteObservation()
+            } else {
+                runtime.scheduleInitialObservation()
+                assertEquals("AI_REPLY_PRIVATE_MESSAGES", tasks.activeTaskId())
+                runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN))
+            }
+            scheduler.runNextWithDelay(300L)
+
+            assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+            assertEquals(0, port.receivedGreetingsIdleSteps)
+            assertNull(tasks.currentLease())
+            assertTrue(logs.any { it.contains("GREETING_FIRST_ACTION_READINESS_WAIT reason=ANDROID_STARTING") })
+            assertTrue(scheduler.hasPendingDelay(500L))
+
+            // READY from the wrong window generation is not fresh execution evidence.
+            readinessStatus = TargetAppReadinessStatus.READY
+            staleGeneration = true
+            scheduler.runNextWithDelay(500L)
+            assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+            assertEquals(0, port.receivedGreetingsIdleSteps)
+            assertNull(tasks.currentLease())
+            assertTrue(logs.any { it.contains("GREETING_FIRST_ACTION_READINESS_WAIT reason=WINDOW_GENERATION_CHANGED") })
+            assertTrue(scheduler.hasPendingDelay(500L))
+
+            // No new accessibility event is required; the existing read-only scheduler
+            // must obtain fresh list evidence and enter the original start path once.
+            staleGeneration = false
+            scheduler.runNextWithDelay(500L)
+            assertEquals(3, readinessReads)
+            assertEquals(3, port.manualGreetingsArrivalObservations)
+            assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+            assertEquals(1, port.receivedGreetingsIdleSteps)
+            assertEquals("AI_REPLY_RECEIVED_GREETINGS", tasks.activeTaskId())
+            assertEquals(0, port.receivedGreetingsNavigationTaskStarts)
+            assertFalse(logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        }
+    }
+
+    @Test
     fun receivedGreetingsWatcherAcceptsPageChangeEventsRegardlessOfInputOrigin() {
         InputOrigin.values().forEach { origin ->
             val scheduler = FakeScheduler()

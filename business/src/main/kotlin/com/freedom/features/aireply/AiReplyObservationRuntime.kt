@@ -1631,6 +1631,27 @@ class AiReplyObservationRuntime(
             receivedGreetingsProbePrivateRouteWon = false
             when (arrivalStatus) {
                 ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
+                    // Ordinary first admission must share the same live Android readiness
+                    // evidence as dispatch. Recovery and private-route arbitration keep
+                    // their existing independent gates and ordering.
+                    if (!receivedGreetingsProbeOrdinaryInboxConfirmed && !recoveryContext.pending) {
+                        val readiness = runCatching { inspectAndroidRecoveryReadiness(inspection) }.getOrNull()
+                        val admission = AndroidRecoveryExecutionGate.assess(
+                            snapshot = inspection, expectedPackage = targetPackage(), evidence = readiness
+                        )
+                        if (!admission.allowed) {
+                            if (ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+                                pauseForReceivedGreetingsPageTransition(arrivalStatus)
+                            }
+                            receivedGreetingsPageProbePending = true
+                            onLog("GREETING_FIRST_ACTION_READINESS_WAIT reason=${admission.reasonCode}；只读复核，不启动遍历")
+                            scheduleFullInspectionAfter(
+                                RecoveryScheduler.readOnlyRetryDelayMs(1),
+                                AiReplyPageReadPurpose.RECEIVED_GREETINGS
+                            )
+                            return
+                        }
+                    }
                     startReceivedGreetingsTaskFromConfirmedPage(
                         ConfirmedGreetingsListEvidence.Observed(arrivalStatus)
                     )
