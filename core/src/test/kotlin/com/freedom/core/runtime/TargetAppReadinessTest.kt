@@ -78,6 +78,19 @@ class TargetAppReadinessTest {
     }
 
     @Test
+    fun foregroundQuietHintUsesExistingClockAndDoesNotAuthorizeOrAdvanceReadiness() {
+        val controller = TargetAppReadinessController()
+        assertEquals(null, controller.foregroundQuietRemainingMs(100L))
+        controller.observeForegroundPackage(TARGET_PACKAGE, TARGET_PACKAGE, 100L)
+        assertEquals(5_000L, controller.foregroundQuietRemainingMs(100L))
+        assertEquals(1L, controller.foregroundQuietRemainingMs(5_099L))
+        assertEquals(0L, controller.foregroundQuietRemainingMs(5_100L))
+        assertEquals(TargetAppReadinessStatus.UNKNOWN, controller.current().status)
+        controller.observeForegroundPackage(TARGET_PACKAGE, "com.android.systemui", 5_200L)
+        assertEquals(null, controller.foregroundQuietRemainingMs(5_200L))
+    }
+
+    @Test
     fun accountBrowseIsNotDelayedByAiReplyForegroundQuietProtection() {
         val controller = TargetAppReadinessController()
         val accountBrowse = readyEvidence().copy(runMode = RunMode.ACCOUNT_BROWSE)

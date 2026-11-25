@@ -631,7 +631,9 @@ class AiReplyObservationRuntimeTest {
         val dispatchedGestures: () -> Int
     )
 
-    private fun preScrollPageRecoveryFixture(): PreScrollPageRecoveryFixture {
+    private fun preScrollPageRecoveryFixture(
+        foregroundQuietRemainingMs: () -> Long = { 0L }
+    ): PreScrollPageRecoveryFixture {
         val scheduler = FakeScheduler()
         val listPage = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -686,7 +688,8 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L,
             taskCoordinator = ownership,
             currentRunGeneration = { 6L },
-            privateMessagesCheckpointRepository = repository
+            privateMessagesCheckpointRepository = repository,
+            foregroundQuietRemainingMs = foregroundQuietRemainingMs
         )
         runtime.scheduleInitialObservation()
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
@@ -935,6 +938,40 @@ class AiReplyObservationRuntimeTest {
             .apply { isAccessible = true }
         (field.get(fixture.runtime) as? ScheduledTask)?.cancel()
         field.set(fixture.runtime, null)
+    }
+
+    @Test
+    fun p6dKnownQuietWindowCoalescesPrivateScrollRequestsWithoutDispatch() {
+        var quietRemaining = 5_000L
+        val fixture = preScrollPageRecoveryFixture { quietRemaining }
+        cancelFixtureStartupObservation(fixture)
+        repeat(3) { invokePreScrollPageValidation(fixture) }
+        assertEquals(0, fixture.dispatchedGestures())
+        assertEquals(1, fixture.logs.count { it.contains("FOREGROUND_QUIET_WAIT") })
+        assertTrue(fixture.scheduler.hasPendingDelay(400L))
+        fixture.scheduler.runNextWithDelay(400L)
+        assertEquals(0, fixture.dispatchedGestures())
+        assertTrue(fixture.scheduler.hasPendingDelay(400L))
+        quietRemaining = 0L
+        fixture.scheduler.runNextWithDelay(400L)
+        assertEquals(0, fixture.dispatchedGestures())
+        assertTrue(fixture.logs.any { it.contains("AI 启动保护[REVERIFIED]") })
+        assertTrue(fixture.scheduler.hasPendingDelay(300L))
+    }
+
+    @Test
+    fun p6dImmediateFullObservationRetiresSupersededOrdinaryTimer() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val schedule = fixture.runtime.javaClass.getDeclaredMethod(
+            "scheduleFullInspectionAfter", Long::class.javaPrimitiveType!!,
+            AiReplyPageReadPurpose::class.java
+        ).apply { isAccessible = true }
+        schedule.invoke(fixture.runtime, 1234L, AiReplyPageReadPurpose.FULL_INSPECTION)
+        assertTrue(fixture.scheduler.hasPendingDelay(1234L))
+        val read = fixture.runtime.javaClass.getDeclaredMethod("runFullInspection").apply { isAccessible = true }
+        read.invoke(fixture.runtime)
+        assertFalse(fixture.scheduler.hasPendingDelay(1234L))
     }
 
     @Test
@@ -3489,6 +3526,60 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, confirmations)
         assertTrue(coordinator.workAreaConfirmed)
         assertEquals(1, port.messageWorkAreaEntryAttempts)
+    }
+
+    @Test
+    fun startupQuietWaitDoesNotSubmitMessageTabGestureUntilExistingGateOpens() {
+        val scheduler = FakeScheduler()
+        val feed = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.NON_CHAT,
+            scannedNodeCount = 60,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            screenBounds = ScreenRect(0, 0, 720, 1600),
+            sessionListNavigationTarget = testNavigationTarget(
+                "com.immomo.momo.maintab.MaintabActivity", generation = 5L
+            ),
+            windowGeneration = 5L
+        )
+        val port = FakeChatPort().apply {
+            page = feed
+            provideMessageTabPositionEvidence = true
+            captureMessageWorkAreaGestureOutcome = true
+        }
+        val logs = mutableListOf<String>()
+        var quietRemaining = 5_000L
+        val coordinator = AiReplyStartupReadinessCoordinator(
+            scheduler = scheduler,
+            chatPagePort = port,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            isSessionRunStarted = { true },
+            inspectFreshPageSnapshot = port::inspectChatPage,
+            isMessageViewportPositionedAgainstTab = { _, _, _ -> true },
+            hasRelevantMessageStructureDelta = { _, _, _, _ -> true },
+            onConfirmed = {},
+            onTimedOut = {},
+            onLog = logs::add,
+            foregroundQuietRemainingMs = { quietRemaining }
+        )
+        coordinator.resetForRun(sessionStarted = true)
+        coordinator.beginVerification()
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        scheduler.runNextWithDelay(400L)
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        assertTrue(scheduler.hasPendingDelay(400L))
+        quietRemaining = 0L
+        scheduler.runNextWithDelay(400L)
+        assertEquals(1, port.messageWorkAreaEntryAttempts)
+        assertTrue(scheduler.hasPendingDelay(900L))
     }
 
     @Test

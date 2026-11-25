@@ -616,6 +616,13 @@ internal class AccessibilityServiceDependencies internal constructor(
             targetPackage = { monitorRepository.targetPackage() },
             isAiReplyActive = { runSessionCoordinator.isRuntimeObserving(RunMode.AI_REPLY) },
             inspectAndroidRecoveryReadiness = { _ -> accessibilityGateway.inspectRecoveryReadiness() },
+            foregroundQuietRemainingMs = {
+                val now = SystemClock.uptimeMillis()
+                val foreground = accessibilityGateway.observeForegroundWindowForReadiness(now)
+                if (foreground.isNotBlank() && foreground == monitorRepository.targetPackage()) {
+                    targetAppReadinessController.foregroundQuietRemainingMs(now) ?: 0L
+                } else 0L
+            },
             onLog = addLog,
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,

@@ -151,7 +151,9 @@ class AiReplyObservationRuntime(
     /** Service composition selects the startup task before any durable checkpoint is activated. */
     private val pageSelectedStartup: Boolean = false,
     /** Report a synchronous failed business admission after releasing its exact lease. */
-    private val onPageTaskAdmissionRolledBack: (com.freedom.core.runtime.TaskLease) -> Unit = {}
+    private val onPageTaskAdmissionRolledBack: (com.freedom.core.runtime.TaskLease) -> Unit = {},
+    /** Read-only hint from the existing Android foreground clock, not a write permit. */
+    private val foregroundQuietRemainingMs: () -> Long = { 0L }
 ) {
     companion object {
         /**
@@ -372,6 +374,7 @@ class AiReplyObservationRuntime(
             targetPackage = targetPackage,
             isAiReplyActive = isAiReplyActive,
             isSessionRunStarted = { sessionRunStarted },
+            foregroundQuietRemainingMs = foregroundQuietRemainingMs,
             inspectFreshPageSnapshot = ::inspectFreshPageSnapshot,
             isMessageViewportPositionedAgainstTab = ::isMessageViewportPositionedAgainstTab,
             hasRelevantMessageStructureDelta = ::hasRelevantMessageStructureDelta,
@@ -1221,6 +1224,12 @@ class AiReplyObservationRuntime(
     }
 
     private fun runFullInspection() {
+        // An event/watcher can satisfy an ordinary pending full observation before
+        // its explicit timer fires. Retire that timer rather than losing its handle.
+        // Protected send/scroll reads are still shielded at their existing entry gates.
+        pageInspectionTask?.cancel()
+        pageInspectionTask = null
+        pageObservationCoordinator.cancelFullInspection()
         val purpose = pendingPageReadPurpose
         pendingPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
         runFullInspection(purpose)
@@ -2457,7 +2466,12 @@ class AiReplyObservationRuntime(
                         canPerformPrivateMessagesUiAction() && isVerifiedRecoveredPrivateDetail(inspection)
                 }
             if (boundDetail) {
-                onLog("AI 发送确认[READ_ONLY_RECHECK]：当前目标聊天与任务租约已验证；重新读取消息，不发送")
+                // Structure requests are already coalesced and OCR is single-flight.
+                // Keep fresh page checks and pending-snapshot semantics; log a new read
+                // only when one can actually start.
+                if (!messageReadCoordinator.isInFlight && ocrAdmissionRetryTask == null) {
+                    onLog("AI 发送确认[READ_ONLY_RECHECK]：当前目标聊天与任务租约已验证；重新读取消息，不发送")
+                }
                 readVisibleMessages(inspection)
             } else {
                 val reason = sendConfirmationReadDeferredReason(
@@ -5777,7 +5791,7 @@ class AiReplyObservationRuntime(
             if (privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount < MAX_BOUNDARY_STABILITY_CONFIRMATIONS) {
                 onLog(
                     "AI 会话管理：边界候选延迟快照一致；继续独立稳定复核=" +
-                        "$privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount/$MAX_BOUNDARY_STABILITY_CONFIRMATIONS"
+                        "${privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount}/$MAX_BOUNDARY_STABILITY_CONFIRMATIONS"
                 )
                 scheduleBoundaryStabilityConfirmation(expectedWindowIdentity)
                 return@schedule
@@ -6550,6 +6564,7 @@ class AiReplyObservationRuntime(
         selectedName: String?
     ) {
         if (!isAiReplyActive() || !sessionRunStarted || !canPerformPrivateMessagesUiAction()) return
+        if (waitForPrivateForegroundQuiet("会话行点击等待目标页面就绪")) return
         currentSessionSendConfirmed = false
         confirmedPrivateReturnBackRetryCount = 0
         confirmedPrivateReturnAwaitingRecovery = false
@@ -7243,6 +7258,7 @@ class AiReplyObservationRuntime(
         toTop: Boolean = false
     ) {
         if (!isAiReplyActive() || !sessionRunStarted || !canPerformPrivateMessagesUiAction()) return
+        if (waitForPrivateForegroundQuiet("列表滚动等待目标页面就绪")) return
         // Reacquire the active page immediately before scrolling. A previous list snapshot can
         // become stale after RecyclerView relayout, window changes, or user interaction.
         val inspectionResult = runCatching { readPageSnapshot(AiReplyPageReadPurpose.SCROLL_BEFORE) }
@@ -7309,17 +7325,20 @@ class AiReplyObservationRuntime(
         }
         // The independent read can reveal a newly clipped/unknown row, or prove a
         // previously pending row READ. Retain that evidence before any return swipe.
-        if (toTop && !receivedGreetingsTaskActive &&
+        val returnViewportRefreshed = toTop && !receivedGreetingsTaskActive &&
             privateMessagesTraversalTaskExecutor.refreshReturnViewportWork(fresh)
-        ) {
+        if (returnViewportRefreshed) {
             privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
         }
         // Row-scoped continuation is not a cached scroll permit. If the independently
         // complete evidence disappears before dispatch, retain the original fail-closed path.
         if (privateMessagesTraversalTaskExecutor.unresolvedIncompleteUnreadKeys.isNotEmpty()) {
             // Preserve new anomaly evidence from the independent pre-scroll read as well.
-            val stillPending = privateMessagesTraversalTaskExecutor.observeIncompleteUnreadEvidence(fresh)
-            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            val stillPending = if (returnViewportRefreshed) true else {
+                privateMessagesTraversalTaskExecutor.observeIncompleteUnreadEvidence(fresh).also {
+                    privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+                }
+            }
             if (stillPending && !privateMessagesTraversalTaskExecutor.canContinueWithIncompleteUnread(fresh)) {
                 onLog("AI 私聊异常会话[PRE_SCROLL_EVIDENCE_LOST]：滚动前新快照缺少独立完整行证据；不使用旧视口")
                 recoverRetryablePrivateList("PRIVATE_INCOMPLETE_UNREAD_ROW")
@@ -7667,6 +7686,24 @@ class AiReplyObservationRuntime(
      * Retains an AI Reply intent when the foreground quiet gate defers dispatch. Every retry
      * reacquires a new page snapshot; callers recompute all bounds and gesture geometry from it.
      */
+    private fun waitForPrivateForegroundQuiet(reason: String): Boolean {
+        if (readinessDeferredRetryTask != null) return true
+        if (!startupReadinessCoordinator.initializationPending ||
+            runCatching(foregroundQuietRemainingMs).getOrDefault(0L) <= 0L
+        ) return false
+        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+        onLog("AI 启动保护[FOREGROUND_QUIET_WAIT]：$reason；仅保留待执行意图，不申请手势")
+        val actionGeneration = sessionActionGeneration
+        scheduleAiReadinessRetry(reason) {
+            // Events may have changed the traversal phase while waiting. The unified
+            // observation owns the new selection/direction; never replay the old intent.
+            if (actionGeneration == sessionActionGeneration && sessionRunStarted &&
+                canPerformPrivateMessagesUiAction()
+            ) scheduleFullInspection()
+        }
+        return true
+    }
+
     private fun scheduleAiReadinessRetry(
         reason: String,
         retry: (ChatPageSnapshot) -> Unit
@@ -7687,6 +7724,12 @@ class AiReplyObservationRuntime(
         readinessDeferredRetryTask = scheduler.schedule(retryDelay) {
             readinessDeferredRetryTask = null
             if (generation != readinessDeferredRetryGeneration || !isAiReplyActive()) return@schedule
+            // During the known foreground quiet interval, use the original timer
+            // cadence without rebuilding a gesture or recursively scanning the tree.
+            if (runCatching(foregroundQuietRemainingMs).getOrDefault(0L) > 0L) {
+                scheduleAiReadinessRetry(reason, retry)
+                return@schedule
+            }
             val fresh = inspectFreshPageSnapshot()
             if (fresh == null) {
                 onLog("AI 启动保护[REVERIFY_UNAVAILABLE]：$reason；本轮没有取得新页面快照，保留意图继续等待")

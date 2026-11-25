@@ -217,7 +217,9 @@ object MonitorStore {
             diagnostics.recordStructured(
                 eventType = "monitor_history_evicted",
                 category = RunLogCategory.DATA_QUALITY,
-                level = RunLogLevel.WARN,
+                // This is intentional rolling UI history retention; the independent
+                // run archive has its own drop/truncation/write-failure counters.
+                level = RunLogLevel.INFO,
                 component = "MonitorStore",
                 message = "普通运行日志历史达到容量预算；已移除旧记录 $removedCount 条，估算字节=$removedBytes",
                 result = "RETENTION_APPLIED"

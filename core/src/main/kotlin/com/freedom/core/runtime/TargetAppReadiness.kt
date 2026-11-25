@@ -75,16 +75,19 @@ class TargetAppReadinessController(
 
     fun current(): TargetAppReadinessSnapshot = snapshot
 
+    /** Read-only wait hint, never an authorization to dispatch. */
+    fun foregroundQuietRemainingMs(nowUptimeMs: Long): Long? = synchronized(lock) {
+        targetForegroundSinceUptimeMs?.let {
+            (foregroundQuietPeriodMs - (nowUptimeMs - it)).coerceAtLeast(0L)
+        }
+    }
+
     fun evaluate(evidence: TargetAppReadinessEvidence, nowUptimeMs: Long): TargetAppReadinessSnapshot {
         observeForegroundPackage(evidence.targetPackage, evidence.foregroundPackage.takeIf {
             evidence.activeWindowAvailable
         }.orEmpty(), nowUptimeMs)
         val foregroundQuietRemainingMs = if (evidence.runMode == RunMode.AI_REPLY) {
-            synchronized(lock) {
-                targetForegroundSinceUptimeMs?.let {
-                    (foregroundQuietPeriodMs - (nowUptimeMs - it)).coerceAtLeast(0L)
-                }
-            }
+            foregroundQuietRemainingMs(nowUptimeMs)
         } else {
             0L
         }

@@ -23,7 +23,8 @@ internal class AiReplyStartupReadinessCoordinator(
     private val hasRelevantMessageStructureDelta: (ChatPageSnapshot, ChatPageSnapshot, ScreenRect, ScreenRect) -> Boolean,
     private val onConfirmed: (ChatPageSnapshot) -> Unit,
     private val onTimedOut: () -> Unit,
-    private val onLog: (String) -> Unit
+    private val onLog: (String) -> Unit,
+    private val foregroundQuietRemainingMs: () -> Long = { 0L }
 ) {
     companion object {
         private const val MAX_STARTUP_MESSAGE_TAB_RETRIES = 75
@@ -190,6 +191,13 @@ internal class AiReplyStartupReadinessCoordinator(
 
         if (tapAttempts >= MAX_STARTUP_MESSAGE_TAB_TAPS) {
             scheduleRetry(expectedGeneration, "消息标签导航点击次数已达上限；等待页面自行完成切换")
+            return
+        }
+
+        // The same Android foreground clock already owns the quiet period. Do not
+        // consume a navigation request/preview while that known gate is closed.
+        if (runCatching(foregroundQuietRemainingMs).getOrDefault(0L) > 0L) {
+            scheduleRetry(expectedGeneration, "启动保护静默观察中；只读等待，不申请消息标签手势")
             return
         }
 

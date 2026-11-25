@@ -196,7 +196,22 @@ object RunLogBudgetPolicy {
         val safeNavigationPause = value.contains("收到的招呼导航暂停") ||
             value.contains("收到招呼详情页返回暂停") ||
             value.contains("收到招呼身份页返回暂停")
-        return directionUnknown || partialOcr || safeNavigationPause
+        // These exact business observation states describe retained, retryable
+        // row evidence. The component name itself contains "异常", not a crash.
+        val privateRowState = Regex(
+            "^AI 私聊异常会话\\[(INCOMPLETE_UNREAD_RETRYABLE|ROW_SCOPED_BLOCK|LIST_EVIDENCE_INSUFFICIENT|HANDOFF_BLOCKED|PRE_SCROLL_EVIDENCE_LOST|RELOCATION_WAIT|RELOCATION_STARTED)\\]：",
+            RegexOption.IGNORE_CASE
+        ).find(message)
+        val privateRowWarning = privateRowState != null && run {
+            val body = message.substring(privateRowState.range.last + 1).uppercase(Locale.ROOT)
+            // Only this exact waiting phrase describes retained evidence, not a new failure.
+            val severityBody = if (privateRowState.groupValues[1] == "RELOCATION_WAIT") {
+                body.replace("原异常未解决", "")
+            } else body
+            listOf("失败", "异常", "错误", "TIMEOUT", "超时", "ERROR", "EXCEPTION")
+                .none { severityBody.contains(it) }
+        }
+        return directionUnknown || partialOcr || safeNavigationPause || privateRowWarning
     }
 
     /**
