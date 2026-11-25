@@ -76,6 +76,36 @@ class AccountBrowseManualHandoffBoundaryTest {
     }
 
     @Test
+    fun imageIndexRemainsOptionalReadOnlyBusinessEvidence() {
+        val adapter = source("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt")
+        val read = adapter.substringAfter("override fun readImageIndex(")
+            .substringBefore("override fun inspectDetail(")
+        assertTrue(read.contains("confirmedImageBrowserIdentity(root, window)"))
+        assertTrue(read.contains("fingerprint != expectedFingerprint"))
+        assertTrue(read.contains("root.findAccessibilityNodeInfosByViewId(viewId)"))
+        assertTrue(read.contains("it.isVisibleToUser"))
+        assertTrue(read.contains("accessibilityGateway.isWindowCurrent(window)"))
+        assertTrue(read.contains("ImageIndexReadResult.fromVisibleLabels("))
+        assertTrue(read.contains("node.recycle()"))
+        assertFalse(read.contains("gesturePolicy.execute("))
+        assertFalse(read.contains("performGlobalAction("))
+        val identity = adapter.substringAfter("private fun confirmedImageBrowserIdentity(")
+            .substringBefore("override fun inspectPage()")
+        assertFalse(identity.contains("include_feed_tv_index"))
+        val workflow = source("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
+        val log = workflow.substringAfter("private fun logImageIndexReadOnly(")
+            .substringBefore("private fun returnFromDetailPage()")
+        assertTrue(log.contains("page.pageKind != BrowsePageKind.IMAGE_VIEWER"))
+        assertTrue(log.contains("socialBrowsePort.readImageIndex(page.fingerprint)"))
+        assertFalse(log.contains("scheduleAccountBrowseStep("))
+        assertFalse(log.contains("pauseAccountBrowse("))
+        assertFalse(log.contains("accountBrowsePhase ="))
+        val back = workflow.substringAfter("private fun returnFromDetailPage()")
+            .substringBefore("private fun beginDynamicNavigationRecovery(")
+        assertFalse(back.contains("readImageIndex("))
+    }
+
+    @Test
     fun confirmedFeedReturnReconcilesPhaseWithoutDispatchingBackOrSkippingPositionVerification() {
         val workflow = source("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
         val reconcile = workflow.substringAfter("private fun resumeFeedReturnIfConfirmed(")

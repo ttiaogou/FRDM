@@ -2409,6 +2409,7 @@ internal class AndroidAccountBrowseWorkflow(
                 accountBrowseSession.detailDwellDueAt = accountBrowseSession.detailDwellStartedAt + dwell
                 addLog("动态详情已确认载入；内容类型=${page.pageKind.name}；本次阅读停留 ${dwell / 1000.0} 秒")
                 scheduleAccountBrowseStep(dwell)
+                logImageIndexReadOnly(page)
                 return
             }
         } else {
@@ -2421,6 +2422,21 @@ internal class AndroidAccountBrowseWorkflow(
             beginDynamicNavigationRecovery("等待动态详情超时；当前 Activity=${accountBrowseSession.currentActivityClass.ifBlank { "未知" }}，重新分析当前页面层级")
         } else {
             scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+        }
+    }
+
+    /** Stage one only: collect and report optional image index evidence without changing the visit. */
+    private fun logImageIndexReadOnly(page: BrowsePageEvidence) {
+        if (page.pageKind != BrowsePageKind.IMAGE_VIEWER) return
+        val result = runCatching { socialBrowsePort.readImageIndex(page.fingerprint) }
+            .getOrElse { ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.NODE_READ_FAILED) }
+        when (result) {
+            is ImageIndexReadResult.Confirmed -> addLog(
+                "图片序号[CONFIRMED]：current=${result.position.current}；total=${result.position.total}；仅取证"
+            )
+            is ImageIndexReadResult.Unavailable -> addLog(
+                "图片序号[UNAVAILABLE]：reason=${result.reason.name}；保持原有阅读和返回流程"
+            )
         }
     }
 
@@ -2619,6 +2635,7 @@ internal class AndroidAccountBrowseWorkflow(
                     "内容节点变化不影响页面身份；继续剩余阅读时间 ${remaining / 1000.0} 秒"
             )
             scheduleAccountBrowseStep(remaining.coerceAtLeast(300L))
+            logImageIndexReadOnly(currentDetailPage)
             return
         }
         if (System.currentTimeMillis() >= accountBrowseSession.deadlineAt) {

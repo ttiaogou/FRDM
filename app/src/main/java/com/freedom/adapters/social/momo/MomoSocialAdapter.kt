@@ -982,6 +982,40 @@ internal class MomoSocialAdapter(
         )
     } ?: FeedSelectionResult(null, 0, 0, 0, 0, "当前没有可用的陌陌活动窗口")
 
+    /** Read only the image counter; never use it to identify or authorize a page. */
+    override fun readImageIndex(expectedFingerprint: String): ImageIndexReadResult =
+        runCatching<ImageIndexReadResult> {
+            rootAccess.withActiveTargetRoot { root, window ->
+                val fingerprint = confirmedImageBrowserIdentity(root, window)
+                if (fingerprint == null || fingerprint != expectedFingerprint ||
+                    root.packageName?.toString() != targetPackage ||
+                    root.windowId != window.windowId
+                ) return@withActiveTargetRoot ImageIndexReadResult.Unavailable(
+                    ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED
+                )
+
+                val viewId = "$targetPackage:id/include_feed_tv_index"
+                val nodes = root.findAccessibilityNodeInfosByViewId(viewId).orEmpty()
+                try {
+                    val visible = nodes.filter { it.isVisibleToUser }
+                    if (visible.any {
+                            it.viewIdResourceName != viewId ||
+                                it.packageName?.toString() != targetPackage ||
+                                it.windowId != window.windowId
+                        } || !accessibilityGateway.isWindowCurrent(window)
+                    ) return@withActiveTargetRoot ImageIndexReadResult.Unavailable(
+                        ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED
+                    )
+                    val labels = visible.map { it.text?.toString().orEmpty() }
+                    if (!accessibilityGateway.isWindowCurrent(window)) {
+                        ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED)
+                    } else ImageIndexReadResult.fromVisibleLabels(labels, fingerprint, window)
+                } finally {
+                    nodes.forEach { node -> runCatching { node.recycle() } }
+                }
+            } ?: ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED)
+        }.getOrElse { ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.NODE_READ_FAILED) }
+
     override fun inspectDetail(expectedFingerprint: String): DetailEvidence =
         rootAccess.withActiveTargetRoot { root, window ->
             if (window.packageName != targetPackage || window.windowId < 0 ||

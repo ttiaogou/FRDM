@@ -155,5 +155,8 @@ interface SocialBrowsePort {
         minimumHeightPx: Int
     ): FeedSelectionResult
     fun inspectDetail(expectedFingerprint: String): DetailEvidence
+    /** Optional fresh business evidence, independent of page identity and BACK eligibility. */
+    fun readImageIndex(expectedFingerprint: String): ImageIndexReadResult =
+        ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.NOT_SUPPORTED)
     fun inspectFeedReturn(expectedFingerprint: String): FeedReturnEvidence
 }
