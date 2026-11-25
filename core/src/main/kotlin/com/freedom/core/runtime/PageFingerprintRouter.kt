@@ -236,3 +236,54 @@ class UnifiedPageObservationBus(
         return decision
     }
 }
+
+
+enum class PageRuntimeLifecycle {
+    NONE,
+    STARTING,
+    READY,
+    STOPPING
+}
+
+data class PageRuntimeSessionState(
+    val runGeneration: Long,
+    val taskId: String,
+    val mode: RunMode,
+    val lifecycle: PageRuntimeLifecycle
+)
+
+/**
+ * Owns page-selected runtime state independently from persisted legacy mode preferences.
+ * This state object has no UI or Android capability.
+ */
+class PageRuntimeSession {
+    private var state: PageRuntimeSessionState? = null
+
+    @Synchronized
+    fun begin(runGeneration: Long, taskId: String, mode: RunMode): PageRuntimeSessionState {
+        require(runGeneration >= 0L)
+        require(taskId.isNotBlank())
+        return PageRuntimeSessionState(runGeneration, taskId, mode, PageRuntimeLifecycle.STARTING)
+            .also { state = it }
+    }
+
+    @Synchronized
+    fun markReady(runGeneration: Long): PageRuntimeSessionState? =
+        state?.takeIf { it.runGeneration == runGeneration }?.copy(
+            lifecycle = PageRuntimeLifecycle.READY
+        )?.also { state = it }
+
+    @Synchronized
+    fun markStopping(runGeneration: Long): PageRuntimeSessionState? =
+        state?.takeIf { it.runGeneration == runGeneration }?.copy(
+            lifecycle = PageRuntimeLifecycle.STOPPING
+        )?.also { state = it }
+
+    @Synchronized
+    fun clear() {
+        state = null
+    }
+
+    @Synchronized
+    fun current(): PageRuntimeSessionState? = state
+}
