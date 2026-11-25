@@ -1705,7 +1705,9 @@ internal class AndroidAccountBrowseWorkflow(
                 ),
                 observationGeneration = currentRunGeneration(),
                 runGeneration = currentRunGeneration(),
-                sourceTaskId = "ACCOUNT_BROWSE"
+                sourceTaskId = "ACCOUNT_BROWSE",
+                windowId = page.windowId,
+                windowSessionKey = page.windowSessionKey
             )
         )
         return page
