@@ -907,6 +907,43 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
+    fun pageDrivenRuntimeNeverReadsOrWritesLegacyModePreferences() {
+        val base = "app/src/main/java/com/freedom/"
+        val core = "core/src/main/kotlin/com/freedom/core/runtime/"
+        val command = projectFile(base + "application/runtime/RunSessionCommandUseCase.kt").readText()
+        val coordinator = projectFile(base + "application/runtime/RunSessionCoordinator.kt").readText()
+        val repository = projectFile(base + "data/MonitorStoreRepository.kt").readText()
+        val store = projectFile(base + "data/MonitorStore.kt").readText()
+        val migration = projectFile(base + "data/RunModePreferences.kt").readText()
+        val runState = projectFile(core + "RunStatePorts.kt").readText()
+        val recovery = projectFile(base + "adapters/accessibility/android/AndroidAccessibilityServiceRecoveryCoordinator.kt").readText()
+        assertTrue("Start command must persist only run authorization", command.contains("fun requestStart(): Boolean") &&
+            command.contains("state.setRunRequested(true)"))
+        assertFalse("Run-state port cannot expose legacy selection", listOf("activeMode(", "setActiveMode(", "RunModeSelectionSource").any(runState::contains))
+        assertFalse("Coordinator must not consult or restore a persisted mode",
+            listOf("state.activeMode(", "observedMode", "pageRoutedMode", "resolveActiveModeForRestore", "onObserveCurrentPage == null").any(coordinator::contains))
+        assertFalse("READY must not accept a generation-only callback",
+            coordinator.contains("fun markPageRuntimeReady(runGeneration: Long)"))
+        assertFalse("Service recovery cannot choose a legacy mode",
+            listOf("resolveActiveModeForRestore", "pageDriven: Boolean", "restoredRunMode").any(recovery::contains))
+        assertTrue("Upgrade cleanup must be invoked before restoring diagnostics",
+            repository.contains("LegacyRunModeMigration.removeObsoleteSelection(appContext)") &&
+                repository.contains("MonitorStore.removeObsoleteRunMode(appContext)"))
+        assertTrue("Both obsolete UI keys must be removed, not read",
+            migration.contains(".remove(\"keep_account_mode_enabled\")") &&
+                migration.contains(".remove(\"ai_reply_mode_enabled\")"))
+        assertFalse("Migration cannot reinterpret old mode selections",
+            migration.contains(".getBoolean(") || migration.contains(".putBoolean("))
+        assertTrue("The old active-mode key may only be deleted, not restored",
+            store.contains(".remove(LEGACY_ACTIVE_RUN_MODE)") &&
+                !store.contains("getString(LEGACY_ACTIVE_RUN_MODE") &&
+                !store.contains("putString(LEGACY_ACTIVE_RUN_MODE"))
+        assertTrue("The user's run authorization must remain persisted",
+            store.contains("KEY_RUNNING = \"monitor_running\"") &&
+                store.contains("putBoolean(KEY_RUNNING, running)"))
+    }
+
+    @Test
     fun serviceDelegatesConnectionRecoveryAndReceiverRegistrationLifecycle() {
         val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
         val recovery = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityServiceRecoveryCoordinator.kt")

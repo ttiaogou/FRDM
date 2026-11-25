@@ -940,13 +940,9 @@ internal class AccessibilityServiceDependencies internal constructor(
         AndroidAccessibilityServiceRecoveryCoordinator(
             host = object : AndroidAccessibilityServiceRecoveryCoordinator.Host {
                 override fun isRunRequested(): Boolean = monitorRepository.isRunRequested()
-                override fun resolveActiveModeForRestore(): RunMode? = runSessionCoordinator.resolveActiveModeForRestore()
                 override fun isBootRecoveryPending(): Boolean = monitorRepository.isBootRecoveryPending()
                 override fun clearBootRecoveryPending() = monitorRepository.setBootRecoveryPending(false)
-                override fun stopRun(reason: String) = runSessionCoordinator.stop(reason)
-                override fun stopKeepAlive() = MonitorKeepAliveService.stop(service)
                 override fun appendLog(message: String) = monitorRepository.addLog(message)
-                override fun resetRuntime(mode: RunMode, reason: String) = runSessionCoordinator.resetRuntime(mode, reason)
                 override fun clearActivityContext() = windowContextTracker.clearActivityClass()
                 override fun connectRuntime() = runSessionCoordinator.onAccessibilityServiceConnected()
                 override fun canDrawOverlays(): Boolean = Settings.canDrawOverlays(service)
@@ -957,8 +953,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                 override fun startKeepAlive() { MonitorKeepAliveService.start(service) }
                 override fun refresh() = refreshViews()
             },
-            scheduler = taskScheduler,
-            pageDriven = true
+            scheduler = taskScheduler
         )
     }
     val serviceRecoveryCoordinator by serviceRecoveryCoordinatorDelegate

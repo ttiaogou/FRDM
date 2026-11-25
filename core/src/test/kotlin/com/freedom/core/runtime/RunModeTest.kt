@@ -6,23 +6,26 @@ import org.junit.Test
 
 class RunModeTest {
     @Test
-    fun selectedBrowseModeResolvesToAccountBrowse() {
-        assertEquals(RunMode.ACCOUNT_BROWSE, RunMode.fromSelection(true, false))
+    fun browseRuntimeCategoryIsStable() {
+        assertEquals("account_browse", RunMode.ACCOUNT_BROWSE.storageValue)
+        assertEquals(RunMode.ACCOUNT_BROWSE, RunMode.fromStorageValue("account_browse"))
     }
 
     @Test
-    fun selectedAiModeResolvesToAiReply() {
-        assertEquals(RunMode.AI_REPLY, RunMode.fromSelection(false, true))
+    fun aiRuntimeCategoryIsStable() {
+        assertEquals("ai_reply", RunMode.AI_REPLY.storageValue)
+        assertEquals(RunMode.AI_REPLY, RunMode.fromStorageValue("ai_reply"))
     }
 
     @Test
-    fun noModeOrConflictingModesAreRejected() {
-        assertNull(RunMode.fromSelection(false, false))
-        assertNull(RunMode.fromSelection(true, true))
+    fun runtimeCategoryCannotBeInferredFromMissingOrAmbiguousLabels() {
+        assertNull(RunMode.fromStorageValue(null))
+        assertNull(RunMode.fromStorageValue("ai_reply,account_browse"))
+        assertNull(RunMode.fromStorageValue(""))
     }
 
     @Test
-    fun persistedValuesAreStableAndValidated() {
+    fun runtimeLabelsAreStableAndValidated() {
         assertEquals(RunMode.AI_REPLY, RunMode.fromStorageValue("ai_reply"))
         assertEquals(RunMode.ACCOUNT_BROWSE, RunMode.fromStorageValue("account_browse"))
         assertNull(RunMode.fromStorageValue("unknown"))

@@ -1,6 +1,5 @@
 package com.freedom.adapters.accessibility.android
 
-import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import org.junit.Assert.assertEquals
@@ -16,20 +15,20 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
 
         coordinator(host, scheduler).onServiceConnected()
 
-        assertEquals(listOf("connect", "show-overlay", "refresh"), host.events)
+        assertEquals(listOf("clear-activity", "connect", "show-overlay", "refresh"), host.events)
         assertEquals(0, scheduler.pendingCount)
         assertFalse(host.keepAliveStarted)
     }
 
     @Test
-    fun missingPersistedModeRestoresManualObservationInsteadOfStoppingTheService() {
-        val host = FakeHost().apply { runRequested = true; restoredMode = null }
+    fun runAuthorizationRestoresPageObservationInsteadOfStoppingTheService() {
+        val host = FakeHost().apply { runRequested = true }
         val scheduler = FakeScheduler()
 
         coordinator(host, scheduler).onServiceConnected()
 
         assertEquals(
-            listOf("resolve-mode", "log:已恢复人工采集待命：未选择 AI 回复或自动浏览；手动节点采集仍可使用", "connect", "show-overlay", "refresh"),
+            listOf("clear-activity", "connect", "log:服务重连：重新观察当前页面", "show-overlay", "refresh"),
             host.events
         )
         assertTrue(host.runRequested)
@@ -37,37 +36,35 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
     }
 
     @Test
-    fun accountBrowseRestoreConnectsAndSchedulesKeepAliveOnlyAfterOverlayIsShown() {
-        val host = FakeHost().apply { runRequested = true; restoredMode = RunMode.ACCOUNT_BROWSE }
+    fun pageRestoreConnectsAndSchedulesKeepAliveOnlyAfterOverlayIsShown() {
+        val host = FakeHost().apply { runRequested = true }
         val scheduler = FakeScheduler()
 
         coordinator(host, scheduler).onServiceConnected()
 
         assertEquals(
-            listOf("resolve-mode", "connect", "show-overlay", "refresh"),
+            listOf("clear-activity", "connect", "log:服务重连：重新观察当前页面", "show-overlay", "refresh"),
             host.events
         )
         assertEquals(listOf(AndroidAccessibilityServiceRecoveryCoordinator.KEEP_ALIVE_START_DELAY_MS), scheduler.delays)
         assertEquals(1, scheduler.pendingCount)
         scheduler.runNext()
-        assertEquals(listOf("resolve-mode", "connect", "show-overlay", "refresh", "start-keep-alive"), host.events)
+        assertEquals(listOf("clear-activity", "connect", "log:服务重连：重新观察当前页面", "show-overlay", "refresh", "start-keep-alive"), host.events)
         assertTrue(host.keepAliveStarted)
     }
 
     @Test
-    fun aiRestoreClearsBrowseStateBeforeRuntimeConnectAndOverlayRecovery() {
-        val host = FakeHost().apply { runRequested = true; restoredMode = RunMode.AI_REPLY }
+    fun restoreClearsActivityEvidenceBeforeRuntimeConnectAndOverlayRecovery() {
+        val host = FakeHost().apply { runRequested = true }
         val scheduler = FakeScheduler()
 
         coordinator(host, scheduler).onServiceConnected()
 
         assertEquals(
             listOf(
-                "resolve-mode",
-                "reset:ACCOUNT_BROWSE:AI 模式恢复",
                 "clear-activity",
-                "log:已恢复 AI 回复模式运行状态；聊天页面观察独立运行，尚未接入消息解析与回复执行器",
                 "connect",
+                "log:服务重连：重新观察当前页面",
                 "show-overlay",
                 "refresh"
             ),
@@ -87,7 +84,7 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
 
         coordinator(host, scheduler).onServiceConnected()
 
-        assertEquals(listOf("connect", "show-overlay", "refresh"), host.events)
+        assertEquals(listOf("clear-activity", "connect", "show-overlay", "refresh"), host.events)
         assertEquals(0, scheduler.pendingCount)
         assertFalse(host.keepAliveStarted)
     }
@@ -102,7 +99,7 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
 
         coordinator(host, FakeScheduler()).onServiceConnected()
 
-        assertEquals(listOf("connect", "refresh"), host.events)
+        assertEquals(listOf("clear-activity", "connect", "refresh"), host.events)
         assertFalse(host.events.contains("show-overlay"))
     }
 
@@ -110,14 +107,13 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
     fun revokedOverlayPermissionDoesNotStopRestoredRunOrBlockKeepAlive() {
         val host = FakeHost().apply {
             runRequested = true
-            restoredMode = RunMode.ACCOUNT_BROWSE
             overlayPermission = false
         }
         val scheduler = FakeScheduler()
 
         coordinator(host, scheduler).onServiceConnected()
 
-        assertEquals(listOf("resolve-mode", "connect", "refresh"), host.events)
+        assertEquals(listOf("clear-activity", "connect", "log:服务重连：重新观察当前页面", "refresh"), host.events)
         assertTrue(host.runRequested)
         assertEquals(1, scheduler.pendingCount)
         scheduler.runNext()
@@ -129,14 +125,13 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
     fun disablingFloatingLogHidesOverlayButDoesNotDisableKeepAlive() {
         val host = FakeHost().apply {
             runRequested = true
-            restoredMode = RunMode.ACCOUNT_BROWSE
             floatingLogEnabled = false
         }
         val scheduler = FakeScheduler()
 
         coordinator(host, scheduler).onServiceConnected()
 
-        assertEquals(listOf("resolve-mode", "connect", "refresh"), host.events)
+        assertEquals(listOf("clear-activity", "connect", "log:服务重连：重新观察当前页面", "refresh"), host.events)
         assertEquals(1, scheduler.pendingCount)
         scheduler.runNext()
         assertTrue(host.keepAliveStarted)
@@ -147,20 +142,19 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
     fun disablingKeepAliveStillAllowsConfiguredOverlayButDoesNotScheduleService() {
         val host = FakeHost().apply {
             runRequested = true
-            restoredMode = RunMode.ACCOUNT_BROWSE
             keepAliveEnabled = false
         }
         val scheduler = FakeScheduler()
 
         coordinator(host, scheduler).onServiceConnected()
 
-        assertEquals(listOf("resolve-mode", "connect", "show-overlay", "refresh"), host.events)
+        assertEquals(listOf("clear-activity", "connect", "log:服务重连：重新观察当前页面", "show-overlay", "refresh"), host.events)
         assertEquals(0, scheduler.pendingCount)
     }
 
     @Test
     fun delayedKeepAliveDoesNotDependOnFloatingLogSetting() {
-        val host = FakeHost().apply { runRequested = true; restoredMode = RunMode.ACCOUNT_BROWSE }
+        val host = FakeHost().apply { runRequested = true }
         val scheduler = FakeScheduler()
         coordinator(host, scheduler).onServiceConnected()
 
@@ -173,7 +167,7 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
 
     @Test
     fun delayedKeepAliveIsNotSkippedWhenOverlayPermissionIsRevokedAfterScheduling() {
-        val host = FakeHost().apply { runRequested = true; restoredMode = RunMode.ACCOUNT_BROWSE }
+        val host = FakeHost().apply { runRequested = true }
         val scheduler = FakeScheduler()
         coordinator(host, scheduler).onServiceConnected()
 
@@ -186,7 +180,7 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
 
     @Test
     fun delayedKeepAliveIsSkippedWhenKeepAliveSettingIsDisabledAfterScheduling() {
-        val host = FakeHost().apply { runRequested = true; restoredMode = RunMode.ACCOUNT_BROWSE }
+        val host = FakeHost().apply { runRequested = true }
         val scheduler = FakeScheduler()
         coordinator(host, scheduler).onServiceConnected()
 
@@ -199,7 +193,7 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
 
     @Test
     fun delayedKeepAliveStartsOnlyWhenAllRuntimeAndPermissionConditionsStillHold() {
-        val host = FakeHost().apply { runRequested = true; restoredMode = RunMode.ACCOUNT_BROWSE }
+        val host = FakeHost().apply { runRequested = true }
         val scheduler = FakeScheduler()
         coordinator(host, scheduler).onServiceConnected()
 
@@ -212,7 +206,7 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
 
     @Test
     fun serviceDestructionCancelsPendingKeepAliveRecovery() {
-        val host = FakeHost().apply { runRequested = true; restoredMode = RunMode.ACCOUNT_BROWSE }
+        val host = FakeHost().apply { runRequested = true }
         val scheduler = FakeScheduler()
         val coordinator = coordinator(host, scheduler)
         coordinator.onServiceConnected()
@@ -226,7 +220,7 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
 
     @Test
     fun repeatedConnectionReplacesThePreviousDelayedStartInsteadOfDuplicatingIt() {
-        val host = FakeHost().apply { runRequested = true; restoredMode = RunMode.ACCOUNT_BROWSE }
+        val host = FakeHost().apply { runRequested = true }
         val scheduler = FakeScheduler()
         val coordinator = coordinator(host, scheduler)
         coordinator.onServiceConnected()
@@ -241,7 +235,6 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
     fun pendingBootRecoveryIsAcknowledgedOnlyAfterRuntimeReconciliation() {
         val host = FakeHost().apply {
             runRequested = true
-            restoredMode = RunMode.AI_REPLY
             bootRecoveryPending = true
         }
         val scheduler = FakeScheduler()
@@ -257,7 +250,6 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
     fun bootSignalForAlreadyConnectedServiceDoesNotRestartRuntime() {
         val host = FakeHost().apply {
             runRequested = true
-            restoredMode = RunMode.ACCOUNT_BROWSE
             bootRecoveryPending = true
         }
         val recovery = coordinator(host, FakeScheduler())
@@ -288,7 +280,6 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
     private class FakeHost : AndroidAccessibilityServiceRecoveryCoordinator.Host {
         val events = mutableListOf<String>()
         var runRequested = false
-        var restoredMode: RunMode? = RunMode.ACCOUNT_BROWSE
         var overlayPermission = true
         var overlayEnabled = true
         var floatingLogEnabled = true
@@ -302,17 +293,7 @@ class AndroidAccessibilityServiceRecoveryCoordinatorTest {
             events += "clear-boot-recovery"
             bootRecoveryPending = false
         }
-        override fun resolveActiveModeForRestore(): RunMode? {
-            events += "resolve-mode"
-            return restoredMode
-        }
-        override fun stopRun(reason: String) {
-            events += "stop:$reason"
-            runRequested = false
-        }
-        override fun stopKeepAlive() { events += "stop-keep-alive" }
         override fun appendLog(message: String) { events += "log:$message" }
-        override fun resetRuntime(mode: RunMode, reason: String) { events += "reset:$mode:$reason" }
         override fun clearActivityContext() { events += "clear-activity" }
         override fun connectRuntime() { events += "connect" }
         override fun canDrawOverlays() = overlayPermission

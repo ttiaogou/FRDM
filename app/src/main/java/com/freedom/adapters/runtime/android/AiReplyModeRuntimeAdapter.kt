@@ -15,8 +15,7 @@ internal class AiReplyModeRuntimeAdapter(
     private val onLog: (String) -> Unit = {},
     private val onReadinessStarting: (RunMode, String) -> Unit = { _, _ -> },
     private val onReadinessInvalidated: (String) -> Unit = {},
-    private val currentRunGeneration: () -> Long = { 0L },
-    private val onPageRuntimeReady: (Long) -> Unit = {}
+    private val currentRunGeneration: () -> Long = { 0L }
 ) : ModeRuntimePort, PageObservationSnapshotClassifier {
     override val mode: RunMode = RunMode.AI_REPLY
 
@@ -29,7 +28,6 @@ internal class AiReplyModeRuntimeAdapter(
         awaitingServiceReconnect = false
         runtime().reset("开始新运行前清理")
         runtime().scheduleInitialObservation()
-        onPageRuntimeReady(currentRunGeneration())
     }
 
     override fun onPageRuntimeStarted(

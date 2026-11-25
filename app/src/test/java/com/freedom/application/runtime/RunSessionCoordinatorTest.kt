@@ -17,18 +17,11 @@ import org.junit.Test
 class RunSessionCoordinatorTest {
     private class FakeState : RunStateRepository {
         var requested = false
-        var mode: RunMode? = null
         val writes = mutableListOf<String>()
         override fun isRunRequested() = requested
-        override fun activeMode() = mode
-        override fun setActiveMode(mode: RunMode?) {
-            this.mode = mode
-            writes += "mode:${mode?.storageValue ?: "null"}"
-        }
         override fun setRunRequested(requested: Boolean) {
             this.requested = requested
             writes += "running:$requested"
-            if (!requested) mode = null
         }
     }
 
@@ -45,10 +38,9 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
-    fun pageDrivenStartAndReconnectIgnorePersistedModeUntilFreshRoute() {
+    fun pageDrivenStartAndReconnectWaitForFreshRoute() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.ACCOUNT_BROWSE
         }
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
         val ai = FakeRuntime(RunMode.AI_REPLY)
@@ -67,7 +59,7 @@ class RunSessionCoordinatorTest {
         coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         assertEquals(listOf("start"), ai.calls)
         assertEquals(RunMode.AI_REPLY, coordinator.activeMode())
-        coordinator.markPageRuntimeReady(coordinator.currentRunGeneration())
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.READY, coordinator.currentPageRuntimeSession()?.lifecycle)
         coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         assertEquals(listOf("start"), ai.calls)
         coordinator.onAccessibilityServiceDisconnected()
@@ -90,7 +82,7 @@ class RunSessionCoordinatorTest {
         coordinator.synchronizeRunRequest()
         val first = requireNotNull(coordinator.routePageTask(RunMode.AI_REPLY, "PRIVATE"))
         assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STARTING, first.lifecycle)
-        assertNull(coordinator.markPageRuntimeReady(first.runGeneration))
+        assertNull(coordinator.markPageRuntimeReady(first))
         val lease = requireNotNull(tasks.tryAcquire("PRIVATE", first.runGeneration))
         assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.READY,
             coordinator.confirmPageTaskOwnership(lease)?.lifecycle)
@@ -295,7 +287,7 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
-    fun synchronizationStartsOnlyThePersistedActiveRuntime() {
+    fun synchronizationStartsOnlyTheFreshPageSelectedRuntime() {
         val state = FakeState()
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
         val ai = FakeRuntime(RunMode.AI_REPLY)
@@ -305,10 +297,12 @@ class RunSessionCoordinatorTest {
             RuntimeLogSink { }
         )
         // The command use case owns persisted writes; the coordinator only reconciles them.
-        state.mode = RunMode.ACCOUNT_BROWSE
         state.requested = true
 
         assertTrue(coordinator.synchronizeRunRequest())
+        assertTrue(browse.calls.isEmpty())
+        assertTrue(ai.calls.isEmpty())
+        coordinator.routePageTask(RunMode.ACCOUNT_BROWSE, "ACCOUNT_BROWSE")
         assertEquals(1L, coordinator.currentRunGeneration())
         assertTrue(state.writes.isEmpty())
         assertEquals(listOf("start"), browse.calls)
@@ -319,7 +313,6 @@ class RunSessionCoordinatorTest {
     fun repeatedSynchronizationDoesNotStartTheSameRuntimeTwice() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.ACCOUNT_BROWSE
         }
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
         val coordinator = RunSessionCoordinator(
@@ -329,6 +322,7 @@ class RunSessionCoordinatorTest {
         )
 
         assertTrue(coordinator.synchronizeRunRequest())
+        coordinator.routePageTask(RunMode.ACCOUNT_BROWSE, "ACCOUNT_BROWSE")
         assertEquals(1L, coordinator.currentRunGeneration())
         assertFalse(coordinator.synchronizeRunRequest())
         assertEquals(1L, coordinator.currentRunGeneration())
@@ -340,7 +334,6 @@ class RunSessionCoordinatorTest {
     fun firstRefreshThatCreatesSessionDoesNotAlsoDispatchIdleRefresh() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.ACCOUNT_BROWSE
         }
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
         val coordinator = RunSessionCoordinator(
@@ -350,6 +343,8 @@ class RunSessionCoordinatorTest {
         )
 
         coordinator.onExternalRefresh()
+        assertTrue(browse.calls.isEmpty())
+        coordinator.routePageTask(RunMode.ACCOUNT_BROWSE, "ACCOUNT_BROWSE")
         assertEquals(listOf("start"), browse.calls)
         assertEquals(0, browse.externalRefreshCalls)
 
@@ -358,7 +353,7 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
-    fun nullPersistedModeRemainsManualObservationEvenWhenUiPreferenceHasModeSelected() {
+    fun runAuthorizationWithoutRecognizedPageRemainsObservationOnly() {
         val state = FakeState().apply { requested = true }
         val ai = FakeRuntime(RunMode.AI_REPLY)
         val logs = mutableListOf<String>()
@@ -368,12 +363,12 @@ class RunSessionCoordinatorTest {
             RuntimeLogSink { logs += it }
         )
 
-        assertNull(coordinator.resolveActiveModeForRestore())
+        assertNull(coordinator.activeMode())
         assertTrue(coordinator.synchronizeRunRequest())
         assertEquals(1L, coordinator.currentRunGeneration())
-        assertNull(state.mode)
         assertTrue(ai.calls.isEmpty())
-        assertTrue(logs.any { it.contains("当前请求模式=null") })
+        assertNull(coordinator.currentWriteRoute())
+        assertNull(coordinator.currentPageRuntimeSession())
         assertFalse(coordinator.synchronizeRunRequest())
     }
 
@@ -387,8 +382,8 @@ class RunSessionCoordinatorTest {
             RuntimeLogSink { }
         )
         state.requested = true
-        state.mode = RunMode.AI_REPLY
         coordinator.synchronizeRunRequest()
+        coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         val click = AccessibilityEventEnvelope(
             type = com.freedom.core.accessibility.events.AccessibilityEventType.VIEW_CLICKED,
             packageName = "com.immomo.momo",
@@ -410,7 +405,6 @@ class RunSessionCoordinatorTest {
     fun implicitRunRequestSynchronizationKeepsActiveRuntime() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.AI_REPLY
         }
         val ai = FakeRuntime(RunMode.AI_REPLY)
         val coordinator = RunSessionCoordinator(
@@ -420,15 +414,16 @@ class RunSessionCoordinatorTest {
         )
 
         coordinator.synchronizeRunRequest()
+        coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
 
+        assertFalse(coordinator.synchronizeRunRequest())
         assertTrue(state.writes.isEmpty())
         assertEquals(listOf("start"), ai.calls)
     }
 
     @Test
-    fun stopClearsRunIntentAndStopsTheLatchedRuntime() {
+    fun stopClearsRunIntentAndStopsThePageSelectedRuntime() {
         val state = FakeState().apply {
-            mode = RunMode.AI_REPLY
             requested = true
         }
         val ai = FakeRuntime(RunMode.AI_REPLY)
@@ -437,19 +432,21 @@ class RunSessionCoordinatorTest {
             mapOf(RunMode.AI_REPLY to ai, RunMode.ACCOUNT_BROWSE to FakeRuntime(RunMode.ACCOUNT_BROWSE)),
             RuntimeLogSink { }
         )
+        assertTrue(coordinator.synchronizeRunRequest())
+        coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         coordinator.stop("user")
         assertFalse(state.requested)
-        assertNull(state.mode)
         assertEquals(listOf("running:false"), state.writes)
-        assertEquals(listOf("stop:user"), ai.calls)
-        assertEquals(1L, coordinator.currentRunGeneration())
+        assertEquals(listOf("start", "stop:user"), ai.calls)
+        assertNull(coordinator.currentWriteRoute())
+        assertNull(coordinator.currentPageRuntimeSession())
+        assertEquals(2L, coordinator.currentRunGeneration())
     }
 
     @Test
-    fun runGenerationAdvancesWhenTheActiveModeChangesAndWhenTheRunStops() {
+    fun runGenerationAdvancesWhenThePageRuntimeChangesAndWhenTheRunStops() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.ACCOUNT_BROWSE
         }
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
         val ai = FakeRuntime(RunMode.AI_REPLY)
@@ -460,10 +457,10 @@ class RunSessionCoordinatorTest {
         )
 
         assertTrue(coordinator.synchronizeRunRequest())
+        coordinator.routePageTask(RunMode.ACCOUNT_BROWSE, "ACCOUNT_BROWSE")
         assertEquals(1L, coordinator.currentRunGeneration())
 
-        state.mode = RunMode.AI_REPLY
-        assertTrue(coordinator.synchronizeRunRequest())
+        coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         assertEquals(2L, coordinator.currentRunGeneration())
         assertEquals(1, browse.calls.count { it.startsWith("stop:") })
         assertEquals(listOf("start"), ai.calls)
@@ -473,10 +470,9 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
-    fun sharedTaskLifecycleRevokesLeasesAcrossModeSwitchReconnectAndUserStop() {
+    fun sharedTaskLifecycleRevokesLeasesAcrossPageSwitchReconnectAndUserStop() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.AI_REPLY
         }
         val shared = TaskCoordinator(UiOperationOwnershipCoordinator())
         val session = RunSessionCoordinator(
@@ -492,6 +488,7 @@ class RunSessionCoordinatorTest {
         val browse = TaskExecutionController(shared, session::currentRunGeneration)
 
         assertTrue(session.synchronizeRunRequest())
+        session.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         ai.beginRun(session.currentRunGeneration())
         assertTrue(ai.claim("AI_REPLY_PRIVATE_MESSAGES", "confirmed inbox"))
         val old = requireNotNull(shared.currentLease())
@@ -500,8 +497,7 @@ class RunSessionCoordinatorTest {
         assertTrue(ai.owns("AI_REPLY_RECEIVED_GREETINGS"))
         assertFalse(shared.release(old))
 
-        state.mode = RunMode.ACCOUNT_BROWSE
-        assertTrue(session.synchronizeRunRequest())
+        session.routePageTask(RunMode.ACCOUNT_BROWSE, "ACCOUNT_BROWSE")
         assertNull(shared.activeTaskId())
         assertFalse(ai.owns("AI_REPLY_RECEIVED_GREETINGS"))
         assertFalse(ai.release("AI_REPLY_RECEIVED_GREETINGS", "late AI stop"))
@@ -518,6 +514,7 @@ class RunSessionCoordinatorTest {
         assertFalse(browse.claim("ACCOUNT_BROWSE", "late queued event"))
 
         session.onAccessibilityServiceConnected()
+        session.routePageTask(RunMode.ACCOUNT_BROWSE, "ACCOUNT_BROWSE")
         browse.beginRun(session.currentRunGeneration())
         assertTrue(browse.claim("ACCOUNT_BROWSE", "reconnected validated run"))
         assertTrue(browse.owns("ACCOUNT_BROWSE"))
@@ -532,7 +529,6 @@ class RunSessionCoordinatorTest {
     fun resetInterruptionAndDestructionRevokeTaskSlotImmediately() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.AI_REPLY
         }
         val shared = TaskCoordinator(UiOperationOwnershipCoordinator())
         val session = RunSessionCoordinator(
@@ -543,19 +539,22 @@ class RunSessionCoordinatorTest {
         )
         val owner = TaskExecutionController(shared, session::currentRunGeneration)
         session.synchronizeRunRequest()
+        session.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         owner.beginRun(session.currentRunGeneration())
         assertTrue(owner.claim("AI_REPLY_PRIVATE_MESSAGES", "start"))
 
-        session.resetRuntime(RunMode.AI_REPLY, "activity invalidated")
+        session.onTargetPackageChanged("activity invalidated")
         assertNull(shared.activeTaskId())
         assertFalse(owner.owns("AI_REPLY_PRIVATE_MESSAGES"))
 
+        session.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         owner.beginRun(session.currentRunGeneration())
         assertTrue(owner.claim("AI_REPLY_PRIVATE_MESSAGES", "revalidated"))
         session.onAccessibilityServiceInterrupted("connection lost")
         assertNull(shared.activeTaskId())
         assertFalse(owner.owns("AI_REPLY_PRIVATE_MESSAGES"))
 
+        session.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         owner.beginRun(session.currentRunGeneration())
         assertTrue(owner.claim("AI_REPLY_PRIVATE_MESSAGES", "revalidated again"))
         session.onServiceDestroyed()
@@ -579,27 +578,31 @@ class RunSessionCoordinatorTest {
 
 
     @Test
-    fun reconnectReusesPersistedRunIntentButRebindsOnlyServiceLifecycle() {
+    fun reconnectReusesUserRunIntentButRequiresNewPageSelection() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.AI_REPLY
         }
         val ai = FakeRuntime(RunMode.AI_REPLY)
         val coordinator = RunSessionCoordinator(state, mapOf(RunMode.AI_REPLY to ai), RuntimeLogSink { })
 
         coordinator.onAccessibilityServiceConnected()
-        assertEquals(listOf("start", "connected"), ai.calls)
+        assertTrue(ai.calls.isEmpty())
+        coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
+        assertEquals(listOf("start"), ai.calls)
         assertEquals(1L, coordinator.currentRunGeneration())
 
         coordinator.onAccessibilityServiceDisconnected()
         assertEquals(2L, coordinator.currentRunGeneration())
-        assertEquals(listOf("start", "connected", "disconnected"), ai.calls)
+        assertEquals(listOf("start", "disconnected"), ai.calls)
         assertTrue(state.requested)
 
         coordinator.onAccessibilityServiceConnected()
-        assertEquals(listOf("start", "connected", "disconnected", "connected"), ai.calls)
+        assertEquals(listOf("start", "disconnected"), ai.calls)
+        assertNull(coordinator.activeMode())
+        coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
+        assertEquals(listOf("start", "disconnected", "start"), ai.calls)
         assertEquals(2L, coordinator.currentRunGeneration())
-        assertEquals(1, ai.calls.count { it == "start" })
+        assertEquals(2, ai.calls.count { it == "start" })
         assertTrue(state.writes.isEmpty())
     }
 
@@ -607,22 +610,25 @@ class RunSessionCoordinatorTest {
     fun userStopBeforeServiceReconnectCannotRestartOldRuntime() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.ACCOUNT_BROWSE
         }
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
-        val coordinator = RunSessionCoordinator(state, mapOf(RunMode.ACCOUNT_BROWSE to browse), RuntimeLogSink { })
+        var ended = 0
+        val coordinator = RunSessionCoordinator(state, mapOf(RunMode.ACCOUNT_BROWSE to browse), RuntimeLogSink { },
+            onUserRunEnded = { ended++ })
 
         coordinator.onAccessibilityServiceConnected()
+        coordinator.routePageTask(RunMode.ACCOUNT_BROWSE, "ACCOUNT_BROWSE")
         coordinator.onAccessibilityServiceDisconnected()
         coordinator.stop("user_stopped")
         coordinator.onAccessibilityServiceConnected()
 
         assertEquals(1, browse.calls.count { it == "start" })
-        assertEquals(1, browse.calls.count { it == "connected" })
+        assertEquals(0, browse.calls.count { it == "connected" })
         assertEquals(1, browse.calls.count { it == "disconnected" })
-        assertTrue(browse.calls.any { it == "stop:user_stopped" })
+        assertTrue(ended >= 1)
+        assertNull(coordinator.currentWriteRoute())
         assertFalse(state.requested)
-        assertNull(coordinator.resolveActiveModeForRestore())
+        assertNull(coordinator.activeMode())
     }
 
 
@@ -630,7 +636,6 @@ class RunSessionCoordinatorTest {
     fun disconnectedRunRevokesOldTaskExecutionAndReconnectCanClaimNewGeneration() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.ACCOUNT_BROWSE
         }
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
         val session = RunSessionCoordinator(
@@ -642,6 +647,7 @@ class RunSessionCoordinatorTest {
         val execution = TaskExecutionController(coordinator, session::currentRunGeneration)
 
         session.onAccessibilityServiceConnected()
+        session.routePageTask(RunMode.ACCOUNT_BROWSE, "ACCOUNT_BROWSE")
         execution.beginRun(session.currentRunGeneration())
         assertTrue(execution.claim("ACCOUNT_BROWSE", "connected"))
         assertTrue(execution.owns("ACCOUNT_BROWSE"))
@@ -651,6 +657,7 @@ class RunSessionCoordinatorTest {
         assertFalse(execution.claim("ACCOUNT_BROWSE", "disconnected old callback"))
 
         session.onAccessibilityServiceConnected()
+        session.routePageTask(RunMode.ACCOUNT_BROWSE, "ACCOUNT_BROWSE")
         execution.beginRun(session.currentRunGeneration())
         assertTrue(execution.claim("ACCOUNT_BROWSE", "reconnected"))
         assertTrue(execution.owns("ACCOUNT_BROWSE"))
@@ -661,7 +668,6 @@ class RunSessionCoordinatorTest {
     fun recreatedServiceUsesProcessGenerationAndCanClaimReleasedAiTaskSlot() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.AI_REPLY
         }
         // The Application root and its UI lease coordinators survive a Service recreation.
         val processClock = RunGenerationClock()
@@ -674,6 +680,7 @@ class RunSessionCoordinatorTest {
         val oldExecution = TaskExecutionController(taskCoordinator, originalSession::currentRunGeneration)
 
         originalSession.onAccessibilityServiceConnected()
+        originalSession.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         oldExecution.beginRun(originalSession.currentRunGeneration())
         assertTrue(oldExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "original service"))
         val oldLease = requireNotNull(taskCoordinator.currentLease())
@@ -692,8 +699,9 @@ class RunSessionCoordinatorTest {
             state, mapOf(RunMode.AI_REPLY to recreatedRuntime),
             RuntimeLogSink { }, processClock
         )
-        recreatedSession.resetRuntime(RunMode.ACCOUNT_BROWSE, "AI mode restore")
         recreatedSession.onAccessibilityServiceConnected()
+        assertNull(recreatedSession.activeMode())
+        recreatedSession.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         val newGeneration = recreatedSession.currentRunGeneration()
         assertTrue(newGeneration > oldGeneration)
 
@@ -709,14 +717,13 @@ class RunSessionCoordinatorTest {
         assertFalse(oldExecution.claim("AI_REPLY_PRIVATE_MESSAGES", "late callback after recreation"))
         assertNull(taskCoordinator.tryAcquire("AI_REPLY_RECEIVED_GREETINGS", oldGeneration))
         assertTrue(newExecution.owns("AI_REPLY_PRIVATE_MESSAGES"))
-        assertEquals(listOf("start", "connected"), recreatedRuntime.calls)
+        assertEquals(listOf("start"), recreatedRuntime.calls)
     }
 
     @Test
     fun repeatedServiceRecreationsKeepUiLeaseEpochMonotonicAcrossThreeConnections() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.AI_REPLY
         }
         val processClock = RunGenerationClock()
         val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
@@ -727,8 +734,9 @@ class RunSessionCoordinatorTest {
             val serviceSession = RunSessionCoordinator(
                 state, mapOf(RunMode.AI_REPLY to runtime), RuntimeLogSink { }, processClock
             )
-            serviceSession.resetRuntime(RunMode.ACCOUNT_BROWSE, "AI mode reconnect")
             serviceSession.onAccessibilityServiceConnected()
+            assertNull(serviceSession.activeMode())
+            serviceSession.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
 
             val generation = serviceSession.currentRunGeneration()
             assertTrue("Service $reconnect must advance the process clock", generation > previousRunGeneration)
@@ -750,7 +758,7 @@ class RunSessionCoordinatorTest {
             assertFalse(taskCoordinator.isCurrent(ownedLease))
             assertFalse(taskCoordinator.release(ownedLease))
             assertNull(taskCoordinator.activeTaskId())
-            assertEquals(listOf("start", "connected", "disconnected"), runtime.calls)
+            assertEquals(listOf("start", "disconnected"), runtime.calls)
             previousRunGeneration = serviceSession.currentRunGeneration()
         }
 
@@ -762,7 +770,6 @@ class RunSessionCoordinatorTest {
     fun serviceDisconnectInvalidatesTheGenerationBeforeRuntimeCleanup() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.AI_REPLY
         }
         val ai = FakeRuntime(RunMode.AI_REPLY)
         val coordinator = RunSessionCoordinator(
@@ -771,6 +778,7 @@ class RunSessionCoordinatorTest {
             RuntimeLogSink { }
         )
         coordinator.synchronizeRunRequest()
+        coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
         assertEquals(1L, coordinator.currentRunGeneration())
 
         coordinator.onAccessibilityServiceDisconnected()
@@ -783,7 +791,6 @@ class RunSessionCoordinatorTest {
     fun externalRuntimeResetAlsoInvalidatesTheGeneration() {
         val state = FakeState().apply {
             requested = true
-            mode = RunMode.AI_REPLY
         }
         val ai = FakeRuntime(RunMode.AI_REPLY)
         val coordinator = RunSessionCoordinator(
@@ -792,10 +799,12 @@ class RunSessionCoordinatorTest {
             RuntimeLogSink { }
         )
         coordinator.synchronizeRunRequest()
+        coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
 
-        coordinator.resetRuntime(RunMode.AI_REPLY, "target changed")
+        coordinator.onTargetPackageChanged("target changed")
 
         assertEquals(2L, coordinator.currentRunGeneration())
-        assertEquals(listOf("start"), ai.calls)
+        assertEquals(listOf("start", "stop:target changed"), ai.calls)
+        assertNull(coordinator.currentPageRuntimeSession())
     }
 }

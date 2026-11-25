@@ -4,7 +4,6 @@ import android.content.Context
 import com.freedom.application.ports.MonitorControlRepository
 import com.freedom.core.accessibility.overlay.FloatingButtonPosition
 import com.freedom.application.ports.MonitorPresentationSnapshot
-import com.freedom.core.runtime.RunMode
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -14,13 +13,15 @@ class MonitorStoreRepository(context: Context) : MonitorControlRepository {
     private val appContext = context.applicationContext
 
     init {
+        LegacyRunModeMigration.removeObsoleteSelection(appContext)
+        MonitorStore.removeObsoleteRunMode(appContext)
         val diagnostics = RunDiagnosticsManager.get(appContext)
         diagnostics.recoverPreviousRunIfNeeded()
         // If the persisted run intent survived process death, start a new diagnostic trace only
         // after the previous process has been marked as an uncleanly ended run.
         if (MonitorStore.isRunning(appContext)) {
             diagnostics.beginRun(
-                mode = MonitorStore.activeRunMode(appContext)?.name ?: "MANUAL_OBSERVATION",
+                mode = "PAGE_OBSERVATION",
                 resumedAfterProcessRecovery = true
             )
         }
@@ -31,25 +32,9 @@ class MonitorStoreRepository(context: Context) : MonitorControlRepository {
     override fun setTargetPackage(packageName: String) =
         MonitorStore.setTargetPackage(appContext, packageName)
 
-    override fun isBrowseModeSelected(): Boolean = RunModePreferences.isBrowseModeSelected(appContext)
-
-    override fun setBrowseModeSelected(enabled: Boolean) =
-        RunModePreferences.setBrowseModeSelected(appContext, enabled)
-
-    override fun isAiReplyModeSelected(): Boolean = RunModePreferences.isAiReplyModeSelected(appContext)
-
-    override fun setAiReplyModeSelected(enabled: Boolean) =
-        RunModePreferences.setAiReplyModeSelected(appContext, enabled)
-
     override fun isRunRequested(): Boolean = MonitorStore.isRunning(appContext)
 
-    override fun activeMode(): RunMode? = MonitorStore.activeRunMode(appContext)
-
-    override fun setActiveMode(mode: RunMode?) = MonitorStore.setActiveRunMode(appContext, mode)
-
     override fun setRunRequested(requested: Boolean) = MonitorStore.setRunning(appContext, requested)
-
-    override fun selectedMode(): RunMode? = RunModePreferences.selectedMode(appContext)
 
     override fun isKeepAliveEnabled(): Boolean = MonitorStore.isKeepAliveEnabled(appContext)
 

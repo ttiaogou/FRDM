@@ -1,7 +1,5 @@
 package com.freedom.application.ports
 
-import com.freedom.core.runtime.RunMode
-import com.freedom.core.runtime.RunModeSelectionSource
 import com.freedom.core.runtime.RunStateRepository
 import com.freedom.core.runtime.RuntimeLogSink
 import com.freedom.core.accessibility.overlay.FloatingButtonPosition
@@ -12,15 +10,10 @@ import com.freedom.core.accessibility.overlay.FloatingButtonPosition
  */
 interface MonitorControlRepository :
     RunStateRepository,
-    RunModeSelectionSource,
     RuntimeLogSink {
 
     fun targetPackage(): String
     fun setTargetPackage(packageName: String)
-    fun isBrowseModeSelected(): Boolean
-    fun setBrowseModeSelected(enabled: Boolean)
-    fun isAiReplyModeSelected(): Boolean
-    fun setAiReplyModeSelected(enabled: Boolean)
     fun isKeepAliveEnabled(): Boolean
     fun setKeepAliveEnabled(enabled: Boolean)
     fun isBootCheckEnabled(): Boolean

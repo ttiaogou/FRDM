@@ -1,21 +1,9 @@
 package com.freedom.core.runtime
 
-/**
- * Port implemented by the data layer using the existing MonitorStore keys and semantics.
- * A null active mode is an intentional manual-observation standby, not a missing selection error.
- */
+/** Persists only the user's authorization to run, independent of any business page. */
 interface RunStateRepository {
     fun isRunRequested(): Boolean
-    fun activeMode(): RunMode?
-    /** Null means an intentional manual-observation session with no AI/Browse runtime selected. */
-    fun setActiveMode(mode: RunMode?)
     fun setRunRequested(requested: Boolean)
-
-}
-
-/** Reads the two existing UI selections without allowing a running session to change mode. */
-fun interface RunModeSelectionSource {
-    fun selectedMode(): RunMode?
 }
 
 /** Structured logging boundary; implementations decide storage and redaction. */

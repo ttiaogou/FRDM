@@ -36,7 +36,6 @@ import com.freedom.application.ports.OcrReviewRepository
 import com.freedom.application.ports.OcrReviewEntry
 import com.freedom.application.ports.MonitorControlRepository
 import com.freedom.adapters.accessibility.android.MonitorOverlay
-import com.freedom.core.runtime.RunMode
 import com.freedom.stability.MonitorKeepAliveService
 import com.freedom.ui.calibration.GestureCalibrationUiController
 import com.freedom.ui.config.ConfigPanel
@@ -1740,8 +1739,7 @@ class MainActivity : Activity() {
         val sealedArchives = listSessionSampleArchives()
         val runsDirectory = sessionSampleRunsDirectory()
         val activeRunIds = SessionSampleArchiveManager.listActiveRunIds(runsDirectory)
-        val aiReplyRequested = monitorRepository.isRunRequested() &&
-            monitorRepository.activeMode() == RunMode.AI_REPLY
+        val runRequested = monitorRepository.isRunRequested()
 
         val actions = ArrayList<Pair<String, () -> Unit>>()
         actions += "导出最近节点预览 ZIP" to { launchNodeDumpExport() }
@@ -1756,8 +1754,8 @@ class MainActivity : Activity() {
                     beginWaitingForSessionArchiveSeal(activeRunIds)
                 }
             }
-            aiReplyRequested -> {
-                actions += "停止当前 AI Reply 并检查采集归档" to {
+            runRequested -> {
+                actions += "停止当前运行并检查采集归档" to {
                     confirmStopCurrentRunAndExport(emptySet())
                 }
             }
@@ -2427,12 +2425,6 @@ class MainActivity : Activity() {
     private fun timestamp(): String =
         java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault())
             .format(java.util.Date())
-
-    private val RunMode.displayName: String
-        get() = when (this) {
-            RunMode.AI_REPLY -> "AI 回复基础模式"
-            RunMode.ACCOUNT_BROWSE -> "自动浏览模式"
-        }
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()

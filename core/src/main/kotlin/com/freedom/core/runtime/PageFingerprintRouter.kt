@@ -310,15 +310,6 @@ class PageRuntimeSession {
         state?.takeIf { matches(expected, it) }
             ?.copy(lifecycle = PageRuntimeLifecycle.STOPPING)?.also { state = it }
 
-    /** Compatibility for legacy mode-only callers; production uses the full route token. */
-    @Synchronized
-    fun markReady(runGeneration: Long): PageRuntimeSessionState? =
-        state?.takeIf { it.runGeneration == runGeneration }?.let { markReady(it) }
-
-    @Synchronized
-    fun markStopping(runGeneration: Long): PageRuntimeSessionState? =
-        state?.takeIf { it.runGeneration == runGeneration }?.let { markStopping(it) }
-
     @Synchronized
     fun clear() {
         state = null

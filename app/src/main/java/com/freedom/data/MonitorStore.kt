@@ -1,7 +1,6 @@
 package com.freedom.data
 
 import android.content.Context
-import com.freedom.core.runtime.RunMode
 import com.freedom.core.accessibility.overlay.FloatingButtonPosition
 import com.freedom.core.logging.RunLogBudgetPolicy
 import com.freedom.core.logging.RunLogCategory
@@ -18,7 +17,7 @@ object MonitorStore {
     private const val PREFS = "freedom_monitor_store"
     private const val KEY_TARGET = "target_package"
     private const val KEY_RUNNING = "monitor_running"
-    private const val KEY_ACTIVE_RUN_MODE = "active_run_mode"
+    private const val LEGACY_ACTIVE_RUN_MODE = "active_run_mode"
     private const val KEY_LOGS = "event_logs"
     private const val KEY_APP = "current_app"
     private const val KEY_PAGE = "current_page"
@@ -57,6 +56,15 @@ object MonitorStore {
         prefs(context).edit().putString(KEY_TARGET, value.trim()).apply()
     }
 
+    /** Upgrade-only cleanup; the persisted run authorization is never changed here. */
+    @Synchronized
+    internal fun removeObsoleteRunMode(context: Context) {
+        val store = prefs(context)
+        if (store.contains(LEGACY_ACTIVE_RUN_MODE)) {
+            store.edit().remove(LEGACY_ACTIVE_RUN_MODE).commit()
+        }
+    }
+
     /** Persisted user intent: whether monitoring should resume after a system rebind. */
     @Synchronized
     fun isRunning(context: Context): Boolean =
@@ -66,15 +74,11 @@ object MonitorStore {
     fun setRunning(context: Context, running: Boolean) {
         val store = prefs(context)
         val wasRunning = store.getBoolean(KEY_RUNNING, false)
-        val mode = store.getString(KEY_ACTIVE_RUN_MODE, null).orEmpty()
-        // This flag is the user's resume intent; commit it before leaving the start/stop action.
-        // Clearing the run intent also clears its latched mode so stale modes cannot be restored.
-        val editor = store.edit().putBoolean(KEY_RUNNING, running)
-        if (!running) editor.remove(KEY_ACTIVE_RUN_MODE)
-        editor.commit()
+        // Persist only user authorization; a page route is never restored from preferences.
+        store.edit().putBoolean(KEY_RUNNING, running).remove(LEGACY_ACTIVE_RUN_MODE).commit()
         if (running && !wasRunning) {
             RunDiagnosticsManager.get(context).beginRun(
-                mode = mode.ifBlank { "MANUAL_OBSERVATION" }
+                mode = "PAGE_OBSERVATION"
             )
         } else if (!running && wasRunning) {
             RunDiagnosticsManager.get(context).finishRun(
@@ -82,18 +86,6 @@ object MonitorStore {
                 reason = "运行请求被清除；具体停止原因由任务结束前的关联日志补充"
             )
         }
-    }
-
-    @Synchronized
-    fun activeRunMode(context: Context): RunMode? =
-        RunMode.fromStorageValue(prefs(context).getString(KEY_ACTIVE_RUN_MODE, null))
-
-    @Synchronized
-    fun setActiveRunMode(context: Context, mode: RunMode?) {
-        val editor = prefs(context).edit()
-        if (mode == null) editor.remove(KEY_ACTIVE_RUN_MODE)
-        else editor.putString(KEY_ACTIVE_RUN_MODE, mode.storageValue)
-        editor.commit()
     }
 
     @Synchronized

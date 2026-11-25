@@ -11,7 +11,7 @@ import org.junit.Test
 
 class RunSessionCoordinatorFailureDiagnosticsTest {
     @Test
-    fun failedStartClearsRunIntentCleansRuntimeAndSealsFailedDiagnostic() {
+    fun failedPageStartCleansRuntimeRecordsFailureAndKeepsUserRunIntent() {
         val state = FakeState()
         val log = FakeLog()
         val runtime = FakeRuntime(failOnStart = true)
@@ -22,20 +22,20 @@ class RunSessionCoordinatorFailureDiagnosticsTest {
         )
 
         state.runRequestedState = true
-        val thrown = runCatching { coordinator.synchronizeRunRequest() }.exceptionOrNull()
+        assertTrue(coordinator.synchronizeRunRequest())
+        assertEquals(null, coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES"))
 
-        assertTrue(thrown is IllegalStateException)
-        assertTrue(!state.runRequestedState)
+        assertTrue(state.runRequestedState)
         assertTrue(runtime.stopCalled)
-        assertEquals("FAILED", log.finishedResult)
-        assertTrue(log.exceptionEvents.contains("runtime_sync_start_failed"))
+        assertEquals(null, coordinator.currentPageRuntimeSession())
+        assertEquals(null, coordinator.currentWriteRoute())
+        assertEquals(null, log.finishedResult)
+        assertTrue(log.exceptionEvents.contains("page_runtime_start_failed"))
     }
 
     private class FakeState : RunStateRepository {
         var runRequestedState = false
         override fun isRunRequested() = runRequestedState
-        override fun activeMode(): RunMode? = if (runRequestedState) RunMode.AI_REPLY else null
-        override fun setActiveMode(mode: RunMode?) = Unit
         override fun setRunRequested(requested: Boolean) { runRequestedState = requested }
     }
 
