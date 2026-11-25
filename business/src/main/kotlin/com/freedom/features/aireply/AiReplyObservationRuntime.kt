@@ -14,6 +14,8 @@ import com.freedom.core.runtime.TargetAppReadinessSnapshot
 import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.PageFingerprint
 import com.freedom.core.runtime.PageRecoveryRouteAdapter
+import com.freedom.core.runtime.PageObservationSnapshot
+import com.freedom.core.runtime.PageClassification
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
 import com.freedom.core.accessibility.gesture.GestureIntent
@@ -3584,6 +3586,20 @@ class AiReplyObservationRuntime(
             onLog("AI 联系人临时账本：消息拦截状态已确认开启；该联系人临时数据已清除")
         }
         return cleared
+    }
+
+    fun classifyPageObservation(snapshot: PageObservationSnapshot): PageClassification {
+        if (snapshot.fingerprint.packageName != targetPackage()) return PageClassification.UNKNOWN
+        val route = sharedPageObservationCoordinator.matchRecoveryAdapter(
+            snapshot.fingerprint,
+            setOf(PRIVATE_MESSAGES_TASK_ID, RECEIVED_GREETINGS_TASK_ID)
+        )
+        return when (route?.routeId) {
+            receivedGreetingsRecoveryRoute.routeId -> PageClassification.RECEIVED_GREETINGS
+            messageListRecoveryRoute.routeId -> PageClassification.PRIVATE_MESSAGES
+            chatDetailRecoveryRoute.routeId -> PageClassification.CHAT_DETAIL
+            else -> PageClassification.UNKNOWN
+        }
     }
 
     fun scheduleInitialObservation() {
