@@ -859,6 +859,33 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p5TopWithUnvisitedUnreadCannotHandoffAndKeepsOriginalRound() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        executor.attemptedSessionKeys += "processed"
+        executor.lockedUnreadSessionKeys += setOf("processed", "offscreen-pending")
+        val handoff = fixture.runtime.javaClass.getDeclaredMethod(
+            "startReceivedGreetingsTask", String::class.java
+        ).apply { isAccessible = true }
+        handoff.invoke(fixture.runtime, "P5_PENDING_UNREAD")
+        assertTrue(fixture.logs.any { it.contains("HANDOFF_BLOCKED") && it.contains("pendingUnread=1") })
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.dispatchedGestures())
+        val saved = requireNotNull(fixture.checkpoint())
+        assertTrue(saved.lockedUnreadSetFinalized)
+        assertEquals(setOf("processed", "offscreen-pending"), saved.lockedUnreadSessionKeys)
+        assertEquals(setOf("processed"), saved.attemptedSessionKeys)
+    }
+
+    @Test
     fun p1RelocationTimerIsIntentOnlyAndReusesExistingScrollAfterFreshProof() {
         val fixture = preScrollPageRecoveryFixture()
         // The startup observation and the relocation timer both use 500ms. Isolate
@@ -7088,7 +7115,7 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("AI Reply 启动准入[UNREAD_LOCKING]") })
         assertEquals(listOf(GestureKind.TAP), actions.filter { it == GestureKind.TAP })
         assertTrue(actions.first() == GestureKind.SWIPE)
-        assertTrue(logs.any { it.contains("未读身份集合已冻结；进入从底部向顶部的处理阶段") })
+        assertTrue(logs.any { it.contains("本轮未读边界已确认，候选仍可补充；进入从底部向顶部的处理阶段") })
         assertTrue(logs.none { it.contains("安全上限=1000") })
     }
 

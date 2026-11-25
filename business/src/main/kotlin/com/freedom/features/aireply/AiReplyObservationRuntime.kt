@@ -5347,18 +5347,6 @@ class AiReplyObservationRuntime(
                 snapshot,
                 receivedGreetingsActive = receivedGreetingsTaskActive
             )
-            if (!receivedGreetingsTaskActive &&
-                privateMessagesTraversalTaskExecutor.phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP &&
-                privateMessagesTraversalTaskExecutor.observeUnreadBlockers(snapshot) &&
-                privateMessagesTraversalTaskExecutor.fullListPollingRoundRequired
-            ) {
-                // UNKNOWN on any scanned viewport is not a completed empty-inbox scan.
-                // The existing unified checkpoint keeps the blocked identities and round.
-                privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
-                onLog("自主轮询[FULL_SCAN_UNKNOWN_BLOCKED]：返回遍历发现未确认未读；保留本轮检查点，转入统一页面恢复")
-                recoverRetryablePrivateList("PRIVATE_POLL_FULL_SCAN_UNKNOWN")
-                return
-            }
         }
 
         var allowExpectedSessionReturnViewportChange = false
@@ -5549,7 +5537,7 @@ class AiReplyObservationRuntime(
                 }
                 PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED -> {
                     sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
-                    onLog("AI Reply 启动准入[UNREAD_BOUNDARY_CONFIRMED]：已确认完整有效已读视口；立即停止向下搜索，开始从最下面未读会话向上处理")
+                    onLog("AI Reply 启动准入[UNREAD_BOUNDARY_CONFIRMED]：已确认未读区域边界或重新找到待处理目标；停止向下搜索，开始由下至上处理")
                     // Do not return: the current stable snapshot is already the first
                     // bottom-to-top processing snapshot. The next candidate is selected below.
                 }
@@ -5797,11 +5785,9 @@ class AiReplyObservationRuntime(
                     onLog("AI 会话管理：顶部边界经延迟独立快照复核通过；检查顶部当前可见会话行")
                 }
             } else {
-                privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
-                privateMessagesTraversalTaskExecutor.atTop = false
-                privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized = true
+                privateMessagesTraversalTaskExecutor.confirmPhysicalEndForReturnTraversal()
                 sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
-                onLog("AI 会话管理：底部边界经延迟独立快照复核通过；未读身份集合已冻结；进入从底部向顶部的处理阶段")
+                onLog("AI 会话管理：底部边界经延迟独立快照复核通过；本轮未读边界已确认，候选仍可补充；进入从底部向顶部的处理阶段")
             }
             handleSessionListPage(fresh)
         }
@@ -5809,9 +5795,12 @@ class AiReplyObservationRuntime(
 
     private fun continueSessionListWithoutCandidate(snapshot: ChatPageSnapshot) {
         if (privateMessagesTraversalTaskExecutor.phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM) {
-            if (privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown) {
+            if (privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown &&
+                !privateMessagesTraversalTaskExecutor.canContinueWithUnknownUnread(snapshot)
+            ) {
                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                onLog("AI Reply 启动准入[POSITIONING_BLOCKED_BY_UNKNOWN]：未读状态无法确认；不执行底部定位滑动，等待新页面证据")
+                onLog("AI Reply 启动准入[POSITIONING_BLOCKED_BY_UNKNOWN]：缺少独立完整行证据；等待新页面证据")
+                scheduleSessionListStabilityRetry("未读状态尚未确认")
             } else {
                 scrollSessionList(snapshot, toTop = false)
             }
@@ -5820,13 +5809,28 @@ class AiReplyObservationRuntime(
         if (privateMessagesTraversalTaskExecutor.atTop) {
             privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
             privateMessagesTraversalTaskExecutor.sessionListStabilityRetryCount = 0
+            if (snapshot.chatListExtractionTruncated || snapshot.windowIdentityKey() == null ||
+                privateMessagesTraversalTaskExecutor.visibleSessionKeys(snapshot).isEmpty() ||
+                privateMessagesTraversalTaskExecutor.collectionBoundaryEvidence(snapshot, toTop = true) == false
+            ) {
+                privateMessagesTraversalTaskExecutor.atTop = false
+                scheduleSessionListStabilityRetry("顶部完成证据已失效，重新复核")
+                return
+            }
+            if (observeIncompleteUnreadRelocation(snapshot)) return
+            if (privateMessagesTraversalTaskExecutor.hasUnresolvedVisibleEdgeEvidence(snapshot)) {
+                onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：边缘未读证据尚未明确；重新观察，不计为已读")
+                scheduleSessionListStabilityRetry("边缘未读证据待复核")
+                return
+            }
             when {
-                privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown -> {
+                privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown ||
+                    privateMessagesTraversalTaskExecutor.unresolvedUnknownUnreadKeys.isNotEmpty() -> {
                     sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                     onLog("AI Reply 测试遍历暂停：完整扫描中存在未读状态 UNKNOWN 的会话行，不能将未知当作无未读")
+                    scheduleSessionListStabilityRetry("待复核未读身份尚未确认")
                 }
                 else -> {
-                    if (observeIncompleteUnreadRelocation(snapshot)) return
                     startReceivedGreetingsTask(
                         if (privateMessagesTraversalTaskExecutor.normalInboxHadUnread) "普通聊天列表已完成由下至上扫描，当前没有剩余符合条件的未读会话"
                         else "普通聊天列表已完成筛选，没有符合条件的新消息"
@@ -5878,7 +5882,7 @@ class AiReplyObservationRuntime(
                 return true
             }
             privateMessagesCheckpointRepository?.save(executor.checkpoint())
-            onLog("AI 私聊异常会话[RELOCATION_STARTED]：保留原轮次、已处理记录与未决身份；复用原有底部定位和由下至上扫描")
+            onLog("AI 私聊异常会话[RELOCATION_STARTED]：保留原轮次、已处理记录与未决身份；重新寻找待处理目标，找到后立即反向处理")
             scrollSessionList(snapshot, toTop = false)
             return true
         }
@@ -6036,7 +6040,8 @@ class AiReplyObservationRuntime(
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
         if (privateMessagesTraversalTaskExecutor.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
             !privateMessagesTraversalTaskExecutor.atTop ||
-            privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown
+            privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown ||
+            privateMessagesTraversalTaskExecutor.unresolvedUnknownUnreadKeys.isNotEmpty()
         ) {
             onLog(
                 "AI Reply 收到的招呼支线暂停：普通会话列表尚未完成底部至顶部的完整复核，" +
@@ -6052,6 +6057,18 @@ class AiReplyObservationRuntime(
             privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
             onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：存在待复核的不完整未读会话；保留本轮检查点，不切换收到招呼任务")
             scheduleSessionListStabilityRetry("原异常未读会话尚未重新确认")
+            return
+        }
+        val executor = privateMessagesTraversalTaskExecutor
+        if (!executor.lockedUnreadSetFinalized || executor.pendingKnownUnreadKeys().isNotEmpty() ||
+            executor.pendingScrollBaseline != null || executor.pendingBoundaryConfirmationKeys != null ||
+            executor.identityReturnPending || currentSessionKey != null || isSendConfirmationPending() ||
+            isConversationDraftPending() || activeSessionGestureRequestId != null
+        ) {
+            privateMessagesCheckpointRepository?.save(executor.checkpoint())
+            onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：未读边界、剩余候选或未决操作尚未完成；" +
+                "pendingUnread=${executor.pendingKnownUnreadKeys().size}；保留本轮检查点")
+            scheduleSessionListStabilityRetry("本轮未读或操作尚未完成")
             return
         }
         val start = claimAndBeginReceivedGreetingsTask(
