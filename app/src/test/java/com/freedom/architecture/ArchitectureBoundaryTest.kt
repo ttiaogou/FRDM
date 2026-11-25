@@ -1,8 +1,15 @@
 package com.freedom.architecture
 
 import java.io.File
+import com.freedom.app.registerEntryPageRoutes
+import com.freedom.core.runtime.PageFingerprint
+import com.freedom.core.runtime.PageObservationCoordinator
+import com.freedom.core.runtime.PageRecoveryRouteAdapter
+import com.freedom.core.runtime.ScheduledTask
+import com.freedom.core.runtime.TaskScheduler
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -1214,6 +1221,43 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
+    fun originalObservationRouterSelectsOnlyVerifiedTopLevelEntryAndNeverSavesCheckpoint() {
+        var scheduled = 0
+        var saved = 0
+        var targetPackage = "com.immomo.momo"
+        val coordinator = PageObservationCoordinator(object : TaskScheduler {
+            override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask {
+                scheduled++
+                return ScheduledTask { }
+            }
+        })
+        coordinator.registerEntryPageRoutes { targetPackage }
+        coordinator.registerRecoveryAdapter(object : PageRecoveryRouteAdapter {
+            override val routeId = "AI_REPLY_RECEIVED_GREETINGS"
+            override fun matches(fingerprint: PageFingerprint) = !fingerprint.adapterFingerprint.isNullOrBlank()
+            override fun saveCheckpoint() { saved++ }
+        })
+        fun page(kind: String, evidence: String? = null, pkg: String = "com.immomo.momo") =
+            PageFingerprint(pkg, "Activity", kind, evidence)
+
+        assertEquals("ENTRY:AI_REPLY_PRIVATE_MESSAGES", coordinator.matchFingerprint(page("CHAT_LIST")))
+        assertEquals("ENTRY:AI_REPLY_RECEIVED_GREETINGS",
+            coordinator.matchFingerprint(page("NON_CHAT", "window|page=RECEIVED_GREETINGS_LIST|identity")))
+        assertEquals("ENTRY:ACCOUNT_BROWSE", coordinator.matchFingerprint(page("DYNAMIC_FEED", "fresh-feed")))
+        assertNull(coordinator.matchFingerprint(page("UNKNOWN", "fresh-feed")))
+        assertNull(coordinator.matchFingerprint(page("CHAT_DETAIL_CANDIDATE", "fresh-chat")))
+        assertNull(coordinator.matchFingerprint(page("NON_CHAT", "unrelated")))
+        assertNull(coordinator.matchFingerprint(page("DYNAMIC_FEED")))
+        assertNull(coordinator.matchFingerprint(page("CHAT_LIST", pkg = "another.app")))
+        assertNull(coordinator.matchFingerprint(page("CHAT_LIST", "other-evidence")))
+        targetPackage = "another.app"
+        assertNull(coordinator.matchFingerprint(page("CHAT_LIST")))
+        assertEquals(0, scheduled)
+        assertEquals(0, saved)
+        assertEquals(setOf("AI_REPLY_RECEIVED_GREETINGS"), coordinator.registeredRecoveryAdapterIds())
+    }
+
+    @Test
     fun independentEntryKeepsObservingAndFilteredWindowMetadataNeverDispatchesBusiness() {
         val root = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
         val forwarder = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventForwarder.kt").readText()
@@ -1226,7 +1270,12 @@ class ArchitectureBoundaryTest {
         assertTrue(service.contains("onFilteredWindowObservation = { sourcePackage ->"))
         assertTrue(service.contains("if (sourcePackage != packageName) dependencies.requestIndependentPageObservation()"))
         assertTrue(root.contains("entryPageRetry.update(shouldRetry, keepObserving = true)"))
-        assertTrue(root.contains("routeIndependentPageTask(mode, targetTask, snapshot.runGeneration)"))
+        assertTrue(root.contains("routeIndependentPageTask(mode, targetTask, generation)"))
+        assertTrue(root.contains("pageObservationCoordinator.matchFingerprint(fingerprint)"))
+        assertTrue(root.contains("registerEntryPageRoutes(monitorRepository::targetPackage)"))
+        assertTrue(root.contains("scheduleReadOnlyObservation = pageObservationCoordinator::scheduleReadOnlyObservation"))
+        assertFalse(root.contains("UnifiedPageObservationBus("))
+        assertFalse(root.contains("pageObservationSnapshotSource ="))
         val request = root.substringAfter("fun requestIndependentPageObservation()").substringBefore("val activityEvidenceReader")
         assertTrue(request.contains("if (runSessionCoordinator.isPageObservationAllowed()) entryPageObservation.requestSnapshot()"))
         assertFalse(request.contains("routePageTask("))

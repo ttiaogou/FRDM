@@ -64,7 +64,7 @@ import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import com.freedom.core.runtime.UiWriteAuthorization
 import com.freedom.core.runtime.UiWriteScope
-import com.freedom.core.runtime.UnifiedPageObservationBus
+import com.freedom.core.runtime.PageFingerprintRoute
 import com.freedom.core.runtime.TargetAppReadinessController
 import com.freedom.data.MonitorStoreRepository
 import com.freedom.data.MonitorStoreSnapshotRepository
@@ -109,6 +109,24 @@ import com.freedom.application.monitor.GlobalNodeLayoutVisualizationUseCase
 import com.freedom.accessibility.gesture.GestureCalibrationController
 import com.freedom.stability.MonitorKeepAliveService
 import java.io.File
+
+/** Register the three top-level page routes in the existing observation-only router.
+ * Recovery adapters keep their own task-scoped registry and checkpoint semantics. */
+internal fun PageObservationCoordinator.registerEntryPageRoutes(targetPackage: () -> String) {
+    registerFingerprintRoute(PageFingerprintRoute("ENTRY:AI_REPLY_PRIVATE_MESSAGES") {
+        it.packageName == targetPackage() &&
+            it.semanticPage == "CHAT_LIST" && it.adapterFingerprint.isNullOrBlank()
+    })
+    registerFingerprintRoute(PageFingerprintRoute("ENTRY:AI_REPLY_RECEIVED_GREETINGS") {
+        it.packageName == targetPackage() &&
+            it.semanticPage == "NON_CHAT" &&
+            it.adapterFingerprint?.contains("|page=RECEIVED_GREETINGS_LIST|") == true
+    })
+    registerFingerprintRoute(PageFingerprintRoute("ENTRY:ACCOUNT_BROWSE") {
+        it.packageName == targetPackage() &&
+            it.semanticPage == "DYNAMIC_FEED" && !it.adapterFingerprint.isNullOrBlank()
+    })
+}
 
 /**
  * The single application composition root. Data implementations are constructed here and exposed
@@ -306,68 +324,17 @@ internal class AccessibilityServiceDependencies internal constructor(
     }
     /** One service-scoped page-observation coordinator shared by AI Reply and AccountBrowse. */
     val pageObservationCoordinator: PageObservationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
-        PageObservationCoordinator(taskScheduler)
-    }
-    val unifiedPageObservationBus: UnifiedPageObservationBus by lazy(LazyThreadSafetyMode.NONE) {
-        UnifiedPageObservationBus(
-            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
-            onDecision = { snapshot, decision ->
-                addLog(
-                    "统一页面仲裁[READ_ONLY]：classification=" + decision.classification +
-                        ";matched=" + decision.matchedClassifications +
-                        ";conflict=" + decision.conflict +
-                        ";generation=" + snapshot.observationGeneration
-                )
-                val targetTask = when (decision.classification) {
-                    com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE -> "ACCOUNT_BROWSE"
-                    com.freedom.core.runtime.PageClassification.PRIVATE_MESSAGES -> "AI_REPLY_PRIVATE_MESSAGES"
-                    com.freedom.core.runtime.PageClassification.RECEIVED_GREETINGS -> "AI_REPLY_RECEIVED_GREETINGS"
-                    else -> null
-                }
-                // Only the independent entry reader may select a different runtime.
-                // A business observer may complete its own verified handoff, but an UNKNOWN
-                // nested page is handled by that runtime's existing checkpoint/recovery gates.
-                if (runSessionCoordinator.isPageObservationAllowed() &&
-                    snapshot.runGeneration == runSessionCoordinator.currentRunGeneration()
-                ) {
-                    if (targetTask != null && !decision.conflict) {
-                        val mode = if (decision.classification ==
-                            com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE
-                        ) RunMode.ACCOUNT_BROWSE else RunMode.AI_REPLY
-                        val verifiedOwnTask = runSessionCoordinator.activeMode() == mode &&
-                            root.taskCoordinator.currentLease()?.taskId == targetTask
-                        val verifiedGreetingNavigation = snapshot.entryObservation &&
-                            targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
-                            runSessionCoordinator.currentPageRuntimeSession()?.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
-                            aiReplyObservationRuntime.isVerifiedGreetingsNavigationPending()
-                        if (verifiedGreetingNavigation) {
-                            runSessionCoordinator.reconcileUnclassifiedPage(snapshot.runGeneration, true)
-                        } else if (snapshot.entryObservation) {
-                            runSessionCoordinator.routeIndependentPageTask(mode, targetTask, snapshot.runGeneration)
-                        } else if (verifiedOwnTask) {
-                            runSessionCoordinator.routePageTask(mode, targetTask)
-                        }
-                    } else if (snapshot.entryObservation && decision.conflict) {
-                        runSessionCoordinator.reconcileUnclassifiedPage(snapshot.runGeneration, false)
-                        addLog("统一页面仲裁[NO_OWNERSHIP]：冲突页面；挂起写入授权并保持只读等待")
-                    }
-                }
-            }
-        ).also { bus ->
-            bus.registerClassifier(
-                AiReplyModeRuntimeAdapter(runtime = { aiReplyObservationRuntime })
-            )
-            bus.registerClassifier(accountBrowseRuntimeAdapter)
+        PageObservationCoordinator(taskScheduler).apply {
+            registerEntryPageRoutes(monitorRepository::targetPackage)
         }
     }
     /**
      * Service-scoped read-only entry observation also works before a business runtime exists.
      * Existing runtime channels retain their detail/checkpoint observation responsibility.
      */
-    private var entryObservationGeneration = 0L
     private val entryPageRetryDelegate: Lazy<EntryPageObservationRetry> = lazy(LazyThreadSafetyMode.NONE) {
         EntryPageObservationRetry(
-            scheduler = taskScheduler,
+            scheduleReadOnlyObservation = pageObservationCoordinator::scheduleReadOnlyObservation,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             isObservationAllowed = { runSessionCoordinator.isPageObservationAllowed() },
             onRetry = { entryPageObservation.requestSnapshot() }
@@ -391,42 +358,48 @@ internal class AccessibilityServiceDependencies internal constructor(
                         return@entryObservation
                     }
                     val generation = runSessionCoordinator.currentRunGeneration()
-                    var entryConflict = false
+                    val currentTaskId = runSessionCoordinator.currentPageRuntimeSession()?.taskId
+                    var ownedNestedPage = false
                     var greetingNavigationAwaitingHandoff = false
                     val recognized = runCatching {
-                        val snapshot = momoSocialAdapter.inspectUnifiedEntryPage(generation, ++entryObservationGeneration)
-                        if (snapshot == null || generation != runSessionCoordinator.currentRunGeneration() ||
+                        val observed = momoSocialAdapter.inspectUnifiedEntryPage(currentTaskId)
+                        if (observed == null || generation != runSessionCoordinator.currentRunGeneration() ||
                             !runSessionCoordinator.isPageObservationAllowed()
                         ) false else {
-                            // Do not revoke a nested transaction just because the top-level reader
-                            // cannot classify it. Its existing business recovery remains responsible.
-                            if (snapshot.fingerprint.semanticPage != "UNKNOWN" ||
-                                runSessionCoordinator.currentPageRuntimeSession() == null
-                            ) {
-                                val decision = unifiedPageObservationBus.observe(snapshot)
-                                entryConflict = decision.conflict
-                                // Preserve the existing verified greeting navigation, but
-                                // keep checking until the independent inbox owns its route.
+                            val (fingerprint, nestedProof) = observed
+                            val targetTask = when (pageObservationCoordinator.matchFingerprint(fingerprint)) {
+                                "ENTRY:AI_REPLY_PRIVATE_MESSAGES" -> "AI_REPLY_PRIVATE_MESSAGES"
+                                "ENTRY:AI_REPLY_RECEIVED_GREETINGS" -> "AI_REPLY_RECEIVED_GREETINGS"
+                                "ENTRY:ACCOUNT_BROWSE" -> "ACCOUNT_BROWSE"
+                                else -> null
+                            }
+                            ownedNestedPage = nestedProof
+                            if (targetTask == null) false else {
+                                val mode = if (targetTask == "ACCOUNT_BROWSE") RunMode.ACCOUNT_BROWSE
+                                    else RunMode.AI_REPLY
+                                val verifiedGreetingNavigation =
+                                    targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
+                                    currentTaskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                                    aiReplyObservationRuntime.isVerifiedGreetingsNavigationPending()
+                                if (verifiedGreetingNavigation) {
+                                    runSessionCoordinator.reconcileUnclassifiedPage(generation, true)
+                                } else {
+                                    runSessionCoordinator.routeIndependentPageTask(mode, targetTask, generation)
+                                }
                                 greetingNavigationAwaitingHandoff =
-                                    !decision.conflict &&
-                                        decision.classification == com.freedom.core.runtime.PageClassification.PRIVATE_MESSAGES &&
-                                        runSessionCoordinator.currentPageRuntimeSession()?.taskId == "AI_REPLY_RECEIVED_GREETINGS"
-                                !decision.conflict && decision.classification in setOf(
-                                    com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE,
-                                    com.freedom.core.runtime.PageClassification.PRIVATE_MESSAGES,
-                                    com.freedom.core.runtime.PageClassification.RECEIVED_GREETINGS
-                                )
-                            } else false
+                                    targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
+                                    runSessionCoordinator.currentPageRuntimeSession()?.taskId == "AI_REPLY_RECEIVED_GREETINGS"
+                                true
+                            }
                         }
                     }.onFailure {
                         addLog("统一入口观察[READ_RETRY]：type=${it.javaClass.simpleName}；保留运行授权")
                     }.getOrDefault(false)
                     val session = runSessionCoordinator.currentPageRuntimeSession()
                     if (!recognized && session != null && generation == runSessionCoordinator.currentRunGeneration()) {
-                        val ownedNestedPage = !entryConflict && runCatching {
-                            momoSocialAdapter.hasFreshOwnedPageEvidence(session.taskId)
-                        }.getOrDefault(false)
-                        runSessionCoordinator.reconcileUnclassifiedPage(generation, ownedNestedPage)
+                        runSessionCoordinator.reconcileUnclassifiedPage(
+                            generation, ownedNestedPage && session.taskId == currentTaskId
+                        )
                     }
                     // Keep the independent observation alive even in READY. Unknown,
                     // startup, cleanup and a protected greeting handoff use the existing
@@ -648,9 +621,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             isAiReplyActive = { runSessionCoordinator.isRuntimeObserving(RunMode.AI_REPLY) },
             inspectAndroidRecoveryReadiness = { _ -> accessibilityGateway.inspectRecoveryReadiness() },
             onLog = addLog,
-            pageObservationSnapshotSource = { snapshot ->
-                unifiedPageObservationBus.observe(snapshot)
-            },
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
             draftStartupFailure = { aiReplyDraftCoordinator.startupFailure() },
@@ -828,9 +798,6 @@ internal class AccessibilityServiceDependencies internal constructor(
                 "当前识别应用=${snapshot.appLabel}；当前识别页面=${snapshot.pageLabel}"
             },
             onLog = addLog,
-            pageObservationSnapshotSource = { snapshot ->
-                unifiedPageObservationBus.observe(snapshot)
-            },
             onRequestScreenOff = requestScreenOff,
             pageObservationCoordinator = pageObservationCoordinator,
             accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository,

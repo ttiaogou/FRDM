@@ -2,9 +2,6 @@ package com.freedom.adapters.runtime.android
 
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.runtime.ModeRuntimePort
-import com.freedom.core.runtime.PageObservationSnapshot
-import com.freedom.core.runtime.PageObservationSnapshotClassifier
-import com.freedom.core.runtime.PageClassification
 import com.freedom.core.runtime.PageRuntimeSessionState
 import com.freedom.core.runtime.RunMode
 import com.freedom.features.aireply.AiReplyObservationRuntime
@@ -16,11 +13,9 @@ internal class AiReplyModeRuntimeAdapter(
     private val onReadinessStarting: (RunMode, String) -> Unit = { _, _ -> },
     private val onReadinessInvalidated: (String) -> Unit = {},
     private val currentRunGeneration: () -> Long = { 0L }
-) : ModeRuntimePort, PageObservationSnapshotClassifier {
+) : ModeRuntimePort {
     override val mode: RunMode = RunMode.AI_REPLY
 
-    override fun classify(snapshot: PageObservationSnapshot): PageClassification =
-        runtime().classifyPageObservation(snapshot)
     private var awaitingServiceReconnect = false
 
     override fun onRunStarted() {

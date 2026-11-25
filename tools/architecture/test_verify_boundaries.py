@@ -724,6 +724,15 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
                 self.assertTrue(any("control surface expanded" in item and "UnifiedPageObservationBus" in item
                                     for item in guard.runtime_architecture_reduction_violations(changed)))
 
+    def test_pp_reduction_guard_rejects_retired_page_control_symbols_anywhere(self):
+        owner = "business/src/main/kotlin/com/freedom/features/bad/Extra.kt"
+        for name in sorted(guard.RETIRED_PAGE_CONTROL_SYMBOLS):
+            with self.subTest(name=name):
+                changed = dict(self.recovery_code)
+                changed[owner] = "val extra = " + name + "()"
+                self.assertTrue(any("control surface expanded" in item and name in item
+                                    for item in guard.runtime_architecture_reduction_violations(changed)))
+
     def test_pp_reduction_guard_permits_retiring_debt_and_ignores_comments(self):
         changed = dict(self.recovery_code)
         root = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"

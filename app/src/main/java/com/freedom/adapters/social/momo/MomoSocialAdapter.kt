@@ -41,7 +41,6 @@ import com.freedom.core.accessibility.api.WindowRef
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.PageFingerprint
-import com.freedom.core.runtime.PageObservationSnapshot
 import com.freedom.core.runtime.TargetAppPageReadiness
 import com.freedom.features.accountbrowse.ports.*
 import com.freedom.features.aireply.ports.ChatPageKind
@@ -512,7 +511,7 @@ internal class MomoSocialAdapter(
      * Entry observation reuses the existing inspectors on one live target root. No identity
      * transaction, navigation, business checkpoint, gesture or task lease is touched here.
      */
-    internal fun inspectUnifiedEntryPage(runGeneration: Long, observationGeneration: Long): PageObservationSnapshot? =
+    internal fun inspectUnifiedEntryPage(currentTaskId: String?): Pair<PageFingerprint, Boolean>? =
         rootAccess.withActiveTargetRoot { root, window ->
             if (window.packageName != targetPackage || window.windowId < 0 ||
                 !accessibilityGateway.isWindowCurrent(window)
@@ -524,9 +523,9 @@ internal class MomoSocialAdapter(
                 root = AccessibilityNodeInfo.obtain(root),
                 targetPackage = targetPackage,
                 activityClass = window.activityClass
-            ).pageType
+            )
             if (!accessibilityGateway.isWindowCurrent(window)) return@withActiveTargetRoot null
-            val privateList = chat == MomoChatPageType.CHAT_LIST
+            val privateList = chat?.pageType == MomoChatPageType.CHAT_LIST
             val matches = listOf(greetings, dynamic != null, privateList).count { it }
             val fingerprint = when {
                 matches != 1 -> PageFingerprint(targetPackage, window.activityClass, "UNKNOWN", null)
@@ -540,62 +539,41 @@ internal class MomoSocialAdapter(
                 )
                 else -> PageFingerprint(targetPackage, window.activityClass, ChatPageKind.CHAT_LIST.name, null)
             }
-            PageObservationSnapshot(
-                fingerprint = fingerprint,
-                observationGeneration = observationGeneration,
-                runGeneration = runGeneration,
-                windowId = window.windowId,
-                entryObservation = true
-            )
-        }
-
-    /** Read-only nested-page proof using existing structural inspectors, never a cached
-     * page identity. This retains an existing task only; it cannot select or claim one. */
-    internal fun hasFreshOwnedPageEvidence(taskId: String): Boolean =
-        rootAccess.withActiveTargetRoot { root, window ->
-            if (window.packageName != targetPackage || window.windowId < 0 ||
-                !accessibilityGateway.isWindowCurrent(window)
-            ) return@withActiveTargetRoot false
-            // A top-level candidate belongs to independent arbitration, not this fallback.
-            // In particular a conflicting list/feed classification cannot regain write authority
-            // through a broader nested-page inspector.
-            val greetings = sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage)
-            val dynamic = browseComponents.pageInspector.inspectMomoFeedReadiness(root).fingerprint
-            if (greetings || dynamic != null) return@withActiveTargetRoot false
-            val detail = chatComponents.pageInspector.inspectRoot(
-                root = AccessibilityNodeInfo.obtain(root),
-                targetPackage = targetPackage,
-                activityClass = window.activityClass
-            )
-            if (detail.pageType == MomoChatPageType.CHAT_LIST) return@withActiveTargetRoot false
-            val verified = when (taskId) {
-                "ACCOUNT_BROWSE" ->
-                    detail.pageType != MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
-                        inspectGesturePageReadiness(root, window.activityClass, RunMode.ACCOUNT_BROWSE).ready
-                "AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS" -> {
-                    val profileTransaction = if (taskId == "AI_REPLY_PRIVATE_MESSAGES") {
-                        pendingInboxIdentityCapture != null
-                    } else {
-                        sayHiSelectedGreeting != null && sayHiReadOnlyStage in setOf(
-                            SayHiReadOnlyStage.AVATAR_TAP_PENDING, SayHiReadOnlyStage.WAITING_PROFILE,
-                            SayHiReadOnlyStage.PROFILE_SCROLL_PENDING, SayHiReadOnlyStage.PROFILE_BACK_PENDING
-                        )
+            // A conflicting or recognized top-level page cannot inherit a previous task's
+            // authorization. Only a non-top-level page can retain the existing task,
+            // using the same fresh root and existing structural evidence.
+            val ownedNestedPage = if (matches == 0 && currentTaskId != null && chat != null) {
+                val verified = when (currentTaskId) {
+                    "ACCOUNT_BROWSE" ->
+                        chat.pageType != MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
+                            inspectGesturePageReadiness(root, window.activityClass, RunMode.ACCOUNT_BROWSE).ready
+                    "AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS" -> {
+                        val profileTransaction = if (currentTaskId == "AI_REPLY_PRIVATE_MESSAGES") {
+                            pendingInboxIdentityCapture != null
+                        } else {
+                            sayHiSelectedGreeting != null && sayHiReadOnlyStage in setOf(
+                                SayHiReadOnlyStage.AVATAR_TAP_PENDING, SayHiReadOnlyStage.WAITING_PROFILE,
+                                SayHiReadOnlyStage.PROFILE_SCROLL_PENDING, SayHiReadOnlyStage.PROFILE_BACK_PENDING
+                            )
+                        }
+                        // Page structure is not conversation identity. Existing business header,
+                        // identity, window and per-operation safety checks are still mandatory.
+                        val chatConfirmed = chat.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
+                            chat.hasStableChatDetailFingerprint && !chat.chatTitleText.isNullOrBlank()
+                        val cardConfirmed = currentTaskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                            window.activityClass == MomoSayHiPageContract.CARD_ACTIVITY &&
+                            pageInspectionComponents.gestureReadinessInspector.hasVisibleViewId(
+                                root, setOf(MomoSayHiPageContract.CARD_CONTENT_VIEW_ID, MomoSayHiPageContract.CARD_CLOSE_VIEW_ID)
+                            )
+                        chatConfirmed || cardConfirmed || (profileTransaction && isSayHiProfileSurfacePresent())
                     }
-                    // Page structure is not conversation identity. Existing business header,
-                    // identity, window and per-operation safety checks are still mandatory.
-                    val chatConfirmed = detail.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
-                        detail.hasStableChatDetailFingerprint && !detail.chatTitleText.isNullOrBlank()
-                    val cardConfirmed = taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
-                        window.activityClass == MomoSayHiPageContract.CARD_ACTIVITY &&
-                        pageInspectionComponents.gestureReadinessInspector.hasVisibleViewId(
-                            root, setOf(MomoSayHiPageContract.CARD_CONTENT_VIEW_ID, MomoSayHiPageContract.CARD_CLOSE_VIEW_ID)
-                        )
-                    chatConfirmed || cardConfirmed || (profileTransaction && isSayHiProfileSurfacePresent())
+                    else -> false
                 }
-                else -> false
-            }
-            verified && accessibilityGateway.isWindowCurrent(window)
-        } ?: false
+                verified
+            } else false
+            if (!accessibilityGateway.isWindowCurrent(window)) return@withActiveTargetRoot null
+            fingerprint to ownedNestedPage
+        }
 
     /** Reuse the existing image-browser readiness check and canonical window identity.
      * No image-content anchors, coordinates or new structural fingerprint are required.

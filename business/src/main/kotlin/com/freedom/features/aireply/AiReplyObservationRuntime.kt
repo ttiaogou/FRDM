@@ -14,9 +14,6 @@ import com.freedom.core.runtime.TargetAppReadinessSnapshot
 import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.PageFingerprint
 import com.freedom.core.runtime.PageRecoveryRouteAdapter
-import com.freedom.core.runtime.PageObservationSnapshot
-import com.freedom.core.runtime.PageObservationSnapshotSource
-import com.freedom.core.runtime.PageClassification
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
 import com.freedom.core.accessibility.gesture.GestureIntent
@@ -81,7 +78,6 @@ class AiReplyObservationRuntime(
     /** Must be freshly evaluated against the active Android window; never a cached permission. */
     private val inspectAndroidRecoveryReadiness: (ChatPageSnapshot) -> TargetAppReadinessSnapshot,
     private val onLog: (String) -> Unit,
-    private val pageObservationSnapshotSource: PageObservationSnapshotSource? = null,
     private val fullInspectionDebounceMs: Long,
     private val regionRefreshDebounceMs: Long,
     private val onMessagesObserved: (ChatMessageBatch) -> Unit = {},
@@ -1595,15 +1591,6 @@ class AiReplyObservationRuntime(
             }.getOrNull()
         )
         val publishedRunGeneration = currentRunGeneration()
-        pageObservationSnapshotSource?.publish(
-            PageObservationSnapshot(
-                fingerprint = pageFingerprint,
-                observationGeneration = observation.observationGeneration,
-                runGeneration = publishedRunGeneration,
-                sourceTaskId = taskCoordinator?.activeTaskId(),
-                windowSessionKey = windowSessionKey(inspection)
-            )
-        )
         if (publishedRunGeneration != currentRunGeneration() || !isAiReplyActive()) return
         val matchedRouteId = if (pageFingerprint.packageName == targetPackage()) {
             sharedPageObservationCoordinator.matchRecoveryAdapter(
@@ -3714,44 +3701,6 @@ class AiReplyObservationRuntime(
         return cleared
     }
 
-    fun classifyPageObservation(snapshot: PageObservationSnapshot): PageClassification {
-        if (snapshot.fingerprint.packageName != targetPackage()) return PageClassification.UNKNOWN
-        // An entry observation may precede the creation of a task identity. Only the
-        // existing top-level list fingerprints can establish that initial route.
-        // An unbound detail snapshot must never infer ownership.
-        if (snapshot.sourceTaskId == null) {
-            val fingerprint = snapshot.fingerprint
-            return when {
-                fingerprint.semanticPage == ChatPageKind.CHAT_LIST.name &&
-                    messageListRecoveryRoute.matches(fingerprint) -> PageClassification.PRIVATE_MESSAGES
-                fingerprint.semanticPage == ChatPageKind.NON_CHAT.name &&
-                    fingerprint.adapterFingerprint?.contains("|page=RECEIVED_GREETINGS_LIST|") == true &&
-                    receivedGreetingsRecoveryRoute.matches(fingerprint) -> PageClassification.RECEIVED_GREETINGS
-                else -> PageClassification.UNKNOWN
-            }
-        }
-        val route = sharedPageObservationCoordinator.matchRecoveryAdapter(
-            snapshot.fingerprint,
-            setOf(PRIVATE_MESSAGES_TASK_ID, RECEIVED_GREETINGS_TASK_ID)
-        )
-        return when (route?.routeId) {
-            receivedGreetingsRecoveryRoute.routeId ->
-                if (snapshot.sourceTaskId == RECEIVED_GREETINGS_TASK_ID) {
-                    PageClassification.RECEIVED_GREETINGS
-                } else PageClassification.UNKNOWN
-            messageListRecoveryRoute.routeId ->
-                if (snapshot.sourceTaskId == PRIVATE_MESSAGES_TASK_ID) {
-                    PageClassification.PRIVATE_MESSAGES
-                } else PageClassification.UNKNOWN
-            chatDetailRecoveryRoute.routeId ->
-                if (snapshot.sourceTaskId == PRIVATE_MESSAGES_TASK_ID ||
-                    snapshot.sourceTaskId == RECEIVED_GREETINGS_TASK_ID
-                ) PageClassification.CHAT_DETAIL
-                else PageClassification.UNKNOWN
-            else -> PageClassification.UNKNOWN
-        }
-    }
-
     /** Request a fresh observation for page-driven startup/handoff without replacing
      * protected send or gesture verification reads. Business admission gates remain unchanged. */
     /** The established greeting navigation/return transaction owns its verified source page
@@ -3860,7 +3809,7 @@ class AiReplyObservationRuntime(
         // workflow retain the existing private-message startup contract.
         privateMessagesTaskController.beginRun(currentRunGeneration())
         val supportsReceivedGreetingsStartup = selectedTaskId != null ||
-            (receivedGreetingsTaskFlow.supportsWorkflow() && pageObservationSnapshotSource != null)
+            (receivedGreetingsTaskFlow.supportsWorkflow() && pageSelectedStartup)
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         resetPollingRound()
         receivedGreetingsTaskFlow.reset()

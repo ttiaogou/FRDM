@@ -797,10 +797,7 @@ RUNTIME_COMPONENT_CEILINGS = {
     _CORE_RUNTIME + "ModeRuntimePort.kt": "ModeRuntimePort",
     _CORE_RUNTIME + "PageFingerprintRouter.kt": (
         "PageFingerprint PageFingerprintRoute PageRecoveryRouteAdapter PageRecoveryAdapterRegistry "
-        "PageFingerprintRouter UnifiedPageTaskRouter PageTaskRoute Observation PageClassification "
-        "PageObservationClassifier PageObservationSnapshot PageObservationSnapshotClassifier "
-        "UnifiedPageObservationMerger Decision PageObservationSnapshotSource UnifiedPageObservationBus "
-        "PageRuntimeLifecycle PageRuntimeSessionState PageRuntimeSession"
+        "PageFingerprintRouter PageRuntimeLifecycle PageRuntimeSessionState PageRuntimeSession"
     ),
     _CORE_RUNTIME + "PageObservationCoordinator.kt": "PageObservationCoordinator PageObservationSubscription",
     _CORE_RUNTIME + "RunMode.kt": "RunMode",
@@ -828,9 +825,6 @@ RUNTIME_COMPONENT_CEILINGS = {
 # business state are deliberately not frozen by this reference inventory.
 RUNTIME_DEBT_REFERENCE_CEILINGS = {
     _CORE_RUNTIME + "PageFingerprintRouter.kt": {
-        "UnifiedPageTaskRouter": 1, "PageObservationClassifier": 1,
-        "PageObservationSnapshotClassifier": 4, "UnifiedPageObservationMerger": 6,
-        "UnifiedPageObservationBus": 1, "PageObservationSnapshotSource": 1,
         "PageRuntimeSessionState": 11, "PageRuntimeSession": 1, "PageRuntimeLifecycle": 8,
     },
     _CORE_RUNTIME + "ModeRuntimePort.kt": {"PageRuntimeSessionState": 5},
@@ -843,23 +837,35 @@ RUNTIME_DEBT_REFERENCE_CEILINGS = {
     },
     _APP_RUNTIME + "EntryPageObservationRetry.kt": {"EntryPageObservationRetry": 1},
     _ROOT: {
-        "UnifiedPageObservationBus": 3, "PageRuntimeLifecycle": 2, "EntryPageObservationRetry": 4,
-        "registerChannel": 1, "inspectUnifiedEntryPage": 1, "hasFreshOwnedPageEvidence": 1,
+        "PageRuntimeLifecycle": 2, "EntryPageObservationRetry": 4,
+        "registerChannel": 1, "inspectUnifiedEntryPage": 1,
         "pageSelectedStartup": 1, "onPageTaskOwnershipConfirmed": 1,
         "routeIndependentPageTask": 1, "admitBusinessPageTaskOwnership": 1,
         "rollbackBusinessPageTaskOwnership": 1,
     },
     _MODE_ADAPTER + "AccountBrowseModeRuntimeAdapter.kt": {
-        "PageObservationSnapshotClassifier": 2, "PageRuntimeSessionState": 6,
+        "PageRuntimeSessionState": 6,
     },
     _MODE_ADAPTER + "AiReplyModeRuntimeAdapter.kt": {
-        "PageObservationSnapshotClassifier": 2, "PageRuntimeSessionState": 8,
+        "PageRuntimeSessionState": 8,
     },
-    _BROWSE_WORKFLOW: {"PageObservationSnapshotSource": 2, "registerChannel": 1, "pageSelectedStartup": 1},
-    _AI_RUNTIME: {"PageObservationSnapshotSource": 2, "pageSelectedStartup": 3, "onPageTaskOwnershipConfirmed": 2},
-    _MOMO_ADAPTER: {"inspectUnifiedEntryPage": 1, "hasFreshOwnedPageEvidence": 1},
+    _BROWSE_WORKFLOW: {"registerChannel": 1, "pageSelectedStartup": 1},
+    # P3 replaces the removed publisher-presence startup test with the existing
+    # pageSelectedStartup flag. One additional use of the same flag, no new state.
+    _AI_RUNTIME: {"pageSelectedStartup": 4, "onPageTaskOwnershipConfirmed": 2},
+    _MOMO_ADAPTER: {"inspectUnifiedEntryPage": 1},
     "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt": {"registerChannel": 2},
     "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt": {"pageSelectedStartup": 2},
+}
+
+
+# P3 retired the parallel page bus and classifier path. Keep these names in
+# the scan even though all permitted reference counts are now zero.
+RETIRED_PAGE_CONTROL_SYMBOLS = {
+    "UnifiedPageTaskRouter", "PageObservationClassifier", "PageObservationSnapshotClassifier",
+    "UnifiedPageObservationMerger", "UnifiedPageObservationBus", "PageObservationSnapshotSource",
+    "PageObservationSnapshot", "PageClassification", "pageObservationSnapshotSource",
+    "classifyPageObservation", "classifyUnifiedPage", "hasFreshOwnedPageEvidence",
 }
 
 
@@ -872,7 +878,9 @@ def runtime_architecture_reduction_violations(code_by_path: dict[str, str]) -> l
     issues: list[str] = []
     protected = (_CORE_RUNTIME, _APP_RUNTIME, _MODE_ADAPTER)
     declarations = re.compile(r"\b(?:class|interface|object|typealias)\s+([A-Za-z_]\w*)\b")
-    debt_names = sorted({name for limits in RUNTIME_DEBT_REFERENCE_CEILINGS.values() for name in limits})
+    debt_names = sorted(RETIRED_PAGE_CONTROL_SYMBOLS | {
+        name for limits in RUNTIME_DEBT_REFERENCE_CEILINGS.values() for name in limits
+    })
     debt_pattern = re.compile(r"\b(?:" + "|".join(map(re.escape, debt_names)) + r")\b")
     for rel, code in sorted(code_by_path.items()):
         if "/src/main/" not in rel or not rel.endswith(".kt"):

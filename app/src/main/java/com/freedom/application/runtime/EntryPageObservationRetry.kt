@@ -1,7 +1,6 @@
 package com.freedom.application.runtime
 
 import com.freedom.core.runtime.ScheduledTask
-import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.recovery.RecoveryScheduler
 
 /**
@@ -11,7 +10,7 @@ import com.freedom.features.recovery.RecoveryScheduler
  * All calls are serialized by the service's Handler.
  */
 internal class EntryPageObservationRetry(
-    private val scheduler: TaskScheduler,
+    private val scheduleReadOnlyObservation: (Long, () -> Unit) -> ScheduledTask,
     private val currentRunGeneration: () -> Long,
     private val isObservationAllowed: () -> Boolean,
     private val onRetry: () -> Unit
@@ -43,7 +42,7 @@ internal class EntryPageObservationRetry(
             RecoveryScheduler.longWaitDelayMs
         }
         val expectedToken = ++token
-        pending = scheduler.schedule(delay) {
+        pending = scheduleReadOnlyObservation(delay) {
             if (token == expectedToken) {
                 pending = null
                 if (isObservationAllowed() && currentRunGeneration() == current) {

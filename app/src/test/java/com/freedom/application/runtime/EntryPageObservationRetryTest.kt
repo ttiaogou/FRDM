@@ -21,7 +21,7 @@ class EntryPageObservationRetryTest {
         val scheduler = Scheduler()
         var reads = 0
         lateinit var retry: EntryPageObservationRetry
-        retry = EntryPageObservationRetry(scheduler, { 7L }, { true }) {
+        retry = EntryPageObservationRetry(scheduler::schedule, { 7L }, { true }) {
             reads++
             retry.update(true)
         }
@@ -44,7 +44,7 @@ class EntryPageObservationRetryTest {
         val scheduler = Scheduler()
         var reads = 0
         lateinit var retry: EntryPageObservationRetry
-        retry = EntryPageObservationRetry(scheduler, { 7L }, { true }) {
+        retry = EntryPageObservationRetry(scheduler::schedule, { 7L }, { true }) {
             reads++
             retry.update(false, keepObserving = true)
         }
@@ -75,7 +75,7 @@ class EntryPageObservationRetryTest {
         var allowed = true
         var generation = 7L
         var reads = 0
-        val retry = EntryPageObservationRetry(scheduler, { generation }, { allowed }) { reads++ }
+        val retry = EntryPageObservationRetry(scheduler::schedule, { generation }, { allowed }) { reads++ }
         retry.update(true)
         generation++
         scheduler.entries[0].callback()

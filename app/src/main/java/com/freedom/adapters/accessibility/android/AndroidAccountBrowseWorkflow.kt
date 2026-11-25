@@ -20,8 +20,6 @@ import com.freedom.core.accessibility.overlay.OverlayPort
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.core.runtime.PageObservationCoordinator
-import com.freedom.core.runtime.PageObservationSnapshot
-import com.freedom.core.runtime.PageObservationSnapshotSource
 import com.freedom.core.runtime.PageFingerprint
 import com.freedom.features.accountbrowse.DynamicFeedRecoveryRouteAdapter
 import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
@@ -63,7 +61,6 @@ internal class AndroidAccountBrowseWorkflow(
     private val targetPackage: () -> String,
     private val monitorPageContext: () -> String,
     private val onLog: (String) -> Unit,
-    private val pageObservationSnapshotSource: PageObservationSnapshotSource? = null,
     private val onRequestScreenOff: () -> Boolean = { false },
     private val pageObservationCoordinator: PageObservationCoordinator,
     private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null,
@@ -118,25 +115,6 @@ internal class AndroidAccountBrowseWorkflow(
 
     private val session: AccountBrowseSessionStatePort
         get() = accountBrowseRuntime.session
-
-    internal fun classifyUnifiedPage(fingerprint: PageFingerprint): com.freedom.core.runtime.PageClassification {
-        if (fingerprint.packageName != targetPackage()) {
-            return com.freedom.core.runtime.PageClassification.UNKNOWN
-        }
-        val pageKind = runCatching {
-            BrowsePageKind.valueOf(fingerprint.semanticPage)
-        }.getOrNull() ?: return com.freedom.core.runtime.PageClassification.UNKNOWN
-        return when (pageKind) {
-            BrowsePageKind.DYNAMIC_FEED ->
-                if (dynamicFeedRecoveryRoute.matches(fingerprint)) {
-                    com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE
-                } else {
-                    com.freedom.core.runtime.PageClassification.UNKNOWN
-                }
-            BrowsePageKind.DETAIL, BrowsePageKind.IMAGE_VIEWER -> com.freedom.core.runtime.PageClassification.CHAT_DETAIL
-            else -> com.freedom.core.runtime.PageClassification.UNKNOWN
-        }
-    }
 
     internal fun startIfIdle() {
         if (accountBrowseTask.start()) {
@@ -1815,21 +1793,6 @@ internal class AndroidAccountBrowseWorkflow(
         }
         if (handleMomoPopup()) return null
         val publishedRunGeneration = currentRunGeneration()
-        pageObservationSnapshotSource?.publish(
-            PageObservationSnapshot(
-                fingerprint = com.freedom.core.runtime.PageFingerprint(
-                    packageName = page.packageName,
-                    activityClass = page.activityClass,
-                    semanticPage = page.pageKind.name,
-                    adapterFingerprint = page.fingerprint
-                ),
-                observationGeneration = publishedRunGeneration,
-                runGeneration = publishedRunGeneration,
-                sourceTaskId = "ACCOUNT_BROWSE",
-                windowId = page.windowId,
-                windowSessionKey = page.windowSessionKey
-            )
-        )
         if (publishedRunGeneration != currentRunGeneration() || !isBrowseModeActive()) return null
         return page
     }
