@@ -14,6 +14,162 @@ import org.junit.Test
 
 class AccountBrowseManualRecoveryTest {
     @Test
+    fun coldBrowseStartupSchedulesSecondReadOnlySampleAndResumesOriginalPhase() {
+        val scheduler = QueuedScheduler()
+        var fingerprint = "feed-a"
+        var pageEvidence = page()
+        var reads = 0
+        var countdowns = 0
+        var swipes = 0
+        var generation = 7L
+        lateinit var runtime: AccountBrowseRuntime
+        val manager = com.freedom.features.recovery.UnifiedRecoveryTransactionManager({ generation })
+        runtime = AccountBrowseRuntime(
+            scheduler = scheduler,
+            canScheduleStep = { true },
+            isSessionEnabled = { true },
+            isTouchActive = { false },
+            targetPackage = { "com.immomo.momo" },
+            currentRunGeneration = { generation },
+            recoveryTransactionManager = manager,
+            pageSelectedStartup = true,
+            onResetSession = {},
+            onReadOnlyRecoveryObservation = {
+                reads++
+                runtime.observeRecoveryPage(pageEvidence)
+                if (runtime.observeDynamicFeedFingerprintReadOnly(fingerprint, pageEvidence, true)) {
+                    runtime.scheduleStep(300L)
+                }
+            },
+            actions = AccountBrowseRuntime.Actions(
+                waitForDynamicTab = {}, verifyNavigationAction = {},
+                refreshDynamicFeed = {}, verifyDynamicFeedRefresh = {},
+                waitForFeedStable = {
+                    reads++
+                    if (runtime.observeDynamicFeedFingerprint(fingerprint, pageEvidence, true)) {
+                        assertTrue(runtime.canExecuteAutomaticStep())
+                        runtime.transitionTo(AccountBrowsePhase.FIRST_SWIPE_COUNTDOWN)
+                        runtime.scheduleStep(1000L)
+                    } else runtime.scheduleStep(750L)
+                },
+                runFirstSwipeCountdown = {
+                    assertTrue(runtime.canExecuteAutomaticStep())
+                    countdowns++
+                    runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_LIST_SCROLL)
+                    runtime.scheduleStep(1000L)
+                },
+                performFeedScroll = {
+                    assertTrue(runtime.canExecuteAutomaticStep())
+                    swipes++
+                },
+                verifyInitialSwipe = {}, openVisibleFeedCard = {}, checkDetailPageLoaded = {},
+                returnFromDetailPage = {}, waitForImageBrowserReturn = {},
+                waitForDetailRestabilize = {}, checkFeedListReturned = {}
+            )
+        )
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_FEED_STABLE)
+        runtime.scheduleStep(300L)
+        scheduler.runNext()
+        assertEquals(1, reads)
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertEquals(RecoveryTransactionState.VERIFYING, runtime.recoveryState())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        // The old phase dispatch still cannot run in VERIFYING.
+        runtime.performStep()
+        assertEquals(1, reads)
+        assertEquals(0, countdowns)
+        assertEquals(0, swipes)
+
+        // A changed feed cannot satisfy the second sample.
+        fingerprint = "feed-b"
+        scheduler.runNext()
+        assertEquals(2, reads)
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        scheduler.runNext() // old ordinary phase callback is blocked
+        assertEquals(2, reads)
+        assertEquals(0, countdowns)
+
+        // An intervening wrong page invalidates the previous sample.
+        pageEvidence = page(BrowsePageKind.HOME)
+        scheduler.runNext()
+        assertEquals(3, reads)
+        assertEquals(0, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        pageEvidence = page()
+        scheduler.runNext()
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        scheduler.runNext()
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertEquals(0, countdowns)
+        assertEquals(0, swipes)
+        assertEquals(null, manager.snapshot("ACCOUNT_BROWSE"))
+
+        scheduler.runNext() // original phase must read again before countdown
+        assertEquals(AccountBrowsePhase.FIRST_SWIPE_COUNTDOWN, runtime.phase)
+        assertEquals(6, reads)
+        assertEquals(0, swipes)
+        scheduler.runNext()
+        assertEquals(1, countdowns)
+        scheduler.runNext()
+        assertEquals(1, swipes)
+
+        // A new stability phase on an unchanged feed must not reuse the completed round.
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_FEED_STABLE)
+        runtime.scheduleStep(300L)
+        scheduler.runNext()
+        assertEquals(RecoveryTransactionState.VERIFYING, runtime.recoveryState())
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        val old = scheduler.nextCallback()
+        generation++
+        runtime.suspendSession()
+        old()
+        assertEquals(AccountBrowsePhase.IDLE, runtime.phase)
+        assertEquals(1, swipes)
+    }
+
+    @Test
+    fun readOnlyCompletionRequiresFreshMatchingFeedBeforeCountdown() {
+        val runtime = runtime()
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_FEED_STABLE)
+        assertFalse(runtime.observeDynamicFeedFingerprint("feed-a", page(), routeVerified = true))
+        assertFalse(runtime.canExecuteAutomaticStep())
+        assertTrue(runtime.observeDynamicFeedFingerprintReadOnly("feed-a", page(), routeVerified = true))
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertEquals(AccountBrowsePhase.WAIT_FOR_FEED_STABLE, runtime.phase)
+        // The asynchronous proof must not authorize the changed feed.
+        assertFalse(runtime.observeDynamicFeedFingerprint("feed-b", page(), routeVerified = true))
+        assertEquals(RecoveryTransactionState.RECOVERING, runtime.recoveryState())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed-b", page(), routeVerified = true))
+        assertTrue(runtime.observeDynamicFeedFingerprintReadOnly("feed-b", page(), routeVerified = true))
+        assertTrue(runtime.observeDynamicFeedFingerprint("feed-b", page(), routeVerified = true))
+        assertEquals(AccountBrowsePhase.WAIT_FOR_FEED_STABLE, runtime.phase)
+    }
+
+    private class QueuedScheduler : TaskScheduler {
+        private data class Entry(val due: Long, val callback: () -> Unit, var cancelled: Boolean = false)
+        private val entries = mutableListOf<Entry>()
+        private var now = 0L
+        override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask {
+            val entry = Entry(now + delayMillis, task)
+            entries += entry
+            return ScheduledTask { entry.cancelled = true }
+        }
+        private fun next() = entries.filterNot { it.cancelled }.minByOrNull { it.due }
+            ?: error("No pending callback")
+        fun nextCallback(): () -> Unit = next().callback
+        fun runNext() {
+            val entry = next()
+            entry.cancelled = true
+            now = entry.due
+            entry.callback()
+        }
+    }
+
+    @Test
     fun touchRecoveryKeepsTaskInUnifiedRecoveryWithoutManualResumeLatch() {
         val runtime = runtime()
         runtime.requestRecovery(

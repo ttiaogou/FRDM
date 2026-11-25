@@ -434,16 +434,20 @@ internal class AndroidAccountBrowseWorkflow(
         accountBrowseRuntime.observeRecoveryPage(page)
         val verifiedRoute = page.pageKind == BrowsePageKind.DYNAMIC_FEED &&
             matchDynamicFeedRoute(page)
-        if (verifiedRoute) {
-            val inspection = socialBrowsePort.inspectFeed()
-            accountBrowseRuntime.observeDynamicFeedFingerprint(
-                inspection.fingerprint.takeIf { inspection.ready && it.isNotBlank() }.orEmpty(),
-                page = page,
-                routeVerified = true
-            )
-        } else if (accountBrowseRuntime.hasPendingCheckpointVerification()) {
-            // Page changed or is not yet identified: never count this as a stable sample.
-            accountBrowseRuntime.observeDynamicFeedFingerprint("", page = page)
+        val inspection = if (verifiedRoute && !isRetainedObstructionEvidence(page.reason) &&
+            socialBrowsePort.inspectPopup() == null
+        ) socialBrowsePort.inspectFeed() else null
+        // Read-only observation must also invalidate a previous sample when the
+        // current route/feed cannot be proved. Never call handleMomoPopup here:
+        // that method can dispatch an action.
+        val recovered = accountBrowseRuntime.observeDynamicFeedFingerprintReadOnly(
+            inspection?.takeIf { it.ready && it.fingerprint.isNotBlank() }?.fingerprint.orEmpty(),
+            page = page,
+            routeVerified = verifiedRoute
+        )
+        if (accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_FEED_STABLE) {
+            val samples = if (recovered) REQUIRED_STABLE_FEED_SAMPLES else accountBrowseRuntime.recoveryStableSamples()
+            addLog("动态列表只读复核：稳定计数=$samples/$REQUIRED_STABLE_FEED_SAMPLES；事务状态=${accountBrowseRuntime.recoveryState().name}；不执行手势")
         }
         if (accountBrowseRuntime.recoveryState() == com.freedom.features.recovery.RecoveryTransactionState.ACTIVE &&
             !accountBrowseSession.touchActive && accountBrowsePhase != AccountBrowsePhase.IDLE
@@ -1251,11 +1255,9 @@ internal class AndroidAccountBrowseWorkflow(
                 routeVerified = page.pageKind == BrowsePageKind.DYNAMIC_FEED && matchDynamicFeedRoute(page)
             )
             accountBrowseSession.lastStableFingerprint = fingerprint
-            accountBrowseSession.stableSamples = accountBrowseRuntime.recoveryStableSamples()
+            accountBrowseSession.stableSamples =
+                if (recovered) REQUIRED_STABLE_FEED_SAMPLES else accountBrowseRuntime.recoveryStableSamples()
             addLog("动态列表采样：可见项目=${inspection.visibleCardCount}，稳定计数=${accountBrowseSession.stableSamples}/$REQUIRED_STABLE_FEED_SAMPLES；事务状态=${accountBrowseRuntime.recoveryState().name}；${inspection.reason}")
-            if (recovered) {
-                accountBrowseSession.stableSamples = REQUIRED_STABLE_FEED_SAMPLES
-            }
         }
 
         if (accountBrowseRuntime.recoveryState() == com.freedom.features.recovery.RecoveryTransactionState.ACTIVE &&

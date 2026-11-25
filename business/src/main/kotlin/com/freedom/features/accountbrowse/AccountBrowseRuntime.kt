@@ -158,7 +158,9 @@ class AccountBrowseRuntime(
 
     /** Normalizes page-observation uncertainty before any AccountBrowse action is authorized. */
     fun observeRecoveryPage(page: BrowsePageEvidence): RecoveryTransactionState {
-        return dynamicPageRecovery.observePage(page)
+        val state = dynamicPageRecovery.observePage(page)
+        if (state != RecoveryTransactionState.ACTIVE) verifiedFeedAwaitingPhaseResume = null
+        return state
     }
 
     fun recoveryState(): RecoveryTransactionState = dynamicPageRecovery.state()
@@ -251,6 +253,30 @@ class AccountBrowseRuntime(
         if (!dynamicPageRecovery.observeFingerprint(fingerprint)) return false
         restoredCheckpointPhase = null
         return true
+    }
+
+    /**
+     * The independent recovery callback contributes evidence only. When it finishes
+     * WAIT_FOR_FEED_STABLE, the original phase still needs its own fresh matching read
+     * before countdown; do not start another verification round or replay a gesture.
+     */
+    fun observeDynamicFeedFingerprintReadOnly(
+        fingerprint: String,
+        page: BrowsePageEvidence,
+        routeVerified: Boolean
+    ): Boolean {
+        if (!isSessionEnabled() || phase == AccountBrowsePhase.IDLE ||
+            dynamicPageRecovery.state() == RecoveryTransactionState.ACTIVE
+        ) return false
+        val confirmed = routeVerified && page.pageKind == BrowsePageKind.DYNAMIC_FEED &&
+            page.packageName == targetPackage() && page.confidence >= 80 &&
+            page.windowAvailable && page.fingerprint.isNotBlank()
+        val freshFingerprint = if (confirmed) fingerprint else ""
+        val recovered = observeDynamicFeedFingerprint(freshFingerprint, page, confirmed)
+        if (recovered && phase == AccountBrowsePhase.WAIT_FOR_FEED_STABLE) {
+            verifiedFeedAwaitingPhaseResume = freshFingerprint
+        }
+        return recovered
     }
 
     /** The AccountBrowse workflow owns all phase transitions. */
@@ -355,6 +381,7 @@ class AccountBrowseRuntime(
         onPauseReasonChanged: (String) -> Unit
     ) {
         beforePause()
+        verifiedFeedAwaitingPhaseResume = null
         session.gestureInFlight = false
         session.countdownRemaining = 0
         hideCountdown()

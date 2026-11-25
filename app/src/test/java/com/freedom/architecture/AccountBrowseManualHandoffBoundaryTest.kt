@@ -29,6 +29,26 @@ class AccountBrowseManualHandoffBoundaryTest {
     }
 
     @Test
+    fun browseReadOnlyVerificationUsesEvidenceOnlyAndRetainsActionGate() {
+        val workflow = source("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
+        val observation = workflow.substringAfter("private fun observeAccountBrowseRecoveryReadOnly() {")
+            .substringBefore("private fun onCoalescedPageObservationRequested()")
+        assertTrue(observation.contains("socialBrowsePort.inspectFeed()"))
+        assertTrue(observation.contains("accountBrowseRuntime.observeDynamicFeedFingerprintReadOnly("))
+        assertTrue(observation.contains("socialBrowsePort.inspectPopup() == null"))
+        assertTrue(observation.contains("RecoveryTransactionState.ACTIVE"))
+        assertFalse(observation.contains("if (handleMomoPopup()"))
+        assertFalse(observation.contains("gesturePolicy.execute("))
+        assertFalse(observation.contains("performFeedScroll()"))
+        val runtime = source("business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt")
+        val dispatch = runtime.substringAfter("fun performStep() {").substringBefore("fun resetSession(")
+        assertTrue(dispatch.contains("interactionPolicy.mayPerformAutomaticStep("))
+        val recovery = source("business/src/main/kotlin/com/freedom/features/accountbrowse/DynamicPageRecovery.kt")
+        val sampling = recovery.substringAfter("fun observeFingerprint(").substringBefore("fun state()")
+        assertTrue(sampling.contains("recoveryScheduler.begin(eventIdentity)"))
+    }
+
+    @Test
     fun overlayWatchdogTimeoutEntersUnifiedRecoveryInsteadOfManualHold() {
         val workflow = source(
             "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"

@@ -52,7 +52,9 @@ class DynamicPageRecovery(
     private val recoveryScheduler = RecoveryScheduler(
         scheduler = scheduler,
         nowEpochMs = System::currentTimeMillis,
-        onReadOnlyObservation = { onReadOnlyObservation() },
+        onReadOnlyObservation = { plan ->
+            if (plan.runGeneration == currentRunGeneration()) onReadOnlyObservation()
+        },
         onLog = onLog,
         scheduleRepository = scheduleRepository
     )
@@ -236,18 +238,30 @@ class DynamicPageRecovery(
     fun observeFingerprint(fingerprint: String): Boolean {
         // Even the pre-UNKNOWN feed stability gate must use the identified
         // manager route, not the dispatcher's former unbound fingerprint bypass.
-        dispatcher.activate(identity("DYNAMIC_FEED_FINGERPRINT_OBSERVATION"))
-        if (fingerprint.isNotBlank() && dispatcher.state == RecoveryTransactionState.RECOVERING) {
+        val eventIdentity = identity("DYNAMIC_FEED_FINGERPRINT_OBSERVATION")
+        dispatcher.activate(eventIdentity)
+        if (fingerprint.isNotBlank() &&
+            (dispatcher.state == RecoveryTransactionState.RECOVERING ||
+                dispatcher.state == RecoveryTransactionState.ACTIVE)
+        ) {
+            // A new feed verification needs fresh samples even when its fingerprint
+            // equals the last completed verification's fingerprint.
             dispatcher.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
         }
         dispatcher.observeFingerprint(fingerprint)
         if (dispatcher.state != RecoveryTransactionState.VERIFYING ||
             dispatcher.stableVerificationSamples < UnifiedRecoveryTransactionStateMachine.REQUIRED_STABLE_SAMPLES
         ) {
+            // The normal phase scheduler is deliberately blocked while VERIFYING.
+            // Arm the existing read-only recovery lane, not the automatic action lane.
+            if (dispatcher.state == RecoveryTransactionState.VERIFYING ||
+                dispatcher.state == RecoveryTransactionState.RECOVERING
+            ) recoveryScheduler.begin(eventIdentity)
             return false
         }
         dispatcher.dispatch(RecoveryTransactionEvent.ResumeRequested)
         dispatcher.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        if (dispatcher.state != RecoveryTransactionState.ACTIVE) return false
         recoveryScheduler.completeRecovery(identity("RECOVERY_VERIFIED"))
         return true
     }
