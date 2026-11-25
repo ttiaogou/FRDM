@@ -341,7 +341,9 @@ internal class AccessibilityServiceDependencies internal constructor(
                 }
             }
         ).also { bus ->
-            bus.registerClassifier(aiReplyModeRuntimeAdapter)
+            bus.registerClassifier(
+                AiReplyModeRuntimeAdapter(runtime = { aiReplyObservationRuntime })
+            )
             bus.registerClassifier(accountBrowseRuntimeAdapter)
         }
     }
