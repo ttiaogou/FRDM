@@ -3661,6 +3661,7 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.lockedUnreadSetFinalized = false
         privateMessagesTraversalTaskExecutor.normalInboxHadUnread = false
         privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown = false
+        receivedGreetingsPageProbePending = false
         pageObservationCoordinator.resetReceivedGreetingsWatch()
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
         privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
