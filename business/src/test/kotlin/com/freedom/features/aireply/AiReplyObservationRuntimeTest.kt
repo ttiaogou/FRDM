@@ -620,6 +620,73 @@ class AiReplyObservationRuntimeTest {
         assertTrue(saved != null)
     }
 
+    @Test
+    fun pagePauseRetiresRuntimeEvenWhenArchiveAndCleanupDiagnosticsFail() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply { sessionRunEnabled = true }
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val shared = PageObservationCoordinator(scheduler)
+        var failDiagnostics = false
+        var failedDiagnostics = 0
+        var archiveAttempts = 0
+        var saves = 0
+        val archivePort = object : ChatSessionManagementPort by port {
+            override fun finishSessionManagement(): String? {
+                archiveAttempts++
+                error("archive packaging unavailable")
+            }
+        }
+        val checkpointRepo = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = null
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { saves++ }
+            override fun clear() = Unit
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = shared,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = archivePort,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = { message ->
+                if (failDiagnostics && (message.contains("CHECKPOINT_SAVED") ||
+                        message.contains("运行时重置；原因=") ||
+                        message.contains("ZIP 封装失败") ||
+                        message.contains("任务协调[RELEASED]"))) {
+                    failedDiagnostics++
+                    error("diagnostic sink unavailable")
+                }
+            },
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = ownership,
+            currentRunGeneration = { 6L },
+            privateMessagesCheckpointRepository = checkpointRepo
+        )
+        runtime.scheduleInitialObservation()
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        assertTrue(scheduler.pendingCount() > 0)
+        failDiagnostics = true
+        runtime.persistTaskProgressBeforeExit("PAGE_SWITCH", serviceBoundary = false)
+        runtime.reset("页面任务暂停", preservePendingRecovery = false)
+        assertEquals(1, saves)
+        assertEquals(1, archiveAttempts)
+        assertTrue(failedDiagnostics >= 4)
+        assertNull(ownership.currentLease())
+        assertEquals(0, scheduler.pendingCount())
+
+        // Repeating cleanup must not repackage the already retired archive.
+        runtime.reset("重复清理", preservePendingRecovery = false)
+        assertEquals(1, archiveAttempts)
+        assertNull(ownership.currentLease())
+        failDiagnostics = false
+        runtime.scheduleInitialObservation()
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+    }
+
     private data class PreScrollPageRecoveryFixture(
         val scheduler: FakeScheduler,
         val runtime: AiReplyObservationRuntime,

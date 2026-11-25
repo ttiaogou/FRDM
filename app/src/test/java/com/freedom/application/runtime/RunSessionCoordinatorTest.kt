@@ -955,6 +955,34 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun stopRevokesLeaseEvenWhenInitialStopDiagnosticFails() {
+        val state = FakeState().apply { requested = true }
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var failStopDiagnostic = false
+        val coordinator = RunSessionCoordinator(
+            state, mapOf(ai.mode to ai), RuntimeLogSink { message ->
+                if (failStopDiagnostic && message.contains("运行请求准备停止")) {
+                    error("diagnostic sink unavailable")
+                }
+            }, taskCoordinator = tasks
+        )
+        coordinator.synchronizeRunRequest()
+        val first = requireNotNull(coordinator.routePageTask(ai.mode, "AI_REPLY_PRIVATE_MESSAGES"))
+        val lease = requireNotNull(tasks.tryAcquire(first.taskId, first.runGeneration))
+        assertTrue(coordinator.admitBusinessPageTaskOwnership(lease, false))
+        failStopDiagnostic = true
+        coordinator.stop("user")
+        assertFalse(state.requested)
+        assertFalse(tasks.isCurrent(lease))
+        assertNull(tasks.currentLease())
+        assertNull(coordinator.currentWriteRoute())
+        assertNull(coordinator.currentPageRuntimeSession())
+        assertEquals(first.runGeneration + 1, coordinator.currentRunGeneration())
+        assertEquals(listOf("start", "stop:user"), ai.calls)
+    }
+
+    @Test
     fun runGenerationAdvancesWhenThePageRuntimeChangesAndWhenTheRunStops() {
         val state = FakeState().apply {
             requested = true

@@ -1832,10 +1832,10 @@ internal class AndroidAccountBrowseWorkflow(
         if (restored) {
             accountBrowseSession.overlayPassthroughActive = false
             cancelOverlayPassthroughWatchdog()
-            addLog("$actionDescription：浮动按钮已恢复显示和触摸操作")
+            runCatching { addLog("$actionDescription：浮动按钮已恢复显示和触摸操作") }
             return true
         }
-        addLog("警告：浮动按钮触摸状态恢复失败；悬浮窗可能仍处于隐藏/穿透状态")
+        runCatching { addLog("警告：浮动按钮触摸状态恢复失败；悬浮窗可能仍处于隐藏/穿透状态") }
         return false
     }
 

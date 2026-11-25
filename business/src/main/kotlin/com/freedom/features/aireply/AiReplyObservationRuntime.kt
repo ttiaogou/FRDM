@@ -3362,7 +3362,7 @@ class AiReplyObservationRuntime(
         val boundary = if (serviceBoundary) "SERVICE_BOUNDARY" else "PAGE_PAUSE"
         if (recoveryContext.pending) {
             // An UNKNOWN transaction already saved its original route checkpoint.
-            onLog("业务进度[${boundary}_PRESERVED]：reason=$reason；沿用待恢复检查点，不覆盖已保存凭据")
+            runCatching { onLog("业务进度[${boundary}_PRESERVED]：reason=$reason；沿用待恢复检查点，不覆盖已保存凭据") }
             return
         }
         val taskId = taskOwnership.activeTaskId()
@@ -3380,13 +3380,13 @@ class AiReplyObservationRuntime(
                 else -> false
             }
         }.onFailure {
-            onLog("业务进度[${boundary}_CHECKPOINT_ERROR]：reason=$reason；type=${it.javaClass.simpleName}；未改变手势或任务状态")
+            runCatching { onLog("业务进度[${boundary}_CHECKPOINT_ERROR]：reason=$reason；type=${it.javaClass.simpleName}；未改变手势或任务状态") }
         }.getOrDefault(false)
         if (persisted) {
             if (serviceBoundary) serviceInterruptionCheckpointPersisted = true
-            onLog("业务进度[${boundary}_CHECKPOINT_SAVED]：task=$taskId；reason=$reason；仅保存进度；所属任务下次进入时再验证")
+            runCatching { onLog("业务进度[${boundary}_CHECKPOINT_SAVED]：task=$taskId；reason=$reason；仅保存进度；所属任务下次进入时再验证") }
         } else {
-            onLog("业务进度[${boundary}_CHECKPOINT_UNAVAILABLE]：task=${taskId ?: "NONE"}；reason=$reason；未生成未经验证的检查点")
+            runCatching { onLog("业务进度[${boundary}_CHECKPOINT_UNAVAILABLE]：task=${taskId ?: "NONE"}；reason=$reason；未生成未经验证的检查点") }
         }
     }
 
@@ -3411,10 +3411,13 @@ class AiReplyObservationRuntime(
         if (interruptedGestureRequestId != null) {
             gesturePolicy.cancelActive(interruptedGestureRequestId, "runtime_reset:$reason")
         }
-        onLog(
-            "AI 样本归档：运行时重置；原因=$reason；当前状态=${sessionManagerState.name}；" +
-                "样本归档已启动=$sampleCaptureActive；自动会话遍历已启动=$sessionRunStarted"
-        )
+        // Diagnostic delivery must not interrupt cancellation or state retirement.
+        runCatching {
+            onLog(
+                "AI 样本归档：运行时重置；原因=$reason；当前状态=${sessionManagerState.name}；" +
+                    "样本归档已启动=$sampleCaptureActive；自动会话遍历已启动=$sessionRunStarted"
+            )
+        }
         pageInspectionTask?.cancel()
         regionRefreshTask?.cancel()
         resetCrossTaskGreetingsHandoffRetry()
@@ -3460,9 +3463,9 @@ class AiReplyObservationRuntime(
                 chatSessionManagementPort.finishSessionManagement()
             }.getOrNull()
             if (!archivePath.isNullOrBlank()) {
-                onLog("AI 会话管理：本次样本包已封存；ZIP=$archivePath")
+                runCatching { onLog("AI 会话管理：本次样本包已封存；ZIP=$archivePath") }
             } else {
-                onLog("AI 会话管理：本次样本包已停止写入；ZIP 封装失败或无可封存样本")
+                runCatching { onLog("AI 会话管理：本次样本包已停止写入；ZIP 封装失败或无可封存样本") }
             }
         }
         sampleCaptureActive = false

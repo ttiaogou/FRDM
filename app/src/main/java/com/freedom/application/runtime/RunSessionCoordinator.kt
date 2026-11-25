@@ -351,7 +351,7 @@ class RunSessionCoordinator(
     /** Clear persisted intent and notify only the runtime that owned the active session. */
     @Synchronized
     fun stop(reason: String) {
-        log.append("运行请求准备停止：来源=RunSessionCoordinator.stop；原因=$reason")
+        runCatching { log.append("运行请求准备停止：来源=RunSessionCoordinator.stop；原因=$reason") }
         pageRuntime?.let(::markPageStopping)
         state.setRunRequested(false)
         observedRunRequested = false

@@ -147,6 +147,46 @@ class TaskExecutionControllerTest {
     }
 
     @Test
+    fun releaseAndResetRetireCapabilitiesEvenWhenReleaseDiagnosticsFail() {
+        val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var generation = 4L
+        var failLog = false
+        val execution = TaskExecutionController(coordinator, { generation }) {
+            if (failLog) error("diagnostic sink unavailable")
+        }
+        execution.beginRun(generation)
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "startup"))
+        failLog = true
+        assertTrue(execution.release("ACCOUNT_BROWSE", "page exit"))
+        assertFalse(execution.owns("ACCOUNT_BROWSE"))
+        assertEquals(null, coordinator.currentLease())
+
+        failLog = false
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "restart"))
+        generation++
+        coordinator.advanceRunGeneration(generation)
+        val replacement = requireNotNull(coordinator.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", generation))
+        failLog = true
+        execution.reset("stale page exit")
+        assertEquals(replacement, coordinator.currentLease())
+        assertFalse(execution.owns("ACCOUNT_BROWSE"))
+
+        failLog = false
+        val isolated = TaskExecutionController(null, { generation }) {
+            if (failLog) error("diagnostic sink unavailable")
+        }
+        assertTrue(isolated.claim("ACCOUNT_BROWSE", "isolated start"))
+        failLog = true
+        assertTrue(isolated.release("ACCOUNT_BROWSE", "isolated release"))
+        assertFalse(isolated.owns("ACCOUNT_BROWSE"))
+        failLog = false
+        assertTrue(isolated.claim("ACCOUNT_BROWSE", "isolated restart"))
+        failLog = true
+        isolated.reset("isolated reset")
+        assertFalse(isolated.owns("ACCOUNT_BROWSE"))
+    }
+
+    @Test
     fun isolatedControllerClearsLocalLeaseWhenReleasedWithoutCoordinator() {
         val execution = TaskExecutionController(coordinator = null, currentRunGeneration = { 2L })
         execution.beginRun(2L)
