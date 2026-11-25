@@ -47,6 +47,7 @@ class RunSessionCoordinator(
 
     private val pageRuntimeSession = PageRuntimeSession()
     private var preparedRuntimeMode: RunMode? = null
+    private var lastBusinessAdmissionLease: TaskLease? = null
     private var pageTransitionInProgress = false
     @Volatile private var pageServiceConnected = initiallyServiceConnected
     @Volatile private var pageServiceDestroyed = false
@@ -94,6 +95,7 @@ class RunSessionCoordinator(
     private fun stopPageRuntime(reason: String, preserveRecovery: Boolean,
                                 cleanup: ((ModeRuntimePort) -> Unit)? = null): Boolean {
         publishWriteRoute(null)
+        lastBusinessAdmissionLease = null
         val previous = pageRuntimeSession.current()
         if (previous == null) {
             advanceRunGeneration()
@@ -168,6 +170,7 @@ class RunSessionCoordinator(
             current.lifecycle == PageRuntimeLifecycle.STOPPING
         ) return false
         if (current.taskId == lease.taskId) {
+            lastBusinessAdmissionLease = lease
             tryCompletePageStart(current)
             return true
         }
@@ -178,7 +181,60 @@ class RunSessionCoordinator(
         pageRuntimeSession.markStopping(current)?.let { logPageLifecycle(it, "已验证业务任务交接") }
         val next = pageRuntimeSession.begin(runGeneration, lease.taskId, current.mode)
         logPageLifecycle(next, "业务准入及目标租约已确认")
-        return tryCompletePageStart(next) != null
+        val ready = tryCompletePageStart(next) != null
+        lastBusinessAdmissionLease = if (ready) lease else null
+        return ready
+    }
+
+    /**
+     * A synchronous business admission rejected its just-acquired lease. Retire its
+     * READY token; do not reinstate the former owner or guess the current page.
+     * The caller has already released the exact capability.
+     */
+    @Synchronized
+    fun rollbackBusinessPageTaskOwnership(failedLease: TaskLease): Boolean {
+        val current = pageRuntimeSession.current() ?: return false
+        if (!isPageObservationAllowed() || current.mode != RunMode.AI_REPLY ||
+            current.runGeneration != runGeneration ||
+            current.runGeneration != failedLease.runGeneration ||
+            current.taskId != failedLease.taskId ||
+            lastBusinessAdmissionLease != failedLease ||
+            current.lifecycle == PageRuntimeLifecycle.STOPPING ||
+            taskCoordinator?.currentLease() != null
+        ) return false
+        publishWriteRoute(null)
+        lastBusinessAdmissionLease = null
+        pageRuntimeSession.markStopping(current)?.let { logPageLifecycle(it, "业务准入失败；撤销原路由代次") }
+        val pending = pageRuntimeSession.begin(runGeneration, current.taskId, current.mode)
+        logPageLifecycle(pending, "业务准入失败；等待新鲜页面重新选择")
+        onObserveCurrentPage()
+        return true
+    }
+
+    /**
+     * Independent top-level page observations are different from an automatic
+     * business handoff. On a sibling-page change, suspend the source task and
+     * invalidate its generation before asking for a fresh destination snapshot.
+     * Never start the destination using the source generation's snapshot.
+     */
+    @Synchronized
+    fun routeIndependentPageTask(mode: RunMode, taskId: String): PageRuntimeSessionState? {
+        val current = pageRuntimeSession.current()
+        if (!isPageObservationAllowed() || !observedRunRequested || pageTransitionInProgress)
+            return current
+        if (current != null && current.mode == RunMode.AI_REPLY && mode == current.mode &&
+            current.taskId != taskId && current.lifecycle != PageRuntimeLifecycle.STOPPING
+        ) {
+            pageTransitionInProgress = true
+            try {
+                val suspended = stopPageRuntime("人工业务页面交接：${current.taskId} -> $taskId", preserveRecovery = true)
+                if (suspended && isPageObservationAllowed()) onObserveCurrentPage()
+                return pageRuntimeSession.current()
+            } finally {
+                pageTransitionInProgress = false
+            }
+        }
+        return routePageTask(mode, taskId)
     }
 
     @Synchronized
@@ -336,6 +392,7 @@ class RunSessionCoordinator(
                 preparedRuntimeMode == mode
             ) {
                 publishWriteRoute(null)
+                lastBusinessAdmissionLease = null
                 pageRuntimeSession.markStopping(currentPage)?.let { logPageLifecycle(it, "同运行时任务切换") }
                 val next = pageRuntimeSession.begin(runGeneration, taskId, mode)
                 logPageLifecycle(next, "等待目标任务验证及租约交接")

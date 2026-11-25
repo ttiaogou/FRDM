@@ -153,7 +153,9 @@ class AiReplyObservationRuntime(
     /** Reports the exact verified capability; the route coordinator never acquires it for us. */
     private val onPageTaskOwnershipConfirmed: (com.freedom.core.runtime.TaskLease, Boolean) -> Boolean = { _, _ -> true },
     /** Service composition selects the startup task before any durable checkpoint is activated. */
-    private val pageSelectedStartup: Boolean = false
+    private val pageSelectedStartup: Boolean = false,
+    /** Report a synchronous failed business admission after releasing its exact lease. */
+    private val onPageTaskAdmissionRolledBack: (com.freedom.core.runtime.TaskLease) -> Unit = {}
 ) {
     companion object {
         /**
@@ -3678,8 +3680,14 @@ class AiReplyObservationRuntime(
      * must not cancel that transaction or grant the private task a competing capability. */
     fun isVerifiedGreetingsNavigationPending(): Boolean =
         receivedGreetingsTaskActive && ownsTask(RECEIVED_GREETINGS_TASK_ID) &&
-            (awaitingNormalInboxAfterGreetingsReturn ||
-                receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING)
+            ((awaitingNormalInboxAfterGreetingsReturn && !isConversationDraftPending() &&
+                !isSendConfirmationPending() && !recoveryContext.pending) ||
+                // NAVIGATING also includes avatar/profile/chat transitions. It is not
+                // proof that a newly visible ordinary inbox belongs to greetings.
+                (privateRoundCompletedForGreetings && !recoveryContext.pending &&
+                    !awaitingNormalInboxAfterGreetingsReturn &&
+                    lastPageInspection?.pageKind == ChatPageKind.CHAT_LIST &&
+                    receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING))
 
     fun requestPageRouteObservation() {
         if (!isAiReplyActive() || !sessionRunStarted ||
@@ -5871,6 +5879,10 @@ class AiReplyObservationRuntime(
         )
         if (start != ReceivedGreetingsTaskFlowController.StartResult.STARTED) {
             onLog("GREETING_LIST_ADMISSION_REJECTED reason=${start.name}；未启用列表遍历")
+            if (pageSelectedStartup && evidence !is ConfirmedGreetingsListEvidence.CrossTaskRecoveryVerified) {
+                receivedGreetingsPageProbePending = true
+                scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            }
             return
         }
         // Lease acquisition, the adapter's fresh current-window proof, and lifecycle start
@@ -5879,7 +5891,9 @@ class AiReplyObservationRuntime(
             // A concurrent handoff may have transferred the lease elsewhere; never
             // release a new owner's UI capability when the greeting admission loses.
             if (ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
+                val rejectedLease = taskCoordinator?.currentLease()?.takeIf { it.taskId == RECEIVED_GREETINGS_TASK_ID }
                 releaseTaskOwnership("收到招呼列表准入后任务未激活；回滚本任务租约")
+                if (rejectedLease != null) onPageTaskAdmissionRolledBack(rejectedLease)
             }
             sessionManagerState = SessionManagerState.PAUSED
             onLog("GREETING_LIST_ADMISSION_REJECTED reason=LEASE_NOT_ACTIVE")
@@ -5932,7 +5946,9 @@ class AiReplyObservationRuntime(
             // The previous private-message task may still own the single UI slot.  A capability
             // rejection is terminal for this handoff; release that old lease instead of leaving
             // a paused task capable of blocking later normal-list re-entry.
+            val rejectedSourceLease = taskCoordinator?.currentLease()
             releaseTaskOwnership("收到的招呼能力不支持；清理切换前的旧任务租约")
+            if (rejectedSourceLease != null) onPageTaskAdmissionRolledBack(rejectedSourceLease)
             sessionManagerState = SessionManagerState.PAUSED
             onLog(
                 "收到的招呼任务启动[NOT_SUPPORTED]：" +
@@ -5947,10 +5963,20 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼任务启动[OWNERSHIP_REJECTED]：恢复门禁尚未解除或未取得唯一 UI 操作权；不执行启动动作")
             return ReceivedGreetingsTaskFlowController.StartResult.OWNERSHIP_REJECTED
         }
+        val admittedLease = taskCoordinator?.currentLease()?.takeIf {
+            it.taskId == RECEIVED_GREETINGS_TASK_ID && it.runGeneration == currentRunGeneration()
+        }
         val result = runCatching { begin() }
             .getOrDefault(ReceivedGreetingsTaskFlowController.StartResult.START_FAILED)
         if (result != ReceivedGreetingsTaskFlowController.StartResult.STARTED) {
-            releaseTaskOwnership("收到的招呼任务启动失败回滚：${result.name}")
+            // A synchronous failed admission may release only its own capability.
+            // A newer task/lease is not the failed transaction's property.
+            if (admittedLease == null || taskCoordinator?.isCurrent(admittedLease) == true) {
+                if (ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
+                    releaseTaskOwnership("收到的招呼任务启动失败回滚：${result.name}")
+                }
+                if (admittedLease != null) onPageTaskAdmissionRolledBack(admittedLease)
+            }
             sessionManagerState = SessionManagerState.PAUSED
             onLog("收到的招呼任务启动[${result.name}]：已回滚UI操作租约；不执行首次遍历和后续页面调度")
         }

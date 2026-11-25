@@ -1795,6 +1795,7 @@ class AiReplyObservationRuntimeTest {
             )
         }
         val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val rejected = mutableListOf<com.freedom.core.runtime.TaskLease>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
@@ -1809,7 +1810,11 @@ class AiReplyObservationRuntimeTest {
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             taskCoordinator = taskCoordinator,
-            currentRunGeneration = { 5L }
+            currentRunGeneration = { 5L },
+            onPageTaskAdmissionRolledBack = { lease ->
+                assertNull(taskCoordinator.currentLease())
+                rejected += lease
+            }
         )
 
         runtime.scheduleInitialObservation()
@@ -1825,6 +1830,10 @@ class AiReplyObservationRuntimeTest {
             taskCoordinator.activeTaskId())
         assertFalse(logs.any { it.contains("GREETING_LIST_READY") })
         assertTrue(logs.any { it.contains("GREETING_LIST_ADMISSION_REJECTED reason=START_FAILED") })
+        assertEquals(1, rejected.size)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", rejected.single().taskId)
+        assertEquals(5L, rejected.single().runGeneration)
+        assertFalse(taskCoordinator.isCurrent(rejected.single()))
     }
 
     /**

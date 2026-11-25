@@ -113,11 +113,13 @@ class VisibleDraftFlowTest {
 
     private class SegmentLedger : ReplySegmentTaskRepository {
         val records = linkedMapOf<String, ReplySegmentTaskRecord>()
+        var failUnknownUpdate = false
         override fun find(taskId: String) = records[taskId]
         override fun findByRequest(requestId: String) = records.values.filter { it.requestId == requestId }
         override fun findByConversation(conversationKey: String) = records.values.filter { it.conversationKey == conversationKey }
         override fun save(record: ReplySegmentTaskRecord) { records[record.taskId] = record }
         override fun update(record: ReplySegmentTaskRecord): Boolean {
+            if (failUnknownUpdate && record.status == ReplySegmentTaskStatus.UNKNOWN) error("journal temporarily unavailable")
             val before = records[record.taskId] ?: return false
             if (!ReplySegmentTaskTransitions.isAllowed(before.status, record.status)) return false
             records[record.taskId] = record
@@ -1539,6 +1541,44 @@ class VisibleDraftFlowTest {
         assertFalse(f.coordinator.isConversationReturnBlocked)
     }
 
+
+    @Test fun taskIsolationStillRevokesPendingCallbacksWhenUnknownJournalUpdateThrows() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        var submitted = 0
+        lateinit var completed: () -> Unit
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
+                error("completion capable send port required")
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String,
+                onGestureCompleted: () -> Unit): ChatDraftInputResult {
+                submitted++
+                completed = onGestureCompleted
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+        first.drain()
+        assertEquals(1, submitted)
+        assertTrue(first.coordinator.isSendConfirmationPending)
+        val durable = segments.records.values.single()
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, durable.status)
+        segments.failUnknownUpdate = true
+        first.coordinator.resetForRuntimeReset()
+        completed()
+        first.drain()
+        assertFalse(first.coordinator.isSendConfirmationPending)
+        assertEquals(0, first.completionObservationRequests)
+        assertEquals(durable, segments.records.values.single())
+        assertEquals(1, submitted)
+        assertTrue(first.logs.any { it.contains("UNKNOWN_JOURNAL_UPDATE_UNCONFIRMED") })
+        // The original conversation still has its non-replayable send proof, even
+        // though the in-memory pending flag no longer globally blocks another task.
+        first.text = ""
+        first.coordinator.generateVisibleDraft(first.batch, first.snapshot)
+        first.drain()
+        assertEquals(1, submitted)
+    }
 
     @Test fun restoredUnknownSendRequiresTwoFreshMatchingObservationsAndNeverResends() {
         val segments = SegmentLedger()

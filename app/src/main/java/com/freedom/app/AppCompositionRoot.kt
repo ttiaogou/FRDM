@@ -340,7 +340,9 @@ internal class AccessibilityServiceDependencies internal constructor(
                             targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
                             runSessionCoordinator.currentPageRuntimeSession()?.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
                             aiReplyObservationRuntime.isVerifiedGreetingsNavigationPending()
-                        if (!verifiedGreetingNavigation && (snapshot.entryObservation || verifiedOwnTask)) {
+                        if (!verifiedGreetingNavigation && snapshot.entryObservation) {
+                            runSessionCoordinator.routeIndependentPageTask(mode, targetTask)
+                        } else if (!snapshot.entryObservation && verifiedOwnTask) {
                             runSessionCoordinator.routePageTask(mode, targetTask)
                         }
                     } else if (snapshot.entryObservation && decision.conflict) {
@@ -740,6 +742,9 @@ internal class AccessibilityServiceDependencies internal constructor(
                 runSessionCoordinator.admitBusinessPageTaskOwnership(lease, verifiedHandoff)
             },
             pageSelectedStartup = true,
+            onPageTaskAdmissionRolledBack = { failedLease ->
+                runSessionCoordinator.rollbackBusinessPageTaskOwnership(failedLease)
+            },
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
             isSendConfirmationPending = { aiReplyDraftCoordinator.isSendConfirmationPending },

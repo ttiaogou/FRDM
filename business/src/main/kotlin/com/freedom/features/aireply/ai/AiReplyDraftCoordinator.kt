@@ -432,7 +432,11 @@ class AiReplyDraftCoordinator(
     /** AI 回复运行环境停止或重建时，使迟到的回调失效。 */
     fun resetForRuntimeReset() {
         var cancelledModelLogs: List<String> = emptyList()
+        var uncertainRecordRetained = false
         synchronized(lock) {
+            // Invalidate callbacks even when the optional UNKNOWN journal update fails.
+            // The pre-submit durable SENDING/SENT_UNCONFIRMED record remains non-replayable.
+            generation.incrementAndGet()
             modelLifecycleTrace?.takeIf { !it.terminalLogged }?.let { trace ->
                 trace.terminalLogged = true
                 cancelledModelLogs = (if (trace.retryPending) listOf(
@@ -447,12 +451,18 @@ class AiReplyDraftCoordinator(
                 val requestId = activeRequestId
                 val repository = replySegmentTaskRepository
                 if (requestId != null && repository != null) {
-                    repository.find("$requestId:segment:${pendingConfirmation.segmentIndex}")?.let { record ->
-                        repository.update(record.copy(status = ReplySegmentTaskStatus.UNKNOWN))
-                    }
+                    uncertainRecordRetained = !runCatching {
+                        val record = repository.find("$requestId:segment:${pendingConfirmation.segmentIndex}")
+                        if (record == null) false
+                        else if (record.status == ReplySegmentTaskStatus.SENT ||
+                            record.status == ReplySegmentTaskStatus.UNKNOWN) true
+                        else if (record.status in setOf(ReplySegmentTaskStatus.SENDING,
+                                ReplySegmentTaskStatus.SENT_UNCONFIRMED)) {
+                            repository.update(record.copy(status = ReplySegmentTaskStatus.UNKNOWN))
+                        } else false
+                    }.getOrDefault(false)
                 }
             }
-            generation.incrementAndGet()
             pending.set(false)
             awaitingUserSend.set(false)
             processedMessageKeys.clear()
@@ -477,6 +487,9 @@ class AiReplyDraftCoordinator(
             sendControlRetryTicket++
         }
         cancelledModelLogs.forEach { runCatching { onLog(it) } }
+        if (uncertainRecordRetained) runCatching {
+            onLog("AI 任务隔离[UNKNOWN_JOURNAL_UPDATE_UNCONFIRMED]：保留原有发送持久化证据；仅允许后续原会话只读核验，不重发")
+        }
     }
 
     fun startupFailure(): String? {
