@@ -99,6 +99,8 @@ class RunSessionCoordinator(
         )
         val previous = observedMode
         if (previous != null) {
+            pageRoutedMode = null
+            pageRuntimeSession.clear()
             if (requestedMode == null) {
                 log.append(
                     "运行请求停止[OBSERVED]：source=RunSessionCoordinator.synchronizeRunRequest；" +
@@ -178,6 +180,8 @@ class RunSessionCoordinator(
         // boundary.  Advance before notifying the runtime so its reset and any late callback
         // observe the new generation as stale.
         advanceRunGeneration()
+        pageRoutedMode = null
+        pageRuntimeSession.clear()
         log.append("无障碍服务租约隔离：事件=DISCONNECTED；runGeneration=$runGeneration")
         observedMode?.let { runtimes[it]?.onAccessibilityServiceDisconnected() }
     }
@@ -295,6 +299,8 @@ class RunSessionCoordinator(
     @Synchronized
     fun onAccessibilityServiceInterrupted(reason: String) {
         advanceRunGeneration()
+        pageRoutedMode = null
+        pageRuntimeSession.clear()
         log.append("无障碍服务租约隔离：事件=INTERRUPTED；reason=$reason；runGeneration=$runGeneration")
         activeMode()?.let { runtimes[it]?.onAccessibilityServiceInterrupted(reason) }
     }
@@ -302,6 +308,8 @@ class RunSessionCoordinator(
     @Synchronized
     fun onServiceDestroyed() {
         advanceRunGeneration()
+        pageRoutedMode = null
+        pageRuntimeSession.clear()
         log.append("无障碍服务租约隔离：事件=DESTROYED；runGeneration=$runGeneration")
         runtimes.values.forEach(ModeRuntimePort::onServiceDestroyed)
     }
