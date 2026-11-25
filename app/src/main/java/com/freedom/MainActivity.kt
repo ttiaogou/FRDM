@@ -371,10 +371,6 @@ class MainActivity : Activity() {
                     val target = monitorRepository.targetPackage()
                     if (target == MonitorControlRepository.DEFAULT_TARGET_PACKAGE) "陌陌" else target
                 },
-                browseEnabled = { monitorRepository.isBrowseModeSelected() },
-                onBrowseChanged = { monitorRepository.setBrowseModeSelected(it) },
-                aiEnabled = { monitorRepository.isAiReplyModeSelected() },
-                onAiChanged = { monitorRepository.setAiReplyModeSelected(it) },
                 taskParameters = { taskLaunchParametersStore.read() },
                 onTaskParametersChanged = taskLaunchParametersStore::write,
                 onTargetClick = ::showTargetPicker,
