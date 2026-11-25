@@ -5,7 +5,6 @@ import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.RunStateRepository
 import com.freedom.core.runtime.RuntimeLogSink
 import com.freedom.core.runtime.TaskCoordinator
-import com.freedom.core.runtime.PageRuntimeSession
 import com.freedom.core.runtime.PageRuntimeSessionState
 import com.freedom.core.runtime.PageRuntimeLifecycle
 import com.freedom.core.runtime.TaskLease
@@ -45,8 +44,11 @@ class RunSessionCoordinator(
 
     private var observedRunRequested: Boolean = false
 
-    private val pageRuntimeSession = PageRuntimeSession()
-    private var preparedRuntimeMode: RunMode? = null
+    // The original run coordinator owns lifecycle state; immutable snapshots are
+    // retained for the existing exact-route write gate until authorization reduction.
+    private var pageRuntime: PageRuntimeSessionState? = null
+    private var nextRouteRevision = 0L
+    private var runtimePrepared = false
     private var lastBusinessAdmissionLease: TaskLease? = null
     private var pageTransitionInProgress = false
     private var pendingCleanup: (() -> Unit)? = null
@@ -93,13 +95,28 @@ class RunSessionCoordinator(
             "runGeneration=${state.runGeneration}；routeRevision=${state.routeRevision}；reason=$reason")
     }
 
+    private fun beginPageRuntime(generation: Long, taskId: String, mode: RunMode): PageRuntimeSessionState {
+        require(generation >= 0L && taskId.isNotBlank())
+        val previous = pageRuntime
+        check(previous == null || previous.lifecycle == PageRuntimeLifecycle.STOPPING) {
+            "Previous page route must stop before replacement"
+        }
+        check(nextRouteRevision < Long.MAX_VALUE) { "page route revision exhausted" }
+        return PageRuntimeSessionState(generation, taskId, mode, PageRuntimeLifecycle.STARTING,
+            ++nextRouteRevision).also { pageRuntime = it }
+    }
+
+    private fun markPageStopping(expected: PageRuntimeSessionState): PageRuntimeSessionState? =
+        pageRuntime?.takeIf { it == expected }?.copy(lifecycle = PageRuntimeLifecycle.STOPPING)
+            ?.also { pageRuntime = it }
+
     /** STOPPING is visible throughout cleanup; revocation precedes any teardown callback. */
     private fun stopPageRuntime(reason: String, preserveRecovery: Boolean,
                                 cleanup: ((ModeRuntimePort) -> Unit)? = null): Boolean {
         publishWriteRoute(null)
         lastBusinessAdmissionLease = null
         unclassifiedWriteHold = false
-        val previous = pageRuntimeSession.current()
+        val previous = pageRuntime
         if (previous?.lifecycle == PageRuntimeLifecycle.STOPPING && pendingCleanup != null) {
             // The old lease and generation have already been revoked.
             if (!preserveRecovery) {
@@ -110,12 +127,12 @@ class RunSessionCoordinator(
         }
         if (previous == null) {
             advanceRunGeneration()
-            preparedRuntimeMode = null
+            runtimePrepared = false
             return true
         }
-        val stopping = pageRuntimeSession.markStopping(previous) ?: return false
+        val stopping = markPageStopping(previous) ?: return false
         logPageLifecycle(stopping, reason)
-        preparedRuntimeMode = null
+        runtimePrepared = false
         val runtime = runtimes[previous.mode]
         if (preserveRecovery && runtime != null) {
             // The checkpoint writer needs the still-current task identity, but STOPPING
@@ -142,7 +159,7 @@ class RunSessionCoordinator(
         return try {
             operation()
             pendingCleanup = null
-            pageRuntimeSession.clear()
+            pageRuntime = null
             true
         } catch (error: Throwable) {
             log.recordException("RunSessionCoordinator", "page_runtime_stop_failed", reason, error)
@@ -154,7 +171,7 @@ class RunSessionCoordinator(
     @Synchronized
     fun retryPendingPageCleanup(): Boolean {
         if (!isPageObservationAllowed() || pageTransitionInProgress ||
-            pageRuntimeSession.current()?.lifecycle != PageRuntimeLifecycle.STOPPING ||
+            pageRuntime?.lifecycle != PageRuntimeLifecycle.STOPPING ||
             pendingCleanup == null) return false
         pageTransitionInProgress = true
         try {
@@ -174,7 +191,7 @@ class RunSessionCoordinator(
     fun reconcileUnclassifiedPage(observedGeneration: Long, ownedPageVerified: Boolean) {
         if (!isPageObservationAllowed() || observedGeneration != runGeneration ||
             pageTransitionInProgress) return
-        val current = pageRuntimeSession.current() ?: return
+        val current = pageRuntime ?: return
         if (current.lifecycle == PageRuntimeLifecycle.STOPPING) return
         if (ownedPageVerified) {
             if (unclassifiedWriteHold) {
@@ -188,24 +205,24 @@ class RunSessionCoordinator(
         publishWriteRoute(null)
         lastBusinessAdmissionLease = null
         if (current.lifecycle == PageRuntimeLifecycle.READY) {
-            pageRuntimeSession.markStopping(current)
-            val pending = pageRuntimeSession.begin(runGeneration, current.taskId, current.mode)
+            markPageStopping(current)
+            val pending = beginPageRuntime(runGeneration, current.taskId, current.mode)
             logPageLifecycle(pending, "UNKNOWN_WRITE_HOLD：页面归属未确认；仅保留观察")
         }
     }
 
     private fun tryCompletePageStart(expected: PageRuntimeSessionState): PageRuntimeSessionState? {
-        val current = pageRuntimeSession.current() ?: return null
+        val current = pageRuntime ?: return null
         if (!isPageObservationAllowed() || unclassifiedWriteHold || current.runGeneration != runGeneration ||
             current.routeRevision != expected.routeRevision || current.taskId != expected.taskId ||
-            current.mode != expected.mode || preparedRuntimeMode != current.mode ||
+            current.mode != expected.mode || !runtimePrepared ||
             current.lifecycle == PageRuntimeLifecycle.STOPPING
         ) return null
         if (taskCoordinator != null) {
             val lease = taskCoordinator.currentLease() ?: return null
             if (lease.taskId != current.taskId || lease.runGeneration != current.runGeneration) return null
         }
-        val ready = pageRuntimeSession.markReady(expected) ?: return null
+        val ready = current.copy(lifecycle = PageRuntimeLifecycle.READY).also { pageRuntime = it }
         publishWriteRoute(ready)
         if (current.lifecycle != PageRuntimeLifecycle.READY) logPageLifecycle(ready, "运行时准备完成且任务租约已确认")
         return ready
@@ -215,7 +232,7 @@ class RunSessionCoordinator(
     @Synchronized
     fun confirmPageTaskOwnership(lease: TaskLease): PageRuntimeSessionState? {
         if (taskCoordinator?.isCurrent(lease) != true) return null
-        val current = pageRuntimeSession.current() ?: return null
+        val current = pageRuntime ?: return null
         if (current.taskId != lease.taskId || current.runGeneration != lease.runGeneration) return null
         return tryCompletePageStart(current)
     }
@@ -230,7 +247,7 @@ class RunSessionCoordinator(
         if (!isPageObservationAllowed() ||
             taskCoordinator?.isCurrent(lease) != true
         ) return false
-        val current = pageRuntimeSession.current() ?: return false
+        val current = pageRuntime ?: return false
         if (current.runGeneration != runGeneration || lease.runGeneration != current.runGeneration ||
             current.lifecycle == PageRuntimeLifecycle.STOPPING
         ) return false
@@ -239,12 +256,12 @@ class RunSessionCoordinator(
             tryCompletePageStart(current)
             return true
         }
-        if (unclassifiedWriteHold || !verifiedHandoff || current.mode != RunMode.AI_REPLY || preparedRuntimeMode != current.mode ||
+        if (unclassifiedWriteHold || !verifiedHandoff || current.mode != RunMode.AI_REPLY || !runtimePrepared ||
             lease.taskId !in setOf("AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS")
         ) return false
         publishWriteRoute(null)
-        pageRuntimeSession.markStopping(current)?.let { logPageLifecycle(it, "已验证业务任务交接") }
-        val next = pageRuntimeSession.begin(runGeneration, lease.taskId, current.mode)
+        markPageStopping(current)?.let { logPageLifecycle(it, "已验证业务任务交接") }
+        val next = beginPageRuntime(runGeneration, lease.taskId, current.mode)
         logPageLifecycle(next, "业务准入及目标租约已确认")
         val ready = tryCompletePageStart(next) != null
         lastBusinessAdmissionLease = if (ready) lease else null
@@ -258,7 +275,7 @@ class RunSessionCoordinator(
      */
     @Synchronized
     fun rollbackBusinessPageTaskOwnership(failedLease: TaskLease): Boolean {
-        val current = pageRuntimeSession.current() ?: return false
+        val current = pageRuntime ?: return false
         if (!isPageObservationAllowed() || current.mode != RunMode.AI_REPLY ||
             current.runGeneration != runGeneration ||
             current.runGeneration != failedLease.runGeneration ||
@@ -269,8 +286,8 @@ class RunSessionCoordinator(
         ) return false
         publishWriteRoute(null)
         lastBusinessAdmissionLease = null
-        pageRuntimeSession.markStopping(current)?.let { logPageLifecycle(it, "业务准入失败；撤销原路由代次") }
-        val pending = pageRuntimeSession.begin(runGeneration, current.taskId, current.mode)
+        markPageStopping(current)?.let { logPageLifecycle(it, "业务准入失败；撤销原路由代次") }
+        val pending = beginPageRuntime(runGeneration, current.taskId, current.mode)
         logPageLifecycle(pending, "业务准入失败；等待新鲜页面重新选择")
         onObserveCurrentPage()
         return true
@@ -288,7 +305,7 @@ class RunSessionCoordinator(
         taskId: String,
         observedGeneration: Long = runGeneration
     ): PageRuntimeSessionState? {
-        val current = pageRuntimeSession.current()
+        val current = pageRuntime
         if (observedGeneration != runGeneration) return current
         if (!isPageObservationAllowed() || !observedRunRequested || pageTransitionInProgress)
             return current
@@ -298,7 +315,7 @@ class RunSessionCoordinator(
             try {
                 val suspended = stopPageRuntime("独立页面业务交接：${current.taskId} -> $taskId", preserveRecovery = true)
                 if (suspended && isPageObservationAllowed()) onObserveCurrentPage()
-                return pageRuntimeSession.current()
+                return pageRuntime
             } finally {
                 pageTransitionInProgress = false
             }
@@ -309,17 +326,17 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun markPageRuntimeReady(expected: PageRuntimeSessionState): PageRuntimeSessionState? {
-        val current = pageRuntimeSession.current() ?: return null
+        val current = pageRuntime ?: return null
         if (!isPageObservationAllowed() || current.runGeneration != runGeneration ||
             current.routeRevision != expected.routeRevision || current.taskId != expected.taskId ||
             current.mode != expected.mode || current.lifecycle == PageRuntimeLifecycle.STOPPING
         ) return null
-        preparedRuntimeMode = current.mode
+        runtimePrepared = true
         return tryCompletePageStart(expected)
     }
 
     private fun dispatchMode(): RunMode? =
-        pageRuntimeSession.current()?.takeIf {
+        pageRuntime?.takeIf {
             isPageObservationAllowed() && it.runGeneration == runGeneration &&
                 it.lifecycle == PageRuntimeLifecycle.READY
         }?.mode
@@ -362,7 +379,7 @@ class RunSessionCoordinator(
         val requestedRun = state.isRunRequested()
         if (pageServiceDestroyed) return false
         if (requestedRun == observedRunRequested &&
-            (requestedRun || pageRuntimeSession.current()?.lifecycle != PageRuntimeLifecycle.STOPPING)
+            (requestedRun || pageRuntime?.lifecycle != PageRuntimeLifecycle.STOPPING)
         ) return false
         observedRunRequested = requestedRun
         pageTransitionInProgress = true
@@ -380,7 +397,7 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun activeMode(): RunMode? =
-        pageRuntimeSession.current()?.takeIf {
+        pageRuntime?.takeIf {
             isPageObservationAllowed() && it.lifecycle != PageRuntimeLifecycle.STOPPING &&
                 it.runGeneration == runGeneration
         }?.mode
@@ -388,7 +405,7 @@ class RunSessionCoordinator(
     @Synchronized
     fun onAccessibilityServiceConnected() {
         if (pageServiceDestroyed) return
-        if (pageRuntimeSession.current() != null) onAccessibilityServiceDisconnected()
+        if (pageRuntime != null) onAccessibilityServiceDisconnected()
         pageServiceConnected = true
         val changed = synchronizeRunRequest()
         if (!changed) {
@@ -420,25 +437,25 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun routePageTask(mode: RunMode?, taskId: String? = null): PageRuntimeSessionState? {
-        val currentPage = pageRuntimeSession.current()
+        val currentPage = pageRuntime
         if (!isPageObservationAllowed() || !observedRunRequested) return null
         if (pageTransitionInProgress) return currentPage
         if (currentPage?.lifecycle == PageRuntimeLifecycle.STOPPING) {
             retryPendingPageCleanup()
-            return pageRuntimeSession.current()
+            return pageRuntime
         }
         if (currentPage != null && currentPage.mode == mode && currentPage.taskId == taskId &&
             currentPage.lifecycle != PageRuntimeLifecycle.STOPPING
         ) {
             if (tryCompletePageStart(currentPage) == null) {
                 val runtime = runtimes[currentPage.mode]
-                if (preparedRuntimeMode != currentPage.mode) {
+                if (!runtimePrepared) {
                     // Only a freshly selected matching page may retry preparation. Do not
                     // reset a prepared runtime that is merely waiting for its business lease.
                     pageTransitionInProgress = true
                     try {
-                        runtime?.onPageRuntimePreparationRetry(currentPage) { prepared ->
-                            markPageRuntimeReady(prepared)
+                        if (runtime?.onRunStarted(currentPage.taskId, retry = true) == true) {
+                            markPageRuntimeReady(currentPage)
                         }
                     } catch (error: Throwable) {
                         log.recordException("RunSessionCoordinator", "page_runtime_prepare_retry_failed",
@@ -451,7 +468,7 @@ class RunSessionCoordinator(
                     runtime?.onPageTaskChanged(currentPage)
                 }
             }
-            return pageRuntimeSession.current()
+            return pageRuntime
         }
         pageTransitionInProgress = true
         try {
@@ -463,45 +480,47 @@ class RunSessionCoordinator(
             // business handoff. Do not reset it, invent a lease or bypass its page checks.
             if (currentPage != null && currentPage.mode == mode &&
                 currentPage.lifecycle != PageRuntimeLifecycle.STOPPING &&
-                preparedRuntimeMode == mode
+                runtimePrepared
             ) {
                 publishWriteRoute(null)
                 lastBusinessAdmissionLease = null
-                pageRuntimeSession.markStopping(currentPage)?.let { logPageLifecycle(it, "同运行时任务切换") }
-                val next = pageRuntimeSession.begin(runGeneration, taskId, mode)
+                markPageStopping(currentPage)?.let { logPageLifecycle(it, "同运行时任务切换") }
+                val next = beginPageRuntime(runGeneration, taskId, mode)
                 logPageLifecycle(next, "等待目标任务验证及租约交接")
                 if (tryCompletePageStart(next) == null) runtimes[mode]?.onPageTaskChanged(next)
-                return pageRuntimeSession.current()
+                return pageRuntime
             }
             if (currentPage != null &&
                 !stopPageRuntime("页面任务路由切换", preserveRecovery = true)
-            ) return pageRuntimeSession.current()
+            ) return pageRuntime
             val runtime = runtimes[mode] ?: return null
-            val next = pageRuntimeSession.begin(runGeneration, taskId, mode)
+            val next = beginPageRuntime(runGeneration, taskId, mode)
             logPageLifecycle(next, "页面识别选中任务")
             try {
-                runtime.onPageRuntimeStarted(next) { prepared -> markPageRuntimeReady(prepared) }
+                if (runtime.onRunStarted(next.taskId, retry = false)) {
+                    markPageRuntimeReady(next)
+                }
             } catch (error: Throwable) {
                 log.recordException("RunSessionCoordinator", "page_runtime_start_failed",
                     "页面运行时启动失败；保持只读等待", error)
                 stopPageRuntime("页面运行时启动失败", preserveRecovery = true)
             }
-            return pageRuntimeSession.current()
+            return pageRuntime
         } finally {
             pageTransitionInProgress = false
         }
     }
 
     @Synchronized
-    fun currentPageRuntimeSession(): PageRuntimeSessionState? = pageRuntimeSession.current()
+    fun currentPageRuntimeSession(): PageRuntimeSessionState? = pageRuntime
 
     @Synchronized
     fun dispatchTargetApplicationEvent(event: AccessibilityEventEnvelope) {
         synchronizeRunRequest()
-        val pageSession = pageRuntimeSession.current()
+        val pageSession = pageRuntime
         if (isPageObservationAllowed() &&
             pageSession?.lifecycle == PageRuntimeLifecycle.STARTING &&
-            preparedRuntimeMode == pageSession.mode &&
+            runtimePrepared &&
             pageSession.runGeneration == runGeneration
         ) {
             // The AI observer must receive page signals to finish its existing verification.

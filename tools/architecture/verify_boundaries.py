@@ -797,7 +797,7 @@ RUNTIME_COMPONENT_CEILINGS = {
     _CORE_RUNTIME + "ModeRuntimePort.kt": "ModeRuntimePort",
     _CORE_RUNTIME + "PageFingerprintRouter.kt": (
         "PageFingerprint PageFingerprintRoute PageRecoveryRouteAdapter PageRecoveryAdapterRegistry "
-        "PageFingerprintRouter PageRuntimeLifecycle PageRuntimeSessionState PageRuntimeSession"
+        "PageFingerprintRouter PageRuntimeLifecycle PageRuntimeSessionState"
     ),
     _CORE_RUNTIME + "PageObservationCoordinator.kt": "PageObservationCoordinator PageObservationSubscription",
     _CORE_RUNTIME + "RunMode.kt": "RunMode",
@@ -825,13 +825,14 @@ RUNTIME_COMPONENT_CEILINGS = {
 # business state are deliberately not frozen by this reference inventory.
 RUNTIME_DEBT_REFERENCE_CEILINGS = {
     _CORE_RUNTIME + "PageFingerprintRouter.kt": {
-        "PageRuntimeSessionState": 11, "PageRuntimeSession": 1, "PageRuntimeLifecycle": 8,
+        "PageRuntimeSessionState": 1, "PageRuntimeLifecycle": 2,
     },
-    _CORE_RUNTIME + "ModeRuntimePort.kt": {"PageRuntimeSessionState": 5},
+    _CORE_RUNTIME + "ModeRuntimePort.kt": {"PageRuntimeSessionState": 1},
     _CORE_RUNTIME + "UiWriteAuthorization.kt": {"PageRuntimeSessionState": 2, "PageRuntimeLifecycle": 1},
     _CORE_RUNTIME + "PageObservationCoordinator.kt": {"registerChannel": 3},
     _APP_RUNTIME + "RunSessionCoordinator.kt": {
-        "PageRuntimeSessionState": 13, "PageRuntimeSession": 2, "PageRuntimeLifecycle": 19,
+        # P4 moves the existing lifecycle state from the retired standalone owner.
+        "PageRuntimeSessionState": 18, "PageRuntimeLifecycle": 23,
         "routeIndependentPageTask": 1, "admitBusinessPageTaskOwnership": 1,
         "rollbackBusinessPageTaskOwnership": 1,
     },
@@ -843,11 +844,8 @@ RUNTIME_DEBT_REFERENCE_CEILINGS = {
         "routeIndependentPageTask": 1, "admitBusinessPageTaskOwnership": 1,
         "rollbackBusinessPageTaskOwnership": 1,
     },
-    _MODE_ADAPTER + "AccountBrowseModeRuntimeAdapter.kt": {
-        "PageRuntimeSessionState": 6,
-    },
     _MODE_ADAPTER + "AiReplyModeRuntimeAdapter.kt": {
-        "PageRuntimeSessionState": 8,
+        "PageRuntimeSessionState": 2,
     },
     _BROWSE_WORKFLOW: {"registerChannel": 1, "pageSelectedStartup": 1},
     # P3 replaces the removed publisher-presence startup test with the existing
@@ -859,13 +857,14 @@ RUNTIME_DEBT_REFERENCE_CEILINGS = {
 }
 
 
-# P3 retired the parallel page bus and classifier path. Keep these names in
-# the scan even though all permitted reference counts are now zero.
+# P3/P4 retired the parallel page bus, classifier path, lifecycle owner and
+# startup callbacks. Keep these names in the scan with zero permitted references.
 RETIRED_PAGE_CONTROL_SYMBOLS = {
     "UnifiedPageTaskRouter", "PageObservationClassifier", "PageObservationSnapshotClassifier",
     "UnifiedPageObservationMerger", "UnifiedPageObservationBus", "PageObservationSnapshotSource",
     "PageObservationSnapshot", "PageClassification", "pageObservationSnapshotSource",
     "classifyPageObservation", "classifyUnifiedPage", "hasFreshOwnedPageEvidence",
+    "PageRuntimeSession", "onPageRuntimeStarted", "onPageRuntimePreparationRetry", "preparedRuntimeMode",
 }
 
 

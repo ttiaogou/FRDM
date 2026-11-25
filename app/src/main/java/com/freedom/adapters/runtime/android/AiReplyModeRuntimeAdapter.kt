@@ -18,39 +18,16 @@ internal class AiReplyModeRuntimeAdapter(
 
     private var awaitingServiceReconnect = false
 
-    override fun onRunStarted() {
-        onReadinessStarting(mode, "AI Reply 已启动；等待目标应用正式就绪")
-        awaitingServiceReconnect = false
-        runtime().reset("开始新运行前清理")
-        runtime().scheduleInitialObservation()
-    }
-
-    override fun onPageRuntimeStarted(
-        session: PageRuntimeSessionState,
-        onPrepared: (PageRuntimeSessionState) -> Unit
-    ) {
-        onReadinessStarting(mode, "AI Reply 页面运行时启动；等待目标应用正式就绪")
-        awaitingServiceReconnect = false
-        runtime().reset("开始新页面运行前清理")
-        prepareSelectedTask(session, onPrepared)
-    }
-
-    override fun onPageRuntimePreparationRetry(
-        session: PageRuntimeSessionState,
-        onPrepared: (PageRuntimeSessionState) -> Unit
-    ) {
-        prepareSelectedTask(session, onPrepared)
-    }
-
-    private fun prepareSelectedTask(
-        session: PageRuntimeSessionState,
-        onPrepared: (PageRuntimeSessionState) -> Unit
-    ) {
-        // Configuration/consent and archive admission remain mandatory. A rejected
-        // preparation is not READY and can only be retried on fresh matching pages.
-        if (!runtime().preparePageSelectedStartup(session.taskId)) return
-        onPrepared(session)
+    override fun onRunStarted(taskId: String, retry: Boolean): Boolean {
+        if (!retry) {
+            onReadinessStarting(mode, "AI Reply 页面运行时启动；等待目标应用正式就绪")
+            awaitingServiceReconnect = false
+            runtime().reset("开始新页面运行前清理")
+        }
+        // Configuration/consent and archive admission remain mandatory.
+        if (!runtime().preparePageSelectedStartup(taskId)) return false
         runtime().requestPageRouteObservation()
+        return true
     }
 
     override fun onPageTaskChanged(session: PageRuntimeSessionState) {

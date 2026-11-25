@@ -28,7 +28,7 @@ class RunSessionCoordinatorTest {
     private class FakeRuntime(override val mode: RunMode) : ModeRuntimePort {
         val calls = mutableListOf<String>()
         var externalRefreshCalls = 0
-        override fun onRunStarted() { calls += "start" }
+        override fun onRunStarted(taskId: String, retry: Boolean): Boolean { calls += "start"; return true }
         override fun onRunStopped(reason: String) { calls += "stop:$reason" }
         override fun onAccessibilityServiceConnected() { calls += "connected" }
         override fun onAccessibilityServiceDisconnected() { calls += "disconnected" }
@@ -84,16 +84,12 @@ class RunSessionCoordinatorTest {
             lateinit var coordinator: RunSessionCoordinator
             fun runtime(runtimeMode: RunMode) = object : ModeRuntimePort {
                 override val mode = runtimeMode
-                override fun onRunStarted() = error("page route required")
                 override fun onRunStopped(reason: String) = error("switch is not user stop")
                 override fun onAccessibilityServiceConnected() = Unit
                 override fun onAccessibilityServiceDisconnected() = Unit
-                override fun onPageRuntimeStarted(
-                    session: com.freedom.core.runtime.PageRuntimeSessionState,
-                    onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit
-                ) {
-                    trace += "start:${session.taskId}"
-                    onPrepared(session)
+                override fun onRunStarted(taskId: String, retry: Boolean): Boolean {
+                    trace += "start:$taskId"
+                    return true
                 }
                 override fun onPageRuntimeWillSuspend(reason: String) {
                     assertNull(coordinator.currentWriteRoute())
@@ -154,15 +150,13 @@ class RunSessionCoordinatorTest {
         lateinit var coordinator: RunSessionCoordinator
         val ai = object : ModeRuntimePort {
             override val mode = RunMode.AI_REPLY
-            override fun onRunStarted() = error("selected task required")
             override fun onRunStopped(reason: String) = error("not a user stop")
             override fun onAccessibilityServiceConnected() = Unit
             override fun onAccessibilityServiceDisconnected() = Unit
             override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = Unit
-            override fun onPageRuntimeStarted(session: com.freedom.core.runtime.PageRuntimeSessionState,
-                onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit) {
-                trace += "start:${session.taskId}"
-                onPrepared(session)
+            override fun onRunStarted(taskId: String, retry: Boolean): Boolean {
+                trace += "start:$taskId"
+                return true
             }
             override fun onPageRuntimeWillSuspend(reason: String) {
                 assertNull(coordinator.currentWriteRoute())
@@ -243,20 +237,13 @@ class RunSessionCoordinatorTest {
         var canPrepare = false
         val ai = object : ModeRuntimePort {
             override val mode = RunMode.AI_REPLY
-            override fun onRunStarted() = error("page route is required")
             override fun onRunStopped(reason: String) = Unit
             override fun onAccessibilityServiceConnected() = Unit
             override fun onAccessibilityServiceDisconnected() = Unit
             override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = Unit
-            override fun onPageRuntimeStarted(session: com.freedom.core.runtime.PageRuntimeSessionState,
-                onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit) {
-                initialStarts++
-                if (canPrepare) onPrepared(session)
-            }
-            override fun onPageRuntimePreparationRetry(session: com.freedom.core.runtime.PageRuntimeSessionState,
-                onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit) {
-                retries++
-                if (canPrepare) onPrepared(session)
+            override fun onRunStarted(taskId: String, retry: Boolean): Boolean {
+                if (retry) retries++ else initialStarts++
+                return canPrepare
             }
             override fun onPageTaskChanged(session: com.freedom.core.runtime.PageRuntimeSessionState) {
                 observations++
@@ -287,6 +274,38 @@ class RunSessionCoordinatorTest {
         assertEquals(2, retries)
         assertEquals(1, observations)
         assertTrue(state.requested)
+    }
+
+    @Test
+    fun runtimeRouteTokensRejectLateReadyAcrossSameGenerationAndStopping() {
+        val state = FakeState().apply { requested = true }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai), RuntimeLogSink { },
+            taskCoordinator = tasks)
+        coordinator.synchronizeRunRequest()
+        val first = requireNotNull(coordinator.routePageTask(ai.mode, "PRIVATE"))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STARTING, first.lifecycle)
+        assertEquals(first, coordinator.routePageTask(ai.mode, "PRIVATE"))
+        val lease = requireNotNull(tasks.tryAcquire(first.taskId, first.runGeneration))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.READY,
+            coordinator.confirmPageTaskOwnership(lease)?.lifecycle)
+        val second = requireNotNull(coordinator.routePageTask(ai.mode, "GREETINGS"))
+        assertEquals(first.runGeneration, second.runGeneration)
+        assertTrue(second.routeRevision > first.routeRevision)
+        assertNull(coordinator.markPageRuntimeReady(first))
+        assertNull(coordinator.confirmPageTaskOwnership(lease))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STARTING,
+            coordinator.currentPageRuntimeSession()?.lifecycle)
+        val targetLease = requireNotNull(tasks.transfer(lease, second.taskId))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.READY,
+            coordinator.confirmPageTaskOwnership(targetLease)?.lifecycle)
+        coordinator.routePageTask(null)
+        assertNull(coordinator.markPageRuntimeReady(second))
+        val third = requireNotNull(coordinator.routePageTask(ai.mode, "GREETINGS"))
+        assertTrue(third.routeRevision > second.routeRevision)
+        assertNull(coordinator.markPageRuntimeReady(second))
+        assertNull(coordinator.confirmPageTaskOwnership(targetLease))
     }
 
     @Test
@@ -333,7 +352,7 @@ class RunSessionCoordinatorTest {
         lateinit var coordinator: RunSessionCoordinator
         val ai = object : ModeRuntimePort {
             override val mode = RunMode.AI_REPLY
-            override fun onRunStarted() { trace += "ai:start" }
+            override fun onRunStarted(taskId: String, retry: Boolean): Boolean { trace += "ai:start"; return true }
             override fun onRunStopped(reason: String) { error("page exit is not user stop") }
             override fun onPageRuntimeSuspended(reason: String) {
                 assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING,
@@ -348,10 +367,11 @@ class RunSessionCoordinatorTest {
         }
         val browse = object : ModeRuntimePort {
             override val mode = RunMode.ACCOUNT_BROWSE
-            override fun onRunStarted() {
+            override fun onRunStarted(taskId: String, retry: Boolean): Boolean {
                 assertNull(tasks.currentLease())
                 trace += "browse:start"
-                tasks.tryAcquire("BROWSE", coordinator.currentRunGeneration())
+                tasks.tryAcquire(taskId, coordinator.currentRunGeneration())
+                return true
             }
             override fun onRunStopped(reason: String) = Unit
             override fun onAccessibilityServiceConnected() = Unit
@@ -382,7 +402,7 @@ class RunSessionCoordinatorTest {
         var reads = 0
         val ai = object : ModeRuntimePort {
             override val mode = RunMode.AI_REPLY
-            override fun onRunStarted() = Unit
+            override fun onRunStarted(taskId: String, retry: Boolean) = true
             override fun onRunStopped(reason: String) = Unit
             override fun onPageRuntimeWillSuspend(reason: String) { checkpointSaves++ }
             override fun onPageRuntimeSuspended(reason: String) {
@@ -559,7 +579,7 @@ class RunSessionCoordinatorTest {
         var destroyed = 0
         val ai = object : ModeRuntimePort {
             override val mode = RunMode.AI_REPLY
-            override fun onRunStarted() = Unit
+            override fun onRunStarted(taskId: String, retry: Boolean) = true
             override fun onRunStopped(reason: String) = error("not a user stop")
             override fun onAccessibilityServiceConnected() = Unit
             override fun onAccessibilityServiceDisconnected() = error("duplicate disconnect cleanup")

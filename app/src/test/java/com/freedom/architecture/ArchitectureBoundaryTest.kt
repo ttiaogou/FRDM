@@ -1284,21 +1284,20 @@ class ArchitectureBoundaryTest {
     @Test
     fun pageSelectedBrowseStartupDoesNotPublishPreparationWhileWorkflowIsIdle() {
         val source = projectFile("app/src/main/java/com/freedom/adapters/runtime/android/AccountBrowseModeRuntimeAdapter.kt").readText()
-        val start = source.substringAfter("override fun onPageRuntimeStarted(")
-            .substringBefore("override fun onPageRuntimePreparationRetry(")
-        val retry = source.substringAfter("override fun onPageRuntimePreparationRetry(")
-            .substringBefore("private fun reportPreparedIfInitialized(")
-        val report = source.substringAfter("private fun reportPreparedIfInitialized(")
+        val start = source.substringAfter("override fun onRunStarted(taskId: String, retry: Boolean): Boolean")
             .substringBefore("override fun onPageRuntimeWillSuspend(")
-        assertTrue(start.contains("onRunStarted()"))
-        assertTrue(start.contains("reportPreparedIfInitialized(session, onPrepared)"))
-        assertFalse(start.contains("onPrepared(session)"))
+        val retry = start.substringAfter("if (retry) {")
+            .substringBefore("taskExecutionController.beginRun(")
+        assertTrue(start.contains("require(taskId == TASK_ID)"))
         assertTrue(retry.contains("ensureTaskOwnership("))
         assertTrue(retry.contains("if (workflow().phase == AccountBrowsePhase.IDLE) workflow().startIfIdle()"))
-        assertTrue(retry.contains("reportPreparedIfInitialized(session, onPrepared)"))
-        assertFalse(retry.contains("onRunStarted()"))
+        assertTrue(retry.contains("return workflow().phase != AccountBrowsePhase.IDLE"))
         assertFalse(retry.contains("restoreRecoveryAfterServiceReconnect()"))
-        assertTrue(report.contains("if (workflow().phase != AccountBrowsePhase.IDLE) onPrepared(session)"))
+        assertFalse(retry.contains("beginRun("))
+        assertTrue(start.substringAfter("taskExecutionController.beginRun(")
+            .contains("return workflow().phase != AccountBrowsePhase.IDLE"))
+        assertFalse(source.contains("override fun onPageRuntimeStarted("))
+        assertFalse(source.contains("override fun onPageRuntimePreparationRetry("))
     }
 
     @Test

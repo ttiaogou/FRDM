@@ -5,21 +5,10 @@ import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 /** Lifecycle/event contract implemented independently by each business runtime. */
 interface ModeRuntimePort {
     val mode: RunMode
-    fun onRunStarted()
+    /** Start the selected task, or retry its existing preparation without resetting it.
+     * Return true only when preparation completed. The task lease remains independently verified. */
+    fun onRunStarted(taskId: String, retry: Boolean): Boolean
     fun onRunStopped(reason: String)
-
-    /** The callback must carry the exact page-route token captured at startup. */
-    fun onPageRuntimeStarted(session: PageRuntimeSessionState, onPrepared: (PageRuntimeSessionState) -> Unit) {
-        onRunStarted()
-        onPrepared(session)
-    }
-
-    /** A fresh observation of the same route may retry a provisional startup.
-     * Implementations with pending asynchronous preparation must not restart it. */
-    fun onPageRuntimePreparationRetry(
-        session: PageRuntimeSessionState,
-        onPrepared: (PageRuntimeSessionState) -> Unit
-    ) = Unit
 
     /** Same-runtime task handoff: request verification without resetting existing transactions. */
     fun onPageTaskChanged(session: PageRuntimeSessionState) = Unit

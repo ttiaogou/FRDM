@@ -28,53 +28,29 @@ internal class AccountBrowseModeRuntimeAdapter(
         onLog = onLog
     )
 
-    override fun onRunStarted() {
+    override fun onRunStarted(taskId: String, retry: Boolean): Boolean {
+        require(taskId == TASK_ID)
+        if (retry) {
+            // Retry preparation only, without reloading checkpoints or resetting the workflow.
+            if (!ensureTaskOwnership("动态浏览启动复核")) return false
+            if (workflow().phase == AccountBrowsePhase.IDLE) workflow().startIfIdle()
+            return workflow().phase != AccountBrowsePhase.IDLE
+        }
         taskExecutionController.beginRun(currentRunGeneration())
         if (!ensureTaskOwnership("自动浏览启动")) {
             throw IllegalStateException("AccountBrowse could not acquire the exclusive UI operation lease")
         }
         try {
             onReadinessStarting(mode, "AccountBrowse 已启动；等待目标应用正式就绪")
-            if (awaitingServiceReconnect) {
-                awaitingServiceReconnect = false
-                workflow().restoreRecoveryAfterServiceReconnect()
-            }
+            // Selected-page startup must verify persisted browse evidence even on cold service creation.
+            awaitingServiceReconnect = false
+            workflow().restoreRecoveryAfterServiceReconnect()
             workflow().startIfIdle()
+            return workflow().phase != AccountBrowsePhase.IDLE
         } catch (error: Throwable) {
             releaseTaskOwnership("自动浏览启动失败")
             throw error
         }
-    }
-
-    override fun onPageRuntimeStarted(
-        session: com.freedom.core.runtime.PageRuntimeSessionState,
-        onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit
-    ) {
-        // A recreated Service has no in-memory reconnect flag. Existing persisted browse
-        // checkpoints still require the same fresh-page verification on the selected route.
-        awaitingServiceReconnect = true
-        onRunStarted()
-        reportPreparedIfInitialized(session, onPrepared)
-    }
-
-    override fun onPageRuntimePreparationRetry(
-        session: com.freedom.core.runtime.PageRuntimeSessionState,
-        onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit
-    ) {
-        // Retry only the existing startup entry on a fresh matching route. Do not
-        // reload checkpoints or reset an already initialized browse workflow.
-        if (!ensureTaskOwnership("动态浏览启动复核")) return
-        if (workflow().phase == AccountBrowsePhase.IDLE) workflow().startIfIdle()
-        reportPreparedIfInitialized(session, onPrepared)
-    }
-
-    private fun reportPreparedIfInitialized(
-        session: com.freedom.core.runtime.PageRuntimeSessionState,
-        onPrepared: (com.freedom.core.runtime.PageRuntimeSessionState) -> Unit
-    ) {
-        // A transient missing foreground/root can leave the original startup in IDLE.
-        // Keep the entry observer's provisional-start retry alive until it initializes.
-        if (workflow().phase != AccountBrowsePhase.IDLE) onPrepared(session)
     }
 
     override fun onPageRuntimeWillSuspend(reason: String) {

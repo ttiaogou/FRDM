@@ -52,8 +52,9 @@ class RunSessionCoordinatorFailureDiagnosticsTest {
     private class FakeRuntime(private val failOnStart: Boolean) : ModeRuntimePort {
         override val mode = RunMode.AI_REPLY
         var stopCalled = false
-        override fun onRunStarted() {
+        override fun onRunStarted(taskId: String, retry: Boolean): Boolean {
             if (failOnStart) throw IllegalStateException("test failure")
+            return true
         }
         override fun onRunStopped(reason: String) { stopCalled = true }
         override fun onAccessibilityServiceConnected() = Unit
