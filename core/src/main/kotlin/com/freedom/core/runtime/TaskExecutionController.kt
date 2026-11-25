@@ -47,6 +47,7 @@ class TaskExecutionController(
         val taskCoordinator = coordinator
         if (taskCoordinator == null) {
             val current = isolatedTaskId
+            if (current == taskId) return true
             // Legacy/platform-neutral fixtures have no second controller that could contend for
             // the slot. Preserve the shared controller's atomic handoff semantics: a new task
             // requested through this same execution boundary replaces the previous local owner.
@@ -58,7 +59,7 @@ class TaskExecutionController(
         val current = lease
         val next = when {
             current == null -> taskCoordinator.tryAcquire(taskId, generation)
-            taskCoordinator.isCurrent(current) && current.taskId == taskId -> current
+            taskCoordinator.isCurrent(current) && current.taskId == taskId -> return true
             taskCoordinator.isCurrent(current) -> taskCoordinator.transfer(current, taskId)
             else -> {
                 lease = null

@@ -220,7 +220,9 @@ class MainActivity : Activity() {
         resumePendingOcrPluginInstall()
         suppressFloatingButtonOnPause = false
         if (!receiverRegistered) {
-            val filter = IntentFilter(MonitorActions.ACTION_REFRESH)
+            val filter = IntentFilter(MonitorActions.ACTION_REFRESH).apply {
+                addAction(MonitorActions.ACTION_PRESENTATION_REFRESH)
+            }
             if (Build.VERSION.SDK_INT >= 33) {
                 registerReceiver(refreshReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
             } else {

@@ -1158,6 +1158,30 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
+    fun presentationRefreshCannotWakeTheBusinessRuntime() {
+        val root = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
+        val main = projectFile("app/src/main/java/com/freedom/MainActivity.kt").readText()
+        val actions = projectFile("app/src/main/java/com/freedom/adapters/android/MonitorActions.kt").readText()
+        val presenterWiring = root.substringAfter("val monitorLogPresenter by lazy").substringBefore("val targetAppReadinessController")
+        val runtimeReceiver = service.substringAfter("private val refreshReceiver").substringBefore("private val bootRecoveryReceiver")
+
+        assertTrue(actions.contains("ACTION_PRESENTATION_REFRESH = \"com.freedom.ACTION_PRESENTATION_REFRESH\""))
+        assertTrue(actions.contains("ACTION_REFRESH = \"com.freedom.ACTION_REFRESH\""))
+        assertTrue(presenterWiring.contains("Intent(MonitorActions.ACTION_PRESENTATION_REFRESH)"))
+        assertFalse(presenterWiring.contains("Intent(MonitorActions.ACTION_REFRESH)"))
+        assertTrue(presenterWiring.contains("MonitorOverlay.update(service)"))
+        assertTrue(service.contains("IntentFilter(MonitorActions.ACTION_REFRESH)"))
+        assertFalse(service.contains("MonitorActions.ACTION_PRESENTATION_REFRESH"))
+        val actionGuard = runtimeReceiver.indexOf("if (intent?.action != MonitorActions.ACTION_REFRESH) return")
+        val runtimeRefresh = runtimeReceiver.indexOf("runSessionCoordinator.onExternalRefresh()")
+        assertTrue(actionGuard >= 0 && runtimeRefresh > actionGuard)
+        assertTrue(main.contains("IntentFilter(MonitorActions.ACTION_REFRESH)"))
+        assertTrue(main.contains("addAction(MonitorActions.ACTION_PRESENTATION_REFRESH)"))
+        assertTrue(main.contains("sendBroadcast(Intent(MonitorActions.ACTION_REFRESH).setPackage(packageName))"))
+    }
+
+    @Test
     fun serviceDelegatesWindowPreviewAndLogResponsibilitiesToAndroidAdapters() {
         val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
         val source = service.readText()

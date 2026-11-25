@@ -116,6 +116,8 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     private val refreshReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            // Only an explicit external refresh may reconcile or wake a runtime.
+            if (intent?.action != MonitorActions.ACTION_REFRESH) return
             runSessionCoordinator.onExternalRefresh()
             applyTargetPackageFilter()
             if (!monitorRepository.isRunRequested()) {

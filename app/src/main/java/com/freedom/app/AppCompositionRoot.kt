@@ -286,7 +286,7 @@ internal class AccessibilityServiceDependencies internal constructor(
         AndroidMonitorLogPresenter(
             persistLog = monitorRepository::addLog,
             refreshPresentation = {
-                service.sendBroadcast(Intent(MonitorActions.ACTION_REFRESH).setPackage(service.packageName))
+                service.sendBroadcast(Intent(MonitorActions.ACTION_PRESENTATION_REFRESH).setPackage(service.packageName))
                 MonitorOverlay.update(service)
             }
         )
