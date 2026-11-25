@@ -7026,7 +7026,7 @@ class AiReplyObservationRuntime(
             return
         }
         val request = GestureIntentRequest(
-            id = "momo-session-scroll-${System.currentTimeMillis()}",
+            id = "momo-session-scroll-${java.util.UUID.randomUUID()}",
             intent = GestureIntent.VerticalSwipe(
                 viewport = viewport,
                 direction = if (toTop) VerticalSwipeDirection.DOWN else VerticalSwipeDirection.UP,
@@ -7084,14 +7084,16 @@ class AiReplyObservationRuntime(
         val submission = runCatching {
             gesturePolicy.execute(request) { result ->
                 scheduler.schedule(0L) {
-                    if (activeSessionGestureRequestId == request.id) activeSessionGestureRequestId = null
-                    if (actionGeneration != sessionActionGeneration) {
+                    if (actionGeneration != sessionActionGeneration ||
+                        activeSessionGestureRequestId != request.id
+                    ) {
                         onLog(
                             "已忽略过期自主滑动回调：commandId=${request.id}；" +
                                 "提交代次=$actionGeneration；当前代次=$sessionActionGeneration；结果=${result.status}"
                         )
                         return@schedule
                     }
+                    activeSessionGestureRequestId = null
                     if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
                         onLog("AI 会话滚动回调[STALE_TASK_IGNORED]：私人消息任务租约已失效；不推进列表状态")
                         recoverTransientPrivateGesture("PRIVATE_SCROLL_CALLBACK_LEASE_LOST")
