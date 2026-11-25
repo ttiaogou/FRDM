@@ -200,8 +200,23 @@ class RunSessionCoordinator(
     }
 
     @Synchronized
-    fun markPageRuntimeReady(runGeneration: Long): PageRuntimeSessionState? =
-        pageRuntimeSession.markReady(runGeneration)
+    fun markPageRuntimeReady(runGeneration: Long): PageRuntimeSessionState? {
+        val ready = pageRuntimeSession.markReady(runGeneration) ?: return null
+        val current = taskCoordinator?.currentLease()
+        val transferred = if (current == null) {
+            taskCoordinator?.tryAcquire(ready.taskId, runGeneration) != null
+        } else if (current.taskId == ready.taskId) {
+            true
+        } else {
+            taskCoordinator?.transfer(current, ready.taskId) != null
+        }
+        log.append(
+            "页面运行时[READY]：taskId=" + ready.taskId +
+                "；ownershipTransferred=" + transferred +
+                "；runGeneration=" + runGeneration
+        )
+        return ready
+    }
 
     @Synchronized
     fun currentPageRuntimeSession(): PageRuntimeSessionState? = pageRuntimeSession.current()
@@ -209,6 +224,10 @@ class RunSessionCoordinator(
     @Synchronized
     fun dispatchTargetApplicationEvent(event: AccessibilityEventEnvelope) {
         synchronizeRunRequest()
+        val pageSession = pageRuntimeSession.current()
+        if (pageSession != null && pageSession.lifecycle != com.freedom.core.runtime.PageRuntimeLifecycle.READY) {
+            return
+        }
         (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.onTargetApplicationEvent(event) }
     }
 
