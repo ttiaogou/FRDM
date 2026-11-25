@@ -138,7 +138,9 @@ class AccountBrowseRuntime(
         restoredCheckpointPhase = null
         restoredBusinessCheckpoint = null
         verifiedFeedAwaitingPhaseResume = null
-        session.reset()
+        // The Android adapter restores overlay touchability before entering this boundary.
+        // Unlike ordinary reset, completed page-exit cleanup retains no overlay latch.
+        sessionStateOwner.resetAfterPlatformCleanup()
     }
 
     fun saveCheckpointBeforePageExit() {

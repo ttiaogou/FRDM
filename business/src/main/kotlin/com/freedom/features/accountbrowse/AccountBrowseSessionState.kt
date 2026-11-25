@@ -377,6 +377,12 @@ internal class AccountBrowseSessionStateOwner {
         current = transform(current)
     }
 
+    /** Only after platform cleanup has succeeded; no old execution flags survive page exit. */
+    @Synchronized
+    fun resetAfterPlatformCleanup() {
+        current = AccountBrowseSessionSnapshot()
+    }
+
     @Synchronized
     fun reset() {
         // Preserve the original reset contract: overlayPassthroughActive is intentionally retained
