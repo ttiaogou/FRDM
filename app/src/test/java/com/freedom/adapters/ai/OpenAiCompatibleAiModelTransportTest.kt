@@ -103,7 +103,7 @@ class OpenAiCompatibleAiModelTransportTest {
             AiModelMessage(AiModelMessage.Role.USER, "今天天气怎么样？")
         ),
         temperature = 0.7,
-        maxOutputTokens = 1_024,
+        maxOutputTokens = 256,
         requestId = "request-1",
         responseFormat = format
     )

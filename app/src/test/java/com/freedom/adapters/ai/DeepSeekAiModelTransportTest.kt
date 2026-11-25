@@ -39,7 +39,7 @@ class DeepSeekAiModelTransportTest {
         assertEquals("Bearer deepseek-secret-key", connection.requestProperties["Authorization"])
         val body = connection.requestBody.toString(StandardCharsets.UTF_8.name())
         assertTrue(body.contains("\"model\":\"deepseek-flash\""))
-        assertTrue(body.contains("\"max_tokens\":512"))
+        assertTrue(body.contains("\"max_tokens\":256"))
         assertFalse(body.contains("max_completion_tokens"))
         assertTrue(body.contains("\"type\":\"json_object\""))
         assertTrue(body.contains("\"thinking\":{\"type\":\"disabled\"}"))
@@ -113,7 +113,7 @@ class DeepSeekAiModelTransportTest {
         systemInstruction = "Return one JSON object only.",
         conversation = listOf(AiModelMessage(AiModelMessage.Role.USER, "你好")),
         temperature = 0.4,
-        maxOutputTokens = 512,
+        maxOutputTokens = 256,
         requestId = "deepseek-request-1",
         responseFormat = format
     )

@@ -71,6 +71,19 @@ class AiReplyDecisionEngineTest {
         assertTrue(request.systemInstruction.contains("如果对方询问你是否为人工智能，必须如实回答"))
     }
 
+    @Test fun simpleJsonDelegatesSchemaToProviderTransportOnlyOnce() {
+        val provider = FakeProvider(replyJson("你好"))
+        AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(
+                context(), contactIdentityVerified = true, requestId = "simple-json",
+                responseMode = ModelResponseMode.SIMPLE_JSON
+            )
+        )
+        val request = provider.lastRequest!!
+        val schema = (request.responseFormat as AiModelResponseFormat.JsonSchema).schema
+        assertFalse(request.systemInstruction.contains(schema))
+    }
+
     @Test fun promptOnlyJsonRecoveryRejectsNonJsonAndDoesNotTurnItIntoDraft() {
         val provider = FakeProvider("你好")
         val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
@@ -102,7 +115,7 @@ class AiReplyDecisionEngineTest {
 
         val request = provider.lastRequest!!
         assertEquals(0.4, request.temperature, 0.0)
-        assertEquals(512, request.maxOutputTokens)
+        assertEquals(256, request.maxOutputTokens)
         assertTrue(request.systemInstruction.contains("轻微、克制的暧昧和试探感"))
         assertTrue(request.systemInstruction.contains("尽量用最少的文字直接回答"))
         assertTrue(request.systemInstruction.contains("根据语境自然表达关心或积极态度"))

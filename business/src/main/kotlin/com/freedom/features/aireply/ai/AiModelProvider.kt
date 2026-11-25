@@ -12,7 +12,7 @@ data class AiModelRequest(
     val systemInstruction: String,
     val conversation: List<AiModelMessage>,
     val temperature: Double = 0.3,
-    val maxOutputTokens: Int = 512,
+    val maxOutputTokens: Int = 256,
     val requestId: String,
     val responseFormat: AiModelResponseFormat = AiModelResponseFormat.PlainText,
     val attemptIndex: Int = 0
@@ -21,8 +21,12 @@ data class AiModelRequest(
         require(systemInstruction.isNotBlank())
         require(conversation.isNotEmpty())
         require(temperature in 0.0..2.0)
-        require(maxOutputTokens in 1..8192)
+        require(maxOutputTokens in 1..MAX_OUTPUT_TOKENS)
         require(requestId.isNotBlank())
+    }
+
+    companion object {
+        const val MAX_OUTPUT_TOKENS = 256
     }
 }
 

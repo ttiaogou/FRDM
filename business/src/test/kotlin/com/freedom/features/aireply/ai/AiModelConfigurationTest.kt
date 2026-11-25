@@ -13,7 +13,7 @@ class AiModelConfigurationTest {
         assertEquals("https://api.deepseek.com", configuration.apiBaseUrl)
         assertEquals("deepseek-flash", configuration.modelName)
         assertEquals(0.3, configuration.temperature, 0.0)
-        assertEquals(512, configuration.maxOutputTokens)
+        assertEquals(256, configuration.maxOutputTokens)
         assertEquals(30_000L, configuration.requestTimeoutMillis)
         assertFalse(configuration.isReadyForCloudProvider)
     }

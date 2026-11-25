@@ -46,7 +46,10 @@ class AiReplyDecisionEngine(
             AiReplyDecisionJsonParser.simpleSchema(maxDraftChars)
         } else AiReplyDecisionJsonParser.schema(maxDraftChars)
         val schemaPromptSuffix = when (responseMode) {
-            ModelResponseMode.SIMPLE_JSON -> SIMPLE_JSON_INSTRUCTION + "\n$jsonSchema"
+            // The provider transport owns the schema when structured JSON is enabled.
+            // Keeping it out of the business-layer prompt prevents DeepSeek from
+            // receiving the same schema twice.
+            ModelResponseMode.SIMPLE_JSON -> SIMPLE_JSON_INSTRUCTION
             ModelResponseMode.PROMPT_ONLY_JSON -> PROMPT_ONLY_JSON_INSTRUCTION + "\n$jsonSchema"
             ModelResponseMode.PLAIN_TEXT -> PLAIN_TEXT_INSTRUCTION
             else -> STRICT_JSON_INSTRUCTION
@@ -115,7 +118,7 @@ class AiReplyDecisionEngine(
 
     companion object {
         const val DEFAULT_TEMPERATURE = 0.4
-        const val DEFAULT_MAX_OUTPUT_TOKENS = 512
+        const val DEFAULT_MAX_OUTPUT_TOKENS = 256
         const val DEFAULT_SYSTEM_INSTRUCTION =
             "你是谨慎、自然的中文聊天回复助手，只能根据提供的聊天记录回复。" +
                 "不得编造事实、猜测未提供的信息或声称已经执行任何操作。" +
