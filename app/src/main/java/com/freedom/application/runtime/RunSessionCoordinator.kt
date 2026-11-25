@@ -188,7 +188,10 @@ class RunSessionCoordinator(
         val session = if (mode != null && taskId != null) {
             pageRuntimeSession.begin(runGeneration, taskId, mode)
         } else {
+            pageRuntimeSession.current()?.let { pageRuntimeSession.markStopping(it.runGeneration) }
+            taskCoordinator?.currentLease()?.let { taskCoordinator.release(it) }
             pageRuntimeSession.clear()
+            pageRoutedMode = null
             null
         }
         log.append(
