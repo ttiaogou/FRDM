@@ -5643,8 +5643,9 @@ class AiReplyObservationRuntime(
                 return
             }
 
-            // Screenshot evidence is diagnostic. After asynchronous collection, let
-            // the existing list observation select the latest bottom-most unread row.
+            // Screenshot evidence is diagnostic. Pass only the selected identity/window
+            // hint to the existing fresh-read click executor. Its traversal-order gate
+            // rejects a stale selection without dispatching or recapturing the same row.
             sessionManagerState = SessionManagerState.CAPTURING_SESSION_LIST
             val captureRunGeneration = currentRunGeneration()
             val captureActionGeneration = sessionActionGeneration
@@ -5661,8 +5662,8 @@ class AiReplyObservationRuntime(
                             "累计不同视口=${privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.size}；" +
                             "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}；使用身份提示重新采集当前会话行"
                     )
-                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                    scheduleFullInspection()
+                    sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
+                    attemptOpenSession(selectedKey, selectedWindow, selectedName)
                 }
             }
         } else {
@@ -5826,12 +5827,17 @@ class AiReplyObservationRuntime(
                 scheduleSessionListStabilityRetry("顶部完成证据已失效，重新复核")
                 return
             }
+            // The existing same-round relocation is a recovery of unresolved work,
+            // not completion or an ordinary skip. It owns the confirmed-top retry
+            // only when no fresh actionable row can be selected.
+            if (privateMessagesTraversalTaskExecutor.nextFreshReturnCandidate(snapshot) == null &&
+                observeIncompleteUnreadRelocation(snapshot)
+            ) return
             if (privateMessagesTraversalTaskExecutor.hasPendingVisibleReturnWork(snapshot)) {
-                onLog("AI 会话遍历[TOP_PENDING]：顶部视口仍有待解决未读行；先重新观察，不切换任务或启动重新定位")
+                onLog("AI 会话遍历[TOP_PENDING]：顶部视口仍有待解决未读行；保留检查点，不切换任务")
                 scheduleSessionListStabilityRetry("顶部未读候选尚未解决")
                 return
             }
-            if (observeIncompleteUnreadRelocation(snapshot)) return
             if (privateMessagesTraversalTaskExecutor.hasUnresolvedVisibleEdgeEvidence(snapshot)) {
                 onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：边缘未读证据尚未明确；重新观察，不计为已读")
                 scheduleSessionListStabilityRetry("边缘未读证据待复核")
