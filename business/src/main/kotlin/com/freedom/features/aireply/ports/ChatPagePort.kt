@@ -654,6 +654,13 @@ interface ChatPagePort {
      */
     fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean = false
 
+    /**
+     * Read-only evidence from the existing greeting-detail BACK transaction.
+     * The source must match the accepted BACK window. This does not confirm the destination
+     * or advance the cursor; the original list fingerprint and double-snapshot gate do that.
+     */
+    fun isReceivedGreetingsDetailReturnNavigationActive(source: ChatPageSnapshot): Boolean = false
+
     /** Display name captured from the exact unread greeting row currently being inspected. */
     fun receivedGreetingsCurrentDisplayName(): String? = null
 

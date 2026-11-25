@@ -1895,13 +1895,35 @@ class AiReplyObservationRuntime(
                     "继续适配器原有资料采集和安全BACK流程"
             )
         }
+        // A dedicated greetings-list snapshot does not necessarily carry the generic
+        // navigation ticket's window locator. The accepted detail BACK already belongs
+        // to the adapter's existing return transaction; do not replace its double-snapshot
+        // confirmation with an unrelated UNKNOWN recovery just because attribution is absent.
+        val pendingGreetingDetailReturn = unmatchedReturnToOwnedRoute &&
+            activeTaskId == RECEIVED_GREETINGS_TASK_ID &&
+            receivedGreetingsTaskActive && ownsTask(RECEIVED_GREETINGS_TASK_ID) &&
+            !awaitingNormalInboxAfterGreetingsReturn && !recoveryContext.pending &&
+            !isSendConfirmationPending() && !isConversationDraftPending() &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE &&
+            inspection.packageName == targetPackage() && inspection.pageKind == ChatPageKind.NON_CHAT &&
+            matchedRouteId == receivedGreetingsRecoveryRoute.routeId &&
+            previous?.let { source ->
+                runCatching {
+                    chatPagePort.isReceivedGreetingsDetailReturnNavigationActive(source)
+                }.getOrDefault(false)
+            } == true
+        if (pendingGreetingDetailReturn) {
+            onLog("收到招呼业务导航[DETAIL_RETURN_PENDING]：原BACK来源、列表路由和任务租约已复核；保留原返回事务等待双快照")
+        }
         val shouldCreateRouteRecovery = sessionRunStarted && activeTaskId != null &&
             !recoveryContext.pending && selfInitiatedTransition == null &&
             !openingPrivateSessionDetail && !activePrivateChatDetail && !receivedGreetingsWorkflowTransition &&
             !verifiedGreetingsInboxReturn && !verifiedGreetingsReturnIntermediate &&
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
-        if ((shouldCreateRouteRecovery || unmatchedReturnToOwnedRoute) && activeTaskId != null) {
+        if ((shouldCreateRouteRecovery || (unmatchedReturnToOwnedRoute && !pendingGreetingDetailReturn)) &&
+            activeTaskId != null
+        ) {
             if (awaitingNormalInboxAfterGreetingsReturn && activeTaskId == RECEIVED_GREETINGS_TASK_ID) {
                 holdGreetingsCompletionReturn("PAGE_ROUTE_CHANGED")
                 unmatchedNavigationObservationPending = false

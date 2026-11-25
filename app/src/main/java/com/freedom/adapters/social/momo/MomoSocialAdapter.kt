@@ -4112,6 +4112,24 @@ internal class MomoSocialAdapter(
         return isSayHiProfileSurfacePresent()
     }
 
+    override fun isReceivedGreetingsDetailReturnNavigationActive(source: ChatPageSnapshot): Boolean {
+        if (sayHiReadOnlyStage != SayHiReadOnlyStage.DETAIL_BACK_PENDING ||
+            sayHiSelectedGreeting == null || source.packageName != targetPackage ||
+            source.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE
+        ) return false
+        val backSource = sayHiDetailBackSourceWindow ?: return false
+        if (backSource.packageName != targetPackage || backSource.windowId < 0 ||
+            backSource.generation <= 0L || source.activityClass != backSource.activityClass ||
+            (source.windowGeneration > 0L && source.windowGeneration != backSource.generation)
+        ) return false
+
+        // Region refresh may retire locators without leaving the source window. A retained
+        // generation or current source locator must still match the accepted BACK receipt.
+        val sourceWindows = listOfNotNull(source.messageListTarget?.window, source.inputFieldTarget?.window)
+        return (source.windowGeneration == backSource.generation || sourceWindows.isNotEmpty()) &&
+            sourceWindows.all { sameMomoWindowGeneration(it, backSource) }
+    }
+
     override fun isReceivedGreetingsWaitingForSafeTargetEvidence(): Boolean =
         sayHiDeferredSafeEvidenceOnlyWait && sayHiTraversalState.hasExhaustedSafeTargetRows &&
             !sayHiTraversalState.hasRetryableDeferredRows() &&

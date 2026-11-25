@@ -5913,6 +5913,80 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun unmatchedGreetingDetailBackKeepsOnlyTheVerifiedBusinessReturnInItsOriginalTask() {
+        for (scenario in listOf("VERIFIED_RETURN", "NO_RETURN_PROOF", "WRONG_ROUTE")) {
+            val scheduler = FakeScheduler()
+            val logs = ArrayList<String>()
+            val port = greetingDraftTestPort()
+            var sendOutcome = com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+            var draftCalls = 0
+            val runtime = greetingRuntimeFixture(
+                scheduler = scheduler, port = port, logs = logs,
+                greetingDraft = { draftCalls++; true },
+                sendConfirmation = { sendOutcome },
+                consumeSendId = { "confirmed-greeting-return" }
+            )
+            val flow = activateGreetingTestFlow(runtime)
+            val source = port.page
+            readGreetingTestMessages(runtime, source)
+            runUntil(scheduler, 50) { draftCalls == 1 && port.persistedChatSamples == 1 }
+
+            // The real send-confirmation path persists the fact and submits the existing BACK.
+            sendOutcome = com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED
+            handleGreetingTestBatch(runtime, requireNotNull(port.lastPersistedBatch), source)
+            assertEquals(1, port.greetingSendJournalWrites)
+            assertEquals(1, port.greetingDetailSuccessfulCompletions)
+            assertTrue(logs.any { it.contains("GREETING_RETURN_BACK_ACCEPTED") })
+
+            // Match the device trace: the last observed page is the source chat, and
+            // global BACK does not have a matching generic navigation receipt.
+            AiReplyObservationRuntime::class.java.getDeclaredField("lastPageInspection").apply {
+                isAccessible = true
+            }.set(runtime, source)
+            port.greetingDetailReturnProof = scenario != "NO_RETURN_PROOF"
+            port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.NAVIGATING
+            val listActivity = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
+            port.page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = if (scenario == "WRONG_ROUTE") "OtherActivity" else listActivity,
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 20,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null
+            )
+            port.receivedGreetingsCheckpointFingerprint =
+                if (scenario == "WRONG_ROUTE") null else "verified-greeting-list-window"
+            val stepsBefore = port.receivedGreetingsIdleSteps
+            runtime.onUnmatchedNavigationObserved(port.page.activityClass)
+            scheduler.runNextWithDelay(0L)
+
+            if (scenario == "VERIFIED_RETURN") {
+                assertTrue(logs.any { it.contains("收到招呼业务导航[DETAIL_RETURN_PENDING]") })
+                assertFalse(logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") })
+                assertFalse(runtime.isReceivedGreetingsRecoveryPending())
+                assertTrue(flow.ownsTask())
+                // Only the adapter's existing return-confirmation step is advanced.
+                assertEquals(stepsBefore + 1, port.receivedGreetingsIdleSteps)
+            } else {
+                assertFalse(logs.any { it.contains("收到招呼业务导航[DETAIL_RETURN_PENDING]") })
+                assertTrue(logs.any {
+                    it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") && it.contains("PAGE_ROUTE_CHANGED")
+                })
+                assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+                assertEquals(stepsBefore, port.receivedGreetingsIdleSteps)
+            }
+            assertEquals(1, draftCalls)
+            assertEquals(1, port.greetingSendJournalWrites)
+            assertEquals(1, port.greetingDetailCompletionCalls)
+        }
+    }
+
+    @Test
     fun greetingSendWaitingUnknownAndAbsentIdNeverMarkRowProcessed() {
         for (scenario in listOf("WAITING", "UNKNOWN", "NO_ID")) {
             val scheduler = FakeScheduler()
@@ -8515,6 +8589,7 @@ class AiReplyObservationRuntimeTest {
         var receivedGreetingsRowKeyHash: String? = null
         var receivedGreetingsDisplayName: String? = null
         var receivedGreetingsIdentityProfileProof = false
+        var greetingDetailReturnProof = false
         var receivedGreetingsCheckpointFingerprint: String? = null
         var receivedGreetingsRecoverySyncAccepted: Boolean = false
         var pageAfterReceivedGreetingsReturn: ChatPageSnapshot? = null
@@ -8636,6 +8711,9 @@ class AiReplyObservationRuntimeTest {
                 snapshot.packageName == "com.immomo.momo" &&
                 snapshot.activityClass == "com.immomo.momo.personalprofile.presentation.activity.PersonalProfileActivityK" &&
                 snapshot.pageKind == ChatPageKind.NON_CHAT
+        override fun isReceivedGreetingsDetailReturnNavigationActive(source: ChatPageSnapshot): Boolean =
+            greetingDetailReturnProof && greetingDetailCompletionCalls > 0 &&
+                source.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE
         override fun receivedGreetingsRecoveryFingerprint(): String? =
             receivedGreetingsCheckpointFingerprint
         override fun receivedGreetingsCompletionReturnSourceFingerprint(): String? =
