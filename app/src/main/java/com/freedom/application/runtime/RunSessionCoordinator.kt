@@ -188,6 +188,15 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun routePageTask(mode: RunMode?, taskId: String? = null): PageRuntimeSessionState? {
+        val currentPage = pageRuntimeSession.current()
+        if (currentPage != null && (mode == null || currentPage.mode != mode || currentPage.taskId != taskId)) {
+            pageRuntimeSession.markStopping(currentPage.runGeneration)
+            log.append(
+                "页面任务路由[STOPPING]：taskId=" + currentPage.taskId +
+                    "；nextTaskId=" + (taskId ?: "NONE") +
+                    "；runGeneration=" + currentPage.runGeneration
+            )
+        }
         pageRoutedMode = mode
         val session = if (mode != null && taskId != null) {
             pageRuntimeSession.begin(runGeneration, taskId, mode)
