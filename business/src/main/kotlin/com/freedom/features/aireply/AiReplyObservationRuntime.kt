@@ -5568,7 +5568,56 @@ class AiReplyObservationRuntime(
             // Archive every distinct viewport even when all visible rows are blocked, read,
             // unknown, or otherwise ineligible. Sampling is observation-only and never grants
             // permission to click a row.
-            val selectedKey = ChatSessionManagementPolicy.stableSessionKey(next)
+            if (privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.add(structuralFingerprint)) {
+                sessionManagerState = SessionManagerState.CAPTURING_SESSION_LIST
+                val captureRunGeneration = currentRunGeneration()
+                val captureActionGeneration = sessionActionGeneration
+                chatSessionManagementPort.captureSessionListSample(snapshot) { screenshotPath ->
+                    scheduler.schedule(0L) {
+                        if (!isAiReplyActive() || !sessionRunStarted ||
+                            captureRunGeneration != currentRunGeneration() ||
+                            captureActionGeneration != sessionActionGeneration ||
+                            !canPerformPrivateMessagesUiAction() || receivedGreetingsTaskActive ||
+                            sessionManagerState != SessionManagerState.CAPTURING_SESSION_LIST
+                        ) return@schedule
+                        onLog(
+                            "AI 会话管理：列表视口样本已累计；识别行=${snapshot.chatListCandidates.size}；" +
+                                "私人聊天=${snapshot.chatListCandidates.count { it.selectionClass == "PRIVATE_CHAT" }}；" +
+                                "系统入口=${snapshot.chatListCandidates.count { it.selectionClass == "SYSTEM_ENTRY" }}；" +
+                                "未分类=${snapshot.chatListCandidates.count { it.selectionClass == "UNCLASSIFIED" }}；" +
+                                "未读=${snapshot.chatListCandidates.count { it.unreadStatus.name == "UNREAD" }}；" +
+                                "未知=${snapshot.chatListCandidates.count { it.unreadStatus.name == "UNKNOWN" }}；" +
+                                "身份冲突键数=${snapshotAmbiguousKeys.size}；" +
+                                "累计不同视口=${privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.size}；" +
+                                "截图=${if (screenshotPath.isNullOrBlank()) "不可用" else "已保存"}"
+                        )
+                        continueSessionListWithoutCandidate(snapshot)
+                    }
+                }
+            } else {
+                continueSessionListWithoutCandidate(snapshot)
+            }
+            return
+        }
+
+        if (wasWaitingForUnread) {
+            sessionTransitionTask?.cancel()
+            sessionTransitionTask = null
+            privateMessagesTraversalTaskExecutor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+            privateMessagesTraversalTaskExecutor.atTop = false
+            privateMessagesTraversalTaskExecutor.noProgressScrollCount = 0
+            privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
+            privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
+            privateMessagesTraversalTaskExecutor.lastStableSessionListVisibleKeys = null
+            sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
+            onLog("AI Reply 低频待机结束：当前页发现明确未读；继续搜索未读区域边界并由下往上处理")
+            scrollSessionList(snapshot, toTop = false)
+            return
+        } else {
+            sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
+        }
+
+        val selectedKey = ChatSessionManagementPolicy.stableSessionKey(next)
         val selectedWindow = next.rowTarget.window
         val selectedName = next.nameText
         if (privateMessagesTraversalTaskExecutor.capturedSessionListFingerprints.add(structuralFingerprint)) {
