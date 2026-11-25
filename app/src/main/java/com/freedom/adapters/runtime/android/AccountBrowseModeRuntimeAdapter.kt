@@ -19,7 +19,9 @@ internal class AccountBrowseModeRuntimeAdapter(
     private val onReadinessInvalidated: (String) -> Unit = {},
     private val taskCoordinator: TaskCoordinator,
     private val currentRunGeneration: () -> Long,
-    private val onLog: (String) -> Unit = {}
+    private val onLog: (String) -> Unit = {},
+    private val currentRunGeneration: () -> Long = { 0L },
+    private val onPageRuntimeReady: (Long) -> Unit = {}
 ) : ModeRuntimePort, PageObservationSnapshotClassifier {
     override val mode: RunMode = RunMode.ACCOUNT_BROWSE
 
@@ -48,6 +50,7 @@ internal class AccountBrowseModeRuntimeAdapter(
         try {
             onReadinessStarting(mode, "AccountBrowse 已启动；等待目标应用正式就绪")
             workflow().startIfIdle()
+            onPageRuntimeReady(currentRunGeneration())
         } catch (error: Throwable) {
             releaseTaskOwnership("自动浏览启动失败")
             throw error
