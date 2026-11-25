@@ -3665,7 +3665,9 @@ class AiReplyObservationRuntime(
         // before assigning the exclusive UI-operation lease. Legacy adapters without that
         // workflow retain the existing private-message startup contract.
         privateMessagesTaskController.beginRun(currentRunGeneration())
-        val supportsReceivedGreetingsStartup = receivedGreetingsTaskFlow.supportsWorkflow()
+        val supportsReceivedGreetingsStartup =
+            receivedGreetingsTaskFlow.supportsWorkflow() &&
+                pageObservationSnapshotSource != null
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         resetPollingRound()
         receivedGreetingsTaskFlow.reset()
