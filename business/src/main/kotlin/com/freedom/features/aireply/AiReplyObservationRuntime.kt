@@ -3611,9 +3611,19 @@ class AiReplyObservationRuntime(
             setOf(PRIVATE_MESSAGES_TASK_ID, RECEIVED_GREETINGS_TASK_ID)
         )
         return when (route?.routeId) {
-            receivedGreetingsRecoveryRoute.routeId -> PageClassification.RECEIVED_GREETINGS
-            messageListRecoveryRoute.routeId -> PageClassification.PRIVATE_MESSAGES
-            chatDetailRecoveryRoute.routeId -> PageClassification.CHAT_DETAIL
+            receivedGreetingsRecoveryRoute.routeId ->
+                if (snapshot.sourceTaskId == RECEIVED_GREETINGS_TASK_ID) {
+                    PageClassification.RECEIVED_GREETINGS
+                } else PageClassification.UNKNOWN
+            messageListRecoveryRoute.routeId ->
+                if (snapshot.sourceTaskId == PRIVATE_MESSAGES_TASK_ID) {
+                    PageClassification.PRIVATE_MESSAGES
+                } else PageClassification.UNKNOWN
+            chatDetailRecoveryRoute.routeId ->
+                if (snapshot.sourceTaskId == PRIVATE_MESSAGES_TASK_ID ||
+                    snapshot.sourceTaskId == RECEIVED_GREETINGS_TASK_ID
+                ) PageClassification.CHAT_DETAIL
+                else PageClassification.UNKNOWN
             else -> PageClassification.UNKNOWN
         }
     }
