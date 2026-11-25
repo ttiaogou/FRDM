@@ -1,6 +1,9 @@
 package com.freedom.data.database
 
 import com.freedom.core.accessibility.api.ScreenRect
+import com.freedom.features.aireply.application.message.ChatMessageCandidate
+import com.freedom.features.aireply.application.message.ChatMessageParser
+import com.freedom.features.aireply.domain.message.ChatMessageDirection
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.domain.contact.ContactProfile
 import com.freedom.features.conversation.domain.message.ConversationMessageInput
@@ -141,6 +144,64 @@ class LocalConversationRepositoryTest {
             assertEquals(setOf(2), stored.map { it.observationCount }.toSet())
             assertEquals(setOf(200L), stored.map { it.lastObservedAtMillis }.toSet())
             assertNotEquals(stored[0].recordId, stored[1].recordId)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun appendingReplyPersistsOnlyTheNewMessageUsingRealParserFingerprints() {
+        val directory = Files.createTempDirectory("freedom-conversation-append").toFile()
+        try {
+            val cipher = TestConversationStoreCipher()
+            val repository = LocalConversationRepository(directory, cipher, nowMillis = { 300L })
+            val parser = ChatMessageParser()
+            val list = ScreenRect(0, 293, 720, 1359)
+            fun row(index: Int, top: Int, bottom: Int, direction: ChatMessageDirection) =
+                ChatMessageCandidate(
+                    rowIndex = index,
+                    rowBounds = ScreenRect(0, top, 720, bottom),
+                    bubbleBounds = if (direction == ChatMessageDirection.INCOMING)
+                        ScreenRect(140, top + 10, 390, bottom - 10)
+                    else ScreenRect(410, top + 10, 650, bottom - 10),
+                    listBounds = list,
+                    text = "相同正文",
+                    explicitDirectionHint = direction
+                )
+            val first = listOf(
+                row(0, 434, 554, ChatMessageDirection.INCOMING),
+                row(1, 554, 674, ChatMessageDirection.INCOMING)
+            )
+            val second = first + row(2, 674, 864, ChatMessageDirection.OUTGOING)
+            fun inputs(rows: List<ChatMessageCandidate>, batchId: String) = parser.parse(rows).map {
+                ConversationMessageInput(
+                    messageFingerprint = it.stableLogicalMessageId,
+                    direction = it.direction.name,
+                    type = it.type.name,
+                    content = it.content,
+                    contentQuality = it.contentQuality.name,
+                    directionEvidence = it.directionEvidence.name,
+                    bounds = it.bounds,
+                    contentRevision = it.effectiveContentRevision,
+                    observationBatchId = batchId,
+                    observationRowIndex = it.observationRowIndex
+                )
+            }
+            val initial = repository.persistMessages(
+                "contact-1", "conversation-1", "PLATFORM_ID_VERIFIED", 100L, inputs(first, "before")
+            )
+            assertEquals(2, initial.insertedCount)
+            val appended = repository.persistMessages(
+                "contact-1", "conversation-1", "PLATFORM_ID_VERIFIED", 200L, inputs(second, "after")
+            )
+            assertEquals(1, appended.insertedCount)
+            assertEquals(2, appended.duplicateObservationCount)
+            assertEquals(0, appended.rejectedCount)
+            val reopened = LocalConversationRepository(directory, cipher, nowMillis = { 300L })
+            val stored = reopened.messagesForConversation("contact-1", "conversation-1")
+            assertEquals(3, stored.size)
+            assertEquals(listOf("INCOMING", "INCOMING", "OUTGOING"), stored.map { it.direction })
+            assertEquals(listOf(2, 2, 1), stored.map { it.observationCount })
         } finally {
             directory.deleteRecursively()
         }
