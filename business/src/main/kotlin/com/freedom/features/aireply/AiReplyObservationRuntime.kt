@@ -1974,7 +1974,19 @@ class AiReplyObservationRuntime(
             previous != null && previous.packageName == targetPackage() &&
             pageIdentityChanged(previous, inspection) &&
             waitForPendingGreetingsNavigationEvidence(inspection)
-        ) return
+        ) {
+            // Stabilization already published the incoming snapshot. Keep the original
+            // source identity for the next route comparison, but retire its locators:
+            // the unconfirmed destination must not become the comparison baseline or
+            // allow a region refresh/action to reuse the departed window's targets.
+            lastPageInspection = previous.copy(
+                messageListTarget = null,
+                inputFieldTarget = null,
+                sessionListNavigationTarget = null,
+                chatListCandidates = emptyList()
+            )
+            return
+        }
 
         val shouldCreateRouteRecovery = sessionRunStarted && activeTaskId != null &&
             !recoveryContext.pending && selfInitiatedTransition == null &&
