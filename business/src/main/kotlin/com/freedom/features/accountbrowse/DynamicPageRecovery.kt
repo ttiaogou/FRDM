@@ -217,6 +217,20 @@ class DynamicPageRecovery(
         recoveryScheduler.begin(eventIdentity)
     }
 
+    /**
+     * An unclassified interaction notification is not a new page sample. Keep the
+     * current transaction and its already armed read-only deadline. Real UNKNOWN
+     * page observations still go through observePage and invalidate the samples.
+     */
+    fun continuePendingObservation(): Boolean {
+        val active = dispatcher.currentIdentity() ?: return false
+        if (active.runGeneration != currentRunGeneration() ||
+            dispatcher.state !in setOf(RecoveryTransactionState.RECOVERING, RecoveryTransactionState.VERIFYING)
+        ) return false
+        recoveryScheduler.begin(active)
+        return true
+    }
+
     fun observePage(page: BrowsePageEvidence): RecoveryTransactionState {
         val unknown = page.pageKind == BrowsePageKind.UNKNOWN ||
             page.packageName.isBlank() ||
@@ -225,13 +239,12 @@ class DynamicPageRecovery(
             page.confidence < 80
         if (!unknown) return dispatcher.state
 
-        dispatcher.activate(identity(page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }))
-        dispatcher.dispatch(
-            RecoveryTransactionEvent.UnknownPage(
-                page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
-            )
-        )
-        recoveryScheduler.begin(identity(page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }))
+        val reason = page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
+        val eventIdentity = identity(reason)
+        dispatcher.activate(eventIdentity)
+        dispatcher.dispatch(RecoveryTransactionEvent.UnknownPage(reason), eventIdentity)
+        // Both the reducer and the observation plan must accept the same touch edges.
+        recoveryScheduler.begin(eventIdentity)
         return dispatcher.state
     }
 

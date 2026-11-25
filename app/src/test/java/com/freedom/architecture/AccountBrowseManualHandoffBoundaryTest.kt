@@ -106,6 +106,25 @@ class AccountBrowseManualHandoffBoundaryTest {
     }
 
     @Test
+    fun unattributedScrollRecoveryDoesNotSynthesizeTouchEndOrRepeatPreparation() {
+        val workflow = source("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
+        val fallback = workflow.substringAfter("internal fun handleManualInteractionFallback(")
+            .substringBefore("private fun checkFeedListReturned()")
+        assertTrue(fallback.contains("eventType == AccessibilityEventType.VIEW_SCROLLED"))
+        assertTrue(fallback.contains("!evidence.hasIndependentTouchEvidence"))
+        assertTrue(fallback.contains("!accountBrowseSession.touchActive"))
+        assertTrue(fallback.contains("pauseAccountBrowse("))
+        assertFalse(fallback.contains("onUserInteractionEnded()"))
+        val runtime = source("business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt")
+        val request = runtime.substringAfter("fun requestRecovery(").substringBefore("fun beginNavigationRecovery(")
+        assertTrue(request.contains("preparedRecoveryGeneration == generation"))
+        assertTrue(request.contains("alreadyPrepared && observationHint && !isTouchActive()"))
+        assertTrue(request.contains("if (!alreadyPrepared)"))
+        assertTrue(request.contains("dynamicPageRecovery.invalidateRestoredCheckpointEvidence()"))
+        assertTrue(request.contains("dynamicPageRecovery.observePage("))
+    }
+
+    @Test
     fun overlayWatchdogTimeoutEntersUnifiedRecoveryInsteadOfManualHold() {
         val workflow = source(
             "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"

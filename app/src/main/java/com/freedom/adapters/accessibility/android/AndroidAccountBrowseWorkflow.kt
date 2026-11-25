@@ -344,8 +344,10 @@ internal class AndroidAccountBrowseWorkflow(
                 if (!accountBrowseSession.touchActive) {
                     accountBrowseSession.touchActive = true
                     accountBrowseRuntime.cancelScheduledStep()
-                    accountBrowseRuntime.onUserInteractionStarted()
                     pauseAccountBrowse("检测到用户触摸；停止危险操作并持续只读观察")
+                    // The first touch may create the recovery plan. Notify it only
+                    // after that plan exists, never infer touch end from a scroll.
+                    accountBrowseRuntime.onUserInteractionStarted()
                 }
             }
 
@@ -562,6 +564,10 @@ internal class AndroidAccountBrowseWorkflow(
 
     /** 所有暂停请求均转入统一恢复事务，不再接受旧人工恢复参数。 */
     internal fun pauseAccountBrowse(reason: String) {
+        pauseAccountBrowse(reason, observationHint = false)
+    }
+
+    private fun pauseAccountBrowse(reason: String, observationHint: Boolean) {
         accountBrowseRuntime.requestRecovery(
             reason = reason,
             beforePause = {
@@ -572,7 +578,8 @@ internal class AndroidAccountBrowseWorkflow(
             hideCountdown = ::hideFirstSwipeCountdown,
             onPauseReasonChanged = { changedReason ->
                 addLog("动态浏览已进入统一恢复观察：$changedReason")
-            }
+            },
+            observationHint = observationHint
         )
     }
 
@@ -2722,13 +2729,17 @@ internal class AndroidAccountBrowseWorkflow(
                 "自动浏览阶段=${accountBrowsePhase.name}；${currentMonitorPageContext()}；" +
                 "事件证据分类=${evidence.category}；${evidence.description}；$sourceDetails"
         )
-        pauseAccountBrowse("$reason；停止危险操作并交由统一恢复观察")
+        // The event is still a safety candidate: the first one enters recovery.
+        // Repeated uncorrelated scroll notifications do not prove a new page
+        // transition or a touch-end edge. Fresh observations remain authoritative.
+        val observationHint = eventType == AccessibilityEventType.VIEW_SCROLLED &&
+            !evidence.hasIndependentTouchEvidence && !accountBrowseSession.touchActive
+        pauseAccountBrowse("$reason；停止危险操作并交由统一恢复观察", observationHint)
 
         if (accountBrowseSession.touchActive) {
             addLog("目标控件事件发生时全局触摸仍处于活动状态；暂不恢复快速只读观察，等待 TYPE_TOUCH_INTERACTION_END")
         } else {
-            addLog("已记录目标控件交互；由统一恢复调度器重新读取并验证当前页面")
-            accountBrowseRuntime.onUserInteractionEnded()
+            addLog("已记录目标控件交互；沿用统一恢复观察计划，不模拟触摸结束")
         }
     }
 

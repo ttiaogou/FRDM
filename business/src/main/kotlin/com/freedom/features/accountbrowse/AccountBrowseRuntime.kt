@@ -81,6 +81,7 @@ class AccountBrowseRuntime(
     private var restoredCheckpointPhase: AccountBrowsePhase? = null
     private var restoredBusinessCheckpoint: AccountBrowseCheckpoint? = null
     private var verifiedFeedAwaitingPhaseResume: String? = null
+    private var preparedRecoveryGeneration: Long? = null
     private val checkpointAdapter = AccountBrowseRecoveryCheckpointAdapter()
 
     private val stateMachine = AccountBrowseStateMachine()
@@ -116,6 +117,7 @@ class AccountBrowseRuntime(
     fun restoreAfterServiceReconnect(): Boolean {
         val checkpoint = checkpointRepository?.load() ?: return false
         restoredBusinessCheckpoint = checkpoint
+        preparedRecoveryGeneration = null
         // Restore durable progress only. A new feed read will supply all current locators,
         // verification samples, window identities and action deadlines.
         session.swipeCount = checkpoint.swipeCount
@@ -134,6 +136,7 @@ class AccountBrowseRuntime(
     fun suspendSession() {
         cancelScheduledStep()
         dynamicPageRecovery.suspendAndResetVolatileState()
+        preparedRecoveryGeneration = null
         stateMachine.reset()
         restoredCheckpointPhase = null
         restoredBusinessCheckpoint = null
@@ -158,6 +161,7 @@ class AccountBrowseRuntime(
 
     /** Normalizes page-observation uncertainty before any AccountBrowse action is authorized. */
     fun observeRecoveryPage(page: BrowsePageEvidence): RecoveryTransactionState {
+        if (dynamicPageRecovery.state() == RecoveryTransactionState.ACTIVE) preparedRecoveryGeneration = null
         val state = dynamicPageRecovery.observePage(page)
         if (state != RecoveryTransactionState.ACTIVE) verifiedFeedAwaitingPhaseResume = null
         return state
@@ -228,6 +232,7 @@ class AccountBrowseRuntime(
             if (!dynamicPageRecovery.observeRestoredCheckpoint(unified, page)) return false
             restoredBusinessCheckpoint = null
             restoredCheckpointPhase = null
+            preparedRecoveryGeneration = null
             // Keep the existing WAIT_FOR_FEED_STABLE -> FIRST_SWIPE_COUNTDOWN transition.
             // A later, fresh feed read in that phase must still agree with this fingerprint.
             verifiedFeedAwaitingPhaseResume = fingerprint
@@ -251,6 +256,7 @@ class AccountBrowseRuntime(
         }
 
         if (!dynamicPageRecovery.observeFingerprint(fingerprint)) return false
+        preparedRecoveryGeneration = null
         restoredCheckpointPhase = null
         return true
     }
@@ -268,7 +274,7 @@ class AccountBrowseRuntime(
         if (!isSessionEnabled() || phase == AccountBrowsePhase.IDLE ||
             dynamicPageRecovery.state() == RecoveryTransactionState.ACTIVE
         ) return false
-        val confirmed = routeVerified && page.pageKind == BrowsePageKind.DYNAMIC_FEED &&
+        val confirmed = !isTouchActive() && routeVerified && page.pageKind == BrowsePageKind.DYNAMIC_FEED &&
             page.packageName == targetPackage() && page.confidence >= 80 &&
             page.windowAvailable && page.fingerprint.isNotBlank()
         val freshFingerprint = if (confirmed) fingerprint else ""
@@ -294,13 +300,15 @@ class AccountBrowseRuntime(
                 AccountBrowsePhase.DETAIL_DWELL, AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE,
                 AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN, AccountBrowsePhase.WAIT_FOR_LIST_RETURN)
         ) return false
-        val confirmed = identityConfirmed && page.pageKind.isDynamicContent &&
+        val confirmed = !isTouchActive() && identityConfirmed && page.pageKind.isDynamicContent &&
             page.packageName == targetPackage() && page.confidence >= 80 &&
             page.windowAvailable && page.fingerprint.isNotBlank() &&
             session.sourceFingerprint.isNotBlank() && page.fingerprint != session.sourceFingerprint
         // Detail and feed observations must never count as two samples of one page.
         val fingerprint = if (confirmed) "detail:${page.fingerprint}" else ""
-        return dynamicPageRecovery.observeFingerprint(fingerprint)
+        return dynamicPageRecovery.observeFingerprint(fingerprint).also { recovered ->
+            if (recovered) preparedRecoveryGeneration = null
+        }
     }
 
     /**
@@ -404,6 +412,7 @@ class AccountBrowseRuntime(
         restoredBusinessCheckpoint = null
         verifiedFeedAwaitingPhaseResume = null
         dynamicPageRecovery.reset()
+        preparedRecoveryGeneration = null
         session.reset()
         afterReset()
     }
@@ -416,14 +425,34 @@ class AccountBrowseRuntime(
         reason: String,
         beforePause: () -> Unit,
         hideCountdown: () -> Unit,
-        onPauseReasonChanged: (String) -> Unit
+        onPauseReasonChanged: (String) -> Unit,
+        observationHint: Boolean = false
     ) {
-        beforePause()
+        val generation = currentRunGeneration()
+        val state = dynamicPageRecovery.state()
+        val alreadyPrepared = preparedRecoveryGeneration == generation &&
+            state in setOf(RecoveryTransactionState.RECOVERING, RecoveryTransactionState.VERIFYING)
+        // Only uncorrelated scroll notifications may preserve an in-progress sample.
+        // Confirmed touch, fresh UNKNOWN and other safety failures remain invalidating.
+        if (alreadyPrepared && observationHint && !isTouchActive() &&
+            dynamicPageRecovery.continuePendingObservation()
+        ) return
+
+        if (!alreadyPrepared) {
+            beforePause()
+            preparedRecoveryGeneration = generation
+            session.gestureInFlight = false
+            session.countdownRemaining = 0
+            hideCountdown()
+            session.deadlineAt = 0L
+        }
         verifiedFeedAwaitingPhaseResume = null
-        session.gestureInFlight = false
-        session.countdownRemaining = 0
-        hideCountdown()
-        session.deadlineAt = 0L
+        dynamicPageRecovery.invalidateRestoredCheckpointEvidence()
+        // With no admitted sample left to invalidate, a repeat request need not
+        // dispatch UNKNOWN or write another copy of the same checkpoint.
+        if (alreadyPrepared && state == RecoveryTransactionState.RECOVERING &&
+            dynamicPageRecovery.continuePendingObservation()
+        ) return
         if (session.pauseReason != reason) {
             session.pauseReason = reason
             onPauseReasonChanged(reason)

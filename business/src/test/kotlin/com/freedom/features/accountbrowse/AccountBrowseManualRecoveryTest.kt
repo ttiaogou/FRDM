@@ -365,6 +365,80 @@ class AccountBrowseManualRecoveryTest {
     }
 
     @Test
+    fun repeatedUnattributedScrollsKeepOneRecoveryPreparationAndOneArmedObservation() {
+        val scheduler = QueuedScheduler()
+        var prepared = 0
+        var hidden = 0
+        var reads = 0
+        var generation = 1L
+        lateinit var runtime: AccountBrowseRuntime
+        runtime = runtime(currentRunGeneration = { generation }, scheduler = scheduler,
+            onReadOnlyObservation = {
+                reads++
+                runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true)
+            })
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD)
+        runtime.session.sourceFingerprint = "source-feed"
+        runtime.session.sourceSnapshot = "original-list-position"
+        fun scrollHint(index: Int) {
+            runtime.requestRecovery("scroll-$index", { prepared++ }, { hidden++ }, {}, observationHint = true)
+        }
+        scrollHint(0)
+        val first = scheduler.nextCallback()
+        runtime.session.deadlineAt = 12345L
+        repeat(100) { scrollHint(it + 1) }
+        assertEquals(1, prepared)
+        assertEquals(1, hidden)
+        assertEquals(12345L, runtime.session.deadlineAt)
+        assertTrue(first === scheduler.nextCallback())
+        scheduler.runNext()
+        assertEquals(1, reads)
+        assertEquals(1, runtime.recoveryStableSamples())
+        val second = scheduler.nextCallback()
+        repeat(100) { scrollHint(it + 101) }
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertTrue(second === scheduler.nextCallback())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        assertEquals("original-list-position", runtime.session.sourceSnapshot)
+        scheduler.runNext()
+        assertEquals(2, reads)
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        scrollHint(201)
+        assertEquals(2, prepared)
+        assertFalse(runtime.canExecuteAutomaticStep())
+        val stale = scheduler.nextCallback()
+        runtime.suspendSession()
+        generation++
+        stale()
+        assertEquals(2, reads)
+    }
+
+    @Test
+    fun freshUnknownAndActualTouchStillInvalidateSamplesInCoalescedRecovery() {
+        var touch = false
+        var prepared = 0
+        val runtime = runtime(isTouchActive = { touch })
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_FEED_STABLE)
+        runtime.requestRecovery("scroll", { prepared++ }, {}, {}, observationHint = true)
+        assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+        assertEquals(1, runtime.recoveryStableSamples())
+        runtime.observeRecoveryPage(page(BrowsePageKind.UNKNOWN).copy(confidence = 0))
+        assertEquals(0, runtime.recoveryStableSamples())
+        assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+        touch = true
+        runtime.requestRecovery("real touch", { prepared++ }, {}, {})
+        runtime.onUserInteractionStarted()
+        assertEquals(0, runtime.recoveryStableSamples())
+        repeat(3) { assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true)) }
+        assertFalse(runtime.canExecuteAutomaticStep())
+        touch = false
+        runtime.onUserInteractionEnded()
+        assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+        assertTrue(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+        assertEquals(1, prepared)
+    }
+
+    @Test
     fun touchRecoveryKeepsTaskInUnifiedRecoveryWithoutManualResumeLatch() {
         val runtime = runtime()
         runtime.requestRecovery(
@@ -686,13 +760,14 @@ class AccountBrowseManualRecoveryTest {
         onReadOnlyObservation: () -> Unit = {},
         onDetailLoad: () -> Unit = {},
         onDetailReturn: () -> Unit = {},
-        onFeedStep: () -> Unit = {}
+        onFeedStep: () -> Unit = {},
+        isTouchActive: () -> Boolean = { false }
     ): AccountBrowseRuntime = AccountBrowseRuntime(
         scheduler = scheduler,
         onReadOnlyRecoveryObservation = onReadOnlyObservation,
         canScheduleStep = { true },
         isSessionEnabled = { true },
-        isTouchActive = { false },
+        isTouchActive = isTouchActive,
         targetPackage = { "com.immomo.momo" },
         checkpointRepository = checkpointRepository,
         currentRunGeneration = currentRunGeneration,
