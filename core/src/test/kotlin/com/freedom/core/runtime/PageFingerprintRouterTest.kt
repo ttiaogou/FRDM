@@ -247,6 +247,28 @@ class PageFingerprintRouterTest {
     }
 
     @Test
+    fun runtimeRouteTokensRejectLateReadyAcrossSameGenerationAndStopping() {
+        val session = PageRuntimeSession()
+        val first = session.begin(7L, "PRIVATE", RunMode.AI_REPLY)
+        assertEquals(PageRuntimeLifecycle.STARTING, first.lifecycle)
+        assertEquals(first, session.begin(7L, "PRIVATE", RunMode.AI_REPLY))
+        assertEquals(PageRuntimeLifecycle.READY, session.markReady(first)?.lifecycle)
+        assertEquals(PageRuntimeLifecycle.STOPPING, session.markStopping(first)?.lifecycle)
+        assertNull(session.markReady(first))
+        val second = session.begin(7L, "GREETINGS", RunMode.AI_REPLY)
+        assertTrue(second.routeRevision > first.routeRevision)
+        assertNull(session.markReady(first))
+        assertNull(session.markStopping(first))
+        assertEquals(PageRuntimeLifecycle.STARTING, session.current()?.lifecycle)
+        assertEquals(PageRuntimeLifecycle.READY, session.markReady(second)?.lifecycle)
+        session.clear()
+        assertNull(session.markReady(second))
+        val third = session.begin(7L, "GREETINGS", RunMode.AI_REPLY)
+        assertTrue(third.routeRevision > second.routeRevision)
+        assertNull(session.markReady(second))
+    }
+
+    @Test
     fun sharedObservationCoordinatorRoutesWithoutStartingSnapshotWork() {
         var scheduledTasks = 0
         val scheduler = object : TaskScheduler {

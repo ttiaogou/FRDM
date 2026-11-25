@@ -170,7 +170,9 @@ data class PageObservationSnapshot(
     val runGeneration: Long = 0L,
     val sourceTaskId: String? = null,
     val windowId: Int? = null,
-    val windowSessionKey: String? = null
+    val windowSessionKey: String? = null,
+    /** True only for the independent, service-level entry page reader. */
+    val entryObservation: Boolean = false
 )
 
 interface PageObservationSnapshotClassifier {
@@ -266,7 +268,8 @@ data class PageRuntimeSessionState(
     val runGeneration: Long,
     val taskId: String,
     val mode: RunMode,
-    val lifecycle: PageRuntimeLifecycle
+    val lifecycle: PageRuntimeLifecycle,
+    val routeRevision: Long = 0L
 )
 
 /**
@@ -275,26 +278,46 @@ data class PageRuntimeSessionState(
  */
 class PageRuntimeSession {
     private var state: PageRuntimeSessionState? = null
+    private var nextRevision = 0L
 
     @Synchronized
     fun begin(runGeneration: Long, taskId: String, mode: RunMode): PageRuntimeSessionState {
         require(runGeneration >= 0L)
         require(taskId.isNotBlank())
-        return PageRuntimeSessionState(runGeneration, taskId, mode, PageRuntimeLifecycle.STARTING)
-            .also { state = it }
+        state?.let {
+            if (it.runGeneration == runGeneration && it.taskId == taskId &&
+                it.mode == mode && it.lifecycle != PageRuntimeLifecycle.STOPPING
+            ) return it
+            check(it.lifecycle == PageRuntimeLifecycle.STOPPING) { "Previous page route must stop before replacement" }
+        }
+        check(nextRevision < Long.MAX_VALUE) { "page route revision exhausted" }
+        return PageRuntimeSessionState(
+            runGeneration, taskId, mode, PageRuntimeLifecycle.STARTING, ++nextRevision
+        ).also { state = it }
     }
 
+    private fun matches(expected: PageRuntimeSessionState, current: PageRuntimeSessionState): Boolean =
+        expected.runGeneration == current.runGeneration && expected.taskId == current.taskId &&
+            expected.mode == current.mode && expected.routeRevision == current.routeRevision
+
+    @Synchronized
+    fun markReady(expected: PageRuntimeSessionState): PageRuntimeSessionState? =
+        state?.takeIf { matches(expected, it) && it.lifecycle != PageRuntimeLifecycle.STOPPING }
+            ?.copy(lifecycle = PageRuntimeLifecycle.READY)?.also { state = it }
+
+    @Synchronized
+    fun markStopping(expected: PageRuntimeSessionState): PageRuntimeSessionState? =
+        state?.takeIf { matches(expected, it) }
+            ?.copy(lifecycle = PageRuntimeLifecycle.STOPPING)?.also { state = it }
+
+    /** Compatibility for legacy mode-only callers; production uses the full route token. */
     @Synchronized
     fun markReady(runGeneration: Long): PageRuntimeSessionState? =
-        state?.takeIf { it.runGeneration == runGeneration }?.copy(
-            lifecycle = PageRuntimeLifecycle.READY
-        )?.also { state = it }
+        state?.takeIf { it.runGeneration == runGeneration }?.let { markReady(it) }
 
     @Synchronized
     fun markStopping(runGeneration: Long): PageRuntimeSessionState? =
-        state?.takeIf { it.runGeneration == runGeneration }?.copy(
-            lifecycle = PageRuntimeLifecycle.STOPPING
-        )?.also { state = it }
+        state?.takeIf { it.runGeneration == runGeneration }?.let { markStopping(it) }
 
     @Synchronized
     fun clear() {

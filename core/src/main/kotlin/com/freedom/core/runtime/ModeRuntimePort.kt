@@ -7,6 +7,22 @@ interface ModeRuntimePort {
     val mode: RunMode
     fun onRunStarted()
     fun onRunStopped(reason: String)
+
+    /** The callback must carry the exact page-route token captured at startup. */
+    fun onPageRuntimeStarted(session: PageRuntimeSessionState, onPrepared: (PageRuntimeSessionState) -> Unit) {
+        onRunStarted()
+        onPrepared(session)
+    }
+
+    /** Same-runtime task handoff: request verification without resetting existing transactions. */
+    fun onPageTaskChanged(session: PageRuntimeSessionState) = Unit
+
+    /** Persist only existing checkpoint evidence before the coordinator revokes the lease. */
+    fun onPageRuntimeWillSuspend(reason: String) = Unit
+
+    /** Page exit is not a user stop. Implementations can preserve durable recovery state. */
+    fun onPageRuntimeSuspended(reason: String) = onRunStopped(reason)
+
     fun onAccessibilityServiceConnected()
     fun onAccessibilityServiceDisconnected()
     fun onTargetApplicationEvent(event: AccessibilityEventEnvelope)

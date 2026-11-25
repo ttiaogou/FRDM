@@ -323,24 +323,25 @@ internal class AccessibilityServiceDependencies internal constructor(
                     com.freedom.core.runtime.PageClassification.RECEIVED_GREETINGS -> "AI_REPLY_RECEIVED_GREETINGS"
                     else -> null
                 }
-                // Stale or stopped-session observations cannot clear or select a live route.
+                // Only the independent entry reader may select a different runtime.
+                // A business observer may complete its own verified handoff, but an UNKNOWN
+                // nested page is handled by that runtime's existing checkpoint/recovery gates.
                 if (monitorRepository.isRunRequested() &&
                     snapshot.runGeneration == runSessionCoordinator.currentRunGeneration()
                 ) {
-                if (targetTask != null && !decision.conflict) {
-                    runSessionCoordinator.routePageTask(
-                        if (decision.classification ==
+                    if (targetTask != null && !decision.conflict) {
+                        val mode = if (decision.classification ==
                             com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE
-                        ) com.freedom.core.runtime.RunMode.ACCOUNT_BROWSE
-                        else com.freedom.core.runtime.RunMode.AI_REPLY,
-                        targetTask
-                    )
-                } else if (decision.conflict || decision.classification ==
-                    com.freedom.core.runtime.PageClassification.UNKNOWN
-                ) {
-                    runSessionCoordinator.routePageTask(null)
-                    addLog("统一页面仲裁[NO_OWNERSHIP]：未知或冲突页面；清除旧路由并保持只读等待")
-                }
+                        ) RunMode.ACCOUNT_BROWSE else RunMode.AI_REPLY
+                        val verifiedOwnTask = runSessionCoordinator.activeMode() == mode &&
+                            root.taskCoordinator.currentLease()?.taskId == targetTask
+                        if (snapshot.entryObservation || verifiedOwnTask) {
+                            runSessionCoordinator.routePageTask(mode, targetTask)
+                        }
+                    } else if (snapshot.entryObservation && decision.conflict) {
+                        runSessionCoordinator.routePageTask(null)
+                        addLog("统一页面仲裁[NO_OWNERSHIP]：冲突页面；退出运行时并保持只读等待")
+                    }
                 }
             }
         ).also { bus ->
@@ -709,6 +710,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+            onPageTaskOwnershipConfirmed = { lease ->
+                runSessionCoordinator.confirmPageTaskOwnership(lease)
+            },
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
             isSendConfirmationPending = { aiReplyDraftCoordinator.isSendConfirmationPending },
@@ -775,10 +779,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
-            onLog = addLog,
-            onPageRuntimeReady = { generation ->
-                runSessionCoordinator.markPageRuntimeReady(generation)
-            }
+            onLog = addLog
         )
     }
     val runSessionCoordinator: RunSessionCoordinator by lazy(LazyThreadSafetyMode.NONE) {
@@ -795,10 +796,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                     onReadinessInvalidated = { reason ->
                         targetAppReadinessController.invalidate(reason, SystemClock.uptimeMillis())
                     },
-                    currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
-                    onPageRuntimeReady = { generation ->
-                        runSessionCoordinator.markPageRuntimeReady(generation)
-                    }
+                    currentRunGeneration = { runSessionCoordinator.currentRunGeneration() }
                 )
             ),
             log = monitorRepository,

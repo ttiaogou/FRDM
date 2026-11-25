@@ -45,12 +45,22 @@ internal class AccountBrowseModeRuntimeAdapter(
         }
         try {
             onReadinessStarting(mode, "AccountBrowse 已启动；等待目标应用正式就绪")
+            if (awaitingServiceReconnect) {
+                awaitingServiceReconnect = false
+                workflow().restoreRecoveryAfterServiceReconnect()
+            }
             workflow().startIfIdle()
             onPageRuntimeReady(currentRunGeneration())
         } catch (error: Throwable) {
             releaseTaskOwnership("自动浏览启动失败")
             throw error
         }
+    }
+
+    override fun onPageRuntimeSuspended(reason: String) {
+        // Preserve the suspended recovery plan instead of treating page exit as user stop.
+        onAccessibilityServiceDisconnected()
+        workflow().cleanup()
     }
 
     override fun onRunStopped(reason: String) {

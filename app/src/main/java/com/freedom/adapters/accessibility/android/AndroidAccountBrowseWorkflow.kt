@@ -1695,6 +1695,7 @@ internal class AndroidAccountBrowseWorkflow(
             return null
         }
         if (handleMomoPopup()) return null
+        val publishedRunGeneration = currentRunGeneration()
         pageObservationSnapshotSource?.publish(
             PageObservationSnapshot(
                 fingerprint = com.freedom.core.runtime.PageFingerprint(
@@ -1703,13 +1704,14 @@ internal class AndroidAccountBrowseWorkflow(
                     semanticPage = page.pageKind.name,
                     adapterFingerprint = page.fingerprint
                 ),
-                observationGeneration = currentRunGeneration(),
-                runGeneration = currentRunGeneration(),
+                observationGeneration = publishedRunGeneration,
+                runGeneration = publishedRunGeneration,
                 sourceTaskId = "ACCOUNT_BROWSE",
                 windowId = page.windowId,
                 windowSessionKey = page.windowSessionKey
             )
         )
+        if (publishedRunGeneration != currentRunGeneration() || !isBrowseModeActive()) return null
         return page
     }
 

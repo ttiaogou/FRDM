@@ -532,7 +532,8 @@ internal class MomoSocialAdapter(
                 fingerprint = fingerprint,
                 observationGeneration = observationGeneration,
                 runGeneration = runGeneration,
-                windowId = window.windowId
+                windowId = window.windowId,
+                entryObservation = true
             )
         }
 

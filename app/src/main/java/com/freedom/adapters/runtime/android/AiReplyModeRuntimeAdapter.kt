@@ -5,6 +5,7 @@ import com.freedom.core.runtime.ModeRuntimePort
 import com.freedom.core.runtime.PageObservationSnapshot
 import com.freedom.core.runtime.PageObservationSnapshotClassifier
 import com.freedom.core.runtime.PageClassification
+import com.freedom.core.runtime.PageRuntimeSessionState
 import com.freedom.core.runtime.RunMode
 import com.freedom.features.aireply.AiReplyObservationRuntime
 
@@ -29,6 +30,28 @@ internal class AiReplyModeRuntimeAdapter(
         runtime().reset("开始新运行前清理")
         runtime().scheduleInitialObservation()
         onPageRuntimeReady(currentRunGeneration())
+    }
+
+    override fun onPageRuntimeStarted(
+        session: PageRuntimeSessionState,
+        onPrepared: (PageRuntimeSessionState) -> Unit
+    ) {
+        onRunStarted()
+        onPrepared(session)
+        runtime().requestPageRouteObservation()
+    }
+
+    override fun onPageTaskChanged(session: PageRuntimeSessionState) {
+        runtime().requestPageRouteObservation()
+    }
+
+    override fun onPageRuntimeWillSuspend(reason: String) {
+        runtime().persistCheckpointBeforeServiceInterruption(reason)
+    }
+
+    override fun onPageRuntimeSuspended(reason: String) {
+        onReadinessInvalidated("AI Reply 页面运行时退出：$reason")
+        runtime().reset("页面运行时退出：$reason")
     }
 
     override fun onRunStopped(reason: String) {

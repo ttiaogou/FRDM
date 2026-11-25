@@ -149,7 +149,9 @@ class AiReplyObservationRuntime(
     private val privateMessagesRecoveryScheduleRepository: RecoveryScheduleRepository? = null,
     private val receivedGreetingsRecoveryScheduleRepository: RecoveryScheduleRepository? = null,
     /** Injected from the process composition root; null only in isolated test fixtures. */
-    private val recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null
+    private val recoveryTransactionManager: UnifiedRecoveryTransactionManager? = null,
+    /** Reports the exact verified capability; the route coordinator never acquires it for us. */
+    private val onPageTaskOwnershipConfirmed: (com.freedom.core.runtime.TaskLease) -> Unit = {}
 ) {
     companion object {
         /**
@@ -1559,15 +1561,17 @@ class AiReplyObservationRuntime(
                 chatPagePort.receivedGreetingsRecoveryFingerprint()
             }.getOrNull()
         )
+        val publishedRunGeneration = currentRunGeneration()
         pageObservationSnapshotSource?.publish(
             PageObservationSnapshot(
                 fingerprint = pageFingerprint,
                 observationGeneration = observation.observationGeneration,
-                runGeneration = currentRunGeneration(),
+                runGeneration = publishedRunGeneration,
                 sourceTaskId = taskCoordinator?.activeTaskId(),
                 windowSessionKey = windowSessionKey(inspection)
             )
         )
+        if (publishedRunGeneration != currentRunGeneration() || !isAiReplyActive()) return
         val matchedRouteId = if (pageFingerprint.packageName == targetPackage()) {
             sharedPageObservationCoordinator.matchRecoveryAdapter(
                 pageFingerprint, setOf(PRIVATE_MESSAGES_TASK_ID, RECEIVED_GREETINGS_TASK_ID)
@@ -3256,11 +3260,19 @@ class AiReplyObservationRuntime(
      * Route ownership requests through the controller that owns the requested business task.
      * Read-only page observations remain outside the UI-operation lease.
      */
-    private fun claimTaskOwnership(taskId: String, reason: String): Boolean = when (taskId) {
-        PrivateMessagesTaskController.TASK_ID -> !receivedGreetingsOwnershipRecheckPending &&
-            privateMessagesTaskController.claimOwnership(reason)
-        ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskFlow.claimOwnership(reason)
-        else -> false
+    private fun claimTaskOwnership(taskId: String, reason: String): Boolean {
+        val claimed = when (taskId) {
+            PrivateMessagesTaskController.TASK_ID -> !receivedGreetingsOwnershipRecheckPending &&
+                privateMessagesTaskController.claimOwnership(reason)
+            ReceivedGreetingsTaskController.TASK_ID -> receivedGreetingsTaskFlow.claimOwnership(reason)
+            else -> false
+        }
+        if (claimed) {
+            taskCoordinator?.currentLease()?.takeIf {
+                it.taskId == taskId && it.runGeneration == currentRunGeneration()
+            }?.let(onPageTaskOwnershipConfirmed)
+        }
+        return claimed
     }
 
     private fun recoveryRouteIdForTask(taskId: String?): String? =
@@ -3640,6 +3652,16 @@ class AiReplyObservationRuntime(
                 else PageClassification.UNKNOWN
             else -> PageClassification.UNKNOWN
         }
+    }
+
+    /** Request a fresh observation for page-driven startup/handoff without replacing
+     * protected send or gesture verification reads. Business admission gates remain unchanged. */
+    fun requestPageRouteObservation() {
+        if (!isAiReplyActive() || !sessionRunStarted ||
+            hasProtectedPrivateInspection() || hasProtectedSendInspection()
+        ) return
+        if (pageInspectionTask != null) return
+        scheduleFullInspection()
     }
 
     fun scheduleInitialObservation() {

@@ -79,6 +79,124 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun pageDrivenHandoffWaitsForExactTargetLeaseAndDoesNotRestartSameRuntime() {
+        val state = FakeState().apply { requested = true }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        val coordinator = RunSessionCoordinator(
+            state, mapOf(RunMode.AI_REPLY to ai), RuntimeLogSink { },
+            taskCoordinator = tasks, onObserveCurrentPage = {}
+        )
+        coordinator.synchronizeRunRequest()
+        val first = requireNotNull(coordinator.routePageTask(RunMode.AI_REPLY, "PRIVATE"))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STARTING, first.lifecycle)
+        assertNull(coordinator.markPageRuntimeReady(first.runGeneration))
+        val lease = requireNotNull(tasks.tryAcquire("PRIVATE", first.runGeneration))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.READY,
+            coordinator.confirmPageTaskOwnership(lease)?.lifecycle)
+        val second = requireNotNull(coordinator.routePageTask(RunMode.AI_REPLY, "GREETINGS"))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STARTING, second.lifecycle)
+        assertEquals(first.runGeneration, second.runGeneration)
+        assertTrue(second.routeRevision > first.routeRevision)
+        assertNull(coordinator.markPageRuntimeReady(first))
+        assertNull(coordinator.confirmPageTaskOwnership(lease))
+        assertEquals(listOf("start"), ai.calls)
+        val newLease = requireNotNull(tasks.transfer(lease, "GREETINGS"))
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.READY,
+            coordinator.confirmPageTaskOwnership(newLease)?.lifecycle)
+        assertFalse(tasks.isCurrent(lease))
+        assertEquals(second.routeRevision,
+            coordinator.routePageTask(RunMode.AI_REPLY, "GREETINGS")?.routeRevision)
+        coordinator.routePageTask(null)
+        assertNull(coordinator.currentPageRuntimeSession())
+        assertNull(tasks.currentLease())
+        assertTrue(state.requested)
+        assertNull(coordinator.markPageRuntimeReady(second))
+    }
+
+    @Test
+    fun pageDrivenCrossRuntimeStopRevokesBeforeStartingNextRuntime() {
+        val state = FakeState().apply { requested = true }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val trace = mutableListOf<String>()
+        lateinit var coordinator: RunSessionCoordinator
+        val ai = object : ModeRuntimePort {
+            override val mode = RunMode.AI_REPLY
+            override fun onRunStarted() { trace += "ai:start" }
+            override fun onRunStopped(reason: String) { error("page exit is not user stop") }
+            override fun onPageRuntimeSuspended(reason: String) {
+                assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING,
+                    coordinator.currentPageRuntimeSession()?.lifecycle)
+                assertNull(tasks.currentLease())
+                assertNull(coordinator.activeMode())
+                trace += "ai:suspend"
+            }
+            override fun onAccessibilityServiceConnected() = Unit
+            override fun onAccessibilityServiceDisconnected() = Unit
+            override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = Unit
+        }
+        val browse = object : ModeRuntimePort {
+            override val mode = RunMode.ACCOUNT_BROWSE
+            override fun onRunStarted() {
+                assertNull(tasks.currentLease())
+                trace += "browse:start"
+                tasks.tryAcquire("BROWSE", coordinator.currentRunGeneration())
+            }
+            override fun onRunStopped(reason: String) = Unit
+            override fun onAccessibilityServiceConnected() = Unit
+            override fun onAccessibilityServiceDisconnected() = Unit
+            override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = Unit
+        }
+        coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai, browse.mode to browse),
+            RuntimeLogSink { }, taskCoordinator = tasks, onObserveCurrentPage = {})
+        coordinator.synchronizeRunRequest()
+        val first = requireNotNull(coordinator.routePageTask(ai.mode, "PRIVATE"))
+        val oldLease = requireNotNull(tasks.tryAcquire("PRIVATE", first.runGeneration))
+        coordinator.confirmPageTaskOwnership(oldLease)
+        val next = requireNotNull(coordinator.routePageTask(browse.mode, "BROWSE"))
+        assertEquals(listOf("ai:start", "ai:suspend", "browse:start"), trace)
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.READY, next.lifecycle)
+        assertTrue(next.runGeneration > first.runGeneration)
+        assertFalse(tasks.isCurrent(oldLease))
+        assertNull(coordinator.markPageRuntimeReady(first))
+    }
+
+    @Test
+    fun pageDrivenFailedCleanupKeepsStoppingAndDoesNotStartReplacement() {
+        val state = FakeState().apply { requested = true }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var failCleanup = true
+        val ai = object : ModeRuntimePort {
+            override val mode = RunMode.AI_REPLY
+            override fun onRunStarted() = Unit
+            override fun onRunStopped(reason: String) = Unit
+            override fun onPageRuntimeSuspended(reason: String) {
+                if (failCleanup) error("cleanup failed")
+            }
+            override fun onAccessibilityServiceConnected() = Unit
+            override fun onAccessibilityServiceDisconnected() = Unit
+            override fun onTargetApplicationEvent(event: AccessibilityEventEnvelope) = Unit
+        }
+        val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
+        val coordinator = RunSessionCoordinator(state, mapOf(ai.mode to ai, browse.mode to browse),
+            RuntimeLogSink { }, taskCoordinator = tasks, onObserveCurrentPage = {})
+        coordinator.synchronizeRunRequest()
+        val first = requireNotNull(coordinator.routePageTask(ai.mode, "PRIVATE"))
+        val lease = requireNotNull(tasks.tryAcquire("PRIVATE", first.runGeneration))
+        coordinator.confirmPageTaskOwnership(lease)
+        assertEquals(com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING,
+            coordinator.routePageTask(browse.mode, "BROWSE")?.lifecycle)
+        assertNull(coordinator.activeMode())
+        assertNull(tasks.currentLease())
+        assertTrue(browse.calls.isEmpty())
+        assertTrue(state.requested)
+        assertNull(coordinator.markPageRuntimeReady(first))
+        failCleanup = false
+        assertEquals("BROWSE", coordinator.routePageTask(browse.mode, "BROWSE")?.taskId)
+        assertEquals(listOf("start"), browse.calls)
+    }
+
+    @Test
     fun synchronizationStartsOnlyThePersistedActiveRuntime() {
         val state = FakeState()
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)

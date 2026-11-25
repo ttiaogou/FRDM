@@ -7,6 +7,8 @@ import com.freedom.core.runtime.RuntimeLogSink
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.PageRuntimeSession
 import com.freedom.core.runtime.PageRuntimeSessionState
+import com.freedom.core.runtime.PageRuntimeLifecycle
+import com.freedom.core.runtime.TaskLease
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 
 /**
@@ -42,6 +44,94 @@ class RunSessionCoordinator(
     private var observedRunRequested: Boolean = false
     private var pageRoutedMode: RunMode? = null
     private val pageRuntimeSession = PageRuntimeSession()
+    private var preparedRuntimeMode: RunMode? = null
+    private var pageTransitionInProgress = false
+
+    private fun logPageLifecycle(state: PageRuntimeSessionState, reason: String) {
+        log.append("页面运行时[${state.lifecycle}]：taskId=${state.taskId}；mode=${state.mode}；" +
+            "runGeneration=${state.runGeneration}；routeRevision=${state.routeRevision}；reason=$reason")
+    }
+
+    /** STOPPING is visible throughout cleanup; revocation precedes any teardown callback. */
+    private fun stopPageRuntime(reason: String, preserveRecovery: Boolean,
+                                cleanup: ((ModeRuntimePort) -> Unit)? = null): Boolean {
+        val previous = pageRuntimeSession.current()
+        if (previous == null) {
+            advanceRunGeneration()
+            preparedRuntimeMode = null
+            pageRoutedMode = null
+            return true
+        }
+        val stopping = pageRuntimeSession.markStopping(previous) ?: return false
+        logPageLifecycle(stopping, reason)
+        preparedRuntimeMode = null
+        pageRoutedMode = null
+        val runtime = runtimes[previous.mode]
+        if (preserveRecovery && runtime != null) {
+            // The checkpoint writer needs the still-current task identity, but STOPPING
+            // has already closed runtime dispatch. No UI work is authorized here.
+            runCatching { runtime.onPageRuntimeWillSuspend(reason) }.onFailure {
+                log.recordException("RunSessionCoordinator", "page_runtime_checkpoint_failed", reason, it)
+            }
+        }
+        advanceRunGeneration()
+        return try {
+            if (runtime != null) {
+                if (cleanup != null) cleanup(runtime)
+                else if (preserveRecovery) runtime.onPageRuntimeSuspended(reason)
+                else runtime.onRunStopped(reason)
+            }
+            pageRuntimeSession.clear()
+            true
+        } catch (error: Throwable) {
+            // Failed cleanup must not start a second runtime. Keep STOPPING for safe retry.
+            log.recordException("RunSessionCoordinator", "page_runtime_stop_failed", reason, error)
+            false
+        }
+    }
+
+    private fun tryCompletePageStart(expected: PageRuntimeSessionState): PageRuntimeSessionState? {
+        val current = pageRuntimeSession.current() ?: return null
+        if (!state.isRunRequested() || current.runGeneration != runGeneration ||
+            current.routeRevision != expected.routeRevision || current.taskId != expected.taskId ||
+            current.mode != expected.mode || preparedRuntimeMode != current.mode ||
+            current.lifecycle == PageRuntimeLifecycle.STOPPING
+        ) return null
+        if (taskCoordinator != null) {
+            val lease = taskCoordinator.currentLease() ?: return null
+            if (lease.taskId != current.taskId || lease.runGeneration != current.runGeneration) return null
+        }
+        val ready = pageRuntimeSession.markReady(expected) ?: return null
+        if (current.lifecycle != PageRuntimeLifecycle.READY) logPageLifecycle(ready, "运行时准备完成且任务租约已确认")
+        return ready
+    }
+
+    /** Called only by the task controller after obtaining its existing verified capability. */
+    @Synchronized
+    fun confirmPageTaskOwnership(lease: TaskLease): PageRuntimeSessionState? {
+        if (onObserveCurrentPage == null || taskCoordinator?.isCurrent(lease) != true) return null
+        val current = pageRuntimeSession.current() ?: return null
+        if (current.taskId != lease.taskId || current.runGeneration != lease.runGeneration) return null
+        return tryCompletePageStart(current)
+    }
+
+    @Synchronized
+    fun markPageRuntimeReady(expected: PageRuntimeSessionState): PageRuntimeSessionState? {
+        val current = pageRuntimeSession.current() ?: return null
+        if (!state.isRunRequested() || current.runGeneration != runGeneration ||
+            current.routeRevision != expected.routeRevision || current.taskId != expected.taskId ||
+            current.mode != expected.mode || current.lifecycle == PageRuntimeLifecycle.STOPPING
+        ) return null
+        preparedRuntimeMode = current.mode
+        return tryCompletePageStart(expected)
+    }
+
+    private fun dispatchMode(): RunMode? =
+        if (onObserveCurrentPage == null) pageRoutedMode ?: activeMode()
+        else pageRuntimeSession.current()?.takeIf {
+            state.isRunRequested() && it.runGeneration == runGeneration &&
+                it.lifecycle == PageRuntimeLifecycle.READY
+        }?.mode
     /** Read from the process-owned clock so a recreated Service cannot issue lower generations. */
     private val runGeneration: Long get() = generationClock.current()
 
@@ -61,7 +151,14 @@ class RunSessionCoordinator(
         if (onObserveCurrentPage != null) {
             log.append("运行请求准备停止：来源=RunSessionCoordinator.stop；原因=$reason")
             state.setRunRequested(false)
-            synchronizeRunRequest()
+            observedRunRequested = false
+            pageTransitionInProgress = true
+            try {
+                val stopped = stopPageRuntime(reason, preserveRecovery = false)
+                log.finishRun(if (stopped) "STOPPED" else "FAILED", reason)
+            } finally {
+                pageTransitionInProgress = false
+            }
             return
         }
         val active = activeMode() ?: observedMode
@@ -97,14 +194,15 @@ class RunSessionCoordinator(
         val requestedRun = state.isRunRequested()
         if (onObserveCurrentPage != null) {
             if (requestedRun == observedRunRequested) return false
-            advanceRunGeneration()
             observedRunRequested = requestedRun
-            val previous = pageRoutedMode
-            pageRoutedMode = null
-            pageRuntimeSession.clear()
-            if (previous != null) runtimes[previous]?.onRunStopped("运行请求已变化")
-            if (requestedRun) onObserveCurrentPage.invoke()
-            else log.finishRun("STOPPED", "运行请求状态变化；页面运行时已清理")
+            pageTransitionInProgress = true
+            try {
+                val stopped = stopPageRuntime("运行请求已变化", preserveRecovery = false)
+                if (requestedRun) onObserveCurrentPage.invoke()
+                else log.finishRun(if (stopped) "STOPPED" else "FAILED", "运行请求状态变化")
+            } finally {
+                pageTransitionInProgress = false
+            }
             return true
         }
         val requestedMode = activeMode()
@@ -187,13 +285,15 @@ class RunSessionCoordinator(
     @Synchronized
     fun activeMode(): RunMode? =
         if (!state.isRunRequested()) null
-        else if (onObserveCurrentPage != null) pageRoutedMode
+        else if (onObserveCurrentPage != null) pageRuntimeSession.current()?.takeIf {
+            it.lifecycle != PageRuntimeLifecycle.STOPPING && it.runGeneration == runGeneration
+        }?.mode
         else resolveActiveModeForRestore()
 
     @Synchronized
     fun onAccessibilityServiceConnected() {
         if (onObserveCurrentPage != null) {
-            if (pageRoutedMode != null) onAccessibilityServiceDisconnected()
+            if (pageRuntimeSession.current() != null) onAccessibilityServiceDisconnected()
             val changed = synchronizeRunRequest()
             if (!changed && state.isRunRequested()) onObserveCurrentPage.invoke()
             return
@@ -207,7 +307,18 @@ class RunSessionCoordinator(
         // A reconnect must never reuse capabilities or callbacks issued before the service
         // boundary.  Advance before notifying the runtime so its reset and any late callback
         // observe the new generation as stale.
-        val previous = if (onObserveCurrentPage != null) pageRoutedMode else observedMode
+        if (onObserveCurrentPage != null) {
+            pageTransitionInProgress = true
+            try {
+                stopPageRuntime("SERVICE_DISCONNECTED", preserveRecovery = true) {
+                    it.onAccessibilityServiceDisconnected()
+                }
+            } finally {
+                pageTransitionInProgress = false
+            }
+            return
+        }
+        val previous = observedMode
         advanceRunGeneration()
         pageRoutedMode = null
         pageRuntimeSession.clear()
@@ -220,43 +331,49 @@ class RunSessionCoordinator(
         val currentPage = pageRuntimeSession.current()
         if (onObserveCurrentPage != null) {
             if (!state.isRunRequested() || !observedRunRequested) return null
-            if (currentPage != null && currentPage.mode == mode && currentPage.taskId == taskId) {
-                return currentPage
+            if (pageTransitionInProgress) return currentPage
+            if (currentPage != null && currentPage.mode == mode && currentPage.taskId == taskId &&
+                currentPage.lifecycle != PageRuntimeLifecycle.STOPPING
+            ) {
+                tryCompletePageStart(currentPage)
+                return pageRuntimeSession.current()
             }
-            if (mode == null || taskId == null) {
-                if (currentPage != null) {
-                    advanceRunGeneration()
-                    pageRuntimeSession.clear()
-                    pageRoutedMode = null
-                    runtimes[currentPage.mode]?.onRunStopped("页面路由未确认")
-                }
-                return null
-            }
-            // Same business runtime: the existing task controllers verify and transfer their own leases.
-            if (currentPage != null && currentPage.mode == mode) {
-                return pageRuntimeSession.begin(runGeneration, taskId, mode).let {
-                    pageRuntimeSession.markReady(it.runGeneration)
-                }
-            }
-            if (currentPage != null) {
-                advanceRunGeneration()
-                pageRuntimeSession.clear()
-                pageRoutedMode = null
-                runtimes[currentPage.mode]?.onRunStopped("页面任务路由切换")
-            }
-            val runtime = runtimes[mode] ?: return null
-            pageRoutedMode = mode
-            pageRuntimeSession.begin(runGeneration, taskId, mode)
+            pageTransitionInProgress = true
             try {
-                runtime.onRunStarted()
-            } catch (error: Throwable) {
-                advanceRunGeneration()
-                pageRuntimeSession.clear()
-                pageRoutedMode = null
-                runCatching { runtime.onRunStopped("页面运行时启动失败") }
-                log.recordException("RunSessionCoordinator", "page_runtime_start_failed", "页面运行时启动失败；保持只读等待", error)
+                if (mode == null || taskId == null) {
+                    if (currentPage != null) stopPageRuntime("页面路由未确认", preserveRecovery = true)
+                    return null
+                }
+                // Private messages and greetings share one runtime and a verified atomic
+                // business handoff. Do not reset it, invent a lease or bypass its page checks.
+                if (currentPage != null && currentPage.mode == mode &&
+                    currentPage.lifecycle != PageRuntimeLifecycle.STOPPING &&
+                    preparedRuntimeMode == mode
+                ) {
+                    pageRuntimeSession.markStopping(currentPage)?.let { logPageLifecycle(it, "同运行时任务切换") }
+                    val next = pageRuntimeSession.begin(runGeneration, taskId, mode)
+                    logPageLifecycle(next, "等待目标任务验证及租约交接")
+                    if (tryCompletePageStart(next) == null) runtimes[mode]?.onPageTaskChanged(next)
+                    return pageRuntimeSession.current()
+                }
+                if (currentPage != null &&
+                    !stopPageRuntime("页面任务路由切换", preserveRecovery = true)
+                ) return pageRuntimeSession.current()
+                val runtime = runtimes[mode] ?: return null
+                pageRoutedMode = mode
+                val next = pageRuntimeSession.begin(runGeneration, taskId, mode)
+                logPageLifecycle(next, "页面识别选中任务")
+                try {
+                    runtime.onPageRuntimeStarted(next) { prepared -> markPageRuntimeReady(prepared) }
+                } catch (error: Throwable) {
+                    log.recordException("RunSessionCoordinator", "page_runtime_start_failed",
+                        "页面运行时启动失败；保持只读等待", error)
+                    stopPageRuntime("页面运行时启动失败", preserveRecovery = true)
+                }
+                return pageRuntimeSession.current()
+            } finally {
+                pageTransitionInProgress = false
             }
-            return pageRuntimeSession.current()
         }
         if (currentPage != null && (mode == null || currentPage.mode != mode || currentPage.taskId != taskId)) {
             pageRuntimeSession.markStopping(currentPage.runGeneration)
@@ -288,10 +405,9 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun markPageRuntimeReady(runGeneration: Long): PageRuntimeSessionState? {
+        // Production callbacks must provide the exact route token, never generation alone.
+        if (onObserveCurrentPage != null) return null
         val ready = pageRuntimeSession.markReady(runGeneration) ?: return null
-        // A page classification is not a task lease. The business task must verify
-        // its page and acquire its own capability via the existing ownership controller.
-        if (onObserveCurrentPage != null) return ready
         val current = taskCoordinator?.currentLease()
         val transferred = if (current == null) {
             taskCoordinator?.tryAcquire(ready.taskId, runGeneration) != null
@@ -315,16 +431,24 @@ class RunSessionCoordinator(
     fun dispatchTargetApplicationEvent(event: AccessibilityEventEnvelope) {
         synchronizeRunRequest()
         val pageSession = pageRuntimeSession.current()
-        if (pageSession != null && pageSession.lifecycle != com.freedom.core.runtime.PageRuntimeLifecycle.READY) {
+        if (onObserveCurrentPage != null && state.isRunRequested() &&
+            pageSession?.lifecycle == PageRuntimeLifecycle.STARTING &&
+            pageSession.mode == RunMode.AI_REPLY && preparedRuntimeMode == RunMode.AI_REPLY &&
+            pageSession.runGeneration == runGeneration
+        ) {
+            // The AI observer must receive page signals to finish its existing verification.
+            // The task controller still owns all business admission and lease checks.
+            runtimes[RunMode.AI_REPLY]?.onTargetApplicationEvent(event)
             return
         }
-        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.onTargetApplicationEvent(event) }
+        if (pageSession != null && pageSession.lifecycle != PageRuntimeLifecycle.READY) return
+        dispatchMode()?.let { runtimes[it]?.onTargetApplicationEvent(event) }
     }
 
     @Synchronized
     fun dispatchGlobalTouchEvent(event: AccessibilityEventEnvelope) {
         synchronizeRunRequest()
-        val mode = pageRoutedMode ?: activeMode()
+        val mode = dispatchMode()
         log.append("全局触摸链路[RUN_SESSION_RECEIVED]：事件=${event.type}；eventTime=${event.eventTimeMillis}；模式=${mode ?: "NONE"}")
         val runtime = mode?.let(runtimes::get)
         if (runtime == null) {
@@ -345,7 +469,7 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun dispatchActivityTransition(activityClass: String) {
-        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.onActivityTransition(activityClass) }
+        dispatchMode()?.let { runtimes[it]?.onActivityTransition(activityClass) }
     }
 
     @Synchronized
@@ -353,28 +477,40 @@ class RunSessionCoordinator(
         // A new session has already received onRunStarted() while synchronizing. Do not run the
         // idle-refresh hook again for the same broadcast; later refreshes still reach the runtime.
         if (synchronizeRunRequest()) return
-        if (onObserveCurrentPage != null && state.isRunRequested() && pageRoutedMode == null) {
+        if (onObserveCurrentPage != null && state.isRunRequested() && dispatchMode() == null) {
             onObserveCurrentPage.invoke()
             return
         }
-        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.onExternalRefresh() }
+        dispatchMode()?.let { runtimes[it]?.onExternalRefresh() }
     }
 
     @Synchronized
     fun isTrackedInteractionEvent(event: AccessibilityEventEnvelope): Boolean =
-        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.isTrackedInteractionEvent(event) } ?: false
+        dispatchMode()?.let { runtimes[it]?.isTrackedInteractionEvent(event) } ?: false
 
     @Synchronized
     fun interactionDiagnostics(event: AccessibilityEventEnvelope, nowMillis: Long): List<String> =
-        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.interactionDiagnostics(event, nowMillis) }.orEmpty()
+        dispatchMode()?.let { runtimes[it]?.interactionDiagnostics(event, nowMillis) }.orEmpty()
 
     @Synchronized
     fun handleManualInteractionFallback(event: AccessibilityEventEnvelope) {
-        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.handleManualInteractionFallback(event) }
+        dispatchMode()?.let { runtimes[it]?.handleManualInteractionFallback(event) }
     }
 
     @Synchronized
     fun resetRuntime(mode: RunMode, reason: String) {
+        if (onObserveCurrentPage != null) {
+            if (pageRuntimeSession.current()?.mode == mode) {
+                pageTransitionInProgress = true
+                try {
+                    stopPageRuntime(reason, preserveRecovery = true)
+                } finally {
+                    pageTransitionInProgress = false
+                }
+            }
+            if (state.isRunRequested()) onObserveCurrentPage.invoke()
+            return
+        }
         advanceRunGeneration()
         log.append("运行时租约隔离：事件=RESET；mode=$mode；reason=$reason；runGeneration=$runGeneration")
         // This entry point is the generation barrier used by the service composition layer.
@@ -385,6 +521,15 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun onAccessibilityServiceInterrupted(reason: String) {
+        if (onObserveCurrentPage != null) {
+            pageTransitionInProgress = true
+            try {
+                stopPageRuntime(reason, preserveRecovery = true) { it.onAccessibilityServiceInterrupted(reason) }
+            } finally {
+                pageTransitionInProgress = false
+            }
+            return
+        }
         val previous = activeMode()
         advanceRunGeneration()
         pageRoutedMode = null
@@ -395,7 +540,15 @@ class RunSessionCoordinator(
 
     @Synchronized
     fun onServiceDestroyed() {
-        advanceRunGeneration()
+        if (onObserveCurrentPage != null && pageRuntimeSession.current() != null) {
+            pageTransitionInProgress = true
+            try {
+                stopPageRuntime("SERVICE_DESTROYED", preserveRecovery = true)
+            } finally {
+                pageTransitionInProgress = false
+            }
+        } else advanceRunGeneration()
+        preparedRuntimeMode = null
         pageRoutedMode = null
         pageRuntimeSession.clear()
         log.append("无障碍服务租约隔离：事件=DESTROYED；runGeneration=$runGeneration")
