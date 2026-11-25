@@ -2026,6 +2026,29 @@ class AiReplyObservationRuntimeTest {
 
     @Test
     fun verifiedGreetingChatDetailRemainsInOwnedWorkflowAndStartsDraft() {
+        runGreetingChatDetailRouteCase()
+    }
+
+    @Test
+    fun dispatchedGreetingRowChatCandidateBeforeCallbackWaitsThenStartsDraft() {
+        runGreetingChatDetailRouteCase(pendingArrival = true)
+    }
+
+    @Test
+    fun dispatchedGreetingRowChatCandidateWithoutProofAtDeadlineUsesRecovery() {
+        runGreetingChatDetailRouteCase(pendingArrival = true, expireArrival = true)
+    }
+
+    @Test
+    fun pendingGreetingRowDoesNotHoldExplicitlyDifferentChatHeader() {
+        runGreetingChatDetailRouteCase(pendingArrival = true, conflictingHeader = true)
+    }
+
+    private fun runGreetingChatDetailRouteCase(
+        pendingArrival: Boolean = false,
+        expireArrival: Boolean = false,
+        conflictingHeader: Boolean = false
+    ) {
         val scheduler = FakeScheduler()
         val listActivity = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
         val verified = ContactRowIdentity(
@@ -2120,6 +2143,41 @@ class AiReplyObservationRuntimeTest {
                 isVisibleToUser = true
             ))
         )
+        if (pendingArrival) {
+            val lease = requireNotNull(owner.currentLease())
+            port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.NAVIGATING
+            port.receivedGreetingsNavigationEvidencePending = true
+            if (conflictingHeader) port.page = port.page.copy(chatTitleText = "与Different Contact对话")
+            // Device sequence: new chat tree, stale list Activity, then click feedback
+            // and terminal callback. The fresh candidate is not an accepted chat yet.
+            runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
+            scheduler.runNextWithDelay(300L)
+            assertEquals(0, port.ocrAsyncReadRequests)
+            assertEquals(0, greetingDrafts)
+            assertFalse(logs.any { it.contains("GREETING_CHAT_BINDING_CREATED") })
+            if (conflictingHeader) {
+                assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+                assertFalse(logs.any { it.contains("TRANSITION_EVIDENCE_WAIT") })
+                return
+            }
+            assertTrue(logs.any {
+                it.contains("TRANSITION_EVIDENCE_WAIT") && it.contains("CHAT_DETAIL_CANDIDATE")
+            })
+            assertEquals(lease, owner.currentLease())
+            assertFalse(runtime.isReceivedGreetingsRecoveryPending())
+            port.receivedGreetingsNavigationEvidencePending = false
+            if (expireArrival) {
+                scheduler.runNextWithDelay(750L)
+                assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+                assertTrue(logs.any {
+                    it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") && it.contains("PAGE_ROUTE_CHANGED")
+                })
+                assertEquals(0, port.ocrAsyncReadRequests)
+                assertEquals(0, greetingDrafts)
+                return
+            }
+            port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.DETAIL_READY
+        }
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
         scheduler.runNextWithDelay(300L)
         assertTrue(logs.any { it.contains("CHAT_LOCATORS_OFFSCREEN") })
@@ -8878,7 +8936,8 @@ class AiReplyObservationRuntimeTest {
         override fun isReceivedGreetingsNavigationAwaitingPageEvidence(snapshot: ChatPageSnapshot): Boolean =
             receivedGreetingsNavigationEvidencePending &&
                 snapshot.packageName == "com.immomo.momo" &&
-                (snapshot.pageKind == ChatPageKind.NON_CHAT || snapshot.pageKind == ChatPageKind.UNKNOWN)
+                (snapshot.pageKind == ChatPageKind.NON_CHAT || snapshot.pageKind == ChatPageKind.UNKNOWN ||
+                    snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE)
         override fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean =
             receivedGreetingsIdentityProfileProof &&
                 snapshot.packageName == "com.immomo.momo" &&

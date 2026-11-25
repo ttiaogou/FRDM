@@ -1385,16 +1385,30 @@ class AiReplyObservationRuntime(
             !ownsTask(RECEIVED_GREETINGS_TASK_ID) || recoveryContext.pending ||
             awaitingNormalInboxAfterGreetingsReturn || isSendConfirmationPending() ||
             isConversationDraftPending() || isSendControlRecoveryPending() ||
-            snapshot.packageName != targetPackage() ||
-            (snapshot.pageKind != ChatPageKind.NON_CHAT && snapshot.pageKind != ChatPageKind.UNKNOWN)
+            snapshot.packageName != targetPackage()
         ) return false
+        when (snapshot.pageKind) {
+            ChatPageKind.NON_CHAT, ChatPageKind.UNKNOWN -> Unit
+            ChatPageKind.CHAT_DETAIL_CANDIDATE -> {
+                // A new chat surface can appear before the row tap callback and Activity
+                // clue. Never apply this grace to an already bound conversation or an
+                // explicitly different chat header. The adapter owns the tap deadline.
+                if (greetingChatBinding != null) return false
+                val title = snapshot.chatTitleText
+                if (!title.isNullOrBlank() && ChatSessionManagementPolicy.matchChatHeader(
+                        receivedGreetingsTaskFlow.currentDisplayName(), title
+                    ) == null
+                ) return false
+            }
+            else -> return false
+        }
         val awaitingEvidence = runCatching {
             chatPagePort.isReceivedGreetingsNavigationAwaitingPageEvidence(snapshot)
         }.getOrDefault(false)
         if (!awaitingEvidence) return false
         // Preserve the last confirmed source snapshot for the next route comparison.
         // In particular, do not turn an unclassified observation into an accepted page.
-        onLog("收到招呼业务导航[TRANSITION_EVIDENCE_WAIT]：现有导航期限内目标页面证据未同步；保留原事务，只读复核")
+        onLog("收到招呼业务导航[TRANSITION_EVIDENCE_WAIT]：pageKind=${snapshot.pageKind}；现有导航期限内目标页面证据未同步；保留原事务，只读复核")
         scheduleFullInspectionAfter(RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS)
         return true
     }

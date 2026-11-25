@@ -4114,9 +4114,27 @@ internal class MomoSocialAdapter(
 
     override fun isReceivedGreetingsNavigationAwaitingPageEvidence(snapshot: ChatPageSnapshot): Boolean {
         if (snapshot.packageName != targetPackage ||
-            (snapshot.pageKind != ChatPageKind.NON_CHAT && snapshot.pageKind != ChatPageKind.UNKNOWN) ||
             sayHiSelectedGreeting == null || sayHiReadOnlyStageStartedAtMs <= 0L
         ) return false
+        when (snapshot.pageKind) {
+            ChatPageKind.NON_CHAT, ChatPageKind.UNKNOWN -> Unit
+            ChatPageKind.CHAT_DETAIL_CANDIDATE -> {
+                // Only a real, current row dispatch may account for a premature chat
+                // candidate. Reservation/pre-action delay, an avatar or BACK stage,
+                // and a rejected tap must not postpone route recovery here.
+                if (sayHiReadOnlyStage !in setOf(
+                        SayHiReadOnlyStage.ROW_TAP_PENDING, SayHiReadOnlyStage.WAITING_DETAIL
+                    ) || pendingSayHiRowTapSubmittedAtUptimeMs <= 0L ||
+                    pendingSayHiRowTapGestureCommandId == null || pendingSayHiRowTapTarget == null ||
+                    pendingSayHiRowTapWindowId < 0 ||
+                    sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.NOT_DISPATCHED ||
+                    sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.REJECTED ||
+                    sayHiSelectedIdentityStatus != MomoSayHiPlatformIdentityStatus.CONFIRMED ||
+                    sayHiSelectedContactIdentity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                ) return false
+            }
+            else -> return false
+        }
         // Read the adapter's original transaction state and deadline; never extend either.
         val timeoutMs = when (sayHiReadOnlyStage) {
             SayHiReadOnlyStage.AVATAR_TAP_PENDING -> SAYHI_GESTURE_TERMINAL_TIMEOUT_MS
