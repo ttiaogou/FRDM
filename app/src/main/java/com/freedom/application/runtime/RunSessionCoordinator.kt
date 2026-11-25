@@ -36,6 +36,7 @@ class RunSessionCoordinator(
 ) {
     private var observedMode: RunMode? = null
     private var observedRunRequested: Boolean = false
+    private var pageRoutedMode: RunMode? = null
     /** Read from the process-owned clock so a recreated Service cannot issue lower generations. */
     private val runGeneration: Long get() = generationClock.current()
 
@@ -72,6 +73,7 @@ class RunSessionCoordinator(
             log.finishRun("STOPPED", reason)
             observedMode = null
             observedRunRequested = false
+            pageRoutedMode = null
         }
     }
 
@@ -178,9 +180,18 @@ class RunSessionCoordinator(
     }
 
     @Synchronized
+    fun routePageTask(mode: RunMode?) {
+        pageRoutedMode = mode
+        log.append(
+            "页面任务路由[SET]：mode=" + (mode?.name ?: "NONE") +
+                "；runGeneration=" + runGeneration
+        )
+    }
+
+    @Synchronized
     fun dispatchTargetApplicationEvent(event: AccessibilityEventEnvelope) {
         synchronizeRunRequest()
-        activeMode()?.let { runtimes[it]?.onTargetApplicationEvent(event) }
+        (pageRoutedMode ?: activeMode())?.let { runtimes[it]?.onTargetApplicationEvent(event) }
     }
 
     @Synchronized
