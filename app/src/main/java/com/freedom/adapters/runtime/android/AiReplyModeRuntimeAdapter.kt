@@ -28,6 +28,7 @@ internal class AiReplyModeRuntimeAdapter(
         awaitingServiceReconnect = false
         runtime().reset("开始新运行前清理")
         runtime().scheduleInitialObservation()
+        onPageRuntimeReady(currentRunGeneration())
     }
 
     override fun onRunStopped(reason: String) {
