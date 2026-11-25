@@ -97,6 +97,8 @@ internal class GesturePolicyValidator(
                 !intent.angleDegrees.isCompatibleWith(intent.axis) -> "directional_swipe_axis_mismatch"
                 else -> null
             }
+            is GestureIntent.ImagePagingSwipe -> if (!validBounds(intent.viewport))
+                "image_paging_viewport_empty" else null
             is GestureIntent.CalibrationSwipe -> when {
                 !validDuration(intent.durationMs) -> "calibration_swipe_duration_out_of_range"
                 !validBounds(intent.region) -> "calibration_swipe_region_empty"

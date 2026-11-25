@@ -13,7 +13,15 @@ import com.freedom.core.accessibility.gesture.GestureKind
 import com.freedom.core.accessibility.gesture.GestureDynamicsPolicy
 import com.freedom.core.accessibility.gesture.toGestureCoordinateContext
 import com.freedom.core.accessibility.gesture.VerticalSwipeDirection
+import com.freedom.core.accessibility.api.GesturePathCommand
+import com.freedom.core.accessibility.api.GesturePoint
+import com.freedom.core.accessibility.gesture.HorizontalDirection
+import com.freedom.core.accessibility.gesture.HorizontalSwipeConfig
+import com.freedom.core.accessibility.gesture.HorizontalSwipePolicy
+import com.freedom.core.accessibility.gesture.ImagePagingDirection
 import kotlin.math.ceil
+import kotlin.math.hypot
+import kotlin.math.roundToLong
 import kotlin.random.Random
 
 /** 将已验证的业务意图和策略决策转换为不可变手势命令的结果。 */
@@ -75,6 +83,7 @@ internal class GestureCommandCompiler(
                 }
             is GestureIntent.DirectionalSwipe -> decision.algorithmId == GestureAlgorithmId.DIRECTIONAL_MOTION_PROFILE &&
                 decision.trajectory != null && decision.motion != null && decision.direction != null
+            is GestureIntent.ImagePagingSwipe -> decision.algorithmId == GestureAlgorithmId.IMAGE_PAGING_HORIZONTAL
             is GestureIntent.CalibrationSwipe -> decision.algorithmId == GestureAlgorithmId.CALIBRATION_CUBIC_BEZIER &&
                 decision.trajectory != null && decision.motion != null && decision.direction != null
         }
@@ -182,6 +191,11 @@ internal class GestureCommandCompiler(
                     executionContext = request.executionContext
                 )
             }
+            is GestureIntent.ImagePagingSwipe -> {
+                val viewport = intersect(intent.viewport, systemGestureSafeBounds, systemGestureSafeBounds) ?: return null
+                compileImagePagingSwipe(request.id, request.description, viewport, intent.direction,
+                    policyDecision, request.executionContext)
+            }
             is GestureIntent.CalibrationSwipe -> {
                 if (!isValidDuration(intent.durationMs)) return null
                 val region = intersect(intent.region, systemGestureSafeBounds, systemGestureSafeBounds) ?: return null
@@ -199,6 +213,92 @@ internal class GestureCommandCompiler(
         }
     }
 
+
+    /** Preserve the independent algorithm's cubic geometry and nominal total duration.
+     *  Adapt only the wire representation into the existing continuous-pointer chain.
+     */
+    private fun compileImagePagingSwipe(
+        requestId: String,
+        description: String,
+        viewport: ScreenRect,
+        direction: ImagePagingDirection,
+        policyDecision: GesturePolicyDecision,
+        executionContext: com.freedom.core.accessibility.gesture.GestureExecutionContext
+    ): GestureCommand? {
+        val region = GestureGeometryPolicy.validationRegion(viewport) ?: return null
+        val stroke = HorizontalSwipePolicy.createSwipe(
+            HorizontalSwipeConfig(
+                direction = if (direction == ImagePagingDirection.RIGHT)
+                    HorizontalDirection.LEFT_TO_RIGHT else HorizontalDirection.RIGHT_TO_LEFT,
+                minX = region.left, maxX = region.right,
+                minY = region.top, maxY = region.bottom,
+                baseY = region.top + (region.bottom - region.top) / 2f
+            ), random
+        ) ?: return null
+        val strokes = adaptHorizontalStroke(stroke) ?: return null
+        val primary = strokes.first()
+        return GestureCommand(
+            id = requestId,
+            kind = GestureKind.SWIPE,
+            gesture = GestureSpec(
+                commands = primary.commands,
+                durationMs = primary.durationMs,
+                startDelayMs = primary.startDelayMs,
+                willContinue = primary.willContinue,
+                additionalStrokes = strokes.drop(1)
+            ),
+            validationRegion = region,
+            executionContext = executionContext,
+            description = description,
+            preDispatchDelayMs = policyDecision.preDispatchDelayMs,
+            touchProfile = policyDecision.touch
+        )
+    }
+
+    private fun adaptHorizontalStroke(stroke: GestureStrokeSpec): List<GestureStrokeSpec>? {
+        if (stroke.startDelayMs != 0L || stroke.continuationOfPrevious || stroke.willContinue) return null
+        val start = (stroke.commands.firstOrNull() as? GesturePathCommand.MoveTo)?.point ?: return null
+        val curves = stroke.commands.drop(1).map { it as? GesturePathCommand.CubicTo ?: return null }
+        if (curves.size !in 3..8 || stroke.durationMs < curves.size.toLong()) return null
+        val starts = listOf(start) + curves.dropLast(1).map { it.end }
+        val lengths = curves.indices.map { cubicArcLength(starts[it], curves[it]) }
+        if (lengths.any { !it.isFinite() || it <= 0.0 }) return null
+        val total = lengths.sum()
+        if (!total.isFinite() || total <= 0.0) return null
+        var distance = 0.0
+        var elapsed = 0L
+        return curves.indices.map { index ->
+            distance += lengths[index]
+            val endTime = if (index == curves.lastIndex) stroke.durationMs
+                else (stroke.durationMs * distance / total).roundToLong()
+            if (endTime <= elapsed) return null
+            GestureStrokeSpec(
+                commands = listOf(GesturePathCommand.MoveTo(starts[index]), curves[index]),
+                durationMs = endTime - elapsed,
+                startDelayMs = elapsed,
+                continuationOfPrevious = index > 0,
+                willContinue = index < curves.lastIndex
+            ).also { elapsed = endTime }
+        }
+    }
+
+    private fun cubicArcLength(start: GesturePoint, curve: GesturePathCommand.CubicTo): Double {
+        var previousX = start.x.toDouble()
+        var previousY = start.y.toDouble()
+        var length = 0.0
+        for (step in 1..32) {
+            val t = step / 32.0
+            val u = 1.0 - t
+            val x = u * u * u * start.x + 3 * u * u * t * curve.control1.x +
+                3 * u * t * t * curve.control2.x + t * t * t * curve.end.x
+            val y = u * u * u * start.y + 3 * u * u * t * curve.control1.y +
+                3 * u * t * t * curve.control2.y + t * t * t * curve.end.y
+            length += hypot(x - previousX, y - previousY)
+            previousX = x
+            previousY = y
+        }
+        return length
+    }
 
     private fun compileDynamicSwipe(
         requestId: String,

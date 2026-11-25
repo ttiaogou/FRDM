@@ -51,6 +51,12 @@ sealed interface GestureIntent {
         val axis: GestureIntentAxis = GestureIntentAxis.FREE_ANGLE
     ) : GestureIntent
 
+    /** One image-page swipe; geometry and duration belong to the independent Runtime policy. */
+    data class ImagePagingSwipe(
+        val viewport: ScreenRect,
+        val direction: ImagePagingDirection
+    ) : GestureIntent
+
     /** Explicit, user-requested gesture on Freedom's own calibration screen. */
     data class CalibrationSwipe(
         val region: ScreenRect,
@@ -60,6 +66,8 @@ sealed interface GestureIntent {
 
 /** Axis intent is semantic metadata; it does not expose a physical path or platform implementation. */
 enum class GestureIntentAxis { HORIZONTAL, VERTICAL, FREE_ANGLE }
+
+enum class ImagePagingDirection { LEFT, RIGHT }
 
 /** Vertical movement is expressed semantically; business code does not calculate endpoints. */
 enum class VerticalSwipeDirection {
@@ -129,6 +137,7 @@ data class GestureIntentRequest(
             is GestureIntent.VerticalSwipe,
             is GestureIntent.FeedSwipe,
             is GestureIntent.DirectionalSwipe,
+            is GestureIntent.ImagePagingSwipe,
             is GestureIntent.CalibrationSwipe -> GestureKind.SWIPE
         }
     val feedbackIntent: GestureFeedbackIntent
