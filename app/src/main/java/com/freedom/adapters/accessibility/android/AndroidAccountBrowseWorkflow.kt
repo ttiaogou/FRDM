@@ -1704,7 +1704,8 @@ internal class AndroidAccountBrowseWorkflow(
                     adapterFingerprint = page.fingerprint
                 ),
                 observationGeneration = currentRunGeneration(),
-                runGeneration = currentRunGeneration()
+                runGeneration = currentRunGeneration(),
+                sourceTaskId = "ACCOUNT_BROWSE"
             )
         )
         return page
