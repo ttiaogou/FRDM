@@ -752,7 +752,10 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
-            onLog = addLog
+            onLog = addLog,
+            onPageRuntimeReady = { generation ->
+                runSessionCoordinator.markPageRuntimeReady(generation)
+            }
         )
     }
     val runSessionCoordinator: RunSessionCoordinator by lazy(LazyThreadSafetyMode.NONE) {
@@ -768,6 +771,10 @@ internal class AccessibilityServiceDependencies internal constructor(
                     },
                     onReadinessInvalidated = { reason ->
                         targetAppReadinessController.invalidate(reason, SystemClock.uptimeMillis())
+                    },
+                    currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+                    onPageRuntimeReady = { generation ->
+                        runSessionCoordinator.markPageRuntimeReady(generation)
                     }
                 )
             ),
