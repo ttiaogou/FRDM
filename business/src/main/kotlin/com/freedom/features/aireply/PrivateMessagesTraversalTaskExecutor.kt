@@ -116,6 +116,7 @@ internal fun assessPrivateListRecoveryFault(
 }
 
 private const val UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS = 2
+private const val COLLECTION_POSITION_PREFIX = "collection-position:"
 
 /** A complete, read-only decision packet for one fresh inbox snapshot. */
 internal data class PrivateMessagesListSnapshotEvaluation(
@@ -431,6 +432,57 @@ internal class PrivateMessagesTraversalTaskExecutor {
                 "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
         }
 
+    // A collection range is only position evidence. Keep the old identity/geometry keys
+    // unchanged for checkpoint restoration, identity return and incomplete-row safety gates.
+    private fun collectionRows(snapshot: ChatPageSnapshot): List<Int>? {
+        if (snapshot.pageKind != ChatPageKind.CHAT_LIST || snapshot.chatListExtractionTruncated ||
+            snapshot.chatListViewport?.isEmpty != false || snapshot.windowGeneration <= 0L ||
+            snapshot.windowIdentityKey() == null
+        ) return null
+        val count = snapshot.chatListCollectionRowCount ?: return null
+        val rows = snapshot.chatListVisibleCollectionRows
+        return rows.takeIf {
+            count > 0 && it.isNotEmpty() && it.all { row -> row in 0 until count } &&
+                it.zipWithNext().all { (a, b) -> b == a + 1 }
+        }
+    }
+
+    private fun collectionPositionKey(snapshot: ChatPageSnapshot): String? =
+        collectionRows(snapshot)?.let { rows ->
+            "$COLLECTION_POSITION_PREFIX${snapshot.windowIdentityKey()}:${rows.first()}:${rows.last()}"
+        }
+
+    /** Null means no independent boundary evidence; false prevents a false no-motion boundary. */
+    fun collectionBoundaryEvidence(snapshot: ChatPageSnapshot, toTop: Boolean): Boolean? {
+        val rows = collectionRows(snapshot) ?: return null
+        val count = snapshot.chatListCollectionRowCount ?: return null
+        val atEdge = if (toTop) rows.first() == 0 else rows.last() == count - 1
+        val canScroll = if (toTop) snapshot.chatListCanScrollBackward else snapshot.chatListCanScrollForward
+        if (!atEdge || canScroll == true) return false
+        if (canScroll == null) return null
+        // A missing pair of scroll actions on a multi-viewport list is not proof of an edge.
+        val opposite = if (toTop) snapshot.chatListCanScrollForward else snapshot.chatListCanScrollBackward
+        if (rows.size < count && opposite != true) return null
+        return true
+    }
+
+    /** Transient scroll baseline: compare row range first; retain old evidence as fallback. */
+    fun scrollPositionKeys(snapshot: ChatPageSnapshot): List<String> {
+        val legacy = visibleSessionKeys(snapshot)
+        if (legacy.isEmpty()) return legacy
+        return collectionPositionKey(snapshot)?.let { listOf(it) + legacy } ?: legacy
+    }
+
+    /** Keep the independent, complete-row boundary stability check; never downgrade a
+     * collection-proven boundary to an identity-only observation when evidence disappears. */
+    fun boundaryConfirmationKeys(snapshot: ChatPageSnapshot): List<String> {
+        val legacy = visibleSessionKeys(snapshot)
+        if (legacy.isEmpty()) return legacy
+        val position = collectionPositionKey(snapshot) ?: return legacy
+        return listOf("$position:${snapshot.chatListCollectionRowCount}:" +
+            "${snapshot.chatListCanScrollForward}:${snapshot.chatListCanScrollBackward}") + legacy
+    }
+
     fun ambiguousIdentityKeys(candidates: List<ChatListCandidateSnapshot>): Set<String> {
         val fullyVisible = candidates.filter {
             it.selectionClass == "PRIVATE_CHAT" && it.rowVisibleToUser &&
@@ -631,7 +683,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         snapshot: ChatPageSnapshot,
         wasWaitingForUnread: Boolean,
         maxNoProgressScrolls: Int,
-        allowExpectedSessionReturnViewportChange: Boolean = false
+        allowExpectedSessionReturnViewportChange: Boolean = false,
+        allowCollectionTopConfirmation: Boolean = true
     ): PrivateMessagesListSnapshotEvaluation {
         val snapshotAmbiguousKeys = ambiguousIdentityKeys(snapshot.chatListCandidates)
         val incompleteUnreadEvidenceBlocked = observeIncompleteUnreadEvidence(snapshot)
@@ -653,11 +706,12 @@ internal class PrivateMessagesTraversalTaskExecutor {
 
         val hadPendingScrollBaseline = pendingScrollBaseline != null
         val visibleKeys = visibleSessionKeys(snapshot)
-        val scrollDecision = consumePendingScrollObservation(
-            visibleKeys = visibleKeys,
-            maxNoProgressScrolls = maxNoProgressScrolls
+        val wasScrollingToTop = pendingScrollToTop
+        val observedScrollDecision = consumePendingScrollObservation(
+            visibleKeys = scrollPositionKeys(snapshot),
+            maxNoProgressScrolls = maxNoProgressScrolls,
+            boundaryEvidence = collectionBoundaryEvidence(snapshot, toTop = wasScrollingToTop)
         )
-
         val viewportPositionInvalidated = if (allowExpectedSessionReturnViewportChange) {
             false
         } else {
@@ -668,6 +722,15 @@ internal class PrivateMessagesTraversalTaskExecutor {
                 snapshot = snapshot
             )
         }
+        // Do not supersede an existing viewport recovery decision. Reuse the independent
+        // boundary verifier only within the current valid traversal.
+        val scrollDecision = if (allowCollectionTopConfirmation && !viewportPositionInvalidated &&
+            !wasWaitingForUnread && !atTop && visibleKeys.isNotEmpty() &&
+            (!hadPendingScrollBaseline || wasScrollingToTop) &&
+            (!initialInboxTopPositioningCompleted || phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP) &&
+            collectionBoundaryEvidence(snapshot, toTop = true) == true
+        ) PrivateMessagesScrollObservationDecision.TOP_BOUNDARY_CANDIDATE
+        else observedScrollDecision
         if (visibleKeys.isNotEmpty()) lastStableSessionListVisibleKeys = visibleKeys
 
         val candidatesEmpty = snapshot.chatListCandidates.isEmpty()
@@ -913,11 +976,19 @@ internal class PrivateMessagesTraversalTaskExecutor {
      */
     fun consumePendingScrollObservation(
         visibleKeys: List<String>,
-        maxNoProgressScrolls: Int
+        maxNoProgressScrolls: Int,
+        boundaryEvidence: Boolean? = null
     ): PrivateMessagesScrollObservationDecision {
         val baseline = pendingScrollBaseline
             ?: return PrivateMessagesScrollObservationDecision.NO_PENDING_SCROLL
-        val positionChanged = visibleKeys != baseline
+        val previousPosition = baseline.firstOrNull()?.takeIf { it.startsWith(COLLECTION_POSITION_PREFIX) }
+        val currentPosition = visibleKeys.firstOrNull()?.takeIf { it.startsWith(COLLECTION_POSITION_PREFIX) }
+        val positionChanged = if (previousPosition != null && currentPosition != null) {
+            previousPosition != currentPosition
+        } else {
+            baseline.filterNot { it.startsWith(COLLECTION_POSITION_PREFIX) } !=
+                visibleKeys.filterNot { it.startsWith(COLLECTION_POSITION_PREFIX) }
+        }
         val wasScrollingToTop = pendingScrollToTop
         pendingScrollBaseline = null
         pendingScrollToTop = false
@@ -929,7 +1000,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
                 return PrivateMessagesScrollObservationDecision.TOP_VIEWPORT_CHANGED
             }
             noProgressScrollCount += 1
-            return if (noProgressScrollCount < maxNoProgressScrolls) {
+            return if (noProgressScrollCount < maxNoProgressScrolls || boundaryEvidence == false) {
                 atTop = false
                 PrivateMessagesScrollObservationDecision.TOP_NO_PROGRESS_RETRY
             } else {
@@ -942,7 +1013,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
             return if (
                 (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM ||
                     phase == SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) &&
-                noProgressScrollCount >= maxNoProgressScrolls
+                noProgressScrollCount >= maxNoProgressScrolls && boundaryEvidence != false
             ) {
                 PrivateMessagesScrollObservationDecision.BOTTOM_BOUNDARY_CANDIDATE
             } else {

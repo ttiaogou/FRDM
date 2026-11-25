@@ -5639,6 +5639,10 @@ internal class MomoSocialAdapter(
             nodeTreeProbeVisitedNodeCount = treeEvidence.visitedNodeCount,
             nodeTreeProbeTruncated = treeEvidence.truncated,
             chatListViewport = chatListExtraction.viewport,
+            chatListCollectionRowCount = chatListExtraction.collectionRowCount,
+            chatListVisibleCollectionRows = chatListExtraction.visibleCollectionRows,
+            chatListCanScrollForward = chatListExtraction.canScrollForward,
+            chatListCanScrollBackward = chatListExtraction.canScrollBackward,
             screenBounds = ScreenRect(
                 left = 0,
                 top = 0,

@@ -1227,6 +1227,85 @@ class PrivateMessagesTraversalTaskExecutorTest {
     private fun key(candidate: ChatListCandidateSnapshot): String =
         com.freedom.features.aireply.ports.ChatSessionManagementPolicy.stableSessionKey(candidate)
 
+    @Test
+    fun collectionEvidenceProposesTopWithoutAProbeScroll() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val row = candidate(3, "Unread", ChatUnreadStatus.UNREAD)
+        val top = snapshot(row).copy(
+            windowGeneration = 1L,
+            chatListCollectionRowCount = 67,
+            chatListVisibleCollectionRows = (0..7).toList(),
+            chatListCanScrollForward = true,
+            chatListCanScrollBackward = false
+        )
+        assertEquals(true, executor.collectionBoundaryEvidence(top, toTop = true))
+        assertEquals(
+            PrivateMessagesScrollObservationDecision.TOP_BOUNDARY_CANDIDATE,
+            executor.evaluateListSnapshot(top, false, 2).scrollDecision
+        )
+        assertFalse(executor.initialInboxTopPositioningCompleted)
+        assertEquals(null, executor.pendingScrollBaseline)
+        assertEquals(PrivateMessagesScrollObservationDecision.NO_PENDING_SCROLL,
+            executor.evaluateListSnapshot(top, false, 2, allowCollectionTopConfirmation = false).scrollDecision)
+        assertEquals(false, executor.collectionBoundaryEvidence(top.copy(chatListCanScrollBackward = true), toTop = true))
+        assertEquals(false, executor.collectionBoundaryEvidence(top.copy(
+            chatListVisibleCollectionRows = (5..14).toList(),
+            chatListCanScrollBackward = true
+        ), toTop = true))
+        assertEquals(null, executor.collectionBoundaryEvidence(top.copy(
+            chatListVisibleCollectionRows = listOf(0, 0, 1)
+        ), toTop = true))
+        assertEquals(null, executor.collectionBoundaryEvidence(top.copy(
+            chatListCanScrollBackward = null
+        ), toTop = true))
+        assertEquals(null, executor.collectionBoundaryEvidence(top.copy(
+            chatListExtractionTruncated = true
+        ), toTop = true))
+        assertFalse(executor.boundaryConfirmationKeys(top) ==
+            executor.boundaryConfirmationKeys(top.copy(chatListVisibleCollectionRows = emptyList())))
+    }
+
+    @Test
+    fun collectionRangeMeasuresScrollWithoutExactCoordinateEquality() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val first = snapshot(candidate(0, "Same", ChatUnreadStatus.UNREAD, top = 100)).copy(
+            windowGeneration = 1L,
+            chatListCollectionRowCount = 67,
+            chatListVisibleCollectionRows = (5..14).toList(),
+            chatListCanScrollForward = true,
+            chatListCanScrollBackward = true
+        )
+        val jitter = first.copy(chatListCandidates = listOf(
+            candidate(1, "Same", ChatUnreadStatus.UNREAD, top = 105)
+        ))
+        assertFalse(executor.visibleSessionKeys(first) == executor.visibleSessionKeys(jitter))
+        executor.pendingScrollBaseline = executor.scrollPositionKeys(first)
+        assertEquals(
+            PrivateMessagesScrollObservationDecision.BOTTOM_NO_PROGRESS,
+            executor.consumePendingScrollObservation(executor.scrollPositionKeys(jitter), 2, false)
+        )
+        executor.pendingScrollBaseline = executor.scrollPositionKeys(jitter)
+        val moved = jitter.copy(chatListVisibleCollectionRows = (13..22).toList())
+        assertEquals(
+            PrivateMessagesScrollObservationDecision.BOTTOM_VIEWPORT_CHANGED,
+            executor.consumePendingScrollObservation(executor.scrollPositionKeys(moved), 2, false)
+        )
+        executor.pendingScrollBaseline = executor.scrollPositionKeys(first)
+        executor.pendingScrollToTop = true
+        assertEquals(
+            PrivateMessagesScrollObservationDecision.TOP_VIEWPORT_CHANGED,
+            executor.consumePendingScrollObservation(
+                executor.scrollPositionKeys(jitter.copy(chatListVisibleCollectionRows = emptyList())), 2
+            )
+        )
+        executor.pendingScrollBaseline = executor.scrollPositionKeys(first)
+        executor.pendingScrollToTop = true
+        assertEquals(
+            PrivateMessagesScrollObservationDecision.TOP_NO_PROGRESS_RETRY,
+            executor.consumePendingScrollObservation(executor.scrollPositionKeys(first), 1, false)
+        )
+    }
+
     private fun snapshot(vararg candidates: ChatListCandidateSnapshot) = ChatPageSnapshot(
         packageName = "com.immomo.momo",
         activityClass = "MaintabActivity",

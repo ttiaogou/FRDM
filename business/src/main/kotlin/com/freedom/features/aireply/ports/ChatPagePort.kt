@@ -294,7 +294,12 @@ data class ChatPageSnapshot(
     /** Adapter-derived semantic locator for navigating to the session list from its main tab host. */
     val sessionListNavigationTarget: SessionListNavigationTarget? = null,
     /** Identity generation of the active Android window; prevents reusing anchors across windows. */
-    val windowGeneration: Long = 0L
+    val windowGeneration: Long = 0L,
+    /** Collection positions from the same inbox observation, not child indexes or contact IDs. */
+    val chatListCollectionRowCount: Int? = null,
+    val chatListVisibleCollectionRows: List<Int> = emptyList(),
+    val chatListCanScrollForward: Boolean? = null,
+    val chatListCanScrollBackward: Boolean? = null
 ) {
     /** Stable physical anchor for the bottom message tab, even while another main tab is active. */
     private fun identityWindowRef() = inputFieldTarget?.window

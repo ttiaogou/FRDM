@@ -5379,7 +5379,8 @@ class AiReplyObservationRuntime(
             snapshot = snapshot,
             wasWaitingForUnread = wasWaitingForUnread,
             maxNoProgressScrolls = MAX_NO_PROGRESS_SCROLLS,
-            allowExpectedSessionReturnViewportChange = allowExpectedSessionReturnViewportChange
+            allowExpectedSessionReturnViewportChange = allowExpectedSessionReturnViewportChange,
+            allowCollectionTopConfirmation = !receivedGreetingsTaskActive
         )
         privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
         if (hadUnknownUnreadBeforeFreshSnapshot &&
@@ -5436,7 +5437,14 @@ class AiReplyObservationRuntime(
             }
             PrivateMessagesScrollObservationDecision.TOP_NO_PROGRESS_RETRY -> {
                 onLog("AI 会话管理：顶部定位后新快照未见位置变化；稳定确认计数=${privateMessagesTraversalTaskExecutor.noProgressScrollCount}")
-                scrollSessionList(snapshot, toTop = true)
+                if (privateMessagesTraversalTaskExecutor.noProgressScrollCount >= MAX_NO_PROGRESS_SCROLLS &&
+                    privateMessagesTraversalTaskExecutor.collectionBoundaryEvidence(snapshot, toTop = true) == false
+                ) {
+                    sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                    scheduleSessionListStabilityRetry("集合位置仍指示未到顶部，等待新快照复核")
+                } else {
+                    scrollSessionList(snapshot, toTop = true)
+                }
                 return
             }
             PrivateMessagesScrollObservationDecision.TOP_BOUNDARY_CANDIDATE -> {
@@ -5647,13 +5655,16 @@ class AiReplyObservationRuntime(
         if (snapshot.nodeTreeProbeTruncated) {
             onLog("AI 会话管理：辅助节点树探针已截断；主会话列表提取器仍完整，使用已确认主列表进行有限边界复核")
         }
-        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = visibleKeys
+        privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys =
+            privateMessagesTraversalTaskExecutor.boundaryConfirmationKeys(snapshot)
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = toTop
         privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         onLog(
             if (toTop) {
-                "AI 会话管理：顶部连续无位移仅作为候选边界；等待延迟新快照复核"
+                if (privateMessagesTraversalTaskExecutor.collectionBoundaryEvidence(snapshot, toTop = true) == true) {
+                    "AI 会话管理：集合行位置与滚动能力已指示顶部；无需试探滑动，等待延迟新快照复核"
+                } else "AI 会话管理：顶部连续无位移仅作为候选边界；等待延迟新快照复核"
             } else {
                 "AI 会话管理：底部连续无位移仅作为候选边界；等待延迟新快照复核"
             }
@@ -5700,7 +5711,7 @@ class AiReplyObservationRuntime(
                 recoverRetryablePrivateList("PRIVATE_LIST_BOUNDARY_PAGE_CHANGED")
                 return@schedule
             }
-            val currentKeys = privateMessagesTraversalTaskExecutor.visibleSessionKeys(fresh)
+            val currentKeys = privateMessagesTraversalTaskExecutor.boundaryConfirmationKeys(fresh)
             if (currentKeys.isEmpty() || fresh.chatListExtractionTruncated) {
                 privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
                 privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
@@ -5712,7 +5723,10 @@ class AiReplyObservationRuntime(
                 onLog("AI 会话管理：延迟复核的辅助节点树探针仍不完整；主列表提取和页面锚点一致，继续有限稳定确认")
             }
             val expectedKeys = privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys
-            if (currentKeys != expectedKeys) {
+            if (currentKeys != expectedKeys || privateMessagesTraversalTaskExecutor.collectionBoundaryEvidence(
+                    fresh, privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop
+                ) == false
+            ) {
                 val wasTopCheck = privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop
                 privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
                 privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
@@ -5746,7 +5760,7 @@ class AiReplyObservationRuntime(
                 if (!privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted) {
                     privateMessagesTraversalTaskExecutor.initialInboxTopPositioningCompleted = true
                     sessionManagerState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
-                    onLog("AI Reply 启动顶部定位[CONFIRMED]：列表顶部已通过连续无位移及延迟独立快照复核；下一步执行首次向上准入滑动")
+                    onLog("AI Reply 启动顶部定位[CONFIRMED]：列表顶部已通过位置证据及延迟独立快照复核；下一步执行首次向上准入滑动")
                 } else {
                     sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
                     onLog("AI 会话管理：顶部边界经延迟独立快照复核通过；检查顶部当前可见会话行")
@@ -7190,6 +7204,15 @@ class AiReplyObservationRuntime(
                 return
             }
         }
+        if (toTop && !receivedGreetingsTaskActive &&
+            privateMessagesTraversalTaskExecutor.collectionBoundaryEvidence(fresh, toTop = true) == true
+        ) {
+            val keys = privateMessagesTraversalTaskExecutor.visibleSessionKeys(fresh)
+            if (keys.isNotEmpty()) {
+                beginBoundaryStabilityConfirmation(keys, toTop = true, snapshot = fresh)
+                return
+            }
+        }
         val listViewport = fresh.chatListViewport
         if (listViewport == null || listViewport.isEmpty ||
             listViewport.width < 240 || listViewport.height < 240
@@ -7275,14 +7298,9 @@ class AiReplyObservationRuntime(
         }
         // The baseline measures viewport movement, not click eligibility. Keep blocked rows in
         // this set so a viewport containing only blocked identities is still measurable.
-        // Use the exact same viewport fingerprint on both sides of the comparison.
-        // handleSessionListPage() compares complete visible-row identity and screen bounds so a
-        // RecyclerView that is still moving cannot look stationary. Row indexes are intentionally
-        // excluded because auxiliary dynamic cards can change list child indexes independently.
-        // An identity-only baseline here would never equal that geometry-aware snapshot,
-        // causing every completed swipe to be misclassified as movement and preventing
-        // the no-progress boundary confirmation from ever starting.
-        privateMessagesTraversalTaskExecutor.pendingScrollBaseline = privateMessagesTraversalTaskExecutor.visibleSessionKeys(fresh)
+        // Collection positions measure progress independently of exact coordinates or child indexes.
+        // Both sides retain the existing complete-row evidence for missing collection metadata.
+        privateMessagesTraversalTaskExecutor.pendingScrollBaseline = privateMessagesTraversalTaskExecutor.scrollPositionKeys(fresh)
         privateMessagesTraversalTaskExecutor.pendingScrollToTop = toTop
         sessionManagerState = SessionManagerState.SCROLLING_SESSION_LIST
         val actionGeneration = sessionActionGeneration
