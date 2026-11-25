@@ -216,7 +216,9 @@ fun interface PageObservationSnapshotSource {
  * Process-local read-only bus for fresh page observations. Classifiers can be registered during
  * composition after their existing runtimes are constructed; publishing never performs UI work.
  */
-class UnifiedPageObservationBus {
+class UnifiedPageObservationBus(
+    private val onDecision: (PageObservationSnapshot, UnifiedPageObservationMerger.Decision) -> Unit = { _, _ -> }
+) {
     private val classifiers = mutableListOf<PageObservationSnapshotClassifier>()
     private var merger = UnifiedPageObservationMerger(emptyList())
 
@@ -227,6 +229,9 @@ class UnifiedPageObservationBus {
     }
 
     @Synchronized
-    fun observe(snapshot: PageObservationSnapshot): UnifiedPageObservationMerger.Decision =
-        merger.classify(snapshot)
+    fun observe(snapshot: PageObservationSnapshot): UnifiedPageObservationMerger.Decision {
+        val decision = merger.classify(snapshot)
+        onDecision(snapshot, decision)
+        return decision
+    }
 }
