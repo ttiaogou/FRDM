@@ -760,8 +760,8 @@ class AccountBrowseManualRecoveryTest {
         onReadOnlyObservation: () -> Unit = {},
         onDetailLoad: () -> Unit = {},
         onDetailReturn: () -> Unit = {},
-        onFeedStep: () -> Unit = {},
-        isTouchActive: () -> Boolean = { false }
+        isTouchActive: () -> Boolean = { false },
+        onFeedStep: () -> Unit = {}
     ): AccountBrowseRuntime = AccountBrowseRuntime(
         scheduler = scheduler,
         onReadOnlyRecoveryObservation = onReadOnlyObservation,
