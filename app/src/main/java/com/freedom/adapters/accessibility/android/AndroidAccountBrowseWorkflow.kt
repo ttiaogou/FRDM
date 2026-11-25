@@ -131,7 +131,7 @@ internal class AndroidAccountBrowseWorkflow(
                 } else {
                     com.freedom.core.runtime.PageClassification.UNKNOWN
                 }
-            BrowsePageKind.DETAIL -> com.freedom.core.runtime.PageClassification.CHAT_DETAIL
+            BrowsePageKind.DETAIL, BrowsePageKind.IMAGE_VIEWER -> com.freedom.core.runtime.PageClassification.CHAT_DETAIL
             else -> com.freedom.core.runtime.PageClassification.UNKNOWN
         }
     }
@@ -445,7 +445,7 @@ internal class AndroidAccountBrowseWorkflow(
             AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD, AccountBrowsePhase.DETAIL_DWELL,
             AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE
         ) && !accountBrowseRuntime.hasPendingCheckpointVerification()
-        val recovered = if (detailPhase && page.pageKind == BrowsePageKind.DETAIL) {
+        val recovered = if (detailPhase && page.pageKind.isDynamicContent) {
             val identity = if (!isRetainedObstructionEvidence(page.reason) &&
                 socialBrowsePort.inspectPopup() == null
             ) socialBrowsePort.inspectDetail(accountBrowseSession.detailFingerprint) else null
@@ -2332,9 +2332,8 @@ internal class AndroidAccountBrowseWorkflow(
 
     private fun checkDetailPageLoaded() {
         val page = obtainTargetPageOrPause() ?: return
-        val isFeedPage = page.pageKind == BrowsePageKind.DYNAMIC_FEED
         val fingerprint = page.fingerprint
-        if (!isFeedPage && page.pageKind == BrowsePageKind.DETAIL &&
+        if (page.pageKind.isDynamicContent &&
             page.confidence >= 80 && !isRetainedObstructionEvidence(page.reason) &&
             fingerprint != accountBrowseSession.sourceFingerprint && fingerprint.isNotBlank()
         ) {
@@ -2346,14 +2345,15 @@ internal class AndroidAccountBrowseWorkflow(
             }
             if (accountBrowseSession.stableSamples >= REQUIRED_STABLE_PAGE_SAMPLES) {
                 accountBrowseSession.detailFingerprint = fingerprint
-                accountBrowseSession.detailActivityClass = accountBrowseSession.currentActivityClass
-                    .ifBlank { socialBrowsePort.detailActivityClass }
+                accountBrowseSession.detailActivityClass = if (page.pageKind == BrowsePageKind.IMAGE_VIEWER) {
+                    page.activityClass
+                } else accountBrowseSession.currentActivityClass.ifBlank { socialBrowsePort.detailActivityClass }
                 val dwell = scrollExecutor.randomBrowseDelayMs()
                 accountBrowsePhase = AccountBrowsePhase.DETAIL_DWELL
                 accountBrowseSession.detailDwellRemainingMs = dwell
                 accountBrowseSession.detailDwellStartedAt = System.currentTimeMillis()
                 accountBrowseSession.detailDwellDueAt = accountBrowseSession.detailDwellStartedAt + dwell
-                addLog("动态详情已确认载入；本次阅读停留 ${dwell / 1000.0} 秒")
+                addLog("动态详情已确认载入；内容类型=${page.pageKind.name}；本次阅读停留 ${dwell / 1000.0} 秒")
                 scheduleAccountBrowseStep(dwell)
                 return
             }
@@ -2393,7 +2393,8 @@ internal class AndroidAccountBrowseWorkflow(
         // contains package/windowId/generation, so an intervening dialog or Activity/window switch
         // cannot reuse the earlier positive result.
         val preBackPage = socialBrowsePort.inspectPage()
-        if (preBackPage.pageKind != BrowsePageKind.DETAIL ||
+        if (!preBackPage.pageKind.isDynamicContent || preBackPage.confidence < 80 ||
+            isRetainedObstructionEvidence(preBackPage.reason) ||
             preBackPage.fingerprint != identity.fingerprint || preBackPage.fingerprint.isBlank()
         ) {
             beginDynamicNavigationRecovery(
@@ -2460,7 +2461,12 @@ internal class AndroidAccountBrowseWorkflow(
         }
 
         if (socialBrowsePort.isImageBrowserActivity(activityClass)) {
-            if (accountBrowsePhase == AccountBrowsePhase.DETAIL_DWELL) {
+            // A picture opened directly from the feed is already the current detail.
+            // Duplicate Activity events must not turn its ordinary dwell into a wait
+            // for an external return. Preserve the existing nested-detail behavior.
+            if (accountBrowsePhase == AccountBrowsePhase.DETAIL_DWELL &&
+                !socialBrowsePort.isImageBrowserActivity(accountBrowseSession.detailActivityClass)
+            ) {
                 accountBrowseSession.imageBrowserReturnActivityClass = previousActivity
                     .takeIf { it.isNotBlank() && !socialBrowsePort.isImageBrowserActivity(it) }
                     ?: socialBrowsePort.detailActivityClass
@@ -2690,6 +2696,22 @@ internal class AndroidAccountBrowseWorkflow(
             addLog("动态详情返回后检测到临时遮挡；仅保留上一页面上下文，不认定已经返回列表，等待遮挡消失后重新确认")
             accountBrowseSession.returnedStableSamples = 0
             accountBrowseSession.lastReturnedSnapshot = ""
+            scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
+            return
+        }
+        // BACK from picture content can expose the ordinary detail rather than the feed.
+        // Reuse the original detail admission instead of issuing a second blind BACK.
+        if (socialBrowsePort.isImageBrowserActivity(accountBrowseSession.detailActivityClass) &&
+            page.pageKind == BrowsePageKind.DETAIL && page.confidence >= 80 &&
+            page.fingerprint.isNotBlank()
+        ) {
+            accountBrowsePhase = AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD
+            accountBrowseSession.detailFingerprint = ""
+            accountBrowseSession.detailActivityClass = ""
+            accountBrowseSession.lastStableFingerprint = ""
+            accountBrowseSession.stableSamples = 0
+            accountBrowseSession.deadlineAt = System.currentTimeMillis() + DETAIL_LOAD_TIMEOUT_MS
+            addLog("图片动态返回后识别到普通动态详情；进入原有详情载入验证，不重复 BACK")
             scheduleAccountBrowseStep(PAGE_STATE_POLL_MS)
             return
         }

@@ -23,7 +23,11 @@ enum class BrowsePageKind {
     DYNAMIC_FEED,
     DETAIL,
     IMAGE_VIEWER,
-    OTHER
+    OTHER;
+
+    /** Both are normal dynamic content; the same detail lifecycle consumes either. */
+    val isDynamicContent: Boolean
+        get() = this == DETAIL || this == IMAGE_VIEWER
 }
 
 data class DynamicTabEvidence(

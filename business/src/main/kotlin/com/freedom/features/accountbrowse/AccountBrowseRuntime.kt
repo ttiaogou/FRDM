@@ -293,7 +293,7 @@ class AccountBrowseRuntime(
             phase !in setOf(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD,
                 AccountBrowsePhase.DETAIL_DWELL, AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE)
         ) return false
-        val confirmed = identityConfirmed && page.pageKind == BrowsePageKind.DETAIL &&
+        val confirmed = identityConfirmed && page.pageKind.isDynamicContent &&
             page.packageName == targetPackage() && page.confidence >= 80 &&
             page.windowAvailable && page.fingerprint.isNotBlank() &&
             session.sourceFingerprint.isNotBlank() && page.fingerprint != session.sourceFingerprint

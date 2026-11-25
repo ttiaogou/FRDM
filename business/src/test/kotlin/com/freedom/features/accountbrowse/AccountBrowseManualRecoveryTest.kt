@@ -226,6 +226,72 @@ class AccountBrowseManualRecoveryTest {
     }
 
     @Test
+    fun pictureContentResumesThroughTheSameDetailLoadDwellAndReturnCallbacks() {
+        val scheduler = QueuedScheduler()
+        var picture = page(BrowsePageKind.IMAGE_VIEWER).copy(fingerprint = "picture-window")
+        var reads = 0
+        var loads = 0
+        var backs = 0
+        lateinit var runtime: AccountBrowseRuntime
+        runtime = runtime(
+            scheduler = scheduler,
+            onReadOnlyObservation = {
+                reads++
+                runtime.observeRecoveryPage(picture)
+                if (runtime.observeDetailFingerprintReadOnly(picture, true)) runtime.scheduleStep(300L)
+            },
+            onDetailLoad = {
+                assertTrue(runtime.canExecuteAutomaticStep())
+                loads++
+                runtime.transitionTo(AccountBrowsePhase.DETAIL_DWELL)
+                runtime.scheduleStep(4000L)
+            },
+            onDetailReturn = {
+                assertTrue(runtime.canExecuteAutomaticStep())
+                backs++
+            }
+        )
+        runtime.session.sourceFingerprint = "source-feed"
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD)
+        runtime.requestRecovery("picture content awaiting observation", {}, {}, {})
+        scheduler.runNext()
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        runtime.performStep()
+        assertEquals(0, backs)
+        picture = picture.copy(fingerprint = "different-picture-window")
+        scheduler.runNext()
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        scheduler.runNext()
+        assertEquals(3, reads)
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertEquals(0, loads)
+        scheduler.runNext()
+        assertEquals(AccountBrowsePhase.DETAIL_DWELL, runtime.phase)
+        assertEquals(1, loads)
+        assertEquals(0, backs)
+        scheduler.runNext()
+        assertEquals(1, backs)
+    }
+
+    @Test
+    fun pictureContentCannotReplacePersistedFeedCheckpointOrUnconfirmedEvidence() {
+        val restored = runtime(FakeStore(savedCheckpoint()))
+        assertTrue(restored.beginCheckpointVerification())
+        repeat(3) { assertFalse(restored.observeDetailFingerprintReadOnly(page(BrowsePageKind.IMAGE_VIEWER), true)) }
+        assertTrue(restored.hasPendingCheckpointVerification())
+        val live = runtime()
+        live.session.sourceFingerprint = "source-feed"
+        live.transitionTo(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD)
+        live.requestRecovery("unknown page", {}, {}, {})
+        repeat(3) {
+            assertFalse(live.observeDetailFingerprintReadOnly(page(BrowsePageKind.IMAGE_VIEWER).copy(confidence = 35), true))
+        }
+        assertFalse(live.canExecuteAutomaticStep())
+    }
+
+    @Test
     fun detailRecoveryCannotReplacePersistedFeedCheckpointVerification() {
         val runtime = runtime(FakeStore(savedCheckpoint()))
         assertTrue(runtime.beginCheckpointVerification())

@@ -49,6 +49,33 @@ class AccountBrowseManualHandoffBoundaryTest {
     }
 
     @Test
+    fun pictureContentSharesDetailLifecycleAndExistingWindowSafetyChecks() {
+        val workflow = source("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
+        val load = workflow.substringAfter("private fun checkDetailPageLoaded() {")
+            .substringBefore("private fun returnFromDetailPage()")
+        assertTrue(load.contains("page.pageKind.isDynamicContent"))
+        assertTrue(load.contains("REQUIRED_STABLE_PAGE_SAMPLES"))
+        assertTrue(load.contains("scrollExecutor.randomBrowseDelayMs()"))
+        assertTrue(load.contains("AccountBrowsePhase.DETAIL_DWELL"))
+        val back = workflow.substringAfter("private fun returnFromDetailPage() {")
+            .substringBefore("private fun beginDynamicNavigationRecovery(")
+        assertTrue(back.contains("socialBrowsePort.inspectDetail(accountBrowseSession.detailFingerprint)"))
+        assertTrue(back.contains("if (identity.isFeedPage)"))
+        assertTrue(back.contains("!preBackPage.pageKind.isDynamicContent"))
+        assertTrue(back.contains("preBackPage.fingerprint != identity.fingerprint"))
+        assertTrue(back.contains("accessibilityGateway.performGlobalAction(GlobalAccessibilityAction.BACK)"))
+        val adapter = source("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt")
+        val image = adapter.substringAfter("private fun confirmedImageBrowserIdentity(")
+            .substringBefore("override fun inspectPage()")
+        assertTrue(image.contains("inspectGesturePageReadiness(root, window.activityClass, RunMode.ACCOUNT_BROWSE).ready"))
+        assertTrue(image.contains("observedDialogWindowIdFor(window)"))
+        assertTrue(image.contains("MomoWindowPageFingerprint.windowIdentity("))
+        assertFalse(image.contains("viewIdResourceName"))
+        assertTrue(adapter.contains("fingerprint = imageIdentity"))
+        assertTrue(back.contains("preBackPage.fingerprint.isBlank()"))
+    }
+
+    @Test
     fun overlayWatchdogTimeoutEntersUnifiedRecoveryInsteadOfManualHold() {
         val workflow = source(
             "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"

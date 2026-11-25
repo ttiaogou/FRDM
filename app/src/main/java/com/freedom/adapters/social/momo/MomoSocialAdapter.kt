@@ -585,6 +585,22 @@ internal class MomoSocialAdapter(
             verified && accessibilityGateway.isWindowCurrent(window)
         } ?: false
 
+    /** Reuse the existing image-browser readiness check and canonical window identity.
+     * No image-content anchors, coordinates or new structural fingerprint are required.
+     */
+    private fun confirmedImageBrowserIdentity(root: AccessibilityNodeInfo, window: WindowRef): String? {
+        if (!isImageBrowserActivity(window.activityClass) ||
+            window.packageName != targetPackage || window.windowId < 0 ||
+            !accessibilityGateway.isWindowCurrent(window) ||
+            observedDialogWindowIdFor(window) != null ||
+            browseComponents.pageInspector.hasMomoHomePageNavigationFingerprint(root)
+        ) return null
+        if (!inspectGesturePageReadiness(root, window.activityClass, RunMode.ACCOUNT_BROWSE).ready ||
+            !accessibilityGateway.isWindowCurrent(window)
+        ) return null
+        return MomoWindowPageFingerprint.windowIdentity(window, targetPackage, BrowsePageKind.IMAGE_VIEWER.name)
+    }
+
     override fun inspectPage(): BrowsePageEvidence = rootAccess.withActiveTargetRoot { root, window ->
         val packageName = safeString { root.packageName?.toString().orEmpty() }
         val activity = window.activityClass
@@ -612,6 +628,9 @@ internal class MomoSocialAdapter(
         val homeFingerprint = if (readiness.fingerprint == null && detail?.identityConfirmed != true) {
             browseComponents.pageInspector.hasMomoHomePageNavigationFingerprint(root)
         } else false
+        val imageBrowserIdentity = if (readiness.fingerprint == null &&
+            detail?.identityConfirmed != true && !homeFingerprint
+        ) confirmedImageBrowserIdentity(root, window) else null
         val fingerprint = when {
             readiness.fingerprint != null -> readiness.fingerprint.signature
             detail?.identityConfirmed == true -> detail.fingerprint.signature
@@ -622,9 +641,10 @@ internal class MomoSocialAdapter(
             readiness.fingerprint != null -> BrowsePageKind.DYNAMIC_FEED
             detail?.identityConfirmed == true -> BrowsePageKind.DETAIL
             homeFingerprint -> BrowsePageKind.HOME
+            imageBrowserIdentity != null -> BrowsePageKind.IMAGE_VIEWER
             else -> BrowsePageKind.OTHER
         }
-        val windowScopedFingerprint = MomoWindowPageFingerprint.create(
+        val windowScopedFingerprint = imageBrowserIdentity ?: MomoWindowPageFingerprint.create(
             window = window,
             targetPackage = targetPackage,
             pageKind = kind.name,
@@ -692,7 +712,7 @@ internal class MomoSocialAdapter(
                 BrowsePageKind.OTHER -> 20
                 BrowsePageKind.HOME -> 85
                 BrowsePageKind.DYNAMIC_FEED, BrowsePageKind.DETAIL -> 100
-                BrowsePageKind.IMAGE_VIEWER -> 0
+                BrowsePageKind.IMAGE_VIEWER -> 100
             },
             reason = when (kind) {
                 BrowsePageKind.UNKNOWN -> "当前窗口不是目标陌陌窗口"
@@ -700,7 +720,7 @@ internal class MomoSocialAdapter(
                 BrowsePageKind.DETAIL -> detail?.reason.orEmpty()
                 BrowsePageKind.HOME -> "首页导航结构指纹确认"
                 BrowsePageKind.OTHER -> "当前陌陌窗口未匹配已验证的页面结构指纹"
-                BrowsePageKind.IMAGE_VIEWER -> "图片浏览器暂时仍采用专属 Activity 与可见内容双重辅助确认"
+                BrowsePageKind.IMAGE_VIEWER -> "图片动态内容已通过原有图片浏览器安全检查与当前窗口身份确认"
             },
             nodeCount = when {
                 readiness.fingerprint != null -> readiness.fingerprint.nodeCount
@@ -973,6 +993,20 @@ internal class MomoSocialAdapter(
                 root = root,
                 currentActivity = window.activityClass
             )
+            if (!result.isFeedPage && !result.identityConfirmed) {
+                val imageIdentity = confirmedImageBrowserIdentity(root, window)
+                if (imageIdentity != null) {
+                    return@withActiveTargetRoot DetailEvidence(
+                        isFeedPage = false,
+                        // Like ordinary detail, fresh evidence can rebind after a window
+                        // generation change. The workflow compares two fresh identities
+                        // before BACK rather than authorizing from the old fingerprint.
+                        identityConfirmed = true,
+                        fingerprint = imageIdentity,
+                        reason = "图片动态内容；复用现有页面安全检查与当前窗口代次"
+                    )
+                }
+            }
             val scopedFingerprint = MomoWindowPageFingerprint.create(
                 window = window,
                 targetPackage = targetPackage,
