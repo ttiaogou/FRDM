@@ -1612,10 +1612,38 @@ class AiReplyObservationRuntime(
             return
         }
 
-        // Resolve a pending Received Greetings transition before polling, recovery, or
-        // private-message ownership can acquire the UI lease from this snapshot.
+        // A pending recovery owns verification of this observation, including the existing
+        // verified private-to-greetings handoff below. Ordinary list admission would reject
+        // the pending recovery and return before its verifier could consume this snapshot.
+        if (recoveryContext.pending && sessionRunStarted && !receivedGreetingsTaskActive) {
+            receivedGreetingsPageProbePending = false
+            receivedGreetingsProbeOrdinaryInboxConfirmed = false
+            receivedGreetingsProbePrivateRouteWon = false
+            pageObservationCoordinator.resetReceivedGreetingsWatch()
+            // Preserve the existing private-route arbitration when a prior greetings
+            // transition suspended private ownership. Resolve only its read-only evidence;
+            // recovery still owns the READY, checkpoint and lease verification below.
+            if (receivedGreetingsOwnershipRecheckPending &&
+                observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                inspection.packageName == targetPackage() &&
+                inspection.pageKind == ChatPageKind.CHAT_LIST &&
+                matchedRouteId == messageListRecoveryRoute.routeId
+            ) {
+                when (observeReceivedGreetingsPageForUnifiedValidation()) {
+                    ReceivedGreetingsPageArrivalStatus.NOT_TARGET,
+                    ReceivedGreetingsPageArrivalStatus.WAITING_FOR_USER_NAVIGATION,
+                    ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED -> {
+                        receivedGreetingsOwnershipRecheckPending = false
+                    }
+                    else -> Unit
+                }
+            }
+        }
+
+        // Resolve ordinary greetings transitions only outside an active recovery transaction.
         if ((receivedGreetingsPageProbePending || receivedGreetingsOwnershipRecheckPending) &&
             sessionRunStarted &&
+            !recoveryContext.pending &&
             !receivedGreetingsTaskActive &&
             receivedGreetingsTaskFlow.supportsWorkflow()
         ) {

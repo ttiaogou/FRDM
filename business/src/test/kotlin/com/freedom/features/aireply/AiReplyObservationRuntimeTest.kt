@@ -370,6 +370,90 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun confirmedGreetingsArrivalEventCannotStarvePendingCheckpointVerification() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            receivedGreetingsCheckpointFingerprint = "greetings-current-window"
+            receivedGreetingsRecoverySyncAccepted = true
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "NewSayHiSessionListActivity",
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 40,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                windowGeneration = 12L
+            )
+        }
+        val checkpoint = MomoSayHiTraversalCheckpointRecord(
+            processedRowKeys = setOf("hashed-row"),
+            processedContactIdHashes = setOf("hashed-contact"),
+            deferredRows = emptyMap(),
+            deferredReturnToTopActive = false,
+            deferredReplayStarted = false
+        )
+        val repository = object : MomoSayHiTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): MomoSayHiTraversalCheckpointRecord = checkpoint
+            override fun save(checkpoint: MomoSayHiTraversalCheckpointRecord) = Unit
+            override fun clear() = error("must retain the original checkpoint")
+        }
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = ownership,
+            currentRunGeneration = { 12L },
+            receivedGreetingsCheckpointRepository = repository,
+            pageSelectedStartup = true
+        )
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_RECEIVED_GREETINGS"))
+        assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+        assertNull(ownership.currentLease())
+
+        // A fresh event re-arms the ordinary arrival probe while the checkpoint is pending.
+        // It must reach the recovery verifier rather than retry a rejected ordinary start.
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertTrue(logs.any { it.contains("收到招呼通用检查点[VERIFYING]") })
+        assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertNull(ownership.currentLease())
+        assertFalse(logs.any { it.contains("GREETING_LIST_ADMISSION_REJECTED") })
+
+        scheduler.runNextWithDelay(500L)
+        scheduler.runNextWithDelay(0L)
+        assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertFalse(runtime.isReceivedGreetingsRecoveryPending())
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertTrue(logs.any { it.contains("GREETING_LIST_READY") && it.contains("source=RECOVERY_VERIFIED") })
+        assertFalse(logs.any { it.contains("GREETING_LIST_ADMISSION_REJECTED") })
+        assertEquals(setOf("hashed-row"), repository.load().processedRowKeys)
+    }
+
+    @Test
     fun processRestartWaitsForAndroidReadyBeforeTwoFreshCheckpointSnapshots() {
         val scheduler = FakeScheduler()
         val logs = ArrayList<String>()
@@ -1397,6 +1481,31 @@ class AiReplyObservationRuntimeTest {
         assertEquals(original, repository.load())
         assertEquals(originalRecovery?.checkpointId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
         assertEquals(null, manager.snapshot("AI_REPLY_RECEIVED_GREETINGS"))
+    }
+
+    @Test
+    fun ordinaryArrivalEventDuringPrivateRecoveryUsesExistingVerifiedHandoff() {
+        val (runtime, scheduler, port, ownership, manager, repository, original, logs) =
+            crossTaskRecoveryFixture()
+        runtime.scheduleInitialObservation()
+        val originalRecoveryId = manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId
+        assertTrue(originalRecoveryId != null)
+
+        runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_VERIFYING") })
+
+        scheduler.runNextWithDelay(350L)
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_TRANSFERRED") })
+        assertFalse(logs.any { it.contains("GREETING_LIST_ADMISSION_REJECTED") })
+        assertEquals(original, repository.load())
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
     }
 
     @Test
