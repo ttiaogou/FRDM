@@ -5,6 +5,8 @@ import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.RunStateRepository
 import com.freedom.core.runtime.RuntimeLogSink
 import com.freedom.core.runtime.TaskCoordinator
+import com.freedom.core.runtime.PageRuntimeSession
+import com.freedom.core.runtime.PageRuntimeSessionState
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 
 /**
@@ -37,6 +39,7 @@ class RunSessionCoordinator(
     private var observedMode: RunMode? = null
     private var observedRunRequested: Boolean = false
     private var pageRoutedMode: RunMode? = null
+    private val pageRuntimeSession = PageRuntimeSession()
     /** Read from the process-owned clock so a recreated Service cannot issue lower generations. */
     private val runGeneration: Long get() = generationClock.current()
 
@@ -180,13 +183,28 @@ class RunSessionCoordinator(
     }
 
     @Synchronized
-    fun routePageTask(mode: RunMode?) {
+    fun routePageTask(mode: RunMode?, taskId: String? = null): PageRuntimeSessionState? {
         pageRoutedMode = mode
+        val session = if (mode != null && taskId != null) {
+            pageRuntimeSession.begin(runGeneration, taskId, mode)
+        } else {
+            pageRuntimeSession.clear()
+            null
+        }
         log.append(
             "页面任务路由[SET]：mode=" + (mode?.name ?: "NONE") +
+                "；taskId=" + (taskId ?: "NONE") +
                 "；runGeneration=" + runGeneration
         )
+        return session
     }
+
+    @Synchronized
+    fun markPageRuntimeReady(runGeneration: Long): PageRuntimeSessionState? =
+        pageRuntimeSession.markReady(runGeneration)
+
+    @Synchronized
+    fun currentPageRuntimeSession(): PageRuntimeSessionState? = pageRuntimeSession.current()
 
     @Synchronized
     fun dispatchTargetApplicationEvent(event: AccessibilityEventEnvelope) {
