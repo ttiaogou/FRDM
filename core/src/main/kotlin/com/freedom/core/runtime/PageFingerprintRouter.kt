@@ -201,3 +201,12 @@ class UnifiedPageObservationMerger(
         }
     }
 }
+
+
+/**
+ * Read-only publication contract for fresh page observations.
+ * Producers must publish only snapshots tied to the current window/generation.
+ */
+fun interface PageObservationSnapshotSource {
+    fun publish(snapshot: PageObservationSnapshot)
+}
