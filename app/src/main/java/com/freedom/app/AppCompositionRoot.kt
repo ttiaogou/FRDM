@@ -326,6 +326,12 @@ internal class AccessibilityServiceDependencies internal constructor(
                     monitorRepository.isRunRequested() &&
                     snapshot.runGeneration == runSessionCoordinator.currentRunGeneration()
                 ) {
+                    runSessionCoordinator.routePageTask(
+                        if (decision.classification ==
+                            com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE
+                        ) com.freedom.core.runtime.RunMode.ACCOUNT_BROWSE
+                        else com.freedom.core.runtime.RunMode.AI_REPLY
+                    )
                     val current = taskCoordinator.currentLease()
                     val transferred = if (current == null) {
                         taskCoordinator.tryAcquire(targetTask, snapshot.runGeneration) != null
