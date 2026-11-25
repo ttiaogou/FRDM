@@ -1055,9 +1055,30 @@ class AiReplyObservationRuntime(
         }
     }
 
+    /**
+     * A transition can expose chat anchors before its composer/list enters the display.
+     * This is binding readiness, not a page fingerprint or a gesture target calculation.
+     * Only explicit offscreen evidence defers admission; missing diagnostic evidence
+     * does not replace the existing independent identity/window proof.
+     */
+    private fun hasOffscreenGreetingChatLocators(snapshot: ChatPageSnapshot): Boolean {
+        val display = snapshot.screenBounds?.takeUnless { it.isEmpty } ?: return false
+        val paths = listOfNotNull(snapshot.messageListTarget, snapshot.inputFieldTarget)
+            .map { it.path.childIndices.joinToString("/") }
+        return snapshot.structureEvidence.any { node ->
+            node.path in paths && node.boundsValid &&
+                (node.right <= display.left || node.left >= display.right ||
+                    node.bottom <= display.top || node.top >= display.bottom)
+        }
+    }
+
     /** The only admission-and-bind entry for a newly verified received-greeting chat. */
     private fun ensureGreetingChatBinding(snapshot: ChatPageSnapshot): Boolean {
         if (greetingBindingRejectReason(snapshot) == null) return true
+        if (hasOffscreenGreetingChatLocators(snapshot)) {
+            onLog("GREETING_CHAT_BINDING_DEFERRED reason=CHAT_LOCATORS_OFFSCREEN")
+            return false
+        }
         val admission = inspectGreetingChatAdmission(snapshot, requireDetailReady = true)
         if (admission is GreetingChatAdmission.Rejected) {
             onLog("GREETING_CHAT_BINDING_REJECTED reason=${admission.reason}")
@@ -1823,7 +1844,11 @@ class AiReplyObservationRuntime(
                 ownsTask(RECEIVED_GREETINGS_TASK_ID) &&
                 observation.status == ObservationStatus.CONFIRMED_PAGE &&
                 previous != null && previous.packageName == targetPackage() &&
-                previous.pageKind == ChatPageKind.NON_CHAT &&
+                (previous.pageKind == ChatPageKind.NON_CHAT ||
+                    (previous.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+                        greetingChatBinding == null &&
+                        hasOffscreenGreetingChatLocators(previous) &&
+                        previous.conversationIdentityKey() == inspection.conversationIdentityKey())) &&
                 inspection.packageName == targetPackage() &&
                 inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
                 inspectGreetingChatAdmission(inspection, requireDetailReady = true) is GreetingChatAdmission.Ready
@@ -4152,6 +4177,11 @@ class AiReplyObservationRuntime(
         }
         if (sessionRunStarted) {
             if (receivedGreetingsTaskActive) {
+                // The region-refresh path reaches this entry too. Apply the same draft hold
+                // as full observation, while preserving pending-send and confirmed-return proof.
+                if (isConversationDraftPending() && !isSendConfirmationPending() &&
+                    confirmedGreetingSend == null
+                ) return
                 // The authoritative entry includes task ownership, profile identity, header,
                 // window and the one-time adapter DETAIL_READY proof before any OCR starts.
                 if (!ensureGreetingChatBinding(snapshot)) {

@@ -1911,6 +1911,7 @@ class AiReplyObservationRuntimeTest {
         var greetingDrafts = 0
         var privateDrafts = 0
         var pendingSend = false
+        var draftPending = false
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
@@ -1932,11 +1933,13 @@ class AiReplyObservationRuntimeTest {
                 greetingDrafts++
                 assertTrue(batch.ocrAttempted)
                 assertEquals(verified, identity)
+                draftPending = true
                 true
             },
             taskCoordinator = owner,
             currentRunGeneration = { 5L },
-            isSendConfirmationPending = { pendingSend }
+            isSendConfirmationPending = { pendingSend },
+            isConversationDraftPending = { draftPending }
         )
 
         runtime.scheduleInitialObservation()
@@ -1953,11 +1956,31 @@ class AiReplyObservationRuntimeTest {
         port.receivedGreetingsDisplayName = "Sample Contact"
         port.simulateStructureThenOcr = true
         port.ocrDebugTextByRowIndex = mapOf(1 to "CURRENT_GREETING_OCR")
-        port.page = chatDetailSnapshot()
+        val transitionalChat = chatDetailSnapshot(windowGeneration = 12L)
+        val inputPath = requireNotNull(transitionalChat.inputFieldTarget).path.childIndices.joinToString("/")
+        port.page = transitionalChat.copy(
+            activityClass = listActivity,
+            screenBounds = ScreenRect(0, 0, 720, 1489),
+            structureEvidence = listOf(ChatPageNodeEvidence(
+                path = inputPath, className = "android.widget.EditText", viewId = "composer",
+                left = 888, top = 1389, right = 1296, bottom = 1489, childCount = 0,
+                isEditable = true, isScrollable = false, isClickable = true,
+                hasText = false, insideListCandidate = false, boundsValid = true,
+                isVisibleToUser = true
+            ))
+        )
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertTrue(logs.any { it.contains("CHAT_LOCATORS_OFFSCREEN") })
+        assertFalse(logs.any { it.contains("GREETING_CHAT_BINDING_CREATED") })
+        assertEquals(0, port.ocrAsyncReadRequests)
+        assertEquals(0, greetingDrafts)
 
+        port.page = chatDetailSnapshot()
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
         scheduler.runNextWithDelay(300L)
         runUntil(scheduler, 40) { greetingDrafts == 1 }
+        assertEquals(1, port.ocrAsyncReadRequests)
 
         assertEquals(1, greetingDrafts)
         assertEquals(0, privateDrafts)
@@ -1987,6 +2010,11 @@ class AiReplyObservationRuntimeTest {
         val inspect = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
             isAccessible = true
         }
+        // An input/scroll content event during the draft must not launch another OCR.
+        val readsDuringDraft = port.ocrAsyncReadRequests
+        refresh.invoke(runtime)
+        assertEquals(readsDuringDraft, port.ocrAsyncReadRequests)
+        assertEquals(1, greetingDrafts)
         port.regionResult = ChatRegionSnapshot(true, 0, 0, 0, 0, false)
         refresh.invoke(runtime)
         assertTrue(logs.any { it.contains("聊天区域定位已失效") })

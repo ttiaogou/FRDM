@@ -306,8 +306,9 @@ internal class MomoSocialAdapter(
     private val sayHiSnapshotCoordinator = MomoSayHiListSnapshotCoordinator(
         recoveryPolicy = sayHiListSnapshotRecoveryPolicy,
         isNavigationRelevant = {
-            sayHiNavigationFlowController.isReceivedListConfirmed() ||
-                sayHiNavigationFlowController.isWaitingForReceivedList()
+            (sayHiNavigationFlowController.isReceivedListConfirmed() ||
+                sayHiNavigationFlowController.isWaitingForReceivedList()) &&
+                (!isSayHiChatNavigationInProgress() || isReceivedGreetingsListStructureVisible())
         },
         isGestureBusy = { sayHiGestureInFlight },
         beforeFreshInspection = { lastSayHiInspectionAtMs = 0L },
@@ -4304,6 +4305,10 @@ internal class MomoSocialAdapter(
         return true
     }
 
+    private fun isSayHiChatNavigationInProgress(): Boolean =
+        sayHiReadOnlyStage == SayHiReadOnlyStage.ROW_TAP_PENDING ||
+            sayHiReadOnlyStage == SayHiReadOnlyStage.WAITING_DETAIL
+
     /**
      * Inspects confirmed SayHi pages. Test traversal may scroll only the confirmed list;
      */
@@ -4319,6 +4324,10 @@ internal class MomoSocialAdapter(
             sayHiNavigationFlowController.isManuallyStabilizingReceivedList()
         val listPipelineCandidate = listSurfaceVisible || listFlowExpected
         val cardHostCandidate = activityHint == MomoSayHiPageContract.CARD_ACTIVITY
+        // A historical confirmed-list phase survives row navigation. It is not proof
+        // that a chat root should be scanned as a list or charged a list retry.
+        // A genuine return with the existing list fingerprint remains admissible.
+        if (isSayHiChatNavigationInProgress() && !listSurfaceVisible && !cardHostCandidate) return false
         if (!listPipelineCandidate && !cardHostCandidate) return false
         val confirmedList = listSurfaceVisible && sayHiNavigationFlowController.isReceivedListConfirmed()
         if (confirmedList) {

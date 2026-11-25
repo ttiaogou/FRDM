@@ -157,6 +157,39 @@ class MomoSayHiListSnapshotCoordinatorTest {
     }
 
     @Test
+    fun delayedListRetryDoesNotScanChatAndCanRestartOnListReturn() {
+        val scheduler = FakeScheduler()
+        var listNavigationRelevant = true
+        var inspections = 0
+        val policy = MomoSayHiListSnapshotRecoveryPolicy(sampleDelayMs = { it.first })
+        val coordinator = MomoSayHiListSnapshotCoordinator(
+            recoveryPolicy = policy,
+            isNavigationRelevant = { listNavigationRelevant },
+            isGestureBusy = { false },
+            beforeFreshInspection = {},
+            inspectFreshSnapshot = { inspections++ },
+            onLog = {},
+            taskScheduler = scheduler,
+            elapsedRealtimeMs = { 1_000L }
+        )
+        coordinator.handleIncompleteSnapshot("list-window", "LIST_INCOMPLETE", 0, false)
+        assertEquals(1, policy.retryAttemptCount())
+        listNavigationRelevant = false
+        scheduler.runNext()
+        assertEquals(0, inspections)
+        assertFalse(coordinator.isPending)
+        assertEquals(1, policy.retryAttemptCount())
+        coordinator.scheduleInspection(500L, "CHAT_EVENT", retry = false)
+        assertTrue(scheduler.scheduled.isEmpty())
+
+        listNavigationRelevant = true
+        coordinator.scheduleInspection(500L, "LIST_RETURN", retry = false)
+        scheduler.runNext()
+        assertEquals(1, inspections)
+        assertFalse(coordinator.isPending)
+    }
+
+    @Test
     fun gestureInFlightDefersReadOnlyPollWithoutInspectingOrChangingRetryBudget() {
         val scheduler = FakeScheduler()
         var gestureBusy = true
