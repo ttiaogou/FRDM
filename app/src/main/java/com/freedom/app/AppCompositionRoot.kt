@@ -308,7 +308,16 @@ internal class AccessibilityServiceDependencies internal constructor(
         PageObservationCoordinator(taskScheduler)
     }
     val unifiedPageObservationBus: UnifiedPageObservationBus by lazy(LazyThreadSafetyMode.NONE) {
-        UnifiedPageObservationBus().also { bus ->
+        UnifiedPageObservationBus(
+            onDecision = { snapshot, decision ->
+                addLog(
+                    "统一页面仲裁[READ_ONLY]：classification=" + decision.classification +
+                        ";matched=" + decision.matchedClassifications +
+                        ";conflict=" + decision.conflict +
+                        ";generation=" + snapshot.observationGeneration
+                )
+            }
+        ).also { bus ->
             bus.registerClassifier(aiReplyModeRuntimeAdapter)
             bus.registerClassifier(accountBrowseRuntimeAdapter)
         }
