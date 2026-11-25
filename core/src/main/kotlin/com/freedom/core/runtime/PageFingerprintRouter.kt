@@ -168,6 +168,7 @@ data class PageObservationSnapshot(
     val fingerprint: PageFingerprint,
     val observationGeneration: Long,
     val runGeneration: Long = 0L,
+    val sourceTaskId: String? = null,
     val windowId: Int? = null,
     val windowSessionKey: String? = null
 )
