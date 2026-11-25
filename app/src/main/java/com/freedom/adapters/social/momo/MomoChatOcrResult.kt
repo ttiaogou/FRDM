@@ -29,7 +29,8 @@ internal data class MomoChatOcrResult(
     /** Row-indexed in-memory OCR tokens; legacy text and P0 quality remain unchanged. */
     val tokensByRowIndex: Map<Int, List<OcrContentToken>> = emptyMap(),
     /** P2 evidence-backed text; kept separate from full OCR text and P0 content quality. */
-    val textProjectionsByRowIndex: Map<Int, OcrTextProjection> = emptyMap()
+    val textProjectionsByRowIndex: Map<Int, OcrTextProjection> = emptyMap(),
+    val admissionDeferred: Boolean = false
 ) {
     override fun toString(): String =
         "MomoChatOcrResult(recognizedRows=${textByRowIndex.values.count(String::isNotBlank)}," +

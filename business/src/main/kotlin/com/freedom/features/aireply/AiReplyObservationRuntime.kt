@@ -2506,7 +2506,7 @@ class AiReplyObservationRuntime(
                                 currentSessionName = null
                                 currentSessionCandidate = null
                                 currentSessionReadCaptured = false
-                                messageReadCoordinator.invalidatePending()
+                                invalidateMessageReadTransaction()
                                 sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                                 onLog("收到招呼手动返回[CONTINUE_LIST]：未确认发送已落盘；当前行延期，继续处理其他招呼")
                             } else {
@@ -4135,6 +4135,7 @@ class AiReplyObservationRuntime(
                 }
             }
         }
+        if (ocrAdmissionRetryTask != null) return
         messageReadCoordinator.request(snapshot)
     }
 
@@ -4264,41 +4265,44 @@ class AiReplyObservationRuntime(
         val visit = draftVisitToken
         val runGeneration = currentRunGeneration()
         val greetingBinding = greetingChatBinding.takeIf { receivedGreetingsTaskActive }
-        runCatching {
-            chatMessagePort.readRecentMessagesAsync(snapshot, limit = 10) { ocrBatch ->
-                scheduler.schedule(0L) sendOcr@{
-                    if (!isAiReplyActive() || !isSendConfirmationPending() || recoveryContext.pending ||
-                        visit != draftVisitToken || (sessionRunStarted && runGeneration != currentRunGeneration())
-                    ) {
-                        onLog("AI 发送确认[OCR_STALE_IGNORED]：原发送事务或运行代次已变化")
-                        return@sendOcr
-                    }
-                    val fresh = readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
-                    val boundDetail = fresh != null && if (receivedGreetingsTaskActive) {
-                        greetingBinding != null && greetingBindingRejectReason(fresh, greetingBinding) == null &&
-                            ownsTask(RECEIVED_GREETINGS_TASK_ID)
-                    } else {
-                        sessionManagerState == SessionManagerState.READING_SESSION &&
-                            canPerformPrivateMessagesUiAction() && isVerifiedRecoveredPrivateDetail(fresh)
-                    }
-                    if (!boundDetail || fresh == null ||
-                        !isMessageReadResultCurrent(snapshot, ocrBatch, fresh)
-                    ) {
-                        val reason = sendConfirmationOcrRejectionReason(
-                            snapshot, ocrBatch, fresh, greetingBinding
-                        )
-                        onLog("AI 发送确认[OCR_REJECTED] reason=$reason；新鲜页面、身份或消息批次不匹配；保留待核验发送")
-                        scheduleDeferredSendProofRecheck(reason)
-                        return@sendOcr
-                    }
-                    deferredSendProofRetryAttempt = 0
-                    onLog("AI 发送确认[OCR_REVALIDATED]：新鲜聊天页面与任务租约已验证；核对己方消息")
-                    handleSendConfirmationResult(onSendTransaction(ocrBatch, snapshot), ocrBatch, snapshot)
-                }
+        messageReadCoordinator.requestOcr(
+            snapshot = snapshot,
+            limit = 10,
+            forceScheduledDelivery = true,
+            onTimeout = { scheduleDeferredSendProofRecheck("OCR_CALLBACK_TIMEOUT") },
+            onFailure = {
+                onLog("AI 发送确认[OCR_REQUEST_FAILED]：只读采集无法启动；保留待核验发送")
+                scheduleDeferredSendProofRecheck("OCR_REQUEST_FAILED")
             }
-        }.onFailure {
-            onLog("AI 发送确认[OCR_REQUEST_FAILED]：只读采集无法启动；保留待核验发送")
-            scheduleDeferredSendProofRecheck("OCR_REQUEST_FAILED")
+        ) sendOcr@{ ocrBatch, _ ->
+            if (!isAiReplyActive() || !isSendConfirmationPending() || recoveryContext.pending ||
+                visit != draftVisitToken || (sessionRunStarted && runGeneration != currentRunGeneration())
+            ) {
+                onLog("AI 发送确认[OCR_STALE_IGNORED]：原发送事务或运行代次已变化")
+                return@sendOcr
+            }
+            val fresh = runCatching { readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY) }.getOrNull()
+            val boundDetail = fresh != null && if (receivedGreetingsTaskActive) {
+                greetingBinding != null && greetingBindingRejectReason(fresh, greetingBinding) == null &&
+                    ownsTask(RECEIVED_GREETINGS_TASK_ID)
+            } else {
+                sessionManagerState == SessionManagerState.READING_SESSION &&
+                    canPerformPrivateMessagesUiAction() && isVerifiedRecoveredPrivateDetail(fresh)
+            }
+            if (!boundDetail || fresh == null ||
+                !isMessageReadResultCurrent(snapshot, ocrBatch, fresh)
+            ) {
+                val reason = sendConfirmationOcrRejectionReason(
+                    snapshot, ocrBatch, fresh, greetingBinding
+                )
+                onLog("AI 发送确认[OCR_REJECTED] reason=$reason；新鲜页面、身份或消息批次不匹配；保留待核验发送")
+                scheduleDeferredSendProofRecheck(reason)
+                return@sendOcr
+            }
+            if (deferBusyOcrResult(ocrBatch)) return@sendOcr
+            deferredSendProofRetryAttempt = 0
+            onLog("AI 发送确认[OCR_REVALIDATED]：新鲜聊天页面与任务租约已验证；核对己方消息")
+            handleSendConfirmationResult(onSendTransaction(ocrBatch, snapshot), ocrBatch, snapshot)
         }
     }
 
@@ -4396,6 +4400,11 @@ class AiReplyObservationRuntime(
     }
 
     private fun handleMessageReadBatch(batch: ChatMessageBatch, snapshot: ChatPageSnapshot) {
+        // A busy adapter did not perform recognition. It is never a draft/send/sample batch.
+        if (batch.ocrAdmissionDeferred) {
+            deferBusyOcrResult(batch)
+            return
+        }
         if (sessionRunStarted) {
             val requiredTask = if (receivedGreetingsTaskActive) {
                 RECEIVED_GREETINGS_TASK_ID
@@ -4676,39 +4685,57 @@ class AiReplyObservationRuntime(
             val ocrSnapshot = snapshot
             val ocrVisit = draftVisitToken
             val ocrGreetingBinding = greetingChatBinding.takeIf { greetingDetail }
-            chatMessagePort.readRecentMessagesAsync(ocrSnapshot, limit = 10) { ocrBatch ->
+            val ocrRun = currentRunGeneration()
+            val started = messageReadCoordinator.requestOcr(
+                snapshot = ocrSnapshot,
+                limit = 10,
+                forceScheduledDelivery = ocrGreetingBinding != null,
+                onTimeout = { scheduleOcrReadRecheck("OCR_CALLBACK_TIMEOUT") },
+                onFailure = { scheduleOcrReadRecheck("OCR_REQUEST_FAILED") }
+            ) ocrDelivery@{ ocrBatch, revalidate ->
                 if (ocrGreetingBinding == null) {
-                    // Preserve the existing private-message OCR callback schedule.
-                    if (ocrVisit == draftVisitToken && isAiReplyActive()) {
-                        handleMessageReadBatch(ocrBatch, ocrSnapshot)
-                    } else {
+                    if (ocrVisit != draftVisitToken || !isAiReplyActive() ||
+                        recoveryContext.pending || ocrRun != currentRunGeneration()
+                    ) {
                         onLog("AI OCR 结果已丢弃：窗口任务已变化")
+                        return@ocrDelivery
                     }
-                } else {
-                    // Greeting OCR can outlive its source row, live window and lease.
-                    // Dispatch onto the runtime scheduler and independently verify fresh
-                    // chat evidence before invoking any model or persistence callback.
-                    scheduler.schedule(0L) ocrDelivery@{
-                        if (ocrVisit != draftVisitToken || !isAiReplyActive()) {
-                            onLog("GREETING_CHAT_OCR_REJECTED reason=READ_GENERATION_CHANGED")
-                            return@ocrDelivery
-                        }
-                        val fresh = readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
-                        val reason = if (fresh == null) "FRESH_CHAT_UNAVAILABLE" else
-                            greetingBindingRejectReason(fresh, ocrGreetingBinding)
-                        if (reason != null || fresh == null ||
-                            !hasSameWindowSession(ocrSnapshot, fresh) ||
-                            ocrBatch.windowSessionKey != ocrGreetingBinding.windowSessionKey
+                    if (revalidate) {
+                        val fresh = runCatching { readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY) }.getOrNull()
+                        if (fresh == null || !isMessageReadResultCurrent(ocrSnapshot, ocrBatch, fresh) ||
+                            !ownsTask(PRIVATE_MESSAGES_TASK_ID)
                         ) {
-                            onLog("GREETING_CHAT_OCR_REJECTED reason=${reason ?: "MESSAGE_WINDOW_MISMATCH"}")
+                            onLog("AI OCR 结果已丢弃：新鲜聊天窗口或任务绑定不匹配")
+                            scheduleOcrReadRecheck("OCR_PAGE_REVALIDATION_PENDING")
                             return@ocrDelivery
                         }
-                        onLog("GREETING_CHAT_OCR_REVALIDATED sameContact=true; sameWindow=true; leaseCurrent=true")
-                        handleMessageReadBatch(ocrBatch, ocrSnapshot)
                     }
+                    if (deferBusyOcrResult(ocrBatch)) return@ocrDelivery
+                    handleMessageReadBatch(ocrBatch, ocrSnapshot)
+                } else {
+                    // The coordinator keeps the gate until this scheduler delivery.
+                    // Retain the original independent greeting identity/window/lease proof.
+                    if (ocrVisit != draftVisitToken || !isAiReplyActive() || ocrRun != currentRunGeneration()) {
+                        onLog("GREETING_CHAT_OCR_REJECTED reason=READ_GENERATION_CHANGED")
+                        return@ocrDelivery
+                    }
+                    val fresh = runCatching { readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY) }.getOrNull()
+                    val reason = if (fresh == null) "FRESH_CHAT_UNAVAILABLE" else
+                        greetingBindingRejectReason(fresh, ocrGreetingBinding)
+                    if (reason != null || fresh == null ||
+                        !hasSameWindowSession(ocrSnapshot, fresh) ||
+                        ocrBatch.windowSessionKey != ocrGreetingBinding.windowSessionKey
+                    ) {
+                        onLog("GREETING_CHAT_OCR_REJECTED reason=${reason ?: "MESSAGE_WINDOW_MISMATCH"}")
+                        scheduleOcrReadRecheck("GREETING_OCR_REVALIDATION_PENDING")
+                        return@ocrDelivery
+                    }
+                    if (deferBusyOcrResult(ocrBatch)) return@ocrDelivery
+                    onLog("GREETING_CHAT_OCR_REVALIDATED sameContact=true; sameWindow=true; leaseCurrent=true")
+                    handleMessageReadBatch(ocrBatch, ocrSnapshot)
                 }
             }
-            onLog("AI OCR 启动：身份采集已终态且聊天页已恢复；开始处理结构批次中的 OCR 区域")
+            if (started) onLog("AI OCR 启动：身份采集已终态且聊天页已恢复；开始处理结构批次中的 OCR 区域")
             return
         }
         val draftAdmission = com.freedom.features.aireply.ai.VisibleDraftContext.assess(batch)
@@ -5847,7 +5874,7 @@ class AiReplyObservationRuntime(
         currentSessionWindowKey = null
         currentSessionName = null
         currentSessionCandidate = null
-        messageReadCoordinator.invalidatePending()
+        invalidateMessageReadTransaction()
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
         onLog(
             "AI Reply：切换收到的招呼自动回复任务；原因=$reason；" +
@@ -5937,7 +5964,7 @@ class AiReplyObservationRuntime(
         currentSessionName = null
         currentSessionCandidate = null
         currentSessionReadCaptured = false
-        messageReadCoordinator.invalidatePending()
+        invalidateMessageReadTransaction()
 
         receivedGreetingsRecoveryRetryAttempt = 0
         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
@@ -7508,6 +7535,58 @@ class AiReplyObservationRuntime(
         scheduleFullInspectionAfter(delayMs, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
     }
 
+    private var ocrAdmissionRetryTask: ScheduledTask? = null
+    private var ocrAdmissionRetryAttempt = 0
+    private var ocrAdmissionRetryGeneration = 0L
+
+    /** A process worker may outlive the previous task's callback. Wait without consuming OCR failure budget. */
+    private fun deferBusyOcrResult(batch: ChatMessageBatch): Boolean {
+        if (!batch.ocrAdmissionDeferred) {
+            ocrAdmissionRetryAttempt = 0
+            return false
+        }
+        if (!isAiReplyActive() || recoveryContext.pending || ocrAdmissionRetryTask != null) return true
+        val visit = draftVisitToken
+        val generation = currentRunGeneration()
+        val delay = RecoveryScheduler.readOnlyRetryDelayMs(++ocrAdmissionRetryAttempt)
+        onLog("AI OCR[ADMISSION_DEFERRED]：上一批工作线程仍占用；delayMs=$delay；不计识别失败、不消耗复读次数")
+        val retryGeneration = ++ocrAdmissionRetryGeneration
+        ocrAdmissionRetryTask = scheduler.schedule(delay) {
+            if (retryGeneration != ocrAdmissionRetryGeneration) return@schedule
+            ocrAdmissionRetryTask = null
+            if (visit != draftVisitToken || generation != currentRunGeneration() ||
+                !isAiReplyActive() || recoveryContext.pending
+            ) return@schedule
+            // The old batch and its geometry are discarded. Only request a fresh observation.
+            scheduleFullInspectionAfter(0L, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
+        }
+        return true
+    }
+
+    private fun scheduleOcrReadRecheck(reason: String) {
+        if (!isAiReplyActive() || recoveryContext.pending) return
+        if (sessionRunStarted && !ownsTask(
+                if (receivedGreetingsTaskActive) RECEIVED_GREETINGS_TASK_ID else PRIVATE_MESSAGES_TASK_ID
+            )
+        ) return
+        onLog("AI OCR[READ_ONLY_RECHECK]：reason=$reason；保留原会话")
+        if (isSendConfirmationPending()) {
+            scheduleDeferredSendProofRecheck(reason)
+        } else if (receivedGreetingsTaskActive) {
+            scheduleReceivedGreetingsRecoveryRetry(reason)
+        } else {
+            schedulePrivatePreSendReadRetry(reason)
+        }
+    }
+
+    private fun invalidateMessageReadTransaction() {
+        ocrAdmissionRetryGeneration++
+        ocrAdmissionRetryTask?.cancel()
+        ocrAdmissionRetryTask = null
+        ocrAdmissionRetryAttempt = 0
+        messageReadCoordinator.invalidatePending()
+    }
+
     private var draftVisitToken = java.util.UUID.randomUUID().toString()
     private var draftReadRetries = 0
     private var draftRetryTask: ScheduledTask? = null
@@ -7532,7 +7611,7 @@ class AiReplyObservationRuntime(
         privateModelFailureRecoveryTask = null
         privateModelFailureRecovery = null
         privateModelRetryAwaitingDraft = false
-        messageReadCoordinator.invalidatePending()
+        invalidateMessageReadTransaction()
         lastMessageFingerprint = ""
         loggedOcrDebugFingerprints.clear()
         ocrDebugBatchLimitLogged = false

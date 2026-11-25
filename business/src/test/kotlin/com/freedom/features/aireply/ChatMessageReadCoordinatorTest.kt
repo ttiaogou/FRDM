@@ -14,6 +14,86 @@ import org.junit.Test
 
 class ChatMessageReadCoordinatorTest {
     @Test
+    fun structuralContinuationOwnsOcrUntilSchedulerDeliveryWithoutReplayingPendingSnapshots() {
+        val page = snapshot("same-chat")
+        val scheduler = FakeScheduler()
+        val port = TestMessagePort()
+        var delivered = 0
+        lateinit var coordinator: ChatMessageReadCoordinator
+        coordinator = coordinator(scheduler, port, inspect = { page }, onResult = { requested, _, _ ->
+            assertTrue(coordinator.requestOcr(requested, 10, onTimeout = {}, onFailure = {}) { _, fresh ->
+                assertTrue(fresh)
+                delivered++
+            })
+        })
+        coordinator.request(page)
+        coordinator.request(snapshot("queued-layout-change"))
+        requireNotNull(port.pendingCallback)(batch())
+        scheduler.runNext(0L)
+        assertEquals(2, port.requestedSnapshots.size)
+        assertTrue(coordinator.isInFlight)
+        repeat(300) { coordinator.request(page) }
+        assertFalse(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {}) { _, _ ->
+            error("duplicate OCR must not be started")
+        })
+        val callback = requireNotNull(port.pendingCallback)
+        callback(batch())
+        callback(batch())
+        repeat(300) { coordinator.request(page) }
+        assertTrue(coordinator.isInFlight)
+        assertEquals(2, port.requestedSnapshots.size)
+        scheduler.runNext(0L)
+        assertEquals(1, delivered)
+        assertFalse(coordinator.isInFlight)
+        assertEquals(2, port.requestedSnapshots.size)
+    }
+
+    @Test
+    fun ocrTimeoutAndLateCallbackCannotReleaseNewRead() {
+        val page = snapshot("same-chat")
+        val scheduler = FakeScheduler()
+        val port = TestMessagePort()
+        var timeouts = 0
+        var delivered = 0
+        val coordinator = coordinator(scheduler, port, inspect = { page })
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = { timeouts++ }, onFailure = {}) { _, _ ->
+            error("timed out OCR must not reach business")
+        })
+        val old = requireNotNull(port.pendingCallback)
+        scheduler.runNext(ChatMessageReadCoordinator.DEFAULT_CALLBACK_TIMEOUT_MS)
+        assertEquals(1, timeouts)
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {}) { _, _ -> delivered++ })
+        old(batch())
+        scheduler.runNext(0L)
+        assertTrue(coordinator.isInFlight)
+        assertEquals(0, delivered)
+        requireNotNull(port.pendingCallback)(batch())
+        scheduler.runNext(0L)
+        assertEquals(1, delivered)
+        assertFalse(coordinator.isInFlight)
+    }
+
+    @Test
+    fun invalidatingOcrDropsAlreadyQueuedResultWithoutClosingReplacementRead() {
+        val page = snapshot("same-chat")
+        val scheduler = FakeScheduler()
+        val port = TestMessagePort()
+        var delivered = 0
+        val coordinator = coordinator(scheduler, port, inspect = { page })
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {}) { _, _ ->
+            error("old generation")
+        })
+        requireNotNull(port.pendingCallback)(batch())
+        coordinator.invalidatePending()
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {}) { _, _ -> delivered++ })
+        scheduler.runNext(0L)
+        assertTrue(coordinator.isInFlight)
+        requireNotNull(port.pendingCallback)(batch())
+        scheduler.runNext(0L)
+        assertEquals(1, delivered)
+    }
+
+    @Test
     fun synchronousAdapterCallbackRemainsSynchronous() {
         val snapshot = snapshot("sync")
         val batch = batch()

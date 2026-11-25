@@ -87,9 +87,9 @@ internal class MomoChatMessageOcrProcessor(
             onComplete(
                 MomoChatOcrResult(
                     emptyMap(),
-                    batch.ocrTargets.size,
-                    batch.ocrTargets.size,
-                    "上一批 OCR 仍在执行或等待插件 Binder 返回；本批次未排队，避免阻塞堆积"
+                    attemptedTargetCount = 0,
+                    failedTargetCount = 0,
+                    admissionDeferred = true
                 )
             )
             return

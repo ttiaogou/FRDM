@@ -6864,6 +6864,12 @@ internal class MomoSocialAdapter(
                     expectedPackage = page.packageName,
                     expectedActivity = page.activityClass
                 ) { ocrResult ->
+                    if (ocrResult.admissionDeferred) {
+                        // The worker gate belongs to actual worker exit, not caller timeout.
+                        // Never merge this as an empty OCR result or charge failure counters.
+                        deliver(structuralBatch.copy(ocrAdmissionDeferred = true))
+                        return@recognize
+                    }
                     val resultBatch = try {
                         val mergedBatch = messageComponents.reader.applyOcrResults(structuralBatch, ocrResult, limit)
                         // Raw recognized text is carried only to the runtime's post-window-validation

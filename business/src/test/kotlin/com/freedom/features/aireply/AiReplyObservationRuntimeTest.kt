@@ -5266,6 +5266,77 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun repeatedGreetingObservationsDoNotRestartOcrBeforeCallbackDelivery() {
+        for (sendPending in listOf(false, true)) {
+            val scheduler = FakeScheduler()
+            val logs = ArrayList<String>()
+            val port = greetingDraftTestPort().apply { deferNextOcrRead = true }
+            var drafts = 0
+            var confirmations = 0
+            val runtime = greetingRuntimeFixture(
+                scheduler, port, logs, greetingDraft = { drafts++; true },
+                sendConfirmation = {
+                    if (sendPending) confirmations++
+                    if (sendPending) com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+                    else com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+                },
+                sendConfirmationPending = { sendPending }
+            )
+            activateGreetingTestFlow(runtime)
+            readGreetingTestMessages(runtime, port.page)
+            repeat(100) { readGreetingTestMessages(runtime, port.page) }
+            assertEquals(1, port.ocrAsyncReadRequests)
+            val structureReads = port.messageReads
+            port.completeDeferredOcrRead()
+            repeat(100) { readGreetingTestMessages(runtime, port.page) }
+            assertEquals(1, port.ocrAsyncReadRequests)
+            assertEquals(structureReads + 1, port.messageReads)
+            assertEquals(0, drafts)
+            assertEquals(0, confirmations)
+            runUntil(scheduler, 40) { if (sendPending) confirmations == 1 else drafts == 1 }
+            assertEquals(1, port.ocrAsyncReadRequests)
+            assertEquals(0, port.navigateBackCalls)
+        }
+    }
+
+    @Test
+    fun busyGreetingOcrIsDeferredWithoutFailureBudgetOrSendProof() {
+        for (sendPending in listOf(false, true)) {
+            val scheduler = FakeScheduler()
+            val logs = ArrayList<String>()
+            val port = greetingDraftTestPort().apply { deferNextOcrAdmission = true }
+            var drafts = 0
+            var confirmations = 0
+            val runtime = greetingRuntimeFixture(
+                scheduler, port, logs, greetingDraft = { drafts++; true },
+                sendConfirmation = {
+                    if (sendPending) confirmations++
+                    if (sendPending) com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+                    else com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+                },
+                sendConfirmationPending = { sendPending }
+            )
+            activateGreetingTestFlow(runtime)
+            readGreetingTestMessages(runtime, port.page)
+            runUntil(scheduler, 30) { logs.any { it.contains("AI OCR[ADMISSION_DEFERRED]") } }
+            assertEquals(1, port.ocrAsyncReadRequests)
+            repeat(100) { readGreetingTestMessages(runtime, port.page) }
+            assertEquals(1, port.ocrAsyncReadRequests)
+            assertEquals(0, drafts)
+            assertEquals(0, confirmations)
+            assertEquals(0, port.persistedChatSamples)
+            assertEquals(0, port.navigateBackCalls)
+            assertFalse(logs.any { it.contains("AI 消息复读：") })
+            assertTrue(scheduler.hasPendingDelay(500L))
+            scheduler.runNextWithDelay(500L)
+            // Re-admission is a new read of the current page, not the deferred batch.
+            readGreetingTestMessages(runtime, port.page)
+            assertEquals(2, port.ocrAsyncReadRequests)
+            runUntil(scheduler, 40) { if (sendPending) confirmations == 1 else drafts == 1 }
+        }
+    }
+
+    @Test
     fun greetingDetailBindingIsEstablishedOnceBeforeOcrAndReusedForSameWindow() {
         val scheduler = FakeScheduler()
         val logs = ArrayList<String>()
@@ -8122,6 +8193,7 @@ class AiReplyObservationRuntimeTest {
         var simulateStructureThenOcr = false
         var ocrAsyncReadRequests = 0
         var deferNextOcrRead = false
+        var deferNextOcrAdmission = false
         private var deferredOcrRead: Pair<ChatPageSnapshot, (ChatMessageBatch) -> Unit>? = null
         fun completeDeferredOcrRead() {
             val pending = requireNotNull(deferredOcrRead)
@@ -8413,7 +8485,14 @@ class AiReplyObservationRuntimeTest {
             onResult: (ChatMessageBatch) -> Unit
         ) {
             ocrAsyncReadRequests++
-            if (deferNextOcrRead) {
+            if (deferNextOcrAdmission) {
+                deferNextOcrAdmission = false
+                onResult(readRecentMessages(page, limit).copy(
+                    ocrAdmissionDeferred = true, ocrAttempted = false,
+                    ocrAttemptedTargetCount = 0, ocrRecognizedTargetCount = 0, ocrFailedTargetCount = 0,
+                    messages = emptyList(), ocrDebugTextByRowIndex = null
+                ))
+            } else if (deferNextOcrRead) {
                 deferNextOcrRead = false
                 deferredOcrRead = page to onResult
             } else {
