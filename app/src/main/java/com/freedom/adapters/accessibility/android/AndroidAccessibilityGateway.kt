@@ -52,6 +52,21 @@ import java.util.ArrayDeque
 
 private const val MAX_TARGET_WINDOWS_PER_CAPTURE = 8
 
+/** A fresh verified identity page substitutes for Activity, never for live window identity. */
+internal fun matchesVerifiedBackSource(
+    expectedWindow: WindowRef,
+    expectedActivityClass: String,
+    liveWindow: WindowRef,
+    sourceIdentityVerified: Boolean
+): Boolean = expectedWindow.packageName.isNotBlank() &&
+    expectedWindow.windowId >= 0 && expectedWindow.generation >= 0L &&
+    liveWindow.packageName == expectedWindow.packageName &&
+    liveWindow.windowId == expectedWindow.windowId &&
+    liveWindow.generation == expectedWindow.generation &&
+    (sourceIdentityVerified || (expectedActivityClass.isNotBlank() &&
+        expectedWindow.activityClass == expectedActivityClass &&
+        liveWindow.activityClass == expectedActivityClass))
+
 /**
  * Android implementation of the feature-facing accessibility gateway.
  * AccessibilityNodeInfo is acquired per call, never returned, and always recycled here.
@@ -499,52 +514,61 @@ internal class AndroidAccessibilityGateway(
     override fun performVerifiedNavigationBack(
         expectedWindow: WindowRef,
         expectedActivityClass: String,
-        targetActivityClass: String?
+        targetActivityClass: String?,
+        sourceIdentityVerified: Boolean
     ): Boolean {
-        if (!uiWriteAuthorization.permits(UiWriteScope.VERIFIED_AI_BACK)) return false
+        val evidence = if (sourceIdentityVerified) "PROFILE_ID" else "ACTIVITY"
+        fun reject(reason: String): Boolean {
+            onReadinessDiagnostic(
+                "经验证导航返回拒绝[$reason]：windowId=${expectedWindow.windowId}；" +
+                    "generation=${expectedWindow.generation}；sourceEvidence=$evidence"
+            )
+            return false
+        }
+        if (!uiWriteAuthorization.permits(UiWriteScope.VERIFIED_AI_BACK)) return reject("UI_WRITE_NOT_AUTHORIZED")
         val expectedPackage = targetPackage().trim()
-        if (expectedActivityClass.isBlank() || expectedPackage.isBlank() ||
-            expectedWindow.packageName != expectedPackage ||
-            expectedWindow.activityClass != expectedActivityClass ||
-            windowActivityClass(expectedWindow.windowId, expectedWindow.generation) != expectedActivityClass ||
-            expectedWindow.windowId < 0 || expectedWindow.generation != windowGeneration ||
-            runCatching { activeRunMode() }.getOrNull() != RunMode.AI_REPLY
-        ) return false
+        if (expectedPackage.isBlank() || expectedWindow.packageName != expectedPackage ||
+            expectedWindow.windowId < 0 || expectedWindow.generation != windowGeneration
+        ) return reject("SOURCE_WINDOW_MISMATCH")
+        if (runCatching { activeRunMode() }.getOrNull() != RunMode.AI_REPLY) return reject("RUN_MODE_MISMATCH")
+        if (!sourceIdentityVerified && (expectedActivityClass.isBlank() ||
+                expectedWindow.activityClass != expectedActivityClass ||
+                windowActivityClass(expectedWindow.windowId, expectedWindow.generation) != expectedActivityClass)
+        ) return reject("ACTIVITY_EVIDENCE_MISSING_OR_MISMATCH")
 
-        val root = runCatching { service.rootInActiveWindow }.getOrNull() ?: return false
+        val root = runCatching { service.rootInActiveWindow }.getOrNull() ?: return reject("ACTIVE_ROOT_UNAVAILABLE")
         return try {
             val actualPackage = safeString { root.packageName?.toString().orEmpty() }
             val actualWindowId = safeInt { root.windowId }
             val actualActivity = windowActivityClass(actualWindowId, windowGeneration)
-            val stillCurrent = actualPackage == expectedPackage &&
-                actualWindowId == expectedWindow.windowId &&
-                windowGeneration == expectedWindow.generation &&
-                (expectedWindow.activityClass.isBlank() || actualActivity == expectedWindow.activityClass)
-            if (!stillCurrent) {
+            val liveWindow = WindowRef(actualPackage, actualActivity, windowGeneration, actualWindowId)
+            if (!matchesVerifiedBackSource(expectedWindow, expectedActivityClass, liveWindow, sourceIdentityVerified)) {
                 onReadinessDiagnostic(
                     "经验证导航返回拒绝[STALE_WINDOW]：expectedWindow=${expectedWindow.windowId}@${expectedWindow.generation}；" +
-                        "actualWindow=$actualWindowId@$windowGeneration；activity=$actualActivity"
+                        "actualWindow=$actualWindowId@$windowGeneration；activity=$actualActivity；sourceEvidence=$evidence"
                 )
                 false
             } else {
                 val accepted = uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.VERIFIED_AI_BACK) {
+                    if (windowGeneration != expectedWindow.generation) return@withAuthorizedWrite reject("STALE_WINDOW")
                     val actionId = inputOriginClassifier.registerExpectedSelfNavigation(
                         sourceWindow = expectedWindow,
                         targetActivityClass = targetActivityClass,
                         runGeneration = currentRunGeneration(),
-                        registeredAtUptimeMs = SystemClock.uptimeMillis()
+                        registeredAtUptimeMs = SystemClock.uptimeMillis(),
+                        sourceIdentityVerified = sourceIdentityVerified
                     )
                     val platformAccepted = runCatching {
                         service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
                     }.getOrDefault(false)
-                    if (!platformAccepted && actionId != null) {
-                        inputOriginClassifier.rejectExpectedSelfNavigation(actionId, "PLATFORM_BACK_REJECTED")
-                    }
-                    platformAccepted
-                } ?: false
+                    if (!platformAccepted) {
+                        if (actionId != null) inputOriginClassifier.rejectExpectedSelfNavigation(actionId, "PLATFORM_BACK_REJECTED")
+                        reject("PLATFORM_BACK_REJECTED")
+                    } else true
+                } ?: return reject("UI_WRITE_REVOKED")
                 onReadinessDiagnostic(
                     "经验证导航返回派发：windowId=$actualWindowId；generation=$windowGeneration；" +
-                        "platformAccepted=$accepted；路径=VERIFIED_NAVIGATION_BACK"
+                        "platformAccepted=$accepted；路径=VERIFIED_NAVIGATION_BACK；sourceEvidence=$evidence"
                 )
                 accepted
             }

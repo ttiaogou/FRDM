@@ -767,6 +767,33 @@ class InputOriginClassifierTest {
     }
 
     @Test
+    fun verifiedIdentityBackRegistersWithoutSourceActivityButStillRequiresExactTransition() {
+        val source = WindowRef(TARGET_PACKAGE, "", 7L, 12)
+        val destination = "com.example.ReturnActivity"
+        val classifier = InputOriginClassifier()
+        assertNull(classifier.registerExpectedSelfNavigation(source, destination, 3L, 10_000L))
+        val id = classifier.registerExpectedSelfNavigation(
+            source, destination, 3L, 10_000L, sourceIdentityVerified = true
+        )
+        assertNotNull(id)
+        classifier.noteActivityTransition(TARGET_PACKAGE, destination, 7L, 9L, 21, 10_180L, 3L)
+        assertEquals(id, classifier.takeAttachedSelfNavigation()?.actionId)
+        classifier.noteActivityTransition(TARGET_PACKAGE, destination, 7L, 9L, 21, 10_200L, 3L)
+        assertNull(classifier.takeAttachedSelfNavigation())
+        assertNotNull(classifier.registerExpectedSelfNavigation(
+            source, destination, 3L, 11_000L, sourceIdentityVerified = true
+        ))
+        classifier.noteActivityTransition(TARGET_PACKAGE, destination, 7L, 9L, 21, 11_180L, 4L)
+        assertNull(classifier.takeAttachedSelfNavigation())
+        assertNull(classifier.registerExpectedSelfNavigation(
+            source.copy(windowId = -1), destination, 3L, 12_000L, sourceIdentityVerified = true
+        ))
+        assertNull(classifier.registerExpectedSelfNavigation(
+            source, null, 3L, 12_000L, sourceIdentityVerified = true
+        ))
+    }
+
+    @Test
     fun verifiedBackRejectsWrongSourceRunDestinationTimeAndUnknownWindow() {
         val source = WindowRef(TARGET_PACKAGE, ACTIVITY, 7L, 12)
         val destination = "com.example.ReturnActivity"

@@ -461,13 +461,16 @@ interface AccessibilityGateway :
      * Performs one BACK navigation only for a caller-validated, exact target window. Unlike the
      * normal global-action path, this does not require the page to be a chat page; the adapter must
      * first complete its dedicated overlay-safety inspection and pass the fresh WindowRef plus
-     * the expected page Activity. Implementations must revalidate package, Activity, window ID,
-     * generation and run mode. The caller provides the expected destination Activity for
-     * provenance only; a null destination means no page transition can be claimed.
+     * the expected page Activity. Only a caller-verified identity page in that exact window may
+     * supply sourceIdentityVerified=true, based on fresh unique platform identity evidence,
+     * not an Activity guess or historical ID. Implementations always revalidate package,
+     * window ID, generation, run mode and authorization; otherwise Activity is also required.
+     * The expected destination Activity is provenance only; null claims no page transition.
      */
     fun performVerifiedNavigationBack(
         expectedWindow: WindowRef,
         expectedActivityClass: String,
-        targetActivityClass: String?
+        targetActivityClass: String?,
+        sourceIdentityVerified: Boolean = false
     ): Boolean = false
 }

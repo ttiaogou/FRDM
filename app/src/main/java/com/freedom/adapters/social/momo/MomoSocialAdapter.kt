@@ -3751,7 +3751,8 @@ internal class MomoSocialAdapter(
     private data class SayHiProfileBackInspection(
         val window: WindowRef,
         val dialogHPresent: Boolean,
-        val dialogHWindowId: Int
+        val dialogHWindowId: Int,
+        val profileIdVerified: Boolean
     )
 
     /**
@@ -3857,8 +3858,13 @@ internal class MomoSocialAdapter(
                 TreeInspectionRequest(maxNodes = 1_800, maxDepth = 48, maxDurationMs = 1_000L,
                     textCapture = NodeTextCapture.EPHEMERAL)
             ) ?: return@withTargetWindowRoots null
-            if (profileTree.window != active.window || !isIdentityProfileActionWindow(profileTree))
+            if (profileTree.window != active.window || !isIdentityProfileActionWindow(profileTree)) {
+                onLog("资料页 BACK 拒绝[PROFILE_SOURCE_UNVERIFIED]：当前资料页或窗口证据不足")
                 return@withTargetWindowRoots null
+            }
+            // Use the current tree, not a cached ID or an inferred Activity.
+            val profileIdVerified = MomoSayHiPlatformIdentityParser.parse(profileTree.nodes)
+                .status == MomoSayHiPlatformIdentityStatus.CONFIRMED
 
             val dialogRoot = dialogObservation?.let { observation ->
                 windows.firstOrNull { it.window.windowId == observation.windowId }
@@ -3913,7 +3919,8 @@ internal class MomoSocialAdapter(
             SayHiProfileBackInspection(
                 window = active.window,
                 dialogHPresent = dialogPresent,
-                dialogHWindowId = dialogRoot?.window?.windowId ?: -1
+                dialogHWindowId = dialogRoot?.window?.windowId ?: -1,
+                profileIdVerified = profileIdVerified && !dialogPresent
             )
         } ?: return null
 
@@ -3924,8 +3931,11 @@ internal class MomoSocialAdapter(
         val accepted = accessibilityGateway.performVerifiedNavigationBack(
             inspection.window,
             inspection.window.activityClass,
-            targetActivityClass.takeUnless { inspection.dialogHPresent }
+            targetActivityClass.takeUnless { inspection.dialogHPresent },
+            sourceIdentityVerified = inspection.profileIdVerified
         )
+        onLog("资料页 BACK 提交结果：accepted=$accepted；sourceEvidence=" +
+            if (inspection.profileIdVerified) "PROFILE_ID" else "ACTIVITY")
         if (!accepted) return null
         return inspection
     }

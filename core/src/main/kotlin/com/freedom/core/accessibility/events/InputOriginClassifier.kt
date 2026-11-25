@@ -432,17 +432,21 @@ class InputOriginClassifier(
     /**
      * Registers the exact source of a non-tap navigation immediately before platform dispatch.
      * A null destination (e.g. a dialog-only BACK) replaces old pending evidence but cannot
-     * claim a page transition. No registration grants page readiness or a UI lease.
+     * claim a page transition. A caller-verified identity source may lack Activity evidence;
+     * the same source generation, destination, run, time and ambiguity checks still apply.
+     * No registration grants page readiness or a UI lease.
      */
     fun registerExpectedSelfNavigation(
         sourceWindow: WindowRef,
         targetActivityClass: String?,
         runGeneration: Long,
-        registeredAtUptimeMs: Long
+        registeredAtUptimeMs: Long,
+        sourceIdentityVerified: Boolean = false
     ): String? = synchronized(lock) {
         pruneLocked(registeredAtUptimeMs)
         pendingExpectedNavigation = null
-        if (sourceWindow.packageName.isBlank() || sourceWindow.activityClass.isBlank() ||
+        if (sourceWindow.packageName.isBlank() ||
+            (sourceWindow.activityClass.isBlank() && !sourceIdentityVerified) ||
             sourceWindow.windowId < 0 || sourceWindow.generation < 0L || runGeneration < 0L ||
             targetActivityClass.isNullOrBlank()
         ) return@synchronized null
