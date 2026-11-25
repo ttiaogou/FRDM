@@ -12,7 +12,9 @@ data class BrowsePageEvidence(
     val confidence: Int,
     val reason: String,
     val nodeCount: Int = 0,
-    val windowAvailable: Boolean = true
+    val windowAvailable: Boolean = true,
+    val windowId: Int? = null,
+    val windowSessionKey: String? = null
 )
 
 enum class BrowsePageKind {
