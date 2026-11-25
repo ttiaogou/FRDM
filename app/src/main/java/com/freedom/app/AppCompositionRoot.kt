@@ -333,23 +333,11 @@ internal class AccessibilityServiceDependencies internal constructor(
                         else com.freedom.core.runtime.RunMode.AI_REPLY,
                         targetTask
                     )
-                    val current = taskCoordinator.currentLease()
-                    val transferred = if (current == null) {
-                        taskCoordinator.tryAcquire(targetTask, snapshot.runGeneration) != null
-                    } else if (current.taskId == targetTask) {
-                        true
-                    } else {
-                        taskCoordinator.transfer(current, targetTask) != null
-                    }
-                    addLog(
-                        "统一页面仲裁[OWNERSHIP]：target=" + targetTask +
-                            ";transferred=" + transferred +
-                            ";runGeneration=" + snapshot.runGeneration
-                    )
                 } else if (decision.conflict || decision.classification ==
                     com.freedom.core.runtime.PageClassification.UNKNOWN
                 ) {
-                    addLog("统一页面仲裁[NO_OWNERSHIP]：未知或冲突页面；保持只读等待")
+                    runSessionCoordinator.routePageTask(null)
+                    addLog("统一页面仲裁[NO_OWNERSHIP]：未知或冲突页面；清除旧路由并保持只读等待")
                 }
             }
         ).also { bus ->
