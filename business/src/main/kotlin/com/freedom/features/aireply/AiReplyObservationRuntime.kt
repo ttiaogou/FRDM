@@ -1265,6 +1265,10 @@ class AiReplyObservationRuntime(
         )
         diagnosePendingIdentityReturn(observationDecision, inspection)
         if (observationDecision.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) {
+            // A target-app transitional sample is not an EMPTY_SNAPSHOT recovery if the
+            // original navigation is still awaiting its destination. No snapshot or a
+            // foreign package still follows the existing recovery path.
+            if (inspection != null && waitForPendingGreetingsNavigationEvidence(inspection)) return
             if (pollingRoundPending) invalidatePollingRoundEvidence()
             if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
                 holdGreetingsCompletionReturn("EMPTY_SNAPSHOT")
@@ -1373,6 +1377,26 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼恢复[RECOVERY_VERIFIED]：连续两次新鲜列表指纹一致；恢复收到招呼任务协调器")
         }
         handleInspectionSnapshot(observationDecision.copy(snapshot = recovered))
+    }
+
+    /** Keep an unconfirmed business transition read-only without creating a recovery transaction. */
+    private fun waitForPendingGreetingsNavigationEvidence(snapshot: ChatPageSnapshot): Boolean {
+        if (!sessionRunStarted || !receivedGreetingsTaskActive ||
+            !ownsTask(RECEIVED_GREETINGS_TASK_ID) || recoveryContext.pending ||
+            awaitingNormalInboxAfterGreetingsReturn || isSendConfirmationPending() ||
+            isConversationDraftPending() || isSendControlRecoveryPending() ||
+            snapshot.packageName != targetPackage() ||
+            (snapshot.pageKind != ChatPageKind.NON_CHAT && snapshot.pageKind != ChatPageKind.UNKNOWN)
+        ) return false
+        val awaitingEvidence = runCatching {
+            chatPagePort.isReceivedGreetingsNavigationAwaitingPageEvidence(snapshot)
+        }.getOrDefault(false)
+        if (!awaitingEvidence) return false
+        // Preserve the last confirmed source snapshot for the next route comparison.
+        // In particular, do not turn an unclassified observation into an accepted page.
+        onLog("收到招呼业务导航[TRANSITION_EVIDENCE_WAIT]：现有导航期限内目标页面证据未同步；保留原事务，只读复核")
+        scheduleFullInspectionAfter(RECEIVED_GREETINGS_NAVIGATION_RECHECK_DELAY_MS)
+        return true
     }
 
     /**
@@ -1943,6 +1967,15 @@ class AiReplyObservationRuntime(
         if (pendingGreetingDetailReturn) {
             onLog("收到招呼业务导航[DETAIL_RETURN_PENDING]：原BACK来源、列表路由和任务租约已复核；保留原返回事务等待双快照")
         }
+        // A known destination (including another task's route) must never be held by
+        // this grace. Only an unclassified observation during a bounded existing
+        // transaction can wait; the original destination proof still owns progression.
+        if (matchedRouteId == null && !receivedGreetingsWorkflowTransition &&
+            previous != null && previous.packageName == targetPackage() &&
+            pageIdentityChanged(previous, inspection) &&
+            waitForPendingGreetingsNavigationEvidence(inspection)
+        ) return
+
         val shouldCreateRouteRecovery = sessionRunStarted && activeTaskId != null &&
             !recoveryContext.pending && selfInitiatedTransition == null &&
             !openingPrivateSessionDetail && !activePrivateChatDetail && !receivedGreetingsWorkflowTransition &&

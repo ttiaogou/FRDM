@@ -2218,6 +2218,35 @@ class AiReplyObservationRuntimeTest {
         }
     }
 
+    @Test
+    fun greetingAvatarArrivalBeforeActivityEvidenceWaitsReadOnlyThenUsesExistingProfileFlow() {
+        val result = runGreetingAvatarProfileRouteCase(
+            profileVerified = false,
+            stage = ReceivedGreetingsTraversalStatus.NAVIGATING,
+            resolvePendingArrival = true
+        )
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", result.owner)
+        assertTrue(result.logs.any { it.contains("TRANSITION_EVIDENCE_WAIT") })
+        assertTrue(result.logs.any { it.contains("IDENTITY_PROFILE_VERIFIED") })
+        assertTrue(result.idleStepsAfterProfile > result.idleStepsBeforeProfile)
+        assertFalse(result.logs.any { it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") })
+    }
+
+    @Test
+    fun greetingAvatarArrivalWithoutProofAfterOriginalDeadlineUsesRouteRecovery() {
+        val result = runGreetingAvatarProfileRouteCase(
+            profileVerified = false,
+            stage = ReceivedGreetingsTraversalStatus.NAVIGATING,
+            resolvePendingArrival = false
+        )
+        assertTrue(result.logs.any { it.contains("TRANSITION_EVIDENCE_WAIT") })
+        assertEquals(result.idleStepsBeforeProfile, result.idleStepsAfterProfile)
+        assertFalse(result.logs.any { it.contains("IDENTITY_PROFILE_VERIFIED") })
+        assertTrue(result.logs.any {
+            it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") && it.contains("PAGE_ROUTE_CHANGED")
+        })
+    }
+
     private data class GreetingProfileRouteCaseResult(
         val owner: String?,
         val idleStepsBeforeProfile: Int,
@@ -2227,7 +2256,8 @@ class AiReplyObservationRuntimeTest {
 
     private fun runGreetingAvatarProfileRouteCase(
         profileVerified: Boolean,
-        stage: ReceivedGreetingsTraversalStatus
+        stage: ReceivedGreetingsTraversalStatus,
+        resolvePendingArrival: Boolean? = null
     ): GreetingProfileRouteCaseResult {
         val scheduler = FakeScheduler()
         val listActivity = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
@@ -2282,6 +2312,35 @@ class AiReplyObservationRuntimeTest {
 
         port.receivedGreetingsIdentityProfileProof = profileVerified
         port.receivedGreetingsTraversalStatusValue = stage
+        if (resolvePendingArrival != null) {
+            // Device log: the new profile root is visible before Activity/generation and
+            // navigation attribution catch up. The adapter's original deadline is still live.
+            val originalLease = requireNotNull(owner.currentLease())
+            port.receivedGreetingsNavigationEvidencePending = true
+            port.page = port.page.copy(
+                activityClass = "com.immomo.momo.message.activity.ChatActivity",
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 198,
+                windowGeneration = 12L
+            )
+            runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
+            scheduler.runNextWithDelay(300L)
+            assertTrue(logs.any { it.contains("TRANSITION_EVIDENCE_WAIT") })
+            assertEquals(idleBefore, port.receivedGreetingsIdleSteps)
+            assertEquals(originalLease, owner.currentLease())
+            assertFalse(runtime.isReceivedGreetingsRecoveryPending())
+            assertEquals(0, port.ocrAsyncReadRequests)
+
+            // Simulate the adapter's existing deadline/confirmation decision, not a new clock.
+            port.receivedGreetingsNavigationEvidencePending = false
+            if (!resolvePendingArrival) {
+                scheduler.runNextWithDelay(750L)
+                return GreetingProfileRouteCaseResult(
+                    owner.activeTaskId(), idleBefore, port.receivedGreetingsIdleSteps, logs
+                )
+            }
+            port.receivedGreetingsIdentityProfileProof = true
+        }
         port.page = port.page.copy(
             activityClass = profileActivity,
             pageKind = ChatPageKind.NON_CHAT,
@@ -8698,6 +8757,7 @@ class AiReplyObservationRuntimeTest {
         var receivedGreetingsRowKeyHash: String? = null
         var receivedGreetingsDisplayName: String? = null
         var receivedGreetingsIdentityProfileProof = false
+        var receivedGreetingsNavigationEvidencePending = false
         var greetingDetailReturnProof = false
         var receivedGreetingsCheckpointFingerprint: String? = null
         var receivedGreetingsRecoverySyncAccepted: Boolean = false
@@ -8815,6 +8875,10 @@ class AiReplyObservationRuntimeTest {
             if (success) greetingDetailSuccessfulCompletions++
             return true
         }
+        override fun isReceivedGreetingsNavigationAwaitingPageEvidence(snapshot: ChatPageSnapshot): Boolean =
+            receivedGreetingsNavigationEvidencePending &&
+                snapshot.packageName == "com.immomo.momo" &&
+                (snapshot.pageKind == ChatPageKind.NON_CHAT || snapshot.pageKind == ChatPageKind.UNKNOWN)
         override fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean =
             receivedGreetingsIdentityProfileProof &&
                 snapshot.packageName == "com.immomo.momo" &&

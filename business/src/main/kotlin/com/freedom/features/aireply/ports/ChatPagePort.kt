@@ -655,6 +655,13 @@ interface ChatPagePort {
     fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean = false
 
     /**
+     * Read-only projection of an existing greeting navigation stage and its original deadline.
+     * True means only that an unclassified target-app observation may be retried; it does not
+     * identify the destination, renew the deadline, grant a lease, or authorize any UI action.
+     */
+    fun isReceivedGreetingsNavigationAwaitingPageEvidence(snapshot: ChatPageSnapshot): Boolean = false
+
+    /**
      * Read-only evidence from the existing greeting-detail BACK transaction.
      * The source must match the accepted BACK window. This does not confirm the destination
      * or advance the cursor; the original list fingerprint and double-snapshot gate do that.

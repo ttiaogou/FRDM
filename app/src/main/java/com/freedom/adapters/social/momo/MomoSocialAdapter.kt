@@ -4112,6 +4112,37 @@ internal class MomoSocialAdapter(
         return isSayHiProfileSurfacePresent()
     }
 
+    override fun isReceivedGreetingsNavigationAwaitingPageEvidence(snapshot: ChatPageSnapshot): Boolean {
+        if (snapshot.packageName != targetPackage ||
+            (snapshot.pageKind != ChatPageKind.NON_CHAT && snapshot.pageKind != ChatPageKind.UNKNOWN) ||
+            sayHiSelectedGreeting == null || sayHiReadOnlyStageStartedAtMs <= 0L
+        ) return false
+        // Read the adapter's original transaction state and deadline; never extend either.
+        val timeoutMs = when (sayHiReadOnlyStage) {
+            SayHiReadOnlyStage.AVATAR_TAP_PENDING -> SAYHI_GESTURE_TERMINAL_TIMEOUT_MS
+            SayHiReadOnlyStage.ROW_TAP_PENDING -> {
+                if (sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.REJECTED) return false
+                SAYHI_GESTURE_TERMINAL_TIMEOUT_MS
+            }
+            SayHiReadOnlyStage.WAITING_PROFILE -> SAYHI_PROFILE_PAGE_TIMEOUT_MS
+            SayHiReadOnlyStage.PROFILE_BACK_PENDING -> {
+                if (sayHiProfileBackWindowId < 0) return false
+                SAYHI_PROFILE_BACK_TIMEOUT_MS
+            }
+            SayHiReadOnlyStage.WAITING_DETAIL -> {
+                if (sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.REJECTED) return false
+                SAYHI_ROW_DETAIL_VERIFY_TIMEOUT_MS
+            }
+            SayHiReadOnlyStage.DETAIL_BACK_PENDING -> {
+                if (sayHiDetailBackSourceWindow == null) return false
+                SAYHI_DETAIL_BACK_TIMEOUT_MS
+            }
+            else -> return false
+        }
+        val elapsedMs = System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs
+        return elapsedMs >= 0L && elapsedMs < timeoutMs
+    }
+
     override fun isReceivedGreetingsDetailReturnNavigationActive(source: ChatPageSnapshot): Boolean {
         if (sayHiReadOnlyStage != SayHiReadOnlyStage.DETAIL_BACK_PENDING ||
             sayHiSelectedGreeting == null || source.packageName != targetPackage ||
