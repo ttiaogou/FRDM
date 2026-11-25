@@ -280,7 +280,7 @@ class AiReplyDecisionEngineTest {
         )
         assertEquals(AiReplyAction.REPLY, model(outcome).action)
         assertEquals("你说的是哪件事呀？", model(outcome).draft)
-        assertTrue(provider.lastRequest!!.systemInstruction.contains("低承诺"))
+        assertTrue(provider.lastRequest!!.systemInstruction.contains("根据上下文选择最值得回应的内容"))
     }
 
     @Test fun parserDiagnosticReasonsDoNotChangeValidationOrDraft() {
