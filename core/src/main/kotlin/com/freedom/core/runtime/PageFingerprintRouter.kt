@@ -158,3 +158,19 @@ enum class PageClassification {
 interface PageObservationClassifier {
     fun classify(fingerprint: PageFingerprint): PageClassification
 }
+
+
+/**
+ * A fresh, provider-neutral page observation passed to read-only classifiers.
+ * Generation/window identity prevents stale snapshots from being treated as current evidence.
+ */
+data class PageObservationSnapshot(
+    val fingerprint: PageFingerprint,
+    val observationGeneration: Long,
+    val windowId: Int? = null,
+    val windowSessionKey: String? = null
+)
+
+interface PageObservationSnapshotClassifier {
+    fun classify(snapshot: PageObservationSnapshot): PageClassification
+}
