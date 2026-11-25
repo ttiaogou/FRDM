@@ -140,3 +140,21 @@ class UnifiedPageTaskRouter(
     @Synchronized
     fun registeredRouteIds(): Set<String> = fingerprintRouter.registeredRouteIds()
 }
+
+
+/** Stable, provider-neutral page categories used by the unified page entry. */
+enum class PageClassification {
+    AUTOMATIC_BROWSE,
+    PRIVATE_MESSAGES,
+    RECEIVED_GREETINGS,
+    CHAT_DETAIL,
+    UNKNOWN
+}
+
+/**
+ * Read-only classifier contract. Implementations may use complete page snapshots and existing
+ * adapter fingerprints, but must not perform UI actions, mutate business state, or acquire leases.
+ */
+interface PageObservationClassifier {
+    fun classify(fingerprint: PageFingerprint): PageClassification
+}
