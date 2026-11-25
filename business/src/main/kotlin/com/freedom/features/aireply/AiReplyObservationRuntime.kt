@@ -1981,10 +1981,14 @@ class AiReplyObservationRuntime(
         if (pendingGreetingDetailReturn) {
             onLog("收到招呼业务导航[DETAIL_RETURN_PENDING]：原BACK来源、列表路由和任务租约已复核；保留原返回事务等待双快照")
         }
-        // A known destination (including another task's route) must never be held by
-        // this grace. Only an unclassified observation during a bounded existing
-        // transaction can wait; the original destination proof still owns progression.
-        if (matchedRouteId == null && !receivedGreetingsWorkflowTransition &&
+        // The generic chat-detail recovery route matches every CHAT_DETAIL_CANDIDATE;
+        // it does not prove a different task owns this specific chat. Allow only that
+        // shared structural route (or no route) to reach the existing bounded adapter
+        // transaction check. Confirmed list routes and unrelated task routes still win.
+        val awaitingGreetingsNavigationRoute = matchedRouteId == null ||
+            (matchedRouteId == chatDetailRecoveryRoute.routeId &&
+                inspection.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE)
+        if (awaitingGreetingsNavigationRoute && !receivedGreetingsWorkflowTransition &&
             previous != null && previous.packageName == targetPackage() &&
             pageIdentityChanged(previous, inspection) &&
             waitForPendingGreetingsNavigationEvidence(inspection)
