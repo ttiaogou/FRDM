@@ -15,6 +15,7 @@ import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.PageFingerprint
 import com.freedom.core.runtime.PageRecoveryRouteAdapter
 import com.freedom.core.runtime.PageObservationSnapshot
+import com.freedom.core.runtime.PageObservationSnapshotSource
 import com.freedom.core.runtime.PageClassification
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
@@ -80,6 +81,7 @@ class AiReplyObservationRuntime(
     /** Must be freshly evaluated against the active Android window; never a cached permission. */
     private val inspectAndroidRecoveryReadiness: (ChatPageSnapshot) -> TargetAppReadinessSnapshot,
     private val onLog: (String) -> Unit,
+    private val pageObservationSnapshotSource: PageObservationSnapshotSource? = null,
     private val fullInspectionDebounceMs: Long,
     private val regionRefreshDebounceMs: Long,
     private val onMessagesObserved: (ChatMessageBatch) -> Unit = {},
@@ -1556,6 +1558,12 @@ class AiReplyObservationRuntime(
             adapterFingerprint = runCatching {
                 chatPagePort.receivedGreetingsRecoveryFingerprint()
             }.getOrNull()
+        )
+        pageObservationSnapshotSource?.publish(
+            PageObservationSnapshot(
+                fingerprint = pageFingerprint,
+                observationGeneration = observation.observationGeneration
+            )
         )
         val matchedRouteId = if (pageFingerprint.packageName == targetPackage()) {
             sharedPageObservationCoordinator.matchRecoveryAdapter(
