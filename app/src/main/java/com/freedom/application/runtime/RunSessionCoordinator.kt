@@ -191,10 +191,12 @@ class RunSessionCoordinator(
         val currentPage = pageRuntimeSession.current()
         if (currentPage != null && (mode == null || currentPage.mode != mode || currentPage.taskId != taskId)) {
             pageRuntimeSession.markStopping(currentPage.runGeneration)
+            runtimes[currentPage.mode]?.onRunStopped("页面任务路由切换")
             log.append(
                 "页面任务路由[STOPPING]：taskId=" + currentPage.taskId +
                     "；nextTaskId=" + (taskId ?: "NONE") +
-                    "；runGeneration=" + currentPage.runGeneration
+                    "；runGeneration=" + currentPage.runGeneration +
+                    "；旧运行时调度已取消"
             )
         }
         pageRoutedMode = mode
