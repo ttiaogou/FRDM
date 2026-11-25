@@ -1,6 +1,9 @@
 package com.freedom.features.accountbrowse
 
 import com.freedom.core.accessibility.events.AccessibilityEventType
+import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
+import com.freedom.core.accessibility.events.InputOrigin
+import com.freedom.core.accessibility.events.InputOriginEvidence
 
 /** Immutable, platform-neutral state required to classify one target-app interaction event. */
 data class AccountBrowseInteractionContext(
@@ -33,6 +36,15 @@ class AccountBrowseInteractionEventClassifier {
             eventType == AccessibilityEventType.VIEW_TEXT_CHANGED ||
             eventType == AccessibilityEventType.VIEW_TEXT_SELECTION_CHANGED ||
             eventType == AccessibilityEventType.VIEW_CONTEXT_CLICKED
+
+    /** The platform ledger has already checked actual dispatch time, geometry and window. */
+    fun isVerifiedSelfClick(event: AccessibilityEventEnvelope, touchActive: Boolean): Boolean {
+        val decision = event.inputOriginDecision ?: return false
+        return event.type == AccessibilityEventType.VIEW_CLICKED && !touchActive &&
+            decision.origin == InputOrigin.SELF_INJECTED &&
+            decision.evidence == InputOriginEvidence.FREEDOM_DISPATCH_GESTURE_LEDGER_MATCH &&
+            !decision.actionId.isNullOrBlank()
+    }
 
     /** True only when the current event matches an action Freedom itself submitted. */
     fun isProgrammaticInteractionEvent(

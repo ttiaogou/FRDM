@@ -18,6 +18,36 @@ import org.junit.Test
 
 class AndroidAccessibilityEventPipelineTest {
     @Test
+    fun browseClickUsesActualPlatformLedgerAfterLongQueueDelayWithoutChangingAiRouting() {
+        val classifier = InputOriginClassifier()
+        val trace = mutableListOf<String>()
+        val fallbackEvents = mutableListOf<AccessibilityEventEnvelope>()
+        val pipeline = pipeline(trace, currentActivityClass = { ACTIVITY },
+            currentWindowGeneration = { 7L }, inputOriginClassifier = classifier,
+            onManualFallback = { fallbackEvents += it })
+        // The request was prepared at 1000; Android actually dispatches much later.
+        classifier.registerDispatchGesture("card", TARGET_PACKAGE, ACTIVITY, 7L, 12,
+            com.freedom.core.accessibility.api.GestureSpec(
+                commands = listOf(com.freedom.core.accessibility.api.GesturePathCommand.MoveTo(
+                    com.freedom.core.accessibility.api.GesturePoint(5f, 5f))),
+                durationMs = 90L,
+                feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
+            ), 2500L)
+        classifier.settleDispatchGesture("card", completed = true, settledAtUptimeMs = 2590L)
+        val click = event(AccessibilityEventType.VIEW_CLICKED, TARGET_PACKAGE)
+            .copy(eventTimeMillis = 2650L, windowId = 12)
+        pipeline.processNormalized(click, AccessibilityEvent.TYPE_VIEW_CLICKED, RunMode.ACCOUNT_BROWSE, 2650L)
+        assertEquals(InputOrigin.SELF_INJECTED, fallbackEvents.single().inputOriginDecision?.origin)
+        assertEquals("card", fallbackEvents.single().inputOriginDecision?.actionId)
+        val policy = com.freedom.features.accountbrowse.AccountBrowseInteractionEventClassifier()
+        assertTrue(policy.isVerifiedSelfClick(fallbackEvents.single(), false))
+        assertFalse(policy.isVerifiedSelfClick(fallbackEvents.single(), true))
+        pipeline.processNormalized(click.copy(windowId = 13, eventTimeMillis = 3100L),
+            AccessibilityEvent.TYPE_VIEW_CLICKED, RunMode.ACCOUNT_BROWSE, 3100L)
+        assertFalse(policy.isVerifiedSelfClick(fallbackEvents.last(), false))
+    }
+
+    @Test
     fun accountBrowseDispatchesTargetEventBeforeDuplicateLogSuppression() {
         val trace = mutableListOf<String>()
         val pipeline = pipeline(trace)
@@ -555,7 +585,8 @@ class AndroidAccessibilityEventPipelineTest {
         updateCurrentActivityClass: (String) -> Unit = { trace += "update-activity" },
         dispatchGlobalTouchEvent: (AccessibilityEventEnvelope) -> Unit = { trace += "dispatch-global-touch" },
         currentWindowGeneration: () -> Long = { 0L },
-        inputOriginClassifier: InputOriginClassifier = InputOriginClassifier()
+        inputOriginClassifier: InputOriginClassifier = InputOriginClassifier(),
+        onManualFallback: (AccessibilityEventEnvelope) -> Unit = {}
     ) = AndroidAccessibilityEventPipeline(
         routePolicy = DefaultAccessibilityEventRoutePolicy(),
         targetPackage = { TARGET_PACKAGE },
@@ -574,7 +605,7 @@ class AndroidAccessibilityEventPipelineTest {
             }
         },
         interactionDiagnostics = { _, _ -> listOf("test-diagnostics") },
-        handleManualInteractionFallback = { trace += "manual-fallback" },
+        handleManualInteractionFallback = { trace += "manual-fallback"; onManualFallback(it) },
         updateAppPage = updateAppPage,
         appendLog = appendLog,
         currentActivityClass = currentActivityClass,

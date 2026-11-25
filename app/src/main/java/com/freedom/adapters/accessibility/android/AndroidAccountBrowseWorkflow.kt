@@ -4,6 +4,7 @@ import com.freedom.gesture.api.GestureApi
 import android.view.accessibility.AccessibilityEvent
 import com.freedom.core.accessibility.api.AccessibilityGateway
 import com.freedom.core.accessibility.api.GestureSubmission
+import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.gesture.GestureIntent
 import com.freedom.core.accessibility.gesture.GestureIntentRequest
 import com.freedom.core.accessibility.gesture.GestureExecutionStatus
@@ -440,11 +441,33 @@ internal class AndroidAccountBrowseWorkflow(
         // Read-only observation must also invalidate a previous sample when the
         // current route/feed cannot be proved. Never call handleMomoPopup here:
         // that method can dispatch an action.
-        val recovered = accountBrowseRuntime.observeDynamicFeedFingerprintReadOnly(
-            inspection?.takeIf { it.ready && it.fingerprint.isNotBlank() }?.fingerprint.orEmpty(),
-            page = page,
-            routeVerified = verifiedRoute
-        )
+        val detailPhase = accountBrowsePhase in setOf(
+            AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD, AccountBrowsePhase.DETAIL_DWELL,
+            AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE
+        ) && !accountBrowseRuntime.hasPendingCheckpointVerification()
+        val recovered = if (detailPhase && page.pageKind == BrowsePageKind.DETAIL) {
+            val identity = if (!isRetainedObstructionEvidence(page.reason) &&
+                socialBrowsePort.inspectPopup() == null
+            ) socialBrowsePort.inspectDetail(accountBrowseSession.detailFingerprint) else null
+            val confirmed = identity != null && identity.identityConfirmed &&
+                !identity.isFeedPage && identity.fingerprint == page.fingerprint
+            accountBrowseRuntime.observeDetailFingerprintReadOnly(page, confirmed).also { completed ->
+                val samples = if (completed) REQUIRED_STABLE_PAGE_SAMPLES else accountBrowseRuntime.recoveryStableSamples()
+                addLog("动态详情只读复核：稳定计数=$samples/$REQUIRED_STABLE_PAGE_SAMPLES；事务状态=${accountBrowseRuntime.recoveryState().name}；不执行 BACK")
+                if (completed && accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD) {
+                    // Start the original load check with fresh samples and its original timeout.
+                    accountBrowseSession.lastStableFingerprint = ""
+                    accountBrowseSession.stableSamples = 0
+                    accountBrowseSession.deadlineAt = System.currentTimeMillis() + DETAIL_LOAD_TIMEOUT_MS
+                }
+            }
+        } else {
+            accountBrowseRuntime.observeDynamicFeedFingerprintReadOnly(
+                inspection?.takeIf { it.ready && it.fingerprint.isNotBlank() }?.fingerprint.orEmpty(),
+                page = page,
+                routeVerified = verifiedRoute
+            )
+        }
         if (accountBrowsePhase == AccountBrowsePhase.WAIT_FOR_FEED_STABLE) {
             val samples = if (recovered) REQUIRED_STABLE_FEED_SAMPLES else accountBrowseRuntime.recoveryStableSamples()
             addLog("动态列表只读复核：稳定计数=$samples/$REQUIRED_STABLE_FEED_SAMPLES；事务状态=${accountBrowseRuntime.recoveryState().name}；不执行手势")
@@ -452,7 +475,11 @@ internal class AndroidAccountBrowseWorkflow(
         if (accountBrowseRuntime.recoveryState() == com.freedom.features.recovery.RecoveryTransactionState.ACTIVE &&
             !accountBrowseSession.touchActive && accountBrowsePhase != AccountBrowsePhase.IDLE
         ) {
-            accountBrowseRuntime.scheduleStep(PAGE_STATE_POLL_MS)
+            // Recovery must not shorten the already chosen detail dwell interval.
+            val delay = if (accountBrowsePhase == AccountBrowsePhase.DETAIL_DWELL) {
+                maxOf(PAGE_STATE_POLL_MS, accountBrowseSession.detailDwellDueAt - System.currentTimeMillis())
+            } else PAGE_STATE_POLL_MS
+            accountBrowseRuntime.scheduleStep(delay)
         }
     }
 
@@ -2225,7 +2252,8 @@ internal class AndroidAccountBrowseWorkflow(
             preferredBounds = candidate.bounds,
             clickableBounds = candidate.bounds,
             description = "陌陌普通动态卡片",
-            expectedWindow = candidate.targetWindow
+            expectedWindow = candidate.targetWindow,
+            feedbackIntent = GestureFeedbackIntent.NAVIGATION_ENTRY
         )
         if (tap == null) {
             accountBrowseSession.sourceFingerprint = ""
@@ -2236,8 +2264,9 @@ internal class AndroidAccountBrowseWorkflow(
             return
         }
         accountBrowseSession.programmaticActionLabel = "Freedom COORDINATE_TAP 动态卡片"
-        accountBrowseSession.ignoreManualEventsUntil =
-            System.currentTimeMillis() + PROGRAMMATIC_CLICK_EVENT_WINDOW_MS
+        // The queue/pre-dispatch delay is not a click feedback window. Only the
+        // platform ledger may identify this card click as our own action.
+        accountBrowseSession.ignoreManualEventsUntil = 0L
         accountBrowseSession.gestureInFlight = true
         val submission = runCatching {
             val callbackGeneration = currentRunGeneration()
@@ -2594,6 +2623,10 @@ internal class AndroidAccountBrowseWorkflow(
         if (!isTrackedInteractionEvent(eventType)) return
         val now = System.currentTimeMillis()
         val interactionContext = interactionContext()
+        if (interactionEventClassifier.isVerifiedSelfClick(event, interactionContext.touchActive)) {
+            addLog("动态浏览点击来源[SELF_CONFIRMED]：actionId=${event.inputOriginDecision?.actionId}；保留原业务阶段")
+            return
+        }
         if (interactionEventClassifier.isProgrammaticInteractionEvent(eventType, now, interactionContext)) return
         val startupSuppressionLog = interactionEventClassifier.startupScrollSuppressionLog(
             eventType = eventType,
@@ -2775,7 +2808,6 @@ internal class AndroidAccountBrowseWorkflow(
         private const val DETAIL_RESTABILIZE_TIMEOUT_MS = 10_000L
         private const val SAFE_CARD_RECHECK_INTERVAL_MS = 2_500L
         private const val MAX_SAFE_CARD_RECHECKS_BEFORE_NEXT_SWIPE = 2
-        private const val PROGRAMMATIC_CLICK_EVENT_WINDOW_MS = 900L
         private const val INITIAL_DYNAMIC_TAB_WAIT_TIMEOUT_MS = 60_000L
         private const val INITIAL_FEED_STABILITY_TIMEOUT_MS = 10_000L
         private const val REQUIRED_STABLE_FEED_SAMPLES = 2

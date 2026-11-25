@@ -2,6 +2,7 @@ package com.freedom.adapters.accessibility.android
 
 import com.freedom.gesture.api.GestureApi
 import com.freedom.core.accessibility.api.ScreenRect
+import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.WindowRef
 import com.freedom.core.accessibility.gesture.GestureIntent
 import com.freedom.core.accessibility.gesture.GestureIntentRequest
@@ -18,7 +19,8 @@ internal class AccountBrowseNavigationExecutor(
         preferredBounds: ScreenRect?,
         clickableBounds: ScreenRect?,
         description: String,
-        expectedWindow: WindowRef?
+        expectedWindow: WindowRef?,
+        feedbackIntent: GestureFeedbackIntent = GestureFeedbackIntent.STANDARD
     ): CoordinateTapPlan? {
         val preferred = preferredBounds?.takeUnless { it.isEmpty } ?: return null
         val clickable = clickableBounds?.takeUnless { it.isEmpty } ?: return null
@@ -38,7 +40,8 @@ internal class AccountBrowseNavigationExecutor(
                     preferredBounds = preferred,
                     targetBounds = clickable,
                     durationMs = 90L,
-                    displayBounds = displayBounds
+                    displayBounds = displayBounds,
+                    feedbackIntent = feedbackIntent
                 ),
                 description = description,
                 executionContext = executionContext

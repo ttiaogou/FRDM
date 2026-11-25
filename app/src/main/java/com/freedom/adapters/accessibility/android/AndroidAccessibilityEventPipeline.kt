@@ -199,6 +199,21 @@ internal class AndroidAccessibilityEventPipeline(
             if (runMode != null) unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.ActivityTransition(className))
         }
 
+        // AccountBrowse click attribution uses the actual platform dispatch ledger,
+        // not the time when a gesture was queued. Keep AI observation unchanged.
+        val browseInteractionEvent = if (runMode == RunMode.ACCOUNT_BROWSE &&
+            normalizedEvent.type == AccessibilityEventType.VIEW_CLICKED
+        ) {
+            normalizedEvent.copy(
+                inputOriginDecision = inputOriginClassifier.classify(
+                    event = normalizedEvent,
+                    currentActivityClass = currentActivityClass(),
+                    currentPageGeneration = currentWindowGeneration(),
+                    targetPackage = targetPackage()
+                )
+            )
+        } else normalizedEvent
+
         val appLabel = resolveAppLabel(eventPackage)
         // Page labels are persisted in SharedPreferences. Use only the control class so
         // transient event text/descriptions (which may include names or message bodies) never
@@ -221,7 +236,7 @@ internal class AndroidAccessibilityEventPipeline(
             if (description.isNotBlank()) add("内容描述=$description")
             if (isTrackedInteractionEvent(eventForRouting.type)) {
                 if (runMode == RunMode.ACCOUNT_BROWSE) {
-                    addAll(interactionDiagnostics(normalizedEvent, eventNow))
+                    addAll(interactionDiagnostics(browseInteractionEvent, eventNow))
                 } else {
                     add("当前 Activity=${currentActivityClass().ifBlank { "未知" }}")
                     add("AI Reply 仅将目标事件用于页面结构观察；UNKNOWN 不参与任务调度")
@@ -232,7 +247,7 @@ internal class AndroidAccessibilityEventPipeline(
         appendLog("$friendlyEvent$LOG_DETAIL_SEPARATOR$technicalDetails")
 
         if (runMode == RunMode.ACCOUNT_BROWSE) {
-            handleManualInteractionFallback(normalizedEvent)
+            handleManualInteractionFallback(browseInteractionEvent)
             onBrowseEventLogged()
         } else if (runMode != null) {
             // AI event delivery intentionally follows visible-event de-duplication and logging.

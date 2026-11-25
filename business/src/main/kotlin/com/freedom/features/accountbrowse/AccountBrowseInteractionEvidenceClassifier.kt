@@ -33,6 +33,12 @@ class AccountBrowseInteractionEvidenceClassifier(
         val closeControlCandidate = event.type == AccessibilityEventType.VIEW_CLICKED &&
             hasCloseControlSemantics(event)
 
+        if (eventClassifier.isVerifiedSelfClick(event, context.touchActive)) {
+            return AccountBrowseInteractionEvidence(
+                category = "SELF_CLICK_LEDGER_MATCH",
+                description = "点击事件已匹配实际平台手势账本；actionId=${event.inputOriginDecision?.actionId}"
+            )
+        }
         if (eventClassifier.isProgrammaticInteractionEvent(event.type, now, context)) {
             val touchOverlap = if (hasTouch) {
                 "；同时存在近期独立全局触摸证据，无法区分自动动作反馈与同期人工触摸"

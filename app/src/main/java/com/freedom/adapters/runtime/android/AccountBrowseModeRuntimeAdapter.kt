@@ -158,7 +158,7 @@ internal class AccountBrowseModeRuntimeAdapter(
         val activeWorkflow = workflow()
         val evidence = activeWorkflow.classifyInteractionEventEvidence(event, nowMillis)
         return listOf(
-            "操作来源判断=${activeWorkflow.classifyInteractionEventOrigin(event.type, nowMillis, event.className)}",
+            "操作来源判断=${if (evidence.category == "SELF_CLICK_LEDGER_MATCH") evidence.description else activeWorkflow.classifyInteractionEventOrigin(event.type, nowMillis, event.className)}",
             "事件证据分类=${evidence.category}；${evidence.description}",
             "当前 Activity=${activeWorkflow.currentActivityForInteractionLog()}",
             "自动浏览阶段=${activeWorkflow.currentPhaseForInteractionLog()}",

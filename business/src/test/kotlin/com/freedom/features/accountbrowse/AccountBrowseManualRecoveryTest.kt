@@ -149,6 +149,92 @@ class AccountBrowseManualRecoveryTest {
         assertEquals(AccountBrowsePhase.WAIT_FOR_FEED_STABLE, runtime.phase)
     }
 
+    @Test
+    fun liveDetailRecoveryKeepsOriginalLoadPhaseAndRequiresTwoFreshDetailSamples() {
+        val runtime = runtime(onFeedStep = { error("detail must not execute a feed step") })
+        runtime.session.sourceFingerprint = "source-feed"
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD)
+        runtime.requestRecovery("unattributed click", {}, {}, {})
+        val detail = page(BrowsePageKind.DETAIL).copy(fingerprint = "detail-window-1")
+        assertFalse(runtime.observeDetailFingerprintReadOnly(detail, true))
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        runtime.performStep()
+        assertFalse(runtime.observeDetailFingerprintReadOnly(detail, false))
+        assertEquals(0, runtime.recoveryStableSamples())
+        assertFalse(runtime.observeDetailFingerprintReadOnly(detail, true))
+        assertFalse(runtime.observeDetailFingerprintReadOnly(detail.copy(fingerprint = "detail-window-2"), true))
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertTrue(runtime.observeDetailFingerprintReadOnly(detail.copy(fingerprint = "detail-window-2"), true))
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertEquals(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD, runtime.phase)
+        assertTrue(runtime.canExecuteAutomaticStep())
+        runtime.suspendSession()
+        assertFalse(runtime.observeDetailFingerprintReadOnly(detail, true))
+        assertEquals(AccountBrowsePhase.IDLE, runtime.phase)
+    }
+
+    @Test
+    fun detailRecoverySchedulerResumesLoadThenOriginalDwellBeforeBack() {
+        val scheduler = QueuedScheduler()
+        val detail = page(BrowsePageKind.DETAIL).copy(fingerprint = "detail-window")
+        var reads = 0
+        var loads = 0
+        var backs = 0
+        lateinit var runtime: AccountBrowseRuntime
+        runtime = runtime(
+            scheduler = scheduler,
+            onReadOnlyObservation = {
+                reads++
+                runtime.observeRecoveryPage(detail)
+                if (runtime.observeDetailFingerprintReadOnly(detail, true)) {
+                    runtime.scheduleStep(300L)
+                }
+            },
+            onDetailLoad = {
+                assertTrue(runtime.canExecuteAutomaticStep())
+                loads++
+                runtime.transitionTo(AccountBrowsePhase.DETAIL_DWELL)
+                runtime.scheduleStep(4000L)
+            },
+            onDetailReturn = {
+                assertTrue(runtime.canExecuteAutomaticStep())
+                backs++
+            }
+        )
+        runtime.session.sourceFingerprint = "source-feed"
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD)
+        runtime.requestRecovery("unattributed card click", {}, {}, {})
+        scheduler.runNext()
+        assertEquals(1, reads)
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        runtime.performStep()
+        assertEquals(0, loads)
+        assertEquals(0, backs)
+        scheduler.runNext()
+        assertEquals(2, reads)
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertEquals(0, loads)
+        assertEquals(0, backs)
+        scheduler.runNext()
+        assertEquals(1, loads)
+        assertEquals(AccountBrowsePhase.DETAIL_DWELL, runtime.phase)
+        assertEquals(0, backs)
+        scheduler.runNext()
+        assertEquals(1, backs)
+    }
+
+    @Test
+    fun detailRecoveryCannotReplacePersistedFeedCheckpointVerification() {
+        val runtime = runtime(FakeStore(savedCheckpoint()))
+        assertTrue(runtime.beginCheckpointVerification())
+        val detail = page(BrowsePageKind.DETAIL)
+        repeat(3) { assertFalse(runtime.observeDetailFingerprintReadOnly(detail, true)) }
+        assertTrue(runtime.hasPendingCheckpointVerification())
+        assertFalse(runtime.canExecuteAutomaticStep())
+    }
+
     private class QueuedScheduler : TaskScheduler {
         private data class Entry(val due: Long, val callback: () -> Unit, var cancelled: Boolean = false)
         private val entries = mutableListOf<Entry>()
@@ -485,11 +571,16 @@ class AccountBrowseManualRecoveryTest {
     private fun runtime(
         checkpointRepository: AccountBrowseCheckpointRepository? = null,
         currentRunGeneration: () -> Long = { 0L },
-        onFeedStep: () -> Unit = {}
-    ): AccountBrowseRuntime = AccountBrowseRuntime(
-        scheduler = object : TaskScheduler {
+        scheduler: TaskScheduler = object : TaskScheduler {
             override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask = ScheduledTask { }
         },
+        onReadOnlyObservation: () -> Unit = {},
+        onDetailLoad: () -> Unit = {},
+        onDetailReturn: () -> Unit = {},
+        onFeedStep: () -> Unit = {}
+    ): AccountBrowseRuntime = AccountBrowseRuntime(
+        scheduler = scheduler,
+        onReadOnlyRecoveryObservation = onReadOnlyObservation,
         canScheduleStep = { true },
         isSessionEnabled = { true },
         isTouchActive = { false },
@@ -507,8 +598,8 @@ class AccountBrowseManualRecoveryTest {
             performFeedScroll = {},
             verifyInitialSwipe = {},
             openVisibleFeedCard = {},
-            checkDetailPageLoaded = {},
-            returnFromDetailPage = {},
+            checkDetailPageLoaded = onDetailLoad,
+            returnFromDetailPage = onDetailReturn,
             waitForImageBrowserReturn = {},
             waitForDetailRestabilize = {},
             checkFeedListReturned = {}

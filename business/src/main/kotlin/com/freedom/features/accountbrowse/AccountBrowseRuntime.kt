@@ -279,6 +279,29 @@ class AccountBrowseRuntime(
         return recovered
     }
 
+    /**
+     * A live detail phase can recover from fresh detail evidence without navigating
+     * away to the feed. Persisted checkpoint restoration still requires its own feed
+     * verifier. This method neither changes the phase nor grants a UI lease.
+     */
+    fun observeDetailFingerprintReadOnly(
+        page: BrowsePageEvidence,
+        identityConfirmed: Boolean
+    ): Boolean {
+        if (!isSessionEnabled() || restoredBusinessCheckpoint != null ||
+            dynamicPageRecovery.state() == RecoveryTransactionState.ACTIVE ||
+            phase !in setOf(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD,
+                AccountBrowsePhase.DETAIL_DWELL, AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE)
+        ) return false
+        val confirmed = identityConfirmed && page.pageKind == BrowsePageKind.DETAIL &&
+            page.packageName == targetPackage() && page.confidence >= 80 &&
+            page.windowAvailable && page.fingerprint.isNotBlank() &&
+            session.sourceFingerprint.isNotBlank() && page.fingerprint != session.sourceFingerprint
+        // Detail and feed observations must never count as two samples of one page.
+        val fingerprint = if (confirmed) "detail:${page.fingerprint}" else ""
+        return dynamicPageRecovery.observeFingerprint(fingerprint)
+    }
+
     /** The AccountBrowse workflow owns all phase transitions. */
     fun transitionTo(nextPhase: AccountBrowsePhase) {
         stateMachine.transitionTo(nextPhase)
