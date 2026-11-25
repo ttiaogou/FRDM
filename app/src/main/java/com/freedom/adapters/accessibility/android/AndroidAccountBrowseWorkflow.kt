@@ -39,6 +39,7 @@ import com.freedom.features.accountbrowse.AccountBrowseSessionStatePort
 import com.freedom.features.accountbrowse.FeedRefreshVerificationPolicy
 import com.freedom.features.accountbrowse.FeedReturnStability
 import com.freedom.features.accountbrowse.FeedReturnVerificationPolicy
+import com.freedom.features.accountbrowse.ImageBrowsePlanningPolicy
 import com.freedom.features.accountbrowse.ports.*
 
 /**
@@ -2425,15 +2426,25 @@ internal class AndroidAccountBrowseWorkflow(
         }
     }
 
-    /** Stage one only: collect and report optional image index evidence without changing the visit. */
+    /** Stages one and two: collect evidence and preview a bounded plan without executing it. */
     private fun logImageIndexReadOnly(page: BrowsePageEvidence) {
         if (page.pageKind != BrowsePageKind.IMAGE_VIEWER) return
         val result = runCatching { socialBrowsePort.readImageIndex(page.fingerprint) }
             .getOrElse { ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.NODE_READ_FAILED) }
         when (result) {
-            is ImageIndexReadResult.Confirmed -> addLog(
-                "图片序号[CONFIRMED]：current=${result.position.current}；total=${result.position.total}；仅取证"
-            )
+            is ImageIndexReadResult.Confirmed -> {
+                addLog("图片序号[CONFIRMED]：current=${result.position.current}；total=${result.position.total}；仅取证")
+                val plan = ImageBrowsePlanningPolicy.plan(result.position)
+                if (plan == null) {
+                    addLog("图片翻阅计划[NO_SWIPE]：current=1；total=1；单张图片；不执行横向滑动")
+                } else {
+                    addLog(
+                        "图片翻阅计划[PREVIEW]：current=${plan.startPosition.current}；total=${plan.startPosition.total}；" +
+                            "direction=${plan.direction.name}；count=${plan.swipeCount}；max=${plan.maxSwipes}；" +
+                            "expectedEnd=${plan.expectedEndIndex}；仅决策，不执行手势"
+                    )
+                }
+            }
             is ImageIndexReadResult.Unavailable -> addLog(
                 "图片序号[UNAVAILABLE]：reason=${result.reason.name}；保持原有阅读和返回流程"
             )

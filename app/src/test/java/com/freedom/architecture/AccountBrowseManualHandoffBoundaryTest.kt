@@ -106,6 +106,26 @@ class AccountBrowseManualHandoffBoundaryTest {
     }
 
     @Test
+    fun imageBrowsePlanIsOnlyPreviewedFromConfirmedIndexEvidence() {
+        val workflow = source("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
+        val log = workflow.substringAfter("private fun logImageIndexReadOnly(")
+            .substringBefore("private fun returnFromDetailPage()")
+        val confirmed = log.substringAfter("is ImageIndexReadResult.Confirmed -> {")
+            .substringBefore("is ImageIndexReadResult.Unavailable ->")
+        assertTrue(confirmed.contains("ImageBrowsePlanningPolicy.plan(result.position)"))
+        assertTrue(confirmed.contains("图片翻阅计划[PREVIEW]"))
+        assertTrue(confirmed.contains("图片翻阅计划[NO_SWIPE]"))
+        assertFalse(log.substringAfter("is ImageIndexReadResult.Unavailable ->").contains("ImageBrowsePlanningPolicy.plan("))
+        assertFalse(log.contains("gesturePolicy.execute("))
+        assertFalse(log.contains("performGlobalAction("))
+        assertFalse(log.contains("scheduleAccountBrowseStep("))
+        val policy = source("business/src/main/kotlin/com/freedom/features/accountbrowse/ImageBrowsePlanningPolicy.kt")
+        assertFalse(policy.contains("import android."))
+        assertFalse(policy.contains("HorizontalSwipePolicy"))
+        assertFalse(policy.contains("GestureIntent"))
+    }
+
+    @Test
     fun confirmedFeedReturnReconcilesPhaseWithoutDispatchingBackOrSkippingPositionVerification() {
         val workflow = source("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt")
         val reconcile = workflow.substringAfter("private fun resumeFeedReturnIfConfirmed(")
