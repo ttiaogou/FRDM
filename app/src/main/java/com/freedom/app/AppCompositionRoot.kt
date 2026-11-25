@@ -309,6 +309,7 @@ internal class AccessibilityServiceDependencies internal constructor(
     }
     val unifiedPageObservationBus: UnifiedPageObservationBus by lazy(LazyThreadSafetyMode.NONE) {
         UnifiedPageObservationBus(
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             onDecision = { snapshot, decision ->
                 addLog(
                     "统一页面仲裁[READ_ONLY]：classification=" + decision.classification +
