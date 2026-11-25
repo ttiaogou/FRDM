@@ -13,6 +13,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from collections import Counter
 from typing import Iterable
 
 EXPECTED_MODULES = {
@@ -563,6 +564,7 @@ def inspect_project(root: Path) -> list[str]:
 
     # P0: freeze single authority declarations and known construction routes.
     issues.extend(architecture_authority_violations(code_by_path))
+    issues.extend(runtime_architecture_reduction_violations(code_by_path))
     issues.extend(unified_page_observation_violations(code_by_path))
     issues.extend(unified_task_lifecycle_violations(code_by_path))
     issues.extend(unified_ui_write_authorization_violations(code_by_path))
@@ -772,6 +774,125 @@ def architecture_authority_violations(code_by_path: dict[str, str]) -> list[str]
     return issues
 
 
+
+
+# PP reduction audit baseline: 660efd431521140fdf31b62a9a5ecc6954fc72fa.
+# These are ceilings, NOT required implementations. P3-P7 must lower the relevant
+# ceilings when retiring debt; do not expand them to accommodate a new coordinator.
+# Keep the existing P0-P7 positive wiring and platform-safety checks independently.
+_CORE_RUNTIME = "core/src/main/kotlin/com/freedom/core/runtime/"
+_APP_RUNTIME = "app/src/main/java/com/freedom/application/runtime/"
+_MODE_ADAPTER = "app/src/main/java/com/freedom/adapters/runtime/android/"
+_ROOT = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+_BROWSE_WORKFLOW = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+_AI_RUNTIME = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+_MOMO_ADAPTER = "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt"
+
+# Explicitly reviewed component inventory in the original core/application runtime
+# boundaries. Also catches a renamed class/interface in an existing file or a new
+# runtime source, not just another constructor with an existing class name.
+RUNTIME_COMPONENT_CEILINGS = {
+    _CORE_RUNTIME + "BusinessTaskSwitchEvent.kt": "BusinessTaskSwitchEvent",
+    _CORE_RUNTIME + "EventAssistedDebouncer.kt": "EventAssistedDebouncer",
+    _CORE_RUNTIME + "ModeRuntimePort.kt": "ModeRuntimePort",
+    _CORE_RUNTIME + "PageFingerprintRouter.kt": (
+        "PageFingerprint PageFingerprintRoute PageRecoveryRouteAdapter PageRecoveryAdapterRegistry "
+        "PageFingerprintRouter UnifiedPageTaskRouter PageTaskRoute Observation PageClassification "
+        "PageObservationClassifier PageObservationSnapshot PageObservationSnapshotClassifier "
+        "UnifiedPageObservationMerger Decision PageObservationSnapshotSource UnifiedPageObservationBus "
+        "PageRuntimeLifecycle PageRuntimeSessionState PageRuntimeSession"
+    ),
+    _CORE_RUNTIME + "PageObservationCoordinator.kt": "PageObservationCoordinator PageObservationSubscription",
+    _CORE_RUNTIME + "RunMode.kt": "RunMode",
+    _CORE_RUNTIME + "RunStatePorts.kt": "RunStateRepository RuntimeLogSink",
+    _CORE_RUNTIME + "TargetAppReadiness.kt": (
+        "TargetAppReadinessStatus TargetAppPageReadiness TargetAppReadinessEvidence "
+        "TargetAppReadinessSnapshot TargetAppReadinessController"
+    ),
+    _CORE_RUNTIME + "TaskCoordinator.kt": "TaskLease TaskCoordinator",
+    _CORE_RUNTIME + "TaskExecutionController.kt": "TaskExecutionController",
+    _CORE_RUNTIME + "TaskScheduler.kt": "ScheduledTask TaskScheduler",
+    _CORE_RUNTIME + "UiOperationOwnershipCoordinator.kt": "UiOperationLease UiOperationOwnershipCoordinator",
+    _CORE_RUNTIME + "UiWriteAuthorization.kt": "UiWriteScope UiWriteAuthorization",
+    _APP_RUNTIME + "EntryPageObservationRetry.kt": "EntryPageObservationRetry",
+    _APP_RUNTIME + "RunSessionCommandUseCase.kt": "RunSessionCommandUseCase",
+    _APP_RUNTIME + "RunSessionCoordinator.kt": "RunGenerationClock RunSessionCoordinator",
+    _MODE_ADAPTER + "AccountBrowseModeRuntimeAdapter.kt": "AccountBrowseModeRuntimeAdapter",
+    _MODE_ADAPTER + "AiReplyModeRuntimeAdapter.kt": "AiReplyModeRuntimeAdapter",
+    _MODE_ADAPTER + "HandlerTaskScheduler.kt": "HandlerTaskScheduler",
+}
+
+# Bound known duplicate control surfaces by exact production source and reference
+# count. Include declarations and imports: moving or adding a second consumer is
+# not a silent way to expand debt. Fresh page/window evidence and feature-local
+# business state are deliberately not frozen by this reference inventory.
+RUNTIME_DEBT_REFERENCE_CEILINGS = {
+    _CORE_RUNTIME + "PageFingerprintRouter.kt": {
+        "UnifiedPageTaskRouter": 1, "PageObservationClassifier": 1,
+        "PageObservationSnapshotClassifier": 4, "UnifiedPageObservationMerger": 6,
+        "UnifiedPageObservationBus": 1, "PageObservationSnapshotSource": 1,
+        "PageRuntimeSessionState": 11, "PageRuntimeSession": 1, "PageRuntimeLifecycle": 8,
+    },
+    _CORE_RUNTIME + "ModeRuntimePort.kt": {"PageRuntimeSessionState": 5},
+    _CORE_RUNTIME + "UiWriteAuthorization.kt": {"PageRuntimeSessionState": 2, "PageRuntimeLifecycle": 1},
+    _CORE_RUNTIME + "PageObservationCoordinator.kt": {"registerChannel": 3},
+    _APP_RUNTIME + "RunSessionCoordinator.kt": {
+        "PageRuntimeSessionState": 13, "PageRuntimeSession": 2, "PageRuntimeLifecycle": 19,
+        "routeIndependentPageTask": 1, "admitBusinessPageTaskOwnership": 1,
+        "rollbackBusinessPageTaskOwnership": 1,
+    },
+    _APP_RUNTIME + "EntryPageObservationRetry.kt": {"EntryPageObservationRetry": 1},
+    _ROOT: {
+        "UnifiedPageObservationBus": 3, "PageRuntimeLifecycle": 2, "EntryPageObservationRetry": 4,
+        "registerChannel": 1, "inspectUnifiedEntryPage": 1, "hasFreshOwnedPageEvidence": 1,
+        "pageSelectedStartup": 1, "onPageTaskOwnershipConfirmed": 1,
+        "routeIndependentPageTask": 1, "admitBusinessPageTaskOwnership": 1,
+        "rollbackBusinessPageTaskOwnership": 1,
+    },
+    _MODE_ADAPTER + "AccountBrowseModeRuntimeAdapter.kt": {
+        "PageObservationSnapshotClassifier": 2, "PageRuntimeSessionState": 6,
+    },
+    _MODE_ADAPTER + "AiReplyModeRuntimeAdapter.kt": {
+        "PageObservationSnapshotClassifier": 2, "PageRuntimeSessionState": 8,
+    },
+    _BROWSE_WORKFLOW: {"PageObservationSnapshotSource": 2, "registerChannel": 1, "pageSelectedStartup": 1},
+    _AI_RUNTIME: {"PageObservationSnapshotSource": 2, "pageSelectedStartup": 3, "onPageTaskOwnershipConfirmed": 2},
+    _MOMO_ADAPTER: {"inspectUnifiedEntryPage": 1, "hasFreshOwnedPageEvidence": 1},
+    "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt": {"registerChannel": 2},
+    "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt": {"pageSelectedStartup": 2},
+}
+
+
+def runtime_architecture_reduction_violations(code_by_path: dict[str, str]) -> list[str]:
+    """Non-expansion guard during PP reduction, using the existing masked Kotlin scan.
+
+    This is a source-level review boundary, not semantic proof that arbitrary
+    renamed code cannot duplicate a responsibility. Behavior tests remain necessary.
+    """
+    issues: list[str] = []
+    protected = (_CORE_RUNTIME, _APP_RUNTIME, _MODE_ADAPTER)
+    declarations = re.compile(r"\b(?:class|interface|object|typealias)\s+([A-Za-z_]\w*)\b")
+    debt_names = sorted({name for limits in RUNTIME_DEBT_REFERENCE_CEILINGS.values() for name in limits})
+    debt_pattern = re.compile(r"\b(?:" + "|".join(map(re.escape, debt_names)) + r")\b")
+    for rel, code in sorted(code_by_path.items()):
+        if "/src/main/" not in rel or not rel.endswith(".kt"):
+            continue
+        if rel.startswith(protected):
+            allowed = RUNTIME_COMPONENT_CEILINGS.get(rel)
+            if allowed is None:
+                issues.append(f"PP reduction: unreviewed core/runtime source: {rel}")
+            else:
+                excess = Counter(declarations.findall(code)) - Counter(allowed.split())
+                if excess:
+                    issues.append(f"PP reduction: unreviewed core/runtime declarations: {rel}: {dict(excess)}")
+        limits = RUNTIME_DEBT_REFERENCE_CEILINGS.get(rel, {})
+        for name, count in sorted(Counter(debt_pattern.findall(code)).items()):
+            if count > limits.get(name, 0):
+                issues.append(
+                    f"PP reduction: control surface expanded: {rel}: {name} "
+                    f"({count} > {limits.get(name, 0)})"
+                )
+    return issues
 
 
 def unified_page_observation_violations(code_by_path: dict[str, str]) -> list[str]:
@@ -1741,6 +1862,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - Android dispatch: confined to AndroidGestureDispatcher")
     print(" - Recovery transaction: adapters cannot bypass it; state machine cannot depend on business page fields")
     print(" - P0 ownership baseline: authority declarations, construction sites, and legacy aliases pinned")
+    print(" - PP reduction: reviewed runtime component inventory and duplicate control-surface ceilings")
     print(" - P1 accessibility: target/touch/Activity/navigation notifications use one business entry")
     print(" - P2 observation: one injected scheduler, mode-isolated channels, task decisions owned by runtimes")
     print(" - P3 task lifecycle: process run clock synchronously revokes shared task/UI leases")
