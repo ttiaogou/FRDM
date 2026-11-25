@@ -513,6 +513,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             inspectAndroidRecoveryReadiness = { _ -> accessibilityGateway.inspectRecoveryReadiness() },
             onLog = addLog,
+            pageObservationSnapshotSource = { snapshot ->
+                unifiedPageObservationBus.observe(snapshot)
+            },
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
             draftStartupFailure = { aiReplyDraftCoordinator.startupFailure() },
