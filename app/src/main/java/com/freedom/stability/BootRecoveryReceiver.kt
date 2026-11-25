@@ -44,7 +44,7 @@ class BootRecoveryReceiver : BroadcastReceiver() {
             context.sendBroadcast(
                 Intent(MonitorActions.ACTION_BOOT_RECOVERY).setPackage(context.packageName)
             )
-            "设备已重启。Freedom 已登记恢复请求，正在等待系统重新连接无障碍服务；服务连接后会按原运行模式恢复。"
+            "设备已重启。Freedom 已登记恢复请求，正在等待系统重新连接无障碍服务；服务连接后会重新识别当前页面。"
         }
 
         postBootCheckNotification(context, message)

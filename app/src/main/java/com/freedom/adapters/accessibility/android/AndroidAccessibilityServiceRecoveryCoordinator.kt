@@ -11,7 +11,8 @@ import com.freedom.core.runtime.TaskScheduler
  */
 internal class AndroidAccessibilityServiceRecoveryCoordinator(
     private val host: Host,
-    private val scheduler: TaskScheduler
+    private val scheduler: TaskScheduler,
+    private val pageDriven: Boolean = false
 ) {
     interface Host {
         fun isRunRequested(): Boolean
@@ -41,13 +42,17 @@ internal class AndroidAccessibilityServiceRecoveryCoordinator(
 
         val bootRecoveryPending = host.isBootRecoveryPending()
 
-        val restoredRunMode = if (host.isRunRequested()) {
+        val restoredRunMode = if (!pageDriven && host.isRunRequested()) {
             host.resolveActiveModeForRestore()
         } else {
             null
         }
 
-        if (host.isRunRequested() && restoredRunMode == null) {
+        if (pageDriven) {
+            host.clearActivityContext()
+            host.connectRuntime()
+            if (host.isRunRequested()) host.appendLog("服务重连：重新观察当前页面；不恢复旧启动模式")
+        } else if (host.isRunRequested() && restoredRunMode == null) {
             // No business runtime is selected by design. Keep the service connected so the user
             // can manually capture the current window without entering AI Reply or Account Browse.
             host.appendLog("已恢复人工采集待命：未选择 AI 回复或自动浏览；手动节点采集仍可使用")
@@ -83,7 +88,7 @@ internal class AndroidAccessibilityServiceRecoveryCoordinator(
     /** Handles the boot signal when the system had already connected this service. */
     fun onBootRecoverySignal() {
         if (!host.isBootRecoveryPending()) return
-        val restoredMode = if (host.isRunRequested()) host.resolveActiveModeForRestore() else null
+        val restoredMode = if (!pageDriven && host.isRunRequested()) host.resolveActiveModeForRestore() else null
         completeBootRecovery(restoredMode)
     }
 
@@ -113,7 +118,7 @@ internal class AndroidAccessibilityServiceRecoveryCoordinator(
         } else {
             host.appendLog(
                 "开机恢复[RECONCILED]：系统无障碍服务已连接并完成持久化运行意图协调；" +
-                    "mode=${restoredMode?.name ?: "MANUAL_OBSERVATION"}；未通过开机广播强制启动服务"
+                    "mode=${if (pageDriven) "PAGE_OBSERVATION" else restoredMode?.name ?: "MANUAL_OBSERVATION"}；未通过开机广播强制启动服务"
             )
         }
         host.clearBootRecoveryPending()

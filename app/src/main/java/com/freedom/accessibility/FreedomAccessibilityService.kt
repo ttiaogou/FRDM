@@ -382,8 +382,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             addAction(GestureCalibrationContract.ACTION_CANCEL_CALIBRATION)
         }
         serviceReceiverRegistry.register(gestureCalibrationController.receiver, calibrationFilter)
-        // Apply the persisted run-mode subscription before reconnecting its runtime, then
-        // reconcile once more in case recovery had to stop an invalid/restored run.
+        // Subscribe to target observations before reconciling the run authorization.
         applyTargetPackageFilter()
         serviceRecoveryCoordinator.onServiceConnected()
         applyTargetPackageFilter()
@@ -401,7 +400,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             currentState = "CONNECTED",
             result = "CONNECTED"
         )
-        addLog("无障碍服务已连接；按运行模式应用目标包名和事件类型订阅策略")
+        addLog("无障碍服务已连接；按运行授权应用目标包名和事件类型订阅策略")
     }
 
     private fun applyTargetPackageFilter() {
@@ -412,7 +411,8 @@ class FreedomAccessibilityService : AccessibilityService() {
             val subscription = AndroidAccessibilitySubscriptionPolicy.forRunMode(
                 targetPackage = targetPackage,
                 fallbackPackage = packageName,
-                runMode = activeMode
+                runMode = activeMode,
+                runRequested = monitorRepository.isRunRequested()
             )
             val signature = "${subscription.packageNames?.joinToString(",") ?: "<GLOBAL_FOR_BROWSE_TOUCH>"}|${subscription.eventTypes}"
             if (signature == lastAppliedSubscriptionSignature) return
@@ -440,8 +440,9 @@ class FreedomAccessibilityService : AccessibilityService() {
                         "额外接收系统全局触摸开始/结束事件用于用户优先权仲裁；不读取非目标应用节点"
                 )
                 null -> addLog(
-                    "无障碍订阅：空闲；目标包名白名单=${subscription.packageNames?.joinToString().orEmpty()}；" +
-                        "仅订阅项目所需事件类型"
+                    if (monitorRepository.isRunRequested())
+                        "无障碍订阅：统一页面观察待命；业务尚未分配；普通事件仍严格过滤目标包名"
+                    else "无障碍订阅：空闲；仅订阅目标包名事件"
                 )
             }
         }.onFailure {

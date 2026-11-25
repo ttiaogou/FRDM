@@ -45,6 +45,40 @@ class RunSessionCoordinatorTest {
     }
 
     @Test
+    fun pageDrivenStartAndReconnectIgnorePersistedModeUntilFreshRoute() {
+        val state = FakeState().apply {
+            requested = true
+            mode = RunMode.ACCOUNT_BROWSE
+        }
+        val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)
+        val ai = FakeRuntime(RunMode.AI_REPLY)
+        var observations = 0
+        val coordinator = RunSessionCoordinator(
+            state,
+            mapOf(RunMode.ACCOUNT_BROWSE to browse, RunMode.AI_REPLY to ai),
+            RuntimeLogSink { },
+            onObserveCurrentPage = { observations++ }
+        )
+        coordinator.onAccessibilityServiceConnected()
+        assertEquals(1, observations)
+        assertNull(coordinator.activeMode())
+        assertTrue(browse.calls.isEmpty())
+        assertTrue(ai.calls.isEmpty())
+        coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
+        assertEquals(listOf("start"), ai.calls)
+        assertEquals(RunMode.AI_REPLY, coordinator.activeMode())
+        coordinator.markPageRuntimeReady(coordinator.currentRunGeneration())
+        coordinator.routePageTask(RunMode.AI_REPLY, "AI_REPLY_PRIVATE_MESSAGES")
+        assertEquals(listOf("start"), ai.calls)
+        coordinator.onAccessibilityServiceDisconnected()
+        coordinator.onAccessibilityServiceConnected()
+        assertEquals(2, observations)
+        assertNull(coordinator.activeMode())
+        assertTrue(browse.calls.isEmpty())
+        assertEquals(listOf("start", "disconnected"), ai.calls)
+    }
+
+    @Test
     fun synchronizationStartsOnlyThePersistedActiveRuntime() {
         val state = FakeState()
         val browse = FakeRuntime(RunMode.ACCOUNT_BROWSE)

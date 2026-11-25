@@ -530,6 +530,23 @@ class AndroidAccessibilityEventPipelineTest {
         assertTrue(received[1] is com.freedom.core.accessibility.api.UnifiedAccessibilityEvent.TargetApplication)
     }
 
+    @Test
+    fun unassignedRuntimeObservationRedactsPayloadAndDoesNotDispatchBusinessEvents() {
+        val trace = mutableListOf<String>()
+        val logs = mutableListOf<String>()
+        val pipeline = pipeline(trace, appendLog = { logs += it })
+        assertFalse(pipeline.shouldCaptureText(null))
+        pipeline.processNormalized(
+            event(AccessibilityEventType.WINDOW_CONTENT_CHANGED, TARGET_PACKAGE,
+                eventText = listOf("private-payload"), contentDescription = "private-description"),
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, null
+        )
+        assertFalse(trace.contains("dispatch-target"))
+        assertFalse(trace.contains("manual-fallback"))
+        assertTrue(trace.contains("update-app-page"))
+        assertTrue(logs.none { it.contains("private-payload") || it.contains("private-description") })
+    }
+
     private fun pipeline(
         trace: MutableList<String>,
         appendLog: (String) -> Unit = { trace += "append-log" },

@@ -40,6 +40,8 @@ import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.accessibility.api.WindowRef
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.PageFingerprint
+import com.freedom.core.runtime.PageObservationSnapshot
 import com.freedom.core.runtime.TargetAppPageReadiness
 import com.freedom.features.accountbrowse.ports.*
 import com.freedom.features.aireply.ports.ChatPageKind
@@ -493,6 +495,46 @@ internal class MomoSocialAdapter(
             observation.windowId
         } else null
     }
+
+    /**
+     * Entry observation reuses the existing inspectors on one live target root. No identity
+     * transaction, navigation, business checkpoint, gesture or task lease is touched here.
+     */
+    internal fun inspectUnifiedEntryPage(runGeneration: Long, observationGeneration: Long): PageObservationSnapshot? =
+        rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(window)
+            ) return@withActiveTargetRoot null
+            val greetings = sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage)
+            val dynamic = browseComponents.pageInspector.inspectMomoFeedReadiness(root).fingerprint
+            // Preserve the dedicated greetings-list inspection boundary.
+            val chat = if (greetings) null else chatComponents.pageInspector.inspectRoot(
+                root = AccessibilityNodeInfo.obtain(root),
+                targetPackage = targetPackage,
+                activityClass = window.activityClass
+            ).pageType
+            if (!accessibilityGateway.isWindowCurrent(window)) return@withActiveTargetRoot null
+            val privateList = chat == MomoChatPageType.CHAT_LIST
+            val matches = listOf(greetings, dynamic != null, privateList).count { it }
+            val fingerprint = when {
+                matches != 1 -> PageFingerprint(targetPackage, window.activityClass, "UNKNOWN", null)
+                greetings -> PageFingerprint(
+                    targetPackage, window.activityClass, ChatPageKind.NON_CHAT.name,
+                    MomoWindowPageFingerprint.windowIdentity(window, targetPackage, "RECEIVED_GREETINGS_LIST")
+                )
+                dynamic != null -> PageFingerprint(
+                    targetPackage, window.activityClass, BrowsePageKind.DYNAMIC_FEED.name,
+                    MomoWindowPageFingerprint.create(window, targetPackage, BrowsePageKind.DYNAMIC_FEED.name, dynamic.signature)
+                )
+                else -> PageFingerprint(targetPackage, window.activityClass, ChatPageKind.CHAT_LIST.name, null)
+            }
+            PageObservationSnapshot(
+                fingerprint = fingerprint,
+                observationGeneration = observationGeneration,
+                runGeneration = runGeneration,
+                windowId = window.windowId
+            )
+        }
 
     override fun inspectPage(): BrowsePageEvidence = rootAccess.withActiveTargetRoot { root, window ->
         val packageName = safeString { root.packageName?.toString().orEmpty() }

@@ -323,10 +323,11 @@ internal class AccessibilityServiceDependencies internal constructor(
                     com.freedom.core.runtime.PageClassification.RECEIVED_GREETINGS -> "AI_REPLY_RECEIVED_GREETINGS"
                     else -> null
                 }
-                if (targetTask != null && !decision.conflict &&
-                    monitorRepository.isRunRequested() &&
+                // Stale or stopped-session observations cannot clear or select a live route.
+                if (monitorRepository.isRunRequested() &&
                     snapshot.runGeneration == runSessionCoordinator.currentRunGeneration()
                 ) {
+                if (targetTask != null && !decision.conflict) {
                     runSessionCoordinator.routePageTask(
                         if (decision.classification ==
                             com.freedom.core.runtime.PageClassification.AUTOMATIC_BROWSE
@@ -340,6 +341,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                     runSessionCoordinator.routePageTask(null)
                     addLog("统一页面仲裁[NO_OWNERSHIP]：未知或冲突页面；清除旧路由并保持只读等待")
                 }
+                }
             }
         ).also { bus ->
             bus.registerClassifier(
@@ -347,6 +349,36 @@ internal class AccessibilityServiceDependencies internal constructor(
             )
             bus.registerClassifier(accountBrowseRuntimeAdapter)
         }
+    }
+    /**
+     * Service-scoped read-only entry observation also works before a business runtime exists.
+     * Existing runtime channels retain their detail/checkpoint observation responsibility.
+     */
+    private var entryObservationGeneration = 0L
+    private val entryPageObservation by lazy(LazyThreadSafetyMode.NONE) {
+        pageObservationCoordinator.registerChannel(
+            channelId = "UNIFIED_ENTRY_PAGE",
+            quietPeriodMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
+            maxWaitMs = 1_200L,
+            isEnabled = monitorRepository::isRunRequested,
+            onObservationRequested = {
+                if (monitorRepository.isRunRequested()) {
+                    val generation = runSessionCoordinator.currentRunGeneration()
+                    val snapshot = runCatching {
+                        momoSocialAdapter.inspectUnifiedEntryPage(generation, ++entryObservationGeneration)
+                    }.getOrNull()
+                    if (snapshot != null && generation == runSessionCoordinator.currentRunGeneration() &&
+                        monitorRepository.isRunRequested()
+                    ) {
+                        // An entry observer cannot assign or revoke a nested detail/profile transaction.
+                        // Existing task-specific observers retain their detail/recovery responsibility.
+                        if (snapshot.fingerprint.semanticPage != "UNKNOWN" ||
+                            runSessionCoordinator.currentPageRuntimeSession() == null
+                        ) unifiedPageObservationBus.observe(snapshot)
+                    }
+                }
+            }
+        )
     }
     /** Service-scoped Activity recovery; no gesture or page-action capability is injected. */
     val activityEvidenceReader by lazy(LazyThreadSafetyMode.NONE) {
@@ -360,7 +392,7 @@ internal class AccessibilityServiceDependencies internal constructor(
         com.freedom.adapters.accessibility.android.AndroidForegroundActivityRecoveryCoordinator(
             scheduler = taskScheduler,
             isRunRequested = {
-                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() != null
+                monitorRepository.isRunRequested()
             },
             currentActivityClass = windowContextTracker::currentActivityClass,
             readEvidence = activityEvidenceReader::probe,
@@ -771,7 +803,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             ),
             log = monitorRepository,
             generationClock = root.runGenerationClock,
-            taskCoordinator = root.taskCoordinator
+            taskCoordinator = root.taskCoordinator,
+            onObserveCurrentPage = { entryPageObservation.requestSnapshot() }
         )
     }
     // Service-scoped platform-neutral routing gateway. Existing runtime dispatch order
@@ -913,7 +946,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                 override fun startKeepAlive() { MonitorKeepAliveService.start(service) }
                 override fun refresh() = refreshViews()
             },
-            scheduler = taskScheduler
+            scheduler = taskScheduler,
+            pageDriven = true
         )
     }
     val serviceRecoveryCoordinator by serviceRecoveryCoordinatorDelegate

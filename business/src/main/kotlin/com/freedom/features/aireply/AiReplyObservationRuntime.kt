@@ -3606,6 +3606,20 @@ class AiReplyObservationRuntime(
 
     fun classifyPageObservation(snapshot: PageObservationSnapshot): PageClassification {
         if (snapshot.fingerprint.packageName != targetPackage()) return PageClassification.UNKNOWN
+        // An entry observation may precede the creation of a task identity. Only the
+        // existing top-level list fingerprints can establish that initial route.
+        // An unbound detail snapshot must never infer ownership.
+        if (snapshot.sourceTaskId == null) {
+            val fingerprint = snapshot.fingerprint
+            return when {
+                fingerprint.semanticPage == ChatPageKind.CHAT_LIST.name &&
+                    messageListRecoveryRoute.matches(fingerprint) -> PageClassification.PRIVATE_MESSAGES
+                fingerprint.semanticPage == ChatPageKind.NON_CHAT.name &&
+                    fingerprint.adapterFingerprint?.contains("|page=RECEIVED_GREETINGS_LIST|") == true &&
+                    receivedGreetingsRecoveryRoute.matches(fingerprint) -> PageClassification.RECEIVED_GREETINGS
+                else -> PageClassification.UNKNOWN
+            }
+        }
         val route = sharedPageObservationCoordinator.matchRecoveryAdapter(
             snapshot.fingerprint,
             setOf(PRIVATE_MESSAGES_TASK_ID, RECEIVED_GREETINGS_TASK_ID)

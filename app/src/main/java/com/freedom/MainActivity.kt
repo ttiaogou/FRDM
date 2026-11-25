@@ -1615,11 +1615,9 @@ class MainActivity : Activity() {
             return
         }
         val targetIntent = resolveTargetLaunchIntent(showError = true) ?: return
-        val runMode = monitorRepository.selectedMode()
-        // A missing mode is an intentional manual-observation session. Only an explicitly
-        // selected mode starts its corresponding business runtime.
-        if (!runSessionCommands.requestStart(runMode)) return
-        val sessionLabel = runMode?.displayName ?: "人工采集待命"
+        // A run authorizes observation; only a fresh page can select a business runtime.
+        if (!runSessionCommands.requestStart()) return
+        val sessionLabel = "统一页面观察"
         monitorRepository.addLog(
             timestamp() + "  ${sessionLabel}已启动；通知发布权限由用户在配置页自主决定"
         )
