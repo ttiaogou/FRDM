@@ -219,6 +219,7 @@ fun interface PageObservationSnapshotSource {
  * composition after their existing runtimes are constructed; publishing never performs UI work.
  */
 class UnifiedPageObservationBus(
+    private val currentRunGeneration: () -> Long = { 0L },
     private val onDecision: (PageObservationSnapshot, UnifiedPageObservationMerger.Decision) -> Unit = { _, _ -> }
 ) {
     private val classifiers = mutableListOf<PageObservationSnapshotClassifier>()
@@ -232,7 +233,18 @@ class UnifiedPageObservationBus(
 
     @Synchronized
     fun observe(snapshot: PageObservationSnapshot): UnifiedPageObservationMerger.Decision {
-        val decision = merger.classify(snapshot)
+        val stale = snapshot.runGeneration != currentRunGeneration()
+        val incomplete = snapshot.fingerprint.semanticPage.isBlank() ||
+            snapshot.fingerprint.packageName.isBlank()
+        val decision = if (stale || incomplete) {
+            UnifiedPageObservationMerger.Decision(
+                classification = PageClassification.UNKNOWN,
+                matchedClassifications = emptySet(),
+                conflict = false
+            )
+        } else {
+            merger.classify(snapshot)
+        }
         onDecision(snapshot, decision)
         return decision
     }
