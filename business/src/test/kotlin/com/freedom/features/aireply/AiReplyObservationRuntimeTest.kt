@@ -1008,18 +1008,18 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun p6TimedFullScanCannotHandoffOnOneViewportWithNoUnread() {
+    fun p6TimedPollingCannotHandoffBeforeReadViewportIsConfirmed() {
         val fixture = preScrollPageRecoveryFixture()
         val executor = fixture.runtime.javaClass.getDeclaredField(
             "privateMessagesTraversalTaskExecutor"
         ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
 
         // The timed round begins after the verified inbox wakeup in production.
-        // Recreate its pure traversal state, including the original first-swipe proof.
+        // Recreate an admitted round before any stable read-viewport boundary proof.
         executor.beginNextPollingRound()
         executor.initialInboxTopPositioningCompleted = true
         executor.initialUnreadGateSwipeCompleted = true
-        assertTrue(executor.fullListPollingRoundRequired)
+        assertFalse(executor.fullListPollingRoundRequired)
         assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
         assertFalse(executor.normalInboxHadUnread)
 
@@ -1028,9 +1028,9 @@ class AiReplyObservationRuntimeTest {
         ).apply { isAccessible = true }
         handoff.invoke(fixture.runtime, "P6_ONE_EMPTY_VIEWPORT")
 
-        assertTrue("A full polling scan may not skip unobserved lower viewports",
+        assertTrue("A timed round may not hand off before the boundary has been confirmed",
             fixture.logs.any { it.contains("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF") })
-        assertTrue(fixture.checkpoint()?.fullListPollingRoundRequired == true)
+        assertTrue(fixture.checkpoint()?.fullListPollingRoundRequired == false)
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
         assertEquals(0, fixture.dispatchedGestures())
     }
@@ -2975,7 +2975,7 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun startupPositionsListAtTopBeforeFirstUpwardUnreadAdmissionSwipe() {
+    fun startupReadsConfirmedTopBeforeFirstUnreadSearchSwipe() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -3037,11 +3037,11 @@ class AiReplyObservationRuntimeTest {
         val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
         assertTrue("启动阶段必须先产生向下回顶手势", firstUpwardSwipe > 0)
         assertTrue(
-            "首次向上准入前的所有滑动都必须是向下回顶",
+            "向下搜索未读边界前的所有滑动都必须是向下回顶",
             directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN }
         )
         assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("首次向上滑动；完成后才检查未读") })
+        assertTrue(logs.any { it.contains("启动准入[UNREAD_LOCKING]") })
     }
 
     @Test
@@ -3122,17 +3122,17 @@ class AiReplyObservationRuntimeTest {
         val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
         assertTrue("启动阶段必须先产生向下回顶手势", firstUpwardSwipe > 0)
         assertTrue(
-            "首次向上准入前的所有滑动都必须是向下回顶",
+            "向下搜索未读边界前的所有滑动都必须是向下回顶",
             directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN }
         )
         assertEquals(1, logs.count { it.contains("AI 启动导航[WAITING]") })
         assertEquals(0, port.messageWorkAreaEntryAttempts)
         assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("首次向上滑动；完成后才检查未读") })
+        assertTrue(logs.any { it.contains("启动准入[UNREAD_LOCKING]") })
     }
 
     @Test
-    fun startupUnknownUnreadStateIsCheckedOnlyAfterTopResetAndFirstUpwardSwipe() {
+    fun startupUnknownUnreadStateIsCheckedAtConfirmedTopWithoutProbeSwipe() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -3187,17 +3187,16 @@ class AiReplyObservationRuntimeTest {
         val directions = submittedCommands.mapNotNull {
             (it.intent as? GestureIntent.VerticalSwipe)?.direction
         }
-        val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
-        assertTrue("UNKNOWN 不得阻止先执行向下回顶", firstUpwardSwipe > 0)
-        assertTrue(directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN })
+        assertTrue("UNKNOWN 不得阻止先执行向下回顶", directions.isNotEmpty())
+        assertTrue(directions.all { it == VerticalSwipeDirection.DOWN })
         assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("首次向上滑动已由 Android 确认成功") })
+        assertTrue(logs.any { it.contains("当前已确认列表视口存在 UNKNOWN") })
         assertFalse(scheduler.hasPendingDelay(1_200L))
         assertFalse(scheduler.hasPendingDelay(30_000L))
     }
 
     @Test
-    fun startupNoUnreadRunsTopResetBeforeExactlyOneAdmissionSwipe() {
+    fun startupNoUnreadConfirmsReadViewportWithoutAdmissionSwipe() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -3247,17 +3246,16 @@ class AiReplyObservationRuntimeTest {
         )
 
         runtime.scheduleInitialObservation()
-        runUntilLog(scheduler, logs, "AI Reply 启动准入[NO_UNREAD_AFTER_FIRST_SWIPE]")
+        runUntilLog(scheduler, logs, "AI Reply 启动准入[NO_UNREAD_AT_CONFIRMED_TOP]")
 
         val directions = submittedCommands.mapNotNull {
             (it.intent as? GestureIntent.VerticalSwipe)?.direction
         }
-        val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
-        assertTrue("无未读判断前必须先完成向下回顶", firstUpwardSwipe > 0)
-        assertTrue(directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN })
-        assertEquals(1, directions.count { it == VerticalSwipeDirection.UP })
+        assertTrue("无未读判断前必须先完成向下回顶", directions.isNotEmpty())
+        assertTrue(directions.all { it == VerticalSwipeDirection.DOWN })
+        assertEquals(0, directions.count { it == VerticalSwipeDirection.UP })
         assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("首次成功向上滑动后的视口没有明确未读") })
+        assertTrue(logs.any { it.contains("顶部完整有效视口全部明确已读") })
         assertFalse(logs.any { it.contains("底部边界经延迟独立快照复核通过") })
     }
 
@@ -3359,10 +3357,10 @@ class AiReplyObservationRuntimeTest {
 
         assertTrue(logs.any { it.contains("AI 启动导航[CONFIRMED]") })
         runUntilLog(scheduler, logs, "AI Reply 启动顶部定位[CONFIRMED]")
-        runUntilLog(scheduler, logs, "AI Reply 启动准入：执行进入消息工作区后的首次向上滑动")
+        runUntilLog(scheduler, logs, "AI Reply 启动准入[NO_UNREAD_AT_CONFIRMED_TOP]")
         assertEquals(
-            "先完成向下回顶，再执行首次向上准入滑动",
-            listOf(GestureKind.SWIPE, GestureKind.SWIPE, GestureKind.SWIPE),
+            "先完成向下回顶并复核已读视口，不执行试探滑动",
+            listOf(GestureKind.SWIPE, GestureKind.SWIPE),
             gestures
         )
     }
@@ -4850,10 +4848,10 @@ class AiReplyObservationRuntimeTest {
             unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ
         )
         val middleUnread = sessionCandidate(nameText = "Middle Contact", completeBoundaryEvidence = true)
-        val topUnknown = sessionCandidate(
+        val topUnread = sessionCandidate(
             nameText = "Top Contact",
             completeBoundaryEvidence = true,
-            unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ
+            unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD
         )
         fun listPage(candidate: ChatListCandidateSnapshot) = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -4871,7 +4869,7 @@ class AiReplyObservationRuntimeTest {
             chatListCandidates = listOf(candidate),
             windowGeneration = 1L
         )
-        val topPage = listPage(topUnknown)
+        val topPage = listPage(topUnread)
         val bottomPage = listPage(bottomUnknown)
         val middlePage = listPage(middleUnread)
         val port = FakeChatPort().apply {
@@ -4887,11 +4885,11 @@ class AiReplyObservationRuntimeTest {
             override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
                 commands += command
                 when {
-                    command.kind == GestureKind.SWIPE && command.description.contains("启动定位底部") -> {
+                    command.kind == GestureKind.SWIPE && command.description.contains("向下搜索未读区域边界") -> {
                         bottomSwipes++
                         when (bottomSwipes) {
-                            1 -> port.page = middlePage // First admission swipe exposes explicit unread.
-                            2 -> port.page = bottomPage // Next swipe positions the locked set at the bottom.
+                            1 -> port.page = middlePage // First search swipe exposes additional explicit unread.
+                            2 -> port.page = bottomPage // Next swipe exposes a fully read viewport.
                         }
                     }
                     command.kind == GestureKind.SWIPE && command.description.contains("从底部向上审视") -> {
@@ -4925,7 +4923,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntil(scheduler, 60) { port.messageReads == 1 }
 
-        assertEquals(2, bottomSwipes) // Admission swipe, then stop after the stable read-only suffix is confirmed.
+        assertEquals(2, bottomSwipes) // Search only until the stable read-only viewport is confirmed.
         assertEquals(1, upwardSwipes) // The first upward swipe exposes the middle page.
         assertEquals(
             listOf(
@@ -4940,7 +4938,7 @@ class AiReplyObservationRuntimeTest {
         }
         assertEquals(VerticalSwipeDirection.DOWN, swipeDirections[0])
         assertEquals(VerticalSwipeDirection.DOWN, swipeDirections[1])
-        assertEquals(VerticalSwipeDirection.UP, swipeDirections[2]) // First unread-admission swipe.
+        assertEquals(VerticalSwipeDirection.UP, swipeDirections[2]) // First unread-search swipe.
         assertTrue(logs.any { it.contains("顶部方向滑动后可见会话行发生变化；先审视当前新区域") })
         assertEquals("Middle Contact", port.resolvedTapCandidateNames.single())
         assertEquals(2, port.sessionListSamples) // Bottom and middle viewports are both archived.
@@ -4981,16 +4979,15 @@ class AiReplyObservationRuntimeTest {
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
             page = firstPage
-            // Startup top positioning performs two DOWN swipes and two independent delayed
-            // boundary samples before the first UP admission swipe. Keep the late viewport
-            // change for the delayed bottom-boundary confirmation itself.
-            inspectionPages = List(13) { firstPage } + latePage
+            // The read-only top admission no longer consumes two extra swipe observations.
+            // Keep the late viewport change for delayed physical-end confirmation.
+            inspectionPages = List(11) { firstPage } + latePage
         }
         var bottomSwipes = 0
         val logs = ArrayList<String>()
         val executor = object : TestGestureApi {
             override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                if (command.kind == GestureKind.SWIPE && command.description.contains("启动定位底部")) {
+                if (command.kind == GestureKind.SWIPE && command.description.contains("向下搜索未读区域边界")) {
                     bottomSwipes++
                 }
                 listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
@@ -5015,7 +5012,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "延迟边界复核发现列表发生迟到变化")
 
-        assertTrue(bottomSwipes >= 3)
+        assertTrue(bottomSwipes >= 2)
         assertTrue(logs.none { it.contains("底部边界经延迟独立快照复核通过") })
         assertTrue(logs.any { it.contains("撤销边界候选") })
     }
@@ -5068,7 +5065,7 @@ class AiReplyObservationRuntimeTest {
                     command: GestureIntentRequest,
                     listener: GestureExecutionListener
                 ): GestureSubmission {
-                    if (command.description.contains("首次向上滑动检查新区域")) {
+                    if (command.description.contains("向下搜索未读区域边界")) {
                         port.page = incompletePage
                     }
                     listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
@@ -5086,7 +5083,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "边界候选缺少完整可见行证据或稳定窗口身份")
 
-        assertTrue(logs.any { it.contains("底部定位无进展计数=2") })
+        assertTrue(logs.any { it.contains("向下搜索无进展计数=2") })
         assertTrue(logs.none { it.contains("底部边界经延迟独立快照复核通过") })
     }
 
@@ -5141,7 +5138,7 @@ class AiReplyObservationRuntimeTest {
                     command: GestureIntentRequest,
                     listener: GestureExecutionListener
                 ): GestureSubmission {
-                    if (command.description.contains("首次向上滑动检查新区域")) {
+                    if (command.description.contains("向下搜索未读区域边界")) {
                         port.page = noWindowPage
                     }
                     listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
@@ -5159,7 +5156,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "边界候选缺少完整可见行证据或稳定窗口身份")
 
-        assertTrue(logs.any { it.contains("底部定位无进展计数=2") })
+        assertTrue(logs.any { it.contains("向下搜索无进展计数=2") })
         assertTrue(logs.none { it.contains("底部边界经延迟独立快照复核通过") })
     }
 
@@ -5516,8 +5513,8 @@ class AiReplyObservationRuntimeTest {
         runUntilLog(scheduler, logs, "AI Reply 启动准入[UNREAD_STATE_UNKNOWN]")
 
         assertTrue(sequence.indexOf("CURRENT_POSITION_CHECK") >= 0)
-        assertTrue("UNKNOWN is checked only after the mandatory first upward admission swipe", sequence.contains("SWIPE"))
-        assertTrue(logs.any { it.contains("首次向上滑动") })
+        assertTrue("UNKNOWN is checked only after the verified top has been reached", sequence.contains("SWIPE"))
+        assertTrue(logs.any { it.contains("当前已确认列表视口存在 UNKNOWN") })
         assertTrue(logs.any { it.contains("UNKNOWN") && it.contains("暂停") })
         assertFalse(scheduler.hasPendingDelay(1_200L))
         assertFalse(scheduler.hasPendingDelay(30_000L))
@@ -5588,12 +5585,12 @@ class AiReplyObservationRuntimeTest {
             (it.intent as? GestureIntent.VerticalSwipe)?.direction
         }
         assertEquals(
-            listOf(VerticalSwipeDirection.DOWN, VerticalSwipeDirection.DOWN, VerticalSwipeDirection.UP),
+            listOf(VerticalSwipeDirection.DOWN, VerticalSwipeDirection.DOWN),
             directions
         )
         assertEquals(1, port.receivedGreetingsIdleSteps)
         assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("首次成功向上滑动后的视口没有明确未读") })
+        assertTrue(logs.any { it.contains("顶部完整有效视口全部明确已读") })
         assertFalse(logs.any { it.contains("底部边界经延迟独立快照复核通过") })
         assertFalse(logs.any { it.contains("随机待机") || it.contains("模拟回复人数") || it.contains("模拟处理目标") })
 
@@ -6912,7 +6909,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "AI Reply 启动准入[UNREAD_STATE_UNKNOWN]")
 
-        assertTrue(logs.any { it.contains("AI Reply 启动准入[UNREAD_STATE_UNKNOWN]") && it.contains("首次成功滑动后的视口") })
+        assertTrue(logs.any { it.contains("AI Reply 启动准入[UNREAD_STATE_UNKNOWN]") && it.contains("当前已确认列表视口") })
         assertEquals(0, port.receivedGreetingsIdleSteps)
         assertFalse(scheduler.hasPendingDelay(1_200L))
         assertFalse(scheduler.hasPendingDelay(30_000L))

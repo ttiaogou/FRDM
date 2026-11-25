@@ -161,7 +161,10 @@ class ChatListCandidateSnapshot(
     val statusPointNodeObservationCount: Int = 0,
     val statusPointVisibleNodeCount: Int = 0,
     val statusPointValidBoundsNodeCount: Int = 0,
-    val statusPointContainedInRowNodeCount: Int = 0
+    val statusPointContainedInRowNodeCount: Int = 0,
+    /** Read-only evidence that Android clipped the row to the vertical viewport edge.
+     * Not a page fingerprint, contact identity or coordinate execution input. */
+    val rowClippedAtViewportEdge: Boolean = false
 ) {
     /** Assigned by the provider adapter for this exact page snapshot; never reused across refreshes. */
     var contactIdentity: ContactRowIdentity? = null

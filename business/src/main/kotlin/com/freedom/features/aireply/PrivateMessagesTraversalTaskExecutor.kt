@@ -45,7 +45,7 @@ internal data class PrivateMessagesUnreadEvidence(
 )
 
 internal enum class PrivateMessagesUnreadAdmissionDecision {
-    FIRST_SWIPE_REQUIRED,
+    WAIT_FOR_TOP_CONFIRMATION,
     UNKNOWN_BLOCKED,
     NO_UNREAD,
     CONTINUE_BOTTOM_POSITIONING,
@@ -219,7 +219,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
         checkpointLastSuccessfulTaskId = checkpoint.lastSuccessfulTaskId
         checkpointNextCursorKey = checkpoint.nextCursorKey
         checkpointTraversalDirection = checkpoint.traversalDirection
-        fullListPollingRoundRequired = checkpoint.fullListPollingRoundRequired
+        // Old ordinary polling checkpoints must not resurrect forced bottom positioning.
+        // A same-round anomaly relocation always starts with finalized locked membership.
+        fullListPollingRoundRequired = checkpoint.fullListPollingRoundRequired && checkpoint.lockedUnreadSetFinalized
         unresolvedIncompleteUnreadKeys.clear()
         unresolvedIncompleteUnreadKeys += checkpoint.unresolvedIncompleteUnreadKeys
     }
@@ -373,17 +375,16 @@ internal class PrivateMessagesTraversalTaskExecutor {
     var initialInboxPositionCheckCompleted: Boolean = false
     /** True only after the startup list-top boundary has been independently confirmed. */
     var initialInboxTopPositioningCompleted: Boolean = false
+    // Legacy checkpoint field name: true after unread admission observes the confirmed top.
+    // No gesture completion is required or implied by this flag.
     var initialUnreadGateSwipeCompleted: Boolean = false
 
     val attemptedSessionKeys: MutableSet<String> = LinkedHashSet()
     val ambiguousSessionIdentityKeys: MutableSet<String> = LinkedHashSet()
     val lockedUnreadSessionKeys: MutableSet<String> = LinkedHashSet()
     var lockedUnreadSetFinalized: Boolean = false
-    /**
-     * Set only when a verified timed polling round starts. The original first-run
-     * fast admission remains unchanged; a timed scan must reach the list bottom
-     * before it can conclude there are no offscreen unread conversations.
-     */
+    /** Legacy checkpoint field: only an exceptional same-round incomplete-row relocation
+     * may require a full scan. Normal startup and timed polling use the unread boundary. */
     var fullListPollingRoundRequired: Boolean = false
         private set
     private var unreadBoundarySignature: String = ""
@@ -515,7 +516,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
     fun observeIncompleteUnreadEvidence(snapshot: ChatPageSnapshot): Boolean {
         val rows = snapshot.chatListCandidates.filter {
             it.selectionClass == "PRIVATE_CHAT" && it.rowVisibleToUser &&
-                it.intersectsViewport && it.fullyInsideViewport
+                it.intersectsViewport && it.fullyInsideViewport &&
+                !isNonContributingClippedEdge(snapshot, it)
         }
         val incomplete = rows.filter {
             it.unreadStatus != ChatUnreadStatus.READ &&
@@ -649,12 +651,14 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val rows = snapshot.chatListCandidates
             .filter { ChatSessionManagementPolicy.isEligible(it) }
             .filter {
-                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
+                !it.rowClippedAtViewportEdge &&
+                    ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
             }
             .sortedWith(
                 compareBy<ChatListCandidateSnapshot> { it.rowBounds.top }
                     .thenBy { it.rowBounds.bottom }
             )
+        val window = snapshot.windowIdentityKey() ?: return ""
         val keys = rows.mapNotNull { row ->
             ChatSessionManagementPolicy.stableSessionKey(row)
                 .takeIf(String::isNotBlank)
@@ -663,11 +667,13 @@ internal class PrivateMessagesTraversalTaskExecutor {
                         "${row.rowBounds.right},${row.rowBounds.bottom}:${row.unreadStatus.name}"
                 }
         }
-        return if (rows.isNotEmpty() && keys.size == rows.size) keys.joinToString("|") else ""
+        return if (rows.isNotEmpty() && keys.size == rows.size) "$window|${keys.joinToString("|")}" else ""
     }
 
     fun unreadEvidence(snapshot: ChatPageSnapshot): PrivateMessagesUnreadEvidence {
-        val eligible = snapshot.chatListCandidates.filter(ChatSessionManagementPolicy::isEligible)
+        val eligible = snapshot.chatListCandidates.filter {
+            ChatSessionManagementPolicy.isEligible(it) && !isNonContributingClippedEdge(snapshot, it)
+        }
         return PrivateMessagesUnreadEvidence(
             hasUnread = eligible.any { it.unreadStatus == ChatUnreadStatus.UNREAD },
             hasUnknown = eligible.any { it.unreadStatus == ChatUnreadStatus.UNKNOWN }
@@ -796,11 +802,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val evidence = unreadEvidence(snapshot)
         if (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM) {
             if (!lockedUnreadSetFinalized) {
-                // During a full polling scan, a later read-only viewport must not
-                // erase unread evidence collected on an earlier offscreen viewport.
-                normalInboxHadUnread = if (fullListPollingRoundRequired) {
-                    normalInboxHadUnread || evidence.hasUnread
-                } else evidence.hasUnread
+                // Every ordinary round preserves earlier unread evidence across viewports.
+                normalInboxHadUnread = normalInboxHadUnread || evidence.hasUnread
                 // A clean *different* viewport must not erase an unresolved historic UNKNOWN.
                 // The admission gate below owns revalidation of saved blocked identities.
                 if (evidence.hasUnknown) normalInboxUnreadStateUnknown = true
@@ -816,11 +819,28 @@ internal class PrivateMessagesTraversalTaskExecutor {
         }
     }
 
-    /** Applies the unread gate after the mandatory first successful upward swipe. */
+    /**
+     * An actually clipped edge holder is not a complete row. It contributes no READ
+     * evidence; explicit or ambiguous badge evidence still prevents an all-read viewport.
+     */
+    private fun isNonContributingClippedEdge(snapshot: ChatPageSnapshot, row: ChatListCandidateSnapshot): Boolean {
+        val viewport = snapshot.chatListViewport ?: return false
+        return row.rowBoundsValid && row.intersectsViewport && row.rowVisibleToUser &&
+            (!row.fullyInsideViewport || row.rowClippedAtViewportEdge) &&
+            (row.rowBounds.top <= viewport.top || row.rowBounds.bottom >= viewport.bottom) &&
+            row.unreadStatus != ChatUnreadStatus.UNREAD &&
+            (row.unreadStatus == ChatUnreadStatus.READ ||
+                (!row.statusNewNodePresent && row.statusNewNodeObservationCount == 0 &&
+                    row.unreadEvidenceSource == com.freedom.features.aireply.ports.ChatUnreadEvidenceSource.NONE &&
+                    row.unreadNodeEvidence.isEmpty()))
+    }
+
+    /** Admit the current confirmed-top snapshot itself; no compulsory swipe. */
     fun evaluateUnreadAdmission(snapshot: ChatPageSnapshot): PrivateMessagesUnreadAdmissionDecision {
-        if (!initialUnreadGateSwipeCompleted) {
-            return PrivateMessagesUnreadAdmissionDecision.FIRST_SWIPE_REQUIRED
+        if (!initialInboxTopPositioningCompleted) {
+            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_TOP_CONFIRMATION
         }
+        initialUnreadGateSwipeCompleted = true
         val viewportUnread = snapshot.chatListCandidates.filter {
             it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
         }
@@ -833,12 +853,24 @@ internal class PrivateMessagesTraversalTaskExecutor {
             return PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
         }
         val privateRows = snapshot.chatListCandidates.filter { it.selectionClass == "PRIVATE_CHAT" }
-        val cleanReadViewport = privateRows.isNotEmpty() && !snapshot.chatListExtractionTruncated &&
-            privateRows.all { it.unreadStatus == ChatUnreadStatus.READ &&
-                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport) }
-        if (canContinueWithIncompleteUnread(snapshot) &&
-            (lockedUnreadSessionKeys.isEmpty() || !cleanReadViewport)
-        ) {
+        val completePrivateRows = privateRows.filter {
+            !it.rowClippedAtViewportEdge &&
+                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
+        }
+        // Clipped holders may lose the timestamp/name and be UNCLASSIFIED. An observed
+        // unread marker on such a row is not evidence of a clean read viewport.
+        val unresolvedUnclassifiedBadge = snapshot.chatListCandidates.any {
+            it.selectionClass == "UNCLASSIFIED" && it.unreadStatus != ChatUnreadStatus.READ &&
+                (it.unreadStatus == ChatUnreadStatus.UNREAD || it.statusNewNodePresent ||
+                    it.unreadNodeEvidence.isNotEmpty())
+        }
+        val cleanReadViewport = completePrivateRows.isNotEmpty() && !snapshot.chatListExtractionTruncated &&
+            snapshot.chatListInvalidRowBoundsCount == 0 && !unresolvedUnclassifiedBadge &&
+            privateRows.all {
+                (it.unreadStatus == ChatUnreadStatus.READ && it in completePrivateRows) ||
+                    isNonContributingClippedEdge(snapshot, it)
+            }
+        if (canContinueWithIncompleteUnread(snapshot) && !cleanReadViewport) {
             // Pending named evidence is not an empty inbox or a proven read suffix.
             // Continue only the existing list positioning path; the completion gate
             // retains the unresolved row until it is independently re-observed.
@@ -846,19 +878,13 @@ internal class PrivateMessagesTraversalTaskExecutor {
             resetUnreadBoundaryObservation()
             return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
         }
-        if (fullListPollingRoundRequired) {
-            // A 60-120s wakeup is not a one-viewport poll: scan to the independently
-            // confirmed bottom, collecting only explicit unread identities. Existing
-            // safe scroll/boundary verification is unchanged.
+        if (fullListPollingRoundRequired && lockedUnreadSetFinalized) {
+            // Exceptional same-round relocation still needs its original target search.
+            // Normal startup and normal timed polling never enter this branch.
             phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
             resetUnreadBoundaryObservation()
             return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
         }
-        if (lockedUnreadSessionKeys.isEmpty()) {
-            resetUnreadBoundaryObservation()
-            return PrivateMessagesUnreadAdmissionDecision.NO_UNREAD
-        }
-
         if (viewportUnread.isNotEmpty()) {
             phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
             resetUnreadBoundaryObservation()
@@ -870,10 +896,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
             resetUnreadBoundaryObservation()
         }
 
-        val eligibleRows = snapshot.chatListCandidates.filter(ChatSessionManagementPolicy::isEligible)
-        val visibleReadSuffix = eligibleRows.isNotEmpty() &&
-            eligibleRows.all { it.unreadStatus == ChatUnreadStatus.READ }
-        if (snapshot.chatListExtractionTruncated || !visibleReadSuffix || !cleanReadViewport) {
+        if (!cleanReadViewport) {
             resetUnreadBoundaryObservation()
             phase = SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY
             return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
@@ -898,13 +921,19 @@ internal class PrivateMessagesTraversalTaskExecutor {
         phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
         lockedUnreadSetFinalized = true
         resetUnreadBoundaryObservation()
+        // A no-work handoff is possible only at the verified top, after the same
+        // full-read viewport proof used by a non-empty unread round.
+        if (atTop && lockedUnreadSessionKeys.isEmpty() && !normalInboxHadUnread &&
+            unresolvedIncompleteUnreadKeys.isEmpty() && unresolvedUnknownUnreadKeys.isEmpty()
+        ) return PrivateMessagesUnreadAdmissionDecision.NO_UNREAD
         return PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED
     }
 
     /** Shared existing UNKNOWN blocker policy, also used by the round wakeup gate. */
     fun observeUnreadBlockers(snapshot: ChatPageSnapshot): Boolean {
         val currentUnknown = snapshot.chatListCandidates.filter {
-            ChatSessionManagementPolicy.isEligible(it) && it.unreadStatus == ChatUnreadStatus.UNKNOWN
+            ChatSessionManagementPolicy.isEligible(it) && it.unreadStatus == ChatUnreadStatus.UNKNOWN &&
+                !isNonContributingClippedEdge(snapshot, it)
         }
         // Keep identifiable badge rows with unusable unread evidence in the same
         // durable row ledger as structurally incomplete rows. A fresh independent
@@ -1090,7 +1119,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
 
     /**
      * Begins a new ordinary-inbox pass after the greetings branch returns to the inbox.
-     * The startup admission swipe is not replayed because the inbox context was already established.
+     * The inbox context was already established; no startup probe gesture is required.
      */
     fun resetForReturnedInbox() {
         clearIdentityReturn()
@@ -1130,7 +1159,6 @@ internal class PrivateMessagesTraversalTaskExecutor {
         // Without this clear, repeated A/B viewport fingerprints are silently treated
         // as already captured in the next complete scan.
         resetForReturnedInbox()
-        fullListPollingRoundRequired = true
         capturedSessionListFingerprints.clear()
         initialInboxPositionCheckCompleted = false
         initialInboxTopPositioningCompleted = false

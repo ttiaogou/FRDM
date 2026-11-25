@@ -211,6 +211,7 @@ internal class MomoChatListSessionExtractor(
                     rowPath = userContainer.path,
                     rowIndex = rowIndex,
                     rowBounds = rowBounds,
+                    rowClippedAtViewportEdge = clippedAtViewportEdge(itemLayout, rowBounds, viewport),
                     rowClass = userContainer.className,
                     rowVisible = rowVisibleToUser,
                     viewport = viewport,
@@ -274,6 +275,7 @@ internal class MomoChatListSessionExtractor(
         val rowPath: List<Int>,
         val rowClassName: String,
         val rowBounds: ScreenRect,
+        val rowClippedAtViewportEdge: Boolean,
         val rowVisibleToUser: Boolean,
         val intersectsViewport: Boolean,
         val avatarPath: List<Int>?,
@@ -359,7 +361,8 @@ internal class MomoChatListSessionExtractor(
             statusPointNodeObservationCount = statusPointNodeObservationCount,
             statusPointVisibleNodeCount = statusPointVisibleNodeCount,
             statusPointValidBoundsNodeCount = statusPointValidBoundsNodeCount,
-            statusPointContainedInRowNodeCount = statusPointContainedInRowNodeCount
+            statusPointContainedInRowNodeCount = statusPointContainedInRowNodeCount,
+            rowClippedAtViewportEdge = rowClippedAtViewportEdge
             )
         }
     }
@@ -454,6 +457,7 @@ internal class MomoChatListSessionExtractor(
         rowPath: List<Int>,
         rowIndex: Int,
         rowBounds: ScreenRect,
+        rowClippedAtViewportEdge: Boolean,
         rowClass: String,
         rowVisible: Boolean,
         viewport: ScreenRect,
@@ -792,6 +796,7 @@ internal class MomoChatListSessionExtractor(
                 rowPath = rowPath,
                 rowClassName = rowClass,
                 rowBounds = rowBounds,
+                rowClippedAtViewportEdge = rowClippedAtViewportEdge,
                 rowVisibleToUser = rowVisible,
                 intersectsViewport = MomoChatListSessionPolicy.intersectsViewport(rowBounds, viewport),
                 avatarPath = avatarPath,
@@ -913,6 +918,21 @@ internal class MomoChatListSessionExtractor(
     )
 
     private fun TextNodeSample.valueAsPolicy() = MomoChatListTextValue(value, source)
+
+    // Android may clamp the screen rectangle to the viewport even while the
+    // parent-relative layout retains the full height. Compare dimensions only;
+    // never convert parent coordinates into a gesture target.
+    @Suppress("DEPRECATION")
+    private fun clippedAtViewportEdge(
+        node: AccessibilityNodeInfo, screen: ScreenRect, viewport: ScreenRect
+    ): Boolean {
+        if (screen.isEmpty || (screen.top != viewport.top && screen.bottom != viewport.bottom)) return false
+        val layout = Rect()
+        return runCatching {
+            node.getBoundsInParent(layout)
+            layout.width() == screen.width && layout.height() > screen.height
+        }.getOrDefault(false)
+    }
 
     private fun boundsOf(node: AccessibilityNodeInfo): ScreenRect {
         val rect = Rect()

@@ -10,6 +10,7 @@ data class PrivateMessagesTraversalCheckpoint(
     val atTop: Boolean,
     val initialInboxPositionCheckCompleted: Boolean,
     val initialInboxTopPositioningCompleted: Boolean,
+    /** Legacy serialized name; records confirmed-top unread admission, not a mandatory gesture. */
     val initialUnreadGateSwipeCompleted: Boolean,
     val lockedUnreadSetFinalized: Boolean,
     val normalInboxHadUnread: Boolean,
@@ -26,7 +27,7 @@ data class PrivateMessagesTraversalCheckpoint(
     val unresolvedUnknownUnreadKeys: Set<String> = emptySet(),
     /** Identity + geometry of the viewport that originally produced the UNKNOWN block. */
     val unknownUnreadViewportKeys: List<String> = emptyList(),
-    /** True only for a timed full-inbox polling round; absent in older checkpoints. */
+    /** Legacy serialized name; retained for exceptional same-round incomplete-row relocation. */
     val fullListPollingRoundRequired: Boolean = false,
     /** Opaque, retryable incomplete unread row hints; never equivalent to a blocked identity. */
     val unresolvedIncompleteUnreadKeys: Set<String> = emptySet()
