@@ -261,6 +261,10 @@ class AiReplyDraftCoordinator(
     private var activeDraftVisitToken: String? = null
     private var activeExistingOutgoingKeys: Set<String> = emptySet()
     private var activeTaskId: String? = null
+    private var completedPrivateNoReplyVisit: Pair<String, String>? = null
+
+    fun isPrivateNoReplyCompleted(visitToken: String, windowSessionKey: String): Boolean =
+        synchronized(lock) { completedPrivateNoReplyVisit == (visitToken to windowSessionKey) }
     private var pendingSendConfirmation: PendingSendConfirmation? = null
     /** A confirmed segment must obtain a fresh chat/composer observation before the next one starts. */
     private var pendingNextMessageSegment: PendingNextMessageSegment? = null
@@ -471,6 +475,22 @@ class AiReplyDraftCoordinator(
                     }.getOrDefault(false)
                 }
             }
+            // Only an owned pre-input model request with no durable segment can
+            // be reclaimed. Existing send/control and uncertain segment guards remain.
+            val abandonedKey = activeMessageKey
+            val abandonedId = activeRequestId
+            if (activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES &&
+                abandonedKey != null && abandonedId != null && activeMessageSegments.isEmpty() &&
+                pendingSendConfirmation == null && pendingNextMessageSegment == null &&
+                pendingSendControl == null && !awaitingUserSend.get()
+            ) runCatching {
+                val journal = replyTaskRepository
+                val record = journal?.find(abandonedKey)
+                if (record?.requestId == abandonedId &&
+                    record.status in setOf(ReplyTaskStatus.REQUESTED, ReplyTaskStatus.MODEL_COMPLETED) &&
+                    replySegmentTaskRepository?.findByRequest(abandonedId)?.isEmpty() == true
+                ) journal.updateStatus(abandonedKey, abandonedId, ReplyTaskStatus.FAILED_RETRYABLE, nowMillis())
+            }
             pending.set(false)
             awaitingUserSend.set(false)
             processedMessageKeys.clear()
@@ -483,6 +503,7 @@ class AiReplyDraftCoordinator(
             activeDraftVisitToken = null
             activeExistingOutgoingKeys = emptySet()
             activeTaskId = null
+            completedPrivateNoReplyVisit = null
             pendingSendConfirmation = null
             pendingNextMessageSegment = null
             readOnlyRecoveredMatch = null
@@ -1556,7 +1577,8 @@ class AiReplyDraftCoordinator(
      * baseline remain unresolved rather than accepting a same-text historical bubble.
      */
     private fun restoreUncertainSendConfirmation(
-        batch: ChatMessageBatch, snapshot: ChatPageSnapshot
+        batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
+        recoveredPrivateOpenedAtMillis: Long? = null
     ): SendConfirmationResult {
         val conversationKey = snapshot.conversationIdentityKey() ?: return SendConfirmationResult.NOT_PENDING
         val repository = replySegmentTaskRepository ?: return SendConfirmationResult.NOT_PENDING
@@ -1568,7 +1590,39 @@ class AiReplyDraftCoordinator(
                 ReplySegmentTaskStatus.UNKNOWN
             )
         }
-        if (uncertain.isEmpty()) return SendConfirmationResult.NOT_PENDING
+        if (uncertain.isEmpty()) {
+            if (recoveredPrivateOpenedAtMillis != null) {
+                val originalGroups = all.filter { it.createdAt >= recoveredPrivateOpenedAtMillis }
+                    .groupBy { it.requestId }.values
+                val startedGroups = originalGroups.filter { group ->
+                    group.any { it.status == ReplySegmentTaskStatus.SENT }
+                }
+                if (startedGroups.isNotEmpty()) {
+                    val group = startedGroups.singleOrNull()?.sortedBy { it.segmentIndex }
+                    val last = group?.lastOrNull()
+                    val receipt = last?.confirmationId
+                    val owner = last?.sendRequestKey?.let { replyTaskRepository?.find(it) }
+                    val complete = group != null && last != null && group.size == last.segmentCount &&
+                        group.indices.all { index ->
+                            val record = group[index]
+                            record.segmentIndex == index && record.segmentCount == group.size &&
+                                record.status == ReplySegmentTaskStatus.SENT &&
+                                !record.confirmationId.isNullOrBlank() &&
+                                record.confirmationId != fingerprint("${record.requestId}|${record.conversationKey}|UNCERTAIN_ARCHIVED")
+                        } && owner != null && owner.requestId == last.requestId &&
+                        owner.conversationKey == conversationKey && owner.status == ReplyTaskStatus.SENT
+                    if (complete && !receipt.isNullOrBlank()) {
+                        synchronized(lock) { lastConfirmedSendId = receipt; replyAwaitingConfirmedSend = false }
+                        return SendConfirmationResult.CONFIRMED
+                    }
+                    // A partial queue is not permission to start a different model reply.
+                    synchronized(lock) { replyAwaitingConfirmedSend = true }
+                    onLog("AI 私聊业务[PARTIAL_SEND_HELD]：原消息段队列未取得完整发送收据；不生成新草稿、不重发")
+                    return SendConfirmationResult.UNKNOWN
+                }
+            }
+            return SendConfirmationResult.NOT_PENDING
+        }
         synchronized(lock) { replyAwaitingConfirmedSend = true }
         val candidate = uncertain.singleOrNull()
         val segments = candidate?.let { current ->
@@ -1582,6 +1636,7 @@ class AiReplyDraftCoordinator(
         val currentWindowKey = if (session == null) null
             else "${session.packageName}|${session.windowId}|${session.generation}|conversation=$conversationKey"
         val valid = candidate != null && segments != null && startedAt != null &&
+            (recoveredPrivateOpenedAtMillis == null || candidate.createdAt >= recoveredPrivateOpenedAtMillis) &&
             !requestKey.isNullOrBlank() && candidate.sendChatTitleHash != null &&
             candidate.sendWindowSessionKey?.endsWith("|conversation=$conversationKey") == true &&
             snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
@@ -1611,7 +1666,7 @@ class AiReplyDraftCoordinator(
         if (!valid || candidate == null || segments == null || targetNode == null ||
             windowIdentity == null || currentWindowKey == null || requestKey == null || startedAt == null
         ) {
-            if (candidate != null && (activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS ||
+            if (recoveredPrivateOpenedAtMillis == null && candidate != null && (activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS ||
                 activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES
             )) {
                 archiveUnconfirmedAttempt(candidate, segments.orEmpty())
@@ -1709,12 +1764,13 @@ class AiReplyDraftCoordinator(
         }
     }
 
-    fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): SendConfirmationResult {
+    fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
+                          recoveredPrivateOpenedAtMillis: Long? = null): SendConfirmationResult {
         val pending = synchronized(lock) { pendingSendConfirmation }
         if (pending == null) {
             val next = synchronized(lock) { pendingNextMessageSegment }
             if (next != null) return resumeConfirmedNextMessageSegment(batch, snapshot, next)
-            return restoreUncertainSendConfirmation(batch, snapshot)
+            return restoreUncertainSendConfirmation(batch, snapshot, recoveredPrivateOpenedAtMillis)
         }
         if (generation.get() != pending.requestGeneration) {
             recordSendTrace(
@@ -1755,7 +1811,7 @@ class AiReplyDraftCoordinator(
             message.direction == ChatMessageDirection.OUTGOING &&
                 messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys &&
                 fingerprint(messageKey(message.stableLogicalMessageId, message.effectiveContentRevision)) !in pending.previousOutgoingKeyHashes
-                && (diffTransaction || (
+                && ((diffTransaction && recoveredPrivateOpenedAtMillis == null) || (
                     message.contentQuality == MessageContentQuality.VERIFIED &&
                     fingerprint(message.content.orEmpty()) == pending.segmentContentHash
                 ))
@@ -1967,8 +2023,9 @@ class AiReplyDraftCoordinator(
      * while the final confirmed segment yields one consumable transaction receipt. The
      * receipt is delivered alongside the final outcome, never as a separate later callback.
      */
-    fun confirmSendTransaction(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): ReplySendTransactionOutcome {
-        val result = confirmSendResult(batch, snapshot)
+    fun confirmSendTransaction(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
+                               recoveredPrivateOpenedAtMillis: Long? = null): ReplySendTransactionOutcome {
+        val result = confirmSendResult(batch, snapshot, recoveredPrivateOpenedAtMillis)
         return ReplySendTransactionOutcome(
             status = result,
             finalSendConfirmationId = if (result == SendConfirmationResult.CONFIRMED) {
@@ -2012,6 +2069,10 @@ class AiReplyDraftCoordinator(
             activeRequestId = null
             activeDraftTarget = null
             activeDraftVisitToken = null
+            if (preSend && activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES &&
+                reasonCode in setOf("MODEL_BUSINESS_WAIT", "MODEL_BUSINESS_DO_NOT_REPLY") &&
+                visitToken != null && originalTarget != null
+            ) completedPrivateNoReplyVisit = visitToken to originalTarget.windowSessionKey
             var attempts = 0
             if (key != null && (technicalPreSendFailure ||
                     reasonCode == "DRAFT_INPUT_CONFIRMED_EMPTY_RETRYABLE")) {

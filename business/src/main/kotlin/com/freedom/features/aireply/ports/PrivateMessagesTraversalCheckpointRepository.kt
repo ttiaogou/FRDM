@@ -32,7 +32,18 @@ data class PrivateMessagesTraversalCheckpoint(
     /** Opaque, retryable incomplete unread row hints; never equivalent to a blocked identity. */
     val unresolvedIncompleteUnreadKeys: Set<String> = emptySet(),
     /** An interrupted scan must independently prove the physical bottom before continuing. */
-    val scanContinuityRecoveryPending: Boolean = false
+    val scanContinuityRecoveryPending: Boolean = false,
+    /** Verified detail entries whose business outcome has not yet been established. */
+    val unfinishedSessions: List<UnfinishedPrivateSession> = emptyList()
+)
+
+/** Opaque recovery hints only: never a node, coordinate, raw contact ID or message. */
+data class UnfinishedPrivateSession(
+    val sourceKey: String,
+    val titleKey: String,
+    val verifiedKey: String?,
+    val conversationKey: String,
+    val openedAtMillis: Long
 )
 
 interface PrivateMessagesTraversalCheckpointRepository {

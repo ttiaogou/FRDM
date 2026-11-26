@@ -1499,6 +1499,56 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertEquals(oldKeys, executor.lastStableSessionListVisibleKeys)
     }
 
+    @Test
+    fun verifiedInterruptedSessionSurvivesReadBadgeLossAndRestoreWithoutAdmittingOtherReadRows() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxPositionCheckCompleted = true
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        }
+        val original = candidate(0, "Interrupted", ChatUnreadStatus.UNREAD)
+        val read = candidate(0, "Interrupted", ChatUnreadStatus.READ)
+        val other = candidate(1, "Other read", ChatUnreadStatus.READ)
+        executor.beginSession(original, key(original), "original-window")
+        executor.attemptedSessionKeys += key(original)
+        val detail = snapshot(original).copy(
+            pageKind = com.freedom.features.aireply.ports.ChatPageKind.CHAT_DETAIL_CANDIDATE,
+            chatTitleText = "与Interrupted对话",
+            inputFieldTarget = original.rowTarget,
+            messageListTarget = original.rowTarget,
+            windowGeneration = 1L
+        )
+        assertTrue(executor.recordVerifiedDetailEntry(detail, 100L))
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(executor.checkpoint()) }
+        assertEquals(setOf(key(original)), restored.pendingKnownUnreadKeys())
+        val list = snapshot(read, other)
+        assertTrue(restored.canRecoverInterruptedRow(list, read))
+        assertFalse(restored.canRecoverInterruptedRow(list, other))
+        assertFalse(restored.canRecoverInterruptedRow(snapshot(read, candidate(1, "Interrupted", ChatUnreadStatus.READ)), read))
+        assertFalse(restored.canRecoverInterruptedRow(snapshot(read.copy(unreadStatus = ChatUnreadStatus.UNKNOWN)), read.copy(unreadStatus = ChatUnreadStatus.UNKNOWN)))
+        val decision = restored.evaluateListSnapshot(list,  false, 2)
+        assertEquals(read, decision.nextCandidate)
+        assertEquals(setOf(key(original)), restored.pendingKnownUnreadKeys())
+        restored.beginSession(read, key(read), "new-window")
+        assertTrue(restored.recoveringUnfinishedSession)
+        assertFalse(restored.verifyUnfinishedIdentity(read))
+        val verified = read.apply {
+            contactIdentity = ContactRowIdentity("snapshot", "temp", "original-id", ContactIdentityConfidence.PLATFORM_ID_VERIFIED)
+        }
+        assertTrue(restored.verifyUnfinishedIdentity(verified))
+        val wrong = candidate(0, "Interrupted", ChatUnreadStatus.READ).apply {
+            contactIdentity = ContactRowIdentity("snapshot", "temp", "different-id", ContactIdentityConfidence.PLATFORM_ID_VERIFIED)
+        }
+        assertFalse(restored.verifyUnfinishedIdentity(wrong))
+        assertEquals(key(verified), restored.currentUnfinishedSession()?.verifiedKey)
+        assertTrue(restored.completeCurrentUnfinishedSession())
+        assertTrue(restored.checkpoint().unfinishedSessions.isEmpty())
+        assertTrue(restored.pendingKnownUnreadKeys().isEmpty())
+        assertEquals(null, restored.selectNextCandidate(list.chatListCandidates))
+    }
+
     private fun key(candidate: ChatListCandidateSnapshot): String =
         com.freedom.features.aireply.ports.ChatSessionManagementPolicy.stableSessionKey(candidate)
 

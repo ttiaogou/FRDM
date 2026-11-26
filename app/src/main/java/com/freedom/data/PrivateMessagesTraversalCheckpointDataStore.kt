@@ -5,6 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
+import com.freedom.features.aireply.ports.UnfinishedPrivateSession
 
 /** SharedPreferences storage for message-list traversal identity/state only. */
 internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : PrivateMessagesTraversalCheckpointRepository {
@@ -37,7 +38,8 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
                 json.readList("unknownUnreadViewportKeys"),
                 json.optBoolean("fullListPollingRoundRequired", false),
                 json.readSet("unresolvedIncompleteUnreadKeys"),
-                json.optBoolean("scanContinuityRecoveryPending", false)
+                json.optBoolean("scanContinuityRecoveryPending", false),
+                json.readUnfinishedSessions()
             )
         }.getOrElse { clear(); null }
     }
@@ -67,10 +69,29 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
             .put("fullListPollingRoundRequired", checkpoint.fullListPollingRoundRequired)
             .put("unresolvedIncompleteUnreadKeys", JSONArray(checkpoint.unresolvedIncompleteUnreadKeys.toList().takeLast(MAX_KEYS)))
             .put("scanContinuityRecoveryPending", checkpoint.scanContinuityRecoveryPending)
+            .put("unfinishedSessions", JSONArray(checkpoint.unfinishedSessions.map { entry ->
+                JSONObject().put("sourceKey", entry.sourceKey).put("titleKey", entry.titleKey)
+                    .put("verifiedKey", entry.verifiedKey.orEmpty())
+                    .put("conversationKey", entry.conversationKey).put("openedAtMillis", entry.openedAtMillis)
+            }))
         preferences.edit().putString(KEY, json.toString()).apply()
     }
 
     @Synchronized override fun clear() { preferences.edit().remove(KEY).apply() }
+
+    private fun JSONObject.readUnfinishedSessions(): List<UnfinishedPrivateSession> {
+        val array = optJSONArray("unfinishedSessions") ?: return emptyList()
+        return (0 until array.length()).mapNotNull { index ->
+            val entry = array.optJSONObject(index) ?: return@mapNotNull null
+            val source = entry.optString("sourceKey")
+            val title = entry.optString("titleKey")
+            val conversation = entry.optString("conversationKey")
+            val opened = entry.optLong("openedAtMillis")
+            if (source.isBlank() || title.isBlank() || conversation.isBlank() || opened <= 0L) null
+            else UnfinishedPrivateSession(source, title,
+                entry.optString("verifiedKey").takeIf(String::isNotBlank), conversation, opened)
+        }.distinctBy { it.sourceKey }
+    }
 
     private fun JSONObject.readList(key: String): List<String> = readSet(key).toList()
     private fun JSONObject.readSet(key: String): LinkedHashSet<String> {

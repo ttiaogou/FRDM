@@ -71,6 +71,32 @@ class PrivateMessagesTaskExecutorTest {
     }
 
     @Test
+    fun readRecoveryRequiresExplicitOriginalObligationAtPreparationAndDelayedDispatch() {
+        val read = candidate(unreadStatus = ChatUnreadStatus.READ)
+        var current = validSnapshot(read)
+        var permit = false
+        var listener: GestureExecutionListener? = null
+        var dispatches = 0
+        val executor = executor(snapshotProvider = { current }, onListener = { listener = it },
+            onDispatch = { dispatches++ })
+        fun attempt() = executor.openSession(key(read), read.rowTarget.window, emptySet(),
+            isInterruptedReadRecovery = { _, row -> permit && key(row) == key(read) }) { _, _, _, _ -> }
+        assertEquals(PrivateMessagesTaskExecutor.RejectionReason.UNREAD_ADMISSION_CHANGED,
+            (attempt() as PrivateMessagesTaskExecutor.Attempt.Rejected).reason)
+        assertEquals(0, dispatches)
+        permit = true
+        val submitted = attempt() as PrivateMessagesTaskExecutor.Attempt.Submitted
+        val guard = requireNotNull(listener)
+        assertTrue(guard.isDispatchTargetCurrent(submitted.requestId))
+        permit = false
+        assertFalse(guard.isDispatchTargetCurrent(submitted.requestId))
+        permit = true
+        current = validSnapshot(candidate(unreadStatus = ChatUnreadStatus.UNKNOWN))
+        assertFalse(guard.isDispatchTargetCurrent(submitted.requestId))
+        assertEquals(1, dispatches)
+    }
+
+    @Test
     fun submitsOnlyAfterFreshRowIdentityBoundsViewportAndOwnershipAreConfirmed() {
         var dispatched: GestureIntentRequest? = null
         val freshCandidate = candidate()

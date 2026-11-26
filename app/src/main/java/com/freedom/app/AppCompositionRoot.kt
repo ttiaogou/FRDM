@@ -719,6 +719,12 @@ internal class AccessibilityServiceDependencies internal constructor(
             onSendTransaction = { batch, snapshot ->
                 aiReplyDraftCoordinator.confirmSendTransaction(batch, snapshot)
             },
+            privateNoReplyCompleted = { visit, window ->
+                aiReplyDraftCoordinator.isPrivateNoReplyCompleted(visit, window)
+            },
+            onRecoveredPrivateSendTransaction = { batch, snapshot, openedAt ->
+                aiReplyDraftCoordinator.confirmSendTransaction(batch, snapshot, openedAt)
+            },
             verifyGreetingPreSendModelFailure = { failure, snapshot ->
                 aiReplyDraftCoordinator.verifyGreetingPreSendFailure(failure, snapshot)
             },

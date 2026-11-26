@@ -4872,7 +4872,9 @@ class AiReplyObservationRuntimeTest {
         freshInspection.invoke(runtime)
         assertTrue(logs.any { it.contains("AI 聊天详情恢复[ROUTE_SELECTED]") })
         val readsBeforeRecovery = port.messageReads
-
+        val traversal = runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(runtime) as PrivateMessagesTraversalTaskExecutor
+        val originalUnfinished = traversal.checkpoint().unfinishedSessions.single()
 
         val originalIdentity = manager.snapshot(PrivateMessagesTaskController.TASK_ID)
         assertEquals("AI_REPLY_CHAT_DETAIL", originalIdentity?.routeId)
@@ -4924,6 +4926,7 @@ class AiReplyObservationRuntimeTest {
         assertEquals("List recovery must not submit OCR", 0, port.ocrAsyncReadRequests)
         assertFalse(port.pendingIdentityReturnReinspection)
         assertEquals(0, port.navigateBackCalls)
+        assertEquals(listOf(originalUnfinished), traversal.checkpoint().unfinishedSessions)
     }
 
     @Test

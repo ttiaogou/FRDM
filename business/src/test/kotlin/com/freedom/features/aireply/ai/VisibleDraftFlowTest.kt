@@ -922,6 +922,63 @@ class VisibleDraftFlowTest {
         assertEquals("", f.text)
         assertFalse(f.coordinator.isConversationReturnBlocked)
         assertEquals(ReplyTaskStatus.MODEL_COMPLETED, ledger.records.values.single().status)
+        assertTrue(f.coordinator.isPrivateNoReplyCompleted(f.batch.windowSessionKey!!, f.batch.windowSessionKey!!))
+        assertFalse(f.coordinator.isPrivateNoReplyCompleted("different-visit", f.batch.windowSessionKey!!))
+        f.coordinator.resetForRuntimeReset()
+        assertFalse(f.coordinator.isPrivateNoReplyCompleted(f.batch.windowSessionKey!!, f.batch.windowSessionKey!!))
+    }
+
+    @Test fun r03PartialSendWithoutUncertainSegmentCannotStartNewReplyOrCountAsCompleted() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val f = Fixture(segmentRepository = segments, taskRepository = tasks)
+        val conversation = f.snapshot.conversationIdentityKey()!!
+        val records = ReplySegmentTaskFactory.create("interrupted", conversation, listOf("first", "second"), 100L)
+        segments.save(records[0].copy(status = ReplySegmentTaskStatus.SENT, confirmationId = "first-receipt"))
+        segments.save(records[1])
+        val outcome = f.coordinator.confirmSendTransaction(f.batch, f.snapshot, 50L)
+        assertEquals(SendConfirmationResult.UNKNOWN, outcome.status)
+        assertNull(outcome.finalSendConfirmationId)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertEquals(listOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.CREATED), segments.records.values.map { it.status })
+        assertEquals(0, f.calls)
+        assertTrue(f.inputWriteTargets.isEmpty())
+    }
+
+    @Test fun r03UnprovableHistoricalSendRetainsUnknownInsteadOfArchivingSuccess() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+        }, segments, tasks)
+        f.now = 100L
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertTrue(f.coordinator.deferPrivateUnconfirmedSendForManualReturn())
+        val record = segments.records.values.single()
+        segments.save(record.copy(sendAttemptStartedAt = null))
+        val result = f.coordinator.confirmSendTransaction(f.batch, f.snapshot, 50L)
+        assertEquals(SendConfirmationResult.UNKNOWN, result.status)
+        assertNull(result.finalSendConfirmationId)
+        assertEquals(record.status, segments.records.values.single().status)
+        assertEquals(1, f.calls)
+    }
+
+    @Test fun r03CompleteDurableSendReceiptCanCloseInterruptedVisitWithoutNewModelOrSend() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val f = Fixture(segmentRepository = segments, taskRepository = tasks)
+        val conversation = f.snapshot.conversationIdentityKey()!!
+        val record = ReplySegmentTaskFactory.create("original-request", conversation, listOf("sent"), 100L).single()
+        segments.save(record.copy(status = ReplySegmentTaskStatus.SENT, confirmationId = "actual-final-receipt", sendRequestKey = "owner-key"))
+        tasks.save(ReplyTaskRecord("owner-key", conversation, "original-logical-message", "revision",
+            ReplyTaskStatus.SENT, "original-request", 110L))
+        val result = f.coordinator.confirmSendTransaction(f.batch, f.snapshot, 50L)
+        assertEquals(SendConfirmationResult.CONFIRMED, result.status)
+        assertEquals("actual-final-receipt", result.finalSendConfirmationId)
+        assertEquals(0, f.calls)
+        assertTrue(f.inputWriteTargets.isEmpty())
     }
 
     @Test fun emptyOutputWithLengthFinishReasonDoesNotRetry() {

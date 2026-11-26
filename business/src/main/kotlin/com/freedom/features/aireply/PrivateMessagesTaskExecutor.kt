@@ -70,6 +70,7 @@ internal class PrivateMessagesTaskExecutor(
         sourceWindow: WindowRef,
         blockedIdentityKeys: Set<String>,
         isCurrentTraversalSelection: (ChatPageSnapshot, String) -> Boolean = { _, _ -> true },
+        isInterruptedReadRecovery: (ChatPageSnapshot, ChatListCandidateSnapshot) -> Boolean = { _, _ -> false },
         onGestureDispatched: (String, Long) -> Unit = { _, _ -> },
         onGestureResult: (requestId: String, snapshot: ChatPageSnapshot, selectedKey: String, result: GestureExecutionResult) -> Unit
     ): Attempt {
@@ -135,7 +136,9 @@ internal class PrivateMessagesTaskExecutor(
 
         // Reapply the complete admission rule to the fresh snapshot immediately before resolving
         // a tap. The row may have changed from UNREAD to READ/UNKNOWN while the tree was relaid out.
-        if (currentCandidate.unreadStatus != ChatUnreadStatus.UNREAD ||
+        if ((currentCandidate.unreadStatus != ChatUnreadStatus.UNREAD &&
+                !(currentCandidate.unreadStatus == ChatUnreadStatus.READ &&
+                    isInterruptedReadRecovery(refreshed, currentCandidate))) ||
             !ChatSessionManagementPolicy.isEligible(currentCandidate) ||
             currentCandidate.rowClippedAtViewportEdge
         ) {
@@ -197,7 +200,7 @@ internal class PrivateMessagesTaskExecutor(
                 override fun isDispatchTargetCurrent(commandId: String): Boolean =
                     commandId == request.id && preparedTargetStillCurrent(
                         selectedKey, sourceWindow, row, bounds, visibleViewport,
-                        blockedIdentityKeys, isCurrentTraversalSelection
+                        blockedIdentityKeys, isCurrentTraversalSelection, isInterruptedReadRecovery
                     )
 
                 override fun onDispatched(commandId: String, dispatchedAtUptimeMs: Long) =
@@ -226,7 +229,8 @@ internal class PrivateMessagesTaskExecutor(
         preparedTapBounds: ScreenRect,
         preparedViewport: ScreenRect,
         blockedIdentityKeys: Set<String>,
-        isCurrentTraversalSelection: (ChatPageSnapshot, String) -> Boolean
+        isCurrentTraversalSelection: (ChatPageSnapshot, String) -> Boolean,
+        isInterruptedReadRecovery: (ChatPageSnapshot, ChatListCandidateSnapshot) -> Boolean
     ): Boolean {
         if (!ownsTask() || selectedKey in blockedIdentityKeys ||
             sessionPort.isSessionIdentityBlocked(selectedKey)
@@ -249,7 +253,9 @@ internal class PrivateMessagesTaskExecutor(
         if (selectedKey in ChatSessionManagementPolicy.ambiguousSessionIdentityKeys(fresh.chatListCandidates) ||
             row.rowTarget.window != sourceWindow ||
             row.rowTarget.window.activityClass != fresh.activityClass ||
-            row.unreadStatus != ChatUnreadStatus.UNREAD || !ChatSessionManagementPolicy.isEligible(row) ||
+            (row.unreadStatus != ChatUnreadStatus.UNREAD &&
+                !(row.unreadStatus == ChatUnreadStatus.READ && isInterruptedReadRecovery(fresh, row))) ||
+            !ChatSessionManagementPolicy.isEligible(row) ||
             row.rowClippedAtViewportEdge || row.rowBounds != preparedRow ||
             !isCurrentTraversalSelection(fresh, selectedKey)
         ) return false
