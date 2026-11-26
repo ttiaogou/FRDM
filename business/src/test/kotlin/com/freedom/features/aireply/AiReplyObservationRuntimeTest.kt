@@ -4871,8 +4871,22 @@ class AiReplyObservationRuntimeTest {
         assertTrue(originalIdentity != null)
         assertFalse(logs.any { it.contains("outcome=ResumeCompleted") })
 
+        // The obsolete row window must not authorize the new inbox generation.
         port.pendingIdentityReturnReinspection = true
         port.page = inbox.copy(windowGeneration = 2L)
+        freshInspection.invoke(runtime)
+        assertFalse(logs.any { it.contains("统一恢复[DETAIL_TO_LIST_ROUTE_REBOUND]") })
+        assertTrue(logs.any { it.contains("WINDOW_GENERATION_CHANGED") })
+
+        // Supply the freshly extracted row from the same new window generation.
+        port.page = inbox.copy(
+            windowGeneration = 2L,
+            chatListCandidates = listOf(sessionCandidate(completeBoundaryEvidence = true, windowGeneration = 2L))
+        )
+        port.completeDeferredStructureRead()
+        repeat(8) {
+            if (scheduler.hasPendingDelay(0L)) scheduler.runNextWithDelay(0L)
+        }
         freshInspection.invoke(runtime)
         assertFalse("One list sample cannot complete recovery",
             logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
