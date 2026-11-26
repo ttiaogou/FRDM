@@ -43,6 +43,7 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
             .putStringSet(KEY_IMAGE_RESOURCE_URIS, parameters.imageResourceUris
                 .asSequence().map(String::trim).filter(String::isNotBlank).distinct().toSet())
             .apply()
+    }
 
     private fun readImageResourceUris(): List<String> {
         val ordered = preferences.getString(KEY_IMAGE_RESOURCE_URIS_ORDERED, null)
@@ -56,7 +57,6 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
         // Legacy StringSet has no recoverable order; sort once for a stable migration.
         return preferences.getStringSet(KEY_IMAGE_RESOURCE_URIS, emptySet()).orEmpty()
             .asSequence().map(String::trim).filter(String::isNotBlank).distinct().sorted().toList()
-    }
     }
 
     // The old Boolean was never enforced by the runtime. Initialize the new setting
