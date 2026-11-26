@@ -377,15 +377,19 @@ internal class AccessibilityServiceDependencies internal constructor(
                     var greetingNavigationAwaitingHandoff = false
                     val recognized = runCatching {
                         val targetTask = if (imageTestMode) {
-                            val initialChat = imageTestRequest != null &&
+                            fun initialChat() = imageTestRequest != null &&
                                 root.taskLaunchParametersRepository.isImageSendTestRequestAvailable(imageTestRequest) &&
                                 momoSocialAdapter.inspectEntryTarget(imageTestRequest) != null
                             if (activeTest) {
-                                ownedNestedPage = momoSocialAdapter.inspectImageTestOwnedPage() ||
-                                    (momoSocialAdapter.progress() ==
-                                        com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE && initialChat)
+                                // A running child uses its existing transaction, not a new admission.
+                                ownedNestedPage = when (momoSocialAdapter.progress()) {
+                                    com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE ->
+                                        momoSocialAdapter.inspectImageTestOwnedPage()
+                                    com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE -> initialChat()
+                                    com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL -> false
+                                }
                                 null
-                            } else if (initialChat) "AI_REPLY_PRIVATE_MESSAGES" else null
+                            } else if (initialChat()) "AI_REPLY_PRIVATE_MESSAGES" else null
                         } else {
                             val observed = momoSocialAdapter.inspectUnifiedEntryPage(currentTaskId)
                             if (observed == null) null else {

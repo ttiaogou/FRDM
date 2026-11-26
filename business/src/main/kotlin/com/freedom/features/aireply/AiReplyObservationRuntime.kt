@@ -4611,7 +4611,7 @@ class AiReplyObservationRuntime(
                 (progress == com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE ||
                     (progress == com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE &&
                         isImageSendTestRequestAvailable(request)))) {
-                scheduleFullInspection()
+                scheduleImageTestObservation(fullInspectionDebounceMs)
             }
             return
         }
@@ -4622,11 +4622,46 @@ class AiReplyObservationRuntime(
         scheduleFullInspection()
     }
 
+    /** Test-only timer on the shared observer; no production read cancellation. */
+    private fun scheduleImageTestObservation(delayMs: Long) {
+        if (pageInspectionTask != null) return
+        val request = activeImageSendTestRequest ?: return
+        val generation = currentRunGeneration()
+        pageInspectionTask = sharedPageObservationCoordinator.scheduleReadOnlyObservation(delayMs) {
+            pageInspectionTask = null
+            if (activeImageSendTestRequest == request && currentRunGeneration() == generation &&
+                sessionRunStarted && isAiReplyActive()
+            ) runImageSendTestObservation()
+        }
+    }
+
     /** Existing observer and ownership controller drive the platform transaction one sample at a time. */
     private fun runImageSendTestObservation() {
         val request = activeImageSendTestRequest ?: return
         val port = imageSendTestPort ?: return
-        fun retry() = scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+        fun retry() = scheduleImageTestObservation(500L)
+        fun waitForEntry(reason: String) {
+            if (lastImageTestAdmissionWait != reason) {
+                lastImageTestAdmissionWait = reason
+                onLog("CHAT_CHILD_TEST ENTRY_WAIT reason=$reason")
+            }
+            retry()
+        }
+        fun advanceActive(first: Boolean = false) {
+            if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+                port.abort("EXACT_LEASE_LOST")
+                return
+            }
+            if (isImageSendTestTouchActive()) {
+                waitForEntry("USER_TOUCH_ACTIVE")
+                return
+            }
+            lastImageTestAdmissionWait = null
+            if (first) onLog("CHAT_CHILD_TEST FIRST_OBSERVE immediate=true")
+            port.observe()
+            if (port.progress() == com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE) retry()
+            else releaseTaskOwnership("图片测试已结束")
+        }
         if (imageSendTestRequestId() != request || !sessionRunStarted) {
             port.abort("REQUEST_REVOKED")
             releaseTaskOwnership("图片测试授权撤销")
@@ -4638,13 +4673,7 @@ class AiReplyObservationRuntime(
                 return
             }
             com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE -> {
-                if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-                    port.abort("EXACT_LEASE_LOST")
-                    return
-                }
-                if (!isImageSendTestTouchActive()) port.observe()
-                if (port.progress() == com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE) retry()
-                else releaseTaskOwnership("图片测试已结束")
+                advanceActive()
                 return
             }
             com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE -> Unit
@@ -4654,16 +4683,8 @@ class AiReplyObservationRuntime(
             return
         }
         if (isImageSendTestTouchActive()) {
-            lastImageTestAdmissionWait = null
-            retry()
+            waitForEntry("USER_TOUCH_ACTIVE")
             return
-        }
-        fun waitForEntry(reason: String) {
-            if (lastImageTestAdmissionWait != reason) {
-                lastImageTestAdmissionWait = reason
-                onLog("CHAT_CHILD_TEST ENTRY_WAIT reason=$reason")
-            }
-            retry()
         }
         val entry = runCatching { port.inspectEntryTarget(request) }.getOrNull()
         if (entry == null || entry.packageName != targetPackage()) {
@@ -4699,9 +4720,13 @@ class AiReplyObservationRuntime(
                 generation == currentRunGeneration() && isAiReplyActive() && coordinator.isCurrent(lease)
         }
         port.begin(target, request, claim = { claimImageSendTestRequest(request) }, ownsTransaction = owns)
-        if (port.progress() == com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL)
-            releaseTaskOwnership("图片测试已结束")
-        else retry()
+        when (port.progress()) {
+            com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE -> advanceActive(first = true)
+            com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL ->
+                releaseTaskOwnership("图片测试已结束")
+            com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE ->
+                waitForEntry("BEGIN_NOT_ADMITTED")
+        }
     }
 
     /** Return true only after the selected AI business runtime has really initialized. */

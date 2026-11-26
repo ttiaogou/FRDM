@@ -8,7 +8,7 @@ interface ChatImageSendTestPort {
     /** Fresh window anchor and the chosen test's first clickable control; no production draft admission. */
     fun inspectEntryTarget(requestId: String): ChatDraftInputTarget?
     fun progress(): ImageSendTestProgress
-    /** Capture the pre-send baseline, then durably consume the one-shot request before any tap. */
+    /** Durably consume the one-shot request before any tap; no production delivery verification. */
     fun begin(target: ChatDraftInputTarget, requestId: String, claim: () -> Boolean, ownsTransaction: () -> Boolean)
     /** One fresh observation/at most one action. No timers, retries or business counters are owned here. */
     fun observe()

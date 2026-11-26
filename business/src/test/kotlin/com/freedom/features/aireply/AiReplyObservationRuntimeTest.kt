@@ -129,7 +129,12 @@ class AiReplyObservationRuntimeTest {
         assertExplicitChatChildTest("interception:manual-test")
     }
 
-    private fun assertExplicitChatChildTest(request: String) {
+    @Test
+    fun explicitImageTestImmediatelyAdvancesThenContinuesOnFreshObservation() {
+        assertExplicitChatChildTest("manual-multi-step-test", completeOnObservation = 2)
+    }
+
+    private fun assertExplicitChatChildTest(request: String, completeOnObservation: Int = 1) {
         val scheduler = FakeScheduler()
         val original = chatDetailSnapshot()
         val window = requireNotNull(original.inputFieldTarget).window
@@ -174,7 +179,11 @@ class AiReplyObservationRuntimeTest {
             }
             override fun observe() {
                 observations++
-                state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
+                assertEquals(1, begins)
+                assertFalse(available)
+                assertTrue(tasks.currentLease() != null)
+                if (observations == completeOnObservation)
+                    state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
             }
             override fun abort(reason: String) {
                 state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
@@ -221,10 +230,18 @@ class AiReplyObservationRuntimeTest {
         scheduler.runNextShortestDelay()
         assertEquals(1, begins)
         assertFalse(available)
-        runUntilShortestDelay(scheduler, 10) { observations == 1 }
+        // First click attempt runs in the same callback as BEGIN.
+        assertEquals(1, observations)
+        if (completeOnObservation > 1) {
+            assertTrue(tasks.currentLease() != null)
+            runtime.requestPageRouteObservation()
+            scheduler.runNextWithDelay(500L)
+        }
+        assertEquals(completeOnObservation, observations)
         assertNull(tasks.currentLease())
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
         assertEquals(1, begins)
+        assertEquals(completeOnObservation, observations)
         assertEquals(0, recoveryChecks)
         assertEquals(0, modelChecks)
         assertEquals(0, draftCalls)
