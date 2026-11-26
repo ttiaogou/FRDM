@@ -11,11 +11,16 @@ Freedom no longer packages PaddleOCR runtime or model files in the main applicat
 
 ## Upstream SDK source
 
-The plugin build downloads the official PaddleOCR Android SDK Kotlin sources from the immutable PaddleOCR commit `dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf`. Three files are locally adapted: the first two let the engine read model and dictionary files from absolute paths in plugin-private storage instead of requiring APK assets; the third preserves the original OpenCV linker exception and records ABI/native-library diagnostics instead of reducing the failure to a Boolean:
+The plugin build downloads the official PaddleOCR Android SDK Kotlin sources from the immutable PaddleOCR commit `dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf`. Six files are locally adapted: the first two let the engine read model and dictionary files from absolute paths in plugin-private storage instead of requiring APK assets; the third preserves OpenCV linker diagnostics; the last three pass the request-specific detection resize limit through the existing inference path so different image sizes reuse the same ONNX sessions without changing preprocessing:
 
 - `com/paddle/ocr/engine/ORTSessionManager.kt`
 - `com/paddle/ocr/model/ModelConfig.kt`
 - `com/paddle/ocr/util/OpenCVUtils.kt` (uses the official OpenCV Android AAR's `OpenCVLoader.initLocal()` API and preserves loader diagnostics).
+- `com/paddle/ocr/PaddleOCR.kt`
+- `com/paddle/ocr/engine/OCREngine.kt`
+- `com/paddle/ocr/engine/DetectionEngine.kt`
+
+The engine holder retains its single cache; only the per-image `detMaxSideLimit` is excluded from the engine key. Each recognition call receives the original resolved limit (explicit option, image long side, or default). Model version, thread count and other existing configuration fields remain cache-key inputs. The original resize algorithm, thresholds, model assets and session release behavior are unchanged.
 
 The OpenCV dependency is the official Android AAR maintained by the OpenCV project. The previous `com.quickbirdstudios:opencv:4.5.3` dependency is intentionally not used because its packaged native library failed to load on the target device with an unresolved `__sfp_handle_exceptions` symbol.
 

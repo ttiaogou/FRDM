@@ -206,7 +206,7 @@ jobs:
           mkdir -p "$HOME/.cache/freedom-ocr"
           gradle --no-daemon --build-cache \
             -PfreedomOcrCacheDir="$HOME/.cache/freedom-ocr" \
-            :ocr-plugin:assembleDebug
+            :ocr-plugin:testDebugUnitTest :ocr-plugin:assembleDebug
 
       - name: Upload OCR plugin debug APK
         uses: actions/upload-artifact@v4

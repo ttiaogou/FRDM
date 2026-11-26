@@ -16,6 +16,9 @@ object OcrPluginContract {
     const val EXTRA_ENGINE_LOCK_WAIT_MS = "freedomEngineLockWaitMs"
     const val EXTRA_MODEL_PREPARE_TIME_MS = "freedomModelPrepareTimeMs"
     const val EXTRA_ENGINE_ACQUIRE_TIME_MS = "freedomEngineAcquireTimeMs"
+    const val EXTRA_ENGINE_CACHE_HIT = "freedomEngineCacheHit"
+    const val EXTRA_ENGINE_CREATE_COUNT = "freedomEngineCreateCount"
+    const val EXTRA_DET_MAX_SIDE_LIMIT = "freedomDetMaxSideLimit"
     const val EXTRA_INFERENCE_WALL_TIME_MS = "freedomInferenceWallTimeMs"
     const val EXTRA_DIAGNOSTIC_REQUEST_ID = "com.freedom.ocr.extra.DIAGNOSTIC_REQUEST_ID"
 }
