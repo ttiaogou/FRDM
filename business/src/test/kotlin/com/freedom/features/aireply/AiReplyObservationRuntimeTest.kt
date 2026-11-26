@@ -3216,6 +3216,82 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun r04aSelectedPrivateStartupAdmitsDetailLeaseOnlyAfterTwoFreshSamples() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply {
+            verifiedMessageWorkAreaNavigationSupported = true
+            receivedGreetingsWorkflowEnabled = true
+            sessionRunEnabled = true
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+            page = chatDetailSnapshot()
+        }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val logs = mutableListOf<String>()
+        val submitted = mutableListOf<GestureIntentRequest>()
+        var active = true
+        var readinessAllowed = false
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    submitted += command
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { active },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = { snapshot ->
+                val ready = testAndroidRecoveryReadiness(snapshot)
+                if (readinessAllowed) ready else ready.copy(status = TargetAppReadinessStatus.UNKNOWN)
+            },
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L },
+            pageSelectedStartup = true
+        )
+
+        // Observation without a selected startup must never claim a detail lease.
+        runtime.requestPageRouteObservation()
+        assertNull(tasks.currentLease())
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
+        runtime.requestPageRouteObservation()
+        runUntilShortestDelay(scheduler, 20) { logs.any { it.contains("PRIVATE_STARTUP_DETAIL_OWNERSHIP_WAIT") } }
+        assertNull(tasks.currentLease())
+
+        readinessAllowed = true
+        runUntilShortestDelay(scheduler, 20) { logs.any { it.contains("PRIVATE_STARTUP_DETAIL_OWNERSHIP_VERIFYING") } }
+        assertNull(tasks.currentLease())
+        // A changed window cannot reuse the first confirmation sample.
+        port.page = chatDetailSnapshot(2L)
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilShortestDelay(scheduler, 20) {
+            logs.count { it.contains("PRIVATE_STARTUP_DETAIL_OWNERSHIP_VERIFYING") } >= 2
+        }
+        assertNull(tasks.currentLease())
+        runUntilShortestDelay(scheduler, 20) { tasks.activeTaskId() == "AI_REPLY_PRIVATE_MESSAGES" }
+        assertTrue(logs.any { it.contains("PRIVATE_STARTUP_DETAIL_OWNERSHIP_RESTORED") })
+        assertTrue(submitted.isEmpty())
+        assertEquals(0, port.messageReads)
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        assertFalse(logs.any { it.contains("AI 启动导航[CONFIRMED]") })
+
+        // Region refresh cannot convert the lease into an unbound business read.
+        runtime.schedule(event(AccessibilityEventType.VIEW_SCROLLED))
+        repeat(4) { if (scheduler.pendingCount() > 0) scheduler.runNextShortestDelay() }
+        assertEquals(0, port.messageReads)
+        assertTrue(submitted.isEmpty())
+        active = false
+        runtime.reset("test stop")
+        assertNull(tasks.currentLease())
+        assertTrue(submitted.isEmpty())
+    }
+
+    @Test
     fun pageSelectedPrivateStartupRunsOriginalWorkAreaProofBeforeFirstGesture() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(

@@ -233,6 +233,7 @@ class AiReplyObservationRuntime(
         private const val GREETINGS_RETURN_RECOVERY_REASON = "GREETING_COMPLETION_RETURN"
         private const val GREETINGS_TO_PRIVATE_HANDOFF_GATE = "AI_REPLY_GREETINGS_TO_PRIVATE_HANDOFF"
         private const val NEXT_POLLING_ROUND_GATE = "AI_REPLY_NEXT_POLLING_ROUND"
+        private const val PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE = "AI_REPLY_PRIVATE_STARTUP_DETAIL_OWNERSHIP"
         private val PAGE_CHANGE_RECHECK_EVENT_TYPES = setOf(
             AccessibilityEventType.WINDOW_STATE_CHANGED,
             AccessibilityEventType.WINDOWS_CHANGED,
@@ -1251,6 +1252,7 @@ class AiReplyObservationRuntime(
         pageInspectionTask = null
         if (!isAiReplyActive()) return
         if (!chatPagePort.supportsTargetPackage(targetPackage())) {
+            pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
             if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
                 holdGreetingsCompletionReturn("EXTERNAL_PAGE")
                 return
@@ -1269,6 +1271,7 @@ class AiReplyObservationRuntime(
             return
         }
         if (sessionRunStarted && userInteractionActive) {
+            pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
             onLog("统一恢复事务[USER_ACTIVE]：用户仍在操作；暂停页面复核和业务动作，10s后重新检查")
             scheduleFullInspectionAfter(RECEIVED_GREETINGS_USER_ACTIVE_RECHECK_DELAY_MS)
             return
@@ -1288,6 +1291,7 @@ class AiReplyObservationRuntime(
         )
         diagnosePendingIdentityReturn(observationDecision, inspection)
         if (observationDecision.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) {
+            pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
             // A target-app transitional sample is not an EMPTY_SNAPSHOT recovery if the
             // original navigation is still awaiting its destination. No snapshot or a
             // foreign package still follows the existing recovery path.
@@ -1577,6 +1581,7 @@ class AiReplyObservationRuntime(
     /** System touch boundaries pause received-greetings recovery without becoming page evidence. */
     fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
         if (!sessionRunStarted) return
+        pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
         val recoveryContextActive = receivedGreetingsTaskActive || pollingRoundPending ||
             messageListRecoveryVerificationPending ||
             recoveryContext.pending || incompleteUnreadRelocationWait != null || userInteractionActive
@@ -1815,6 +1820,11 @@ class AiReplyObservationRuntime(
             }
         }
 
+        // A selected private-list startup may be interrupted before its first lease claim.
+        // Admit the verified chat subpage to that SAME task, without pretending a list
+        // initialization, selected row, contact binding or unfinished transaction exists.
+        if (handlePrivateStartupDetailOwnership(observation, inspection, matchedRouteId)) return
+
         if (sessionRunStarted && pollingRoundPending && !receivedGreetingsTaskActive &&
             !recoveryContext.pending && !messageListRecoveryVerificationPending &&
             !isSendConfirmationPending() && !isConversationDraftPending()
@@ -1925,6 +1935,10 @@ class AiReplyObservationRuntime(
             selfInitiatedTransition == null &&
             previous != null &&
             inboxPageRecognizer.isChatDetail(previous) &&
+            // The unbound startup detail never opened a visit or advanced the list cursor.
+            // Returning from it must still run the original list startup verification.
+            !(pageSelectedPrivateStartupVerificationPending && currentSessionCandidate == null &&
+                currentSessionBinding == null && matchedRouteId == messageListRecoveryRoute.routeId) &&
             matchedRouteId == activeRouteId
         // A private-message row tap moves from the owned inbox route into its chat-detail
         // subpage. That subpage is part of the active task's normal workflow, not an UNKNOWN
@@ -3575,6 +3589,84 @@ class AiReplyObservationRuntime(
      * Route ownership requests through the controller that owns the requested business task.
      * Read-only page observations remain outside the UI-operation lease.
      */
+    /**
+     * R04-A: only a previously page-selected private task can acquire its startup
+     * detail subpage. A residual detail at cold entry is not an independent task.
+     * This admits task ownership, NOT a chat visit or a permission to send.
+     * Existing protected transactions, recovery routes and list-startup proof win.
+     */
+    private fun handlePrivateStartupDetailOwnership(
+        observation: ObservationResult,
+        snapshot: ChatPageSnapshot,
+        matchedRouteId: String?
+    ): Boolean {
+        val gate = PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE
+        val eligible = pageSelectedPrivateStartupVerificationPending &&
+            sessionRunStarted && isAiReplyActive() && !receivedGreetingsTaskActive &&
+            !receivedGreetingsOwnershipRecheckPending && !awaitingNormalInboxAfterGreetingsReturn &&
+            !recoveryContext.pending && !messageListRecoveryVerificationPending &&
+            !pollingRoundPending && suspendedPrivateRecovery == null &&
+            currentSessionCandidate == null && currentSessionKey == null &&
+            currentSessionBinding == null && expectedPrivateSessionDetailNavigation == null &&
+            privateMessagesTraversalTaskExecutor.currentUnfinishedSession() == null &&
+            activeSessionGestureRequestId == null && !isConversationDraftPending() &&
+            !isSendConfirmationPending() && !isSendControlRecoveryPending() &&
+            taskOwnership.activeTaskId()?.let { it == PRIVATE_MESSAGES_TASK_ID } != false
+        if (!eligible || snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE) {
+            pageRecoveryVerificationGate.reset(gate)
+            return false
+        }
+
+        // Retire old locators even on the first sample; this subpage is not yet a bound visit.
+        lastPageInspection = snapshot
+        unmatchedNavigationObservationPending = false
+        val windowKey = windowSessionKey(snapshot)
+        val surfaceKey = chatSurfaceKey(snapshot)
+        val verified = observation.status == ObservationStatus.CONFIRMED_PAGE &&
+            matchedRouteId == chatDetailRecoveryRoute.routeId &&
+            snapshot.packageName == targetPackage() && snapshot.windowIdentityKey() != null &&
+            windowKey != null && surfaceKey != null && snapshot.scannedNodeCount > 0 &&
+            snapshot.messageListCount > 0 && snapshot.editableInputCount > 0 &&
+            !snapshot.nodeTreeProbeTruncated && !userInteractionActive
+        val readiness = if (verified) runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()
+            else null
+        val admission = AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(), readiness)
+        if (!verified || !admission.allowed) {
+            pageRecoveryVerificationGate.reset(gate)
+            onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_WAIT reason=${if (!verified) "PAGE_EVIDENCE" else admission.reasonCode}")
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        // The existing lease is retained, but this unbound page cannot start message work.
+        if (ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+            pageRecoveryVerificationGate.reset(gate)
+            return true
+        }
+        val generation = currentRunGeneration()
+        val key = "$generation|$windowKey|$surfaceKey"
+        if (!pageRecoveryVerificationGate.observe(gate, key)) {
+            onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_VERIFYING samples=1/2;binding=false")
+            scheduleFullInspectionAfter(350L)
+            return true
+        }
+        // Re-evaluate the live Android gate before claiming through the existing coordinator.
+        val beforeClaim = runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()
+        if (generation != currentRunGeneration() || !isAiReplyActive() ||
+            !AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(), beforeClaim).allowed ||
+            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "已启动私人消息任务的聊天子页面双快照验证完成")
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_WAIT reason=LEASE_OR_READINESS")
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        pageRecoveryVerificationGate.reset(gate)
+        onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_RESTORED task=$PRIVATE_MESSAGES_TASK_ID;binding=false;listStartupPreserved=true")
+        // Do not advance to READING_SESSION, mark work-area confirmed, create a
+        // candidate, or clear the pending list-startup verification.
+        return true
+    }
+
     private fun claimTaskOwnership(taskId: String, reason: String, verifiedHandoff: Boolean = false): Boolean {
         val claimed = when (taskId) {
             PrivateMessagesTaskController.TASK_ID -> !receivedGreetingsOwnershipRecheckPending &&
@@ -4087,6 +4179,7 @@ class AiReplyObservationRuntime(
 
     private fun scheduleInitialObservation(selectedTaskId: String?) {
         pageSelectedPrivateStartupVerificationPending = false
+        pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
         resetCrossTaskGreetingsHandoffRetry()
         val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
         if (failure != null) {
@@ -4410,6 +4503,7 @@ class AiReplyObservationRuntime(
             }
         }
         if (windowTransition || chatListNavigation) {
+            pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
             // Invalidate before scheduling a debounced inspection. An OCR callback that returns
             // during the debounce window must not be delivered to a different chat/session.
             invalidatePendingMessageRead()
@@ -4476,6 +4570,13 @@ class AiReplyObservationRuntime(
             return
         }
         if (sessionRunStarted) {
+            if (pageSelectedPrivateStartupVerificationPending && !receivedGreetingsTaskActive &&
+                currentSessionCandidate == null && currentSessionBinding == null
+            ) {
+                // A startup detail lease is not a conversation binding. The same guard
+                // covers known-region refreshes while the original list startup is pending.
+                return
+            }
             if (receivedGreetingsTaskActive) {
                 // The region-refresh path reaches this entry too. Apply the same draft hold
                 // as full observation, while preserving pending-send and confirmed-return proof.
