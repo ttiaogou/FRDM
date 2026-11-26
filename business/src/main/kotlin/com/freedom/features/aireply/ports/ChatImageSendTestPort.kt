@@ -5,6 +5,8 @@ const val INTERCEPTION_TEST_REQUEST_PREFIX = "interception:"
 enum class ImageSendTestProgress { IDLE, ACTIVE, TERMINAL }
 
 interface ChatImageSendTestPort {
+    /** Fresh window anchor and the chosen test's first clickable control; no production draft admission. */
+    fun inspectEntryTarget(requestId: String): ChatDraftInputTarget?
     fun progress(): ImageSendTestProgress
     /** Capture the pre-send baseline, then durably consume the one-shot request before any tap. */
     fun begin(target: ChatDraftInputTarget, requestId: String, claim: () -> Boolean, ownsTransaction: () -> Boolean)

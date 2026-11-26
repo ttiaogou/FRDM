@@ -5761,19 +5761,37 @@ internal class MomoSocialAdapter(
         else -> ImageSendTestProgress.ACTIVE
     }
 
-    /** Only the existing chat-detail fingerprint and private-title evidence admit manual test entry. */
-    internal fun inspectImageTestEntryPage(): Boolean =
+    /** Manual one-shot test entry: a live chat window and the selected first control only. */
+    override fun inspectEntryTarget(requestId: String): ChatDraftInputTarget? =
         rootAccess.withActiveTargetRoot { root, window ->
-            if (window.packageName != targetPackage || window.windowId < 0 ||
-                MomoAlbumArrivalInspector.isConfirmed(root, targetPackage)) return@withActiveTargetRoot false
-            val page = chatComponents.pageInspector.inspectRoot(
-                AccessibilityNodeInfo.obtain(root), targetPackage, window.activityClass
-            )
-            val title = page.chatTitleText?.trim().orEmpty()
-            page.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
-                page.hasStableChatDetailFingerprint && title.startsWith("与") && title.endsWith("对话") &&
-                accessibilityGateway.currentGestureWindow() == window
-        } == true
+            if (requestId.isBlank() || window.packageName != targetPackage || window.windowId < 0 ||
+                (window.activityClass.isNotBlank() &&
+                    window.activityClass != MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
+            ) return@withActiveTargetRoot null
+            val interception = requestId.startsWith(INTERCEPTION_TEST_REQUEST_PREFIX)
+            val firstTargetPresent = if (interception) {
+                interceptionNodeBounds(root, "chat_toolbar_avatar", "android.widget.ImageView", clickable = true) != null
+            } else {
+                chatComponents.pageInspector.inspectImageEntry(AccessibilityNodeInfo.obtain(root), targetPackage) != null
+            }
+            if (!firstTargetPresent || accessibilityGateway.currentGestureWindow() != window)
+                return@withActiveTargetRoot null
+            // Title is optional evidence for post-send/return diagnosis, never an entry gate.
+            val titleNodes = root.findAccessibilityNodeInfosByViewId(MomoChatPageContract.CHAT_TITLE_VIEW_ID).orEmpty()
+            val title = try {
+                titleNodes.singleOrNull { it.isVisibleToUser }
+                    ?.let { it.text?.toString().orEmpty().ifBlank { it.contentDescription?.toString().orEmpty() } }
+                    ?.trim()?.takeIf { it.isNotBlank() }
+            } finally {
+                titleNodes.forEach { runCatching { it.recycle() } }
+            }
+            if (accessibilityGateway.currentGestureWindow() != window) return@withActiveTargetRoot null
+            val windowKey = "${window.packageName}|windowId=${window.windowId}|generation=${window.generation}"
+            // The root path anchors only this window; this test never invokes draft input.
+            ChatDraftInputTarget(window.packageName, window.activityClass, windowKey,
+                title?.hashCode()?.toString() ?: windowKey, windowKey,
+                NodeTarget(window, NodePath(emptyList())), title)
+        }
 
     private fun testCurrent(test: ImageTestTransaction): Boolean =
         imageSendTest === test && test.stage != ImageTestStage.TERMINAL &&
@@ -5867,15 +5885,13 @@ internal class MomoSocialAdapter(
                 if (testCurrent(test)) {
                     test.inFlight = false
                     onLog("${test.logPrefix} GESTURE_RESULT stage=$next;status=$status")
-                    if (test.interception && status != GestureExecutionStatus.COMPLETED) {
-                        if (status == GestureExecutionStatus.DEFERRED) {
-                            // Platform explicitly did not dispatch. Reacquire the current target.
-                            test.stage = previous
-                            test.stageStartedAt = previousStartedAt
-                        } else {
-                            // Never repeat a possibly executed toggle.
-                            testTerminal(test, "UNKNOWN", "INTERCEPTION_GESTURE_NOT_CONFIRMED")
-                        }
+                    if (status == GestureExecutionStatus.DEFERRED) {
+                        // No platform dispatch: keep the original stage and reacquire the target.
+                        test.stage = previous
+                        test.stageStartedAt = previousStartedAt
+                    } else if (test.interception && status != GestureExecutionStatus.COMPLETED) {
+                        // Never repeat a possibly executed toggle.
+                        testTerminal(test, "UNKNOWN", "INTERCEPTION_GESTURE_NOT_CONFIRMED")
                     }
                 }
             }
@@ -5953,8 +5969,9 @@ internal class MomoSocialAdapter(
             window.packageName == test.target.packageName &&
                 window.generation >= test.target.nodeTarget.window.generation &&
                 interceptionNodeBounds(root, "chat_toolbar_avatar", "android.widget.ImageView", clickable = true) != null &&
-                interceptionNodeBounds(root, "chat_user_name", "android.widget.TextView",
-                    text = test.target.expectedChatTitle?.trim()?.takeIf { it.isNotEmpty() } ?: return@withActiveTargetRoot false) != null &&
+                (test.target.expectedChatTitle == null ||
+                    interceptionNodeBounds(root, "chat_user_name", "android.widget.TextView",
+                        text = test.target.expectedChatTitle) != null) &&
                 accessibilityGateway.currentGestureWindow() == window
         } == true
 

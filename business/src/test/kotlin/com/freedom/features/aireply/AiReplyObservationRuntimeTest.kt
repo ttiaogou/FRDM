@@ -121,8 +121,25 @@ class AiReplyObservationRuntimeTest {
 
     @Test
     fun explicitImageTestUsesManualChatLeaseAndOneShotWithoutNormalReplyWorkflow() {
+        assertExplicitChatChildTest("manual-test")
+    }
+
+    @Test
+    fun explicitInterceptionTestUsesSameParentAdmissionWithoutImageOrDraftWorkflow() {
+        assertExplicitChatChildTest("interception:manual-test")
+    }
+
+    private fun assertExplicitChatChildTest(request: String) {
         val scheduler = FakeScheduler()
-        val chat = FakeChatPort().apply { page = chatDetailSnapshot() }
+        val original = chatDetailSnapshot()
+        val window = requireNotNull(original.inputFieldTarget).window
+        val chat = FakeChatPort().apply {
+            page = original.copy(inputFieldTarget = null, messageListTarget = null,
+                messageListCount = 0, editableInputCount = 0, chatTitleText = null,
+                pageKind = ChatPageKind.UNKNOWN)
+        }
+        var entryAvailable = false
+        var recoveryChecks = 0
         val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
         var available = true
         var begins = 0
@@ -132,14 +149,22 @@ class AiReplyObservationRuntimeTest {
         val testPort = object : com.freedom.features.aireply.ports.ChatImageSendTestPort {
             private var state = com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE
             override fun progress() = state
+            override fun inspectEntryTarget(requestId: String): com.freedom.features.aireply.ports.ChatDraftInputTarget? {
+                assertEquals(request, requestId)
+                if (!entryAvailable) return null
+                return com.freedom.features.aireply.ports.ChatDraftInputTarget(
+                    window.packageName, window.activityClass, "test-window", "test-window", "test-window",
+                    com.freedom.core.accessibility.api.NodeTarget(window, com.freedom.core.accessibility.api.NodePath(emptyList()))
+                )
+            }
             override fun begin(
                 target: com.freedom.features.aireply.ports.ChatDraftInputTarget,
                 requestId: String,
                 claim: () -> Boolean,
                 ownsTransaction: () -> Boolean
             ) {
-                assertEquals("manual-test", requestId)
-                assertEquals(chat.page.inputFieldTarget?.window, target.nodeTarget.window)
+                assertEquals(request, requestId)
+                assertEquals(window, target.nodeTarget.window)
                 assertEquals(tasks.currentLease(), target.taskLease)
                 assertTrue(ownsTransaction())
                 assertTrue(claim())
@@ -161,12 +186,15 @@ class AiReplyObservationRuntimeTest {
             scheduler = scheduler, sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = chat, chatMessagePort = chat, chatSessionManagementPort = chat,
             gesturePolicy = NoOpGestureApi, targetPackage = { "com.immomo.momo" }, isAiReplyActive = { true },
-            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            inspectAndroidRecoveryReadiness = { snapshot ->
+                recoveryChecks++
+                testAndroidRecoveryReadiness(snapshot)
+            },
             onLog = {}, fullInspectionDebounceMs = 300L, regionRefreshDebounceMs = 500L,
             taskCoordinator = tasks, currentRunGeneration = { 1L }, pageSelectedStartup = true,
             draftStartupFailure = { modelChecks++; "MODEL_NOT_CONFIGURED" },
             onDraftConversationObserved = { _, _, _, _ -> draftCalls++; false },
-            imageSendTestRequestId = { "manual-test" },
+            imageSendTestRequestId = { request },
             isImageSendTestRequestAvailable = { available },
             claimImageSendTestRequest = { if (!available) false else { available = false; true } },
             imageSendTestPort = testPort
@@ -179,12 +207,15 @@ class AiReplyObservationRuntimeTest {
         scheduler.runNextWithDelay(300L)
         assertEquals(0, begins)
         assertNull(tasks.currentLease())
-        runUntilShortestDelay(scheduler, 10) { begins == 1 }
+        entryAvailable = true
+        scheduler.runNextShortestDelay()
+        assertEquals(1, begins)
         assertFalse(available)
         runUntilShortestDelay(scheduler, 10) { observations == 1 }
         assertNull(tasks.currentLease())
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
         assertEquals(1, begins)
+        assertEquals(0, recoveryChecks)
         assertEquals(0, modelChecks)
         assertEquals(0, draftCalls)
         assertEquals(0, chat.messageReads)

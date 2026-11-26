@@ -379,7 +379,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                         val targetTask = if (imageTestMode) {
                             val initialChat = imageTestRequest != null &&
                                 root.taskLaunchParametersRepository.isImageSendTestRequestAvailable(imageTestRequest) &&
-                                momoSocialAdapter.inspectImageTestEntryPage()
+                                momoSocialAdapter.inspectEntryTarget(imageTestRequest) != null
                             if (activeTest) {
                                 ownedNestedPage = momoSocialAdapter.inspectImageTestOwnedPage() ||
                                     (momoSocialAdapter.progress() ==
@@ -426,6 +426,11 @@ internal class AccessibilityServiceDependencies internal constructor(
                         runSessionCoordinator.reconcileUnclassifiedPage(
                             generation, ownedNestedPage && session.taskId == currentTaskId
                         )
+                    }
+                    // Explicitly wake the existing business observer after route reconciliation.
+                    // This also covers a quiet chat with no further accessibility events.
+                    if (imageTestMode && (recognized || ownedNestedPage)) {
+                        aiReplyObservationRuntime.requestPageRouteObservation()
                     }
                     // Keep the independent observation alive even in READY. Unknown,
                     // startup, cleanup and a protected greeting handoff use the existing

@@ -180,7 +180,7 @@ class AiReplyObservationRuntime(
     // Test mode is latched for this page runtime; it never falls through to the normal reply
     // workflow when the one-shot request is consumed or the switch changes.
     @Volatile private var activeImageSendTestRequest: String? = null
-    private val imageSendTestGate = "IMAGE_SEND_TEST_INITIAL_CHAT"
+    private var lastImageTestAdmissionWait: String? = null
     fun isImageSendTestRun(): Boolean = activeImageSendTestRequest != null
 
     companion object {
@@ -1635,7 +1635,7 @@ class AiReplyObservationRuntime(
     fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
         if (!sessionRunStarted) return
         if (isImageSendTestRun()) {
-            pageRecoveryVerificationGate.reset(imageSendTestGate)
+            lastImageTestAdmissionWait = null
             if (event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER &&
                 imageSendTestPort?.progress() == com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE
             ) {
@@ -3592,7 +3592,7 @@ class AiReplyObservationRuntime(
             pageInspectionTask?.cancel()
             pageInspectionTask = null
             pageObservationCoordinator.reset()
-            pageRecoveryVerificationGate.reset(imageSendTestGate)
+            lastImageTestAdmissionWait = null
             taskOwnership.reset("图片测试结束：$reason")
             activeImageSendTestRequest = null
             sessionRunStarted = false
@@ -4654,48 +4654,40 @@ class AiReplyObservationRuntime(
             return
         }
         if (isImageSendTestTouchActive()) {
-            pageRecoveryVerificationGate.reset(imageSendTestGate)
+            lastImageTestAdmissionWait = null
             retry()
             return
         }
-        val snapshot = runCatching { readPageSnapshot(AiReplyPageReadPurpose.FULL_INSPECTION) }.getOrNull()
-        val input = snapshot?.inputFieldTarget
-        val conversation = snapshot?.conversationIdentityKey()
-        val windowKey = snapshot?.windowIdentityKey()
-        val sessionKey = snapshot?.let(::windowSessionKey)
-        if (snapshot == null || snapshot.packageName != targetPackage() ||
-            snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
-            snapshot.nodeTreeProbeTruncated || snapshot.messageListCount <= 0 ||
-            snapshot.editableInputCount <= 0 || input == null || conversation == null ||
-            windowKey == null || sessionKey == null
-        ) {
-            pageRecoveryVerificationGate.reset(imageSendTestGate)
+        fun waitForEntry(reason: String) {
+            if (lastImageTestAdmissionWait != reason) {
+                lastImageTestAdmissionWait = reason
+                onLog("CHAT_CHILD_TEST ENTRY_WAIT reason=$reason")
+            }
             retry()
+        }
+        val entry = runCatching { port.inspectEntryTarget(request) }.getOrNull()
+        if (entry == null || entry.packageName != targetPackage()) {
+            waitForEntry("FIRST_CONTROL_OR_CHAT_WINDOW_UNAVAILABLE")
             return
         }
         val generation = currentRunGeneration()
-        val readiness = runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()
-        if (!AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(), readiness).allowed ||
-            !pageRecoveryVerificationGate.observe(imageSendTestGate, "$generation|$sessionKey")
-        ) {
-            retry()
-            return
-        }
         if (!ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
-            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "图片测试：手动选择的聊天详情双快照确认")
+            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "独立子任务测试：当前聊天首个目标控件已确认")
         ) {
-            retry()
+            waitForEntry("PARENT_LEASE_NOT_ADMITTED")
             return
         }
-        val coordinator = taskCoordinator ?: return
-        val lease = coordinator.currentLease()?.takeIf {
+        val coordinator = taskCoordinator
+        val lease = coordinator?.currentLease()?.takeIf {
             it.taskId == PRIVATE_MESSAGES_TASK_ID && it.runGeneration == generation
-        } ?: return
-        val target = com.freedom.features.aireply.ports.ChatDraftInputTarget(
-            packageName = snapshot.packageName, activityClass = snapshot.activityClass,
-            windowIdentityKey = windowKey, conversationIdentityKey = conversation, windowSessionKey = sessionKey,
-            nodeTarget = input, expectedChatTitle = snapshot.chatTitleText, taskLease = lease
-        )
+        }
+        if (coordinator == null || lease == null) {
+            waitForEntry("PARENT_LEASE_UNAVAILABLE")
+            return
+        }
+        val target = entry.copy(taskLease = lease)
+        lastImageTestAdmissionWait = null
+        onLog("CHAT_CHILD_TEST ENTRY_READY windowId=${target.nodeTarget.window.windowId};parentLeaseInherited=true")
         val owns = {
             activeImageSendTestRequest == request && imageSendTestRequestId() == request &&
                 generation == currentRunGeneration() && isAiReplyActive() && coordinator.isCurrent(lease)
@@ -4725,8 +4717,10 @@ class AiReplyObservationRuntime(
             }
             privateMessagesTaskController.beginRun(currentRunGeneration())
             sessionRunStarted = true
-            pageRecoveryVerificationGate.reset(imageSendTestGate)
-            onLog("MEDIA_IMAGE_TEST ARMED：等待手动进入私人聊天；不调用模型、不读取生产断点、不遍历列表")
+            lastImageTestAdmissionWait = null
+            val testLog = if (testRequest.startsWith(com.freedom.features.aireply.ports.INTERCEPTION_TEST_REQUEST_PREFIX))
+                "MESSAGE_INTERCEPTION_TEST" else "MEDIA_IMAGE_TEST"
+            onLog("$testLog ARMED：等待当前聊天首个点击控件；不调用模型、不读取生产断点、不遍历列表")
             return
         }
         pageSelectedPrivateStartupVerificationPending = false
