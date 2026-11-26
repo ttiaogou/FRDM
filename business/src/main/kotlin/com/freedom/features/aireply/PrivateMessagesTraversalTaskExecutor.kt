@@ -174,7 +174,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         unresolvedUnknownUnreadKeys = unresolvedUnknownUnreadKeys.toSet(),
         unknownUnreadViewportKeys = unknownUnreadViewportKeys.toList(),
         fullListPollingRoundRequired = fullListPollingRoundRequired,
-        unresolvedIncompleteUnreadKeys = unresolvedIncompleteUnreadKeys.toSet()
+        unresolvedIncompleteUnreadKeys = unresolvedIncompleteUnreadKeys.toSet(),
+        scanContinuityRecoveryPending = scanContinuityRecoveryPending
     )
 
     fun restore(checkpoint: PrivateMessagesTraversalCheckpoint) {
@@ -233,6 +234,11 @@ internal class PrivateMessagesTraversalTaskExecutor {
         fullListPollingRoundRequired = checkpoint.fullListPollingRoundRequired && checkpoint.lockedUnreadSetFinalized
         unresolvedIncompleteUnreadKeys.clear()
         unresolvedIncompleteUnreadKeys += checkpoint.unresolvedIncompleteUnreadKeys
+        scanContinuityRecoveryPending = checkpoint.scanContinuityRecoveryPending
+        if (scanContinuityRecoveryPending) {
+            phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+            atTop = false
+        }
     }
 
     internal enum class RestoreReanchorStatus { REANCHORED, NOT_FOUND, AMBIGUOUS }
@@ -247,8 +253,6 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * clicking still goes through the normal fresh-row validation path.
      */
     fun reanchorRestoredCheckpoint(snapshot: ChatPageSnapshot): RestoreReanchorResult {
-        recordVerifiedViewport(snapshot)
-
         val candidates = snapshot.chatListCandidates.filter { candidate ->
             candidate.selectionClass == "PRIVATE_CHAT" && ChatSessionManagementPolicy.isEligible(candidate)
         }
@@ -260,12 +264,17 @@ internal class PrivateMessagesTraversalTaskExecutor {
             ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) == titleKey
         }
         val matches = when {
+            keyMatches.size > 1 || titleMatches.size > 1 -> return RestoreReanchorResult(RestoreReanchorStatus.AMBIGUOUS)
             keyMatches.size == 1 -> keyMatches
             titleMatches.size == 1 -> titleMatches
-            keyMatches.size > 1 || titleMatches.size > 1 -> return RestoreReanchorResult(RestoreReanchorStatus.AMBIGUOUS)
             else -> return RestoreReanchorResult(RestoreReanchorStatus.NOT_FOUND)
         }
         val matched = matches.single()
+        // Finding a contact is not proof that the intervening list range was visited.
+        if (!hasRestoredViewportContinuity(snapshot)) {
+            return RestoreReanchorResult(RestoreReanchorStatus.REANCHORED, matched)
+        }
+        recordVerifiedViewport(snapshot)
         val newKey = ChatSessionManagementPolicy.stableSessionKey(matched)
         val oldKey = resumeSessionKey
         if (oldKey != null && oldKey != newKey) {
@@ -293,14 +302,58 @@ internal class PrivateMessagesTraversalTaskExecutor {
      */
     fun isRestoredViewportCompatible(snapshot: ChatPageSnapshot): Boolean {
         val expected = lastStableSessionListVisibleKeys.orEmpty()
-        if (expected.isEmpty()) return true
+        if (expected.isEmpty()) return phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
         val actual = visibleSessionKeys(snapshot)
-        if (actual.isEmpty()) return false
+        if (actual.isEmpty() || snapshot.chatListExtractionTruncated) return false
         // Compatibility is deliberately stricter than re-anchoring: a row identity that is
         // still visible at a different geometry must enter the re-anchor path instead of
         // allowing the caller to reuse the old viewport/checkpoint coordinates.
         return actual == expected
     }
+    /**
+     * Page/window recovery alone cannot prove list position. Use fresh, unique
+     * complete-row identities, never saved coordinates or an isolated moved contact.
+     */
+    fun hasRestoredViewportContinuity(snapshot: ChatPageSnapshot): Boolean {
+        if (snapshot.pageKind != ChatPageKind.CHAT_LIST || snapshot.chatListExtractionTruncated ||
+            snapshot.windowIdentityKey() == null
+        ) return false
+        val before = orderedIdentityKeys(lastStableSessionListVisibleKeys.orEmpty())
+        val after = orderedIdentityKeys(visibleSessionKeys(snapshot))
+        if (before.isEmpty() || after.isEmpty()) return false
+        val conflicts = ambiguousIdentityKeys(snapshot.chatListCandidates) + ambiguousSessionIdentityKeys
+        val common = before.toSet().intersect(after.toSet()).filter { key ->
+            key !in conflicts && before.count { it == key } == 1 && after.count { it == key } == 1
+        }.toSet()
+        if (common.isEmpty()) return false
+        if (before.size == common.size && after.size == common.size) return true
+        // A processed conversation may move anywhere when a new message arrives.
+        // It cannot on its own prove continuity of the old viewport.
+        if (common.size == 1 && common.single() in setOf(resumeSessionKey, checkpointNextCursorKey)) return false
+        return before.filter { it in common } == after.filter { it in common }
+    }
+
+    /** Same round, but the scan must start from a newly verified physical bottom. */
+    fun beginScanContinuityRecovery() {
+        scanContinuityRecoveryPending = true
+        phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+        atTop = false
+        fullListPollingRoundRequired = false
+        clearRecoveryViewportEvidence()
+        resetUnreadBoundaryObservation()
+    }
+
+    /** Retire transient scroll/boundary evidence, not saved business progress. */
+    fun clearRecoveryViewportEvidence() {
+        pendingScrollBaseline = null
+        pendingScrollToTop = false
+        pendingBoundaryConfirmationKeys = null
+        pendingBoundaryConfirmationToTop = false
+        boundaryStabilityConfirmationCount = 0
+        noProgressScrollCount = 0
+        sessionListStabilityRetryCount = 0
+    }
+
     private data class IdentityReturn(
         val original: ChatListCandidateSnapshot,
         val oldKey: String,
@@ -400,6 +453,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * Stop as soon as an actionable target is rediscovered; physical end is a fallback. */
     var fullListPollingRoundRequired: Boolean = false
         private set
+    /** Durable obligation to prove a safe scan origin after a discontinuous return. */
+    var scanContinuityRecoveryPending: Boolean = false
+        private set
     private var unreadBoundarySignature: String = ""
     private var unreadBoundaryStabilityCount: Int = 0
 
@@ -476,7 +532,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
     /** Record only an independently observed list, never a stale coordinate or row target. */
     fun recordVerifiedViewport(snapshot: ChatPageSnapshot) {
         val keys = visibleSessionKeys(snapshot)
-        if (keys.isEmpty() || snapshot.chatListExtractionTruncated) return
+        if (scanContinuityRecoveryPending || keys.isEmpty() || snapshot.chatListExtractionTruncated) return
         lastStableSessionListVisibleKeys = keys
         val window = snapshot.windowIdentityKey() ?: return
         lastObservedViewportPosition = window to collectionRows(snapshot)?.let { it.first()..it.last() }
@@ -747,6 +803,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
     }
 
     fun confirmPhysicalEndForReturnTraversal() {
+        scanContinuityRecoveryPending = false
         phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
         atTop = false
         lockedUnreadSetFinalized = true
@@ -930,12 +987,19 @@ internal class PrivateMessagesTraversalTaskExecutor {
             invalidateTraversalPosition(snapshot)
             true
         } else if (allowExpectedSessionReturnViewportChange) {
-            // A verified return may reorder the processed row. Preserve the phase,
-            // but do not carry a stale top assertion into the changed viewport.
-            if (atTop && (lastStableSessionListVisibleKeys != visibleKeys ||
-                    collectionBoundaryEvidence(snapshot, toTop = true) == false)
-            ) atTop = false
-            false
+            // A verified BACK is not evidence of a continuous scan. Reordering of
+            // the same complete identities is fine; a disconnected viewport is not.
+            if (phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP &&
+                !hasRestoredViewportContinuity(snapshot)
+            ) {
+                invalidateTraversalPosition(snapshot)
+                true
+            } else {
+                if (atTop && (lastStableSessionListVisibleKeys != visibleKeys ||
+                        collectionBoundaryEvidence(snapshot, toTop = true) == false)
+                ) atTop = false
+                false
+            }
         } else {
             reconcileUnrequestedViewportChange(
                 hadPendingScrollBaseline = hadPendingScrollBaseline,
@@ -1091,6 +1155,13 @@ internal class PrivateMessagesTraversalTaskExecutor {
         if (unknownBlocked && !canContinueWithUnknownUnread(snapshot)) {
             resetUnreadBoundaryObservation()
             return PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
+        }
+        // A continuity repair is not a named-row relocation. Even a clean READ
+        // viewport or a rediscovered pending row cannot terminate this positioning.
+        if (scanContinuityRecoveryPending) {
+            phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+            atTop = false
+            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
         }
         // An exceptional same-round search may stop at the first newly actionable
         // pending identity instead of forcing a full physical-bottom scan.
@@ -1277,7 +1348,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
             // complete private rows remain visible. This alone is not scroll progress.
             val towardTop = after.first <= before.first && after.last <= before.last && after != before
             val towardBottom = after.first >= before.first && after.last >= before.last && after != before
-            if (!sameIdentitySequence && (if (wasScrollingToTop) towardBottom else towardTop)) {
+            val skippedRange = after.first > before.last + 1 || before.first > after.last + 1
+            if (!sameIdentitySequence && (skippedRange || (if (wasScrollingToTop) towardBottom else towardTop))) {
                 // The observed movement contradicts the submitted direction. Do not
                 // infer a completed scroll or boundary from the changed range.
                 return PrivateMessagesScrollObservationDecision.POSITION_UNVERIFIED
@@ -1398,6 +1470,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
         fullListPollingRoundRequired = false
+        scanContinuityRecoveryPending = false
         resetUnreadBoundaryObservation()
         normalInboxHadUnread = false
         normalInboxUnreadStateUnknown = false
@@ -1432,6 +1505,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
         fullListPollingRoundRequired = false
+        scanContinuityRecoveryPending = false
         resetUnreadBoundaryObservation()
         attemptedSessionKeys.clear()
         initialInboxPositionCheckCompleted = true
@@ -1456,7 +1530,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * established admission sequence, preserving run-scoped identity blocks and send audit.
      */
     fun beginNextPollingRound() {
-        check(!normalInboxUnreadStateUnknown && unresolvedUnknownUnreadKeys.isEmpty() &&
+        check(!scanContinuityRecoveryPending && !normalInboxUnreadStateUnknown && unresolvedUnknownUnreadKeys.isEmpty() &&
             unresolvedIncompleteUnreadKeys.isEmpty())
         // Only an admitted NEW round retires old viewport capture deduplication.
         // A resumeAfterReturnedInbox() or restored same-round checkpoint must keep it.
@@ -1489,7 +1563,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         executionState = SessionManagerState.WAITING_FOR_SESSION_LIST
         pendingScrollBaseline = null
         pendingScrollToTop = false
-        lastStableSessionListVisibleKeys = null
+        // Retain the original same-round position until the fresh inbox proves continuity.
     }
 
     fun clearCurrentSession() {

@@ -823,7 +823,7 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun p4UnassociatedViewportUsesExistingCheckpointWithoutRestartingBottomSearch() {
+    fun p4UnassociatedViewportPreservesOriginalCheckpointBeforeSafeRescan() {
         val fixture = preScrollPageRecoveryFixture()
         cancelFixtureStartupObservation(fixture)
         val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
@@ -852,6 +852,14 @@ class AiReplyObservationRuntimeTest {
         assertEquals(setOf("previously-processed"), saved.attemptedSessionKeys)
         assertEquals(setOf("retained-pending"), saved.lockedUnreadSessionKeys)
         assertEquals(oldKeys, saved.lastStableVisibleKeys)
+        awaitPreScrollRecovery(fixture)
+        assertTrue(fixture.logs.any { it.contains("SAFE_RESCAN_REQUIRED") })
+        val positioning = requireNotNull(fixture.checkpoint())
+        assertTrue(positioning.scanContinuityRecoveryPending)
+        assertEquals(SessionListTraversalPhase.POSITIONING_AT_BOTTOM.name, positioning.phase)
+        assertEquals(oldKeys, positioning.lastStableVisibleKeys)
+        assertEquals(setOf("previously-processed"), positioning.attemptedSessionKeys)
+        assertTrue("Original pending work survives positioning", "retained-pending" in positioning.lockedUnreadSessionKeys)
     }
 
     @Test

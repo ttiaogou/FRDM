@@ -36,7 +36,8 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
                 json.readSet("unresolvedUnknownUnreadKeys"),
                 json.readList("unknownUnreadViewportKeys"),
                 json.optBoolean("fullListPollingRoundRequired", false),
-                json.readSet("unresolvedIncompleteUnreadKeys")
+                json.readSet("unresolvedIncompleteUnreadKeys"),
+                json.optBoolean("scanContinuityRecoveryPending", false)
             )
         }.getOrElse { clear(); null }
     }
@@ -65,6 +66,7 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
             .put("unknownUnreadViewportKeys", JSONArray(checkpoint.unknownUnreadViewportKeys.takeLast(MAX_KEYS)))
             .put("fullListPollingRoundRequired", checkpoint.fullListPollingRoundRequired)
             .put("unresolvedIncompleteUnreadKeys", JSONArray(checkpoint.unresolvedIncompleteUnreadKeys.toList().takeLast(MAX_KEYS)))
+            .put("scanContinuityRecoveryPending", checkpoint.scanContinuityRecoveryPending)
         preferences.edit().putString(KEY, json.toString()).apply()
     }
 

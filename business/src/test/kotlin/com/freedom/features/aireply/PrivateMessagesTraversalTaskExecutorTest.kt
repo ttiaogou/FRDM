@@ -513,7 +513,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         executor.attemptedSessionKeys += key(previous)
 
         val evaluation = executor.evaluateListSnapshot(
-            snapshot(next),
+            snapshot(previous, next),
             wasWaitingForUnread = false,
             maxNoProgressScrolls = 2,
             allowExpectedSessionReturnViewportChange = true
@@ -653,7 +653,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         executor.recordVerifiedViewport(snapshot(previous))
         executor.attemptedSessionKeys += key(previous)
         executor.lockedUnreadSessionKeys += setOf(key(previous), key(next))
-        val fresh = snapshot(next).copy(
+        val fresh = snapshot(previous, next).copy(
             windowGeneration = 1L,
             chatListCollectionRowCount = 67,
             chatListVisibleCollectionRows = (5..14).toList(),
@@ -1398,7 +1398,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
-    fun restoredViewportMismatchWithoutAnchorContinuesWithCurrentViewport() {
+    fun restoredViewportMismatchWithoutAnchorPreservesOriginalViewport() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         executor.lastStableSessionListVisibleKeys = listOf("old@0,100,720,240")
 
@@ -1409,7 +1409,67 @@ class PrivateMessagesTraversalTaskExecutorTest {
             PrivateMessagesTraversalTaskExecutor.RestoreReanchorStatus.NOT_FOUND,
             result.status
         )
-        assertEquals(executor.visibleSessionKeys(current), executor.lastStableSessionListVisibleKeys)
+        assertEquals(listOf("old@0,100,720,240"), executor.lastStableSessionListVisibleKeys)
+    }
+
+    @Test
+    fun disconnectedReturnCannotSelectOrReplaceOriginalScanAndSafeRescanSurvivesRestore() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxPositionCheckCompleted = true
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        }
+        val done = candidate(0, "Done", ChatUnreadStatus.READ)
+        val pending = candidate(1, "Pending", ChatUnreadStatus.UNREAD)
+        val unseen = candidate(2, "Previously unseen", ChatUnreadStatus.UNREAD)
+        val original = snapshot(done, pending)
+        executor.recordVerifiedViewport(original)
+        executor.rememberRecoveryAnchor(done)
+        executor.attemptedSessionKeys += key(done)
+        executor.lockedUnreadSessionKeys += setOf(key(done), key(pending))
+        executor.checkpointLastSuccessfulTaskId = "confirmed-send"
+        val oldKeys = executor.lastStableSessionListVisibleKeys
+        val jumped = snapshot(unseen)
+        val invalid = executor.evaluateListSnapshot(jumped, false, 2, allowExpectedSessionReturnViewportChange = true)
+        assertTrue(invalid.viewportPositionInvalidated)
+        assertEquals(null, invalid.nextCandidate)
+        assertEquals(oldKeys, executor.lastStableSessionListVisibleKeys)
+        executor.beginScanContinuityRecovery()
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(executor.checkpoint()) }
+        assertTrue(restored.scanContinuityRecoveryPending)
+        assertEquals(oldKeys, restored.lastStableSessionListVisibleKeys)
+        assertEquals(setOf(key(done)), restored.attemptedSessionKeys)
+        assertEquals("confirmed-send", restored.checkpointLastSuccessfulTaskId)
+        val duringPositioning = restored.evaluateListSnapshot(snapshot(pending, unseen), false, 2)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING, duringPositioning.unreadAdmissionDecision)
+        assertEquals(null, duringPositioning.nextCandidate)
+        assertEquals(oldKeys, restored.lastStableSessionListVisibleKeys)
+        assertTrue(runCatching { restored.beginNextPollingRound() }.isFailure)
+        restored.confirmPhysicalEndForReturnTraversal()
+        restored.recordVerifiedViewport(snapshot(pending, unseen))
+        assertFalse(restored.scanContinuityRecoveryPending)
+        val resumed = restored.evaluateListSnapshot(snapshot(pending, unseen), false, 2)
+        assertEquals(unseen, resumed.nextCandidate)
+        assertEquals(setOf(key(done)), restored.attemptedSessionKeys)
+        assertTrue(restored.pendingKnownUnreadKeys().contains(key(pending)))
+    }
+
+    @Test
+    fun movedSingleRecoveryContactCannotProveContinuityOfDifferentViewport() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val moved = candidate(0, "Moved contact", ChatUnreadStatus.READ)
+        val neighbor = candidate(1, "Original neighbor", ChatUnreadStatus.UNREAD)
+        executor.recordVerifiedViewport(snapshot(moved, neighbor))
+        executor.rememberRecoveryAnchor(moved)
+        val oldKeys = executor.lastStableSessionListVisibleKeys
+        val unrelated = candidate(2, "Unrelated", ChatUnreadStatus.READ)
+        val fresh = snapshot(moved, unrelated)
+        assertEquals(PrivateMessagesTraversalTaskExecutor.RestoreReanchorStatus.REANCHORED,
+            executor.reanchorRestoredCheckpoint(fresh).status)
+        assertFalse(executor.hasRestoredViewportContinuity(fresh))
+        assertEquals(oldKeys, executor.lastStableSessionListVisibleKeys)
     }
 
     private fun key(candidate: ChatListCandidateSnapshot): String =

@@ -30,7 +30,9 @@ data class PrivateMessagesTraversalCheckpoint(
     /** Legacy serialized name; retained for exceptional same-round incomplete-row relocation. */
     val fullListPollingRoundRequired: Boolean = false,
     /** Opaque, retryable incomplete unread row hints; never equivalent to a blocked identity. */
-    val unresolvedIncompleteUnreadKeys: Set<String> = emptySet()
+    val unresolvedIncompleteUnreadKeys: Set<String> = emptySet(),
+    /** An interrupted scan must independently prove the physical bottom before continuing. */
+    val scanContinuityRecoveryPending: Boolean = false
 )
 
 interface PrivateMessagesTraversalCheckpointRepository {

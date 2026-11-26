@@ -1515,30 +1515,39 @@ class AiReplyObservationRuntime(
         }
     }
 
-    /** Uses the original checkpoint re-anchor algorithm; never reuses saved row coordinates. */
+    /** Page recovery is complete; independently decide whether the scan can continue. */
     private fun reanchorRestoredMessageList(inspection: ChatPageSnapshot) {
         if (!messageListCheckpointRestored) return
-        if (recoveryContext.reason == "PRIVATE_LIST_POSITION_UNVERIFIED") {
-            // Position recovery is not identity migration. Preserve the entire round ledger.
-            privateMessagesTraversalTaskExecutor.recordVerifiedViewport(inspection)
-            messageListCheckpointRestored = false
-            onLog("消息列表检查点恢复[POSITION_REANCHORED]：新鲜页面已验证；保留本轮身份与原遍历方向")
-            return
-        }
-        val compatible = privateMessagesTraversalTaskExecutor.isRestoredViewportCompatible(inspection)
-        if (!compatible) {
-            val reanchor = privateMessagesTraversalTaskExecutor.reanchorRestoredCheckpoint(inspection)
-            onLog(
-                "消息列表检查点恢复[REANCHOR]：当前视口与保存视口不同；" +
-                    "status=${reanchor.status.name}；" +
-                    "已重新读取当前位置，不复用旧坐标；" +
-                    "目标会话=${if (reanchor.matchedCandidate != null) "已定位" else "未定位，继续按原方向扫描"}"
-            )
+        val executor = privateMessagesTraversalTaskExecutor
+        executor.clearRecoveryViewportEvidence()
+        if (executor.scanContinuityRecoveryPending) {
+            onLog("消息列表检查点恢复[RESCAN_RETAINED]：原安全补扫尚未确认底部；继续同轮定位")
+        } else if (executor.isRestoredViewportCompatible(inspection) &&
+            (executor.lastStableSessionListVisibleKeys.orEmpty().isEmpty() ||
+                executor.hasRestoredViewportContinuity(inspection))
+        ) {
+            executor.recordVerifiedViewport(inspection)
+            if (executor.collectionBoundaryEvidence(inspection, toTop = true) == false) executor.atTop = false
+            onLog("消息列表检查点恢复[CONTINUE]：原视口连续；保留本轮记录与遍历游标")
         } else {
-            privateMessagesTraversalTaskExecutor.recordVerifiedViewport(inspection)
-            onLog("消息列表检查点恢复[CONTINUE]：页面已验证；保留原检查点和遍历游标继续处理")
+            val continuous = executor.hasRestoredViewportContinuity(inspection)
+            val reanchor = executor.reanchorRestoredCheckpoint(inspection)
+            if (continuous && reanchor.status != PrivateMessagesTraversalTaskExecutor.RestoreReanchorStatus.AMBIGUOUS) {
+                executor.recordVerifiedViewport(inspection)
+                executor.atTop = false
+                onLog("消息列表检查点恢复[REANCHOR]：status=${reanchor.status.name}；邻接身份连续；重新获取当前行，不复用旧坐标")
+            } else if (executor.initialInboxTopPositioningCompleted) {
+                executor.beginScanContinuityRecovery()
+                onLog("消息列表检查点恢复[SAFE_RESCAN_REQUIRED]：status=${reanchor.status.name}；原位置未证明；保留原锚点、本轮记录和方向；等待底部独立验证")
+            } else {
+                // The startup top gate has not yet admitted a scan. Keep its
+                // original positioning policy; this is not a restored scan origin.
+                executor.atTop = false
+                onLog("消息列表检查点恢复[STARTUP_POSITION_WAIT]：初始顶部尚未确认；保留原准入流程")
+            }
         }
         messageListCheckpointRestored = false
+        privateMessagesCheckpointRepository?.save(executor.checkpoint())
     }
 
     private fun recoveryStructuralKey(snapshot: ChatPageSnapshot): String = listOf(
@@ -2315,9 +2324,8 @@ class AiReplyObservationRuntime(
                     receivedGreetingsRecoveryRetryAttempt = 0
                     pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
                 } else {
-                    // Re-anchor only from the new list snapshot, before acknowledging resume.
+                    // Page/lease proof does not yet admit a new scan origin.
                     sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                    reanchorRestoredMessageList(inspection)
                     if (!messageListCheckpointVerifier.completeResume()) {
                         sessionManagerState = SessionManagerState.PAUSED
                         onLog("消息列表统一检查点[COMPLETE_REJECTED]：尚未完成恢复事务确认；保持暂停")
@@ -2360,11 +2368,6 @@ class AiReplyObservationRuntime(
                 return
             }
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID && targetRoute == messageListRecoveryRoute.routeId) {
-                // The fallback verifier must consume the same position-only recovery
-                // before recoveryContext.clear() retires the original reason.
-                if (recoveryContext.reason == "PRIVATE_LIST_POSITION_UNVERIFIED") {
-                    reanchorRestoredMessageList(inspection)
-                }
                 messageRecoveryRetryAttempt = 0
             }
             if (privateListFaultEvidence != PrivateListRecoveryFaultEvidence.NOT_APPLICABLE) {
@@ -3692,6 +3695,7 @@ class AiReplyObservationRuntime(
         // Do not restore/reset the traversal executor: its existing cursor and
         // round ledger belong to the checkpoint, not to the departed UI window.
         messageListCheckpointForUnified = checkpoint
+        messageListCheckpointRestored = true
         messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION
         sessionActionGeneration += 1L
         invalidatePendingMessageRead()
@@ -3757,6 +3761,7 @@ class AiReplyObservationRuntime(
             messageListCheckpointVerifier.reset()
             messageListCheckpointForUnified = if (recoverCurrentChatDetail) null
                 else privateMessagesCheckpointRepository?.load()
+            if (!recoverCurrentChatDetail) messageListCheckpointRestored = true
             messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION
             if (recoverCurrentChatDetail) {
                 if (pendingPrivateSend) {
@@ -5940,7 +5945,13 @@ class AiReplyObservationRuntime(
                     onLog("AI 会话管理：顶部边界经延迟独立快照复核通过；检查顶部当前可见会话行")
                 }
             } else {
+                val repairing = privateMessagesTraversalTaskExecutor.scanContinuityRecoveryPending
                 privateMessagesTraversalTaskExecutor.confirmPhysicalEndForReturnTraversal()
+                if (repairing) {
+                    privateMessagesTraversalTaskExecutor.recordVerifiedViewport(fresh)
+                    privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+                    onLog("消息列表检查点恢复[SAFE_ORIGIN_VERIFIED]：底部独立复核通过；同轮由下至上补扫")
+                }
                 sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
                 onLog("AI 会话管理：底部边界经延迟独立快照复核通过；本轮未读边界已确认，候选仍可补充；进入从底部向顶部的处理阶段")
             }
@@ -6203,7 +6214,8 @@ class AiReplyObservationRuntime(
      */
     private fun startReceivedGreetingsTask(reason: String) {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
-        if (privateMessagesTraversalTaskExecutor.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
+        if (privateMessagesTraversalTaskExecutor.scanContinuityRecoveryPending ||
+            privateMessagesTraversalTaskExecutor.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
             !privateMessagesTraversalTaskExecutor.atTop ||
             privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown ||
             privateMessagesTraversalTaskExecutor.unresolvedUnknownUnreadKeys.isNotEmpty()
@@ -7449,6 +7461,20 @@ class AiReplyObservationRuntime(
             // scroll attempt, but not strand the retained private-message task.
             // Recovery will re-acquire all page evidence after the user returns.
             recoverRetryablePrivateList("MESSAGE_LIST_PRE_SCROLL_PAGE_IDENTITY_MISMATCH")
+            return
+        }
+        // The pre-scroll read is independent; a manual jump between selection and
+        // submission must not silently redefine the scan origin.
+        if (toTop && !receivedGreetingsTaskActive &&
+            privateMessagesTraversalTaskExecutor.reconcileUnrequestedViewportChange(
+                hadPendingScrollBaseline = false,
+                wasWaitingForUnread = false,
+                visibleKeys = privateMessagesTraversalTaskExecutor.visibleSessionKeys(fresh),
+                snapshot = fresh
+            )
+        ) {
+            messageListCheckpointRestored = true
+            recoverRetryablePrivateList("PRIVATE_LIST_POSITION_UNVERIFIED")
             return
         }
         // The independent read can reveal a newly clipped/unknown row, or prove a
