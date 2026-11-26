@@ -19,6 +19,67 @@ data class OcrTextProjection(
             "excludedLines=${excludedLineIndices.size},text=[REDACTED])"
 
     companion object {
+        const val MIN_ISOLATED_TEXT_CONFIDENCE = 0.80f
+        private const val ISOLATION_GAP_PX = 2
+
+        /** Only an edge region is eligible. Middle/overlapping symbols must not split sentences. */
+        fun isolatedCropBounds(
+            line: OcrContentRect,
+            region: OcrContentRect,
+            width: Int,
+            height: Int
+        ): OcrContentRect? {
+            val full = OcrContentRect(0, 0, width, height)
+            if (!full.valid() || !full.contains(line) || !full.contains(region) ||
+                !line.valid() || !region.valid() || !line.overlapsVertically(region)
+            ) return null
+            val tolerance = maxOf(4, (line.bottom - line.top) / 4)
+            val leading = region.left <= line.left + tolerance && region.right > line.left
+            val trailing = region.right >= line.right - tolerance && region.left < line.right
+            if (leading == trailing) return null
+            val candidate = if (leading) OcrContentRect(region.right + ISOLATION_GAP_PX, 0, width, height)
+                else OcrContentRect(0, 0, region.left - ISOLATION_GAP_PX, height)
+            return candidate.takeIf { it.valid() && full.contains(it) &&
+                it.right - it.left >= 8 && it.bottom - it.top >= 8 }
+        }
+
+        private fun hasIndependentTextEvidence(
+            parts: List<OcrContentToken>,
+            canonicalize: (String) -> String
+        ): Boolean {
+            if (parts.size != 2) return false
+            val text = parts.singleOrNull { it.kind == OcrContentKind.TEXT } ?: return false
+            val marker = parts.singleOrNull { it.kind == OcrContentKind.PLACEHOLDER } ?: return false
+            val line = text.lineBounds ?: return false
+            val region = marker.symbolBounds ?: return false
+            val proof = text.isolatedTextEvidence ?: return false
+            if (text.status != OcrTokenStatus.AMBIGUOUS || text.source != OcrTokenSource.OCR_LINE ||
+                text.symbolBounds != null || '\n' in text.text ||
+                marker.status != OcrTokenStatus.UNVERIFIED || marker.source != OcrTokenSource.VISUAL_GUARD ||
+                marker.text != OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY ||
+                marker.lineBounds != line || marker.isolatedTextEvidence != null ||
+                !line.valid() || !region.valid() || !proof.cropBounds.valid() || !proof.recognizedBounds.valid() ||
+                !proof.confidence.isFinite() || proof.confidence !in MIN_ISOLATED_TEXT_CONFIDENCE..1f ||
+                !proof.cropBounds.contains(proof.recognizedBounds) ||
+                !line.overlapsVertically(proof.recognizedBounds) ||
+                proof.recognizedBounds.left < line.left - 4 || proof.recognizedBounds.right > line.right + 4 ||
+                proof.recognizedBounds.top < line.top - 4 || proof.recognizedBounds.bottom > line.bottom + 4 ||
+                canonicalize(proof.recognizedText.trim()) != canonicalize(text.text.trim())
+            ) return false
+            val tolerance = maxOf(4, (line.bottom - line.top) / 4)
+            val leading = region.left <= line.left + tolerance && region.right > line.left
+            val trailing = region.right >= line.right - tolerance && region.left < line.right
+            if (!line.overlapsVertically(region) || leading == trailing) return false
+            return if (leading) proof.cropBounds.left >= region.right + ISOLATION_GAP_PX
+                else proof.cropBounds.right <= region.left - ISOLATION_GAP_PX
+        }
+
+        private fun OcrContentRect.valid() = left >= 0 && top >= 0 && right > left && bottom > top
+        private fun OcrContentRect.contains(other: OcrContentRect) =
+            left <= other.left && top <= other.top && right >= other.right && bottom >= other.bottom
+        private fun OcrContentRect.overlapsVertically(other: OcrContentRect) =
+            maxOf(top, other.top) < minOf(bottom, other.bottom)
+
         /**
          * Single structural evidence rule for the OCR producer and independent AI consumer.
          * The caller still owns its existing normalization and text-quality policy.
@@ -47,7 +108,7 @@ data class OcrTextProjection(
                 val bounds = parts.first().lineBounds
                 val supported = bounds != null && bounds.right > bounds.left && bounds.bottom > bounds.top &&
                     parts.all { token ->
-                        token.lineBounds == bounds && when (token.kind) {
+                        token.lineBounds == bounds && token.isolatedTextEvidence == null && when (token.kind) {
                             OcrContentKind.TEXT ->
                                 token.status == OcrTokenStatus.RECOGNIZED &&
                                     token.source == OcrTokenSource.OCR_LINE &&
@@ -61,14 +122,17 @@ data class OcrTextProjection(
                     }
                 val originalText = parts.filter { it.kind == OcrContentKind.TEXT }
                     .joinToString("") { it.text }.trim()
-                val clean = if (supported) verifiedLineText(originalText) else null
+                // A raw ambiguous line remains ambiguous. Only a separate, geometrically
+                // isolated matching OCR observation can provide its text projection.
+                val isolated = !supported && hasIndependentTextEvidence(parts, canonicalize)
+                val clean = if (supported || isolated) verifiedLineText(originalText) else null
                 if (clean == null) {
                     excluded += index
                     continue
                 }
                 included += index
                 textLines += clean
-                if (parts.any { it.kind == OcrContentKind.EMOJI }) omittedEmoji = true
+                if (isolated || parts.any { it.kind == OcrContentKind.EMOJI }) omittedEmoji = true
             }
             if (included.isEmpty()) return null
             return OcrTextProjection(

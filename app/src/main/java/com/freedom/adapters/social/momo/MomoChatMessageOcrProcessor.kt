@@ -18,6 +18,12 @@ import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
 import com.freedom.features.aireply.domain.message.ChatMessageOcrTarget
 import com.freedom.features.aireply.domain.message.OcrContentToken
+import com.freedom.features.aireply.domain.message.OcrContentKind
+import com.freedom.features.aireply.domain.message.OcrContentRect
+import com.freedom.features.aireply.domain.message.OcrIsolatedTextEvidence
+import com.freedom.features.aireply.domain.message.OcrTokenStatus
+import com.freedom.features.aireply.domain.message.OcrTokenSource
+import com.freedom.features.aireply.domain.message.OcrUncertaintyMarkers
 import com.freedom.features.aireply.domain.message.OcrTextProjection
 import com.freedom.features.aireply.domain.message.MessageContentQuality
 import com.freedom.ocr.OcrManager
@@ -426,7 +432,12 @@ internal class MomoChatMessageOcrProcessor(
             return
         }
         val recognition = reused ?: runCatching {
-            recognizeCrop(crop) { !isCompleted() && isRequestCurrent() }
+            // Never add a projection read to outgoing send-confirmation evidence.
+            val incoming = target.explicitDirectionHint == ChatMessageDirection.INCOMING &&
+                target.identityDirectionHint != ChatMessageDirection.OUTGOING ||
+                target.identityDirectionHint == ChatMessageDirection.INCOMING &&
+                target.explicitDirectionHint != ChatMessageDirection.OUTGOING
+            recognizeCrop(crop, incoming) { !isCompleted() && isRequestCurrent() }
         }
             .getOrElse { failure ->
                 val detail = failure.message?.takeIf { it.isNotBlank() } ?: "无异常消息"
@@ -509,7 +520,11 @@ internal class MomoChatMessageOcrProcessor(
      * Sends one already-cropped message body to the independently-installed OCR plugin.
      * Freedom itself does not load the OCR runtime or model files.
      */
-    private fun recognizeCrop(crop: Bitmap, isRequestCurrent: () -> Boolean): CropRecognition {
+    private fun recognizeCrop(
+        crop: Bitmap,
+        allowIsolatedText: Boolean,
+        isRequestCurrent: () -> Boolean
+    ): CropRecognition {
         if (!isRequestCurrent()) return CropRecognition("", "", "", null, 0)
         val result = ocrManager.recognize(crop, isRequestCurrent = isRequestCurrent)
         if (!isRequestCurrent()) return CropRecognition("", "", "", null, 0)
@@ -541,10 +556,13 @@ internal class MomoChatMessageOcrProcessor(
         }
         val reconciled = MomoOcrVisualSymbolGuard.reconcileWithTokens(lines, colorRegions)
         val finalText = normalizeRecognizedText(reconciled.text)
+        val evidenceTokens = if (allowIsolatedText && lines.size == 1 && colorRegions.size == 1 &&
+            reconciled.text.length <= MAX_RECOGNIZED_TEXT_LENGTH && isRequestCurrent()
+        ) isolateEdgeText(crop, reconciled, isRequestCurrent) else reconciled.tokens
         // Projection is separate from the existing P0 text/quality. A truncated OCR render
         // cannot prove that its tokens align with the complete captured message.
         val textProjection = reconciled.text.takeIf { it.length <= MAX_RECOGNIZED_TEXT_LENGTH }
-            ?.let { MomoOcrTextProjector.extract(it, reconciled.tokens) }
+            ?.let { MomoOcrTextProjector.extract(it, evidenceTokens) }
             ?.let { projection ->
                 val usable = normalizeRecognizedText(projection.text)
                 if (usable.isNotBlank() &&
@@ -569,9 +587,76 @@ internal class MomoChatMessageOcrProcessor(
             meanConfidence = validConfidences.takeIf { it.isNotEmpty() }?.average()?.toFloat(),
             lineCount = lines.size,
             detectionBoxes = detectionBoxes,
-            tokens = reconciled.tokens,
+            tokens = evidenceTokens,
             textProjection = textProjection
         )
+    }
+
+    /**
+     * One extra read at most, using the same captured bitmap and existing OCR manager.
+     * Raw text, quality, line count and geometry remain unchanged; this is projection-only evidence.
+     */
+    private fun isolateEdgeText(
+        crop: Bitmap,
+        reconciled: OcrVisualReconciliation,
+        isRequestCurrent: () -> Boolean
+    ): List<OcrContentToken> {
+        val tokens = reconciled.tokens
+        if (tokens.size != 2) return tokens
+        val text = tokens.singleOrNull { it.kind == OcrContentKind.TEXT } ?: return tokens
+        val marker = tokens.singleOrNull { it.kind == OcrContentKind.PLACEHOLDER } ?: return tokens
+        if (text.status != OcrTokenStatus.AMBIGUOUS || text.source != OcrTokenSource.OCR_LINE ||
+            marker.source != OcrTokenSource.VISUAL_GUARD ||
+            marker.text != OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY ||
+            MomoOcrQualityPolicy.classify(text.text) != MessageContentQuality.VERIFIED
+        ) return tokens
+        val line = text.lineBounds ?: return tokens
+        val region = marker.symbolBounds ?: return tokens
+        val bounds = OcrTextProjection.isolatedCropBounds(line, region, crop.width, crop.height) ?: return tokens
+        if (!isRequestCurrent()) return tokens
+        val isolated = Bitmap.createBitmap(crop, bounds.left, bounds.top,
+            bounds.right - bounds.left, bounds.bottom - bounds.top)
+        try {
+            // Reject residual colored glyphs rather than guessing that the cut was sufficient.
+            if (MomoOcrVisualSymbolGuard.detectColorRegions(isolated.width, isolated.height) { x, y ->
+                    isolated.getPixel(x, y)
+                }.isNotEmpty() || !isRequestCurrent()
+            ) return tokens
+            val result = runCatching { ocrManager.recognize(isolated, isRequestCurrent = isRequestCurrent) }
+                .getOrElse {
+                    onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=FAILED;reason=LOCAL_OCR_FAILED")
+                    return tokens
+                }
+            if (!isRequestCurrent()) return tokens
+            val read = result.singleOrNull() ?: return tokens
+            val recognized = normalizeRecognizedText(read.text)
+            if (recognized != normalizeRecognizedText(text.text) ||
+                read.points.isEmpty() || !read.confidence.isFinite() ||
+                read.confidence !in OcrTextProjection.MIN_ISOLATED_TEXT_CONFIDENCE..1f
+            ) {
+                onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=REJECTED;reason=TEXT_OR_CONFIDENCE_MISMATCH")
+                return tokens
+            }
+            if (read.points.any { !it.first.toDouble().isFinite() || !it.second.toDouble().isFinite() }) return tokens
+            val observed = OcrContentRect(
+                bounds.left + floor(read.points.minOf { it.first.toDouble() }).toInt(),
+                bounds.top + floor(read.points.minOf { it.second.toDouble() }).toInt(),
+                bounds.left + ceil(read.points.maxOf { it.first.toDouble() }).toInt(),
+                bounds.top + ceil(read.points.maxOf { it.second.toDouble() }).toInt()
+            )
+            val updated = tokens.map { token ->
+                if (token === text) token.copy(isolatedTextEvidence =
+                    OcrIsolatedTextEvidence(bounds, observed, recognized, read.confidence)) else token
+            }
+            if (MomoOcrTextProjector.extract(reconciled.text, updated) == null) {
+                onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=REJECTED;reason=GEOMETRY_OR_PROJECTION")
+                return tokens
+            }
+            onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=VERIFIED;originalQualityUnchanged=true")
+            return updated
+        } finally {
+            if (isolated !== crop) isolated.recycle()
+        }
     }
 
     private fun createAnnotatedCrop(source: Bitmap, boxes: List<OcrDetectionBox>): Bitmap? {

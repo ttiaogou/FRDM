@@ -10,7 +10,8 @@ import com.freedom.features.aireply.domain.message.OcrTextProjection
  * The existing PaddleOCR result supplies line boxes, not character boxes. An unknown visual
  * marker or a low-confidence symbol therefore excludes its whole line; it cannot make nearby
  * characters independently admissible. Identified Unicode emoji can be omitted from an otherwise
- * unambiguous OCR line without changing the original message.
+ * unambiguous OCR line without changing the original message. A same-line visual placeholder
+ * remains inadmissible unless the domain verifies separate, matching edge-region OCR evidence.
  *
  * This produces metadata for the later AI-context stage; it does not change P0 message admission.
  */

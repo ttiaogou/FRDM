@@ -7,6 +7,9 @@ import com.freedom.features.aireply.domain.message.ChatMessageOcrTarget
 import com.freedom.features.aireply.domain.message.MessageContentQuality
 import com.freedom.features.aireply.domain.message.MessageReadStatus
 import com.freedom.features.aireply.domain.message.OcrContentRect
+import com.freedom.features.aireply.domain.message.OcrContentKind
+import com.freedom.features.aireply.domain.message.OcrIsolatedTextEvidence
+import com.freedom.features.aireply.domain.message.OcrTextProjection
 import com.freedom.features.aireply.domain.message.OcrTextProjectionStatus
 import com.freedom.features.aireply.domain.message.OcrTokenSource
 import org.junit.Assert.assertEquals
@@ -55,6 +58,30 @@ class MomoOcrTextProjectorTest {
         )
         assertEquals("${MomoOcrVisualSymbolGuard.UNCERTAIN_SYMBOL_ONLY} 在吗a", rendered.text)
         assertNull(MomoOcrTextProjector.extract(rendered.text, rendered.tokens))
+    }
+
+    @Test
+    fun edgeVisualRegionNeedsSeparateMatchingOcrEvidence() {
+        val line = OcrVisualLine("哈哈，我也是，牛马生活", OcrVisualRect(0, 0, 392, 59), emptyList())
+        val region = OcrVisualRect(355, 14, 391, 48)
+        val rendered = MomoOcrVisualSymbolGuard.reconcileWithTokens(listOf(line), listOf(region))
+        assertNull(MomoOcrTextProjector.extract(rendered.text, rendered.tokens))
+        val bounds = OcrTextProjection.isolatedCropBounds(OcrContentRect(0, 0, 392, 59),
+            OcrContentRect(355, 14, 391, 48), 392, 59)!!
+        assertEquals(OcrContentRect(0, 0, 353, 59), bounds)
+        val proof = OcrIsolatedTextEvidence(bounds, OcrContentRect(1, 16, 350, 47), line.text, 0.95f)
+        val tokens = rendered.tokens.map {
+            if (it.kind == OcrContentKind.TEXT) it.copy(isolatedTextEvidence = proof) else it
+        }
+        val projection = MomoOcrTextProjector.extract(rendered.text, tokens)!!
+        assertEquals(line.text, projection.text)
+        assertEquals(OcrTextProjectionStatus.PARTIAL, projection.status)
+        assertEquals(MessageContentQuality.AMBIGUOUS, MomoOcrQualityPolicy.classify(rendered.text))
+        assertNull(OcrTextProjection.isolatedCropBounds(OcrContentRect(0, 0, 392, 59),
+            OcrContentRect(180, 14, 214, 48), 392, 59))
+        assertEquals(OcrContentRect(38, 0, 392, 59),
+            OcrTextProjection.isolatedCropBounds(OcrContentRect(0, 0, 392, 59),
+                OcrContentRect(0, 14, 36, 48), 392, 59))
     }
 
     @Test
