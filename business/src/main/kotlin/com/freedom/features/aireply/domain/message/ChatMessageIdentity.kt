@@ -19,10 +19,14 @@ object ChatMessageIdentity {
 
     fun contentRevision(content: String?): String = "ocr-${sha256(content.orEmpty().trim())}"
 
+    /**
+     * Identity evidence must not depend on a following row that may not exist yet.
+     * Keep the predecessor and current row so appending a reply does not rename
+     * the previously visible tail. Geometry remains provisional, not a server ID.
+     */
     fun neighborSignature(rows: List<ScreenRect>, index: Int): String = listOfNotNull(
         rows.getOrNull(index - 1)?.let(::rect),
-        rows.getOrNull(index)?.let(::rect),
-        rows.getOrNull(index + 1)?.let(::rect)
+        rows.getOrNull(index)?.let(::rect)
     ).joinToString("|")
 
     fun observationBatchId(windowSessionKey: String?, capturedAtMillis: Long, rows: List<ScreenRect>): String =

@@ -73,37 +73,6 @@ class PageObservationCoordinator(
     @Synchronized
     fun registeredFingerprintRouteIds(): Set<String> = fingerprintRouter.registeredRouteIds()
 
-    /** Creates the shared coordinator used by the AccessibilityService dependency graph. */
-    /**
-     * Compatibility constructor for the original two-channel API. New business areas should use
-     * [registerChannel] so they can share one service-scoped instance without owning other channels.
-     */
-    constructor(
-        scheduler: TaskScheduler,
-        fullPageDebounceMs: Long,
-        knownRegionDebounceMs: Long,
-        maxEventBurstWaitMs: Long,
-        runFullPageSnapshot: () -> Unit,
-        runKnownRegionSnapshot: () -> Unit,
-        nowMillis: () -> Long = { System.nanoTime() / 1_000_000L }
-    ) : this(scheduler, nowMillis) {
-        legacyFullPage = registerChannel(
-            channelId = LEGACY_FULL_PAGE_CHANNEL,
-            quietPeriodMs = fullPageDebounceMs,
-            maxWaitMs = maxEventBurstWaitMs,
-            onObservationRequested = runFullPageSnapshot
-        )
-        legacyKnownRegion = registerChannel(
-            channelId = LEGACY_KNOWN_REGION_CHANNEL,
-            quietPeriodMs = knownRegionDebounceMs,
-            maxWaitMs = maxEventBurstWaitMs,
-            onObservationRequested = runKnownRegionSnapshot
-        )
-    }
-
-    private var legacyFullPage: PageObservationSubscription? = null
-    private var legacyKnownRegion: PageObservationSubscription? = null
-
     @Synchronized
     fun registerChannel(
         channelId: String,
@@ -138,9 +107,6 @@ class PageObservationCoordinator(
         channels.values.toList().forEach(PageObservationSubscription::cancel)
     }
 
-    /** Cancels all channels for compatibility with a coordinator owned by one runtime. */
-    fun reset() = resetAll()
-
     /**
      * Schedules an explicit read-only page recheck (recovery, arrival stability or delayed
      * inspection) via the same service-level observation scheduler as event channels.
@@ -159,33 +125,11 @@ class PageObservationCoordinator(
             .forEach(PageObservationSubscription::requestSnapshot)
     }
 
-    fun requestFullPageSnapshot() = requireLegacyFullPage().requestSnapshot()
-
-    fun requestKnownRegionSnapshot() = requireLegacyKnownRegion().requestSnapshot()
-
-    fun cancelFullPageSnapshot() = requireLegacyFullPage().cancel()
-
-    fun cancelKnownRegionSnapshot() = requireLegacyKnownRegion().cancel()
-
-    fun isFullPageSnapshotPending(): Boolean = requireLegacyFullPage().isPending()
-
-    fun isKnownRegionSnapshotPending(): Boolean = requireLegacyKnownRegion().isPending()
-
-    private fun requireLegacyFullPage(): PageObservationSubscription =
-        checkNotNull(legacyFullPage) { "Legacy full-page observation channel is not configured" }
-
-    private fun requireLegacyKnownRegion(): PageObservationSubscription =
-        checkNotNull(legacyKnownRegion) { "Legacy known-region observation channel is not configured" }
-
     @Synchronized
     private fun unregister(channelId: String, subscription: PageObservationSubscription) {
         if (channels[channelId] === subscription) channels.remove(channelId)
     }
 
-    private companion object {
-        const val LEGACY_FULL_PAGE_CHANNEL = "__legacy_full_page__"
-        const val LEGACY_KNOWN_REGION_CHANNEL = "__legacy_known_region__"
-    }
 }
 
 /** A single business area's registration in the shared page-observation coordinator. */

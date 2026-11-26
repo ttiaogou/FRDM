@@ -6,6 +6,7 @@ import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSpec
 import com.freedom.core.accessibility.api.GestureStrokeSpec
 import com.freedom.core.accessibility.api.ScreenRect
+import com.freedom.core.accessibility.api.WindowRef
 import kotlin.math.hypot
 
 /**
@@ -185,11 +186,13 @@ class InputOriginClassifier(
     private val lock = Any()
     private val actions = LinkedHashMap<String, ActionRecord>()
     private var pendingExpectedNavigation: ExpectedNavigationRegistration? = null
+    private var expectedNavigationSequence = 0L
     private var lastAttachedSelfNavigation: SelfNavigationTransition? = null
 
     private data class ExpectedNavigationRegistration(
         val actionId: String,
-        val packageName: String,
+        val sourceWindow: WindowRef,
+        val runGeneration: Long,
         val targetActivityClass: String,
         val registeredAtUptimeMs: Long
     )
@@ -334,7 +337,8 @@ class InputOriginClassifier(
         sourcePageGeneration: Long,
         targetPageGeneration: Long,
         targetWindowId: Int,
-        transitionAtUptimeMs: Long
+        transitionAtUptimeMs: Long,
+        runGeneration: Long = -1L
     ) {
         if (packageName.isBlank() || targetActivityClass.isBlank()) return
         val diagnostic = synchronized(lock) {
@@ -352,15 +356,26 @@ class InputOriginClassifier(
                     transitionAtUptimeMs >= record.submittedAtUptimeMs - EVENT_EARLY_TOLERANCE_MS &&
                     transitionAtUptimeMs <= record.submittedAtUptimeMs + NAVIGATION_ENTRY_TRANSITION_CAUSALITY_MS
             }
+            val registration = pendingExpectedNavigation
+            val expected = registration?.takeIf {
+                it.sourceWindow.packageName == packageName &&
+                    it.runGeneration == runGeneration &&
+                    it.sourceWindow.generation == sourcePageGeneration &&
+                    targetPageGeneration > sourcePageGeneration && targetWindowId >= 0 &&
+                    it.targetActivityClass == targetActivityClass &&
+                    transitionAtUptimeMs >= it.registeredAtUptimeMs &&
+                    transitionAtUptimeMs <= it.registeredAtUptimeMs + NAVIGATION_ENTRY_TRANSITION_CAUSALITY_MS
+            }
+            // A transition from this source consumes the single pending registration even if
+            // it is unexpected. A later navigation must not inherit the earlier BACK.
+            if (registration != null && transitionAtUptimeMs >= registration.registeredAtUptimeMs &&
+                (runGeneration != registration.runGeneration ||
+                    sourcePageGeneration >= registration.sourceWindow.generation)
+            ) pendingExpectedNavigation = null
             when {
-                eligible.isEmpty() && pendingExpectedNavigation?.let { expected ->
-                    expected.packageName == packageName &&
-                        expected.targetActivityClass == targetActivityClass &&
-                        transitionAtUptimeMs >= expected.registeredAtUptimeMs &&
-                        transitionAtUptimeMs <= expected.registeredAtUptimeMs + NAVIGATION_ENTRY_TRANSITION_CAUSALITY_MS
-                } == true -> {
-                    val expected = pendingExpectedNavigation!!
-                    pendingExpectedNavigation = null
+                expected != null && eligible.isNotEmpty() ->
+                    "导航事务[AMBIGUOUS]：安全BACK与点击均可能触发页面迁移；backActionId=${expected.actionId}"
+                eligible.isEmpty() && expected != null -> {
                     lastAttachedSelfNavigation = SelfNavigationTransition(
                         actionId = expected.actionId,
                         sourcePageGeneration = sourcePageGeneration,
@@ -372,7 +387,8 @@ class InputOriginClassifier(
                     "导航事务[ATTACHED]：selfActionId=${expected.actionId}；" +
                         "sourcePageGeneration=$sourcePageGeneration；targetActivity=$targetActivityClass；" +
                         "targetPageGeneration=$targetPageGeneration；targetWindowId=$targetWindowId；" +
-                        "transitionAtUptimeMs=$transitionAtUptimeMs；source=EXPECTED_SELF_NAVIGATION"
+                        "transitionAtUptimeMs=$transitionAtUptimeMs；source=EXPECTED_SELF_NAVIGATION；" +
+                        "sourceWindowId=${expected.sourceWindow.windowId}；runGeneration=${expected.runGeneration}"
                 }
                 eligible.size == 1 -> {
                     val record = eligible.single()
@@ -413,22 +429,62 @@ class InputOriginClassifier(
         lastAttachedSelfNavigation.also { lastAttachedSelfNavigation = null }
     }
 
-    /** Registers a business-neutral self-navigation action whose transition is not a tap. */
+    /**
+     * Registers the exact source of a non-tap navigation immediately before platform dispatch.
+     * A null destination (e.g. a dialog-only BACK) replaces old pending evidence but cannot
+     * claim a page transition. A caller-verified identity source may lack Activity evidence;
+     * the same source generation, destination, run, time and ambiguity checks still apply.
+     * No registration grants page readiness or a UI lease.
+     */
     fun registerExpectedSelfNavigation(
-        packageName: String,
-        targetActivityClass: String,
-        registeredAtUptimeMs: Long = System.nanoTime() / 1_000_000L
+        sourceWindow: WindowRef,
+        targetActivityClass: String?,
+        runGeneration: Long,
+        registeredAtUptimeMs: Long,
+        sourceIdentityVerified: Boolean = false
     ): String? = synchronized(lock) {
-        if (packageName.isBlank() || targetActivityClass.isBlank()) return@synchronized null
-        val actionId = "freedom-self-navigation-${registeredAtUptimeMs}-${actions.size}"
+        pruneLocked(registeredAtUptimeMs)
+        pendingExpectedNavigation = null
+        if (sourceWindow.packageName.isBlank() ||
+            (sourceWindow.activityClass.isBlank() && !sourceIdentityVerified) ||
+            sourceWindow.windowId < 0 || sourceWindow.generation < 0L || runGeneration < 0L ||
+            targetActivityClass.isNullOrBlank()
+        ) return@synchronized null
+        val actionId = "freedom-self-navigation-${registeredAtUptimeMs}-${++expectedNavigationSequence}"
         pendingExpectedNavigation = ExpectedNavigationRegistration(
-            actionId = actionId,
-            packageName = packageName,
-            targetActivityClass = targetActivityClass,
-            registeredAtUptimeMs = registeredAtUptimeMs
+            actionId, sourceWindow, runGeneration, targetActivityClass, registeredAtUptimeMs
         )
-        emitDiagnostic("导航事务[EXPECTED_REGISTERED]：actionId=$actionId；targetActivity=$targetActivityClass")
+        emitDiagnostic("导航事务[EXPECTED_REGISTERED]：actionId=$actionId；" +
+            "sourceWindowId=${sourceWindow.windowId}；sourcePageGeneration=${sourceWindow.generation}；" +
+            "runGeneration=$runGeneration；targetActivity=$targetActivityClass")
         actionId
+    }
+
+    /** Platform rejection/exception must remove only the matching registration. */
+    fun rejectExpectedSelfNavigation(actionId: String, reason: String) {
+        val removed = synchronized(lock) {
+            var matched = false
+            if (pendingExpectedNavigation?.actionId == actionId) {
+                pendingExpectedNavigation = null
+                matched = true
+            }
+            if (lastAttachedSelfNavigation?.actionId == actionId) {
+                lastAttachedSelfNavigation = null
+                matched = true
+            }
+            matched
+        }
+        if (removed) emitDiagnostic("导航事务[EXPECTED_REJECTED]：actionId=$actionId；reason=$reason")
+    }
+
+    /** Touch callbacks do not prove an actor; overlapping BACK attribution becomes uncertain. */
+    fun noteExpectedNavigationTouch(eventTime: Long) {
+        synchronized(lock) {
+            val expected = pendingExpectedNavigation ?: return
+            if (eventTime >= expected.registeredAtUptimeMs - EVENT_EARLY_TOLERANCE_MS &&
+                eventTime <= expected.registeredAtUptimeMs + NAVIGATION_ENTRY_TRANSITION_CAUSALITY_MS
+            ) pendingExpectedNavigation = null
+        }
     }
 
     fun rejectDispatchGesture(actionId: String, reason: String) {
@@ -782,6 +838,11 @@ class InputOriginClassifier(
     }
 
     private fun pruneLocked(nowUptimeMs: Long) {
+        pendingExpectedNavigation?.let {
+            if (nowUptimeMs > it.registeredAtUptimeMs + NAVIGATION_ENTRY_TRANSITION_CAUSALITY_MS) {
+                pendingExpectedNavigation = null
+            }
+        }
         val iterator = actions.entries.iterator()
         while (iterator.hasNext()) {
             val record = iterator.next().value

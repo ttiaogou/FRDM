@@ -103,10 +103,18 @@ internal class MomoGesturePageReadinessInspector(
             )
         }
 
-        if (mode == RunMode.AI_REPLY &&
-            currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY &&
-            isSayHiProfileScrollPending(rootWindowId)
-        ) {
+        if (mode == RunMode.AI_REPLY && isSayHiProfileScrollPending(rootWindowId)) {
+            // The adapter has prepared the swipe from a fresh profile window; require
+            // the exact in-flight transaction window again after the popup checks.
+            if (!MomoSayHiProfileScrollPolicy.permitsIdentityProfileScroll(
+                    mode = mode,
+                    pendingOnCurrentWindow = isSayHiProfileScrollPending(rootWindowId),
+                    activeWindowId = rootWindowId,
+                    expectedWindowId = sayHiProfileScrollWindowId()
+                )
+            ) return TargetAppPageReadiness(
+                ready = false, reason = "资料页上滑暂缓：当前窗口与身份采集事务不一致", retryable = true
+            )
             val dialogObservation = latestDialogWindowObservation()
             if (dialogObservation != null) {
                 val dialogStillPresent = rootAccess.isTargetWindowPresent(dialogObservation.windowId)
@@ -124,7 +132,7 @@ internal class MomoGesturePageReadinessInspector(
             }
             return TargetAppPageReadiness(
                 true,
-                "AI Reply：收到招呼身份采集的一次性资料页上滑许可；windowId=${sayHiProfileScrollWindowId()}"
+                "AI Reply：身份采集事务的一次性资料页上滑许可；windowId=${sayHiProfileScrollWindowId()}"
             )
         }
 

@@ -28,7 +28,8 @@ class AiModelHttpException(
     override val responseContentState: String? = null,
     override val responseFinishReason: String? = null,
     override val responseInputTokens: Int? = null,
-    override val responseOutputTokens: Int? = null
+    override val responseOutputTokens: Int? = null,
+    override val responseReasoningContentState: String? = null
 ) : IOException(safeCode, cause), com.freedom.features.aireply.ai.AiModelCallFailureDetails
 
 /** 每次调用使用独立追踪记录，避免并发请求相互覆盖状态或阶段信息。 */
@@ -74,7 +75,8 @@ internal class AiModelHttpCallTrace {
                 responseContentState = known?.responseContentState,
                 responseFinishReason = known?.responseFinishReason,
                 responseInputTokens = known?.responseInputTokens,
-                responseOutputTokens = known?.responseOutputTokens
+                responseOutputTokens = known?.responseOutputTokens,
+                responseReasoningContentState = known?.responseReasoningContentState
             )
         }
 }

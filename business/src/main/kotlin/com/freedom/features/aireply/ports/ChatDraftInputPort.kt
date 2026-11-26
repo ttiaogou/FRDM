@@ -60,4 +60,11 @@ interface ChatDraftInputPort {
 /** Sends only a freshly validated, unchanged draft through the shared screen-gesture channel. */
 interface ChatDraftSendPort {
     fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult
+
+    /** Completion is only an observation signal, never evidence that a message was sent. */
+    fun sendDraft(
+        target: ChatDraftInputTarget,
+        expectedText: String,
+        onGestureCompleted: () -> Unit
+    ): ChatDraftInputResult = sendDraft(target, expectedText)
 }

@@ -198,6 +198,46 @@ class GesturePolicyPipelineTest {
     }
 
     @Test
+    fun imagePagingUsesIndependentPolicyAndExistingApprovalForBothDirections() {
+        for (direction in com.freedom.core.accessibility.gesture.ImagePagingDirection.values()) {
+            val executor = RecordingExecutor()
+            val diagnostics = mutableListOf<String>()
+            val pipeline = pipeline(executor, diagnostics::add)
+            val request = GestureIntentRequest(
+                id = "image-paging-${direction.name}",
+                intent = GestureIntent.ImagePagingSwipe(ScreenRect(100, 100, 980, 1800), direction),
+                description = "one image page",
+                executionContext = testContext
+            )
+            assertEquals(diagnostics.joinToString("\n"), GestureSubmission.ACCEPTED, pipeline.execute(request) {})
+            val gesture = requireNotNull(executor.lastCommand).gesture
+            assertNotNull(executor.lastApprovedCommand)
+            assertEquals(1, executor.executeCount)
+            assertEquals(2, gesture.additionalStrokes.size)
+            assertTrue(gesture.willContinue)
+            assertTrue(gesture.additionalStrokes.all { it.continuationOfPrevious })
+            assertFalse(gesture.additionalStrokes.last().willContinue)
+            val start = (gesture.commands.first() as GesturePathCommand.MoveTo).point
+            val end = (gesture.additionalStrokes.last().commands.last() as GesturePathCommand.CubicTo).end
+            val displacement = if (direction.name == "RIGHT") end.x - start.x else start.x - end.x
+            assertTrue(displacement >= 260f)
+            val region = requireNotNull(executor.lastCommand).validationRegion
+            assertTrue(displacement >= (region.right - region.left) * 0.80f)
+            assertTrue(gesture.durationMs + gesture.additionalStrokes.sumOf { it.durationMs } in 120L..1200L)
+            assertTrue(diagnostics.any { "algorithm=IMAGE_PAGING_HORIZONTAL" in it })
+            val narrow = request.copy(intent = GestureIntent.ImagePagingSwipe(ScreenRect(100, 100, 200, 1800), direction))
+            assertEquals(GestureSubmission.REJECTED, pipeline.execute(narrow) {})
+            assertEquals(1, executor.executeCount)
+            val belowOriginalMinimum = request.copy(
+                id = "image-paging-below-minimum-${direction.name}",
+                intent = GestureIntent.ImagePagingSwipe(ScreenRect(100, 100, 350, 1800), direction)
+            )
+            assertEquals(GestureSubmission.REJECTED, pipeline.execute(belowOriginalMinimum) {})
+            assertEquals(1, executor.executeCount)
+        }
+    }
+
+    @Test
     fun pauseProfileCompilesToAStationaryContinuousStrokeAndPassesValidation() {
         val executor = RecordingExecutor()
         val diagnostics = mutableListOf<String>()

@@ -44,6 +44,7 @@ internal class ChatMessageReadCoordinator(
 
     private var requestGeneration = 0L
     private var requestInFlight = false
+    private var ocrInFlight = false
     private var timeoutTask: ScheduledTask? = null
     private var pendingSnapshot: ChatPageSnapshot? = null
 
@@ -56,18 +57,77 @@ internal class ChatMessageReadCoordinator(
         get() = requestInFlight
 
     /**
-     * Requests a bounded message read. While one request is active, only the newest fresh snapshot
-     * is retained; it is considered after the active callback closes and passes its generation gate.
+     * Coalesces structural reads while structure is in flight. During OCR, page events remain
+     * observations, but no queued snapshot is replayed into a second OCR transaction.
      */
     fun request(snapshot: ChatPageSnapshot) {
         if (!isReadRequestAllowed()) return
         if (requestInFlight) {
-            pendingSnapshot = snapshot
+            // The OCR stage owns the whole read until its result is delivered.
+            // Never replay a queued structural snapshot after OCR; it can contain
+            // transient overlay/layout changes and stale message geometry.
+            if (!ocrInFlight) pendingSnapshot = snapshot
             return
         }
+        pendingSnapshot = null
+        startRead(
+            read = { callback -> messagePort.readRecentMessagesStructureAsync(snapshot, messageLimit, callback) },
+            forceScheduledDelivery = false,
+            timedOut = onTimeout,
+            failed = onAdapterFailure
+        ) { batch, revalidate, generation ->
+            completeRequest(snapshot, batch, generation, revalidate)
+        }
+    }
 
+    /** Continuation after identity or send-proof admission. Shares the structural single-flight. */
+    fun requestOcr(
+        snapshot: ChatPageSnapshot,
+        limit: Int,
+        forceScheduledDelivery: Boolean = false,
+        onTimeout: (Long) -> Unit,
+        onFailure: () -> Unit,
+        sendConfirmation: Boolean = false,
+        onResult: (ChatMessageBatch, Boolean) -> Unit
+    ): Boolean {
+        if (!isReadRequestAllowed() || requestInFlight) return false
+        pendingSnapshot = null
+        ocrInFlight = true
+        startRead(
+            read = { callback ->
+                if (sendConfirmation) messagePort.readRecentMessagesForSendConfirmationAsync(snapshot, limit, callback)
+                else messagePort.readRecentMessagesAsync(snapshot, limit, callback)
+            },
+            forceScheduledDelivery = forceScheduledDelivery,
+            timedOut = onTimeout,
+            failed = onFailure
+        ) { batch, revalidate, generation ->
+            if (generation == requestGeneration && requestInFlight) {
+                closeRead()
+                // The owning runtime applies the existing draft/send-specific page,
+                // identity and lease checks before accepting the batch.
+                onResult(batch, revalidate)
+            }
+        }
+        return true
+    }
+
+    private fun closeRead() {
+        timeoutTask?.cancel()
+        timeoutTask = null
+        requestInFlight = false
+        ocrInFlight = false
+    }
+
+    private fun startRead(
+        read: ((ChatMessageBatch) -> Unit) -> Unit,
+        forceScheduledDelivery: Boolean,
+        timedOut: (Long) -> Unit,
+        failed: () -> Unit,
+        deliverResult: (ChatMessageBatch, Boolean, Long) -> Unit
+    ) {
         requestInFlight = true
-        val expectedGeneration = requestGeneration
+        val expectedGeneration = ++requestGeneration
         timeoutTask?.cancel()
 
         // The adapter callback may run on a worker thread. The gate arbitrates callback, timeout
@@ -90,12 +150,11 @@ internal class ChatMessageReadCoordinator(
                 return@schedule
             }
 
-            timeoutTask = null
             // Invalidate before reopening the in-flight gate; any late adapter callback becomes stale.
             requestGeneration += 1L
-            requestInFlight = false
+            closeRead()
             pendingSnapshot = null
-            onTimeout(timeoutMs)
+            timedOut(timeoutMs)
         }
         timeoutTask = scheduledTimeout
         timeoutTaskRef.set(scheduledTimeout)
@@ -103,7 +162,7 @@ internal class ChatMessageReadCoordinator(
         val callThread = Thread.currentThread()
         val callReturned = AtomicBoolean(false)
         try {
-            messagePort.readRecentMessagesStructureAsync(snapshot, limit = messageLimit) { batch ->
+            read { batch ->
                 val shouldDeliver = synchronized(callbackGate) {
                     if (callbackReceived) {
                         false
@@ -118,16 +177,11 @@ internal class ChatMessageReadCoordinator(
                     // thread reuses the requested snapshot, while asynchronous or cross-thread
                     // callbacks must re-inspect the active page before accepting the result.
                     val shouldRevalidateActivePage =
-                        callReturned.get() || Thread.currentThread() != callThread
+                        forceScheduledDelivery || callReturned.get() || Thread.currentThread() != callThread
                     val deliver = {
-                        completeRequest(
-                            requestedSnapshot = snapshot,
-                            batch = batch,
-                            expectedGeneration = expectedGeneration,
-                            revalidateActivePage = shouldRevalidateActivePage
-                        )
+                        deliverResult(batch, shouldRevalidateActivePage, expectedGeneration)
                     }
-                    if (!callReturned.get() && Thread.currentThread() == callThread) {
+                    if (!shouldRevalidateActivePage) {
                         // Preserve synchronous adapter semantics. OCR/screenshot callbacks that
                         // cross a thread boundary are delivered through the injected scheduler.
                         deliver()
@@ -145,12 +199,12 @@ internal class ChatMessageReadCoordinator(
                     true
                 }
             }
-            if (shouldHandleException) {
-                if (expectedGeneration == requestGeneration) requestGeneration += 1L
+            if (shouldHandleException && expectedGeneration == requestGeneration) {
+                requestGeneration += 1L
                 timeoutTaskRef.get()?.cancel()
-                timeoutTask = null
-                requestInFlight = false
-                onAdapterFailure()
+                closeRead()
+                pendingSnapshot = null
+                failed()
             }
         } finally {
             callReturned.set(true)
@@ -160,9 +214,7 @@ internal class ChatMessageReadCoordinator(
     /** Invalidates the active callback and drops any queued snapshot at a task/runtime boundary. */
     fun invalidatePending() {
         requestGeneration += 1L
-        requestInFlight = false
-        timeoutTask?.cancel()
-        timeoutTask = null
+        closeRead()
         pendingSnapshot = null
     }
 
@@ -174,9 +226,7 @@ internal class ChatMessageReadCoordinator(
     ) {
         if (expectedGeneration != requestGeneration || !requestInFlight) return
 
-        timeoutTask?.cancel()
-        timeoutTask = null
-        requestInFlight = false
+        closeRead()
         val mayDrainPending = shouldDrainPendingSnapshot()
 
         if (isReadRequestAllowed()) {
@@ -190,6 +240,9 @@ internal class ChatMessageReadCoordinator(
             }
         }
 
+        // The validated structural callback may synchronously start OCR or a
+        // replacement structure read. Do not drain stale snapshots into that transaction.
+        if (expectedGeneration != requestGeneration || requestInFlight) return
         val pending = pendingSnapshot
         pendingSnapshot = null
         if (mayDrainPending && pending != null && pending.stableKey() != requestedSnapshot.stableKey()) {

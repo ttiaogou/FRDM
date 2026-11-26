@@ -296,7 +296,9 @@ internal class MomoChatMessageReader(
             sampleCropPathsByRowIndex = result.sampleCropPathsByRowIndex,
             ocrSampleTextByRowIndex = result.textByRowIndex,
             ocrConfidenceByRowIndex = result.confidenceByRowIndex,
-            ocrLineCountByRowIndex = result.lineCountByRowIndex
+            ocrLineCountByRowIndex = result.lineCountByRowIndex,
+            ocrTokensByRowIndex = result.tokensByRowIndex,
+            ocrTextProjectionsByRowIndex = result.textProjectionsByRowIndex
         )
     }
 

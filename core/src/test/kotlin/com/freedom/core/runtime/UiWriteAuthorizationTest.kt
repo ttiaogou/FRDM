@@ -8,6 +8,62 @@ import org.junit.Test
 
 class UiWriteAuthorizationTest {
     @Test
+    fun pageRouteMustBeReadyAndMatchExactTaskEvenWithinSameMode() {
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val generation = 41L
+        val privateLease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", generation))
+        var route: PageRuntimeSessionState? = PageRuntimeSessionState(
+            generation, privateLease.taskId, RunMode.AI_REPLY, PageRuntimeLifecycle.STARTING, 1L
+        )
+        val gate = UiWriteAuthorization(tasks, { generation }, { RunMode.AI_REPLY }, { route })
+        var writes = 0
+        assertFalse(gate.permits(UiWriteScope.AI_COMPOSER))
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE) { ++writes })
+        route = route?.copy(lifecycle = PageRuntimeLifecycle.READY)
+        assertEquals(1, gate.withBoundAuthorizedWrite(UiWriteScope.AI_COMPOSER, privateLease) { ++writes })
+        route = PageRuntimeSessionState(generation, "AI_REPLY_RECEIVED_GREETINGS", RunMode.AI_REPLY,
+            PageRuntimeLifecycle.STARTING, 2L)
+        assertFalse(gate.permitsBound(UiWriteScope.AI_COMPOSER, privateLease))
+        val greetingLease = requireNotNull(tasks.transfer(privateLease, "AI_REPLY_RECEIVED_GREETINGS"))
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE) { ++writes })
+        route = route?.copy(lifecycle = PageRuntimeLifecycle.READY)
+        assertEquals(2, gate.withBoundAuthorizedWrite(UiWriteScope.VERIFIED_GREETING_COMPOSER, greetingLease) { ++writes })
+        assertNull(gate.withBoundAuthorizedWrite(UiWriteScope.AI_COMPOSER, privateLease) { ++writes })
+        route = route?.copy(lifecycle = PageRuntimeLifecycle.STOPPING)
+        assertFalse(gate.permits(UiWriteScope.VERIFIED_AI_BACK))
+        route = null
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.GLOBAL_NAVIGATION) { ++writes })
+        assertEquals(2, writes)
+    }
+
+    @Test
+    fun directAndBoundWritesRejectPageRevisionChangedDuringFinalValidation() {
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val generation = 41L
+        val lease = requireNotNull(tasks.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", generation))
+        val ready = PageRuntimeSessionState(generation, lease.taskId, RunMode.AI_REPLY,
+            PageRuntimeLifecycle.READY, 1L)
+        var reads = 0
+        var writes = 0
+        val gate = UiWriteAuthorization(tasks, { generation }, { RunMode.AI_REPLY }, {
+            if (++reads == 1) ready else ready.copy(routeRevision = 2L)
+        })
+        assertNull(gate.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE) { ++writes })
+        reads = 0
+        assertNull(gate.withBoundAuthorizedWrite(UiWriteScope.AI_COMPOSER, lease) { ++writes })
+        assertEquals(0, writes)
+
+        val held = UiWriteAuthorization(tasks, { generation }, { RunMode.AI_REPLY }, {
+            ready.copy(lifecycle = PageRuntimeLifecycle.UNCLASSIFIED)
+        })
+        assertFalse(held.permits(UiWriteScope.AUTONOMOUS_GESTURE))
+        assertFalse(held.permitsBound(UiWriteScope.AI_COMPOSER, lease))
+        assertNull(held.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE) { ++writes })
+        assertNull(held.withBoundAuthorizedWrite(UiWriteScope.AI_COMPOSER, lease) { ++writes })
+        assertEquals(0, writes)
+    }
+
+    @Test
     fun noLeaseOrNoRunModeNeverAuthorizesAnAutonomousWrite() {
         val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
         var generation = 1L

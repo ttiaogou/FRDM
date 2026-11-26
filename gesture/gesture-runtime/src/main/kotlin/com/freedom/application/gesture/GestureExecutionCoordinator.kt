@@ -274,6 +274,7 @@ internal class GestureExecutionCoordinator(
         // dispatch wins first, cancelActive treats it as an in-flight platform stroke and drains
         // its callback/watchdog before another command may be submitted.
         var contextFailureBeforeDispatch: String? = null
+        var dispatchTargetRejected = false
         val dispatchAttempt = synchronized(lock) {
             if (activeExecution !== execution || execution.resultDelivered.get()) {
                 null
@@ -303,6 +304,16 @@ internal class GestureExecutionCoordinator(
                                         execution, GestureExecutionStatus.CANCELLED, "android_gesture_cancelled"
                                     )
                                 }
+                            }, canDispatch = {
+                                val targetCurrent = runCatching {
+                                    execution.listener.isDispatchTargetCurrent(command.id)
+                                }.getOrDefault(false)
+                                val stillCurrent = targetCurrent &&
+                                    activeExecution === execution && !execution.resultDelivered.get() &&
+                                    execution.cancellationRequestedReason == null &&
+                                    executionContextFailure(command.executionContext) == null
+                                if (!stillCurrent) dispatchTargetRejected = true
+                                stillCurrent
                             }) {
                                 runCatching {
                                     execution.listener.onDispatched(command.id, uptimeClockMillis())
@@ -401,7 +412,8 @@ internal class GestureExecutionCoordinator(
                 )
             }
             GestureSubmission.REJECTED -> settleFromPlatform(
-                execution, GestureExecutionStatus.REJECTED, "android_rejected_gesture",
+                execution, GestureExecutionStatus.REJECTED,
+                if (dispatchTargetRejected) "dispatch_target_unverified" else "android_rejected_gesture",
                 notifyListener = execution.wasQueued || execution.asyncResultRequired
             )
         }

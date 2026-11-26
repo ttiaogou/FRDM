@@ -7,6 +7,39 @@ import org.junit.Test
 
 class TaskExecutionControllerTest {
     @Test
+    fun repeatedConfirmationOfCurrentLeaseDoesNotEmitNewOwnershipLogs() {
+        val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val logs = mutableListOf<String>()
+        val execution = TaskExecutionController(coordinator, { 4L }, logs::add)
+        execution.beginRun(4L)
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "startup"))
+        val initialLease = requireNotNull(coordinator.currentLease())
+        repeat(300) {
+            assertTrue(execution.claim("ACCOUNT_BROWSE", "external refresh"))
+            assertEquals(initialLease, coordinator.currentLease())
+        }
+        assertEquals(1, logs.size)
+        assertTrue(logs.single().contains("OWNED"))
+        assertTrue(execution.claim("AI_REPLY_PRIVATE_MESSAGES", "verified handoff"))
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", coordinator.activeTaskId())
+        assertEquals(2, logs.size)
+        assertTrue(execution.release("AI_REPLY_PRIVATE_MESSAGES", "stop"))
+        assertEquals(3, logs.size)
+    }
+
+    @Test
+    fun isolatedRepeatedConfirmationDoesNotEmitNewOwnershipLogs() {
+        val logs = mutableListOf<String>()
+        val execution = TaskExecutionController(null, { 4L }, logs::add)
+        execution.beginRun(4L)
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "startup"))
+        repeat(300) { assertTrue(execution.claim("ACCOUNT_BROWSE", "external refresh")) }
+        assertEquals(1, logs.size)
+        assertTrue(execution.claim("AI_REPLY_PRIVATE_MESSAGES", "handoff"))
+        assertEquals(2, logs.size)
+    }
+
+    @Test
     fun oneControllerCanTransferOwnershipBetweenBusinessTasksWithoutAnUnownedGap() {
         val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
         val execution = TaskExecutionController(coordinator, currentRunGeneration = { 4L })
@@ -111,6 +144,46 @@ class TaskExecutionControllerTest {
         assertFalse(execution.owns("AI_REPLY_PRIVATE_MESSAGES"))
         assertTrue(execution.claim("AI_REPLY_PRIVATE_MESSAGES", "new run"))
         assertTrue(execution.owns("AI_REPLY_PRIVATE_MESSAGES"))
+    }
+
+    @Test
+    fun releaseAndResetRetireCapabilitiesEvenWhenReleaseDiagnosticsFail() {
+        val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var generation = 4L
+        var failLog = false
+        val execution = TaskExecutionController(coordinator, { generation }) {
+            if (failLog) error("diagnostic sink unavailable")
+        }
+        execution.beginRun(generation)
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "startup"))
+        failLog = true
+        assertTrue(execution.release("ACCOUNT_BROWSE", "page exit"))
+        assertFalse(execution.owns("ACCOUNT_BROWSE"))
+        assertEquals(null, coordinator.currentLease())
+
+        failLog = false
+        assertTrue(execution.claim("ACCOUNT_BROWSE", "restart"))
+        generation++
+        coordinator.advanceRunGeneration(generation)
+        val replacement = requireNotNull(coordinator.tryAcquire("AI_REPLY_PRIVATE_MESSAGES", generation))
+        failLog = true
+        execution.reset("stale page exit")
+        assertEquals(replacement, coordinator.currentLease())
+        assertFalse(execution.owns("ACCOUNT_BROWSE"))
+
+        failLog = false
+        val isolated = TaskExecutionController(null, { generation }) {
+            if (failLog) error("diagnostic sink unavailable")
+        }
+        assertTrue(isolated.claim("ACCOUNT_BROWSE", "isolated start"))
+        failLog = true
+        assertTrue(isolated.release("ACCOUNT_BROWSE", "isolated release"))
+        assertFalse(isolated.owns("ACCOUNT_BROWSE"))
+        failLog = false
+        assertTrue(isolated.claim("ACCOUNT_BROWSE", "isolated restart"))
+        failLog = true
+        isolated.reset("isolated reset")
+        assertFalse(isolated.owns("ACCOUNT_BROWSE"))
     }
 
     @Test

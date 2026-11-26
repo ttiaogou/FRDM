@@ -91,22 +91,22 @@ class FreedomAccessibilityService : AccessibilityService() {
             onLog = ::addLog,
             onGlobalTouch = { type, eventTimeMs, callbackUptimeMs, packageName, windowId ->
                 touchInteractionMonitor.record(type, eventTimeMs, callbackUptimeMs, packageName, windowId)
+                inputOriginClassifier.noteExpectedNavigationTouch(eventTimeMs)
             },
             onWindowTransition = ::handleAccessibilityWindowTransition,
             pipeline = accessibilityEventPipeline,
             currentRunGeneration = runSessionCoordinator::currentRunGeneration,
-            currentWindowGeneration = accessibilityGateway::currentWindowGeneration
+            currentWindowGeneration = accessibilityGateway::currentWindowGeneration,
+            onFilteredWindowObservation = { sourcePackage ->
+                // Freedom's own log/overlay refresh cannot wake the entry reader.
+                if (sourcePackage != packageName) dependencies.requestIndependentPageObservation()
+            }
         )
     }
 
     private val targetChangedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (!monitorRepository.isRunRequested() ||
-                runSessionCoordinator.activeMode() == RunMode.ACCOUNT_BROWSE
-            ) {
-                runSessionCoordinator.resetRuntime(RunMode.ACCOUNT_BROWSE, "监听目标已更新")
-            }
-            runSessionCoordinator.resetRuntime(RunMode.AI_REPLY, "监听目标已更新")
+            runSessionCoordinator.onTargetPackageChanged("监听目标已更新")
             activityRecoveryCoordinator.stop()
             windowContextTracker.clearActivityClass()
             LatestAccessibilityNodeDump.clear()
@@ -121,6 +121,8 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     private val refreshReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            // Only an explicit external refresh may reconcile or wake a runtime.
+            if (intent?.action != MonitorActions.ACTION_REFRESH) return
             runSessionCoordinator.onExternalRefresh()
             applyTargetPackageFilter()
             if (!monitorRepository.isRunRequested()) {
@@ -382,8 +384,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             addAction(GestureCalibrationContract.ACTION_CANCEL_CALIBRATION)
         }
         serviceReceiverRegistry.register(gestureCalibrationController.receiver, calibrationFilter)
-        // Apply the persisted run-mode subscription before reconnecting its runtime, then
-        // reconcile once more in case recovery had to stop an invalid/restored run.
+        // Subscribe to target observations before reconciling the run authorization.
         applyTargetPackageFilter()
         serviceRecoveryCoordinator.onServiceConnected()
         applyTargetPackageFilter()
@@ -401,7 +402,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             currentState = "CONNECTED",
             result = "CONNECTED"
         )
-        addLog("无障碍服务已连接；按运行模式应用目标包名和事件类型订阅策略")
+        addLog("无障碍服务已连接；按运行授权应用目标包名和事件类型订阅策略")
     }
 
     private fun applyTargetPackageFilter() {
@@ -412,7 +413,8 @@ class FreedomAccessibilityService : AccessibilityService() {
             val subscription = AndroidAccessibilitySubscriptionPolicy.forRunMode(
                 targetPackage = targetPackage,
                 fallbackPackage = packageName,
-                runMode = activeMode
+                runMode = activeMode,
+                runRequested = monitorRepository.isRunRequested()
             )
             val signature = "${subscription.packageNames?.joinToString(",") ?: "<GLOBAL_FOR_BROWSE_TOUCH>"}|${subscription.eventTypes}"
             if (signature == lastAppliedSubscriptionSignature) return
@@ -440,8 +442,9 @@ class FreedomAccessibilityService : AccessibilityService() {
                         "额外接收系统全局触摸开始/结束事件用于用户优先权仲裁；不读取非目标应用节点"
                 )
                 null -> addLog(
-                    "无障碍订阅：空闲；目标包名白名单=${subscription.packageNames?.joinToString().orEmpty()}；" +
-                        "仅订阅项目所需事件类型"
+                    if (monitorRepository.isRunRequested())
+                        "无障碍订阅：统一页面观察待命；业务尚未分配；普通事件仍严格过滤目标包名"
+                    else "无障碍订阅：空闲；仅订阅目标包名事件"
                 )
             }
         }.onFailure {
@@ -489,7 +492,8 @@ class FreedomAccessibilityService : AccessibilityService() {
                 sourcePageGeneration = pairedSource ?: sourcePageGeneration,
                 targetPageGeneration = accessibilityGateway.currentWindowGeneration(),
                 targetWindowId = runCatching { event.windowId }.getOrDefault(-1),
-                transitionAtUptimeMs = event.eventTime
+                transitionAtUptimeMs = event.eventTime,
+                runGeneration = runSessionCoordinator.currentRunGeneration()
             )
             val attachedSelfNavigation = inputOriginClassifier.takeAttachedSelfNavigation()
             // Business-facing navigation attribution now crosses the same normalized entry.
@@ -529,6 +533,7 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         activityRecoveryCoordinator.stop()
+        windowContextTracker.discardPlatformRecoveryEvidence()
         diagnostics.recordStructured(
             eventType = "accessibility_service_interrupted",
             category = RunLogCategory.LIFECYCLE,
@@ -579,7 +584,8 @@ class FreedomAccessibilityService : AccessibilityService() {
             "无障碍服务销毁；应用就绪状态失效",
             android.os.SystemClock.uptimeMillis()
         )
-        // Release leases before shutting down OCR and clearing the main Handler queue.
+        // Seal the route and release its lease before shutting down adapters and callbacks.
+        runSessionCoordinator.onServiceDestroyed()
         MonitorOverlay.releaseAllObservationVisibility("AccessibilityService.onDestroy")
         overlayPort.clearNodeBoundsHighlight()
         NodeHierarchyOverlay.clear()
@@ -592,8 +598,6 @@ class FreedomAccessibilityService : AccessibilityService() {
             serviceRecoveryCoordinator.onServiceDestroyed()
         }
         mainHandler.removeCallbacksAndMessages(null)
-        runSessionCoordinator.onAccessibilityServiceDisconnected()
-        runSessionCoordinator.onServiceDestroyed()
         if (accessibilityEventPipelineDelegate.isInitialized()) {
             accessibilityEventPipeline.resetDuplicateWindow()
         }

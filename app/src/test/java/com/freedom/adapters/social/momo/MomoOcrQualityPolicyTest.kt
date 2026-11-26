@@ -16,24 +16,24 @@ class MomoOcrQualityPolicyTest {
     }
 
     @Test
-    fun recognizedTextWithVisualMarkerRemainsModelInput() {
+    fun recognizedTextWithVisualMarkerIsAmbiguous() {
         assertEquals(
-            MessageContentQuality.VERIFIED,
+            MessageContentQuality.AMBIGUOUS,
             MomoOcrQualityPolicy.classify("在吗${MomoOcrVisualSymbolGuard.UNKNOWN_VISUAL_SYMBOL}")
         )
     }
 
     @Test
-    fun recognizedTextWithPunctuationMarkerRemainsModelInput() {
+    fun recognizedTextWithPunctuationMarkerIsAmbiguous() {
         assertEquals(
-            MessageContentQuality.VERIFIED,
+            MessageContentQuality.AMBIGUOUS,
             MomoOcrQualityPolicy.classify("你好${MomoOcrVisualSymbolGuard.UNCERTAIN_TEXT_SYMBOL}")
         )
     }
 
     @Test
-    fun symbolOnlyRecognizedTextIsNotBlockedByTrustClassification() {
-        assertEquals(MessageContentQuality.VERIFIED, MomoOcrQualityPolicy.classify(")("))
+    fun symbolOnlyRecognizedTextIsAmbiguous() {
+        assertEquals(MessageContentQuality.AMBIGUOUS, MomoOcrQualityPolicy.classify(")("))
     }
 
     @Test
@@ -42,10 +42,39 @@ class MomoOcrQualityPolicyTest {
     }
 
     @Test
-    fun recognizedTextWithUncertainLineMarkerRemainsModelInput() {
+    fun recognizedTextWithUncertainLineMarkerIsAmbiguous() {
         assertEquals(
-            MessageContentQuality.VERIFIED,
+            MessageContentQuality.AMBIGUOUS,
             MomoOcrQualityPolicy.classify("${MomoOcrVisualSymbolGuard.UNCERTAIN_SYMBOL_ONLY} 在吗a")
         )
+    }
+
+    @Test
+    fun visualMarkersInTheMiddleOfReadableTextRemainAmbiguous() {
+        val markers = listOf(
+            MomoOcrVisualSymbolGuard.UNKNOWN_VISUAL_SYMBOL,
+            MomoOcrVisualSymbolGuard.UNCERTAIN_TEXT_SYMBOL,
+            MomoOcrVisualSymbolGuard.UNCERTAIN_SYMBOL_ONLY
+        )
+        markers.forEach { marker ->
+            assertEquals(
+                MessageContentQuality.AMBIGUOUS,
+                MomoOcrQualityPolicy.classify("你好${marker}还没睡吗")
+            )
+        }
+    }
+
+    @Test
+    fun standaloneEmojiKeycapsAndPunctuationDoNotBecomeVerifiedText() {
+        listOf("😊", "❤️", "1️⃣", "?!", "....").forEach { symbol ->
+            assertEquals(MessageContentQuality.AMBIGUOUS, MomoOcrQualityPolicy.classify(symbol))
+        }
+    }
+
+    @Test
+    fun normalTextWithPunctuationAndNumbersStaysVerified() {
+        listOf("晚上好😊", "Hi :)", "8点见？", "666").forEach { text ->
+            assertEquals(MessageContentQuality.VERIFIED, MomoOcrQualityPolicy.classify(text))
+        }
     }
 }

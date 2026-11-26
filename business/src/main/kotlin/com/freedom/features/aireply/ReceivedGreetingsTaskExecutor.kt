@@ -3,6 +3,7 @@ package com.freedom.features.aireply
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 
@@ -10,7 +11,7 @@ import com.freedom.features.conversation.domain.contact.ContactRowIdentity
  * 收到招呼任务的适配器执行边界。
  *
  * 所有可能推进页面或列表遍历的适配器调用都在这里统一检查当前任务租约；只读状态查询
- * 保持可用。具体重试节律、状态转换和完成后留在当前页面（A 方案）仍由上层任务协调逻辑负责。
+ * 保持可用。具体重试节律、状态转换和完成后的安全返回调度仍由上层任务协调逻辑负责。
  */
 internal class ReceivedGreetingsTaskExecutor(
     private val pagePort: ChatPagePort,
@@ -158,11 +159,25 @@ internal class ReceivedGreetingsTaskExecutor(
         return runCatching { pagePort.deferReceivedGreetingAfterModelFailure() }.getOrDefault(false)
     }
 
-    /** Returns from a verified greetings boundary only when this task still owns UI operations. */
-    fun returnForPriorityCheck(): Boolean {
+    /** Defers an unconfirmed greeting after manual return while retaining its durable record. */
+    fun deferReceivedGreetingAfterManualReturn(): Boolean {
         if (!ownsTask()) return false
+        return runCatching { pagePort.deferReceivedGreetingAfterManualReturn() }.getOrDefault(false)
+    }
+
+    /** Returns from a verified greetings boundary only when this task still owns UI operations. */
+    fun returnForPriorityCheck(): ReceivedGreetingsBackResult {
+        if (!ownsTask()) return ReceivedGreetingsBackResult.OWNERSHIP_REJECTED
         return runCatching { pagePort.returnFromReceivedGreetingsForPriorityCheck() }
-            .getOrDefault(false)
+            .getOrDefault(ReceivedGreetingsBackResult.REJECTED)
+    }
+
+    fun isCompletionReturnIntermediate(): Boolean =
+        runCatching { pagePort.isReceivedGreetingsCompletionReturnIntermediate() }.getOrDefault(false)
+
+    fun confirmCompletionReturn(): Boolean {
+        if (!ownsTask()) return false
+        return runCatching { pagePort.confirmReceivedGreetingsCompletionReturn() }.getOrDefault(false)
     }
 
     /** Completing detail inspection can navigate back to the greetings list, so it is lease-gated. */

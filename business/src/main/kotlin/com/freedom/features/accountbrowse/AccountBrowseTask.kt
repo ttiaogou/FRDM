@@ -27,6 +27,11 @@ class AccountBrowseTask(
         if (status == Status.RUNNING) runtime.performStep()
     }
 
+    fun suspendForPageExit() {
+        runtime.suspendSession()
+        status = Status.IDLE
+    }
+
     fun stop(
         beforeReset: () -> Unit,
         afterReset: () -> Unit

@@ -4,6 +4,8 @@ import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.features.accountbrowse.FeedPositionMatcher
 import com.freedom.features.accountbrowse.ports.FeedGestureProfile
 import com.freedom.core.accessibility.gesture.GestureIntent
+import com.freedom.core.accessibility.gesture.ImagePagingDirection
+import com.freedom.features.accountbrowse.ImageSwipeDirection
 import kotlin.random.Random
 
 /** Stateless scroll-command and return-position policies; it never owns AccountBrowse session data. */
@@ -12,6 +14,15 @@ internal class AccountBrowseScrollExecutor(
 ) {
     fun feedSwipeIntent(bounds: ScreenRect, profile: FeedGestureProfile): GestureIntent.FeedSwipe =
         GestureIntent.FeedSwipe(viewport = bounds, durationMs = profile.durationMillis)
+
+    fun imagePagingSwipeIntent(bounds: ScreenRect, direction: ImageSwipeDirection): GestureIntent.ImagePagingSwipe =
+        GestureIntent.ImagePagingSwipe(
+            viewport = bounds,
+            direction = when (direction) {
+                ImageSwipeDirection.RIGHT -> ImagePagingDirection.RIGHT
+                ImageSwipeDirection.LEFT -> ImagePagingDirection.LEFT
+            }
+        )
 
     fun isFeedPositionRestored(expectedSnapshot: String, currentSnapshot: String): Boolean =
         FeedPositionMatcher.isPositionRestored(

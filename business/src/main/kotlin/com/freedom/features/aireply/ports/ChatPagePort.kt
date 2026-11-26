@@ -161,7 +161,10 @@ class ChatListCandidateSnapshot(
     val statusPointNodeObservationCount: Int = 0,
     val statusPointVisibleNodeCount: Int = 0,
     val statusPointValidBoundsNodeCount: Int = 0,
-    val statusPointContainedInRowNodeCount: Int = 0
+    val statusPointContainedInRowNodeCount: Int = 0,
+    /** Read-only evidence that Android clipped the row to the vertical viewport edge.
+     * Not a page fingerprint, contact identity or coordinate execution input. */
+    val rowClippedAtViewportEdge: Boolean = false
 ) {
     /** Assigned by the provider adapter for this exact page snapshot; never reused across refreshes. */
     var contactIdentity: ContactRowIdentity? = null
@@ -294,7 +297,12 @@ data class ChatPageSnapshot(
     /** Adapter-derived semantic locator for navigating to the session list from its main tab host. */
     val sessionListNavigationTarget: SessionListNavigationTarget? = null,
     /** Identity generation of the active Android window; prevents reusing anchors across windows. */
-    val windowGeneration: Long = 0L
+    val windowGeneration: Long = 0L,
+    /** Collection positions from the same inbox observation, not child indexes or contact IDs. */
+    val chatListCollectionRowCount: Int? = null,
+    val chatListVisibleCollectionRows: List<Int> = emptyList(),
+    val chatListCanScrollForward: Boolean? = null,
+    val chatListCanScrollBackward: Boolean? = null
 ) {
     /** Stable physical anchor for the bottom message tab, even while another main tab is active. */
     private fun identityWindowRef() = inputFieldTarget?.window
@@ -520,6 +528,16 @@ enum class ReceivedGreetingsTraversalStatus {
     UNKNOWN
 }
 
+/** One completed-list BACK step; acceptance is never evidence of inbox arrival. */
+enum class ReceivedGreetingsBackResult {
+    BACK_SUBMITTED,
+    GESTURE_IN_FLIGHT,
+    WAITING_FOR_PAGE_CONFIRMATION,
+    SOURCE_UNVERIFIED,
+    REJECTED,
+    OWNERSHIP_REJECTED
+}
+
 /** Result of observing a page the user may be opening manually as the Received Greetings list. */
 enum class ReceivedGreetingsPageArrivalStatus {
     /** Momo is open, but the user has not reached the Received Greetings surface yet. */
@@ -644,6 +662,20 @@ interface ChatPagePort {
      */
     fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean = false
 
+    /**
+     * Read-only projection of an existing greeting navigation stage and its original deadline.
+     * True means only that an unclassified target-app observation may be retried; it does not
+     * identify the destination, renew the deadline, grant a lease, or authorize any UI action.
+     */
+    fun isReceivedGreetingsNavigationAwaitingPageEvidence(snapshot: ChatPageSnapshot): Boolean = false
+
+    /**
+     * Read-only evidence from the existing greeting-detail BACK transaction.
+     * The source must match the accepted BACK window. This does not confirm the destination
+     * or advance the cursor; the original list fingerprint and double-snapshot gate do that.
+     */
+    fun isReceivedGreetingsDetailReturnNavigationActive(source: ChatPageSnapshot): Boolean = false
+
     /** Display name captured from the exact unread greeting row currently being inspected. */
     fun receivedGreetingsCurrentDisplayName(): String? = null
 
@@ -669,6 +701,22 @@ interface ChatPagePort {
      */
     fun deferReceivedGreetingAfterModelFailure(): Boolean = false
 
-    /** Returns from a confirmed received-greetings page so ordinary chat can regain priority. */
-    fun returnFromReceivedGreetingsForPriorityCheck(): Boolean = false
+    /** Records a manually returned, still-unconfirmed greeting row and releases detail state. */
+    fun deferReceivedGreetingAfterManualReturn(): Boolean = false
+
+    /** One lease-gated completed-list BACK step from independently verified source evidence. */
+    fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult =
+        ReceivedGreetingsBackResult.REJECTED
+
+    /** Read-only proof of the intermediate greeting card reached by a submitted list BACK. */
+    fun isReceivedGreetingsCompletionReturnIntermediate(): Boolean = false
+
+    /** Current verified list/card source for recovery of the completed-list BACK transaction. */
+    fun receivedGreetingsCompletionReturnSourceFingerprint(): String? = null
+
+    /** Breaks stale retry samples on a missing window or user interaction; retains submission state. */
+    fun invalidateReceivedGreetingsCompletionReturnEvidence() {}
+
+    /** Finalizes adapter traversal state only after the business layer confirms inbox arrival. */
+    fun confirmReceivedGreetingsCompletionReturn(): Boolean = true
 }

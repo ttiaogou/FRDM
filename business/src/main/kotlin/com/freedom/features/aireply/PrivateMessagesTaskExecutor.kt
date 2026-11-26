@@ -3,7 +3,9 @@ package com.freedom.features.aireply
 import com.freedom.core.accessibility.api.GestureFeedbackIntent
 import com.freedom.core.accessibility.api.GestureSubmission
 import com.freedom.core.accessibility.api.ScreenRect
+import com.freedom.core.accessibility.api.WindowRef
 import com.freedom.core.accessibility.gesture.GestureExecutionResult
+import com.freedom.core.accessibility.gesture.GestureExecutionListener
 import com.freedom.core.accessibility.gesture.GestureIntent
 import com.freedom.core.accessibility.gesture.GestureIntentRequest
 import com.freedom.core.accessibility.gesture.GestureExecutionContext
@@ -36,6 +38,7 @@ internal class PrivateMessagesTaskExecutor(
         AMBIGUOUS_SESSION_IDENTITY,
         SESSION_ROW_NOT_FOUND,
         UNREAD_ADMISSION_CHANGED,
+        TRAVERSAL_ORDER_CHANGED,
         UNSAFE_TAP_BOUNDS,
         MISSING_LIST_VIEWPORT,
         WINDOW_CONTEXT_CHANGED
@@ -45,7 +48,8 @@ internal class PrivateMessagesTaskExecutor(
         data class Rejected(
             val selectedKey: String,
             val reason: RejectionReason,
-            val unreadStatus: ChatUnreadStatus? = null
+            val unreadStatus: ChatUnreadStatus? = null,
+            val confirmedIdentityBlock: Boolean = false
         ) : Attempt
 
         data class Submitted(
@@ -62,37 +66,78 @@ internal class PrivateMessagesTaskExecutor(
     }
 
     fun openSession(
-        candidate: ChatListCandidateSnapshot,
+        selectedKey: String,
+        sourceWindow: WindowRef,
         blockedIdentityKeys: Set<String>,
+        isCurrentTraversalSelection: (ChatPageSnapshot, String) -> Boolean = { _, _ -> true },
+        onGestureDispatched: (String, Long) -> Unit = { _, _ -> },
         onGestureResult: (requestId: String, snapshot: ChatPageSnapshot, selectedKey: String, result: GestureExecutionResult) -> Unit
     ): Attempt {
-        val selectedKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
         if (!ownsTask()) {
             return Attempt.Rejected(selectedKey, RejectionReason.OWNERSHIP_LOST)
         }
 
         val refreshed = inspectFreshPageSnapshot()
         if (refreshed == null || refreshed.pageKind != ChatPageKind.CHAT_LIST ||
-            refreshed.packageName != targetPackage()
+            refreshed.packageName != targetPackage() || refreshed.chatListExtractionTruncated
         ) {
             return Attempt.Rejected(selectedKey, RejectionReason.PAGE_CHANGED)
         }
 
+        val sourceWindowKey = "${sourceWindow.packageName}|windowId=${sourceWindow.windowId}|generation=${sourceWindow.generation}"
+        if (sourceWindow.windowId < 0 || sourceWindow.generation <= 0L ||
+            refreshed.windowIdentityKey() != sourceWindowKey
+        ) return Attempt.Rejected(selectedKey, RejectionReason.WINDOW_CONTEXT_CHANGED)
+
         val refreshedAmbiguousKeys = ChatSessionManagementPolicy.ambiguousSessionIdentityKeys(
             refreshed.chatListCandidates
         )
-        if (selectedKey in blockedIdentityKeys || selectedKey in refreshedAmbiguousKeys) {
-            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY)
+        if (selectedKey in blockedIdentityKeys || selectedKey in refreshedAmbiguousKeys ||
+            sessionPort.isSessionIdentityBlocked(selectedKey)
+        ) {
+            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
+                confirmedIdentityBlock = true)
         }
 
-        val currentCandidate = refreshed.chatListCandidates.firstOrNull {
-            ChatSessionManagementPolicy.stableSessionKey(it) == selectedKey && it.rowIndex == candidate.rowIndex
-        } ?: return Attempt.Rejected(selectedKey, RejectionReason.SESSION_ROW_NOT_FOUND)
+        // The original child index, path and bounds are never part of reacquisition.
+        // Count before eligibility filtering: an incomplete duplicate is still ambiguous.
+        val matches = refreshed.chatListCandidates.filter {
+            it.selectionClass == "PRIVATE_CHAT" &&
+                ChatSessionManagementPolicy.stableSessionKey(it) == selectedKey
+        }
+        if (selectedKey.isBlank() || matches.isEmpty()) {
+            return Attempt.Rejected(selectedKey, RejectionReason.SESSION_ROW_NOT_FOUND)
+        }
+        if (matches.size != 1) {
+            // Repeated extraction of one row is unsafe to click, but does not prove
+            // a collision between two different rows and must remain retryable.
+            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
+                confirmedIdentityBlock = matches.map { it.rowIndex }.distinct().size > 1)
+        }
+        val currentCandidate = matches.single()
+        // A weak title cannot become unique merely because a second same-title row
+        // has a verified ID, incomplete evidence, or is temporarily unclassified.
+        val titleKey = ChatSessionManagementPolicy.stableSessionKeyForTitle(currentCandidate.nameText)
+        val sameTitleRows = refreshed.chatListCandidates.filter {
+            it.selectionClass != "SYSTEM_ENTRY" &&
+                ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) == titleKey
+        }
+        if (selectedKey == titleKey && sameTitleRows.size != 1) {
+            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
+                confirmedIdentityBlock = sameTitleRows.map { it.rowIndex }.distinct().size > 1)
+        }
+        val currentWindow = currentCandidate.rowTarget.window
+        if (currentWindow.packageName != sourceWindow.packageName ||
+            currentWindow.windowId != sourceWindow.windowId ||
+            currentWindow.generation != sourceWindow.generation ||
+            currentWindow.activityClass != refreshed.activityClass
+        ) return Attempt.Rejected(selectedKey, RejectionReason.WINDOW_CONTEXT_CHANGED)
 
         // Reapply the complete admission rule to the fresh snapshot immediately before resolving
         // a tap. The row may have changed from UNREAD to READ/UNKNOWN while the tree was relaid out.
         if (currentCandidate.unreadStatus != ChatUnreadStatus.UNREAD ||
-            !ChatSessionManagementPolicy.isEligible(currentCandidate)
+            !ChatSessionManagementPolicy.isEligible(currentCandidate) ||
+            currentCandidate.rowClippedAtViewportEdge
         ) {
             return Attempt.Rejected(
                 selectedKey,
@@ -122,7 +167,7 @@ internal class PrivateMessagesTaskExecutor(
                 ?: return Attempt.Rejected(selectedKey, RejectionReason.WINDOW_CONTEXT_CHANGED)
 
         val request = GestureIntentRequest(
-            id = "momo-session-${nowMillis()}-${candidate.rowIndex}",
+            id = "momo-session-${nowMillis()}-${currentCandidate.rowIndex}",
             intent = GestureIntent.Tap(
                 preferredBounds = bounds,
                 targetBounds = row,
@@ -130,7 +175,7 @@ internal class PrivateMessagesTaskExecutor(
                 displayBounds = visibleViewport,
                 feedbackIntent = GestureFeedbackIntent.NAVIGATION_ENTRY
             ),
-            description = "AI 会话管理：打开已复核的会话行 ${candidate.rowIndex + 1}",
+            description = "AI 会话管理：打开已复核的会话行 ${currentCandidate.rowIndex + 1}",
             executionContext = executionContext
         )
 
@@ -140,8 +185,27 @@ internal class PrivateMessagesTaskExecutor(
             return Attempt.Rejected(selectedKey, RejectionReason.OWNERSHIP_LOST)
         }
 
+        if (selectedKey in blockedIdentityKeys || sessionPort.isSessionIdentityBlocked(selectedKey)) {
+            return Attempt.Rejected(selectedKey, RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
+                confirmedIdentityBlock = true)
+        }
+        if (!isCurrentTraversalSelection(refreshed, selectedKey)) {
+            return Attempt.Rejected(selectedKey, RejectionReason.TRAVERSAL_ORDER_CHANGED)
+        }
         val submission = runCatching {
-            gesturePolicy.execute(request) { result -> onGestureResult(request.id, refreshed, selectedKey, result) }
+            gesturePolicy.execute(request, object : GestureExecutionListener {
+                override fun isDispatchTargetCurrent(commandId: String): Boolean =
+                    commandId == request.id && preparedTargetStillCurrent(
+                        selectedKey, sourceWindow, row, bounds, visibleViewport,
+                        blockedIdentityKeys, isCurrentTraversalSelection
+                    )
+
+                override fun onDispatched(commandId: String, dispatchedAtUptimeMs: Long) =
+                    onGestureDispatched(commandId, dispatchedAtUptimeMs)
+
+                override fun onResult(result: GestureExecutionResult) =
+                    onGestureResult(request.id, refreshed, selectedKey, result)
+            })
         }.getOrDefault(GestureSubmission.REJECTED)
 
         return Attempt.Submitted(
@@ -151,5 +215,48 @@ internal class PrivateMessagesTaskExecutor(
             requestId = request.id,
             submission = submission
         )
+    }
+
+    /** The compiled trajectory is immutable. Only fresh, unique identity and identical
+     * safe geometry may authorize it after FIFO/visualization/pre-dispatch delay. */
+    private fun preparedTargetStillCurrent(
+        selectedKey: String,
+        sourceWindow: WindowRef,
+        preparedRow: ScreenRect,
+        preparedTapBounds: ScreenRect,
+        preparedViewport: ScreenRect,
+        blockedIdentityKeys: Set<String>,
+        isCurrentTraversalSelection: (ChatPageSnapshot, String) -> Boolean
+    ): Boolean {
+        if (!ownsTask() || selectedKey in blockedIdentityKeys ||
+            sessionPort.isSessionIdentityBlocked(selectedKey)
+        ) return false
+        val fresh = inspectFreshPageSnapshot() ?: return false
+        val expectedWindow = "${sourceWindow.packageName}|windowId=${sourceWindow.windowId}|generation=${sourceWindow.generation}"
+        if (fresh.pageKind != ChatPageKind.CHAT_LIST || fresh.packageName != targetPackage() ||
+            fresh.chatListExtractionTruncated || fresh.windowIdentityKey() != expectedWindow ||
+            fresh.chatListViewport != preparedViewport
+        ) return false
+        val row = fresh.chatListCandidates.filter {
+            it.selectionClass == "PRIVATE_CHAT" && ChatSessionManagementPolicy.stableSessionKey(it) == selectedKey
+        }.singleOrNull() ?: return false
+        val titleKey = ChatSessionManagementPolicy.stableSessionKeyForTitle(row.nameText)
+        if (selectedKey == titleKey && fresh.chatListCandidates.count {
+                it.selectionClass != "SYSTEM_ENTRY" &&
+                    ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) == titleKey
+            } != 1
+        ) return false
+        if (selectedKey in ChatSessionManagementPolicy.ambiguousSessionIdentityKeys(fresh.chatListCandidates) ||
+            row.rowTarget.window != sourceWindow ||
+            row.rowTarget.window.activityClass != fresh.activityClass ||
+            row.unreadStatus != ChatUnreadStatus.UNREAD || !ChatSessionManagementPolicy.isEligible(row) ||
+            row.rowClippedAtViewportEdge || row.rowBounds != preparedRow ||
+            !isCurrentTraversalSelection(fresh, selectedKey)
+        ) return false
+        // The adapter performs its existing live node/overlay and safe-bounds checks.
+        // A change invalidates this command; recovery will build a new one.
+        return sessionPort.resolveSessionTapBounds(fresh, row) == preparedTapBounds &&
+            ownsTask() && selectedKey !in blockedIdentityKeys &&
+            !sessionPort.isSessionIdentityBlocked(selectedKey)
     }
 }

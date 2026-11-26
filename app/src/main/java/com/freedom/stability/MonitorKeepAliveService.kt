@@ -32,8 +32,7 @@ class MonitorKeepAliveService : Service() {
             val repository = FreedomApplication.root(this).monitorRepository
             repository.addLog(
                 "运行请求停止[REQUESTED]：source=MonitorKeepAliveService.ACTION_STOP；" +
-                    "previousRunRequested=${repository.isRunRequested()}；" +
-                    "previousMode=${repository.activeMode()?.name ?: "NONE"}"
+                    "previousRunRequested=${repository.isRunRequested()}"
             )
             repository.setRunRequested(false)
             sendBroadcast(Intent(MonitorActions.ACTION_REFRESH).setPackage(packageName))

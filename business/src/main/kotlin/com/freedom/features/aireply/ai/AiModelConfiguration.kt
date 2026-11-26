@@ -126,7 +126,7 @@ data class AiModelConfiguration(
 
     companion object {
         const val DEFAULT_TEMPERATURE = 0.3
-        const val DEFAULT_MAX_OUTPUT_TOKENS = 512
+        const val DEFAULT_MAX_OUTPUT_TOKENS = 256
         const val DEFAULT_REQUEST_TIMEOUT_MILLIS = 30_000L
         const val MIN_REQUEST_TIMEOUT_MILLIS = 1_000L
         const val MAX_REQUEST_TIMEOUT_MILLIS = 180_000L

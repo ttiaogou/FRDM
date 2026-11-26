@@ -1,6 +1,8 @@
 package com.freedom.core.runtime
 
+import com.freedom.core.accessibility.api.WindowRef
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -75,6 +77,45 @@ class TargetAppReadinessTest {
         controller.invalidate("run stopped", 5_310L)
         assertEquals(TargetAppReadinessStatus.UNKNOWN, controller.current().status)
         assertTrue(transitions.contains(TargetAppReadinessStatus.READY to TargetAppReadinessStatus.UNKNOWN))
+    }
+
+    @Test
+    fun greetingsReturnRequiresFreshReadyForExactRecoveredWindowBeforeActionPreparation() {
+        val controller = TargetAppReadinessController(foregroundQuietPeriodMs = 0L)
+        val list = readyEvidence().copy(
+            activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity",
+            windowId = 3083,
+            pageGeneration = 24L
+        )
+        val window = WindowRef(list.targetPackage, list.activityClass, list.pageGeneration, list.windowId)
+        val missing = controller.evaluate(list.copy(activityClass = ""), 100L)
+        repeat(6) {
+            assertFalse(missing.isReadyForWindow(window, RunMode.AI_REPLY))
+        }
+        val ready = controller.evaluate(list, 200L)
+        assertTrue(ready.isReadyForWindow(window, RunMode.AI_REPLY))
+        assertFalse(ready.isReadyForWindow(window.copy(activityClass = ""), RunMode.AI_REPLY))
+        assertFalse(ready.isReadyForWindow(window.copy(windowId = 3097), RunMode.AI_REPLY))
+        assertFalse(ready.isReadyForWindow(window.copy(generation = 25L), RunMode.AI_REPLY))
+        assertFalse(ready.isReadyForWindow(window.copy(packageName = "other"), RunMode.AI_REPLY))
+        assertFalse(ready.isReadyForWindow(window, RunMode.ACCOUNT_BROWSE))
+        assertFalse(controller.evaluate(list.copy(blockingReason = "overlay"), 300L)
+            .isReadyForWindow(window, RunMode.AI_REPLY))
+        controller.invalidate("stop", 400L)
+        assertFalse(controller.current().isReadyForWindow(window, RunMode.AI_REPLY))
+    }
+
+    @Test
+    fun foregroundQuietHintUsesExistingClockAndDoesNotAuthorizeOrAdvanceReadiness() {
+        val controller = TargetAppReadinessController()
+        assertEquals(null, controller.foregroundQuietRemainingMs(100L))
+        controller.observeForegroundPackage(TARGET_PACKAGE, TARGET_PACKAGE, 100L)
+        assertEquals(5_000L, controller.foregroundQuietRemainingMs(100L))
+        assertEquals(1L, controller.foregroundQuietRemainingMs(5_099L))
+        assertEquals(0L, controller.foregroundQuietRemainingMs(5_100L))
+        assertEquals(TargetAppReadinessStatus.UNKNOWN, controller.current().status)
+        controller.observeForegroundPackage(TARGET_PACKAGE, "com.android.systemui", 5_200L)
+        assertEquals(null, controller.foregroundQuietRemainingMs(5_200L))
     }
 
     @Test

@@ -40,10 +40,14 @@ import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.accessibility.api.WindowRef
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.PageFingerprint
 import com.freedom.core.runtime.TargetAppPageReadiness
+import com.freedom.core.runtime.TargetAppReadinessSnapshot
+import com.freedom.core.runtime.TargetAppReadinessStatus
 import com.freedom.features.accountbrowse.ports.*
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.domain.message.MessageReadStatus
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatPageNodeEvidence
@@ -102,8 +106,8 @@ internal class MomoSocialAdapter(
     private val receivedGreetingsSendReturnRepository: ReceivedGreetingsSendReturnRepository,
     private val ocrReviewRepository: OcrReviewRepository,
     private val sampleArchivePort: SessionSampleArchivePort,
-    /** Registers the imminent profile-to-chat return in the unified navigation provenance layer. */
-    private val registerSelfNavigation: (String) -> Unit = {},
+    /** Fresh observation from the existing Android READY owner; not a UI write grant. */
+    private val inspectReceivedGreetingsReadiness: () -> TargetAppReadinessSnapshot,
     /** The AI task lease must still be current when a send gesture is admitted. */
     private val isAiReplyUiOperationOwned: () -> Boolean = { true },
     /** Exact lease captured at model admission; task handoff revokes old async callbacks. */
@@ -210,10 +214,13 @@ internal class MomoSocialAdapter(
         @Volatile var lastTransitionAtMs: Long = lastTransitionAtMs
         @Volatile var platformUserId: String? = null
         @Volatile var profileReadCompleted: Boolean = false
-        /** Set only after a fresh current-window snapshot passes the existing profile-page check. */
+        /** Set only after the unique platform ID has been read in the current transaction. */
         @Volatile var profileEntryVerified: Boolean = false
         @Volatile var profileScrollAttempted: Boolean = false
         @Volatile var profileScrollInFlight: Boolean = false
+        @Volatile var profileScrollWindowId: Int = -1
+        @Volatile var profileScrollSettledAtMs: Long = 0L
+        val profileDeferredRetryGate = MomoSayHiProfileDeferredRetryGate()
         @Volatile var backAttempts: Int = 0
         @Volatile var avatarClickState: MomoAvatarClickTransactionState =
             MomoAvatarClickTransactionState.AVATAR_CLICK_PREPARING
@@ -279,10 +286,18 @@ internal class MomoSocialAdapter(
         onLog = onLog,
         latestDialogWindowObservation = latestDialogWindowObservation,
         isSayHiProfileScrollPending = { windowId ->
-            sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_SCROLL_PENDING &&
-                sayHiProfileScrollInFlight && sayHiProfileScrollWindowId == windowId
+            (sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_SCROLL_PENDING &&
+                sayHiSelectedGreeting != null &&
+                sayHiProfileScrollInFlight && sayHiProfileScrollWindowId == windowId) ||
+                pendingInboxIdentityCapture?.let {
+                    it.stage == InboxIdentityCaptureStage.WAITING_PROFILE &&
+                        it.profileScrollInFlight && it.profileScrollWindowId == windowId
+                } == true
         },
-        sayHiProfileScrollWindowId = { sayHiProfileScrollWindowId }
+        sayHiProfileScrollWindowId = {
+            pendingInboxIdentityCapture?.takeIf { it.profileScrollInFlight }?.profileScrollWindowId
+                ?: sayHiProfileScrollWindowId
+        }
     )
 
     private val sayHiNavigationEvidenceInspector = MomoSayHiNavigationEvidenceInspector()
@@ -292,8 +307,9 @@ internal class MomoSocialAdapter(
     private val sayHiSnapshotCoordinator = MomoSayHiListSnapshotCoordinator(
         recoveryPolicy = sayHiListSnapshotRecoveryPolicy,
         isNavigationRelevant = {
-            sayHiNavigationFlowController.isReceivedListConfirmed() ||
-                sayHiNavigationFlowController.isWaitingForReceivedList()
+            (sayHiNavigationFlowController.isReceivedListConfirmed() ||
+                sayHiNavigationFlowController.isWaitingForReceivedList()) &&
+                (!isSayHiChatNavigationInProgress() || isReceivedGreetingsListStructureVisible())
         },
         isGestureBusy = { sayHiGestureInFlight },
         beforeFreshInspection = { lastSayHiInspectionAtMs = 0L },
@@ -319,6 +335,9 @@ internal class MomoSocialAdapter(
     @Volatile private var manualReceivedGreetingsArrivalProbeActive: Boolean = false
     @Volatile private var sayHiCardListTapPending: Boolean = false
     @Volatile private var sayHiGestureInFlight: Boolean = false
+    private enum class CompletionBackStage { NONE, LIST_SUBMITTED, CARD_SUBMITTED }
+    @Volatile private var completionBackStage = CompletionBackStage.NONE
+    private val completionBackRetryGate = MomoCompletionBackRetryGate(SAYHI_DETAIL_BACK_TIMEOUT_MS)
     @Volatile private var receivedGreetingsEntryTapAtMs: Long = 0L
     @Volatile private var sayHiCardListTapAtMs: Long = 0L
     @Volatile private var lastSayHiCardListTapAtMs: Long = 0L
@@ -347,6 +366,7 @@ internal class MomoSocialAdapter(
     private var sayHiPendingVerifiedReturnRow: String? = null
     @Volatile private var sayHiProfileReadAttempts: Int = 0
     @Volatile private var sayHiProfileScrollAttempted: Boolean = false
+    private val sayHiProfileDeferredRetryGate = MomoSayHiProfileDeferredRetryGate()
     @Volatile private var sayHiProfileScrollFailed: Boolean = false
     @Volatile private var sayHiProfileScrollInFlight: Boolean = false
     @Volatile private var sayHiProfileScrollWindowId: Int = -1
@@ -489,6 +509,90 @@ internal class MomoSocialAdapter(
         } else null
     }
 
+    /**
+     * Entry observation reuses the existing inspectors on one live target root. No identity
+     * transaction, navigation, business checkpoint, gesture or task lease is touched here.
+     */
+    internal fun inspectUnifiedEntryPage(currentTaskId: String?): Pair<PageFingerprint, Boolean>? =
+        rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(window)
+            ) return@withActiveTargetRoot null
+            val greetings = sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage)
+            val dynamic = browseComponents.pageInspector.inspectMomoFeedReadiness(root).fingerprint
+            // Preserve the dedicated greetings-list inspection boundary.
+            val chat = if (greetings) null else chatComponents.pageInspector.inspectRoot(
+                root = AccessibilityNodeInfo.obtain(root),
+                targetPackage = targetPackage,
+                activityClass = window.activityClass
+            )
+            if (!accessibilityGateway.isWindowCurrent(window)) return@withActiveTargetRoot null
+            val privateList = chat?.pageType == MomoChatPageType.CHAT_LIST
+            val matches = listOf(greetings, dynamic != null, privateList).count { it }
+            val fingerprint = when {
+                matches != 1 -> PageFingerprint(targetPackage, window.activityClass, "UNKNOWN", null)
+                greetings -> PageFingerprint(
+                    targetPackage, window.activityClass, ChatPageKind.NON_CHAT.name,
+                    MomoWindowPageFingerprint.windowIdentity(window, targetPackage, "RECEIVED_GREETINGS_LIST")
+                )
+                dynamic != null -> PageFingerprint(
+                    targetPackage, window.activityClass, BrowsePageKind.DYNAMIC_FEED.name,
+                    MomoWindowPageFingerprint.create(window, targetPackage, BrowsePageKind.DYNAMIC_FEED.name, dynamic.signature)
+                )
+                else -> PageFingerprint(targetPackage, window.activityClass, ChatPageKind.CHAT_LIST.name, null)
+            }
+            // A conflicting or recognized top-level page cannot inherit a previous task's
+            // authorization. Only a non-top-level page can retain the existing task,
+            // using the same fresh root and existing structural evidence.
+            val ownedNestedPage = if (matches == 0 && currentTaskId != null && chat != null) {
+                val verified = when (currentTaskId) {
+                    "ACCOUNT_BROWSE" ->
+                        chat.pageType != MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
+                            inspectGesturePageReadiness(root, window.activityClass, RunMode.ACCOUNT_BROWSE).ready
+                    "AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS" -> {
+                        val profileTransaction = if (currentTaskId == "AI_REPLY_PRIVATE_MESSAGES") {
+                            pendingInboxIdentityCapture != null
+                        } else {
+                            sayHiSelectedGreeting != null && sayHiReadOnlyStage in setOf(
+                                SayHiReadOnlyStage.AVATAR_TAP_PENDING, SayHiReadOnlyStage.WAITING_PROFILE,
+                                SayHiReadOnlyStage.PROFILE_SCROLL_PENDING, SayHiReadOnlyStage.PROFILE_BACK_PENDING
+                            )
+                        }
+                        // Page structure is not conversation identity. Existing business header,
+                        // identity, window and per-operation safety checks are still mandatory.
+                        val chatConfirmed = chat.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
+                            chat.hasStableChatDetailFingerprint && !chat.chatTitleText.isNullOrBlank()
+                        val cardConfirmed = currentTaskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                            window.activityClass == MomoSayHiPageContract.CARD_ACTIVITY &&
+                            pageInspectionComponents.gestureReadinessInspector.hasVisibleViewId(
+                                root, setOf(MomoSayHiPageContract.CARD_CONTENT_VIEW_ID, MomoSayHiPageContract.CARD_CLOSE_VIEW_ID)
+                            )
+                        chatConfirmed || cardConfirmed || (profileTransaction && isSayHiProfileSurfacePresent())
+                    }
+                    else -> false
+                }
+                verified
+            } else false
+            if (!accessibilityGateway.isWindowCurrent(window)) return@withActiveTargetRoot null
+            fingerprint to ownedNestedPage
+        }
+
+    /** Reuse the existing image-browser readiness check and canonical window identity.
+     * No image-content anchors, coordinates or new structural fingerprint are required.
+     */
+    private fun confirmedImageBrowserIdentity(root: AccessibilityNodeInfo, window: WindowRef): String? {
+        if (!isImageBrowserActivity(window.activityClass) ||
+            window.packageName != targetPackage || window.windowId < 0 ||
+            !accessibilityGateway.isWindowCurrent(window) ||
+            observedDialogWindowIdFor(window) != null ||
+            browseComponents.pageInspector.hasMomoHomePageNavigationFingerprint(root)
+        ) return null
+        if (!inspectGesturePageReadiness(root, window.activityClass, RunMode.ACCOUNT_BROWSE).ready ||
+            !accessibilityGateway.isWindowCurrent(window)
+        ) return null
+        return MomoWindowPageFingerprint.windowIdentity(window, targetPackage, BrowsePageKind.IMAGE_VIEWER.name)
+    }
+
     override fun inspectPage(): BrowsePageEvidence = rootAccess.withActiveTargetRoot { root, window ->
         val packageName = safeString { root.packageName?.toString().orEmpty() }
         val activity = window.activityClass
@@ -516,6 +620,9 @@ internal class MomoSocialAdapter(
         val homeFingerprint = if (readiness.fingerprint == null && detail?.identityConfirmed != true) {
             browseComponents.pageInspector.hasMomoHomePageNavigationFingerprint(root)
         } else false
+        val imageBrowserIdentity = if (readiness.fingerprint == null &&
+            detail?.identityConfirmed != true && !homeFingerprint
+        ) confirmedImageBrowserIdentity(root, window) else null
         val fingerprint = when {
             readiness.fingerprint != null -> readiness.fingerprint.signature
             detail?.identityConfirmed == true -> detail.fingerprint.signature
@@ -526,9 +633,10 @@ internal class MomoSocialAdapter(
             readiness.fingerprint != null -> BrowsePageKind.DYNAMIC_FEED
             detail?.identityConfirmed == true -> BrowsePageKind.DETAIL
             homeFingerprint -> BrowsePageKind.HOME
+            imageBrowserIdentity != null -> BrowsePageKind.IMAGE_VIEWER
             else -> BrowsePageKind.OTHER
         }
-        val windowScopedFingerprint = MomoWindowPageFingerprint.create(
+        val windowScopedFingerprint = imageBrowserIdentity ?: MomoWindowPageFingerprint.create(
             window = window,
             targetPackage = targetPackage,
             pageKind = kind.name,
@@ -596,7 +704,7 @@ internal class MomoSocialAdapter(
                 BrowsePageKind.OTHER -> 20
                 BrowsePageKind.HOME -> 85
                 BrowsePageKind.DYNAMIC_FEED, BrowsePageKind.DETAIL -> 100
-                BrowsePageKind.IMAGE_VIEWER -> 0
+                BrowsePageKind.IMAGE_VIEWER -> 100
             },
             reason = when (kind) {
                 BrowsePageKind.UNKNOWN -> "当前窗口不是目标陌陌窗口"
@@ -604,7 +712,7 @@ internal class MomoSocialAdapter(
                 BrowsePageKind.DETAIL -> detail?.reason.orEmpty()
                 BrowsePageKind.HOME -> "首页导航结构指纹确认"
                 BrowsePageKind.OTHER -> "当前陌陌窗口未匹配已验证的页面结构指纹"
-                BrowsePageKind.IMAGE_VIEWER -> "图片浏览器暂时仍采用专属 Activity 与可见内容双重辅助确认"
+                BrowsePageKind.IMAGE_VIEWER -> "图片动态内容已通过原有图片浏览器安全检查与当前窗口身份确认"
             },
             nodeCount = when {
                 readiness.fingerprint != null -> readiness.fingerprint.nodeCount
@@ -855,6 +963,49 @@ internal class MomoSocialAdapter(
         )
     } ?: FeedSelectionResult(null, 0, 0, 0, 0, "当前没有可用的陌陌活动窗口")
 
+    /** Read only the image counter; never use it to identify or authorize a page. */
+    override fun readImageIndex(expectedFingerprint: String): ImageIndexReadResult =
+        runCatching<ImageIndexReadResult> {
+            rootAccess.withActiveTargetRoot { root, window ->
+                val fingerprint = confirmedImageBrowserIdentity(root, window)
+                if (fingerprint == null || fingerprint != expectedFingerprint ||
+                    root.packageName?.toString() != targetPackage ||
+                    root.windowId != window.windowId
+                ) return@withActiveTargetRoot ImageIndexReadResult.Unavailable(
+                    ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED
+                )
+
+                val viewId = "$targetPackage:id/include_feed_tv_index"
+                val nodes = root.findAccessibilityNodeInfosByViewId(viewId).orEmpty()
+                try {
+                    val visible = nodes.filter { it.isVisibleToUser }
+                    if (visible.any {
+                            it.viewIdResourceName != viewId ||
+                                it.packageName?.toString() != targetPackage ||
+                                it.windowId != window.windowId
+                        } || !accessibilityGateway.isWindowCurrent(window)
+                    ) return@withActiveTargetRoot ImageIndexReadResult.Unavailable(
+                        ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED
+                    )
+                    val labels = visible.map { it.text?.toString().orEmpty() }
+                    if (!accessibilityGateway.isWindowCurrent(window)) {
+                        ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED)
+                    } else {
+                        val bounds = Rect()
+                        root.getBoundsInScreen(bounds)
+                        val result = ImageIndexReadResult.fromVisibleLabels(labels, fingerprint, window)
+                        if (!accessibilityGateway.isWindowCurrent(window)) {
+                            ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED)
+                        } else if (result is ImageIndexReadResult.Confirmed && !bounds.isEmpty) {
+                            result.copy(viewport = bounds.toScreenRect())
+                        } else result
+                    }
+                } finally {
+                    nodes.forEach { node -> runCatching { node.recycle() } }
+                }
+            } ?: ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.WINDOW_NOT_CONFIRMED)
+        }.getOrElse { ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.NODE_READ_FAILED) }
+
     override fun inspectDetail(expectedFingerprint: String): DetailEvidence =
         rootAccess.withActiveTargetRoot { root, window ->
             if (window.packageName != targetPackage || window.windowId < 0 ||
@@ -877,6 +1028,20 @@ internal class MomoSocialAdapter(
                 root = root,
                 currentActivity = window.activityClass
             )
+            if (!result.isFeedPage && !result.identityConfirmed) {
+                val imageIdentity = confirmedImageBrowserIdentity(root, window)
+                if (imageIdentity != null) {
+                    return@withActiveTargetRoot DetailEvidence(
+                        isFeedPage = false,
+                        // Like ordinary detail, fresh evidence can rebind after a window
+                        // generation change. The workflow compares two fresh identities
+                        // before BACK rather than authorizing from the old fingerprint.
+                        identityConfirmed = true,
+                        fingerprint = imageIdentity,
+                        reason = "图片动态内容；复用现有页面安全检查与当前窗口代次"
+                    )
+                }
+            }
             val scopedFingerprint = MomoWindowPageFingerprint.create(
                 window = window,
                 targetPackage = targetPackage,
@@ -1030,33 +1195,36 @@ internal class MomoSocialAdapter(
         }
     }
 
+    /**
+     * Uses exactly the final start gates in the shared recovery preflight. No gesture is
+     * admitted here; each caller takes a fresh snapshot and fails closed on missing evidence.
+     */
+    private fun sampleReceivedGreetingsListAdmission(): MomoReceivedGreetingsAdmissionDiagnostic {
+        val confirmedTarget = sayHiConfirmedListTarget
+        return MomoReceivedGreetingsAdmissionDiagnostic(
+            listConfirmed = sayHiNavigationFlowController.isReceivedListConfirmed(),
+            listStructureVisible = runCatching { isReceivedGreetingsListStructureVisible() }.getOrDefault(false),
+            windowTargetPresent = confirmedTarget != null,
+            windowCurrent = runCatching {
+                confirmedTarget?.let { accessibilityGateway.isWindowCurrent(it.window) } == true
+            }.getOrDefault(false),
+            sayHiGestureInFlight = sayHiGestureInFlight,
+            readOnlyStage = sayHiReadOnlyStage.name,
+            entrySearchGestureInFlight = receivedGreetingsEntrySearchGestureInFlight
+        )
+    }
+
     /** Starts the existing read-only browser on the already confirmed current list. */
     override fun beginReceivedGreetingsTaskFromCurrentList(): Boolean {
-        val confirmedTarget = sayHiConfirmedListTarget
-        if (!sayHiNavigationFlowController.isReceivedListConfirmed() ||
-            !isReceivedGreetingsListStructureVisible() ||
-            confirmedTarget == null || !accessibilityGateway.isWindowCurrent(confirmedTarget.window) ||
-            sayHiGestureInFlight || sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE ||
-            receivedGreetingsEntrySearchGestureInFlight
-        ) {
-            // Diagnostic-only second sampling: the original short-circuit guard above is unchanged.
-            // An all-ready sample means the admission state changed between rejection and logging.
-            val admissionDiagnostic = MomoReceivedGreetingsAdmissionDiagnostic(
-                listConfirmed = sayHiNavigationFlowController.isReceivedListConfirmed(),
-                listStructureVisible = runCatching { isReceivedGreetingsListStructureVisible() }.getOrDefault(false),
-                windowTargetPresent = confirmedTarget != null,
-                windowCurrent = runCatching {
-                    confirmedTarget?.let { accessibilityGateway.isWindowCurrent(it.window) } == true
-                }.getOrDefault(false),
-                sayHiGestureInFlight = sayHiGestureInFlight,
-                readOnlyStage = sayHiReadOnlyStage.name,
-                entrySearchGestureInFlight = receivedGreetingsEntrySearchGestureInFlight
-            )
+        val admission = sampleReceivedGreetingsListAdmission()
+        if (!admission.isReadyForCurrentList()) {
             onLog("收到的招呼人工入口接管[REJECTED]：" +
-                admissionDiagnostic.toLogFields() + "；保持页面不动")
+                admission.toLogFields() + "；保持页面不动")
             return false
         }
 
+        completionBackStage = CompletionBackStage.NONE
+        completionBackRetryGate.reset()
         resetReceivedGreetingsEntrySearch()
         sayHiAutonomousBrowseController.reset()
         clearSayHiSelectedGreeting()
@@ -1082,19 +1250,23 @@ internal class MomoSocialAdapter(
         if (status != ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED) {
             status = observeManuallyOpenedReceivedGreetingsPage()
         }
+        val admission = sampleReceivedGreetingsListAdmission()
         val confirmed = status == ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED &&
-            isReceivedGreetingsListStructureVisible() &&
-            sayHiNavigationFlowController.isReceivedListConfirmed() &&
-            sayHiConfirmedListTarget?.let { accessibilityGateway.isWindowCurrent(it.window) } == true
+            admission.isReadyForCurrentList()
         onLog(
             "收到的招呼统一恢复确认同步：结果=${if (confirmed) "已同步" else "未同步"}；" +
-                "adapterList=${sayHiNavigationFlowController.isReceivedListConfirmed()}；" +
-                "windowTarget=${sayHiConfirmedListTarget != null}"
+                "adapterList=${admission.listConfirmed}；" +
+                "windowTarget=${admission.windowTargetPresent}；" +
+                "admissionReady=${admission.isReadyForCurrentList()}；" +
+                "failedGates=${admission.rejectedGates().joinToString(",").ifEmpty { "NONE" }}；" +
+                "readOnlyStage=${admission.readOnlyStage}"
         )
         return confirmed
     }
 
     override fun beginReceivedGreetingsNavigationTask() {
+        completionBackStage = CompletionBackStage.NONE
+        completionBackRetryGate.reset()
         resetReceivedGreetingsEntrySearch()
     }
 
@@ -1167,16 +1339,11 @@ internal class MomoSocialAdapter(
                         false -> {
                             sayHiProfileBackDialogPending = false
                             sayHiProfileBackDialogWindowId = -1
-                            val activePage = rootAccess.withActiveTargetRoot { root, window ->
-                                window to pageInspectionComponents.gestureReadinessInspector.hasVisibleViewId(
-                                    root,
-                                    setOf(MomoSayHiPageContract.LIST_VIEW_ID)
-                                )
-                            }
+                            val activePage = rootAccess.withActiveTargetRoot { _, window -> window }
                             if (activePage == null) return true
                             if (isReceivedGreetingsListConfirmed()) {
                                 sayHiProfileBackWindowId = -1
-                                onLog("收到招呼资料页返回：dialog.h 已消失；NewSayHiSessionListActivity、活动窗口和可见 listview 均已确认")
+                                onLog("收到招呼资料页返回：dialog.h 已消失；当前窗口与列表结构指纹已确认；Activity 和操作准入由现有 READY 复核")
                                 return inspectSayHiPageAndAutonomousBrowse(
                                     allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
                                 )
@@ -1186,7 +1353,7 @@ internal class MomoSocialAdapter(
                                 return true
                             }
                             if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY &&
-                                activePage.first.activityClass == MomoSayHiPageContract.PROFILE_ACTIVITY
+                                activePage.activityClass == MomoSayHiPageContract.PROFILE_ACTIVITY
                             ) {
                                 onLog("收到招呼资料页返回：已确认 dialog.h 消失且资料页重新活动；重新执行独立安全检查后再返回列表")
                                 return requestSayHiProfileBack()
@@ -1200,7 +1367,7 @@ internal class MomoSocialAdapter(
                 }
                 if (isReceivedGreetingsListConfirmed()) {
                     sayHiProfileBackWindowId = -1
-                    onLog("收到招呼资料页返回确认：NewSayHiSessionListActivity、活动窗口和可见 listview 均已重新验证")
+                    onLog("收到招呼资料页返回确认：当前窗口与列表结构指纹已重新验证；Activity 和操作准入由现有 READY 复核")
                     return inspectSayHiPageAndAutonomousBrowse(
                         allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
                     )
@@ -1339,9 +1506,9 @@ internal class MomoSocialAdapter(
                         onLog("收到招呼单用户隔离：点击来源未核验，仅延期原行；不标记已发送")
                     }
                     onLog(
-                        "收到招呼详情页返回确认：NewSayHiSessionListActivity、当前活动窗口和可见 listview " +
+                        "收到招呼详情页返回确认：当前窗口和列表结构指纹" +
                             "已由连续 ${sayHiDetailBackReturnConfirmation.stableSampleCount} 份新鲜快照确认；" +
-                            "window=$listWindowIdentity"
+                            "Activity 和操作准入由现有 READY 独立复核；window=$listWindowIdentity"
                     )
                     clearSayHiSelectedGreeting()
                     return inspectSayHiPageAndAutonomousBrowse(
@@ -1350,7 +1517,7 @@ internal class MomoSocialAdapter(
                 }
                 if (listWindowIdentity != null && sayHiDetailBackReturnConfirmation.stableSampleCount == 1) {
                     onLog(
-                        "收到招呼详情页返回候选：已识别目标 Activity、当前窗口和可见 listview；" +
+                        "收到招呼详情页返回候选：已识别当前窗口和列表结构指纹；尚非操作准入；" +
                             "等待至少 500ms 后的第二份新鲜快照；window=$listWindowIdentity"
                     )
                 }
@@ -1512,7 +1679,7 @@ internal class MomoSocialAdapter(
                 }
                 sayHiCardListTapPending = false
                 sayHiAutonomousBrowseController.reset()
-                onLog("收到的招呼资料卡‘列表’导航已验证：NewSayHiSessionListActivity 与外层可滚动 listview 连续稳定")
+                onLog("收到的招呼资料卡‘列表’导航已验证：窗口与外层可滚动 listview 结构连续稳定；Activity 和操作准入由现有 READY 复核")
                 return true
             }
             if (!sayHiNavigationFlowController.isReceivedListConfirmed()) {
@@ -1640,7 +1807,9 @@ internal class MomoSocialAdapter(
             description = "陌陌收到的招呼入口安全点击",
             executionContext = executionContext
         )
+        val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = gesturePolicy.execute(tapRequest, GestureExecutionListener { result ->
+            if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
             sayHiGestureInFlight = false
             val completed = result.status == GestureExecutionStatus.COMPLETED
             onLog(
@@ -1752,7 +1921,9 @@ internal class MomoSocialAdapter(
             description = "陌陌收到招呼资料卡点击列表入口",
             executionContext = executionContext
         )
+        val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
+            if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
             sayHiGestureInFlight = false
             if (result.status == GestureExecutionStatus.COMPLETED) {
                 sayHiCardListTapPending = true
@@ -1945,8 +2116,10 @@ internal class MomoSocialAdapter(
         )
         receivedGreetingsEntrySearchGestureInFlight = true
         sayHiGestureInFlight = true
+        val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
+                if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
                 receivedGreetingsEntrySearchGestureInFlight = false
                 sayHiGestureInFlight = false
                 if (result.status == GestureExecutionStatus.COMPLETED) {
@@ -2316,7 +2489,13 @@ internal class MomoSocialAdapter(
         }
         // New users are isolated from one user's transient failures. Deferred users get a
         // bounded retry opportunity only after currently visible fresh candidates are handled.
-        val candidate = (unprocessedCandidates.firstOrNull() ?: deferredRetryCandidates.firstOrNull()) ?: run {
+        // Retain the pending row identity across a pre-dispatch deferral, but never its
+        // coordinates. If it is still eligible and visible, prefer it on the fresh snapshot.
+        val candidate = (unprocessedCandidates.firstOrNull {
+            MomoSayHiIdentityFingerprintPolicy.rowKey(it) == sayHiStableCandidateKey
+        } ?: deferredRetryCandidates.firstOrNull {
+            MomoSayHiIdentityFingerprintPolicy.rowKey(it) == sayHiStableCandidateKey
+        } ?: unprocessedCandidates.firstOrNull() ?: deferredRetryCandidates.firstOrNull()) ?: run {
             sayHiStableCandidateKey = ""
             sayHiStableCandidateTarget = null
             sayHiStableCandidateWindow = null
@@ -2470,6 +2649,7 @@ internal class MomoSocialAdapter(
         clearSayHiRowTapEvidence()
         sayHiProfileReadAttempts = 0
         sayHiProfileScrollAttempted = false
+        sayHiProfileDeferredRetryGate.reset()
         sayHiProfileScrollFailed = false
         sayHiProfileScrollInFlight = false
         sayHiProfileScrollWindowId = -1
@@ -2492,8 +2672,10 @@ internal class MomoSocialAdapter(
             description = "陌陌收到招呼未读行头像身份读取（只读）",
             executionContext = executionContext
         )
+        val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
+                if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
                 sayHiGestureInFlight = false
                 if (result.status == GestureExecutionStatus.COMPLETED) {
                     sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
@@ -2501,6 +2683,7 @@ internal class MomoSocialAdapter(
                     onLog("收到招呼头像导航：精确头像手势完成；等待用户资料页与明确身份字段，不点击消息行")
                 } else if (result.status == GestureExecutionStatus.DEFERRED) {
                     clearSayHiSelectedGreeting()
+                    sayHiStableCandidateKey = selected.rowKey
                     onLog("收到招呼头像导航[DEFERRED]：平台未派发头像点击；不标记跳过，等待新列表快照重新识别")
                     scheduleSayHiListSnapshotInspection(
                         delayMs = 500L,
@@ -2523,6 +2706,7 @@ internal class MomoSocialAdapter(
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
             sayHiGestureInFlight = false
             clearSayHiSelectedGreeting()
+            sayHiStableCandidateKey = selected.rowKey
             onLog("收到招呼头像导航[DEFERRED_NOT_READY]：弹窗/页面准入暂未放行；未点击、未标记跳过；下一轮使用新列表快照重新识别原用户行")
             scheduleSayHiListSnapshotInspection(
                 delayMs = 500L,
@@ -2623,9 +2807,11 @@ internal class MomoSocialAdapter(
             description = "陌陌收到招呼用户行安全区域进入聊天详情",
             executionContext = executionContext
         )
+        val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = runCatching {
             gesturePolicy.execute(request, object : GestureExecutionListener {
                 override fun onDispatched(commandId: String, dispatchedAtUptimeMs: Long) {
+                    if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return
                     if (pendingSayHiRowTapGestureCommandId == commandId) {
                         pendingSayHiRowTapSubmittedAtUptimeMs = dispatchedAtUptimeMs
                         sayHiRowTapFeedbackState = SayHiRowTapFeedbackState.WAITING
@@ -2633,6 +2819,7 @@ internal class MomoSocialAdapter(
                 }
 
                 override fun onResult(result: com.freedom.core.accessibility.gesture.GestureExecutionResult) {
+                    if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return
                     sayHiGestureInFlight = false
                     if (result.status == GestureExecutionStatus.COMPLETED) {
                         sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_DETAIL
@@ -2643,10 +2830,9 @@ internal class MomoSocialAdapter(
                             onLog("收到招呼详情导航：用户行安全区域手势已完成；等待行级点击事件核验和目标聊天页验证后才允许读取")
                         }
                     } else if (result.status == GestureExecutionStatus.DEFERRED) {
-                        clearSayHiSelectedGreeting()
                         resetSayHiRowTapTransaction()
-                        sayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
-                        onLog("收到招呼详情点击[DEFERRED]：平台尚未派发用户行点击；不记为未验证或跳过，等待新鲜列表快照重新识别")
+                        sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_BACK_PENDING
+                        onLog("收到招呼详情点击[DEFERRED]：平台尚未派发用户行点击；保留已验证身份和原始行，等待新鲜列表快照重新识别")
                         scheduleSayHiListSnapshotInspection(
                             delayMs = 500L,
                             reason = "ROW_TAP_CALLBACK_DEFERRED",
@@ -2695,10 +2881,9 @@ internal class MomoSocialAdapter(
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
             sayHiGestureInFlight = false
-            clearSayHiSelectedGreeting()
-            pendingSayHiRowTapTarget = null
             resetSayHiRowTapTransaction()
-            onLog("收到招呼消息行点击[DEFERRED_NOT_READY]：平台手势未派发；不标记本行跳过、不进入详情；重新扫描后再确认")
+            sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_BACK_PENDING
+            onLog("收到招呼消息行点击[DEFERRED_NOT_READY]：平台手势未派发；保留已验证身份和原始行，不进入详情；重新扫描后再确认")
             scheduleSayHiListSnapshotInspection(
                 delayMs = 500L,
                 reason = "ROW_TAP_SUBMISSION_DEFERRED",
@@ -3077,7 +3262,7 @@ internal class MomoSocialAdapter(
             )
         )
         if (tree == null || tree.window.packageName != targetPackage ||
-            !isSayHiProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)) {
+            tree.window.windowId < 0 || !accessibilityGateway.isWindowCurrent(tree.window)) {
             if (ageMs < SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
             sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
             sessionComponents.sampleStore.persistSayHiIdentityResult(
@@ -3102,7 +3287,18 @@ internal class MomoSocialAdapter(
             return returnFromSayHiIdentityProfile(true)
         }
 
+        // Read ID evidence directly. Only reject a known source page or stale window;
+        // optional profile presentation nodes are never identity prerequisites.
         val readout = MomoSayHiPlatformIdentityParser.parse(tree.nodes)
+        if (isReceivedGreetingsListConfirmed()) {
+            if (ageMs >= SAYHI_PROFILE_PAGE_TIMEOUT_MS) {
+                return returnFromSayHiIdentityProfile(false)
+            }
+            return true
+        }
+        if (inspectCurrentChatDetailFingerprint() != null ||
+            !accessibilityGateway.isWindowCurrent(tree.window)
+        ) return true
         if (readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED) {
             val resolved = sessionComponents.contactIdentityManager.resolveSnapshot(
                 snapshotId = "sayhi-${System.currentTimeMillis()}-${selected.rowKey.take(12)}",
@@ -3138,6 +3334,11 @@ internal class MomoSocialAdapter(
         }
 
         if (!sayHiProfileScrollAttempted) {
+            // The ID is missing; only the existing safe profile-scroll path may move the UI.
+            // A deferred swipe must not be resubmitted on every identical observation.
+            if (!sayHiProfileDeferredRetryGate.mayAttempt(tree.window, SystemClock.uptimeMillis())) {
+                return true
+            }
             onLog(
                 "收到招呼头像身份采集[INITIAL_SCAN]：资料页首次完整节点扫描未取得唯一用户 ID；" +
                     "status=${readout.status}；准备执行且仅执行一次纵向向上滑动"
@@ -3163,16 +3364,23 @@ internal class MomoSocialAdapter(
     /** Dispatches the one allowed upward profile scroll through the shared gesture policy path. */
     private fun dispatchSayHiProfileIdentityScroll(tree: AccessibilityTreeSnapshot): Boolean {
         if (sayHiProfileScrollAttempted) return true
-        sayHiProfileScrollAttempted = true
         val selected = sayHiSelectedGreeting ?: return false
+        if (!isIdentityProfileActionWindow(tree)) {
+            onLog("收到招呼身份采集：资料页滑动安全条件尚未确认；等待新鲜快照，不消耗滑动机会")
+            return true
+        }
         val metrics = accessibilityGateway.displayMetrics()
-        val decision = MomoSayHiProfileScrollPolicy.resolveViewport(
+        val decision = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(
             nodes = tree.nodes,
             displayWidth = metrics.widthPixels,
             displayHeight = metrics.heightPixels
         )
         val viewport = decision.viewport
         if (viewport == null) {
+            if (System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs < SAYHI_PROFILE_PAGE_TIMEOUT_MS) {
+                onLog("收到招呼身份采集：安全滑动视口暂不可用；reason=${decision.reason}；等待新鲜快照，不消耗滑动机会")
+                return true
+            }
             sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
             sessionComponents.sampleStore.persistSayHiIdentityResult(
                 selected.rowKey, selected.displayName, sayHiSelectedIdentityStatus,
@@ -3184,8 +3392,7 @@ internal class MomoSocialAdapter(
             )
             return returnFromSayHiIdentityProfile(true)
         }
-        if (!isSayHiProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)
-        ) {
+        if (!isIdentityProfileActionWindow(tree)) {
             sayHiProfileScrollAttempted = false
             onLog("收到招呼身份采集：资料页窗口在滑动准备期间发生变化；丢弃旧坐标")
             return true
@@ -3197,8 +3404,8 @@ internal class MomoSocialAdapter(
             // No platform gesture was submitted. Preserve the one permitted scroll attempt for
             // a later fresh snapshot instead of consuming it on a stale execution context.
             sayHiProfileScrollAttempted = false
-            sayHiProfileScrollFailed = true
-            onLog("收到招呼身份采集：资料页滑动坐标上下文已失效；不使用旧视口")
+            sayHiProfileScrollFailed = false
+            onLog("收到招呼身份采集：资料页滑动坐标上下文已失效；等待新鲜快照，不使用旧视口")
             return true
         }
         val request = GestureIntentRequest(
@@ -3225,13 +3432,17 @@ internal class MomoSocialAdapter(
                 "bounds=${viewport.left},${viewport.top},${viewport.right},${viewport.bottom}；" +
                 "direction=UP；count=1"
         )
+        val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
+                if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
                 if (sayHiProfileScrollRequestId != request.id) return@GestureExecutionListener
                 sayHiGestureInFlight = false
                 sayHiProfileScrollInFlight = false
                 sayHiProfileScrollRequestId = null
                 if (result.status == GestureExecutionStatus.COMPLETED) {
+                    sayHiProfileScrollAttempted = true
+                    sayHiProfileDeferredRetryGate.reset()
                     sayHiProfileScrollFailed = false
                     sayHiProfileScrollSettledAtMs = System.currentTimeMillis()
                     sayHiProfileReadAttempts = 0
@@ -3239,6 +3450,9 @@ internal class MomoSocialAdapter(
                     sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
                     onLog("收到招呼身份采集[PROFILE_SCROLL_COMPLETED]：单次向上滑动完成；等待新鲜资料页快照后重新提取 ID")
                 } else if (result.status == GestureExecutionStatus.DEFERRED) {
+                    sayHiProfileDeferredRetryGate.onDeferred(
+                        request.id, tree.window, SystemClock.uptimeMillis()
+                    )
                     sayHiProfileScrollFailed = false
                     sayHiProfileScrollAttempted = false
                     sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
@@ -3262,6 +3476,7 @@ internal class MomoSocialAdapter(
             return true
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+            sayHiProfileDeferredRetryGate.onDeferred(request.id, tree.window, SystemClock.uptimeMillis())
             sayHiGestureInFlight = false
             sayHiProfileScrollInFlight = false
             sayHiProfileScrollRequestId = null
@@ -3282,27 +3497,30 @@ internal class MomoSocialAdapter(
         return true
     }
 
-    /** Current Momo builds render this profile surface inside MaintabActivity. */
-    private fun isSayHiProfileTree(tree: AccessibilityTreeSnapshot): Boolean {
-        val ids = tree.nodes.asSequence().map { it.viewId.substringAfterLast('/') }.toSet()
-        return setOf(
-            "root_layout",
-            "personal_profile_name",
-            "toolbar_id",
-            "tabs",
-            "pagertabcontent"
-        ).all(ids::contains)
+    /**
+     * Read-only identity is established by the existing unique-ID parser. For a UI action
+     * before an ID becomes visible, require the existing profile Activity in a fresh
+     * current target window. Never issue a profile action on a confirmed source page.
+     * This is action safety, not a prerequisite for extracting an ID.
+     */
+    private fun isIdentityProfileActionWindow(tree: AccessibilityTreeSnapshot): Boolean {
+        if (tree.truncated || tree.window.packageName != targetPackage ||
+            tree.window.windowId < 0 || !accessibilityGateway.isWindowCurrent(tree.window)
+        ) return false
+        if (isReceivedGreetingsListConfirmed() || inspectCurrentChatDetailFingerprint() != null) return false
+        val evidence = tree.window.activityClass == MomoSayHiPageContract.PROFILE_ACTIVITY ||
+            MomoSayHiPlatformIdentityParser.parse(tree.nodes).status == MomoSayHiPlatformIdentityStatus.CONFIRMED
+        return evidence && accessibilityGateway.isWindowCurrent(tree.window)
     }
 
     private fun isSayHiProfileSurfacePresent(): Boolean {
         val tree = runCatching {
             accessibilityGateway.inspectActiveWindow(
                 TreeInspectionRequest(maxNodes = 1_200, maxDepth = 48, maxDurationMs = 800L,
-                    textCapture = NodeTextCapture.NONE)
+                    textCapture = NodeTextCapture.EPHEMERAL)
             )
         }.getOrNull() ?: return false
-        return tree.window.packageName == targetPackage &&
-            isSayHiProfileTree(tree) && accessibilityGateway.isWindowCurrent(tree.window)
+        return isIdentityProfileActionWindow(tree)
     }
 
     private fun returnFromSayHiIdentityProfile(pageChanged: Boolean): Boolean {
@@ -3329,6 +3547,7 @@ internal class MomoSocialAdapter(
     private fun requestChatActivityBack(
         reason: String,
         expectedWindow: WindowRef? = null,
+        targetActivityClass: String = MomoSayHiPageContract.LIST_ACTIVITY,
         onSubmitted: (WindowRef) -> Unit = {}
     ): Boolean {
         val dialogObservation = latestDialogWindowObservation()
@@ -3464,7 +3683,8 @@ internal class MomoSocialAdapter(
         }
         val accepted = accessibilityGateway.performVerifiedNavigationBack(
             inspection.window,
-            inspection.window.activityClass
+            inspection.window.activityClass,
+            targetActivityClass
         )
         onLog(
             "ChatActivity 安全 BACK 派发：windowId=${inspection.window.windowId}；" +
@@ -3476,13 +3696,7 @@ internal class MomoSocialAdapter(
     }
 
     /** Structural identity confirmation; Activity names and stale list-view events are not enough. */
-    private fun isReceivedGreetingsListConfirmed(): Boolean = rootAccess.withActiveTargetRoot { root, window ->
-        if (window.packageName != targetPackage || window.windowId < 0 ||
-            !accessibilityGateway.isWindowCurrent(window)
-        ) return@withActiveTargetRoot false
-        val confirmed = sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage)
-        confirmed && accessibilityGateway.isWindowCurrent(window)
-    } == true
+    private fun isReceivedGreetingsListConfirmed(): Boolean = isReceivedGreetingsListStructureVisible()
 
     /** Current list identity includes the actual Android window and page generation. */
     private fun receivedGreetingsListWindowIdentity(): String? =
@@ -3537,7 +3751,8 @@ internal class MomoSocialAdapter(
     private data class SayHiProfileBackInspection(
         val window: WindowRef,
         val dialogHPresent: Boolean,
-        val dialogHWindowId: Int
+        val dialogHWindowId: Int,
+        val profileIdVerified: Boolean
     )
 
     /**
@@ -3628,21 +3843,28 @@ internal class MomoSocialAdapter(
      * Shared verified profile return used by Received Greetings and inbox identity capture.
      * Keeps the existing active-window, dialog.h, popup-blocker and WindowRef checks in one path.
      */
-    private fun submitVerifiedProfileBackNavigation(): SayHiProfileBackInspection? {
+    private fun submitVerifiedProfileBackNavigation(
+        targetActivityClass: String = MomoSayHiPageContract.LIST_ACTIVITY
+    ): SayHiProfileBackInspection? {
         val dialogObservation = latestDialogWindowObservation()
         val inspection = rootAccess.withTargetWindowRoots { windows ->
             if (windows.isEmpty()) return@withTargetWindowRoots null
             val active = windows.firstOrNull { it.active }
                 ?: windows.firstOrNull { it.focused }
                 ?: return@withTargetWindowRoots null
-            if (active.window.packageName != targetPackage || active.window.windowId < 0 ||
-                !isSayHiProfileTree(
-                    accessibilityGateway.inspectActiveWindow(
-                        TreeInspectionRequest(maxNodes = 1_200, maxDepth = 48, maxDurationMs = 800L,
-                            textCapture = NodeTextCapture.NONE)
-                    ) ?: return@withTargetWindowRoots null
-                )
-            ) return@withTargetWindowRoots null
+            if (active.window.packageName != targetPackage || active.window.windowId < 0)
+                return@withTargetWindowRoots null
+            val profileTree = accessibilityGateway.inspectActiveWindow(
+                TreeInspectionRequest(maxNodes = 1_800, maxDepth = 48, maxDurationMs = 1_000L,
+                    textCapture = NodeTextCapture.EPHEMERAL)
+            ) ?: return@withTargetWindowRoots null
+            if (profileTree.window != active.window || !isIdentityProfileActionWindow(profileTree)) {
+                onLog("资料页 BACK 拒绝[PROFILE_SOURCE_UNVERIFIED]：当前资料页或窗口证据不足")
+                return@withTargetWindowRoots null
+            }
+            // Use the current tree, not a cached ID or an inferred Activity.
+            val profileIdVerified = MomoSayHiPlatformIdentityParser.parse(profileTree.nodes)
+                .status == MomoSayHiPlatformIdentityStatus.CONFIRMED
 
             val dialogRoot = dialogObservation?.let { observation ->
                 windows.firstOrNull { it.window.windowId == observation.windowId }
@@ -3697,7 +3919,8 @@ internal class MomoSocialAdapter(
             SayHiProfileBackInspection(
                 window = active.window,
                 dialogHPresent = dialogPresent,
-                dialogHWindowId = dialogRoot?.window?.windowId ?: -1
+                dialogHWindowId = dialogRoot?.window?.windowId ?: -1,
+                profileIdVerified = profileIdVerified && !dialogPresent
             )
         } ?: return null
 
@@ -3707,8 +3930,12 @@ internal class MomoSocialAdapter(
         }
         val accepted = accessibilityGateway.performVerifiedNavigationBack(
             inspection.window,
-            inspection.window.activityClass
+            inspection.window.activityClass,
+            targetActivityClass.takeUnless { inspection.dialogHPresent },
+            sourceIdentityVerified = inspection.profileIdVerified
         )
+        onLog("资料页 BACK 提交结果：accepted=$accepted；sourceEvidence=" +
+            if (inspection.profileIdVerified) "PROFILE_ID" else "ACTIVITY")
         if (!accepted) return null
         return inspection
     }
@@ -3722,6 +3949,7 @@ internal class MomoSocialAdapter(
         sayHiSelectedIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
         sayHiProfileReadAttempts = 0
         sayHiProfileScrollAttempted = false
+        sayHiProfileDeferredRetryGate.reset()
         sayHiProfileScrollFailed = false
         sayHiProfileScrollInFlight = false
         sayHiProfileScrollWindowId = -1
@@ -3814,6 +4042,19 @@ internal class MomoSocialAdapter(
         return completeReceivedGreetingDetailInspectionInternal(false, "DRAFT_MODEL_FAILURE")
     }
 
+    override fun deferReceivedGreetingAfterManualReturn(): Boolean {
+        val selected = sayHiSelectedGreeting ?: return false
+        val priorSend = runCatching { sayHiSendReturnJournal.findByRow(selected.rowKey) }.getOrNull()
+        if (priorSend?.phase == ReceivedGreetingsSendReturnPhase.SEND_CONFIRMED) return false
+        deferSayHiRow(selected.rowKey, "MANUAL_RETURN_BEFORE_SEND_CONFIRMATION")
+        sayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
+        sayHiRowTapFeedbackState = SayHiRowTapFeedbackState.NOT_DISPATCHED
+        pendingSayHiRowTapTarget = null
+        sayHiSelectedGreeting = null
+        onLog("收到招呼手动返回[ROW_DEFERRED]：未确认发送记录保留；当前招呼行延期，不计入成功")
+        return true
+    }
+
     private fun completeReceivedGreetingDetailInspectionInternal(
         success: Boolean, failureReason: String
     ): Boolean {
@@ -3870,7 +4111,6 @@ internal class MomoSocialAdapter(
 
     override fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean {
         if (snapshot.packageName != targetPackage ||
-            snapshot.activityClass != MomoSayHiPageContract.PROFILE_ACTIVITY ||
             snapshot.pageKind != ChatPageKind.NON_CHAT ||
             sayHiSelectedGreeting == null ||
             sayHiReadOnlyStage !in setOf(
@@ -3880,9 +4120,75 @@ internal class MomoSocialAdapter(
                 SayHiReadOnlyStage.PROFILE_BACK_PENDING
             )
         ) return false
-        // Existing five-anchor profile proof plus live-window validity. Do not infer the
-        // destination from the Activity event or an already-consumed gesture callback.
+        // Fresh target-window evidence; optional profile presentation nodes are not required.
         return isSayHiProfileSurfacePresent()
+    }
+
+    override fun isReceivedGreetingsNavigationAwaitingPageEvidence(snapshot: ChatPageSnapshot): Boolean {
+        if (snapshot.packageName != targetPackage ||
+            sayHiSelectedGreeting == null || sayHiReadOnlyStageStartedAtMs <= 0L
+        ) return false
+        when (snapshot.pageKind) {
+            ChatPageKind.NON_CHAT, ChatPageKind.UNKNOWN -> Unit
+            ChatPageKind.CHAT_DETAIL_CANDIDATE -> {
+                // Only a real, current row dispatch may account for a premature chat
+                // candidate. Reservation/pre-action delay, an avatar or BACK stage,
+                // and a rejected tap must not postpone route recovery here.
+                if (sayHiReadOnlyStage !in setOf(
+                        SayHiReadOnlyStage.ROW_TAP_PENDING, SayHiReadOnlyStage.WAITING_DETAIL
+                    ) || pendingSayHiRowTapSubmittedAtUptimeMs <= 0L ||
+                    pendingSayHiRowTapGestureCommandId == null || pendingSayHiRowTapTarget == null ||
+                    pendingSayHiRowTapWindowId < 0 ||
+                    sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.NOT_DISPATCHED ||
+                    sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.REJECTED ||
+                    sayHiSelectedIdentityStatus != MomoSayHiPlatformIdentityStatus.CONFIRMED ||
+                    sayHiSelectedContactIdentity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                ) return false
+            }
+            else -> return false
+        }
+        // Read the adapter's original transaction state and deadline; never extend either.
+        val timeoutMs = when (sayHiReadOnlyStage) {
+            SayHiReadOnlyStage.AVATAR_TAP_PENDING -> SAYHI_GESTURE_TERMINAL_TIMEOUT_MS
+            SayHiReadOnlyStage.ROW_TAP_PENDING -> {
+                if (sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.REJECTED) return false
+                SAYHI_GESTURE_TERMINAL_TIMEOUT_MS
+            }
+            SayHiReadOnlyStage.WAITING_PROFILE -> SAYHI_PROFILE_PAGE_TIMEOUT_MS
+            SayHiReadOnlyStage.PROFILE_BACK_PENDING -> {
+                if (sayHiProfileBackWindowId < 0) return false
+                SAYHI_PROFILE_BACK_TIMEOUT_MS
+            }
+            SayHiReadOnlyStage.WAITING_DETAIL -> {
+                if (sayHiRowTapFeedbackState == SayHiRowTapFeedbackState.REJECTED) return false
+                SAYHI_ROW_DETAIL_VERIFY_TIMEOUT_MS
+            }
+            SayHiReadOnlyStage.DETAIL_BACK_PENDING -> {
+                if (sayHiDetailBackSourceWindow == null) return false
+                SAYHI_DETAIL_BACK_TIMEOUT_MS
+            }
+            else -> return false
+        }
+        val elapsedMs = System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs
+        return elapsedMs >= 0L && elapsedMs < timeoutMs
+    }
+
+    override fun isReceivedGreetingsDetailReturnNavigationActive(source: ChatPageSnapshot): Boolean {
+        if (sayHiReadOnlyStage != SayHiReadOnlyStage.DETAIL_BACK_PENDING ||
+            sayHiSelectedGreeting == null || source.packageName != targetPackage ||
+            source.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE
+        ) return false
+        val backSource = sayHiDetailBackSourceWindow ?: return false
+        if (backSource.packageName != targetPackage || backSource.windowId < 0 ||
+            backSource.generation <= 0L || source.activityClass != backSource.activityClass ||
+            (source.windowGeneration > 0L && source.windowGeneration != backSource.generation)
+        ) return false
+
+        // Region refresh may retire locators without leaving the source window. A retained
+        // generation or current source locator must still match the accepted BACK receipt.
+        val sourceWindows = listOfNotNull(source.messageListTarget?.window, source.inputFieldTarget?.window)
+        return (source.windowGeneration == backSource.generation || sourceWindows.isNotEmpty()) &&
+            sourceWindows.all { sameMomoWindowGeneration(it, backSource) }
     }
 
     override fun isReceivedGreetingsWaitingForSafeTargetEvidence(): Boolean =
@@ -3931,39 +4237,134 @@ internal class MomoSocialAdapter(
         }
     }
 
-    override fun returnFromReceivedGreetingsForPriorityCheck(): Boolean {
-        val currentActivity = activityClass()
-        val isReceivedList = isReceivedGreetingsListStructureVisible()
-        val isCardHost = currentActivity == MomoSayHiPageContract.CARD_ACTIVITY
-        if (!isReceivedList && !isCardHost) return false
-        val confirmedWindow = rootAccess.withActiveTargetRoot { _, window ->
-            window.packageName == targetPackage && accessibilityGateway.isWindowCurrent(window)
-        } ?: false
-        if (!confirmedWindow) return false
-        if (sayHiGestureInFlight) {
-            onLog("收到的招呼任务让出执行权：等待当前已提交手势完成，暂不并发执行返回操作")
-            return true
-        }
-        val accepted = accessibilityGateway.performGlobalAction(GlobalAccessibilityAction.BACK)
-        if (accepted) {
-            receivedGreetingsEntryTapPending = false
-            sayHiCardListTapPending = false
-            sayHiNavigationFlowController.reset()
-            sayHiAutonomousBrowseController.reset()
-            resetReceivedGreetingsEntrySearch()
-            resetSayHiListSnapshotState()
-            clearSayHiSelectedGreeting()
-            sayHiTraversalState.clear()
-            sayHiStableCandidateKey = ""
-            sayHiStableCandidateTarget = null
-            sayHiStableCandidateWindow = null
-        }
-        onLog(
-            if (accepted) "收到的招呼任务让出执行权：已从确认的招呼页面请求返回普通聊天列表"
-            else "收到的招呼任务让出执行权失败：系统拒绝返回操作"
-        )
-        return accepted
+    /** Source proof is read-only and uses the existing card fingerprint policy. */
+    override fun isReceivedGreetingsCompletionReturnIntermediate(): Boolean {
+        if (completionBackStage == CompletionBackStage.NONE) return false
+        return inspectSayHiCardListTapTarget() is SayHiCardListTapInspection.Ready
     }
+
+    override fun receivedGreetingsCompletionReturnSourceFingerprint(): String? {
+        receivedGreetingsListWindowIdentity()?.let { return it }
+        if (completionBackStage == CompletionBackStage.NONE) return null
+        val card = inspectSayHiCardListTapTarget() as? SayHiCardListTapInspection.Ready ?: return null
+        return MomoWindowPageFingerprint.windowIdentity(card.tree.window, targetPackage, "RECEIVED_GREETINGS_CARD")
+    }
+
+    override fun invalidateReceivedGreetingsCompletionReturnEvidence() {
+        completionBackRetryGate.invalidateSamples()
+    }
+
+    @Synchronized
+    override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult {
+        if (sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight) {
+            completionBackRetryGate.invalidateSamples()
+            onLog("收到的招呼任务返回[GESTURE_IN_FLIGHT]：等待已提交手势终态；未提交BACK")
+            return ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT
+        }
+        // Use one current-window structural proof, not a cached activity or old list target.
+        val listWindow = rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName == targetPackage && window.windowId >= 0 &&
+                accessibilityGateway.isWindowCurrent(window) &&
+                sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage) &&
+                accessibilityGateway.isWindowCurrent(window)
+            ) window else null
+        }
+        val nextStage: CompletionBackStage
+        val sourceWindow: WindowRef
+        if (listWindow != null) {
+            if (!sayHiNavigationFlowController.isReceivedListConfirmed() ||
+                !sayHiAutonomousBrowseController.isFinished() || sayHiTraversalState.hasDeferredRows ||
+                sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE
+            ) return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+            nextStage = CompletionBackStage.LIST_SUBMITTED
+            sourceWindow = listWindow
+        } else {
+            // Only the verified entry-card host reached after a list BACK permits a second step.
+            // Never use an arbitrary profile Activity or an Activity hint as authorization.
+            if (completionBackStage == CompletionBackStage.NONE) {
+                return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+            }
+            val card = inspectSayHiCardListTapTarget() as? SayHiCardListTapInspection.Ready
+                ?: return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+            nextStage = CompletionBackStage.CARD_SUBMITTED
+            sourceWindow = card.tree.window
+        }
+        if (sourceWindow.packageName != targetPackage || sourceWindow.windowId < 0 ||
+            !accessibilityGateway.isWindowCurrent(sourceWindow)
+        ) {
+            return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+        }
+        if (sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight) {
+            return ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT
+        }
+        val sourceKey = MomoWindowPageFingerprint.windowIdentity(
+            sourceWindow, targetPackage, nextStage.name
+        ) ?: return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+        // A different verified forward step (list -> card) is not a retry. A replay
+        // of the same step or a return to the list requires the original timeout
+        // and two fresh, spaced observations of that exact source.
+        val forwardCardStep = completionBackStage == CompletionBackStage.LIST_SUBMITTED &&
+            nextStage == CompletionBackStage.CARD_SUBMITTED
+        if (completionBackStage != CompletionBackStage.NONE && !forwardCardStep &&
+            !completionBackRetryGate.mayRetry(sourceKey, SystemClock.uptimeMillis())
+        ) return ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
+        val accepted = accessibilityGateway.performGlobalAction(GlobalAccessibilityAction.BACK)
+        if (!accepted) {
+            completionBackRetryGate.invalidateSamples()
+            onLog("收到的招呼任务返回[REJECTED]：系统未受理BACK；保留遍历检查点")
+            return ReceivedGreetingsBackResult.REJECTED
+        }
+        completionBackStage = nextStage
+        completionBackRetryGate.onSubmitted(SystemClock.uptimeMillis())
+        onLog("收到的招呼任务返回[BACK_SUBMITTED]：stage=$nextStage；保留遍历检查点，等待独立页面确认")
+        return ReceivedGreetingsBackResult.BACK_SUBMITTED
+    }
+
+    @Synchronized
+    override fun confirmReceivedGreetingsCompletionReturn(): Boolean {
+        // The Runtime has independently confirmed the ordinary inbox and retains the greeting
+        // lease. Recheck the target window before retiring the completed adapter transaction.
+        // Do not invoke the general chat inspection path here: it can advance a separate
+        // identity transaction. Use the same existing root-based page classifier read-only.
+        if (sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight ||
+            pendingInboxIdentityCapture != null
+        ) return false
+        val inboxConfirmed = rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                !accessibilityGateway.isWindowCurrent(window) ||
+                sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(root, targetPackage)
+            ) return@withActiveTargetRoot false
+            val inspection = chatComponents.pageInspector.inspectRoot(
+                root = AccessibilityNodeInfo.obtain(root),
+                targetPackage = targetPackage,
+                activityClass = window.activityClass.ifBlank { activityClass() }
+            )
+            inspection.pageType == MomoChatPageType.CHAT_LIST &&
+                accessibilityGateway.isWindowCurrent(window)
+        } == true
+        if (!inboxConfirmed || sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight) {
+            return false
+        }
+        receivedGreetingsEntryTapPending = false
+        sayHiCardListTapPending = false
+        sayHiNavigationFlowController.reset()
+        sayHiAutonomousBrowseController.reset()
+        resetReceivedGreetingsEntrySearch()
+        resetSayHiListSnapshotState()
+        clearSayHiSelectedGreeting()
+        sayHiTraversalState.clear()
+        sayHiStableCandidateKey = ""
+        sayHiStableCandidateTarget = null
+        sayHiStableCandidateWindow = null
+        completionBackStage = CompletionBackStage.NONE
+        completionBackRetryGate.reset()
+        onLog("收到的招呼任务返回[INBOX_CONFIRMED]：普通消息列表已复核；退休本轮遍历状态")
+        return true
+    }
+
+    private fun isSayHiChatNavigationInProgress(): Boolean =
+        sayHiReadOnlyStage == SayHiReadOnlyStage.ROW_TAP_PENDING ||
+            sayHiReadOnlyStage == SayHiReadOnlyStage.WAITING_DETAIL
 
     /**
      * Inspects confirmed SayHi pages. Test traversal may scroll only the confirmed list;
@@ -3980,29 +4381,42 @@ internal class MomoSocialAdapter(
             sayHiNavigationFlowController.isManuallyStabilizingReceivedList()
         val listPipelineCandidate = listSurfaceVisible || listFlowExpected
         val cardHostCandidate = activityHint == MomoSayHiPageContract.CARD_ACTIVITY
+        // A historical confirmed-list phase survives row navigation. It is not proof
+        // that a chat root should be scanned as a list or charged a list retry.
+        // A genuine return with the existing list fingerprint remains admissible.
+        if (isSayHiChatNavigationInProgress() && !listSurfaceVisible && !cardHostCandidate) return false
         if (!listPipelineCandidate && !cardHostCandidate) return false
         val confirmedList = listSurfaceVisible && sayHiNavigationFlowController.isReceivedListConfirmed()
-        if (confirmedList) {
-            val pausedTarget = sayHiConfirmedListTarget
-            val pausedWindowKey = pausedTarget?.window?.let(::sayHiWindowStabilityKey)
-                ?: "${targetPackage}|$activityHint|WINDOW_UNAVAILABLE"
-            if (sayHiListSnapshotRecoveryPolicy.isPausedForWindow(pausedWindowKey)) {
-                if (pausedTarget == null || accessibilityGateway.isWindowCurrent(pausedTarget.window)) {
-                    // The current page has already exhausted its bounded retry budget. Do not
-                    // trigger another full tree walk for every subsequent accessibility event.
-                    return true
-                }
-                // The paused window identity is no longer current. Drop its locator and allow one
-                // bounded full-window recovery under the new window identity.
-                sayHiConfirmedListTarget = null
-                sayHiSnapshotCoordinator.requestFullListFallback()
-            }
-        }
         if (listPipelineCandidate &&
             sayHiSnapshotCoordinator.isPending && !forceFresh
         ) return true
         val now = System.currentTimeMillis()
         if (!forceFresh && now - lastSayHiInspectionAtMs < minimumIntervalMs) return true
+        // Read-only list observations and BACK confirmation must remain available while
+        // Activity evidence is missing. Only the task-owned action pass consults READY.
+        val listActionReadiness = if (allowAutonomousScroll && confirmedList &&
+            (sayHiReadOnlyStage == SayHiReadOnlyStage.IDLE ||
+                sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_BACK_PENDING)
+        ) {
+            val readiness = runCatching(inspectReceivedGreetingsReadiness).getOrNull()
+            if (readiness == null || readiness.status != TargetAppReadinessStatus.READY ||
+                readiness.runMode != RunMode.AI_REPLY ||
+                readiness.targetPackage != targetPackage ||
+                readiness.foregroundPackage != targetPackage ||
+                readiness.activityClass.isBlank() || readiness.windowId < 0 || readiness.pageGeneration < 0L
+            ) {
+                // Keep business row identity, cursor, and send proof. A previously observed
+                // target is not a valid locator after Activity/window recovery.
+                sayHiStableCandidateTarget = null
+                sayHiStableCandidateWindow = null
+                sayHiConfirmedListTarget = null
+                lastSayHiInspectionAtMs = now
+                // false uses the existing task executor RETRY_REQUIRED / read-only backoff.
+                // Do not create another polling loop or reserve any gesture.
+                return false
+            }
+            readiness
+        } else null
         var listSnapshotLeaseAcquired = false
         if (listPipelineCandidate) {
             when (val admission = sayHiListSnapshotRecoveryPolicy.tryBeginSnapshot(
@@ -4045,7 +4459,10 @@ internal class MomoSocialAdapter(
         lastSayHiInspectionAtMs = now
 
         val confirmedTarget = if (confirmedList && !sayHiSnapshotCoordinator.forceFullListSnapshot) {
-            sayHiConfirmedListTarget?.takeIf { accessibilityGateway.isWindowCurrent(it.window) }
+            sayHiConfirmedListTarget?.takeIf {
+                accessibilityGateway.isWindowCurrent(it.window) &&
+                    (listActionReadiness == null || listActionReadiness.isReadyForWindow(it.window, RunMode.AI_REPLY))
+            }
         } else null
         if (confirmedList && confirmedTarget == null) sayHiSnapshotCoordinator.requestFullListFallback()
         val usedListSubtree = confirmedTarget != null
@@ -4316,6 +4733,20 @@ internal class MomoSocialAdapter(
         if (allowAutonomousScroll && result.kind == MomoSayHiPageKind.RECEIVED_GREETINGS_LIST &&
             sayHiNavigationFlowController.isReceivedListConfirmed()
         ) {
+            if (sayHiReadOnlyStage == SayHiReadOnlyStage.IDLE ||
+                sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_BACK_PENDING
+            ) {
+                // READY must match the freshly acquired tree, not the old list locator.
+                // A transition during preparation restarts the existing observation path.
+                if (listActionReadiness?.isReadyForWindow(tree.window, RunMode.AI_REPLY) != true ||
+                    !accessibilityGateway.isWindowCurrent(tree.window)
+                ) {
+                    sayHiStableCandidateTarget = null
+                    sayHiStableCandidateWindow = null
+                    sayHiConfirmedListTarget = null
+                    return false
+                }
+            }
             greetingRowActionHandled = processReceivedGreetingRows(tree, result)
             if (!greetingRowActionHandled) {
                 // Empty visible rows are not by themselves proof of completion. Route them
@@ -4591,8 +5022,10 @@ internal class MomoSocialAdapter(
             return
         }
         sayHiGestureInFlight = true
+        val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = try {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
+                if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
                 sayHiGestureInFlight = false
                 if (result.status == GestureExecutionStatus.DEFERRED) {
                     sayHiAutonomousBrowseController.onGestureDeferred()
@@ -4852,7 +5285,14 @@ internal class MomoSocialAdapter(
         } ?: false
     }
 
-    override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+    override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
+        sendDraft(target, expectedText) {}
+
+    override fun sendDraft(
+        target: ChatDraftInputTarget,
+        expectedText: String,
+        onGestureCompleted: () -> Unit
+    ): ChatDraftInputResult {
         if (!isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease)) {
             return ChatDraftInputResult(ChatDraftInputStatus.SEND_PRECONDITION_FAILED, "TASK_OWNERSHIP_LOST")
         }
@@ -4979,6 +5419,9 @@ internal class MomoSocialAdapter(
                 }
                 val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
                     onLog("AI 发送手势回调：status=${result.status}; reason=${result.reason}")
+                    if (result.status == GestureExecutionStatus.COMPLETED) {
+                        onGestureCompleted()
+                    }
                 })
                 if (submission == GestureSubmission.ACCEPTED) {
                     ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
@@ -5231,6 +5674,10 @@ internal class MomoSocialAdapter(
             nodeTreeProbeVisitedNodeCount = treeEvidence.visitedNodeCount,
             nodeTreeProbeTruncated = treeEvidence.truncated,
             chatListViewport = chatListExtraction.viewport,
+            chatListCollectionRowCount = chatListExtraction.collectionRowCount,
+            chatListVisibleCollectionRows = chatListExtraction.visibleCollectionRows,
+            chatListCanScrollForward = chatListExtraction.canScrollForward,
+            chatListCanScrollBackward = chatListExtraction.canScrollBackward,
             screenBounds = ScreenRect(
                 left = 0,
                 top = 0,
@@ -5680,6 +6127,9 @@ internal class MomoSocialAdapter(
 
             InboxIdentityCaptureStage.WAITING_PROFILE -> {
                 if (pending.profileScrollInFlight) return true
+                if (pending.profileScrollSettledAtMs > 0L &&
+                    System.currentTimeMillis() - pending.profileScrollSettledAtMs < SAYHI_PROFILE_SCROLL_SETTLE_MS
+                ) return true
 
                 if (pending.backAttempts >= MAX_SAYHI_PROFILE_BACK_ATTEMPTS) return true
 
@@ -5687,8 +6137,7 @@ internal class MomoSocialAdapter(
                 if (dialogObservation != null &&
                     rootAccess.isTargetWindowPresent(dialogObservation.windowId) != false
                 ) {
-                    registerSelfNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
-                    val back = submitVerifiedProfileBackNavigation() ?: return true
+                    val back = submitVerifiedProfileBackNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS) ?: return true
                     pending.backAttempts++
                     pending.lastTransitionAtMs = System.currentTimeMillis()
                     // As in Received Greetings, dismiss a verified overlay first; only the next
@@ -5710,54 +6159,40 @@ internal class MomoSocialAdapter(
                         )
                     )
                     if (tree == null || tree.truncated || tree.window.packageName != targetPackage ||
-                        !isInboxProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)) {
-                        pending.profileEntryVerified = false
-                        if (ageMs <= SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
-                        if (currentActivity != MomoSayHiPageContract.PROFILE_ACTIVITY) {
+                        tree.window.windowId < 0 || !accessibilityGateway.isWindowCurrent(tree.window)
+                    ) return true
+
+                    val readout = MomoSayHiPlatformIdentityParser.parse(tree.nodes)
+                    if (inspectCurrentChatDetailFingerprint() != null || isReceivedGreetingsListConfirmed()) {
+                        if (ageMs > SAYHI_PROFILE_PAGE_TIMEOUT_MS) {
                             releaseAvatarCaptureAfterProfileMiss(
-                                pending,
-                                MomoAvatarClickFailureReason.PROFILE_PAGE_NOT_CONFIRMED
+                                pending, MomoAvatarClickFailureReason.PROFILE_PAGE_NOT_CONFIRMED
                             )
                             return false
                         }
-                        pending.profileReadCompleted = true
-                        onLog("AI 联系人身份采集：资料页当前快照未确认；按原有返回逻辑退出资料页，返回聊天详情后重新定位头像")
-                    } else {
+                        return true
+                    }
+                    if (!accessibilityGateway.isWindowCurrent(tree.window)) return true
+                    pending.platformUserId = readout.value.takeIf {
+                        readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED
+                    }
+                    if (pending.platformUserId != null) {
                         pending.profileEntryVerified = true
-                        transitionAvatarClickState(
-                            pending,
-                            MomoAvatarClickTransactionState.AVATAR_ENTRY_VERIFYING,
-                            "当前窗口新快照通过既有资料页确认条件"
-                        )
-                        onLog("AI 联系人身份采集：已通过当前窗口新快照确认资料页；开始按原逻辑读取资料页 ID")
-                        // A verified left-message-avatar tap is the profile transition. Display
-                        // name and toolbar nodes are presentation data, not identity gates.
-                        // Read the explicit profile ID directly; scroll only when it is missing.
-                        val readout = MomoSayHiPlatformIdentityParser.parse(tree.nodes)
-                        pending.platformUserId = readout.value.takeIf {
-                            readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED
-                        }
                         pending.profileReadCompleted = true
-                        onLog(
-                            if (pending.platformUserId != null) {
-                                "AI 联系人身份采集：资料页已读取唯一平台 ID；原始 ID 不写入运行日志"
-                            } else {
-                                "AI 联系人身份采集失败：PROFILE_ID_NOT_FOUND；" +
-                                    "不读取历史会话，返回聊天页后仅使用当前窗口上下文"
-                            }
-                        )
-                        if (pending.platformUserId == null && !pending.profileScrollAttempted) {
-                            pending.profileReadCompleted = false
-                            if (dispatchInboxProfileIdentityScroll(pending, tree)) {
-                                onLog("AI 联系人身份采集：首次扫描未取得 ID；已提交且仅提交一次资料页上滑")
-                                return true
-                            }
-                        }
+                        onLog("AI 联系人身份采集：资料页已读取唯一平台 ID；原始 ID 不写入运行日志")
+                    } else if (!pending.profileScrollAttempted) {
+                        if (!isIdentityProfileActionWindow(tree)) return true
+                        if (!pending.profileDeferredRetryGate.mayAttempt(tree.window, SystemClock.uptimeMillis())) return true
+                        if (dispatchInboxProfileIdentityScroll(pending, tree)) return true
+                        if (ageMs < SAYHI_PROFILE_PAGE_TIMEOUT_MS) return true
+                        pending.profileReadCompleted = true
+                    } else {
+                        pending.profileReadCompleted = true
+                        onLog("AI 联系人身份采集：单次上滑后仍未取得唯一 ID；保留可重试状态，不关联历史")
                     }
                 }
 
-                registerSelfNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
-                val back = submitVerifiedProfileBackNavigation() ?: return true
+                val back = submitVerifiedProfileBackNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS) ?: return true
                 pending.backAttempts++
                 pending.lastTransitionAtMs = System.currentTimeMillis()
                 if (!back.dialogHPresent) {
@@ -5831,8 +6266,7 @@ internal class MomoSocialAdapter(
                 ) {
                     // A submitted BACK is not proof that the profile was left. Allow one more
                     // independently revalidated, popup-safe attempt after the bounded wait.
-                    registerSelfNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
-                    val back = submitVerifiedProfileBackNavigation() ?: return true
+                    val back = submitVerifiedProfileBackNavigation(MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS) ?: return true
                     pending.backAttempts++
                     pending.lastTransitionAtMs = System.currentTimeMillis()
                     if (back.dialogHPresent) {
@@ -5880,7 +6314,7 @@ internal class MomoSocialAdapter(
         tree: AccessibilityTreeSnapshot
     ): Boolean {
         val metrics = accessibilityGateway.displayMetrics()
-        val decision = MomoSayHiProfileScrollPolicy.resolveViewport(
+        val decision = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(
             nodes = tree.nodes,
             displayWidth = metrics.widthPixels,
             displayHeight = metrics.heightPixels
@@ -5892,8 +6326,7 @@ internal class MomoSocialAdapter(
             )
             return false
         }
-        if (!isInboxProfileTree(tree) || !accessibilityGateway.isWindowCurrent(tree.window)
-        ) {
+        if (!isIdentityProfileActionWindow(tree)) {
             onLog("AI 联系人身份采集失败：PROFILE_SCROLL_WINDOW_NOT_CURRENT；不使用旧窗口")
             return false
         }
@@ -5914,46 +6347,107 @@ internal class MomoSocialAdapter(
             description = "陌陌私人会话资料页身份字段只读上滑",
             executionContext = executionContext
         )
+        pending.profileScrollWindowId = tree.window.windowId
         pending.profileScrollInFlight = true
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
-                pending.profileScrollInFlight = false
+                if (pendingInboxIdentityCapture !== pending) return@GestureExecutionListener
                 pending.lastTransitionAtMs = System.currentTimeMillis()
-                onLog(
-                    if (result.status == GestureExecutionStatus.COMPLETED) {
-                        "AI 联系人身份采集[PROFILE_SCROLL_COMPLETED]：上滑完成；等待资料页二次节点扫描"
-                    } else {
-                        "AI 联系人身份采集失败：PROFILE_SCROLL_${result.status.name}；" +
-                            "资料页二次扫描未开始"
+                when (result.status) {
+                    GestureExecutionStatus.COMPLETED -> {
+                        pending.profileScrollAttempted = true
+                        pending.profileDeferredRetryGate.reset()
+                        pending.profileScrollSettledAtMs = System.currentTimeMillis()
+                        onLog("AI 联系人身份采集[PROFILE_SCROLL_COMPLETED]：上滑完成；等待资料页二次节点扫描")
                     }
-                )
+                    GestureExecutionStatus.DEFERRED -> {
+                        pending.profileDeferredRetryGate.onDeferred(request.id, tree.window, SystemClock.uptimeMillis())
+                        onLog("AI 联系人身份采集：上滑暂缓，等待新快照，不消耗滑动机会")
+                    }
+                    else -> {
+                        pending.profileReadCompleted = true
+                        onLog("AI 联系人身份采集失败：PROFILE_SCROLL_${result.status.name}；不重复滑动")
+                    }
+                }
+                pending.profileScrollInFlight = false
+                pending.profileScrollWindowId = -1
             })
         }.getOrElse {
             pending.profileScrollInFlight = false
+            pending.profileScrollWindowId = -1
+            pending.profileReadCompleted = true
             onLog("AI 联系人身份采集失败：PROFILE_SCROLL_EXECUTION_EXCEPTION；exception=${it.javaClass.simpleName}")
-            return false
+            return true
         }
         if (submission != GestureSubmission.ACCEPTED) {
             pending.profileScrollInFlight = false
+            pending.profileScrollWindowId = -1
+            if (submission == GestureSubmission.DEFERRED_NOT_READY) {
+                pending.profileDeferredRetryGate.onDeferred(request.id, tree.window, SystemClock.uptimeMillis())
+            } else {
+                pending.profileReadCompleted = true
+            }
             onLog("AI 联系人身份采集失败：PROFILE_SCROLL_SUBMISSION_${submission.name}")
-            return false
         }
         return true
     }
 
-    /** The profile is rendered inside MaintabActivity on current Momo builds. */
-    private fun isInboxProfileTree(tree: AccessibilityTreeSnapshot): Boolean {
-        val ids = tree.nodes.asSequence().map { it.viewId.substringAfterLast('/') }.toSet()
-        return setOf(
-            "root_layout",
-            "personal_profile_name",
-            "toolbar_id",
-            "tabs",
-            "pagertabcontent"
-        ).all(ids::contains)
+    /** A stop or new run invalidates every received-greetings gesture callback from its predecessor. */
+    private val sayHiRunGenerationGuard = MomoSayHiRunGenerationGuard()
+
+    /**
+     * Only volatile, adapter-owned received-greetings state is cleared here. Never erase
+     * sayHiTraversalState checkpoints or the durable send/return journal.
+     */
+    private fun resetReceivedGreetingsRunState(reason: String) {
+        val newGeneration = sayHiRunGenerationGuard.invalidatePreviousRun()
+        completionBackStage = CompletionBackStage.NONE
+        completionBackRetryGate.reset()
+        val previousStage = sayHiReadOnlyStage.name
+        val previousGestureInFlight = sayHiGestureInFlight
+        val previousEntrySearchInFlight = receivedGreetingsEntrySearchGestureInFlight
+
+        resetSayHiListSnapshotState()
+        sayHiNavigationFlowController.reset()
+        sayHiAutonomousBrowseController.reset()
+        resetReceivedGreetingsEntrySearch()
+        clearSayHiSelectedGreeting()
+        resetSayHiRowTapTransaction()
+        sayHiRestoredReturnConfirmation.reset()
+
+        sayHiGestureInFlight = false
+        sayHiDeferredSafeEvidenceOnlyWait = false
+        sayHiStableCandidateKey = ""
+        sayHiStableCandidateTarget = null
+        sayHiStableCandidateWindow = null
+        sayHiPendingVerifiedReturnRow = null
+
+        receivedGreetingsEntryTapPending = false
+        manualReceivedGreetingsArrivalProbeActive = false
+        sayHiCardListTapPending = false
+        receivedGreetingsEntryTapAtMs = 0L
+        sayHiCardListTapAtMs = 0L
+        lastSayHiCardListTapAtMs = 0L
+        lastReceivedGreetingsEntryTapAtMs = 0L
+        lastReceivedGreetingsEntryDiagnostic = ""
+        lastReceivedGreetingsEntryDiagnosticAtMs = 0L
+        lastReceivedGreetingsNavigationWaitActivityClass = ""
+        lastSayHiInspectionSignature = ""
+        lastSayHiInspectionAtMs = 0L
+        lastSayHiNavigationEvidenceSignature = ""
+        lastMomoNavigationEvidenceAtMs = 0L
+
+        onLog(
+            "收到招呼运行时状态清理[$reason]：" +
+                "generation=$newGeneration;previousStage=$previousStage;" +
+                "previousGestureInFlight=$previousGestureInFlight;" +
+                "previousEntrySearchInFlight=$previousEntrySearchInFlight;" +
+                "checkpointPreserved=true;sendJournalPreserved=true"
+        )
     }
 
     override fun beginSessionManagement(): String? = runCatching {
+        resetReceivedGreetingsRunState("BEGIN_RUN")
         synchronized(inboxIdentityCaptureLock) {
             pendingInboxIdentityCapture = null
             identityReturnReinspectionPending = false
@@ -5984,6 +6478,7 @@ internal class MomoSocialAdapter(
     }
 
     override fun finishSessionManagement(): String? {
+        resetReceivedGreetingsRunState("FINISH_RUN")
         synchronized(inboxIdentityCaptureLock) {
             pendingInboxIdentityCapture = null
             identityReturnReinspectionPending = false
@@ -6002,6 +6497,21 @@ internal class MomoSocialAdapter(
 
     override fun isSessionIdentityBlocked(sessionKey: String): Boolean =
         sessionComponents.sampleStore.isSessionIdentityBlocked(sessionKey)
+
+    override fun persistVerifiedSessionListMetadata(snapshot: ChatPageSnapshot): Boolean {
+        // The same sample store and schema are used. Do not skip visual evidence
+        // when any selectable row still has a weak or missing platform identity.
+        if (snapshot.chatListCandidates.none(ChatSessionManagementPolicy::isEligible) ||
+            snapshot.chatListCandidates.any {
+                ChatSessionManagementPolicy.isEligible(it) &&
+                    (it.contactIdentity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED ||
+                        it.contactIdentity?.contactId.isNullOrBlank())
+            }
+        ) return false
+        return runCatching {
+            sessionComponents.sampleStore.persistSessionList(snapshot) > 0
+        }.getOrDefault(false)
+    }
 
     override fun captureSessionListSample(
         snapshot: ChatPageSnapshot,
@@ -6398,7 +6908,7 @@ internal class MomoSocialAdapter(
     }
 
     override fun navigateBackToSessionList(): Boolean =
-        requestChatActivityBack("普通聊天消息采集完成")
+        requestChatActivityBack("普通聊天消息采集完成", targetActivityClass = MomoAppDescriptor.MAIN_ACTIVITY_CLASS)
 
     private fun resolveLocalPath(
         root: AccessibilityNodeInfo,
@@ -6502,6 +7012,19 @@ internal class MomoSocialAdapter(
         page: ChatPageSnapshot,
         limit: Int,
         onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesWithOcr(page, limit, false, onResult)
+
+    override fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesWithOcr(page, limit, true, onResult)
+
+    private fun readRecentMessagesWithOcr(
+        page: ChatPageSnapshot,
+        limit: Int,
+        reuseVerifiedIncoming: Boolean,
+        onResult: (ChatMessageBatch) -> Unit
     ) {
         // Hide the monitor before the structural node read, not only before the screenshot.
         // The nested screenshot lease in AndroidAccessibilityGateway keeps the same hidden
@@ -6549,8 +7072,15 @@ internal class MomoSocialAdapter(
                 messageComponents.ocrProcessor.recognize(
                     batch = structuralBatch,
                     expectedPackage = page.packageName,
-                    expectedActivity = page.activityClass
+                    expectedActivity = page.activityClass,
+                    reuseVerifiedIncoming = reuseVerifiedIncoming
                 ) { ocrResult ->
+                    if (ocrResult.admissionDeferred) {
+                        // The worker gate belongs to actual worker exit, not caller timeout.
+                        // Never merge this as an empty OCR result or charge failure counters.
+                        deliver(structuralBatch.copy(ocrAdmissionDeferred = true))
+                        return@recognize
+                    }
                     val resultBatch = try {
                         val mergedBatch = messageComponents.reader.applyOcrResults(structuralBatch, ocrResult, limit)
                         // Raw recognized text is carried only to the runtime's post-window-validation

@@ -93,6 +93,7 @@ internal class GesturePolicyPipeline(
             is GestureIntent.VerticalSwipe -> intent.durationMs
             is GestureIntent.FeedSwipe -> intent.durationMs
             is GestureIntent.DirectionalSwipe -> intent.durationMs
+            is GestureIntent.ImagePagingSwipe -> null
             is GestureIntent.CalibrationSwipe -> intent.durationMs
         }
         diagnostic(
@@ -103,7 +104,7 @@ internal class GesturePolicyPipeline(
                 "maxVelocity=${selectedMotion?.maximumVelocityPxPerSecond ?: "NONE"}；" +
                 "acceleration=${selectedMotion?.accelerationPxPerSecondSquared ?: "NONE"}；" +
                 "deceleration=${selectedMotion?.decelerationPxPerSecondSquared ?: "NONE"}；" +
-                "durationMs=$requestDurationMs；selection=per_request"
+                "durationMs=${requestDurationMs ?: "algorithm_owned"}；selection=per_request"
         )
 
         // 阶段 4：将已验证请求编译为一份不可变、与平台无关的 GestureCommand。

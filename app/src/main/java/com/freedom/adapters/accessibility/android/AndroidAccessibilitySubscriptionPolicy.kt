@@ -42,15 +42,11 @@ internal object AndroidAccessibilitySubscriptionPolicy {
     fun forRunMode(
         targetPackage: String,
         fallbackPackage: String,
-        runMode: RunMode?
+        runMode: RunMode?,
+        runRequested: Boolean = runMode != null
     ): AndroidAccessibilitySubscription {
         val selectedPackage = targetPackage.takeIf(String::isNotBlank) ?: fallbackPackage
-        return if (runMode == RunMode.ACCOUNT_BROWSE) {
-            AndroidAccessibilitySubscription(
-                packageNames = if (targetPackage.isNotBlank()) null else listOf(selectedPackage),
-                eventTypes = targetApplicationEventTypes or globalTouchEventTypes
-            )
-        } else if (runMode == RunMode.AI_REPLY) {
+        return if (runRequested) {
             AndroidAccessibilitySubscription(
                 packageNames = if (targetPackage.isNotBlank()) null else listOf(selectedPackage),
                 eventTypes = targetApplicationEventTypes or globalTouchEventTypes
@@ -71,13 +67,13 @@ internal object AndroidAccessibilitySubscriptionPolicy {
         eventPackage: String?,
         eventType: Int,
         targetPackage: String,
-        runMode: RunMode?
+        runMode: RunMode?,
+        runRequested: Boolean = runMode != null
     ): Boolean {
         val isGlobalTouch = eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START ||
             eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END
         return if (isGlobalTouch) {
-            targetPackage.isNotBlank() &&
-                (runMode == RunMode.ACCOUNT_BROWSE || runMode == RunMode.AI_REPLY)
+            targetPackage.isNotBlank() && runRequested
         } else {
             targetPackage.isNotBlank() && eventPackage == targetPackage
         }

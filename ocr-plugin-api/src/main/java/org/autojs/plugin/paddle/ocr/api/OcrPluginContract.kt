@@ -12,5 +12,10 @@ object OcrPluginContract {
     const val EXTRA_DETECTION_TIME_MS = "detectionTimeMs"
     const val EXTRA_RECOGNITION_TIME_MS = "recognitionTimeMs"
     const val EXTRA_COLD_LOAD_TIME_MS = "coldLoadTimeMs"
+    const val EXTRA_IMAGE_DECODE_TIME_MS = "freedomImageDecodeTimeMs"
+    const val EXTRA_ENGINE_LOCK_WAIT_MS = "freedomEngineLockWaitMs"
+    const val EXTRA_MODEL_PREPARE_TIME_MS = "freedomModelPrepareTimeMs"
+    const val EXTRA_ENGINE_ACQUIRE_TIME_MS = "freedomEngineAcquireTimeMs"
+    const val EXTRA_INFERENCE_WALL_TIME_MS = "freedomInferenceWallTimeMs"
     const val EXTRA_DIAGNOSTIC_REQUEST_ID = "com.freedom.ocr.extra.DIAGNOSTIC_REQUEST_ID"
 }

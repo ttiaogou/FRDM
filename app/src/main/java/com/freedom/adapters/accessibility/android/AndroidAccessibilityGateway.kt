@@ -52,6 +52,21 @@ import java.util.ArrayDeque
 
 private const val MAX_TARGET_WINDOWS_PER_CAPTURE = 8
 
+/** A fresh verified identity page substitutes for Activity, never for live window identity. */
+internal fun matchesVerifiedBackSource(
+    expectedWindow: WindowRef,
+    expectedActivityClass: String,
+    liveWindow: WindowRef,
+    sourceIdentityVerified: Boolean
+): Boolean = expectedWindow.packageName.isNotBlank() &&
+    expectedWindow.windowId >= 0 && expectedWindow.generation >= 0L &&
+    liveWindow.packageName == expectedWindow.packageName &&
+    liveWindow.windowId == expectedWindow.windowId &&
+    liveWindow.generation == expectedWindow.generation &&
+    (sourceIdentityVerified || (expectedActivityClass.isNotBlank() &&
+        expectedWindow.activityClass == expectedActivityClass &&
+        liveWindow.activityClass == expectedActivityClass))
+
 /**
  * Android implementation of the feature-facing accessibility gateway.
  * AccessibilityNodeInfo is acquired per call, never returned, and always recycled here.
@@ -59,15 +74,15 @@ private const val MAX_TARGET_WINDOWS_PER_CAPTURE = 8
 internal class AndroidAccessibilityGateway(
     private val service: AccessibilityService,
     private val targetPackage: () -> String,
-    private val activityClass: () -> String,
+    private val windowActivityClass: (Int, Long) -> String,
     private val inputOriginClassifier: InputOriginClassifier,
+    private val currentRunGeneration: () -> Long,
     private val activeRunMode: () -> RunMode?,
     private val inspectPageReadiness: (AccessibilityNodeInfo, String, RunMode) -> TargetAppPageReadiness,
     private val targetAppReadinessController: TargetAppReadinessController,
     private val uiWriteAuthorization: UiWriteAuthorization,
     private val onReadinessDiagnostic: (String) -> Unit = {},
-    private val recoveredActivityBindingCurrent: (Int, Long) -> Boolean = { _, _ -> true },
-    private val onRecoveredActivityBindingMismatch: () -> Unit = {}
+    private val onActivityBindingMissing: () -> Unit = {}
 ) : AccessibilityGateway, GestureExecutionPort, AndroidActiveWindowRootAccess, AndroidScreenshotCapture {
 
     @Volatile
@@ -89,7 +104,7 @@ internal class AndroidAccessibilityGateway(
         AndroidGestureDispatcher(
             service = service,
             targetPackage = targetPackage,
-            activityClass = activityClass,
+            activityClass = ::currentTargetActivityClass,
             inputOriginClassifier = inputOriginClassifier,
             targetAppReadinessController = targetAppReadinessController,
             onReadinessDiagnostic = onReadinessDiagnostic,
@@ -103,7 +118,7 @@ internal class AndroidAccessibilityGateway(
         AndroidScreenshotCaptureCoordinator(
             service = service,
             targetPackage = targetPackage,
-            activityClass = activityClass,
+            activityClass = ::currentTargetActivityClass,
             mainHandler = mainHandler
         )
     }
@@ -152,21 +167,30 @@ internal class AndroidAccessibilityGateway(
     override fun currentGestureWindow(): WindowRef? {
         // Refresh first so a rotation/resolution change also advances the captured generation.
         displayContextTracker.snapshot()
+        val generation = windowGeneration
         val root = runCatching { service.rootInActiveWindow }.getOrNull() ?: return null
         return try {
             val packageName = safeString { root.packageName?.toString().orEmpty() }
             if (packageName.isBlank()) return null
             val currentWindowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: -1
+            val activity = if (packageName == targetPackage()) {
+                windowActivityClass(currentWindowId, generation)
+            } else ""
+            if (generation != windowGeneration) return null
             WindowRef(
                 packageName = packageName,
-                activityClass = activityForWindow(currentWindowId),
-                generation = windowGeneration,
+                activityClass = activity,
+                generation = generation,
                 windowId = currentWindowId
             )
         } finally {
             recycle(root)
         }
     }
+
+    /** Current target Activity evidence, never the cached class of another window. */
+    fun currentTargetActivityClass(): String =
+        currentGestureWindow()?.takeIf { it.packageName == targetPackage() }?.activityClass.orEmpty()
 
     /** Rechecks package, Activity, window ID and page generation immediately before dispatch. */
     override fun isGestureWindowCurrent(window: WindowRef): Boolean {
@@ -180,12 +204,14 @@ internal class AndroidAccessibilityGateway(
     }
 
     override fun inspectActiveWindow(request: TreeInspectionRequest): AccessibilityTreeSnapshot? {
+        displayContextTracker.snapshot()
+        val generation = windowGeneration
         val deadlineNanos = inspectionDeadline(request.maxDurationMs)
         return nodeSnapshotReader.inspectRoot(
             acquireTargetRoot(request.allowVisibleWindowFallback),
             request,
             deadlineNanos = deadlineNanos
-        )
+        )?.takeIf { it.window.generation == generation && windowGeneration == generation }
     }
 
     /**
@@ -242,7 +268,7 @@ internal class AndroidAccessibilityGateway(
                 deadlineNanos,
                 initialPath = target.path.childIndices
             ) ?: return null
-            if (!isWindowCurrent(target.window)) return null
+            if (!isWindowCurrent(target.window) || snapshot.window.generation != target.window.generation) return null
             val resolvedWindowId = target.window.windowId.takeIf { it >= 0 } ?: snapshot.windowId
             return snapshot.copy(
                 window = target.window.copy(windowId = resolvedWindowId),
@@ -264,6 +290,8 @@ internal class AndroidAccessibilityGateway(
             val root: AccessibilityNodeInfo
         )
 
+        displayContextTracker.snapshot()
+        val generation = windowGeneration
         val deadlineNanos = inspectionDeadline(request.maxDurationMs)
         val candidates = ArrayList<WindowRootCandidate>()
         val seenWindowIds = HashSet<Int>()
@@ -354,7 +382,9 @@ internal class AndroidAccessibilityGateway(
                 }
             )
         }
-        return snapshots
+        return if (windowGeneration == generation && snapshots.all { it.window.generation == generation }) {
+            snapshots
+        } else emptyList()
     }
 
     private fun inspectionDeadline(maxDurationMs: Long): Long {
@@ -366,9 +396,8 @@ internal class AndroidAccessibilityGateway(
     override fun isWindowCurrent(window: WindowRef): Boolean {
         if (window.generation != windowGeneration) return false
         if (window.packageName != targetPackage()) return false
-        val currentActivity = activityClass()
-        if (window.activityClass.isNotBlank() && currentActivity.isNotBlank() &&
-            window.activityClass != currentActivity
+        if (window.activityClass.isNotBlank() &&
+            window.activityClass != windowActivityClass(window.windowId, window.generation)
         ) return false
         if (window.windowId < 0) {
             return withActiveTargetRoot { root, _ ->
@@ -484,42 +513,62 @@ internal class AndroidAccessibilityGateway(
 
     override fun performVerifiedNavigationBack(
         expectedWindow: WindowRef,
-        expectedActivityClass: String
+        expectedActivityClass: String,
+        targetActivityClass: String?,
+        sourceIdentityVerified: Boolean
     ): Boolean {
-        if (!uiWriteAuthorization.permits(UiWriteScope.VERIFIED_AI_BACK)) return false
+        val evidence = if (sourceIdentityVerified) "PROFILE_ID" else "ACTIVITY"
+        fun reject(reason: String): Boolean {
+            onReadinessDiagnostic(
+                "经验证导航返回拒绝[$reason]：windowId=${expectedWindow.windowId}；" +
+                    "generation=${expectedWindow.generation}；sourceEvidence=$evidence"
+            )
+            return false
+        }
+        if (!uiWriteAuthorization.permits(UiWriteScope.VERIFIED_AI_BACK)) return reject("UI_WRITE_NOT_AUTHORIZED")
         val expectedPackage = targetPackage().trim()
-        if (expectedActivityClass.isBlank() || expectedPackage.isBlank() ||
-            expectedWindow.packageName != expectedPackage ||
-            expectedWindow.activityClass != expectedActivityClass ||
-            activityClass() != expectedActivityClass ||
-            expectedWindow.windowId < 0 || expectedWindow.generation != windowGeneration ||
-            runCatching { activeRunMode() }.getOrNull() != RunMode.AI_REPLY
-        ) return false
+        if (expectedPackage.isBlank() || expectedWindow.packageName != expectedPackage ||
+            expectedWindow.windowId < 0 || expectedWindow.generation != windowGeneration
+        ) return reject("SOURCE_WINDOW_MISMATCH")
+        if (runCatching { activeRunMode() }.getOrNull() != RunMode.AI_REPLY) return reject("RUN_MODE_MISMATCH")
+        if (!sourceIdentityVerified && (expectedActivityClass.isBlank() ||
+                expectedWindow.activityClass != expectedActivityClass ||
+                windowActivityClass(expectedWindow.windowId, expectedWindow.generation) != expectedActivityClass)
+        ) return reject("ACTIVITY_EVIDENCE_MISSING_OR_MISMATCH")
 
-        val root = runCatching { service.rootInActiveWindow }.getOrNull() ?: return false
+        val root = runCatching { service.rootInActiveWindow }.getOrNull() ?: return reject("ACTIVE_ROOT_UNAVAILABLE")
         return try {
             val actualPackage = safeString { root.packageName?.toString().orEmpty() }
             val actualWindowId = safeInt { root.windowId }
-            val actualActivity = activityClass()
-            val stillCurrent = actualPackage == expectedPackage &&
-                actualWindowId == expectedWindow.windowId &&
-                windowGeneration == expectedWindow.generation &&
-                (expectedWindow.activityClass.isBlank() || actualActivity == expectedWindow.activityClass)
-            if (!stillCurrent) {
+            val actualActivity = windowActivityClass(actualWindowId, windowGeneration)
+            val liveWindow = WindowRef(actualPackage, actualActivity, windowGeneration, actualWindowId)
+            if (!matchesVerifiedBackSource(expectedWindow, expectedActivityClass, liveWindow, sourceIdentityVerified)) {
                 onReadinessDiagnostic(
                     "经验证导航返回拒绝[STALE_WINDOW]：expectedWindow=${expectedWindow.windowId}@${expectedWindow.generation}；" +
-                        "actualWindow=$actualWindowId@$windowGeneration；activity=$actualActivity"
+                        "actualWindow=$actualWindowId@$windowGeneration；activity=$actualActivity；sourceEvidence=$evidence"
                 )
                 false
             } else {
                 val accepted = uiWriteAuthorization.withAuthorizedWrite(UiWriteScope.VERIFIED_AI_BACK) {
-                    runCatching {
+                    if (windowGeneration != expectedWindow.generation) return@withAuthorizedWrite reject("STALE_WINDOW")
+                    val actionId = inputOriginClassifier.registerExpectedSelfNavigation(
+                        sourceWindow = expectedWindow,
+                        targetActivityClass = targetActivityClass,
+                        runGeneration = currentRunGeneration(),
+                        registeredAtUptimeMs = SystemClock.uptimeMillis(),
+                        sourceIdentityVerified = sourceIdentityVerified
+                    )
+                    val platformAccepted = runCatching {
                         service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
                     }.getOrDefault(false)
-                } ?: false
+                    if (!platformAccepted) {
+                        if (actionId != null) inputOriginClassifier.rejectExpectedSelfNavigation(actionId, "PLATFORM_BACK_REJECTED")
+                        reject("PLATFORM_BACK_REJECTED")
+                    } else true
+                } ?: return reject("UI_WRITE_REVOKED")
                 onReadinessDiagnostic(
                     "经验证导航返回派发：windowId=$actualWindowId；generation=$windowGeneration；" +
-                        "platformAccepted=$accepted；路径=VERIFIED_NAVIGATION_BACK"
+                        "platformAccepted=$accepted；路径=VERIFIED_NAVIGATION_BACK；sourceEvidence=$evidence"
                 )
                 accepted
             }
@@ -576,8 +625,16 @@ internal class AndroidAccessibilityGateway(
         listener: GestureResultListener,
         onPlatformDispatch: () -> Unit
     ): GestureSubmission =
+        dispatchGesture(spec, listener, { true }, onPlatformDispatch)
+
+    override fun dispatchGesture(
+        spec: GestureSpec,
+        listener: GestureResultListener,
+        canDispatch: () -> Boolean,
+        onPlatformDispatch: () -> Unit
+    ): GestureSubmission =
         authorizedGestureDispatch(spec) {
-            gestureDispatcher.dispatchGesture(spec, listener, onPlatformDispatch)
+            gestureDispatcher.dispatchGesture(spec, listener, canDispatch, onPlatformDispatch)
         }
 
     /**
@@ -585,12 +642,17 @@ internal class AndroidAccessibilityGateway(
      * This does not dispatch a gesture or grant UI ownership. The cached current()
      * diagnostic alone is insufficient after a service restart.
      */
-    fun inspectRecoveryReadiness(): TargetAppReadinessSnapshot {
-        inspectAutonomousDispatchReadiness()
-        return targetAppReadinessController.current()
-    }
+    fun inspectRecoveryReadiness(): TargetAppReadinessSnapshot = evaluateCurrentReadiness()
 
     private fun inspectAutonomousDispatchReadiness(): String? {
+        val snapshot = evaluateCurrentReadiness()
+        if (snapshot.status == TargetAppReadinessStatus.READY) return null
+        emitReadinessRejection(snapshot.status, snapshot.reason, snapshot.runMode, snapshot.windowId)
+        return snapshot.reason
+    }
+
+    /** Shared live safety evaluation. Observing readiness is not a rejected dispatch. */
+    private fun evaluateCurrentReadiness(): TargetAppReadinessSnapshot {
         val expectedPackage = targetPackage()
         val mode = runCatching { activeRunMode() }.getOrNull()
         val root = runCatching { service.rootInActiveWindow }.getOrNull()
@@ -599,7 +661,7 @@ internal class AndroidAccessibilityGateway(
                 TargetAppReadinessEvidence(
                     targetPackage = expectedPackage,
                     foregroundPackage = "",
-                    activityClass = activityClass(),
+                    activityClass = "",
                     runMode = mode,
                     windowId = -1,
                     pageGeneration = windowGeneration,
@@ -607,18 +669,19 @@ internal class AndroidAccessibilityGateway(
                 ),
                 SystemClock.uptimeMillis()
             )
-            emitReadinessRejection(snapshot.status, snapshot.reason, mode, -1)
-            return snapshot.reason
+            return snapshot
         }
 
         try {
             val foregroundPackage = safeString { root.packageName?.toString().orEmpty() }
             val windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: -1
-            val currentActivity = activityForWindow(windowId)
-            if (currentActivity.isBlank() && activityClass().isNotBlank()) {
-                // The recovered identity was tied to a different window or generation.
-                // Revoke that provisional clue and re-enter read-only evidence collection.
-                onRecoveredActivityBindingMismatch()
+            val generation = windowGeneration
+            val currentActivity = if (foregroundPackage == expectedPackage) {
+                windowActivityClass(windowId, generation)
+            } else ""
+            if (foregroundPackage == expectedPackage && currentActivity.isBlank()) {
+                // A missing or mismatched clue may only wake the existing read-only recovery.
+                onActivityBindingMissing()
             }
             val pageReadiness = if (mode != null && foregroundPackage == expectedPackage) {
                 runCatching { inspectPageReadiness(root, currentActivity, mode) }
@@ -641,8 +704,8 @@ internal class AndroidAccessibilityGateway(
                     activityClass = currentActivity,
                     runMode = mode,
                     windowId = windowId,
-                    pageGeneration = windowGeneration,
-                    activeWindowAvailable = foregroundPackage.isNotBlank(),
+                    pageGeneration = generation,
+                    activeWindowAvailable = foregroundPackage.isNotBlank() && windowGeneration == generation,
                     // An incomplete safety scan is transient: let the dispatcher defer the
                     // still-pending task and reacquire a fresh root. The per-window retry count
                     // is diagnostic only; exhaustion never authorizes an action or ends the task.
@@ -652,11 +715,7 @@ internal class AndroidAccessibilityGateway(
                 ),
                 SystemClock.uptimeMillis()
             )
-            if (snapshot.status != TargetAppReadinessStatus.READY) {
-                emitReadinessRejection(snapshot.status, snapshot.reason, mode, windowId)
-                return snapshot.reason
-            }
-            return null
+            return snapshot
         } finally {
             recycle(root)
         }
@@ -690,6 +749,8 @@ internal class AndroidAccessibilityGateway(
     ): T? {
         val expectedPackage = targetPackage().trim()
         if (expectedPackage.isBlank()) return null
+        displayContextTracker.snapshot()
+        val generation = windowGeneration
         val roots = ArrayList<AndroidTargetWindowRoot>()
         val seenIds = HashSet<Int>()
         val windows = runCatching { service.windows }.getOrNull().orEmpty()
@@ -747,6 +808,7 @@ internal class AndroidAccessibilityGateway(
             }
             val ordered = roots.sortedWith(compareByDescending<AndroidTargetWindowRoot> { it.active }
                 .thenByDescending { it.focused })
+            if (windowGeneration != generation || ordered.any { it.window.generation != generation }) return null
             return block(ordered)
         } finally {
             roots.forEach { recycle(it.root) }
@@ -827,9 +889,12 @@ internal class AndroidAccessibilityGateway(
     }
 
     override fun <T> withActiveTargetRoot(block: (AccessibilityNodeInfo, WindowRef) -> T): T? {
+        displayContextTracker.snapshot()
+        val generation = windowGeneration
         val root = acquireTargetRoot(allowVisibleWindowFallback = false) ?: return null
         return try {
             val window = createWindowRef(root) ?: return null
+            if (window.generation != generation || windowGeneration != generation) return null
             block(root, window)
         } finally {
             recycle(root)
@@ -996,18 +1061,18 @@ internal class AndroidAccessibilityGateway(
         }
     }
 
-    private fun activityForWindow(windowId: Int): String =
-        if (recoveredActivityBindingCurrent(windowId, windowGeneration)) activityClass() else ""
-
     private fun createWindowRef(root: AccessibilityNodeInfo, windowIdFallback: Int = -1): WindowRef? {
         displayContextTracker.snapshot()
         val packageName = safeString { root.packageName?.toString().orEmpty() }
         if (packageName.isBlank() || packageName != targetPackage()) return null
+        val generation = windowGeneration
         val windowId = safeInt { root.windowId }.takeIf { it >= 0 } ?: windowIdFallback
+        val activity = windowActivityClass(windowId, generation)
+        if (generation != windowGeneration) return null
         return WindowRef(
             packageName = packageName,
-            activityClass = activityForWindow(windowId),
-            generation = windowGeneration,
+            activityClass = activity,
+            generation = generation,
             windowId = windowId
         )
     }

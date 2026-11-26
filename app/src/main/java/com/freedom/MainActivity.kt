@@ -36,7 +36,6 @@ import com.freedom.application.ports.OcrReviewRepository
 import com.freedom.application.ports.OcrReviewEntry
 import com.freedom.application.ports.MonitorControlRepository
 import com.freedom.adapters.accessibility.android.MonitorOverlay
-import com.freedom.core.runtime.RunMode
 import com.freedom.stability.MonitorKeepAliveService
 import com.freedom.ui.calibration.GestureCalibrationUiController
 import com.freedom.ui.config.ConfigPanel
@@ -221,7 +220,9 @@ class MainActivity : Activity() {
         resumePendingOcrPluginInstall()
         suppressFloatingButtonOnPause = false
         if (!receiverRegistered) {
-            val filter = IntentFilter(MonitorActions.ACTION_REFRESH)
+            val filter = IntentFilter(MonitorActions.ACTION_REFRESH).apply {
+                addAction(MonitorActions.ACTION_PRESENTATION_REFRESH)
+            }
             if (Build.VERSION.SDK_INT >= 33) {
                 registerReceiver(refreshReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
             } else {
@@ -371,10 +372,6 @@ class MainActivity : Activity() {
                     val target = monitorRepository.targetPackage()
                     if (target == MonitorControlRepository.DEFAULT_TARGET_PACKAGE) "陌陌" else target
                 },
-                browseEnabled = { monitorRepository.isBrowseModeSelected() },
-                onBrowseChanged = { monitorRepository.setBrowseModeSelected(it) },
-                aiEnabled = { monitorRepository.isAiReplyModeSelected() },
-                onAiChanged = { monitorRepository.setAiReplyModeSelected(it) },
                 taskParameters = { taskLaunchParametersStore.read() },
                 onTaskParametersChanged = taskLaunchParametersStore::write,
                 onTargetClick = ::showTargetPicker,
@@ -1619,11 +1616,9 @@ class MainActivity : Activity() {
             return
         }
         val targetIntent = resolveTargetLaunchIntent(showError = true) ?: return
-        val runMode = monitorRepository.selectedMode()
-        // A missing mode is an intentional manual-observation session. Only an explicitly
-        // selected mode starts its corresponding business runtime.
-        if (!runSessionCommands.requestStart(runMode)) return
-        val sessionLabel = runMode?.displayName ?: "人工采集待命"
+        // A run authorizes observation; only a fresh page can select a business runtime.
+        if (!runSessionCommands.requestStart()) return
+        val sessionLabel = "统一页面观察"
         monitorRepository.addLog(
             timestamp() + "  ${sessionLabel}已启动；通知发布权限由用户在配置页自主决定"
         )
@@ -1746,8 +1741,7 @@ class MainActivity : Activity() {
         val sealedArchives = listSessionSampleArchives()
         val runsDirectory = sessionSampleRunsDirectory()
         val activeRunIds = SessionSampleArchiveManager.listActiveRunIds(runsDirectory)
-        val aiReplyRequested = monitorRepository.isRunRequested() &&
-            monitorRepository.activeMode() == RunMode.AI_REPLY
+        val runRequested = monitorRepository.isRunRequested()
 
         val actions = ArrayList<Pair<String, () -> Unit>>()
         actions += "导出最近节点预览 ZIP" to { launchNodeDumpExport() }
@@ -1762,8 +1756,8 @@ class MainActivity : Activity() {
                     beginWaitingForSessionArchiveSeal(activeRunIds)
                 }
             }
-            aiReplyRequested -> {
-                actions += "停止当前 AI Reply 并检查采集归档" to {
+            runRequested -> {
+                actions += "停止当前运行并检查采集归档" to {
                     confirmStopCurrentRunAndExport(emptySet())
                 }
             }
@@ -1772,7 +1766,7 @@ class MainActivity : Activity() {
             actions += "导出已封存采集归档 ZIP（${sealedArchives.size}）" to {
                 showSessionSampleArchiveExportPicker()
             }
-        } else if (activeRunIds.isEmpty() && !aiReplyRequested) {
+        } else if (activeRunIds.isEmpty() && !runRequested) {
             actions += "暂无已封存的采集归档" to {
                 Toast.makeText(this, "暂无已封存的采集归档", Toast.LENGTH_LONG).show()
             }
@@ -2433,12 +2427,6 @@ class MainActivity : Activity() {
     private fun timestamp(): String =
         java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault())
             .format(java.util.Date())
-
-    private val RunMode.displayName: String
-        get() = when (this) {
-            RunMode.AI_REPLY -> "AI 回复基础模式"
-            RunMode.ACCOUNT_BROWSE -> "自动浏览模式"
-        }
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()

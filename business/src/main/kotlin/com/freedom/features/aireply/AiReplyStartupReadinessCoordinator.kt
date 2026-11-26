@@ -23,7 +23,8 @@ internal class AiReplyStartupReadinessCoordinator(
     private val hasRelevantMessageStructureDelta: (ChatPageSnapshot, ChatPageSnapshot, ScreenRect, ScreenRect) -> Boolean,
     private val onConfirmed: (ChatPageSnapshot) -> Unit,
     private val onTimedOut: () -> Unit,
-    private val onLog: (String) -> Unit
+    private val onLog: (String) -> Unit,
+    private val foregroundQuietRemainingMs: () -> Long = { 0L }
 ) {
     companion object {
         private const val MAX_STARTUP_MESSAGE_TAB_RETRIES = 75
@@ -37,6 +38,8 @@ internal class AiReplyStartupReadinessCoordinator(
     private var task: ScheduledTask? = null
     private var generation = 0L
     private var retryCount = 0
+    private var suspendedForRecovery = false
+    private var verificationStarted = false
     private var tapAttempts = 0
     private var tapAttemptSequence = 0L
     private var pendingTapAttemptId: Long? = null
@@ -57,6 +60,8 @@ internal class AiReplyStartupReadinessCoordinator(
 
     fun resetState(sessionStarted: Boolean) {
         initializationPending = sessionStarted
+        suspendedForRecovery = false
+        verificationStarted = false
         workAreaConfirmed = !sessionStarted
         retryCount = 0
         tapAttempts = 0
@@ -93,8 +98,39 @@ internal class AiReplyStartupReadinessCoordinator(
         lastStableSnapshot = null
     }
 
+    /**
+     * The shared recovery owner must finish its page/lease verification before the
+     * startup owner resumes. Invalidated taps never regain their real-tap allowance.
+     */
+    fun suspendForPageRecovery() {
+        if (!initializationPending || workAreaConfirmed) return
+        suspendedForRecovery = true
+        cancelRecovery()
+    }
+
+    /** Resume the original startup gate without creating a second navigation allowance. */
+    fun resumeAfterPageRecovery(): Boolean {
+        if (!suspendedForRecovery || !initializationPending || workAreaConfirmed ||
+            !isSessionRunStarted() || !isAiReplyActive()
+        ) return false
+        suspendedForRecovery = false
+        verificationStarted = true
+        timedOut = false
+        retryCount = 0
+        onLog("AI 启动导航[RECOVERY_REVERIFY]：原启动工作区尚未确认；重新采集三次新鲜证据，保留原点击额度")
+        runProbe(generation)
+        return true
+    }
+
+    /** Page-selected startup may receive repeated observations; never reset an active probe. */
+    fun beginVerificationIfNeeded() {
+        if (verificationStarted || suspendedForRecovery || !initializationPending || workAreaConfirmed) return
+        beginVerification()
+    }
+
     /** Starts bounded Activity readiness and Message-tab verification. */
     fun beginVerification() {
+        verificationStarted = true
         retryCount = 0
         tapAttempts = 0
         timedOut = false
@@ -111,7 +147,7 @@ internal class AiReplyStartupReadinessCoordinator(
     }
 
     private fun runProbe(expectedGeneration: Long) {
-        if (expectedGeneration != generation || timedOut || workAreaConfirmed ||
+        if (expectedGeneration != generation || timedOut || workAreaConfirmed || suspendedForRecovery ||
             !initializationPending || !isSessionRunStarted() || !isAiReplyActive()
         ) return
 
@@ -155,6 +191,13 @@ internal class AiReplyStartupReadinessCoordinator(
 
         if (tapAttempts >= MAX_STARTUP_MESSAGE_TAB_TAPS) {
             scheduleRetry(expectedGeneration, "消息标签导航点击次数已达上限；等待页面自行完成切换")
+            return
+        }
+
+        // The same Android foreground clock already owns the quiet period. Do not
+        // consume a navigation request/preview while that known gate is closed.
+        if (runCatching(foregroundQuietRemainingMs).getOrDefault(0L) > 0L) {
+            scheduleRetry(expectedGeneration, "启动保护静默观察中；只读等待，不申请消息标签手势")
             return
         }
 

@@ -4,6 +4,8 @@ import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.features.aireply.application.message.ChatMessageCandidate
 import com.freedom.features.aireply.application.message.ChatMessageParser
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
+import com.freedom.features.aireply.domain.message.ChatMessageIdentity
+import com.freedom.features.aireply.domain.message.ChatMessageObservationIndex
 import com.freedom.features.aireply.domain.message.ChatMessageType
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.MessageReadStatus
@@ -194,6 +196,63 @@ class ChatMessageParserTest {
 
         assertEquals(first.map { it.id }, second.map { it.id })
         assertNotEquals(first[0].id, first[1].id)
+    }
+
+    @Test
+    fun appendingReplyPreservesAllExistingLogicalIdsAndObservationCounts() {
+        val incoming = listOf(
+            candidate(0, ScreenRect(40, 200, 340, 270), "你好"),
+            candidate(1, ScreenRect(40, 300, 340, 370), "你好")
+        )
+        val reply = candidate(2, ScreenRect(660, 400, 960, 470), "你好")
+        // Exercise both the parser fallback and the adapter-supplied complete-row signature.
+        for (adapterSupplied in listOf(false, true)) {
+            fun parse(rows: List<ChatMessageCandidate>) = parser.parse(
+                if (adapterSupplied) {
+                    val bounds = rows.map { it.rowBounds }
+                    rows.mapIndexed { index, row ->
+                        row.copy(neighborSignature = ChatMessageIdentity.neighborSignature(bounds, index))
+                    }
+                } else rows
+            )
+            val before = parse(incoming)
+            val after = parse(incoming + reply)
+            assertEquals(before.map { it.stableLogicalMessageId },
+                after.take(2).map { it.stableLogicalMessageId })
+            assertEquals(3, after.map { it.stableLogicalMessageId }.distinct().size)
+            val batch = ChatMessageBatch(
+                status = MessageReadStatus.SUCCESS,
+                windowSessionKey = "verified-chat-window",
+                messages = before,
+                scannedRowCount = before.size,
+                candidateRowCount = before.size,
+                truncated = false,
+                capturedAtMillis = 100L
+            )
+            val index = ChatMessageObservationIndex()
+            index.observe("contact-a", batch)
+            val result = index.observe("contact-a", batch.copy(
+                messages = after, scannedRowCount = after.size,
+                candidateRowCount = after.size, capturedAtMillis = 200L
+            ))
+            assertEquals(3, result?.uniqueMessageFingerprintCount)
+            assertEquals(2, result?.repeatedObservationCount)
+            assertEquals(listOf(2, 2, 1), index.snapshot().map { it.observationCount })
+        }
+    }
+
+    @Test
+    fun appendingIncomingDoesNotRenameExistingOutgoingOrOcrRevision() {
+        val old = candidate(0, ScreenRect(660, 200, 960, 270), "旧回复")
+        val before = parser.parse(listOf(old)).single()
+        val after = parser.parse(listOf(
+            old.copy(text = "修正回复"),
+            candidate(1, ScreenRect(40, 300, 340, 370), "新消息")
+        ))
+        assertEquals(before.stableLogicalMessageId, after.first().stableLogicalMessageId)
+        assertNotEquals(before.effectiveContentRevision, after.first().effectiveContentRevision)
+        assertNotEquals(after.first().stableLogicalMessageId, after.last().stableLogicalMessageId)
+        assertEquals(ChatMessageDirection.OUTGOING, after.first().direction)
     }
 
     @Test

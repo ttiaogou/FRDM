@@ -49,6 +49,7 @@ import com.freedom.application.ports.TaskLaunchParametersRepository
 import com.freedom.application.runtime.RunSessionCommandUseCase
 import com.freedom.application.runtime.RunGenerationClock
 import com.freedom.application.runtime.RunSessionCoordinator
+import com.freedom.application.runtime.EntryPageObservationRetry
 import com.freedom.core.accessibility.api.UnifiedAccessibilityEntry
 import com.freedom.core.accessibility.api.UnifiedAccessibilityEvent
 import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
@@ -63,6 +64,7 @@ import com.freedom.core.runtime.PageObservationCoordinator
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
 import com.freedom.core.runtime.UiWriteAuthorization
 import com.freedom.core.runtime.UiWriteScope
+import com.freedom.core.runtime.PageFingerprintRoute
 import com.freedom.core.runtime.TargetAppReadinessController
 import com.freedom.data.MonitorStoreRepository
 import com.freedom.data.MonitorStoreSnapshotRepository
@@ -107,6 +109,24 @@ import com.freedom.application.monitor.GlobalNodeLayoutVisualizationUseCase
 import com.freedom.accessibility.gesture.GestureCalibrationController
 import com.freedom.stability.MonitorKeepAliveService
 import java.io.File
+
+/** Register the three top-level page routes in the existing observation-only router.
+ * Recovery adapters keep their own task-scoped registry and checkpoint semantics. */
+internal fun PageObservationCoordinator.registerEntryPageRoutes(targetPackage: () -> String) {
+    registerFingerprintRoute(PageFingerprintRoute("ENTRY:AI_REPLY_PRIVATE_MESSAGES") {
+        it.packageName == targetPackage() &&
+            it.semanticPage == "CHAT_LIST" && it.adapterFingerprint.isNullOrBlank()
+    })
+    registerFingerprintRoute(PageFingerprintRoute("ENTRY:AI_REPLY_RECEIVED_GREETINGS") {
+        it.packageName == targetPackage() &&
+            it.semanticPage == "NON_CHAT" &&
+            it.adapterFingerprint?.contains("|page=RECEIVED_GREETINGS_LIST|") == true
+    })
+    registerFingerprintRoute(PageFingerprintRoute("ENTRY:ACCOUNT_BROWSE") {
+        it.packageName == targetPackage() &&
+            it.semanticPage == "DYNAMIC_FEED" && !it.adapterFingerprint.isNullOrBlank()
+    })
+}
 
 /**
  * The single application composition root. Data implementations are constructed here and exposed
@@ -284,7 +304,7 @@ internal class AccessibilityServiceDependencies internal constructor(
         AndroidMonitorLogPresenter(
             persistLog = monitorRepository::addLog,
             refreshPresentation = {
-                service.sendBroadcast(Intent(MonitorActions.ACTION_REFRESH).setPackage(service.packageName))
+                service.sendBroadcast(Intent(MonitorActions.ACTION_PRESENTATION_REFRESH).setPackage(service.packageName))
                 MonitorOverlay.update(service)
             }
         )
@@ -304,29 +324,130 @@ internal class AccessibilityServiceDependencies internal constructor(
     }
     /** One service-scoped page-observation coordinator shared by AI Reply and AccountBrowse. */
     val pageObservationCoordinator: PageObservationCoordinator by lazy(LazyThreadSafetyMode.NONE) {
-        PageObservationCoordinator(taskScheduler)
+        PageObservationCoordinator(taskScheduler).apply {
+            registerEntryPageRoutes(monitorRepository::targetPackage)
+        }
     }
+    /**
+     * Service-scoped read-only entry observation also works before a business runtime exists.
+     * Existing runtime channels retain their detail/checkpoint observation responsibility.
+     */
+    private val entryPageRetryDelegate: Lazy<EntryPageObservationRetry> = lazy(LazyThreadSafetyMode.NONE) {
+        EntryPageObservationRetry(
+            scheduleReadOnlyObservation = pageObservationCoordinator::scheduleReadOnlyObservation,
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+            isObservationAllowed = { runSessionCoordinator.isPageObservationAllowed() },
+            onRetry = { entryPageObservation.requestSnapshot() }
+        )
+    }
+    private val entryPageRetry: EntryPageObservationRetry by entryPageRetryDelegate
+    private val entryPageObservationDelegate: Lazy<com.freedom.core.runtime.PageObservationSubscription> = lazy(LazyThreadSafetyMode.NONE) {
+        pageObservationCoordinator.registerChannel(
+            channelId = "UNIFIED_ENTRY_PAGE",
+            quietPeriodMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
+            maxWaitMs = 1_200L,
+            isEnabled = { runSessionCoordinator.isPageObservationAllowed() },
+            onObservationRequested = entryObservation@{
+                if (runSessionCoordinator.isPageObservationAllowed()) {
+                    // A failed safety teardown still forbids writes. Once it succeeds,
+                    // read the destination now; do not wait through another retry interval.
+                    if (runSessionCoordinator.currentPageRuntimeSession()?.lifecycle ==
+                        com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING &&
+                        !runSessionCoordinator.retryPendingPageCleanup()
+                    ) {
+                        entryPageRetry.update(true)
+                        return@entryObservation
+                    }
+                    val generation = runSessionCoordinator.currentRunGeneration()
+                    val currentTaskId = runSessionCoordinator.currentPageRuntimeSession()?.taskId
+                    var ownedNestedPage = false
+                    var greetingNavigationAwaitingHandoff = false
+                    val recognized = runCatching {
+                        val observed = momoSocialAdapter.inspectUnifiedEntryPage(currentTaskId)
+                        if (observed == null || generation != runSessionCoordinator.currentRunGeneration() ||
+                            !runSessionCoordinator.isPageObservationAllowed()
+                        ) false else {
+                            val (fingerprint, nestedProof) = observed
+                            val targetTask = when (pageObservationCoordinator.matchFingerprint(fingerprint)) {
+                                "ENTRY:AI_REPLY_PRIVATE_MESSAGES" -> "AI_REPLY_PRIVATE_MESSAGES"
+                                "ENTRY:AI_REPLY_RECEIVED_GREETINGS" -> "AI_REPLY_RECEIVED_GREETINGS"
+                                "ENTRY:ACCOUNT_BROWSE" -> "ACCOUNT_BROWSE"
+                                else -> null
+                            }
+                            ownedNestedPage = nestedProof
+                            if (targetTask == null) false else {
+                                val mode = if (targetTask == "ACCOUNT_BROWSE") RunMode.ACCOUNT_BROWSE
+                                    else RunMode.AI_REPLY
+                                val verifiedGreetingNavigation =
+                                    targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
+                                    currentTaskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                                    aiReplyObservationRuntime.isVerifiedGreetingsNavigationPending()
+                                if (verifiedGreetingNavigation) {
+                                    runSessionCoordinator.reconcileUnclassifiedPage(generation, true)
+                                } else {
+                                    runSessionCoordinator.routeIndependentPageTask(mode, targetTask, generation)
+                                }
+                                greetingNavigationAwaitingHandoff =
+                                    targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
+                                    runSessionCoordinator.currentPageRuntimeSession()?.taskId == "AI_REPLY_RECEIVED_GREETINGS"
+                                true
+                            }
+                        }
+                    }.onFailure {
+                        addLog("统一入口观察[READ_RETRY]：type=${it.javaClass.simpleName}；保留运行授权")
+                    }.getOrDefault(false)
+                    val session = runSessionCoordinator.currentPageRuntimeSession()
+                    if (!recognized && session != null && generation == runSessionCoordinator.currentRunGeneration()) {
+                        runSessionCoordinator.reconcileUnclassifiedPage(
+                            generation, ownedNestedPage && session.taskId == currentTaskId
+                        )
+                    }
+                    // Keep the independent observation alive even in READY. Unknown,
+                    // startup, cleanup and a protected greeting handoff use the existing
+                    // retry backoff; a healthy route uses its low-frequency interval.
+                    val shouldRetry = !recognized || session == null || greetingNavigationAwaitingHandoff ||
+                        session.lifecycle == com.freedom.core.runtime.PageRuntimeLifecycle.STOPPING ||
+                        !runSessionCoordinator.isRuntimeReady(session.mode)
+                    entryPageRetry.update(shouldRetry, keepObserving = true)
+                }
+            }
+        )
+    }
+    private val entryPageObservation: com.freedom.core.runtime.PageObservationSubscription by entryPageObservationDelegate
+
+    /** A filtered window callback may wake the independent reader, never a business task. */
+    fun requestIndependentPageObservation() {
+        if (runSessionCoordinator.isPageObservationAllowed()) entryPageObservation.requestSnapshot()
+    }
+
     /** Service-scoped Activity recovery; no gesture or page-action capability is injected. */
     val activityEvidenceReader by lazy(LazyThreadSafetyMode.NONE) {
         com.freedom.adapters.accessibility.android.AndroidUsageActivityEvidenceReader(
             service = service,
             targetPackage = monitorRepository::targetPackage,
-            currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() }
+            currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() },
+            platformRecoveryCandidate = windowContextTracker::platformRecoveryCandidate
         )
     }
     val activityRecoveryCoordinator by lazy(LazyThreadSafetyMode.NONE) {
         com.freedom.adapters.accessibility.android.AndroidForegroundActivityRecoveryCoordinator(
             scheduler = taskScheduler,
             isRunRequested = {
-                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() != null
+                monitorRepository.isRunRequested()
             },
-            currentActivityClass = windowContextTracker::currentActivityClass,
+            currentActivityClass = { accessibilityGateway.currentTargetActivityClass() },
             readEvidence = activityEvidenceReader::probe,
             acceptEvidence = { evidence ->
-                accessibilityGateway.currentWindowGeneration() == evidence.windowGeneration &&
-                    windowContextTracker.restoreActivityClass(
-                        evidence.activityClass, evidence.windowId, evidence.windowGeneration
-                    )
+                val live = accessibilityGateway.currentGestureWindow()
+                live != null && live.packageName == monitorRepository.targetPackage() &&
+                    live.windowId == evidence.windowId && live.generation == evidence.windowGeneration &&
+                    if (evidence.platformEventGeneration != null) {
+                        windowContextTracker.restorePlatformActivity(evidence)
+                    } else {
+                        windowContextTracker.restoreActivityClass(
+                            evidence.activityClass, evidence.windowId, evidence.windowGeneration
+                        )
+                    }
             },
             onLog = addLog
         )
@@ -334,9 +455,15 @@ internal class AccessibilityServiceDependencies internal constructor(
     val uiWriteAuthorization: UiWriteAuthorization by lazy(LazyThreadSafetyMode.NONE) {
         UiWriteAuthorization(
             taskCoordinator = root.taskCoordinator,
-            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
-            activeRunMode = {
-                if (monitorRepository.isRunRequested()) runSessionCoordinator.activeMode() else null
+            currentRunGeneration = root.runGenerationClock::current,
+            activeRunMode = { runSessionCoordinator.currentWriteRoute()?.mode },
+            currentPageRuntime = {
+                runSessionCoordinator.currentWriteRoute()?.takeUnless { route ->
+                    // A reserved greeting lease and READY page route do not authorize
+                    // platform mutations while that business is recovering.
+                    route.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                        aiReplyObservationRuntime.isReceivedGreetingsRecoveryPending()
+                }
             }
         )
     }
@@ -344,7 +471,7 @@ internal class AccessibilityServiceDependencies internal constructor(
         AndroidAccessibilityGateway(
             service = service,
             targetPackage = { monitorRepository.targetPackage() },
-            activityClass = windowContextTracker::currentActivityClass,
+            windowActivityClass = windowContextTracker::activityForWindow,
             activeRunMode = {
                 if (monitorRepository.isRunRequested()) runSessionCoordinator.activeMode() else null
             },
@@ -353,11 +480,10 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             targetAppReadinessController = targetAppReadinessController,
             inputOriginClassifier = inputOriginClassifier,
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
             uiWriteAuthorization = uiWriteAuthorization,
             onReadinessDiagnostic = addLog,
-            recoveredActivityBindingCurrent = windowContextTracker::recoveredActivityMatches,
-            onRecoveredActivityBindingMismatch = {
-                windowContextTracker.invalidateRecoveredActivity()
+            onActivityBindingMissing = {
                 activityRecoveryCoordinator.ensureStarted()
             }
         )
@@ -402,7 +528,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             rootAccess = accessibilityGateway,
             accessibilityGateway = accessibilityGateway,
             targetPackage = MomoAppDescriptor.PACKAGE_NAME,
-            activityClass = windowContextTracker::currentActivityClass,
+            activityClass = accessibilityGateway::currentTargetActivityClass,
             dp = dp,
             onLog = addLog,
             gestureSettingsRepository = root.gestureSettingsRepository,
@@ -418,12 +544,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             receivedGreetingsSendReturnRepository = root.receivedGreetingsSendReturnRepository,
             ocrReviewRepository = root.ocrReviewRepository,
             sampleArchivePort = root.sampleArchivePort,
-            registerSelfNavigation = { targetActivityClass ->
-                inputOriginClassifier.registerExpectedSelfNavigation(
-                    packageName = monitorRepository.targetPackage(),
-                    targetActivityClass = targetActivityClass
-                )
-            },
+            inspectReceivedGreetingsReadiness = accessibilityGateway::inspectRecoveryReadiness,
             isAiReplyUiOperationOwned = {
                 uiWriteAuthorization.permits(UiWriteScope.AI_COMPOSER) ||
                     uiWriteAuthorization.permits(UiWriteScope.VERIFIED_GREETING_COMPOSER)
@@ -443,13 +564,11 @@ internal class AccessibilityServiceDependencies internal constructor(
             inputPort = momoSocialAdapter,
             sendPort = momoSocialAdapter,
             scheduler = taskScheduler,
-            isAiReplyActive = {
-                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
-            },
+            isAiReplyActive = { runSessionCoordinator.isRuntimeReady(RunMode.AI_REPLY) },
             onLog = addLog,
             createGateway = { configuration ->
                 val transport = when (configuration.provider) {
-                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration)
+                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration).also { it.diagnosticLog = addLog }
                     AiModelServiceProvider.OPENAI,
                     AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport(configuration)
                 }
@@ -476,6 +595,15 @@ internal class AccessibilityServiceDependencies internal constructor(
                 // This callback is dispatched asynchronously onto the runtime scheduler.
                 // It cannot grant a new task lease or authorize a stale greeting BACK.
                 aiReplyObservationRuntime.onPreSendModelFailure(failure)
+            },
+            onSendConfirmationObservationRequested = {
+                aiReplyObservationRuntime.onSendConfirmationObservationRequested()
+            },
+            captureGreetingPreSendOutgoingKeys = { target ->
+                aiReplyObservationRuntime.captureGreetingPreSendOutgoingKeys(target.windowSessionKey)
+            },
+            capturePrivatePreSendOutgoingKeys = { target ->
+                aiReplyObservationRuntime.capturePrivatePreSendOutgoingKeys(target.windowSessionKey)
             }
         )
     }
@@ -492,10 +620,15 @@ internal class AccessibilityServiceDependencies internal constructor(
             chatSessionManagementPort = momoSocialAdapter,
             gesturePolicy = gesturePolicy,
             targetPackage = { monitorRepository.targetPackage() },
-            isAiReplyActive = {
-                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.AI_REPLY
-            },
+            isAiReplyActive = { runSessionCoordinator.isRuntimeObserving(RunMode.AI_REPLY) },
             inspectAndroidRecoveryReadiness = { _ -> accessibilityGateway.inspectRecoveryReadiness() },
+            foregroundQuietRemainingMs = {
+                val now = SystemClock.uptimeMillis()
+                val foreground = accessibilityGateway.observeForegroundWindowForReadiness(now)
+                if (foreground.isNotBlank() && foreground == monitorRepository.targetPackage()) {
+                    targetAppReadinessController.foregroundQuietRemainingMs(now) ?: 0L
+                } else 0L
+            },
             onLog = addLog,
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
@@ -589,6 +722,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             verifyGreetingPreSendModelFailure = { failure, snapshot ->
                 aiReplyDraftCoordinator.verifyGreetingPreSendFailure(failure, snapshot)
             },
+            verifyPrivatePreSendModelFailure = { failure, snapshot ->
+                aiReplyDraftCoordinator.rearmVerifiedPrivatePreSendFailure(failure, snapshot)
+            },
             onGreetingModelFailureDeferred = { failure ->
                 aiReplyDraftCoordinator.releaseDeferredGreetingModelFailure(failure)
             },
@@ -620,9 +756,22 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             taskCoordinator = root.taskCoordinator,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+            onPageTaskOwnershipConfirmed = { lease, verifiedHandoff ->
+                runSessionCoordinator.admitBusinessPageTaskOwnership(lease, verifiedHandoff)
+            },
+            pageSelectedStartup = true,
+            onPageTaskAdmissionRolledBack = { failedLease ->
+                runSessionCoordinator.rollbackBusinessPageTaskOwnership(failedLease)
+            },
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
             isSendConfirmationPending = { aiReplyDraftCoordinator.isSendConfirmationPending },
+            deferGreetingSendForManualReturn = {
+                aiReplyDraftCoordinator.deferUnconfirmedSendForManualReturn()
+            },
+            deferPrivateSendForManualReturn = {
+                aiReplyDraftCoordinator.deferPrivateUnconfirmedSendForManualReturn()
+            },
             isSendControlRecoveryPending = { aiReplyDraftCoordinator.isSendControlRecoveryPending },
             onDraftRuntimeReset = {
                 if (aiReplyDraftCoordinatorDelegate.isInitialized()) {
@@ -648,7 +797,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             accessibilityGateway = accessibilityGateway,
             gesturePolicy = gesturePolicy,
             taskScheduler = taskScheduler,
-            isBrowseModeActive = { runSessionCoordinator.activeMode() == RunMode.ACCOUNT_BROWSE },
+            isBrowseModeActive = { runSessionCoordinator.isRuntimeObserving(RunMode.ACCOUNT_BROWSE) },
             socialBrowsePort = momoSocialAdapter,
             overlayPort = overlayPort,
             isMonitoringRunning = { monitorRepository.isRunRequested() },
@@ -663,7 +812,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository,
             recoveryScheduleRepository = root.recoveryScheduleRepository,
             recoveryTransactionManager = root.recoveryTransactionManager,
-            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() }
+            currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },
+            isGlobalTouchActive = { touchInteractionMonitor.snapshot().interactionActive }
         )
     }
     val accountBrowseRuntimeAdapter by lazy(LazyThreadSafetyMode.NONE) {
@@ -698,7 +848,19 @@ internal class AccessibilityServiceDependencies internal constructor(
             ),
             log = monitorRepository,
             generationClock = root.runGenerationClock,
-            taskCoordinator = root.taskCoordinator
+            taskCoordinator = root.taskCoordinator,
+            onObserveCurrentPage = { entryPageObservation.requestSnapshot() },
+            cancelCurrentPageObservation = {
+                if (entryPageObservationDelegate.isInitialized()) entryPageObservation.cancel()
+                if (entryPageRetryDelegate.isInitialized()) entryPageRetry.cancel()
+            },
+            onUserRunEnded = {
+                root.recoveryScheduleRepository.clear()
+                root.privateMessagesRecoveryScheduleRepository.clear()
+                root.receivedGreetingsRecoveryScheduleRepository.clear()
+                root.accountBrowseCheckpointRepository.clear()
+            },
+            initiallyServiceConnected = false
         )
     }
     // Service-scoped platform-neutral routing gateway. Existing runtime dispatch order
@@ -713,9 +875,11 @@ internal class AccessibilityServiceDependencies internal constructor(
                 is UnifiedAccessibilityEvent.ActivityTransition ->
                     runSessionCoordinator.dispatchActivityTransition(notification.activityClass)
                 is UnifiedAccessibilityEvent.NavigationObservation -> {
-                    val attached = notification.attachedSelfNavigation
-                    if (attached != null) aiReplyObservationRuntime.onSelfNavigationAttached(attached)
-                    else aiReplyObservationRuntime.onUnmatchedNavigationObserved(notification.activityClass)
+                    if (runSessionCoordinator.isRuntimeObserving(RunMode.AI_REPLY)) {
+                        val attached = notification.attachedSelfNavigation
+                        if (attached != null) aiReplyObservationRuntime.onSelfNavigationAttached(attached)
+                        else aiReplyObservationRuntime.onUnmatchedNavigationObserved(notification.activityClass)
+                    }
                 }
             }
         }
@@ -730,12 +894,11 @@ internal class AccessibilityServiceDependencies internal constructor(
             updateAppPage = { appLabel, pageLabel -> monitorRepository.updateAppPage(appLabel, pageLabel) },
             appendLog = addLog,
             currentActivityClass = windowContextTracker::currentActivityClass,
-            updateCurrentActivityClass = windowContextTracker::updateActivityClass,
+            observeWindowStateEvent = windowContextTracker::observeWindowStateEvent,
             onBrowseEventLogged = { monitorPreviewScheduler.scheduleBrowseScan() },
             unifiedAccessibilityEntry = unifiedAccessibilityEntry,
             currentWindowGeneration = { accessibilityGateway.currentWindowGeneration() },
             inputOriginClassifier = inputOriginClassifier,
-            observeWindowStateEvent = windowContextTracker::observeWindowStateEvent,
             pageObservationCoordinator = pageObservationCoordinator,
             onActivityWindowEventDiagnostic = { className, windowId, generation, tracked ->
                 addLog(
@@ -789,7 +952,7 @@ internal class AccessibilityServiceDependencies internal constructor(
         AndroidMonitorPreviewScheduler(
             scheduler = taskScheduler,
             isBrowseRunActive = {
-                monitorRepository.isRunRequested() && runSessionCoordinator.activeMode() == RunMode.ACCOUNT_BROWSE
+                runSessionCoordinator.isRuntimeReady(RunMode.ACCOUNT_BROWSE)
             },
             scanActiveWindow = { accessibilityTreePreviewUseCase.scanActiveWindow() }
         )
@@ -823,13 +986,9 @@ internal class AccessibilityServiceDependencies internal constructor(
         AndroidAccessibilityServiceRecoveryCoordinator(
             host = object : AndroidAccessibilityServiceRecoveryCoordinator.Host {
                 override fun isRunRequested(): Boolean = monitorRepository.isRunRequested()
-                override fun resolveActiveModeForRestore(): RunMode? = runSessionCoordinator.resolveActiveModeForRestore()
                 override fun isBootRecoveryPending(): Boolean = monitorRepository.isBootRecoveryPending()
                 override fun clearBootRecoveryPending() = monitorRepository.setBootRecoveryPending(false)
-                override fun stopRun(reason: String) = runSessionCoordinator.stop(reason)
-                override fun stopKeepAlive() = MonitorKeepAliveService.stop(service)
                 override fun appendLog(message: String) = monitorRepository.addLog(message)
-                override fun resetRuntime(mode: RunMode, reason: String) = runSessionCoordinator.resetRuntime(mode, reason)
                 override fun clearActivityContext() = windowContextTracker.clearActivityClass()
                 override fun connectRuntime() = runSessionCoordinator.onAccessibilityServiceConnected()
                 override fun canDrawOverlays(): Boolean = Settings.canDrawOverlays(service)

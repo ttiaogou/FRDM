@@ -1,6 +1,5 @@
 package com.freedom.application.runtime
 
-import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.RunStateRepository
 
 /**
@@ -12,11 +11,10 @@ class RunSessionCommandUseCase(
     private val state: RunStateRepository,
     private val onDiagnostic: (String) -> Unit = {}
 ) {
-    /** Persist the optional business mode before run intent; null starts manual-observation standby. */
+    /** Authorize unified page observation, without selecting or persisting a business runtime. */
     @Synchronized
-    fun requestStart(mode: RunMode? = null): Boolean {
+    fun requestStart(): Boolean {
         if (state.isRunRequested()) return false
-        state.setActiveMode(mode)
         state.setRunRequested(true)
         return true
     }
@@ -24,11 +22,10 @@ class RunSessionCommandUseCase(
     /** Clear persisted run intent; the service coordinator stops the active runtime on refresh. */
     @Synchronized
     fun requestStop() {
-        val previousMode = state.activeMode()
         val wasRequested = state.isRunRequested()
         onDiagnostic(
             "运行请求停止[REQUESTED]：source=RunSessionCommandUseCase.requestStop；" +
-                "previousMode=${previousMode?.name ?: "NONE"}；previousRunRequested=$wasRequested"
+                "previousRunRequested=$wasRequested"
         )
         state.setRunRequested(false)
     }

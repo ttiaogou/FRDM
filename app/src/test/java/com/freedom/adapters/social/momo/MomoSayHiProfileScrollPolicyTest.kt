@@ -78,6 +78,87 @@ class MomoSayHiProfileScrollPolicyTest {
         }
     }
 
+    @Test fun pendingProfileScrollAcceptsFiveAnchorsWithoutDependingOnStaleActivityLabel() {
+        val ids = listOf(
+            "com.immomo.momo:id/root_layout",
+            "com.immomo.momo:id/personal_profile_name",
+            "com.immomo.momo:id/toolbar_id",
+            "com.immomo.momo:id/tabs",
+            "com.immomo.momo:id/pagertabcontent"
+        )
+        assertTrue(MomoSayHiProfileScrollPolicy.permitsPendingProfileScroll(
+            mode = com.freedom.core.runtime.RunMode.AI_REPLY,
+            pendingOnCurrentWindow = true,
+            activeWindowId = 10,
+            currentRootViewIds = ids
+        ))
+    }
+
+    @Test fun profilePermitStillRequiresExactPendingWindowModeAndAllFiveAnchors() {
+        val ids = setOf(
+            "root_layout", "personal_profile_name", "toolbar_id", "tabs", "pagertabcontent"
+        )
+        val policy = MomoSayHiProfileScrollPolicy
+        assertTrue(policy.matchesProfileSurface(ids))
+        assertTrue(!policy.permitsPendingProfileScroll(
+            com.freedom.core.runtime.RunMode.AI_REPLY, false, 10, ids
+        ))
+        assertTrue(!policy.permitsPendingProfileScroll(
+            com.freedom.core.runtime.RunMode.ACCOUNT_BROWSE, true, 10, ids
+        ))
+        assertTrue(!policy.permitsPendingProfileScroll(
+            com.freedom.core.runtime.RunMode.AI_REPLY, true, -1, ids
+        ))
+        assertTrue(!policy.permitsPendingProfileScroll(
+            com.freedom.core.runtime.RunMode.AI_REPLY, true, 10, ids - "tabs"
+        ))
+    }
+
+    @Test fun identitySwipePermitRequiresExactTransactionWindowAndModeWithoutProfileAnchors() {
+        val policy = MomoSayHiProfileScrollPolicy
+        val mode = com.freedom.core.runtime.RunMode.AI_REPLY
+        assertTrue(policy.permitsIdentityProfileScroll(mode, true, 10, 10))
+        assertTrue(!policy.permitsIdentityProfileScroll(mode, true, 10, 11))
+        assertTrue(!policy.permitsIdentityProfileScroll(mode, false, 10, 10))
+        assertTrue(!policy.permitsIdentityProfileScroll(mode, true, -1, -1))
+        assertTrue(!policy.permitsIdentityProfileScroll(com.freedom.core.runtime.RunMode.ACCOUNT_BROWSE, true, 10, 10))
+    }
+
+    @Test fun identityViewportCanUseUniqueVerticalContentWithoutAnyProfileAnchors() {
+        val vertical = node(listOf(0), "android.widget.ScrollView",
+            bounds = ScreenRect(0, 478, 720, 1600), scrollable = true)
+        val horizontal = node(listOf(1), "androidx.viewpager.widget.ViewPager",
+            bounds = ScreenRect(0, 478, 720, 1600), scrollable = true)
+        val decision = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(listOf(vertical, horizontal), 720, 1554)
+        assertEquals(ScreenRect(0, 478, 720, 1274), decision.viewport)
+        assertEquals(listOf(0), decision.targetPath)
+        assertNull(MomoSayHiProfileScrollPolicy.resolveIdentityViewport(listOf(horizontal), 720, 1554).viewport)
+        assertNull(MomoSayHiProfileScrollPolicy.resolveIdentityViewport(
+            listOf(vertical, vertical.copy(path = NodePath(listOf(2)))), 720, 1554
+        ).viewport)
+        assertNull(MomoSayHiProfileScrollPolicy.resolveIdentityViewport(
+            listOf(vertical.copy(bounds = ScreenRect(0, 1500, 720, 1600))), 720, 1554
+        ).viewport)
+    }
+
+    @Test fun identitySwipeUsesNameBandAndStopsAboveAnnotatedLowerBoundary() {
+        val decision = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(observedProfileNodes(), 720, 1554)
+        assertEquals(ScreenRect(0, 758, 720, 1274), decision.viewport)
+        assertEquals(listOf(2, 0), decision.targetPath)
+        assertEquals("PROFILE_VIEWPORT_FINGERPRINT_CONFIRMED", decision.reason)
+    }
+
+    @Test fun identitySwipeExcludesEarlierFixedActionAndRejectsInsufficientSpace() {
+        val action = node(listOf(3), "android.widget.TextView", text = "对话",
+            bounds = ScreenRect(100, 1190, 300, 1260))
+        val safe = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(observedProfileNodes() + action, 720, 1554)
+        assertEquals(ScreenRect(0, 758, 720, 1190), safe.viewport)
+        val noHeader = observedProfileNodes().filterNot { it.viewId.endsWith("/personal_profile_name") }
+        val unsafe = MomoSayHiProfileScrollPolicy.resolveIdentityViewport(noHeader, 720, 1554)
+        assertNull(unsafe.viewport)
+        assertEquals("IDENTITY_SCROLL_SAFE_SPACE_INSUFFICIENT", unsafe.reason)
+    }
+
     @Test fun selectsObservedProfileRecyclerViewAndClipsAccessibilityBoundsToDisplay() {
         val decision = MomoSayHiProfileScrollPolicy.resolveViewport(
             nodes = observedProfileNodes(),

@@ -55,15 +55,23 @@ class OcrPluginService : Service() {
                 ?.takeIf { it.isNotBlank() }
                 ?: nextRequestId("aidl")
             logStage(requestId, "REQUEST_RECEIVED", "cpuThreads=${options.cpuThreadNum};detLongSize=${options.detLongSize}")
+            val decodeStartedAt = SystemClock.elapsedRealtime()
             val bitmap = traceStage(
                 requestId,
                 "IMAGE_DECODE",
                 "raw=${options.extras?.getBoolean(org.autojs.plugin.paddle.ocr.api.PaddleOcrOptionExtraKeys.RAW_IMAGE, false) == true}",
             ) { OcrImageFdDecoder.decode(imageFd, options.extras) }
+            val timings = mutableMapOf(
+                OcrPluginContract.EXTRA_IMAGE_DECODE_TIME_MS to (SystemClock.elapsedRealtime() - decodeStartedAt)
+            )
             logStage(requestId, "IMAGE_DECODED", "width=${bitmap.width};height=${bitmap.height};config=${bitmap.config};byteCount=${bitmap.byteCount}")
             try {
-                val runResult = recognizeBitmap(bitmap, options, requestId)
-                val results = runResult.results.map { it.toPluginResult(runResult) }.toMutableList()
+                val runResult = recognizeBitmap(bitmap, options, requestId, timings)
+                val results = runResult.results.map { item ->
+                    item.toPluginResult(runResult).apply {
+                        extras?.let { bundle -> timings.forEach { (key, value) -> bundle.putLong(key, value) } }
+                    }
+                }.toMutableList()
                 logStage(requestId, "REQUEST_SUCCESS", "results=${results.size};totalTimeMs=${runResult.totalTimeMs}")
                 return results
             } catch (failure: Throwable) {
@@ -200,20 +208,30 @@ class OcrPluginService : Service() {
         bitmap: android.graphics.Bitmap,
         options: OcrOptions,
         requestId: String,
+        timings: MutableMap<String, Long>? = null,
     ): OCRRunResult {
         val lockWaitStartedAt = SystemClock.elapsedRealtime()
         logStage(requestId, "ENGINE_LOCK_WAIT_START")
         synchronized(engineLock) {
-            logStage(requestId, "ENGINE_LOCK_ACQUIRED", "waitMs=${SystemClock.elapsedRealtime() - lockWaitStartedAt}")
+            val lockWaitMs = SystemClock.elapsedRealtime() - lockWaitStartedAt
+            timings?.put(OcrPluginContract.EXTRA_ENGINE_LOCK_WAIT_MS, lockWaitMs)
+            logStage(requestId, "ENGINE_LOCK_ACQUIRED", "waitMs=$lockWaitMs")
             val modelId = selectedModelId() ?: DEFAULT_MODEL_ID
+            val modelStartedAt = SystemClock.elapsedRealtime()
             val files = traceStage(requestId, "MODEL_PREPARE", "modelId=$modelId") {
                 modelManager.ensureInstalled(modelId)
             }
+            timings?.put(OcrPluginContract.EXTRA_MODEL_PREPARE_TIME_MS, SystemClock.elapsedRealtime() - modelStartedAt)
+            val engineStartedAt = SystemClock.elapsedRealtime()
             val engine = traceStage(requestId, "ENGINE_ACQUIRE", "modelId=${files.modelId};version=${files.version}") {
                 engineHolder.get(files, options)
             }
+            timings?.put(OcrPluginContract.EXTRA_ENGINE_ACQUIRE_TIME_MS, SystemClock.elapsedRealtime() - engineStartedAt)
+            val inferenceStartedAt = SystemClock.elapsedRealtime()
             return traceStage(requestId, "INFERENCE", "image=${bitmap.width}x${bitmap.height}") {
                 runBlocking(Dispatchers.IO) { engine.recognize(bitmap) }
+            }.also {
+                timings?.put(OcrPluginContract.EXTRA_INFERENCE_WALL_TIME_MS, SystemClock.elapsedRealtime() - inferenceStartedAt)
             }
         }
     }

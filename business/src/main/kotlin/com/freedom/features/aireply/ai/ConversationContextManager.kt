@@ -25,7 +25,11 @@ class ConversationContextManager(
         batch: ChatMessageBatch
     ): ConversationContext {
         requireVerifiedIdentity(contactId, conversationId, identityConfidence)
-        val eligible = batch.messages.filter(ChatMessage::isAiInputEligible)
+        // Keep the original evidence and fingerprint in storage; do not persist partial
+        // P2 projections as if they were fully VERIFIED OCR messages.
+        val eligible = batch.messages.filter {
+            it.isAiInputEligible && AiSafeConversationText.legacy(it.content) != null
+        }
         val inputs = eligible.map { message ->
             ConversationMessageInput(
                 messageFingerprint = message.stableLogicalMessageId,
@@ -84,7 +88,8 @@ class ConversationContextManager(
                 it.contactId == contactId && it.conversationId == conversationId &&
                     it.identityConfidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED.name &&
                     it.contentQuality == "VERIFIED" && it.type == "TEXT" &&
-                    !it.content.isNullOrBlank()
+                    it.directionEvidence != "AMBIGUOUS" &&
+                    AiSafeConversationText.legacy(it.content) != null
             }
             .sortedWith(
                 compareBy<com.freedom.features.conversation.domain.message.StoredConversationMessage> {
@@ -103,7 +108,9 @@ class ConversationContextManager(
                     ChatMessageDirection.OUTGOING.name -> AiModelMessage.Role.ASSISTANT
                     else -> null
                 } ?: return@mapNotNull null
-                AiModelMessage(role, record.content!!.take(maxMessageChars))
+                AiSafeConversationText.legacy(record.content)?.let { safe ->
+                    AiModelMessage(role, safe.take(maxMessageChars))
+                }
             }
         return ConversationContext(
             contactId = contactId,

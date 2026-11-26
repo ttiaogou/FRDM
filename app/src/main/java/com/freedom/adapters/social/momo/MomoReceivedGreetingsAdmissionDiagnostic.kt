@@ -10,6 +10,9 @@ internal data class MomoReceivedGreetingsAdmissionDiagnostic(
     val readOnlyStage: String,
     val entrySearchGestureInFlight: Boolean
 ) {
+    /** One read-only gate shared by recovery preflight and the final start admission. */
+    fun isReadyForCurrentList(): Boolean = rejectedGates().isEmpty()
+
     fun rejectedGates(): List<String> = buildList {
         if (!listConfirmed) add("LIST_NOT_CONFIRMED")
         if (!listStructureVisible) add("LIST_STRUCTURE_NOT_VISIBLE")

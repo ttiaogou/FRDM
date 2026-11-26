@@ -72,7 +72,7 @@ internal class AndroidForegroundActivityRecoveryCoordinator(
                 if (lastPendingReason != result.reason) {
                     lastPendingReason = result.reason
                     onLog("ACTIVITY_EVIDENCE_PENDING reason=" + result.reason +
-                        "; activityEvidenceSource=USAGE_ACTIVITY_RESUMED; rejectReason=" + result.reason +
+                        "; activityEvidenceSource=" + result.evidenceSource + "; rejectReason=" + result.reason +
                         "; no Activity inferred from a node tree; gestures remain gated")
                 }
                 schedule(RETRY_MS)
@@ -93,10 +93,10 @@ internal class AndroidForegroundActivityRecoveryCoordinator(
                     return
                 }
                 if (acceptEvidence(proof)) {
-                    onLog("ACTIVITY_EVIDENCE_VERIFIED source=USAGE_ACTIVITY_RESUMED; windowId=" +
+                    onLog("ACTIVITY_EVIDENCE_VERIFIED source=" + proof.evidenceSource + "; windowId=" +
                         proof.windowId + "; generation=" + proof.windowGeneration +
                         "; Activity=" + proof.activityClass +
-                        "; activityEvidenceSource=USAGE_ACTIVITY_RESUMED; result=VERIFIED")
+                        "; activityEvidenceSource=" + proof.evidenceSource + "; result=VERIFIED")
                     stop()
                 } else {
                     firstSample = null

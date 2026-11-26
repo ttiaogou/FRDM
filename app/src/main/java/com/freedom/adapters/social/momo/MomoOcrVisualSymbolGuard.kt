@@ -1,5 +1,13 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.features.aireply.domain.message.OcrUncertaintyMarkers
+
+import com.freedom.features.aireply.domain.message.OcrContentKind
+import com.freedom.features.aireply.domain.message.OcrContentRect
+import com.freedom.features.aireply.domain.message.OcrContentToken
+import com.freedom.features.aireply.domain.message.OcrTokenSource
+import com.freedom.features.aireply.domain.message.OcrTokenStatus
+
 /** A rectangle in OCR-crop-local pixel coordinates. */
 internal data class OcrVisualRect(
     val left: Int,
@@ -32,6 +40,12 @@ internal data class OcrVisualLine(
     val symbols: List<OcrVisualSymbol>
 )
 
+/** The existing rendered OCR text plus typed content evidence. */
+internal data class OcrVisualReconciliation(
+    val text: String,
+    val tokens: List<OcrContentToken>
+)
+
 /**
  * Conservative guard for colored emoji/pictograms inside Momo's custom-drawn message body.
  * This does not guess the emoji's meaning. If a colored glyph is omitted or misread as an ASCII
@@ -39,9 +53,9 @@ internal data class OcrVisualLine(
  * a misleading OCR character is not passed to the AI conversation layer.
  */
 internal object MomoOcrVisualSymbolGuard {
-    const val UNKNOWN_VISUAL_SYMBOL = "[表情/图形未识别]"
-    const val UNCERTAIN_TEXT_SYMBOL = "[标点/符号待确认]"
-    const val UNCERTAIN_SYMBOL_ONLY = "[图形/符号内容待确认]"
+    const val UNKNOWN_VISUAL_SYMBOL = OcrUncertaintyMarkers.UNKNOWN_VISUAL_SYMBOL
+    const val UNCERTAIN_TEXT_SYMBOL = OcrUncertaintyMarkers.UNCERTAIN_TEXT_SYMBOL
+    const val UNCERTAIN_SYMBOL_ONLY = OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY
 
     /**
      * Detects compact, saturated color components from the already-cropped message body.
@@ -117,31 +131,61 @@ internal object MomoOcrVisualSymbolGuard {
         return mergeNearbyRegions(regions)
     }
 
-    /** Reconciles OCR lines with detected colored components without inventing emoji identity. */
-    fun reconcile(
+    /** Preserve exact legacy OCR rendering while collecting typed evidence. */
+    fun reconcile(lines: List<OcrVisualLine>, colorRegions: List<OcrVisualRect>): String =
+        reconcileWithTokens(lines, colorRegions).text
+
+    fun reconcileWithTokens(
         lines: List<OcrVisualLine>,
         colorRegions: List<OcrVisualRect>
-    ): String {
+    ): OcrVisualReconciliation {
         if (lines.isEmpty()) {
-            return if (colorRegions.isEmpty()) "" else UNKNOWN_VISUAL_SYMBOL
+            if (colorRegions.isEmpty()) return OcrVisualReconciliation("", emptyList())
+            return OcrVisualReconciliation(
+                UNKNOWN_VISUAL_SYMBOL,
+                listOf(OcrContentToken(
+                    kind = OcrContentKind.PLACEHOLDER,
+                    status = OcrTokenStatus.UNVERIFIED,
+                    text = UNKNOWN_VISUAL_SYMBOL,
+                    source = OcrTokenSource.VISUAL_GUARD,
+                    lineIndex = 0,
+                    symbolBounds = colorRegions.singleOrNull()?.asContentRect()
+                ))
+            )
         }
-        val sortedLines = lines.sortedWith(compareBy<OcrVisualLine> { it.bounds.top }.thenBy { it.bounds.left })
+        val sorted = lines.sortedWith(compareBy<OcrVisualLine> { it.bounds.top }.thenBy { it.bounds.left })
         val usedRegions = HashSet<Int>()
-        return sortedLines.joinToString("\n") { line ->
-            reconcileLine(line, colorRegions, usedRegions)
+        val rendered = sorted.mapIndexed { index, line ->
+            reconcileLine(line, colorRegions, usedRegions, index)
         }
+        return OcrVisualReconciliation(
+            rendered.joinToString("\n") { it.text },
+            rendered.flatMap { it.tokens }
+        )
     }
+
+    private data class AnnotatedChar(
+        val char: Char,
+        val markerSource: OcrTokenSource? = null,
+        val markerBounds: OcrVisualRect? = null
+    )
+
+    private data class ReconciledLine(val text: String, val tokens: List<OcrContentToken>)
+
+    private fun OcrVisualRect.asContentRect(): OcrContentRect =
+        OcrContentRect(left, top, right, bottom)
 
     private fun reconcileLine(
         line: OcrVisualLine,
         allRegions: List<OcrVisualRect>,
-        usedRegions: MutableSet<Int>
-    ): String {
-        if (line.text.isBlank()) return ""
+        usedRegions: MutableSet<Int>,
+        lineIndex: Int
+    ): ReconciledLine {
+        if (line.text.isBlank()) return ReconciledLine("", emptyList())
         val indexedSymbols = indexSymbols(line)
         val edits = ArrayList<TextEdit>()
 
-        // Low-confidence punctuation is retained as an explicit uncertainty marker.
+        // A low-confidence OCR symbol is an explicit uncertainty marker, not verified text.
         indexedSymbols.forEach { indexed ->
             val overlapsColorRegion = allRegions.any { region ->
                 indexed.symbol.bounds.intersectionArea(region) > 0
@@ -151,7 +195,10 @@ internal object MomoOcrVisualSymbolGuard {
                 confidence < LOW_CONFIDENCE_SYMBOL_THRESHOLD &&
                 isPunctuationOrSymbol(indexed.symbol.text)
             ) {
-                edits += TextEdit(indexed.start, indexed.end, UNCERTAIN_TEXT_SYMBOL)
+                edits += TextEdit(
+                    indexed.start, indexed.end, UNCERTAIN_TEXT_SYMBOL,
+                    OcrTokenSource.OCR_SYMBOL, indexed.symbol.bounds
+                )
             }
         }
 
@@ -162,10 +209,13 @@ internal object MomoOcrVisualSymbolGuard {
                 region.centerX <= line.bounds.right + LINE_HORIZONTAL_TOLERANCE_PX
         }
 
-        // Without character boxes we cannot place a detected pictogram relative to the text.
-        // Mark the entire line uncertain rather than appending a placeholder at a guessed edge.
+        // Without per-character boxes, never guess a visual symbol's location in text.
         if (lineRegions.isNotEmpty() && indexedSymbols.isEmpty()) {
-            return "$UNCERTAIN_SYMBOL_ONLY ${line.text}"
+            val markerBounds = lineRegions.singleOrNull()?.value
+            val chars = (UNCERTAIN_SYMBOL_ONLY.map {
+                AnnotatedChar(it, OcrTokenSource.VISUAL_GUARD, markerBounds)
+            } + AnnotatedChar(' ') + line.text.map { AnnotatedChar(it) })
+            return renderLine(chars, lineIndex, line.bounds, ambiguous = true)
         }
 
         for ((regionIndex, region) in lineRegions) {
@@ -179,37 +229,125 @@ internal object MomoOcrVisualSymbolGuard {
                 if (overlapRatio < MIN_SYMBOL_REGION_OVERLAP) null else indexed
             }
 
-            // If an actual Unicode emoji is already recognized, preserve it. Remove every
-            // non-emoji OCR token that overlaps the same visual component, not just one ASCII
-            // character; this prevents residues such as ")", "e", or a false Han glyph.
             val nonEmojiOverlaps = overlapping.filterNot { isUnicodeEmojiToken(it.symbol.text) }
             if (nonEmojiOverlaps.isNotEmpty()) {
                 nonEmojiOverlaps.forEach { indexed ->
                     edits += TextEdit(indexed.start, indexed.end, "")
                 }
                 val insertionIndex = nonEmojiOverlaps.minOf { it.start }
-                edits += TextEdit(insertionIndex, insertionIndex, UNKNOWN_VISUAL_SYMBOL)
+                edits += TextEdit(
+                    insertionIndex, insertionIndex, UNKNOWN_VISUAL_SYMBOL,
+                    OcrTokenSource.VISUAL_GUARD, region
+                )
             } else if (overlapping.isEmpty()) {
-                // OCR omitted the pictogram completely. Insert a marker at its approximate
-                // horizontal position using neighboring symbol geometry.
                 val insertionIndex = indexedSymbols.firstOrNull {
                     it.symbol.bounds.centerX >= region.centerX
                 }?.start ?: line.text.length
-                edits += TextEdit(insertionIndex, insertionIndex, UNKNOWN_VISUAL_SYMBOL)
+                edits += TextEdit(
+                    insertionIndex, insertionIndex, UNKNOWN_VISUAL_SYMBOL,
+                    OcrTokenSource.VISUAL_GUARD, region
+                )
             }
-            // If every overlapping OCR symbol is already a Unicode emoji, preserve it.
             usedRegions += regionIndex
         }
 
-        if (edits.isEmpty()) return line.text
+        // Apply the same descending edits to annotated characters as the legacy StringBuilder.
+        // Tracking their origin prevents literal OCR text matching a marker from being mislabeled.
+        val chars = line.text.map { AnnotatedChar(it) }.toMutableList()
         val ordered = edits.distinctBy { Triple(it.start, it.end, it.replacement) }
             .sortedWith(compareByDescending<TextEdit> { it.start }.thenByDescending { it.end })
-        val result = StringBuilder(line.text)
         for (edit in ordered) {
-            if (edit.start !in 0..result.length || edit.end !in edit.start..result.length) continue
-            result.replace(edit.start, edit.end, edit.replacement)
+            if (edit.start !in 0..chars.size || edit.end !in edit.start..chars.size) continue
+            chars.subList(edit.start, edit.end).clear()
+            chars.addAll(edit.start, edit.replacement.map {
+                AnnotatedChar(it, edit.source, edit.bounds)
+            })
         }
-        return result.toString()
+        return renderLine(
+            chars, lineIndex, line.bounds,
+            ambiguous = lineRegions.isNotEmpty() ||
+                edits.any { it.replacement == UNCERTAIN_TEXT_SYMBOL }
+        )
+    }
+
+    private fun renderLine(
+        chars: List<AnnotatedChar>,
+        lineIndex: Int,
+        bounds: OcrVisualRect,
+        ambiguous: Boolean
+    ): ReconciledLine {
+        val text = chars.joinToString("") { it.char.toString() }
+        val tokens = ArrayList<OcrContentToken>()
+        var index = 0
+        while (index < text.length) {
+            val origin = chars[index].markerSource
+            if (origin != null) {
+                val markerBounds = chars[index].markerBounds
+                var end = index + 1
+                while (end < text.length &&
+                    chars[end].markerSource == origin &&
+                    chars[end].markerBounds == markerBounds
+                ) end++
+                tokens += OcrContentToken(
+                    kind = OcrContentKind.PLACEHOLDER,
+                    status = OcrTokenStatus.UNVERIFIED,
+                    text = text.substring(index, end),
+                    source = origin,
+                    lineIndex = lineIndex,
+                    lineBounds = bounds.asContentRect(),
+                    symbolBounds = markerBounds?.asContentRect()
+                )
+                index = end
+                continue
+            }
+            val emojiLength = unicodeEmojiSpanLength(text, index)
+            if (emojiLength > 0) {
+                tokens += OcrContentToken(
+                    kind = OcrContentKind.EMOJI,
+                    status = OcrTokenStatus.UNVERIFIED,
+                    text = text.substring(index, index + emojiLength),
+                    source = OcrTokenSource.UNICODE_EMOJI,
+                    lineIndex = lineIndex,
+                    lineBounds = bounds.asContentRect()
+                )
+                index += emojiLength
+                continue
+            }
+            var end = index
+            while (end < text.length && chars[end].markerSource == null &&
+                unicodeEmojiSpanLength(text, end) == 0
+            ) end += Character.charCount(text.codePointAt(end))
+            tokens += OcrContentToken(
+                kind = OcrContentKind.TEXT,
+                status = if (ambiguous) OcrTokenStatus.AMBIGUOUS else OcrTokenStatus.RECOGNIZED,
+                text = text.substring(index, end),
+                source = OcrTokenSource.OCR_LINE,
+                lineIndex = lineIndex,
+                lineBounds = bounds.asContentRect()
+            )
+            index = end
+        }
+        return ReconciledLine(text, tokens)
+    }
+
+    private fun unicodeEmojiSpanLength(text: String, offset: Int): Int {
+        if (offset >= text.length) return 0
+        val first = text.codePointAt(offset)
+        var end = offset + Character.charCount(first)
+        if (first in '0'.code..'9'.code || first == '#'.code || first == '*'.code) {
+            if (end < text.length && text.codePointAt(end) == 0xFE0F) end++
+            return if (end < text.length && text.codePointAt(end) == 0x20E3) end + 1 - offset else 0
+        }
+        if (!isLikelyEmojiCodePoint(first) && first !in 0x2300..0x23FF) return 0
+        while (end < text.length) {
+            val next = text.codePointAt(end)
+            if (next != 0xFE0F && next != 0xFE0E && next != 0x200D &&
+                next !in 0x1F3FB..0x1F3FF &&
+                !isLikelyEmojiCodePoint(next) && next !in 0x2300..0x23FF
+            ) break
+            end += Character.charCount(next)
+        }
+        return end - offset
     }
 
     private fun isUnicodeEmojiToken(value: String): Boolean {
@@ -329,7 +467,13 @@ internal object MomoOcrVisualSymbolGuard {
         val end: Int
     )
 
-    private data class TextEdit(val start: Int, val end: Int, val replacement: String)
+    private data class TextEdit(
+        val start: Int,
+        val end: Int,
+        val replacement: String,
+        val source: OcrTokenSource? = null,
+        val bounds: OcrVisualRect? = null
+    )
 
     private const val MIN_IMAGE_EDGE = 8
     private const val MIN_GLYPH_EDGE = 6

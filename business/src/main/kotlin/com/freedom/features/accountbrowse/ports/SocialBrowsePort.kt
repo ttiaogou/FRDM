@@ -12,7 +12,9 @@ data class BrowsePageEvidence(
     val confidence: Int,
     val reason: String,
     val nodeCount: Int = 0,
-    val windowAvailable: Boolean = true
+    val windowAvailable: Boolean = true,
+    val windowId: Int? = null,
+    val windowSessionKey: String? = null
 )
 
 enum class BrowsePageKind {
@@ -21,7 +23,11 @@ enum class BrowsePageKind {
     DYNAMIC_FEED,
     DETAIL,
     IMAGE_VIEWER,
-    OTHER
+    OTHER;
+
+    /** Both are normal dynamic content; the same detail lifecycle consumes either. */
+    val isDynamicContent: Boolean
+        get() = this == DETAIL || this == IMAGE_VIEWER
 }
 
 data class DynamicTabEvidence(
@@ -149,5 +155,8 @@ interface SocialBrowsePort {
         minimumHeightPx: Int
     ): FeedSelectionResult
     fun inspectDetail(expectedFingerprint: String): DetailEvidence
+    /** Optional fresh business evidence, independent of page identity and BACK eligibility. */
+    fun readImageIndex(expectedFingerprint: String): ImageIndexReadResult =
+        ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.NOT_SUPPORTED)
     fun inspectFeedReturn(expectedFingerprint: String): FeedReturnEvidence
 }

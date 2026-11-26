@@ -17,7 +17,6 @@ internal class MomoChatSampleImageStore(
     private val runDirectory: () -> File?,
     private val appendJsonLine: (String, JSONObject) -> Unit,
     private val relativeSamplePath: (String) -> String,
-    private val blockSessionIdentityKey: (String) -> Unit,
     private val onWriteFailure: () -> Unit
 ) {
     private companion object {
@@ -66,7 +65,10 @@ internal class MomoChatSampleImageStore(
             .put("monitorOverlayHidden", true)
             .put("screenshotPath", relativeSamplePath(screenshotPath)))
 
-        // Avatar fingerprints are diagnostics only; conflicting name-only keys are quarantined.
+        // Avatar crops are asynchronous observations. A hash difference can reflect
+        // clipping, list movement, animation or badges; it is not an identity verdict.
+        // Keep the evidence diagnostic-only. Real row/ID collisions are adjudicated
+        // by the existing identity and navigation gates, never by this sample store.
         val bitmap = runCatching { BitmapFactory.decodeFile(screenshotPath) }.getOrNull() ?: return
         try {
             val evidenceRows = JSONArray()
@@ -92,7 +94,6 @@ internal class MomoChatSampleImageStore(
                         similarityThreshold = AVATAR_DHASH_DIAGNOSTIC_THRESHOLD,
                         platformIdVerified = hasVerifiedPlatformIdentity
                     )
-                if (visualConflictCandidate) blockSessionIdentityKey(displayNameKey)
                 evidenceRows.put(JSONObject()
                     .put("rowIndex", candidate.rowIndex)
                     .put("displayNameIdentityKey", displayNameKey)
@@ -106,8 +107,8 @@ internal class MomoChatSampleImageStore(
                     .put("visualSimilarityCandidate", distance != null && distance <= AVATAR_DHASH_DIAGNOSTIC_THRESHOLD)
                     .put("visualConflictCandidate", visualConflictCandidate)
                     .put("identityVerified", false)
-                    .put("identityQuarantined", visualConflictCandidate)
-                    .put("selectionImpact", if (visualConflictCandidate) "BLOCKED_NAME_ONLY_IDENTITY" else "DIAGNOSTIC_ONLY"))
+                    .put("identityQuarantined", false)
+                    .put("selectionImpact", "DIAGNOSTIC_ONLY"))
                 val history = avatarFingerprintHistory.getOrPut(displayNameKey) { ArrayList() }
                 history.add(AvatarFingerprintObservation(sampleIndex, candidate.rowIndex, fingerprint))
                 while (history.size > MAX_AVATAR_HISTORY_PER_NAME) history.removeAt(0)

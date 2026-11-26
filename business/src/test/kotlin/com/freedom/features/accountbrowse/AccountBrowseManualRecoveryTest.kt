@@ -14,6 +14,431 @@ import org.junit.Test
 
 class AccountBrowseManualRecoveryTest {
     @Test
+    fun coldBrowseStartupSchedulesSecondReadOnlySampleAndResumesOriginalPhase() {
+        val scheduler = QueuedScheduler()
+        var fingerprint = "feed-a"
+        var pageEvidence = page()
+        var reads = 0
+        var countdowns = 0
+        var swipes = 0
+        var generation = 7L
+        lateinit var runtime: AccountBrowseRuntime
+        val manager = com.freedom.features.recovery.UnifiedRecoveryTransactionManager({ generation })
+        runtime = AccountBrowseRuntime(
+            scheduler = scheduler,
+            canScheduleStep = { true },
+            isSessionEnabled = { true },
+            isTouchActive = { false },
+            targetPackage = { "com.immomo.momo" },
+            currentRunGeneration = { generation },
+            recoveryTransactionManager = manager,
+            pageSelectedStartup = true,
+            onResetSession = {},
+            onReadOnlyRecoveryObservation = {
+                reads++
+                runtime.observeRecoveryPage(pageEvidence)
+                if (runtime.observeDynamicFeedFingerprintReadOnly(fingerprint, pageEvidence, true)) {
+                    runtime.scheduleStep(300L)
+                }
+            },
+            actions = AccountBrowseRuntime.Actions(
+                waitForDynamicTab = {}, verifyNavigationAction = {},
+                refreshDynamicFeed = {}, verifyDynamicFeedRefresh = {},
+                waitForFeedStable = {
+                    reads++
+                    if (runtime.observeDynamicFeedFingerprint(fingerprint, pageEvidence, true)) {
+                        assertTrue(runtime.canExecuteAutomaticStep())
+                        runtime.transitionTo(AccountBrowsePhase.FIRST_SWIPE_COUNTDOWN)
+                        runtime.scheduleStep(1000L)
+                    } else runtime.scheduleStep(750L)
+                },
+                runFirstSwipeCountdown = {
+                    assertTrue(runtime.canExecuteAutomaticStep())
+                    countdowns++
+                    runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_LIST_SCROLL)
+                    runtime.scheduleStep(1000L)
+                },
+                performFeedScroll = {
+                    assertTrue(runtime.canExecuteAutomaticStep())
+                    swipes++
+                },
+                verifyInitialSwipe = {}, openVisibleFeedCard = {}, checkDetailPageLoaded = {},
+                returnFromDetailPage = {}, waitForImageBrowserReturn = {},
+                waitForDetailRestabilize = {}, checkFeedListReturned = {}
+            )
+        )
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_FEED_STABLE)
+        runtime.scheduleStep(300L)
+        scheduler.runNext()
+        assertEquals(1, reads)
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertEquals(RecoveryTransactionState.VERIFYING, runtime.recoveryState())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        // The old phase dispatch still cannot run in VERIFYING.
+        runtime.performStep()
+        assertEquals(1, reads)
+        assertEquals(0, countdowns)
+        assertEquals(0, swipes)
+
+        // A changed feed cannot satisfy the second sample.
+        fingerprint = "feed-b"
+        scheduler.runNext()
+        assertEquals(2, reads)
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        scheduler.runNext() // old ordinary phase callback is blocked
+        assertEquals(2, reads)
+        assertEquals(0, countdowns)
+
+        // An intervening wrong page invalidates the previous sample.
+        pageEvidence = page(BrowsePageKind.HOME)
+        scheduler.runNext()
+        assertEquals(3, reads)
+        assertEquals(0, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        pageEvidence = page()
+        scheduler.runNext()
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        scheduler.runNext()
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertEquals(0, countdowns)
+        assertEquals(0, swipes)
+        assertEquals(null, manager.snapshot("ACCOUNT_BROWSE"))
+
+        scheduler.runNext() // original phase must read again before countdown
+        assertEquals(AccountBrowsePhase.FIRST_SWIPE_COUNTDOWN, runtime.phase)
+        assertEquals(6, reads)
+        assertEquals(0, swipes)
+        scheduler.runNext()
+        assertEquals(1, countdowns)
+        scheduler.runNext()
+        assertEquals(1, swipes)
+
+        // A new stability phase on an unchanged feed must not reuse the completed round.
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_FEED_STABLE)
+        runtime.scheduleStep(300L)
+        scheduler.runNext()
+        assertEquals(RecoveryTransactionState.VERIFYING, runtime.recoveryState())
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        val old = scheduler.nextCallback()
+        generation++
+        runtime.suspendSession()
+        old()
+        assertEquals(AccountBrowsePhase.IDLE, runtime.phase)
+        assertEquals(1, swipes)
+    }
+
+    @Test
+    fun readOnlyCompletionRequiresFreshMatchingFeedBeforeCountdown() {
+        val runtime = runtime()
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_FEED_STABLE)
+        assertFalse(runtime.observeDynamicFeedFingerprint("feed-a", page(), routeVerified = true))
+        assertFalse(runtime.canExecuteAutomaticStep())
+        assertTrue(runtime.observeDynamicFeedFingerprintReadOnly("feed-a", page(), routeVerified = true))
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertEquals(AccountBrowsePhase.WAIT_FOR_FEED_STABLE, runtime.phase)
+        // The asynchronous proof must not authorize the changed feed.
+        assertFalse(runtime.observeDynamicFeedFingerprint("feed-b", page(), routeVerified = true))
+        assertEquals(RecoveryTransactionState.RECOVERING, runtime.recoveryState())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed-b", page(), routeVerified = true))
+        assertTrue(runtime.observeDynamicFeedFingerprintReadOnly("feed-b", page(), routeVerified = true))
+        assertTrue(runtime.observeDynamicFeedFingerprint("feed-b", page(), routeVerified = true))
+        assertEquals(AccountBrowsePhase.WAIT_FOR_FEED_STABLE, runtime.phase)
+    }
+
+    @Test
+    fun liveDetailRecoveryKeepsOriginalLoadPhaseAndRequiresTwoFreshDetailSamples() {
+        val runtime = runtime(onFeedStep = { error("detail must not execute a feed step") })
+        runtime.session.sourceFingerprint = "source-feed"
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD)
+        runtime.requestRecovery("unattributed click", {}, {}, {})
+        val detail = page(BrowsePageKind.DETAIL).copy(fingerprint = "detail-window-1")
+        assertFalse(runtime.observeDetailFingerprintReadOnly(detail, true))
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        runtime.performStep()
+        assertFalse(runtime.observeDetailFingerprintReadOnly(detail, false))
+        assertEquals(0, runtime.recoveryStableSamples())
+        assertFalse(runtime.observeDetailFingerprintReadOnly(detail, true))
+        assertFalse(runtime.observeDetailFingerprintReadOnly(detail.copy(fingerprint = "detail-window-2"), true))
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertTrue(runtime.observeDetailFingerprintReadOnly(detail.copy(fingerprint = "detail-window-2"), true))
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertEquals(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD, runtime.phase)
+        assertTrue(runtime.canExecuteAutomaticStep())
+        runtime.suspendSession()
+        assertFalse(runtime.observeDetailFingerprintReadOnly(detail, true))
+        assertEquals(AccountBrowsePhase.IDLE, runtime.phase)
+    }
+
+    @Test
+    fun detailRecoverySchedulerResumesLoadThenOriginalDwellBeforeBack() {
+        val scheduler = QueuedScheduler()
+        val detail = page(BrowsePageKind.DETAIL).copy(fingerprint = "detail-window")
+        var reads = 0
+        var loads = 0
+        var backs = 0
+        lateinit var runtime: AccountBrowseRuntime
+        runtime = runtime(
+            scheduler = scheduler,
+            onReadOnlyObservation = {
+                reads++
+                runtime.observeRecoveryPage(detail)
+                if (runtime.observeDetailFingerprintReadOnly(detail, true)) {
+                    runtime.scheduleStep(300L)
+                }
+            },
+            onDetailLoad = {
+                assertTrue(runtime.canExecuteAutomaticStep())
+                loads++
+                runtime.transitionTo(AccountBrowsePhase.DETAIL_DWELL)
+                runtime.scheduleStep(4000L)
+            },
+            onDetailReturn = {
+                assertTrue(runtime.canExecuteAutomaticStep())
+                backs++
+            }
+        )
+        runtime.session.sourceFingerprint = "source-feed"
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD)
+        runtime.requestRecovery("unattributed card click", {}, {}, {})
+        scheduler.runNext()
+        assertEquals(1, reads)
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        runtime.performStep()
+        assertEquals(0, loads)
+        assertEquals(0, backs)
+        scheduler.runNext()
+        assertEquals(2, reads)
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertEquals(0, loads)
+        assertEquals(0, backs)
+        scheduler.runNext()
+        assertEquals(1, loads)
+        assertEquals(AccountBrowsePhase.DETAIL_DWELL, runtime.phase)
+        assertEquals(0, backs)
+        scheduler.runNext()
+        assertEquals(1, backs)
+    }
+
+    @Test
+    fun pictureContentResumesThroughTheSameDetailLoadDwellAndReturnCallbacks() {
+        val scheduler = QueuedScheduler()
+        var picture = page(BrowsePageKind.IMAGE_VIEWER).copy(fingerprint = "picture-window")
+        var reads = 0
+        var loads = 0
+        var backs = 0
+        lateinit var runtime: AccountBrowseRuntime
+        runtime = runtime(
+            scheduler = scheduler,
+            onReadOnlyObservation = {
+                reads++
+                runtime.observeRecoveryPage(picture)
+                if (runtime.observeDetailFingerprintReadOnly(picture, true)) runtime.scheduleStep(300L)
+            },
+            onDetailLoad = {
+                assertTrue(runtime.canExecuteAutomaticStep())
+                loads++
+                runtime.transitionTo(AccountBrowsePhase.DETAIL_DWELL)
+                runtime.scheduleStep(4000L)
+            },
+            onDetailReturn = {
+                assertTrue(runtime.canExecuteAutomaticStep())
+                backs++
+            }
+        )
+        runtime.session.sourceFingerprint = "source-feed"
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD)
+        runtime.requestRecovery("picture content awaiting observation", {}, {}, {})
+        scheduler.runNext()
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        runtime.performStep()
+        assertEquals(0, backs)
+        picture = picture.copy(fingerprint = "different-picture-window")
+        scheduler.runNext()
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        scheduler.runNext()
+        assertEquals(3, reads)
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        assertEquals(0, loads)
+        scheduler.runNext()
+        assertEquals(AccountBrowsePhase.DETAIL_DWELL, runtime.phase)
+        assertEquals(1, loads)
+        assertEquals(0, backs)
+        scheduler.runNext()
+        assertEquals(1, backs)
+    }
+
+    @Test
+    fun pictureContentCannotReplacePersistedFeedCheckpointOrUnconfirmedEvidence() {
+        val restored = runtime(FakeStore(savedCheckpoint()))
+        assertTrue(restored.beginCheckpointVerification())
+        repeat(3) { assertFalse(restored.observeDetailFingerprintReadOnly(page(BrowsePageKind.IMAGE_VIEWER), true)) }
+        assertTrue(restored.hasPendingCheckpointVerification())
+        val live = runtime()
+        live.session.sourceFingerprint = "source-feed"
+        live.transitionTo(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD)
+        live.requestRecovery("unknown page", {}, {}, {})
+        repeat(3) {
+            assertFalse(live.observeDetailFingerprintReadOnly(page(BrowsePageKind.IMAGE_VIEWER).copy(confidence = 35), true))
+        }
+        assertFalse(live.canExecuteAutomaticStep())
+    }
+
+    @Test
+    fun verifiedFeedReturnCanResumeEveryLiveContentPhaseWithoutWaitingForDetailTimeout() {
+        for (phase in listOf(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD, AccountBrowsePhase.DETAIL_DWELL,
+            AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN, AccountBrowsePhase.WAIT_FOR_DETAIL_RESTABILIZE)) {
+            val runtime = runtime()
+            runtime.session.sourceFingerprint = "source-feed"
+            runtime.session.sourceSnapshot = "original-list-position"
+            runtime.transitionTo(phase)
+            assertFalse(runtime.canResumeFeedReturn(page(), false))
+            assertFalse(runtime.canResumeFeedReturn(page().copy(confidence = 35), true))
+            assertFalse(runtime.canResumeFeedReturn(page().copy(windowAvailable = false), true))
+            assertFalse(runtime.canResumeFeedReturn(page(BrowsePageKind.IMAGE_VIEWER), true))
+            runtime.requestRecovery("unknown during content visit", {}, {}, {})
+            assertFalse(runtime.canResumeFeedReturn(page(), true))
+            assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+            assertFalse(runtime.canResumeFeedReturn(page(), true))
+            assertTrue(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+            assertTrue(runtime.canResumeFeedReturn(page(), true))
+            assertEquals(phase, runtime.phase)
+            assertEquals("original-list-position", runtime.session.sourceSnapshot)
+            runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_LIST_RETURN)
+            assertFalse(runtime.canResumeFeedReturn(page(), true))
+            runtime.suspendSession()
+            assertFalse(runtime.canResumeFeedReturn(page(), true))
+        }
+    }
+
+    @Test
+    fun contentRecoveryAlsoWorksWhileWaitingForReturnWithoutGrantingBackBeforeActive() {
+        for (phase in listOf(AccountBrowsePhase.WAIT_FOR_IMAGE_BROWSER_RETURN, AccountBrowsePhase.WAIT_FOR_LIST_RETURN)) {
+            val runtime = runtime()
+            runtime.session.sourceFingerprint = "source-feed"
+            runtime.transitionTo(phase)
+            runtime.requestRecovery("return window temporarily unknown", {}, {}, {})
+            val detail = page(BrowsePageKind.DETAIL).copy(fingerprint = "detail-window")
+            assertFalse(runtime.observeDetailFingerprintReadOnly(detail, true))
+            assertFalse(runtime.canExecuteAutomaticStep())
+            assertTrue(runtime.observeDetailFingerprintReadOnly(detail, true))
+            assertEquals(phase, runtime.phase)
+            assertTrue(runtime.canExecuteAutomaticStep())
+        }
+    }
+
+    @Test
+    fun detailRecoveryCannotReplacePersistedFeedCheckpointVerification() {
+        val runtime = runtime(FakeStore(savedCheckpoint()))
+        assertTrue(runtime.beginCheckpointVerification())
+        val detail = page(BrowsePageKind.DETAIL)
+        repeat(3) { assertFalse(runtime.observeDetailFingerprintReadOnly(detail, true)) }
+        assertTrue(runtime.hasPendingCheckpointVerification())
+        assertFalse(runtime.canExecuteAutomaticStep())
+    }
+
+    private class QueuedScheduler : TaskScheduler {
+        private data class Entry(val due: Long, val callback: () -> Unit, var cancelled: Boolean = false)
+        private val entries = mutableListOf<Entry>()
+        private var now = 0L
+        override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask {
+            val entry = Entry(now + delayMillis, task)
+            entries += entry
+            return ScheduledTask { entry.cancelled = true }
+        }
+        private fun next() = entries.filterNot { it.cancelled }.minByOrNull { it.due }
+            ?: error("No pending callback")
+        fun nextCallback(): () -> Unit = next().callback
+        fun runNext() {
+            val entry = next()
+            entry.cancelled = true
+            now = entry.due
+            entry.callback()
+        }
+    }
+
+    @Test
+    fun repeatedUnattributedScrollsKeepOneRecoveryPreparationAndOneArmedObservation() {
+        val scheduler = QueuedScheduler()
+        var prepared = 0
+        var hidden = 0
+        var reads = 0
+        var generation = 1L
+        lateinit var runtime: AccountBrowseRuntime
+        runtime = runtime(currentRunGeneration = { generation }, scheduler = scheduler,
+            onReadOnlyObservation = {
+                reads++
+                runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true)
+            })
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_DETAIL_LOAD)
+        runtime.session.sourceFingerprint = "source-feed"
+        runtime.session.sourceSnapshot = "original-list-position"
+        fun scrollHint(index: Int) {
+            runtime.requestRecovery("scroll-$index", { prepared++ }, { hidden++ }, {}, observationHint = true)
+        }
+        scrollHint(0)
+        val first = scheduler.nextCallback()
+        runtime.session.deadlineAt = 12345L
+        repeat(100) { scrollHint(it + 1) }
+        assertEquals(1, prepared)
+        assertEquals(1, hidden)
+        assertEquals(12345L, runtime.session.deadlineAt)
+        assertTrue(first === scheduler.nextCallback())
+        scheduler.runNext()
+        assertEquals(1, reads)
+        assertEquals(1, runtime.recoveryStableSamples())
+        val second = scheduler.nextCallback()
+        repeat(100) { scrollHint(it + 101) }
+        assertEquals(1, runtime.recoveryStableSamples())
+        assertTrue(second === scheduler.nextCallback())
+        assertFalse(runtime.canExecuteAutomaticStep())
+        assertEquals("original-list-position", runtime.session.sourceSnapshot)
+        scheduler.runNext()
+        assertEquals(2, reads)
+        assertEquals(RecoveryTransactionState.ACTIVE, runtime.recoveryState())
+        scrollHint(201)
+        assertEquals(2, prepared)
+        assertFalse(runtime.canExecuteAutomaticStep())
+        val stale = scheduler.nextCallback()
+        runtime.suspendSession()
+        generation++
+        stale()
+        assertEquals(2, reads)
+    }
+
+    @Test
+    fun freshUnknownAndActualTouchStillInvalidateSamplesInCoalescedRecovery() {
+        var touch = false
+        var prepared = 0
+        val runtime = runtime(isTouchActive = { touch })
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_FEED_STABLE)
+        runtime.requestRecovery("scroll", { prepared++ }, {}, {}, observationHint = true)
+        assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+        assertEquals(1, runtime.recoveryStableSamples())
+        runtime.observeRecoveryPage(page(BrowsePageKind.UNKNOWN).copy(confidence = 0))
+        assertEquals(0, runtime.recoveryStableSamples())
+        assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+        touch = true
+        runtime.requestRecovery("real touch", { prepared++ }, {}, {})
+        runtime.onUserInteractionStarted()
+        assertEquals(0, runtime.recoveryStableSamples())
+        repeat(3) { assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true)) }
+        assertFalse(runtime.canExecuteAutomaticStep())
+        touch = false
+        runtime.onUserInteractionEnded()
+        assertFalse(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+        assertTrue(runtime.observeDynamicFeedFingerprintReadOnly("feed", page(), true))
+        assertEquals(1, prepared)
+    }
+
+    @Test
     fun touchRecoveryKeepsTaskInUnifiedRecoveryWithoutManualResumeLatch() {
         val runtime = runtime()
         runtime.requestRecovery(
@@ -57,6 +482,48 @@ class AccountBrowseManualRecoveryTest {
         assertEquals(AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE, runtime.phase)
         assertEquals(RecoveryTransactionState.RECOVERING, runtime.recoveryState())
         assertFalse(runtime.canExecuteAutomaticStep())
+    }
+
+    @Test
+    fun suspendedBrowseDiscardsTransientStateAndPreservesOriginalCheckpointUntilFreshVerification() {
+        val store = FakeStore(null)
+        var generation = 11L
+        val runtime = runtime(store, currentRunGeneration = { generation })
+        val task = AccountBrowseTask(runtime)
+        assertTrue(task.start())
+        runtime.session.touchActive = true
+        runtime.session.gestureInFlight = true
+        runtime.session.overlayPassthroughActive = true
+        runtime.session.sourceFingerprint = "old-source"
+        runtime.session.lastStableFingerprint = "old-stable"
+        runtime.session.stableSamples = 2
+        runtime.session.swipeCount = 3
+        runtime.transitionTo(AccountBrowsePhase.WAIT_FOR_SCROLL_SETTLE)
+        runtime.saveCheckpointBeforePageExit()
+        val original = requireNotNull(store.value)
+        generation++
+        task.suspendForPageExit()
+        assertEquals(AccountBrowseTask.Status.IDLE, task.status)
+        assertEquals(AccountBrowsePhase.IDLE, runtime.phase)
+        assertFalse(runtime.session.touchActive)
+        assertFalse(runtime.session.gestureInFlight)
+        assertFalse(runtime.session.overlayPassthroughActive)
+        assertEquals("", runtime.session.sourceFingerprint)
+        assertEquals("", runtime.session.lastStableFingerprint)
+        assertEquals(0, runtime.session.stableSamples)
+        assertEquals(original, store.value)
+        assertTrue(task.start())
+        assertTrue(runtime.restoreAfterServiceReconnect())
+        assertEquals(3, runtime.session.swipeCount)
+        assertEquals("", runtime.session.sourceFingerprint)
+        assertTrue(runtime.beginCheckpointVerification())
+        assertEquals(original, store.value)
+        assertFalse(runtime.observeDynamicFeedFingerprint("fresh-feed", page(), routeVerified = true))
+        assertEquals(original, store.value)
+        assertTrue(runtime.observeDynamicFeedFingerprint("fresh-feed", page(), routeVerified = true))
+        assertFalse(runtime.hasPendingCheckpointVerification())
+        task.stop({}, {})
+        assertEquals(null, store.value)
     }
 
     @Test
@@ -287,14 +754,20 @@ class AccountBrowseManualRecoveryTest {
     private fun runtime(
         checkpointRepository: AccountBrowseCheckpointRepository? = null,
         currentRunGeneration: () -> Long = { 0L },
-        onFeedStep: () -> Unit = {}
-    ): AccountBrowseRuntime = AccountBrowseRuntime(
-        scheduler = object : TaskScheduler {
+        scheduler: TaskScheduler = object : TaskScheduler {
             override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask = ScheduledTask { }
         },
+        onReadOnlyObservation: () -> Unit = {},
+        onDetailLoad: () -> Unit = {},
+        onDetailReturn: () -> Unit = {},
+        isTouchActive: () -> Boolean = { false },
+        onFeedStep: () -> Unit = {}
+    ): AccountBrowseRuntime = AccountBrowseRuntime(
+        scheduler = scheduler,
+        onReadOnlyRecoveryObservation = onReadOnlyObservation,
         canScheduleStep = { true },
         isSessionEnabled = { true },
-        isTouchActive = { false },
+        isTouchActive = isTouchActive,
         targetPackage = { "com.immomo.momo" },
         checkpointRepository = checkpointRepository,
         currentRunGeneration = currentRunGeneration,
@@ -309,8 +782,8 @@ class AccountBrowseManualRecoveryTest {
             performFeedScroll = {},
             verifyInitialSwipe = {},
             openVisibleFeedCard = {},
-            checkDetailPageLoaded = {},
-            returnFromDetailPage = {},
+            checkDetailPageLoaded = onDetailLoad,
+            returnFromDetailPage = onDetailReturn,
             waitForImageBrowserReturn = {},
             waitForDetailRestabilize = {},
             checkFeedListReturned = {}

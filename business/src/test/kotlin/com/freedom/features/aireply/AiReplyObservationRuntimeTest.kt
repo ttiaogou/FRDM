@@ -22,6 +22,10 @@ import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.TargetAppReadinessSnapshot
 import com.freedom.core.runtime.TargetAppReadinessStatus
 import com.freedom.core.runtime.UiOperationOwnershipCoordinator
+import com.freedom.core.runtime.UiWriteAuthorization
+import com.freedom.core.runtime.UiWriteScope
+import com.freedom.core.runtime.PageRuntimeSessionState
+import com.freedom.core.runtime.PageRuntimeLifecycle
 import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
@@ -48,6 +52,7 @@ import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.features.aireply.ports.ChatPageNodeEvidence
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.MessageWorkAreaNavigationOutcome
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatPageSnapshot
@@ -172,6 +177,112 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun pageSelectedStartupLoadsOnlyTheSelectedCheckpointAndRetriesConfigurationAndArchiveAdmission() {
+        for (selected in listOf("AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS")) {
+            val scheduler = FakeScheduler()
+            val port = FakeChatPort().apply { receivedGreetingsWorkflowEnabled = true }
+            val logs = ArrayList<String>()
+            val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+            var configFailure: String? = "MODEL_CONFIGURATION_NOT_READY"
+            var privateLoads = 0
+            var greetingLoads = 0
+            val privateCheckpoint = PrivateMessagesTraversalTaskExecutor().checkpoint()
+            val greetingCheckpoint = MomoSayHiTraversalCheckpointRecord(
+                processedRowKeys = setOf("retained-row"),
+                processedContactIdHashes = emptySet(),
+                deferredRows = emptyMap(),
+                deferredReturnToTopActive = false,
+                deferredReplayStarted = false
+            )
+            val privateRepo = object : PrivateMessagesTraversalCheckpointRepository {
+                override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint {
+                    privateLoads++
+                    return privateCheckpoint
+                }
+                override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) = Unit
+                override fun clear() = error("must retain private checkpoint")
+            }
+            val greetingRepo = object : MomoSayHiTraversalCheckpointRepository {
+                override fun load(nowEpochMs: Long): MomoSayHiTraversalCheckpointRecord {
+                    greetingLoads++
+                    return greetingCheckpoint
+                }
+                override fun save(checkpoint: MomoSayHiTraversalCheckpointRecord) = Unit
+                override fun clear() = error("must retain greeting checkpoint")
+            }
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port, chatMessagePort = port, chatSessionManagementPort = port,
+                gesturePolicy = NoOpGestureApi, targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true }, onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L, regionRefreshDebounceMs = 500L,
+                draftStartupFailure = { configFailure },
+                taskCoordinator = tasks, currentRunGeneration = { 9L },
+                privateMessagesCheckpointRepository = privateRepo,
+                receivedGreetingsCheckpointRepository = greetingRepo,
+                pageSelectedStartup = true
+            )
+            assertEquals(0, privateLoads)
+            assertEquals(0, greetingLoads)
+            assertFalse(runtime.preparePageSelectedStartup(selected))
+            assertEquals(0, privateLoads + greetingLoads)
+            configFailure = null
+            port.sessionRunEnabled = false
+            assertFalse(runtime.preparePageSelectedStartup(selected))
+            assertEquals(0, privateLoads + greetingLoads)
+            port.sessionRunEnabled = true
+            assertTrue(runtime.preparePageSelectedStartup(selected))
+            assertEquals(if (selected == "AI_REPLY_PRIVATE_MESSAGES") 1 else 0, privateLoads)
+            assertEquals(if (selected == "AI_REPLY_RECEIVED_GREETINGS") 1 else 0, greetingLoads)
+            assertTrue(logs.any { it.contains("CHECKPOINT_LOADED") && it.contains("task=$selected") })
+            assertNull(tasks.currentLease())
+            assertEquals(0, port.receivedGreetingsIdleSteps)
+            // Duplicate preparation must not reopen the archive or reload a checkpoint.
+            assertTrue(runtime.preparePageSelectedStartup(selected))
+            assertEquals(1, privateLoads + greetingLoads)
+        }
+    }
+
+    @Test
+    fun revokedGreetingsLeaseDoesNotPreventFreshReadAndSchedulesRecoveryWithoutGesture() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            receivedGreetingsCheckpointFingerprint = "greetings-current-window"
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            page = page.copy(pageKind = ChatPageKind.NON_CHAT, scannedNodeCount = 40)
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port, chatMessagePort = port, chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi, targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true }, onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L, regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 5L },
+            pageSelectedStartup = true
+        )
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_RECEIVED_GREETINGS"))
+        val flow = activateGreetingTestFlow(runtime)
+        assertTrue(flow.releaseOwnership("temporary lease loss"))
+        val readsBefore = port.fullInspections
+        val stepsBefore = port.receivedGreetingsIdleSteps
+        runtime.requestPageRouteObservation()
+        scheduler.runNextWithDelay(300L)
+        assertTrue(port.fullInspections > readsBefore)
+        assertEquals(stepsBefore, port.receivedGreetingsIdleSteps)
+        assertNull(tasks.currentLease())
+        assertTrue(logs.any { it.contains("LEASE_LOST_READ_ONLY") })
+        assertTrue(scheduler.hasPendingDelay(500L))
+    }
+
+    @Test
     fun receivedGreetingsRestoredCheckpointRequiresSharedProofAndAdapterConfirmation() {
         val scheduler = FakeScheduler()
         val logs = ArrayList<String>()
@@ -208,6 +319,8 @@ class AiReplyObservationRuntimeTest {
             override fun clear() = Unit
         }
         val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var pendingSend = false
+        var retiredDrafts = 0
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
@@ -223,24 +336,121 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L,
             taskCoordinator = ownership,
             currentRunGeneration = { 12L },
-            receivedGreetingsCheckpointRepository = repository
+            receivedGreetingsCheckpointRepository = repository,
+            isSendConfirmationPending = { pendingSend },
+            onDraftRuntimeReset = { retiredDrafts++; pendingSend = false }
         )
         runtime.scheduleInitialObservation()
         // The existing Momo adapter may report an unconfirmed page at the reconnect moment;
         // the new durable checkpoint path must still enter read-only verification.
         assertFalse(runtime.reloadReceivedGreetingsCheckpointAfterServiceReconnect())
+        // An outstanding send may still exist while recovery samples are collected.
+        // Do not retire that chat on the first sample, or grant a write route early.
+        pendingSend = true
+        val resetsBeforeProof = retiredDrafts
         scheduler.runNextWithDelay(0L)
         assertTrue(logs.any { it.contains("收到招呼通用检查点[VERIFYING]") })
         assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
         assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+        assertTrue(pendingSend)
+        assertEquals(resetsBeforeProof, retiredDrafts)
 
         scheduler.runNextWithDelay(500L)
         scheduler.runNextWithDelay(0L)
         assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertFalse(runtime.isReceivedGreetingsRecoveryPending())
+        assertFalse(pendingSend)
+        assertEquals(resetsBeforeProof + 1, retiredDrafts)
+        assertTrue(logs.any { it.contains("OLD_CHAT_DRAFT_RETIRED") })
         assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
         assertEquals(1, port.receivedGreetingsIdleSteps)
         assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
         assertEquals(setOf("hashed-row"), checkpoint.processedRowKeys)
+    }
+
+    @Test
+    fun confirmedGreetingsArrivalEventCannotStarvePendingCheckpointVerification() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            receivedGreetingsCheckpointFingerprint = "greetings-current-window"
+            receivedGreetingsRecoverySyncAccepted = true
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "NewSayHiSessionListActivity",
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 40,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                windowGeneration = 12L
+            )
+        }
+        val checkpoint = MomoSayHiTraversalCheckpointRecord(
+            processedRowKeys = setOf("hashed-row"),
+            processedContactIdHashes = setOf("hashed-contact"),
+            deferredRows = emptyMap(),
+            deferredReturnToTopActive = false,
+            deferredReplayStarted = false
+        )
+        val repository = object : MomoSayHiTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): MomoSayHiTraversalCheckpointRecord = checkpoint
+            override fun save(checkpoint: MomoSayHiTraversalCheckpointRecord) = Unit
+            override fun clear() = error("must retain the original checkpoint")
+        }
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = ownership,
+            currentRunGeneration = { 12L },
+            receivedGreetingsCheckpointRepository = repository,
+            pageSelectedStartup = true
+        )
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_RECEIVED_GREETINGS"))
+        assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+        assertNull(ownership.currentLease())
+
+        // A fresh event re-arms the ordinary arrival probe while the checkpoint is pending.
+        // It must reach the recovery verifier rather than retry a rejected ordinary start.
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertTrue(logs.any { it.contains("收到招呼通用检查点[VERIFYING]") })
+        assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertNull(ownership.currentLease())
+        assertFalse(logs.any { it.contains("GREETING_LIST_ADMISSION_REJECTED") })
+
+        scheduler.runNextWithDelay(500L)
+        scheduler.runNextWithDelay(0L)
+        assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertFalse(runtime.isReceivedGreetingsRecoveryPending())
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertTrue(logs.any { it.contains("GREETING_LIST_READY") && it.contains("source=RECOVERY_VERIFIED") })
+        assertFalse(logs.any { it.contains("GREETING_LIST_ADMISSION_REJECTED") })
+        assertEquals(setOf("hashed-row"), repository.load().processedRowKeys)
     }
 
     @Test
@@ -368,6 +578,115 @@ class AiReplyObservationRuntimeTest {
     }
 
 
+    @Test
+    fun ordinaryPagePauseSavesProgressWithoutServiceRecoveryAndPreservesDurableRecord() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply { sessionRunEnabled = true }
+        val logs = ArrayList<String>()
+        var saved: PrivateMessagesTraversalCheckpoint? = null
+        var saveCount = 0
+        val repo = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = saved
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) {
+                saved = checkpoint
+                saveCount++
+            }
+            override fun clear() = Unit
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator()),
+            currentRunGeneration = { 6L },
+            privateMessagesCheckpointRepository = repo
+        )
+        runtime.scheduleInitialObservation()
+        runtime.persistTaskProgressBeforeExit("PAGE_SWITCH", serviceBoundary = false)
+        assertEquals(1, saveCount)
+        assertTrue(logs.any { it.contains("PAGE_PAUSE_CHECKPOINT_SAVED") })
+        assertFalse(logs.any { it.contains("SERVICE_BOUNDARY_CHECKPOINT_SAVED") })
+        runtime.reset("页面任务暂停", preservePendingRecovery = false)
+        assertEquals(1, saveCount)
+        assertTrue(saved != null)
+    }
+
+    @Test
+    fun pagePauseRetiresRuntimeEvenWhenArchiveAndCleanupDiagnosticsFail() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply { sessionRunEnabled = true }
+        val ownership = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val shared = PageObservationCoordinator(scheduler)
+        var failDiagnostics = false
+        var failedDiagnostics = 0
+        var archiveAttempts = 0
+        var saves = 0
+        val archivePort = object : ChatSessionManagementPort by port {
+            override fun finishSessionManagement(): String? {
+                archiveAttempts++
+                error("archive packaging unavailable")
+            }
+        }
+        val checkpointRepo = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = null
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { saves++ }
+            override fun clear() = Unit
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = shared,
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = archivePort,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = { message ->
+                if (failDiagnostics && (message.contains("CHECKPOINT_SAVED") ||
+                        message.contains("运行时重置；原因=") ||
+                        message.contains("ZIP 封装失败") ||
+                        message.contains("任务协调[RELEASED]"))) {
+                    failedDiagnostics++
+                    error("diagnostic sink unavailable")
+                }
+            },
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = ownership,
+            currentRunGeneration = { 6L },
+            privateMessagesCheckpointRepository = checkpointRepo
+        )
+        runtime.scheduleInitialObservation()
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        assertTrue(scheduler.pendingCount() > 0)
+        failDiagnostics = true
+        runtime.persistTaskProgressBeforeExit("PAGE_SWITCH", serviceBoundary = false)
+        runtime.reset("页面任务暂停", preservePendingRecovery = false)
+        assertEquals(1, saves)
+        assertEquals(1, archiveAttempts)
+        assertTrue(failedDiagnostics >= 4)
+        assertNull(ownership.currentLease())
+        assertEquals(0, scheduler.pendingCount())
+
+        // Repeating cleanup must not repackage the already retired archive.
+        runtime.reset("重复清理", preservePendingRecovery = false)
+        assertEquals(1, archiveAttempts)
+        assertNull(ownership.currentLease())
+        failDiagnostics = false
+        runtime.scheduleInitialObservation()
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+    }
+
     private data class PreScrollPageRecoveryFixture(
         val scheduler: FakeScheduler,
         val runtime: AiReplyObservationRuntime,
@@ -379,7 +698,9 @@ class AiReplyObservationRuntimeTest {
         val dispatchedGestures: () -> Int
     )
 
-    private fun preScrollPageRecoveryFixture(): PreScrollPageRecoveryFixture {
+    private fun preScrollPageRecoveryFixture(
+        foregroundQuietRemainingMs: () -> Long = { 0L }
+    ): PreScrollPageRecoveryFixture {
         val scheduler = FakeScheduler()
         val listPage = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -434,7 +755,8 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L,
             taskCoordinator = ownership,
             currentRunGeneration = { 6L },
-            privateMessagesCheckpointRepository = repository
+            privateMessagesCheckpointRepository = repository,
+            foregroundQuietRemainingMs = foregroundQuietRemainingMs
         )
         runtime.scheduleInitialObservation()
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
@@ -479,6 +801,435 @@ class AiReplyObservationRuntimeTest {
         messageListTarget = null,
         inputFieldTarget = null
     )
+
+    @Test
+    fun p4RecoverablePrivatePauseUsesSharedCheckpointAndWaitsForFreshInboxProof() {
+        val fixture = preScrollPageRecoveryFixture()
+        fixture.port.page = desktopPage()
+        invokePreScrollPageValidation(fixture)
+        assertTrue(fixture.logs.any {
+            it.contains("PAUSED_CHECKPOINT_SAVED") &&
+                it.contains("MESSAGE_LIST_PRE_SCROLL_PAGE_IDENTITY_MISMATCH")
+        })
+        assertTrue(fixture.logs.any {
+            it.contains("AI 私聊暂停分类[RETRYABLE]") &&
+                it.contains("MESSAGE_LIST_PRE_SCROLL_PAGE_IDENTITY_MISMATCH")
+        })
+        assertTrue("Retryable pause must save the original traversal cursor", fixture.checkpoint() != null)
+        assertEquals("No stale gesture can be submitted during a pause", 0, fixture.dispatchedGestures())
+        fixture.port.page = fixture.listPage
+        awaitPreScrollRecovery(fixture)
+        assertTrue(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+    }
+
+    @Test
+    fun p4UnassociatedViewportUsesExistingCheckpointWithoutRestartingBottomSearch() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.attemptedSessionKeys += "previously-processed"
+        executor.lockedUnreadSessionKeys += "retained-pending"
+        executor.recordVerifiedViewport(fixture.listPage)
+        val oldKeys = executor.visibleSessionKeys(fixture.listPage)
+        val fresh = fixture.listPage.copy(chatListCandidates = listOf(
+            sessionCandidate(nameText = "Completely different viewport", completeBoundaryEvidence = true)
+        ))
+        fixture.port.page = fresh
+        val handle = fixture.runtime.javaClass.getDeclaredMethod("handleSessionListPage", ChatPageSnapshot::class.java)
+            .apply { isAccessible = true }
+        handle.invoke(fixture.runtime, fresh)
+        assertTrue(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") && it.contains("PRIVATE_LIST_POSITION_UNVERIFIED") })
+        assertEquals(0, fixture.dispatchedGestures())
+        val saved = requireNotNull(fixture.checkpoint())
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP.name, saved.phase)
+        assertTrue(saved.lockedUnreadSetFinalized)
+        assertEquals(setOf("previously-processed"), saved.attemptedSessionKeys)
+        assertEquals(setOf("retained-pending"), saved.lockedUnreadSessionKeys)
+        assertEquals(oldKeys, saved.lastStableVisibleKeys)
+    }
+
+    @Test
+    fun p7IncompleteUnreadRowCheckpointsAndBlocksGesturesWithoutPermanentIdentityBlacklist() {
+        val fixture = preScrollPageRecoveryFixture()
+        // Full-size visible private row, but it lacks a readable identity; a confirmed
+        // UNREAD badge alone must not turn it into an eligible, completed or ignored row.
+        val incomplete = sessionCandidate(nameText = "", completeBoundaryEvidence = true)
+        val altered = fixture.listPage.copy(chatListCandidates = listOf(incomplete))
+        val handle = fixture.runtime.javaClass.getDeclaredMethod(
+            "handleSessionListPage", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        handle.invoke(fixture.runtime, altered)
+
+        assertTrue(fixture.logs.any { it.contains("INCOMPLETE_UNREAD_RETRYABLE") })
+        assertTrue(fixture.logs.any { it.contains("PRIVATE_INCOMPLETE_UNREAD_ROW") &&
+            it.contains("PAUSED_CHECKPOINT_SAVED") })
+        assertEquals(0, fixture.dispatchedGestures())
+        val saved = requireNotNull(fixture.checkpoint())
+        assertTrue(saved.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertTrue(saved.ambiguousSessionIdentityKeys.isEmpty())
+        assertTrue(saved.attemptedSessionKeys.isEmpty())
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+    }
+
+    @Test
+    fun p0MixedListRetainsNamedAnomalyAndAllowsExistingStartupScroll() {
+        val fixture = preScrollPageRecoveryFixture()
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        val healthy = sessionCandidate(1, "Healthy B", completeBoundaryEvidence = true)
+        val mixed = fixture.listPage.copy(chatListCandidates = listOf(damaged, healthy))
+        fixture.port.page = mixed
+        val handle = fixture.runtime.javaClass.getDeclaredMethod(
+            "handleSessionListPage", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        handle.invoke(fixture.runtime, mixed)
+
+        assertTrue(fixture.logs.any { it.contains("ROW_SCOPED_BLOCK") })
+        assertFalse(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+            it.contains("PRIVATE_INCOMPLETE_UNREAD_ROW") })
+        assertEquals(1, fixture.dispatchedGestures())
+        val saved = requireNotNull(fixture.checkpoint())
+        assertEquals(1, saved.unresolvedIncompleteUnreadKeys.size)
+        assertTrue(saved.attemptedSessionKeys.isEmpty())
+        assertTrue(saved.ambiguousSessionIdentityKeys.isEmpty())
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+    }
+
+    @Test
+    fun p0PendingNamedAnomalyCannotCompletePrivateScanOrHandoff() {
+        val fixture = preScrollPageRecoveryFixture()
+        val executor = fixture.runtime.javaClass.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        assertTrue(executor.observeIncompleteUnreadEvidence(
+            fixture.listPage.copy(chatListCandidates = listOf(damaged))
+        ))
+        val handoff = fixture.runtime.javaClass.getDeclaredMethod(
+            "startReceivedGreetingsTask", String::class.java
+        ).apply { isAccessible = true }
+        handoff.invoke(fixture.runtime, "P0_PENDING_INCOMPLETE")
+
+        assertTrue(fixture.logs.any { it.contains("HANDOFF_BLOCKED") })
+        assertFalse(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        assertTrue(requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.dispatchedGestures())
+    }
+
+    @Test
+    fun p5TopWithUnvisitedUnreadCannotHandoffAndKeepsOriginalRound() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        executor.attemptedSessionKeys += "processed"
+        executor.lockedUnreadSessionKeys += setOf("processed", "offscreen-pending")
+        val handoff = fixture.runtime.javaClass.getDeclaredMethod(
+            "startReceivedGreetingsTask", String::class.java
+        ).apply { isAccessible = true }
+        handoff.invoke(fixture.runtime, "P5_PENDING_UNREAD")
+        assertTrue(fixture.logs.any { it.contains("HANDOFF_BLOCKED") && it.contains("pendingUnread=1") })
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.dispatchedGestures())
+        val saved = requireNotNull(fixture.checkpoint())
+        assertTrue(saved.lockedUnreadSetFinalized)
+        assertEquals(setOf("processed", "offscreen-pending"), saved.lockedUnreadSessionKeys)
+        assertEquals(setOf("processed"), saved.attemptedSessionKeys)
+    }
+
+    @Test
+    fun p1RelocationTimerIsIntentOnlyAndReusesExistingScrollAfterFreshProof() {
+        val fixture = preScrollPageRecoveryFixture()
+        // The startup observation and the relocation timer both use 500ms. Isolate
+        // the manually constructed top-of-list state from the fixture's startup probe.
+        cancelFixtureStartupObservation(fixture)
+        val executor = fixture.runtime.javaClass.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        val healthy = sessionCandidate(1, "Healthy B", ChatUnreadStatus.READ, true)
+        val mixed = fixture.listPage.copy(chatListCandidates = listOf(damaged, healthy))
+        fixture.port.page = mixed
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        assertTrue(executor.observeIncompleteUnreadEvidence(mixed))
+
+        val continueList = fixture.runtime.javaClass.getDeclaredMethod(
+            "continueSessionListWithoutCandidate", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        continueList.invoke(fixture.runtime, mixed)
+        continueList.invoke(fixture.runtime, mixed)
+        assertEquals(1, fixture.logs.count { it.contains("RELOCATION_WAIT") })
+        assertEquals(0, fixture.dispatchedGestures())
+        val delay = com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(1)
+        fixture.scheduler.runNextWithDelay(delay)
+        assertEquals("Timer alone cannot dispatch a gesture", 0, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("RELOCATION_STARTED") })
+
+        // Simulate the subsequent confirmed fresh list observation with no candidate.
+        continueList.invoke(fixture.runtime, mixed)
+        assertTrue(fixture.logs.any { it.contains("RELOCATION_STARTED") })
+        assertEquals(1, fixture.dispatchedGestures())
+        val saved = requireNotNull(fixture.checkpoint())
+        assertTrue(saved.fullListPollingRoundRequired)
+        assertTrue(saved.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertTrue(saved.attemptedSessionKeys.isEmpty())
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+    }
+
+    private fun cancelFixtureStartupObservation(fixture: PreScrollPageRecoveryFixture) {
+        val field = fixture.runtime.javaClass.getDeclaredField("pageInspectionTask")
+            .apply { isAccessible = true }
+        (field.get(fixture.runtime) as? ScheduledTask)?.cancel()
+        field.set(fixture.runtime, null)
+    }
+
+    @Test
+    fun p6dKnownQuietWindowCoalescesPrivateScrollRequestsWithoutDispatch() {
+        var quietRemaining = 5_000L
+        val fixture = preScrollPageRecoveryFixture { quietRemaining }
+        cancelFixtureStartupObservation(fixture)
+        repeat(3) { invokePreScrollPageValidation(fixture) }
+        assertEquals(0, fixture.dispatchedGestures())
+        assertEquals(1, fixture.logs.count { it.contains("FOREGROUND_QUIET_WAIT") })
+        assertTrue(fixture.scheduler.hasPendingDelay(400L))
+        fixture.scheduler.runNextWithDelay(400L)
+        assertEquals(0, fixture.dispatchedGestures())
+        assertTrue(fixture.scheduler.hasPendingDelay(400L))
+        quietRemaining = 0L
+        fixture.scheduler.runNextWithDelay(400L)
+        assertEquals(0, fixture.dispatchedGestures())
+        assertTrue(fixture.logs.any { it.contains("AI 启动保护[REVERIFIED]") })
+        assertTrue(fixture.scheduler.hasPendingDelay(300L))
+    }
+
+    @Test
+    fun p6dImmediateFullObservationRetiresSupersededOrdinaryTimer() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val schedule = fixture.runtime.javaClass.getDeclaredMethod(
+            "scheduleFullInspectionAfter", Long::class.javaPrimitiveType!!,
+            AiReplyPageReadPurpose::class.java
+        ).apply { isAccessible = true }
+        schedule.invoke(fixture.runtime, 1234L, AiReplyPageReadPurpose.FULL_INSPECTION)
+        assertTrue(fixture.scheduler.hasPendingDelay(1234L))
+        val read = fixture.runtime.javaClass.getDeclaredMethod("runFullInspection").apply { isAccessible = true }
+        read.invoke(fixture.runtime)
+        assertFalse(fixture.scheduler.hasPendingDelay(1234L))
+    }
+
+    @Test
+    fun p1RelocationCannotReuseExpiredWindowIntent() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val executor = fixture.runtime.javaClass.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        fun page(generation: Long) = fixture.listPage.copy(
+            windowGeneration = generation,
+            chatListCandidates = listOf(
+                sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+                    windowGeneration = generation, previewBoundsValid = false),
+                sessionCandidate(1, "Healthy B", ChatUnreadStatus.READ, true, generation)
+            )
+        )
+        val original = page(1L)
+        fixture.port.page = original
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        assertTrue(executor.observeIncompleteUnreadEvidence(original))
+        val continueList = fixture.runtime.javaClass.getDeclaredMethod(
+            "continueSessionListWithoutCandidate", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        continueList.invoke(fixture.runtime, original)
+        fixture.scheduler.runNextWithDelay(
+            com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(1)
+        )
+        val replacement = page(2L)
+        fixture.port.page = replacement
+        continueList.invoke(fixture.runtime, replacement)
+        assertEquals(0, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("RELOCATION_STARTED") })
+        assertEquals(2, fixture.logs.count { it.contains("RELOCATION_WAIT") })
+        assertTrue(requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+    }
+
+    @Test
+    fun p3RepeatedPrivateRecoveryRequestsKeepCheckpointAndOneInitialRetry() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        val blocked = fixture.listPage.copy(chatListCandidates = listOf(damaged))
+        fixture.port.page = blocked
+        val handle = fixture.runtime.javaClass.getDeclaredMethod(
+            "handleSessionListPage", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        handle.invoke(fixture.runtime, blocked)
+        val original = requireNotNull(fixture.checkpoint())
+        val retry = fixture.runtime.javaClass.getDeclaredMethod(
+            "recoverRetryablePrivateList", String::class.java
+        ).apply { isAccessible = true }
+        repeat(4) { retry.invoke(fixture.runtime, "PRIVATE_INCOMPLETE_UNREAD_ROW") }
+        assertEquals(original, fixture.checkpoint())
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+            it.contains("PRIVATE_INCOMPLETE_UNREAD_ROW") })
+        assertEquals(4, fixture.logs.count { it.contains("TRANSACTION_REUSED") })
+        assertEquals(1, fixture.logs.count { it.contains("READ_ONLY_RETRY_RETAINED") })
+        assertEquals(0, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+    }
+
+    @Test
+    fun p2OriginalIncompleteFaultKeepsSameRecoveryUntilFreshRepair() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        val blocked = fixture.listPage.copy(chatListCandidates = listOf(damaged))
+        fixture.port.page = blocked
+        val handle = fixture.runtime.javaClass.getDeclaredMethod(
+            "handleSessionListPage", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        handle.invoke(fixture.runtime, blocked)
+        val saved = requireNotNull(fixture.checkpoint())
+        assertTrue(saved.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        var steps = 0
+        while (fixture.logs.count { it.contains("ORIGINAL_FAULT_WAIT") } < 2 &&
+            steps < 80 && fixture.scheduler.pendingCount() > 0
+        ) {
+            fixture.scheduler.runNextShortestDelay()
+            steps++
+        }
+        assertTrue("Original fault wait not observed: ${fixture.logs.takeLast(25)}",
+            fixture.logs.count { it.contains("ORIGINAL_FAULT_WAIT") } >= 2)
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+            it.contains("PRIVATE_INCOMPLETE_UNREAD_ROW") })
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertEquals(saved.unresolvedIncompleteUnreadKeys, requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys)
+        assertEquals(0, fixture.dispatchedGestures())
+
+        fixture.port.page = fixture.listPage.copy(chatListCandidates = listOf(
+            sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true)
+        ))
+        awaitPreScrollRecovery(fixture)
+        assertTrue(fixture.logs.any { it.contains("ORIGINAL_FAULT_RECHECKED") &&
+            it.contains("evidence=CLEARED") })
+        assertTrue(requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys.isEmpty())
+    }
+
+    @Test
+    fun p6TimedPollingWakeupSchedulesReadOnlyInspectionWithoutNewMessages() {
+        val fixture = preScrollPageRecoveryFixture()
+        val enterWait = fixture.runtime.javaClass.getDeclaredMethod(
+            "enterUnreadWait", String::class.java
+        ).apply { isAccessible = true }
+        enterWait.invoke(fixture.runtime, "P6_TIMER_ONLY")
+        val scheduleLog = fixture.logs.last { it.contains("AI Reply 低频待机：") }
+        val waitSeconds = requireNotNull(
+            Regex("低频待机：(\\d+) 秒后").find(scheduleLog)
+        ).groupValues[1].toInt()
+        assertTrue("Existing idle polling interval must remain 60-120 seconds",
+            waitSeconds in 60..120)
+        assertTrue(fixture.scheduler.hasPendingDelay(waitSeconds * 1_000L))
+        assertEquals(0, fixture.dispatchedGestures())
+
+        // No accessibility event or unread callback is delivered. The saved timer alone
+        // must request a new, read-only inbox snapshot.
+        fixture.scheduler.runNextWithDelay(waitSeconds * 1_000L)
+        assertTrue(fixture.logs.any { it.contains("自主轮询[ROUND_DUE]") })
+        assertTrue(fixture.scheduler.hasPendingDelay(0L))
+        assertEquals(0, fixture.dispatchedGestures())
+    }
+
+    @Test
+    fun p6TimedPollingCannotHandoffBeforeReadViewportIsConfirmed() {
+        val fixture = preScrollPageRecoveryFixture()
+        val executor = fixture.runtime.javaClass.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+
+        // The timed round begins after the verified inbox wakeup in production.
+        // Recreate an admitted round before any stable read-viewport boundary proof.
+        executor.beginNextPollingRound()
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        assertFalse(executor.fullListPollingRoundRequired)
+        assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
+        assertFalse(executor.normalInboxHadUnread)
+
+        val handoff = fixture.runtime.javaClass.getDeclaredMethod(
+            "startReceivedGreetingsTask", String::class.java
+        ).apply { isAccessible = true }
+        handoff.invoke(fixture.runtime, "P6_ONE_EMPTY_VIEWPORT")
+
+        assertTrue("A timed round may not hand off before the boundary has been confirmed",
+            fixture.logs.any { it.contains("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF") })
+        assertTrue(fixture.checkpoint()?.fullListPollingRoundRequired == false)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.dispatchedGestures())
+    }
+
+    @Test
+    fun p4IncompletePrivateScanDoesNotHandOffToGreetingsOrTerminate() {
+        val fixture = preScrollPageRecoveryFixture()
+        val beginGreetings = fixture.runtime.javaClass.getDeclaredMethod(
+            "startReceivedGreetingsTask", String::class.java
+        ).apply { isAccessible = true }
+        beginGreetings.invoke(fixture.runtime, "P4_INCOMPLETE_PRIVATE_SCAN")
+        assertTrue(fixture.logs.any { it.contains("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF") })
+        assertTrue(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+            it.contains("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF") })
+        assertTrue(fixture.checkpoint() != null)
+        assertEquals("Incomplete private scan must not enter greetings", "AI_REPLY_PRIVATE_MESSAGES",
+            fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.dispatchedGestures())
+    }
+
+    @Test
+    fun p4ExplicitUserStopDoesNotRearmRecoverablePrivatePause() {
+        val fixture = preScrollPageRecoveryFixture()
+        fixture.port.page = desktopPage()
+        invokePreScrollPageValidation(fixture)
+        val savedPauses = fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") }
+        assertTrue(savedPauses > 0)
+        fixture.runtime.reset("用户主动停止")
+        val invoke = fixture.runtime.javaClass.getDeclaredMethod(
+            "recoverRetryablePrivateList", String::class.java
+        ).apply { isAccessible = true }
+        invoke.invoke(fixture.runtime, "PRIVATE_STOPPED_CALLBACK")
+        assertEquals(savedPauses, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        assertEquals(0, fixture.dispatchedGestures())
+        assertTrue(fixture.logs.none { it.contains("PRIVATE_STOPPED_CALLBACK") })
+    }
 
     @Test
     fun preScrollDesktopReturnUsesCheckpointRecoveryWithoutOldGesture() {
@@ -563,6 +1314,103 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p4CancelledScrollKeepsAutonomousRetryThroughPassiveEvents() {
+        val fixture = capturedScrollRecoveryFixture()
+        fixture.listener.onResult(GestureExecutionResult(fixture.request.id, GestureExecutionStatus.CANCELLED))
+        runUntilLog(fixture.scheduler, fixture.logs, "GESTURE_RECOVERY_REQUESTED")
+        val saved = requireNotNull(fixture.savedCheckpoint())
+        assertTrue(fixture.scheduler.hasPendingDelay(180L))
+        repeat(4) { fixture.runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED)) }
+        assertTrue(fixture.scheduler.hasPendingDelay(180L))
+        assertTrue(fixture.logs.any { it.contains("ACTIVE_RECHECK_RETAINED") })
+        assertTrue(fixture.logs.any { it.contains("SCROLL_CANCELLED") && it.contains("次数=1") })
+        assertEquals(saved, fixture.savedCheckpoint())
+        assertEquals(1, fixture.dispatchedGestures())
+        // The shared recovery timer posts its next backoff before the immediate
+        // read-only callback. Execute by delay, not the legacy FIFO insertion order.
+        runUntilShortestDelay(fixture.scheduler, 80) {
+            fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") }
+        }
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        // The original command remains cancelled; a later admitted action must be
+        // a newly computed request from the recovered list, not a replay.
+        assertTrue(fixture.logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+    }
+
+    @Test
+    fun p5ColdStartupCancelledFirstSwipeRecoversAndCompletesFreshSwipeWithoutAnyInputEvent() {
+        // This fixture uses the public startup entry and scheduled reads only.
+        // No accessibility event, touch callback, reflection or manual resume.
+        val fixture = capturedScrollRecoveryFixture()
+        assertEquals(1, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("INITIALIZATION_COMPLETE") })
+        fixture.listener.onResult(GestureExecutionResult(fixture.request.id, GestureExecutionStatus.CANCELLED))
+        runUntilShortestDelay(fixture.scheduler, 80) {
+            fixture.logs.any { it.contains("GESTURE_RECOVERY_REQUESTED") }
+        }
+        val original = requireNotNull(fixture.savedCheckpoint())
+        assertFalse(original.initialUnreadGateSwipeCompleted)
+        assertEquals(1, fixture.dispatchedGestures())
+        fixture.scheduler.runNextWithDelay(180L)
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertEquals(1, fixture.dispatchedGestures())
+
+        runUntilShortestDelay(fixture.scheduler, 80) {
+            fixture.dispatchedGestures() > 1
+        }
+        assertTrue(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        val replacement = requireNotNull(fixture.latestRequest())
+        assertTrue(replacement.id != fixture.request.id)
+        assertTrue(replacement.intent is GestureIntent.VerticalSwipe)
+        assertFalse(fixture.logs.any { it.contains("INITIALIZATION_COMPLETE") })
+
+        // A stale completion cannot certify the first cancelled swipe.
+        fixture.listener.onResult(GestureExecutionResult(fixture.request.id, GestureExecutionStatus.COMPLETED))
+        runUntilShortestDelay(fixture.scheduler, 20) {
+            fixture.logs.any { it.contains("已忽略过期自主滑动回调") }
+        }
+        assertFalse(fixture.logs.any { it.contains("INITIALIZATION_COMPLETE") })
+        requireNotNull(fixture.latestListener()).onResult(
+            GestureExecutionResult(replacement.id, GestureExecutionStatus.COMPLETED)
+        )
+        runUntilShortestDelay(fixture.scheduler, 40) {
+            fixture.logs.any { it.contains("INITIALIZATION_COMPLETE") }
+        }
+        assertEquals(1, fixture.logs.count { it.contains("INITIALIZATION_COMPLETE") })
+    }
+
+    @Test
+    fun p5ColdStartupIncompleteUnreadRemainsBlockedUntilAutonomousRepair() {
+        val fixture = preScrollPageRecoveryFixture()
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true,
+            previewBoundsValid = false)
+        fixture.port.page = fixture.listPage.copy(chatListCandidates = listOf(damaged))
+        // Let the actual startup timer discover the anomaly; no private method calls.
+        runUntilShortestDelay(fixture.scheduler, 80) {
+            fixture.logs.count { it.contains("ORIGINAL_FAULT_WAIT") } >= 2
+        }
+        val original = requireNotNull(fixture.checkpoint())
+        assertTrue(original.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertTrue(original.attemptedSessionKeys.isEmpty())
+        assertEquals(0, fixture.dispatchedGestures())
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
+
+        // Model the accessibility tree repairing by itself, without signalling an event.
+        fixture.port.page = fixture.listPage.copy(chatListCandidates = listOf(
+            sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true)
+        ))
+        runUntilShortestDelay(fixture.scheduler, 80) { fixture.dispatchedGestures() > 0 }
+        assertTrue(fixture.logs.any { it.contains("ORIGINAL_FAULT_RECHECKED") &&
+            it.contains("evidence=CLEARED") })
+        assertTrue(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+        assertTrue(requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys.isEmpty())
+        assertEquals(1, fixture.logs.count { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+    }
+
+    @Test
     fun windowTransitionDuringScrollInvalidatesOldGestureCallbackAndKeepsCheckpoint() {
         val fixture = capturedScrollRecoveryFixture()
         fixture.runtime.schedule(event(AccessibilityEventType.WINDOWS_CHANGED))
@@ -570,6 +1418,7 @@ class AiReplyObservationRuntimeTest {
             it.contains("GESTURE_RECOVERY_REQUESTED") && it.contains("GESTURE_WINDOW_CHANGED")
         })
         assertTrue(fixture.savedCheckpoint() != null)
+        assertEquals(listOf(fixture.request.id), fixture.cancelledRequests)
         // A delayed completion from the old window must not be interpreted as a success.
         fixture.listener.onResult(
             GestureExecutionResult(fixture.request.id, GestureExecutionStatus.COMPLETED)
@@ -798,6 +1647,142 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun ordinaryArrivalEventDuringPrivateRecoveryUsesExistingVerifiedHandoff() {
+        val (runtime, scheduler, port, ownership, manager, repository, original, logs) =
+            crossTaskRecoveryFixture()
+        runtime.scheduleInitialObservation()
+        val originalRecoveryId = manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId
+        assertTrue(originalRecoveryId != null)
+
+        runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_VERIFYING") })
+
+        scheduler.runNextWithDelay(350L)
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_TRANSFERRED") })
+        assertFalse(logs.any { it.contains("GREETING_LIST_ADMISSION_REJECTED") })
+        assertEquals(original, repository.load())
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+    }
+
+    @Test
+    fun failedCrossTaskStartUsesReadOnlyBackoffWithoutRepeatedLeaseRollbacks() {
+        val (runtime, scheduler, port, ownership, manager, repository, original, logs) =
+            crossTaskRecoveryFixture()
+        port.beginCurrentListResult = false
+        runtime.scheduleInitialObservation()
+        val originalRecoveryId = manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId
+
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertEquals(null, ownership.activeTaskId())
+        assertEquals(original, repository.load())
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_ROLLBACK") })
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_READ_ONLY_WAIT") &&
+            it.contains("reason=GREETING_START_FAILED") && it.contains("delayMs=500") })
+
+        // Extra content events on the unchanged page are read-only; no lease churn.
+        repeat(2) {
+            runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
+            scheduler.runNextWithDelay(300L)
+        }
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+
+        port.beginCurrentListResult = true
+        scheduler.runNextWithDelay(500L)
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals(2, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertEquals(original, repository.load())
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_TRANSFERRED") })
+    }
+
+    @Test
+    fun repeatedCrossTaskStartFailuresBackOffWithoutLosingPrivateCheckpointOrReplayingTask() {
+        val (runtime, scheduler, port, ownership, manager, repository, original, logs) =
+            crossTaskRecoveryFixture()
+        port.beginCurrentListResult = false
+        runtime.scheduleInitialObservation()
+        val originalRecoveryId = manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId
+        assertTrue(originalRecoveryId != null)
+
+        // Initial double-snapshot verification completes, but adapter start still rejects.
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertEquals(original, repository.load())
+
+        // First read-only timer (500ms) permits a NEW two-snapshot verification.
+        scheduler.runNextWithDelay(500L)
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals(2, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+        assertEquals(2, logs.count { it.contains("PRIVATE_TO_GREETINGS_ROLLBACK") })
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_READ_ONLY_WAIT") &&
+            it.contains("attempt=2") && it.contains("delayMs=1000") })
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertEquals(original, repository.load())
+        assertEquals(null, ownership.activeTaskId())
+
+        // More events on the unchanged page cannot bypass the queued 1000ms observation.
+        runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertEquals(2, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, port.receivedGreetingsIdleSteps)
+
+        port.beginCurrentListResult = true
+        scheduler.runNextWithDelay(1_000L)
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals(3, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertEquals(2, logs.count { it.contains("PRIVATE_TO_GREETINGS_ROLLBACK") })
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertEquals(originalRecoveryId, manager.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.checkpointId)
+        assertEquals(original, repository.load())
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_TRANSFERRED") })
+    }
+
+    @Test
+    fun adapterAdmissionBlockKeepsPrivateLeaseAndRetriesOnlyAfterReadOnlyWait() {
+        val (runtime, scheduler, port, ownership, manager, repository, original, logs) =
+            crossTaskRecoveryFixture(adapterConfirmation = false)
+        runtime.scheduleInitialObservation()
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", ownership.activeTaskId())
+        assertEquals(original, repository.load())
+        assertTrue(manager.snapshot("AI_REPLY_PRIVATE_MESSAGES") != null)
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_READ_ONLY_WAIT") &&
+            it.contains("reason=ADAPTER_ADMISSION_NOT_READY") })
+
+        port.receivedGreetingsRecoverySyncAccepted = true
+        scheduler.runNextWithDelay(500L)
+        scheduler.runNextWithDelay(0L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertTrue(logs.any { it.contains("PRIVATE_TO_GREETINGS_TRANSFERRED") })
+        assertEquals(original, repository.load())
+    }
+
+    @Test
     fun incompleteOrUnsynchronizedGreetingsEvidenceCannotPreemptPendingPrivateRecovery() {
         listOf(
             ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING to true,
@@ -827,10 +1812,29 @@ class AiReplyObservationRuntimeTest {
         assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
 
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
-        runUntilLog(scheduler, logs, "收到的招呼任务[COMPLETE_STAY_ON_PAGE]")
-        assertEquals(null, ownership.activeTaskId())
+        runUntilLog(scheduler, logs, "收到的招呼任务[RETURN_PENDING]")
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+
+        // A second observation of the unchanged source must not submit another BACK or
+        // retire the traversal checkpoint before the independently confirmed destination.
+        runUntilLog(scheduler, logs, "result=WAITING_FOR_PAGE_CONFIRMATION")
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
+
+        // An empty/UNKNOWN observation during completion must preserve the return lifecycle,
+        // not re-enter the list traversal or strand the original private checkpoint.
+        port.failNextInspection = true
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilLog(scheduler, logs, "收到的招呼返回恢复[HOLD]")
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
 
         port.receivedGreetingsCheckpointFingerprint = null
+        port.provideMessageTabPositionEvidence = true
         port.page = ChatPageSnapshot(
             packageName = "com.immomo.momo",
             activityClass = "com.immomo.momo.maintab.MaintabActivity",
@@ -855,7 +1859,13 @@ class AiReplyObservationRuntimeTest {
             windowGeneration = 20L
         )
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilLog(scheduler, logs, "收到的招呼返回恢复[RESUMED]")
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        runUntilLog(scheduler, logs, "跨任务交接[INBOX_VERIFYING]")
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", ownership.activeTaskId())
         runUntilLog(scheduler, logs, "跨任务恢复[PRIVATE_CHECKPOINT_REARMED]")
+        assertEquals(1, port.receivedGreetingsConfirmedReturns)
         assertEquals(null, ownership.activeTaskId())
         assertEquals(original, repository.load())
         assertTrue(manager.snapshot("AI_REPLY_PRIVATE_MESSAGES") != null)
@@ -1081,12 +2091,12 @@ class AiReplyObservationRuntimeTest {
             it.contains("GREETING_LIST_READY") && it.contains("source=PAGE_OBSERVATION")
         })
 
-        // Option A: completion releases automation ownership but never navigates away.
+        // Completion retains the task lease and requests the existing safe return path.
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
         scheduler.runNextWithDelay(1_300L)
-        assertEquals(0, port.receivedGreetingsPriorityReturns)
-        assertNull(taskCoordinator.activeTaskId())
-        assertTrue(logs.any { it.contains("收到的招呼任务[COMPLETE_STAY_ON_PAGE]") })
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", taskCoordinator.activeTaskId())
+        assertTrue(logs.any { it.contains("收到的招呼任务[RETURN_PENDING]") })
     }
 
 
@@ -1118,6 +2128,7 @@ class AiReplyObservationRuntimeTest {
             )
         }
         val taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val rejected = mutableListOf<com.freedom.core.runtime.TaskLease>()
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
@@ -1132,7 +2143,11 @@ class AiReplyObservationRuntimeTest {
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
             taskCoordinator = taskCoordinator,
-            currentRunGeneration = { 5L }
+            currentRunGeneration = { 5L },
+            onPageTaskAdmissionRolledBack = { lease ->
+                assertNull(taskCoordinator.currentLease())
+                rejected += lease
+            }
         )
 
         runtime.scheduleInitialObservation()
@@ -1148,6 +2163,10 @@ class AiReplyObservationRuntimeTest {
             taskCoordinator.activeTaskId())
         assertFalse(logs.any { it.contains("GREETING_LIST_READY") })
         assertTrue(logs.any { it.contains("GREETING_LIST_ADMISSION_REJECTED reason=START_FAILED") })
+        assertEquals(1, rejected.size)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", rejected.single().taskId)
+        assertEquals(5L, rejected.single().runGeneration)
+        assertFalse(taskCoordinator.isCurrent(rejected.single()))
     }
 
     /**
@@ -1169,6 +2188,242 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun verifiedGreetingChatDetailRemainsInOwnedWorkflowAndStartsDraft() {
+        runGreetingChatDetailRouteCase()
+    }
+
+    @Test
+    fun dispatchedGreetingRowChatCandidateBeforeCallbackWaitsThenStartsDraft() {
+        runGreetingChatDetailRouteCase(pendingArrival = true)
+    }
+
+    @Test
+    fun dispatchedGreetingRowChatCandidateWithoutProofAtDeadlineUsesRecovery() {
+        runGreetingChatDetailRouteCase(pendingArrival = true, expireArrival = true)
+    }
+
+    @Test
+    fun pendingGreetingRowDoesNotHoldExplicitlyDifferentChatHeader() {
+        runGreetingChatDetailRouteCase(pendingArrival = true, conflictingHeader = true)
+    }
+
+    private fun runGreetingChatDetailRouteCase(
+        pendingArrival: Boolean = false,
+        expireArrival: Boolean = false,
+        conflictingHeader: Boolean = false
+    ) {
+        val scheduler = FakeScheduler()
+        val listActivity = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
+        val verified = ContactRowIdentity(
+            snapshotId = "greeting-avatar-proof",
+            temporaryUserId = "greeting-row",
+            contactId = "greeting-platform-id",
+            confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            receivedGreetingsWorkflowEnabled = true
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            manualGreetingsArrivalStatuses = listOf(
+                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
+                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+            )
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = listActivity,
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 32,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                windowGeneration = 12L
+            )
+        }
+        val logs = ArrayList<String>()
+        val owner = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var greetingDrafts = 0
+        var privateDrafts = 0
+        var pendingSend = false
+        var draftPending = false
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            onDraftConversationObserved = { _, _, _, _ ->
+                privateDrafts++
+                true
+            },
+            onGreetingDraftConversationObserved = { batch, _, identity, _ ->
+                greetingDrafts++
+                assertTrue(batch.ocrAttempted)
+                assertEquals(verified, identity)
+                draftPending = true
+                true
+            },
+            taskCoordinator = owner,
+            currentRunGeneration = { 5L },
+            isSendConfirmationPending = { pendingSend },
+            isConversationDraftPending = { draftPending }
+        )
+
+        runtime.scheduleInitialObservation()
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        scheduler.runNextWithDelay(350L)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", owner.activeTaskId())
+
+        // The adapter reports DETAIL_READY only after the selected row tap and fresh
+        // chat-detail structure are both verified. The list fingerprint is absent here.
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.DETAIL_READY
+        port.receivedGreetingsContactIdentity = verified
+        port.receivedGreetingsRowKeyHash = "greeting-row-hash"
+        port.receivedGreetingsDisplayName = "Sample Contact"
+        port.simulateStructureThenOcr = true
+        port.ocrDebugTextByRowIndex = mapOf(1 to "CURRENT_GREETING_OCR")
+        val transitionalChat = chatDetailSnapshot(windowGeneration = 12L)
+        val inputPath = requireNotNull(transitionalChat.inputFieldTarget).path.childIndices.joinToString("/")
+        port.page = transitionalChat.copy(
+            activityClass = listActivity,
+            screenBounds = ScreenRect(0, 0, 720, 1489),
+            structureEvidence = listOf(ChatPageNodeEvidence(
+                path = inputPath, className = "android.widget.EditText", viewId = "composer",
+                left = 888, top = 1389, right = 1296, bottom = 1489, childCount = 0,
+                isEditable = true, isScrollable = false, isClickable = true,
+                hasText = false, insideListCandidate = false, boundsValid = true,
+                isVisibleToUser = true
+            ))
+        )
+        if (pendingArrival) {
+            val lease = requireNotNull(owner.currentLease())
+            port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.NAVIGATING
+            port.receivedGreetingsNavigationEvidencePending = true
+            if (conflictingHeader) port.page = port.page.copy(chatTitleText = "与Different Contact对话")
+            // Device sequence: new chat tree, stale list Activity, then click feedback
+            // and terminal callback. The fresh candidate is not an accepted chat yet.
+            runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
+            scheduler.runNextWithDelay(300L)
+            assertEquals(0, port.ocrAsyncReadRequests)
+            assertEquals(0, greetingDrafts)
+            assertFalse(logs.any { it.contains("GREETING_CHAT_BINDING_CREATED") })
+            if (conflictingHeader) {
+                assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+                assertFalse(logs.any { it.contains("TRANSITION_EVIDENCE_WAIT") })
+                return
+            }
+            assertTrue(logs.any {
+                it.contains("TRANSITION_EVIDENCE_WAIT") && it.contains("CHAT_DETAIL_CANDIDATE")
+            })
+            assertEquals(lease, owner.currentLease())
+            assertFalse(runtime.isReceivedGreetingsRecoveryPending())
+            port.receivedGreetingsNavigationEvidencePending = false
+            if (expireArrival) {
+                scheduler.runNextWithDelay(750L)
+                assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+                assertTrue(logs.any {
+                    it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") && it.contains("PAGE_ROUTE_CHANGED")
+                })
+                assertEquals(0, port.ocrAsyncReadRequests)
+                assertEquals(0, greetingDrafts)
+                return
+            }
+            port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.DETAIL_READY
+        }
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertTrue(logs.any { it.contains("CHAT_LOCATORS_OFFSCREEN") })
+        assertFalse(logs.any { it.contains("GREETING_CHAT_BINDING_CREATED") })
+        assertEquals(0, port.ocrAsyncReadRequests)
+        assertEquals(0, greetingDrafts)
+
+        port.page = chatDetailSnapshot()
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        runUntil(scheduler, 40) { greetingDrafts == 1 }
+        assertEquals(1, port.ocrAsyncReadRequests)
+
+        assertEquals(1, greetingDrafts)
+        assertEquals(0, privateDrafts)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", owner.activeTaskId())
+        assertEquals(1, port.persistedChatSamples)
+        assertTrue(logs.any { it.contains("CHAT_DETAIL_VERIFIED") })
+        assertFalse(logs.any { it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") })
+        assertFalse(logs.any { it.contains("收到招呼通用检查点[ROUTE_WAIT]") })
+
+        // Reproduce the composer/scroll refresh from the device log: the cached
+        // paths are cleared, but the next full read confirms the original binding.
+        val bindingCount = logs.count { it.contains("GREETING_CHAT_BINDING_CREATED") }
+        val originalLease = requireNotNull(owner.currentLease())
+        val route = PageRuntimeSessionState(
+            5L, originalLease.taskId, RunMode.AI_REPLY, PageRuntimeLifecycle.READY, 1L
+        )
+        val authorization = UiWriteAuthorization(owner, { 5L }, { RunMode.AI_REPLY }, {
+            route.takeUnless { runtime.isReceivedGreetingsRecoveryPending() }
+        })
+        var platformWrites = 0
+        assertEquals(1, authorization.withBoundAuthorizedWrite(
+            UiWriteScope.VERIFIED_GREETING_COMPOSER, originalLease
+        ) { ++platformWrites })
+        val refresh = runtime.javaClass.getDeclaredMethod("runRegionRefresh").apply {
+            isAccessible = true
+        }
+        val inspect = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
+            isAccessible = true
+        }
+        // An input/scroll content event during the draft must not launch another OCR.
+        val readsDuringDraft = port.ocrAsyncReadRequests
+        refresh.invoke(runtime)
+        assertEquals(readsDuringDraft, port.ocrAsyncReadRequests)
+        assertEquals(1, greetingDrafts)
+        port.regionResult = ChatRegionSnapshot(true, 0, 0, 0, 0, false)
+        refresh.invoke(runtime)
+        assertTrue(logs.any { it.contains("聊天区域定位已失效") })
+        inspect.invoke(runtime)
+        assertTrue(logs.any { it.contains("CHAT_DETAIL_REVALIDATED") })
+        assertFalse(logs.any { it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") })
+        assertFalse(logs.any { it.contains("收到招呼通用检查点[ROUTE_WAIT]") })
+        assertEquals(bindingCount, logs.count { it.contains("GREETING_CHAT_BINDING_CREATED") })
+        assertEquals(originalLease, owner.currentLease())
+
+        // A different window generation is NOT the same bound conversation.
+        // Keep the pre-existing recovery path instead of suppressing all detail changes.
+        pendingSend = true
+        port.page = chatDetailSnapshot(windowGeneration = 2L)
+        inspect.invoke(runtime)
+        assertTrue(logs.any {
+            it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") && it.contains("PAGE_ROUTE_CHANGED")
+        })
+        assertEquals(bindingCount, logs.count { it.contains("GREETING_CHAT_BINDING_CREATED") })
+        // The original task slot is still reserved, but neither composer mutation
+        // nor delayed gesture dispatch may cross the final platform write gate.
+        assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+        assertEquals(originalLease, owner.currentLease())
+        assertFalse(authorization.permitsBound(UiWriteScope.VERIFIED_GREETING_COMPOSER, originalLease))
+        assertNull(authorization.withBoundAuthorizedWrite(
+            UiWriteScope.VERIFIED_GREETING_COMPOSER, originalLease
+        ) { ++platformWrites })
+        assertNull(authorization.withAuthorizedWrite(UiWriteScope.AUTONOMOUS_GESTURE) { ++platformWrites })
+        assertEquals(1, platformWrites)
+        val readsBeforeCompletion = port.ocrAsyncReadRequests
+        runtime.onSendConfirmationObservationRequested()
+        assertTrue(logs.any { it.contains("RECOVERY_READ_ONLY_WAIT") })
+        assertTrue(pendingSend)
+        assertEquals(readsBeforeCompletion, port.ocrAsyncReadRequests)
+    }
+
+    @Test
     fun unverifiedOrNonNavigatingGreetingProfileMustKeepRouteRecoveryGate() {
         listOf(
             false to ReceivedGreetingsTraversalStatus.NAVIGATING,
@@ -1184,6 +2439,35 @@ class AiReplyObservationRuntimeTest {
         }
     }
 
+    @Test
+    fun greetingAvatarArrivalBeforeActivityEvidenceWaitsReadOnlyThenUsesExistingProfileFlow() {
+        val result = runGreetingAvatarProfileRouteCase(
+            profileVerified = false,
+            stage = ReceivedGreetingsTraversalStatus.NAVIGATING,
+            resolvePendingArrival = true
+        )
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", result.owner)
+        assertTrue(result.logs.any { it.contains("TRANSITION_EVIDENCE_WAIT") })
+        assertTrue(result.logs.any { it.contains("IDENTITY_PROFILE_VERIFIED") })
+        assertTrue(result.idleStepsAfterProfile > result.idleStepsBeforeProfile)
+        assertFalse(result.logs.any { it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") })
+    }
+
+    @Test
+    fun greetingAvatarArrivalWithoutProofAfterOriginalDeadlineUsesRouteRecovery() {
+        val result = runGreetingAvatarProfileRouteCase(
+            profileVerified = false,
+            stage = ReceivedGreetingsTraversalStatus.NAVIGATING,
+            resolvePendingArrival = false
+        )
+        assertTrue(result.logs.any { it.contains("TRANSITION_EVIDENCE_WAIT") })
+        assertEquals(result.idleStepsBeforeProfile, result.idleStepsAfterProfile)
+        assertFalse(result.logs.any { it.contains("IDENTITY_PROFILE_VERIFIED") })
+        assertTrue(result.logs.any {
+            it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") && it.contains("PAGE_ROUTE_CHANGED")
+        })
+    }
+
     private data class GreetingProfileRouteCaseResult(
         val owner: String?,
         val idleStepsBeforeProfile: Int,
@@ -1193,7 +2477,8 @@ class AiReplyObservationRuntimeTest {
 
     private fun runGreetingAvatarProfileRouteCase(
         profileVerified: Boolean,
-        stage: ReceivedGreetingsTraversalStatus
+        stage: ReceivedGreetingsTraversalStatus,
+        resolvePendingArrival: Boolean? = null
     ): GreetingProfileRouteCaseResult {
         val scheduler = FakeScheduler()
         val listActivity = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
@@ -1248,6 +2533,35 @@ class AiReplyObservationRuntimeTest {
 
         port.receivedGreetingsIdentityProfileProof = profileVerified
         port.receivedGreetingsTraversalStatusValue = stage
+        if (resolvePendingArrival != null) {
+            // Device log: the new profile root is visible before Activity/generation and
+            // navigation attribution catch up. The adapter's original deadline is still live.
+            val originalLease = requireNotNull(owner.currentLease())
+            port.receivedGreetingsNavigationEvidencePending = true
+            port.page = port.page.copy(
+                activityClass = "com.immomo.momo.message.activity.ChatActivity",
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 198,
+                windowGeneration = 12L
+            )
+            runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED))
+            scheduler.runNextWithDelay(300L)
+            assertTrue(logs.any { it.contains("TRANSITION_EVIDENCE_WAIT") })
+            assertEquals(idleBefore, port.receivedGreetingsIdleSteps)
+            assertEquals(originalLease, owner.currentLease())
+            assertFalse(runtime.isReceivedGreetingsRecoveryPending())
+            assertEquals(0, port.ocrAsyncReadRequests)
+
+            // Simulate the adapter's existing deadline/confirmation decision, not a new clock.
+            port.receivedGreetingsNavigationEvidencePending = false
+            if (!resolvePendingArrival) {
+                scheduler.runNextWithDelay(750L)
+                return GreetingProfileRouteCaseResult(
+                    owner.activeTaskId(), idleBefore, port.receivedGreetingsIdleSteps, logs
+                )
+            }
+            port.receivedGreetingsIdentityProfileProof = true
+        }
         port.page = port.page.copy(
             activityClass = profileActivity,
             pageKind = ChatPageKind.NON_CHAT,
@@ -1342,6 +2656,174 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, port.receivedGreetingsNavigationTaskStarts)
         assertEquals(0, gestures)
         assertTrue(logs.any { it.contains("收到的招呼任务[STARTED]") })
+    }
+
+    @Test
+    fun pageSelectedGreetingsStartupRunsFirstTraversalWithoutAnotherTargetEvent() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            verifiedMessageWorkAreaNavigationSupported = true
+            receivedGreetingsWorkflowEnabled = true
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity",
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 24,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null
+            )
+            manualGreetingsArrivalStatuses = listOf(
+                ReceivedGreetingsPageArrivalStatus.LIST_STABILIZING,
+                ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+            )
+            receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var gestures = 0
+        val logs = ArrayList<String>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    gestures++
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L },
+            pageSelectedStartup = true
+        )
+
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_RECEIVED_GREETINGS"))
+        assertNull(tasks.currentLease())
+        runtime.requestPageRouteObservation()
+        scheduler.runNextWithDelay(300L) // A debounced fresh page snapshot probes the manual arrival.
+
+        assertEquals(1, port.manualGreetingsArrivalObservations)
+        assertTrue(scheduler.hasPendingDelay(350L))
+        assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(0, gestures)
+        scheduler.runNextWithDelay(350L) // A second fresh same-window list snapshot confirms arrival.
+
+        assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", tasks.activeTaskId())
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        assertEquals(0, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(0, gestures)
+        assertTrue(logs.any { it.contains("收到的招呼任务[STARTED]") })
+    }
+
+    @Test
+    fun confirmedGreetingsListWaitsForFreshAndroidReadyBeforeFirstTraversal() {
+        for (pageSelected in listOf(false, true)) {
+            val scheduler = FakeScheduler()
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                verifiedMessageWorkAreaNavigationSupported = true
+                receivedGreetingsWorkflowEnabled = true
+                page = ChatPageSnapshot(
+                    packageName = "com.immomo.momo",
+                    activityClass = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity",
+                    pageKind = ChatPageKind.NON_CHAT,
+                    scannedNodeCount = 24,
+                    editableInputCount = 0,
+                    messageListCount = 0,
+                    sendActionCount = 0,
+                    messageRelatedViewIdCount = 0,
+                    hasChatTab = false,
+                    messageListTarget = null,
+                    inputFieldTarget = null,
+                    windowGeneration = 7L
+                )
+                manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED
+                receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+            }
+            val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+            val logs = ArrayList<String>()
+            var readinessStatus = TargetAppReadinessStatus.STARTING
+            var staleGeneration = false
+            var readinessReads = 0
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = NoOpGestureApi,
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = logs::add,
+                inspectAndroidRecoveryReadiness = { page ->
+                    readinessReads++
+                    testAndroidRecoveryReadiness(page).copy(
+                        status = readinessStatus,
+                        pageGeneration = if (staleGeneration) 6L else page.windowGeneration
+                    )
+                },
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L,
+                taskCoordinator = tasks,
+                currentRunGeneration = { 1L },
+                pageSelectedStartup = pageSelected
+            )
+
+            if (pageSelected) {
+                assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_RECEIVED_GREETINGS"))
+                runtime.requestPageRouteObservation()
+            } else {
+                runtime.scheduleInitialObservation()
+                assertEquals("AI_REPLY_PRIVATE_MESSAGES", tasks.activeTaskId())
+                runtime.schedule(eventWithOrigin(AccessibilityEventType.VIEW_SCROLLED, InputOrigin.UNKNOWN))
+            }
+            scheduler.runNextWithDelay(300L)
+
+            assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+            assertEquals(0, port.receivedGreetingsIdleSteps)
+            assertNull(tasks.currentLease())
+            assertTrue(logs.any { it.contains("GREETING_FIRST_ACTION_READINESS_WAIT reason=ANDROID_STARTING") })
+            assertTrue(scheduler.hasPendingDelay(500L))
+
+            // READY from the wrong window generation is not fresh execution evidence.
+            readinessStatus = TargetAppReadinessStatus.READY
+            staleGeneration = true
+            scheduler.runNextWithDelay(500L)
+            assertEquals(0, port.receivedGreetingsCurrentListStartAttempts)
+            assertEquals(0, port.receivedGreetingsIdleSteps)
+            assertNull(tasks.currentLease())
+            assertTrue(logs.any { it.contains("GREETING_FIRST_ACTION_READINESS_WAIT reason=WINDOW_GENERATION_CHANGED") })
+            assertTrue(scheduler.hasPendingDelay(500L))
+
+            // No new accessibility event is required; the existing read-only scheduler
+            // must obtain fresh list evidence and enter the original start path once.
+            staleGeneration = false
+            scheduler.runNextWithDelay(500L)
+            assertEquals(3, readinessReads)
+            assertEquals(3, port.manualGreetingsArrivalObservations)
+            assertEquals(1, port.receivedGreetingsCurrentListStartAttempts)
+            assertEquals(1, port.receivedGreetingsIdleSteps)
+            assertEquals("AI_REPLY_RECEIVED_GREETINGS", tasks.activeTaskId())
+            assertEquals(0, port.receivedGreetingsNavigationTaskStarts)
+            assertFalse(logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") })
+        }
     }
 
     @Test
@@ -1591,6 +3073,14 @@ class AiReplyObservationRuntimeTest {
         scheduler.runNextWithDelay(300L)
         assertNull(ownership.activeTaskId())
 
+        // An unknown result after an observed transition does not restore private ownership.
+        port.manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.UNKNOWN
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        scheduler.runNextWithDelay(300L)
+        assertNull(ownership.activeTaskId())
+
+        // The lease returns only after both the ordinary inbox and the greetings observer
+        // independently confirm that the transition has ended.
         port.manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
         runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
         scheduler.runNextWithDelay(300L)
@@ -1648,7 +3138,7 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun startupPositionsListAtTopBeforeFirstUpwardUnreadAdmissionSwipe() {
+    fun startupReadsConfirmedTopBeforeFirstUnreadSearchSwipe() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -1710,15 +3200,102 @@ class AiReplyObservationRuntimeTest {
         val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
         assertTrue("启动阶段必须先产生向下回顶手势", firstUpwardSwipe > 0)
         assertTrue(
-            "首次向上准入前的所有滑动都必须是向下回顶",
+            "向下搜索未读边界前的所有滑动都必须是向下回顶",
             directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN }
         )
         assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("首次向上滑动；完成后才检查未读") })
+        assertTrue(logs.any { it.contains("启动准入[UNREAD_LOCKING]") })
     }
 
     @Test
-    fun startupUnknownUnreadStateIsCheckedOnlyAfterTopResetAndFirstUpwardSwipe() {
+    fun pageSelectedPrivateStartupRunsOriginalWorkAreaProofBeforeFirstGesture() {
+        val scheduler = FakeScheduler()
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(sessionCandidate(
+                unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD,
+                completeBoundaryEvidence = true
+            )),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            provideMessageTabPositionEvidence = true
+            verifiedMessageWorkAreaNavigationSupported = true
+            receivedGreetingsWorkflowEnabled = true
+            sessionRunEnabled = true
+            page = inbox
+        }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val logs = mutableListOf<String>()
+        val submittedCommands = mutableListOf<GestureIntentRequest>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    assertTrue(logs.any { it.contains("AI 启动导航[CONFIRMED]") })
+                    assertEquals("AI_REPLY_PRIVATE_MESSAGES", tasks.activeTaskId())
+                    submittedCommands += command
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L },
+            pageSelectedStartup = true
+        )
+
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
+        assertNull(tasks.currentLease())
+        runtime.requestPageRouteObservation()
+        // No target event or presentation refresh is required to start.
+        runUntilShortestDelay(scheduler, 20) { logs.any { it.contains("AI 启动导航[INBOX_ALREADY_VISIBLE]") } }
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", tasks.activeTaskId())
+        assertTrue(submittedCommands.isEmpty())
+        // A second route observation must not restart the original verification.
+        runtime.requestPageRouteObservation()
+        runUntilShortestDelay(scheduler, 80) {
+            submittedCommands.any {
+                (it.intent as? GestureIntent.VerticalSwipe)?.direction == VerticalSwipeDirection.UP
+            }
+        }
+
+        val directions = submittedCommands.mapNotNull {
+            (it.intent as? GestureIntent.VerticalSwipe)?.direction
+        }
+        val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
+        assertTrue("启动阶段必须先产生向下回顶手势", firstUpwardSwipe > 0)
+        assertTrue(
+            "向下搜索未读边界前的所有滑动都必须是向下回顶",
+            directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN }
+        )
+        assertEquals(1, logs.count { it.contains("AI 启动导航[WAITING]") })
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
+        assertTrue(logs.any { it.contains("启动准入[UNREAD_LOCKING]") })
+    }
+
+    @Test
+    fun startupUnknownUnreadStateIsCheckedAtConfirmedTopWithoutProbeSwipe() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -1773,17 +3350,16 @@ class AiReplyObservationRuntimeTest {
         val directions = submittedCommands.mapNotNull {
             (it.intent as? GestureIntent.VerticalSwipe)?.direction
         }
-        val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
-        assertTrue("UNKNOWN 不得阻止先执行向下回顶", firstUpwardSwipe > 0)
-        assertTrue(directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN })
+        assertTrue("UNKNOWN 不得阻止先执行向下回顶", directions.isNotEmpty())
+        assertTrue(directions.all { it == VerticalSwipeDirection.DOWN })
         assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("首次向上滑动已由 Android 确认成功") })
+        assertTrue(logs.any { it.contains("当前已确认列表视口存在 UNKNOWN") })
         assertFalse(scheduler.hasPendingDelay(1_200L))
         assertFalse(scheduler.hasPendingDelay(30_000L))
     }
 
     @Test
-    fun startupNoUnreadRunsTopResetBeforeExactlyOneAdmissionSwipe() {
+    fun startupNoUnreadConfirmsReadViewportWithoutAdmissionSwipe() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -1833,17 +3409,16 @@ class AiReplyObservationRuntimeTest {
         )
 
         runtime.scheduleInitialObservation()
-        runUntilLog(scheduler, logs, "AI Reply 启动准入[NO_UNREAD_AFTER_FIRST_SWIPE]")
+        runUntilLog(scheduler, logs, "AI Reply 启动准入[NO_UNREAD_AT_CONFIRMED_TOP]")
 
         val directions = submittedCommands.mapNotNull {
             (it.intent as? GestureIntent.VerticalSwipe)?.direction
         }
-        val firstUpwardSwipe = directions.indexOfFirst { it == VerticalSwipeDirection.UP }
-        assertTrue("无未读判断前必须先完成向下回顶", firstUpwardSwipe > 0)
-        assertTrue(directions.take(firstUpwardSwipe).all { it == VerticalSwipeDirection.DOWN })
-        assertEquals(1, directions.count { it == VerticalSwipeDirection.UP })
+        assertTrue("无未读判断前必须先完成向下回顶", directions.isNotEmpty())
+        assertTrue(directions.all { it == VerticalSwipeDirection.DOWN })
+        assertEquals(0, directions.count { it == VerticalSwipeDirection.UP })
         assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("首次成功向上滑动后的视口没有明确未读") })
+        assertTrue(logs.any { it.contains("顶部完整有效视口全部明确已读") })
         assertFalse(logs.any { it.contains("底部边界经延迟独立快照复核通过") })
     }
 
@@ -1945,14 +3520,134 @@ class AiReplyObservationRuntimeTest {
 
         assertTrue(logs.any { it.contains("AI 启动导航[CONFIRMED]") })
         runUntilLog(scheduler, logs, "AI Reply 启动顶部定位[CONFIRMED]")
-        runUntilLog(scheduler, logs, "AI Reply 启动准入：执行进入消息工作区后的首次向上滑动")
+        runUntilLog(scheduler, logs, "AI Reply 启动准入[NO_UNREAD_AT_CONFIRMED_TOP]")
         assertEquals(
-            "先完成向下回顶，再执行首次向上准入滑动",
-            listOf(GestureKind.SWIPE, GestureKind.SWIPE, GestureKind.SWIPE),
+            "先完成向下回顶并复核已读视口，不执行试探滑动",
+            listOf(GestureKind.SWIPE, GestureKind.SWIPE),
             gestures
         )
     }
 
+
+    @Test
+    fun p4StartupRecoveryReverifiesThreeSamplesWithoutRefundingUnconfirmedTap() {
+        val scheduler = FakeScheduler()
+        val feed = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.NON_CHAT,
+            scannedNodeCount = 60,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            screenBounds = ScreenRect(0, 0, 720, 1600),
+            sessionListNavigationTarget = testNavigationTarget(
+                "com.immomo.momo.maintab.MaintabActivity", generation = 5L
+            ),
+            windowGeneration = 5L
+        )
+        val inbox = feed.copy(
+            pageKind = ChatPageKind.CHAT_LIST,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(sessionCandidate(completeBoundaryEvidence = true, windowGeneration = 5L))
+        )
+        val port = FakeChatPort().apply {
+            page = feed
+            provideMessageTabPositionEvidence = true
+            captureMessageWorkAreaGestureOutcome = true
+        }
+        val logs = mutableListOf<String>()
+        var confirmations = 0
+        val coordinator = AiReplyStartupReadinessCoordinator(
+            scheduler = scheduler,
+            chatPagePort = port,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            isSessionRunStarted = { true },
+            inspectFreshPageSnapshot = port::inspectChatPage,
+            isMessageViewportPositionedAgainstTab = { _, _, _ -> true },
+            hasRelevantMessageStructureDelta = { _, _, _, _ -> true },
+            onConfirmed = { confirmations++ },
+            onTimedOut = {},
+            onLog = logs::add
+        )
+        coordinator.resetForRun(sessionStarted = true)
+        coordinator.beginVerification()
+        assertEquals(1, port.messageWorkAreaEntryAttempts)
+        coordinator.suspendForPageRecovery()
+        assertFalse(scheduler.hasPendingDelay(900L))
+        port.messageWorkAreaOutcomeCallbacks[0](MessageWorkAreaNavigationOutcome.DEFERRED_NOT_DISPATCHED)
+        assertTrue(coordinator.resumeAfterPageRecovery())
+        assertEquals(1, port.messageWorkAreaEntryAttempts)
+        assertFalse(coordinator.workAreaConfirmed)
+        port.page = inbox
+        scheduler.runNextWithDelay(400L)
+        assertEquals(0, confirmations)
+        scheduler.runNextWithDelay(300L)
+        assertEquals(0, confirmations)
+        scheduler.runNextWithDelay(300L)
+        assertEquals(1, confirmations)
+        assertTrue(coordinator.workAreaConfirmed)
+        assertEquals(1, port.messageWorkAreaEntryAttempts)
+    }
+
+    @Test
+    fun startupQuietWaitDoesNotSubmitMessageTabGestureUntilExistingGateOpens() {
+        val scheduler = FakeScheduler()
+        val feed = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.NON_CHAT,
+            scannedNodeCount = 60,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            screenBounds = ScreenRect(0, 0, 720, 1600),
+            sessionListNavigationTarget = testNavigationTarget(
+                "com.immomo.momo.maintab.MaintabActivity", generation = 5L
+            ),
+            windowGeneration = 5L
+        )
+        val port = FakeChatPort().apply {
+            page = feed
+            provideMessageTabPositionEvidence = true
+            captureMessageWorkAreaGestureOutcome = true
+        }
+        val logs = mutableListOf<String>()
+        var quietRemaining = 5_000L
+        val coordinator = AiReplyStartupReadinessCoordinator(
+            scheduler = scheduler,
+            chatPagePort = port,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            isSessionRunStarted = { true },
+            inspectFreshPageSnapshot = port::inspectChatPage,
+            isMessageViewportPositionedAgainstTab = { _, _, _ -> true },
+            hasRelevantMessageStructureDelta = { _, _, _, _ -> true },
+            onConfirmed = {},
+            onTimedOut = {},
+            onLog = logs::add,
+            foregroundQuietRemainingMs = { quietRemaining }
+        )
+        coordinator.resetForRun(sessionStarted = true)
+        coordinator.beginVerification()
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        scheduler.runNextWithDelay(400L)
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        assertTrue(scheduler.hasPendingDelay(400L))
+        quietRemaining = 0L
+        scheduler.runNextWithDelay(400L)
+        assertEquals(1, port.messageWorkAreaEntryAttempts)
+        assertTrue(scheduler.hasPendingDelay(900L))
+    }
 
     @Test
     fun deferredMessageTabGestureDoesNotConsumeTapLimitOrAcceptOldCallback() {
@@ -2465,6 +4160,299 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun p3DelayedVisualEvidenceReacquiresMovedRowAndVerifiedViewportDoesNotWaitForScreenshot() {
+        for (verified in listOf(false, true)) {
+            val scheduler = FakeScheduler()
+            val candidate = sessionCandidate(completeBoundaryEvidence = true).apply {
+                if (verified) contactIdentity = ContactRowIdentity(
+                    snapshotId = "sample", temporaryUserId = "temp",
+                    contactId = "verified-contact", confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                )
+            }
+            val inbox = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                resolveTapBoundsFromCandidate = true
+                deferSessionListSample = true
+                supportVerifiedListMetadata = true
+                page = inbox
+            }
+            val commands = ArrayList<GestureIntentRequest>()
+            val logs = ArrayList<String>()
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = object : TestGestureApi {
+                    override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                        commands += command
+                        if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                        listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                        return GestureSubmission.ACCEPTED
+                    }
+                },
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L
+            )
+            runtime.scheduleInitialObservation()
+            if (verified) {
+                runUntil(scheduler, 80) { commands.any { it.kind == GestureKind.TAP } }
+                assertEquals(1, port.verifiedListMetadataSamples)
+                assertNull(port.pendingSessionListSample)
+                assertEquals(candidate.rowBounds,
+                    (commands.single { it.kind == GestureKind.TAP }.intent as GestureIntent.Tap).targetBounds)
+            } else {
+                runUntil(scheduler, 80) { port.pendingSessionListSample != null }
+                assertTrue(commands.none { it.kind == GestureKind.TAP })
+                assertEquals(0, port.verifiedListMetadataSamples)
+                val moved = sessionCandidate(rowIndex = 3, completeBoundaryEvidence = true)
+                port.page = inbox.copy(chatListCandidates = listOf(moved))
+                val callback = requireNotNull(port.pendingSessionListSample)
+                port.pendingSessionListSample = null
+                callback(null)
+                runUntil(scheduler, 40) { commands.any { it.kind == GestureKind.TAP } }
+                val tap = commands.single { it.kind == GestureKind.TAP }
+                assertEquals(moved.rowBounds, (tap.intent as GestureIntent.Tap).targetBounds)
+                assertTrue(tap.description.contains("会话行 4"))
+                assertEquals(1, port.sessionTapResolutions)
+            }
+            assertEquals(1, port.sessionListSamples)
+        }
+    }
+
+    /** A no-op gesture must not poison the traverser's attempted-session checkpoint. */
+    @Test
+    fun acceptedTapThatNeverNavigatesRetriesSameUnreadSessionAfterFreshListRecovery() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            page = inbox
+        }
+        val logs = ArrayList<String>()
+        var tapCount = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) {
+                        tapCount++
+                        if (tapCount == 2) port.page = chatDetailSnapshot()
+                    }
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 160) { logs.any { it.contains("NO_NAVIGATION_RECOVERY") } }
+        val traversal = AiReplyObservationRuntime::class.java.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(runtime) as PrivateMessagesTraversalTaskExecutor
+        val selectedKey = com.freedom.features.aireply.ports.ChatSessionManagementPolicy.stableSessionKey(candidate)
+        assertEquals(1, tapCount)
+        assertFalse("No-op tap must not stay in attempted-session memory",
+            traversal.attemptedSessionKeys.contains(selectedKey))
+        assertFalse("No-op tap must not be saved as attempted",
+            traversal.checkpoint().attemptedSessionKeys.contains(selectedKey))
+        assertEquals("No-op tap is not a completed session action", 0, traversal.sessionActionCount)
+        assertTrue(logs.any { it.contains("NO_NAVIGATION_RECOVERY") &&
+            it.contains("attempt=1") && it.contains("delayMs=500") })
+
+        runUntil(scheduler, 220) { logs.any { it.contains("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定") } }
+        assertEquals("The same unread row must be reselected from a fresh snapshot", 2, tapCount)
+        assertTrue(traversal.attemptedSessionKeys.contains(selectedKey))
+        assertEquals(1, traversal.sessionActionCount)
+        assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+    }
+
+    @Test
+    fun p6cCancelledTapReacquiresOriginalRowAfterReorderWithoutLosingRound() {
+        val scheduler = FakeScheduler()
+        val original = sessionCandidate(1, "Sample Contact", completeBoundaryEvidence = true)
+        val other = sessionCandidate(0, "Other Contact", completeBoundaryEvidence = true)
+        val moved = sessionCandidate(0, "Sample Contact", completeBoundaryEvidence = true)
+        val reorderedOther = sessionCandidate(1, "Other Contact", completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(other, original),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolveTapBoundsFromCandidate = true
+            page = inbox
+        }
+        val logs = ArrayList<String>()
+        val taps = ArrayList<GestureIntentRequest>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) {
+                        taps += command
+                        if (taps.size == 1) {
+                            port.page = inbox.copy(chatListCandidates = listOf(moved, reorderedOther))
+                            listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.CANCELLED))
+                            return GestureSubmission.ACCEPTED
+                        }
+                        port.page = chatDetailSnapshot()
+                    }
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) { logs.any { it.contains("UNVERIFIED_TAP_ROLLBACK") && it.contains("GESTURE_TAP_CANCELLED") } }
+        val traversal = AiReplyObservationRuntime::class.java.getDeclaredField(
+            "privateMessagesTraversalTaskExecutor"
+        ).apply { isAccessible = true }.get(runtime) as PrivateMessagesTraversalTaskExecutor
+        val originalKey = com.freedom.features.aireply.ports.ChatSessionManagementPolicy.stableSessionKey(original)
+        val otherKey = com.freedom.features.aireply.ports.ChatSessionManagementPolicy.stableSessionKey(other)
+        assertEquals(1, taps.size)
+        assertFalse(originalKey in traversal.checkpoint().attemptedSessionKeys)
+        assertTrue(originalKey in traversal.pendingKnownUnreadKeys())
+        assertTrue(otherKey in traversal.pendingKnownUnreadKeys())
+        assertTrue(traversal.lockedUnreadSetFinalized)
+        runUntil(scheduler, 220) { taps.size == 2 }
+        assertEquals(original.rowBounds, (taps[0].intent as GestureIntent.Tap).targetBounds)
+        assertEquals(moved.rowBounds, (taps[1].intent as GestureIntent.Tap).targetBounds)
+        assertTrue(otherKey in traversal.pendingKnownUnreadKeys())
+    }
+
+    @Test
+    fun repeatedNoOpSessionTapsUseIncreasingRecoveryBackoff() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+        }
+        val logs = ArrayList<String>()
+        var taps = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) taps++
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 350) {
+            logs.any { it.contains("NO_NAVIGATION_RECOVERY") && it.contains("attempt=2") }
+        }
+        assertEquals("The second retry must follow a newly verified list and actual tap", 2, taps)
+        assertTrue(logs.any { it.contains("NO_NAVIGATION_RECOVERY") &&
+            it.contains("attempt=2") && it.contains("delayMs=1000") })
+        assertTrue(logs.none { it.contains("点击后仍停留在会话列表；记录本次未命中") })
+    }
+
+    @Test
     fun openedPrivateSessionBuildsBindingForBothEventAndDelayedVerification() {
         for (eventFirst in listOf(false, true)) {
             val scheduler = FakeScheduler()
@@ -2646,6 +4634,129 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun privateUnconfirmedSendRetriesRejectedBindingUntilFreshOcrWithoutReplayingGesture() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            simulateStructureThenOcr = true
+            ocrDebugTextByRowIndex = mapOf(1 to "verified message")
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+        }
+        val logs = ArrayList<String>()
+        var pendingSend = false
+        var confirmationCalls = 0
+        var gestureCalls = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    gestureCalls++
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            isSendConfirmationPending = { pendingSend },
+            onSendTransaction = { _, _ ->
+                // A real coordinator has no pending transaction before the send is submitted.
+                val result = if (pendingSend) {
+                    confirmationCalls++
+                    com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+                } else com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+                com.freedom.features.aireply.ai.ReplySendTransactionOutcome(result)
+            }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) {
+            logs.any { it.contains("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定") }
+        }
+        val bindingField = runtime.javaClass.getDeclaredField("currentSessionBinding").apply {
+            isAccessible = true
+        }
+        val originalBinding = requireNotNull(bindingField.get(runtime))
+        val inspect = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
+            isAccessible = true
+        }
+
+        // Simulate the previously observed temporary source-binding admission failure.
+        // Pending is the already-submitted send: only read-only inspection is permitted.
+        pendingSend = true
+        bindingField.set(runtime, null)
+        val gesturesBefore = gestureCalls
+        runtime.onSendConfirmationObservationRequested()
+        assertTrue(logs.any { it.contains("ACTIVE_RECHECK_REQUESTED") })
+        assertTrue(scheduler.hasPendingDelay(0L))
+        // No accessibility event or manual resume is needed for the initial proof.
+        runUntilShortestDelay(scheduler, 40) {
+            logs.any { it.contains("AI 发送确认[READ_DEFERRED] reason=SOURCE_CHAT_BINDING_NOT_VERIFIED") }
+        }
+        assertTrue(logs.any {
+            it.contains("AI 发送确认[READ_DEFERRED] reason=SOURCE_CHAT_BINDING_NOT_VERIFIED")
+        })
+        assertTrue(logs.any {
+            it.contains("AI 发送确认[READ_ONLY_RETRY_SCHEDULED]") &&
+                it.contains("attempt=1") && it.contains("delayMs=500")
+        })
+        assertTrue(scheduler.hasPendingDelay(500L))
+        assertEquals(0, confirmationCalls)
+        assertEquals(gesturesBefore, gestureCalls)
+        repeat(4) { runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED)) }
+        assertTrue("Ordinary events cannot cancel the queued send-proof retry",
+            scheduler.hasPendingDelay(500L))
+
+        scheduler.runNextWithDelay(500L)
+        assertTrue("An unverified binding must remain on autonomous read-only backoff",
+            logs.any { it.contains("attempt=2") && it.contains("delayMs=1000") })
+        assertTrue(scheduler.hasPendingDelay(1_000L))
+        assertEquals(0, confirmationCalls)
+
+        // An independently restored original binding is allowed to resume the
+        // unchanged OCR/send matcher on the next timer, without input or a new gesture.
+        bindingField.set(runtime, originalBinding)
+        scheduler.runNextWithDelay(1_000L)
+        runUntil(scheduler, 50) { confirmationCalls > 0 }
+        assertTrue(logs.any { it.contains("AI 发送确认[READ_ONLY_RECHECK]") })
+        assertTrue(logs.any { it.contains("AI 发送确认[OCR_REVALIDATED]") })
+        assertEquals("No new UI gestures may be submitted during send-proof recovery",
+            gesturesBefore, gestureCalls)
+        assertEquals(0, port.navigateBackCalls)
+
+        runtime.reset("user stopped")
+        assertFalse("A stopped run must cancel a pending send-proof recheck",
+            scheduler.hasPendingDelay(500L))
+    }
+
+    @Test
     fun boundPrivateDetailEmptySnapshotRecoversOnlyAfterFreshTargetAndIdentityReturnProof() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)
@@ -2679,6 +4790,9 @@ class AiReplyObservationRuntimeTest {
         var draftCalls = 0
         var draftHadOcrEvidence = false
         var draftIdentityVerified = false
+        var boundAtRebind = false
+        var sendGateReasonAtRebind: String? = null
+        lateinit var runtime: AiReplyObservationRuntime
         val gesture = object : TestGestureApi {
             override fun execute(
                 command: GestureIntentRequest,
@@ -2689,7 +4803,7 @@ class AiReplyObservationRuntimeTest {
                 return GestureSubmission.ACCEPTED
             }
         }
-        val runtime = AiReplyObservationRuntime(
+        runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
@@ -2698,7 +4812,16 @@ class AiReplyObservationRuntimeTest {
             gesturePolicy = gesture,
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
-            onLog = logs::add,
+            onLog = { entry ->
+            logs += entry
+            if (entry.contains("AI 会话绑定[VERIFIED_CHAT_REBOUND]")) {
+                boundAtRebind = runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
+                    .apply { isAccessible = true }.invoke(runtime) as Boolean
+                sendGateReasonAtRebind = runtime.javaClass.getDeclaredMethod(
+                    "privateSendConfirmationDetailReason", ChatPageSnapshot::class.java
+                ).apply { isAccessible = true }.invoke(runtime, port.page) as String
+            }
+        },
             inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
@@ -2782,9 +4905,16 @@ class AiReplyObservationRuntimeTest {
         assertEquals("Exactly one OCR read from the restored chat", 1, port.ocrAsyncReadRequests)
         assertTrue("Draft must have verified OCR content", draftHadOcrEvidence)
         assertTrue("Draft must keep the platform-confirmed identity", draftIdentityVerified)
+        assertTrue("Verified identity writeback must preserve the send-confirmation binding",
+            runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
+                .apply { isAccessible = true }.invoke(runtime) as Boolean)
         assertTrue(logs.any { it.contains("AI 身份回接[REQUEST_NOT_CONSUMED]") &&
             it.contains("reason=RECOVERY_TRANSACTION_PENDING") })
         assertTrue(logs.any { it.contains("AI 身份回接[RECOVERY_HANDOFF]") })
+        assertTrue("At the verified recovery handoff, the source row and fresh window must be bound", boundAtRebind)
+        assertEquals("At rebind the same chat must pass the read-only send confirmation identity gate",
+            "CHAT_DETAIL_NOT_VERIFIED", sendGateReasonAtRebind)
+        assertTrue(logs.any { it.contains("AI 会话绑定[VERIFIED_CHAT_REBOUND]") })
         assertEquals("Only the verified current target may draft", 1, draftCalls)
         assertEquals(0, port.navigateBackCalls)
     }
@@ -2822,6 +4952,8 @@ class AiReplyObservationRuntimeTest {
         var draftCalls = 0
         var passedIdentity: ContactRowIdentity? = null
         var draftHadOcrEvidence = false
+        var boundAtRebind = false
+        lateinit var runtime: AiReplyObservationRuntime
         val gesture = object : TestGestureApi {
             override fun execute(
                 command: GestureIntentRequest,
@@ -2832,7 +4964,7 @@ class AiReplyObservationRuntimeTest {
                 return GestureSubmission.ACCEPTED
             }
         }
-        val runtime = AiReplyObservationRuntime(
+        runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
             chatPagePort = port,
@@ -2841,7 +4973,13 @@ class AiReplyObservationRuntimeTest {
             gesturePolicy = gesture,
             targetPackage = { "com.immomo.momo" },
             isAiReplyActive = { true },
-            onLog = logs::add,
+            onLog = { entry ->
+            logs += entry
+            if (entry.contains("AI 会话绑定[VERIFIED_CHAT_REBOUND]")) {
+                boundAtRebind = runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
+                    .apply { isAccessible = true }.invoke(runtime) as Boolean
+            }
+        },
             inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
@@ -2883,6 +5021,8 @@ class AiReplyObservationRuntimeTest {
         }
         assertTrue(logs.any { it.contains("AI 身份业务续接[IDENTITY_RETURN_CONFIRMED]") })
         assertTrue(logs.any { it.contains("AI 身份回接[BUSINESS_HANDOFF]") })
+        assertTrue("At the ordinary identity-return handoff, source session binding must remain valid",
+            boundAtRebind)
         assertTrue(logs.any { it.contains("AI OCR 启动") })
         assertFalse(port.pendingIdentityReturnReinspection)
         assertEquals(1, port.ocrAsyncReadRequests)
@@ -3083,10 +5223,10 @@ class AiReplyObservationRuntimeTest {
             unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ
         )
         val middleUnread = sessionCandidate(nameText = "Middle Contact", completeBoundaryEvidence = true)
-        val topUnknown = sessionCandidate(
+        val topUnread = sessionCandidate(
             nameText = "Top Contact",
             completeBoundaryEvidence = true,
-            unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.READ
+            unreadStatus = com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD
         )
         fun listPage(candidate: ChatListCandidateSnapshot) = ChatPageSnapshot(
             packageName = "com.immomo.momo",
@@ -3104,7 +5244,7 @@ class AiReplyObservationRuntimeTest {
             chatListCandidates = listOf(candidate),
             windowGeneration = 1L
         )
-        val topPage = listPage(topUnknown)
+        val topPage = listPage(topUnread)
         val bottomPage = listPage(bottomUnknown)
         val middlePage = listPage(middleUnread)
         val port = FakeChatPort().apply {
@@ -3120,11 +5260,11 @@ class AiReplyObservationRuntimeTest {
             override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
                 commands += command
                 when {
-                    command.kind == GestureKind.SWIPE && command.description.contains("启动定位底部") -> {
+                    command.kind == GestureKind.SWIPE && command.description.contains("向下搜索未读区域边界") -> {
                         bottomSwipes++
                         when (bottomSwipes) {
-                            1 -> port.page = middlePage // First admission swipe exposes explicit unread.
-                            2 -> port.page = bottomPage // Next swipe positions the locked set at the bottom.
+                            1 -> port.page = middlePage // First search swipe exposes additional explicit unread.
+                            2 -> port.page = bottomPage // Next swipe exposes a fully read viewport.
                         }
                     }
                     command.kind == GestureKind.SWIPE && command.description.contains("从底部向上审视") -> {
@@ -3158,7 +5298,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntil(scheduler, 60) { port.messageReads == 1 }
 
-        assertEquals(2, bottomSwipes) // Admission swipe, then stop after the stable read-only suffix is confirmed.
+        assertEquals(2, bottomSwipes) // Search only until the stable read-only viewport is confirmed.
         assertEquals(1, upwardSwipes) // The first upward swipe exposes the middle page.
         assertEquals(
             listOf(
@@ -3173,7 +5313,7 @@ class AiReplyObservationRuntimeTest {
         }
         assertEquals(VerticalSwipeDirection.DOWN, swipeDirections[0])
         assertEquals(VerticalSwipeDirection.DOWN, swipeDirections[1])
-        assertEquals(VerticalSwipeDirection.UP, swipeDirections[2]) // First unread-admission swipe.
+        assertEquals(VerticalSwipeDirection.UP, swipeDirections[2]) // First unread-search swipe.
         assertTrue(logs.any { it.contains("顶部方向滑动后可见会话行发生变化；先审视当前新区域") })
         assertEquals("Middle Contact", port.resolvedTapCandidateNames.single())
         assertEquals(2, port.sessionListSamples) // Bottom and middle viewports are both archived.
@@ -3214,16 +5354,15 @@ class AiReplyObservationRuntimeTest {
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
             page = firstPage
-            // Startup top positioning performs two DOWN swipes and two independent delayed
-            // boundary samples before the first UP admission swipe. Keep the late viewport
-            // change for the delayed bottom-boundary confirmation itself.
-            inspectionPages = List(13) { firstPage } + latePage
+            // The read-only top admission no longer consumes two extra swipe observations.
+            // Keep the late viewport change for delayed physical-end confirmation.
+            inspectionPages = List(11) { firstPage } + latePage
         }
         var bottomSwipes = 0
         val logs = ArrayList<String>()
         val executor = object : TestGestureApi {
             override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
-                if (command.kind == GestureKind.SWIPE && command.description.contains("启动定位底部")) {
+                if (command.kind == GestureKind.SWIPE && command.description.contains("向下搜索未读区域边界")) {
                     bottomSwipes++
                 }
                 listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
@@ -3248,7 +5387,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "延迟边界复核发现列表发生迟到变化")
 
-        assertTrue(bottomSwipes >= 3)
+        assertTrue(bottomSwipes >= 2)
         assertTrue(logs.none { it.contains("底部边界经延迟独立快照复核通过") })
         assertTrue(logs.any { it.contains("撤销边界候选") })
     }
@@ -3301,7 +5440,7 @@ class AiReplyObservationRuntimeTest {
                     command: GestureIntentRequest,
                     listener: GestureExecutionListener
                 ): GestureSubmission {
-                    if (command.description.contains("首次向上滑动检查新区域")) {
+                    if (command.description.contains("向下搜索未读区域边界")) {
                         port.page = incompletePage
                     }
                     listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
@@ -3319,7 +5458,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "边界候选缺少完整可见行证据或稳定窗口身份")
 
-        assertTrue(logs.any { it.contains("底部定位无进展计数=2") })
+        assertTrue(logs.any { it.contains("向下搜索无进展计数=2") })
         assertTrue(logs.none { it.contains("底部边界经延迟独立快照复核通过") })
     }
 
@@ -3374,7 +5513,7 @@ class AiReplyObservationRuntimeTest {
                     command: GestureIntentRequest,
                     listener: GestureExecutionListener
                 ): GestureSubmission {
-                    if (command.description.contains("首次向上滑动检查新区域")) {
+                    if (command.description.contains("向下搜索未读区域边界")) {
                         port.page = noWindowPage
                     }
                     listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
@@ -3392,7 +5531,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "边界候选缺少完整可见行证据或稳定窗口身份")
 
-        assertTrue(logs.any { it.contains("底部定位无进展计数=2") })
+        assertTrue(logs.any { it.contains("向下搜索无进展计数=2") })
         assertTrue(logs.none { it.contains("底部边界经延迟独立快照复核通过") })
     }
 
@@ -3467,6 +5606,10 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "AI 会话管理已暂停：延迟边界复核未能确认同一会话列表页面")
 
+        assertTrue(logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+            it.contains("PRIVATE_LIST_BOUNDARY_PAGE_CHANGED") })
+        assertTrue(logs.any { it.contains("AI 私聊暂停分类[RETRYABLE]") &&
+            it.contains("PRIVATE_LIST_BOUNDARY_PAGE_CHANGED") })
         assertTrue(logs.none { it.contains("底部边界经延迟独立快照复核通过") })
     }
 
@@ -3745,8 +5888,8 @@ class AiReplyObservationRuntimeTest {
         runUntilLog(scheduler, logs, "AI Reply 启动准入[UNREAD_STATE_UNKNOWN]")
 
         assertTrue(sequence.indexOf("CURRENT_POSITION_CHECK") >= 0)
-        assertTrue("UNKNOWN is checked only after the mandatory first upward admission swipe", sequence.contains("SWIPE"))
-        assertTrue(logs.any { it.contains("首次向上滑动") })
+        assertTrue("UNKNOWN is checked only after the verified top has been reached", sequence.contains("SWIPE"))
+        assertTrue(logs.any { it.contains("当前已确认列表视口存在 UNKNOWN") })
         assertTrue(logs.any { it.contains("UNKNOWN") && it.contains("暂停") })
         assertFalse(scheduler.hasPendingDelay(1_200L))
         assertFalse(scheduler.hasPendingDelay(30_000L))
@@ -3817,14 +5960,23 @@ class AiReplyObservationRuntimeTest {
             (it.intent as? GestureIntent.VerticalSwipe)?.direction
         }
         assertEquals(
-            listOf(VerticalSwipeDirection.DOWN, VerticalSwipeDirection.DOWN, VerticalSwipeDirection.UP),
+            listOf(VerticalSwipeDirection.DOWN, VerticalSwipeDirection.DOWN),
             directions
         )
         assertEquals(1, port.receivedGreetingsIdleSteps)
         assertTrue(logs.any { it.contains("启动顶部定位[CONFIRMED]") })
-        assertTrue(logs.any { it.contains("首次成功向上滑动后的视口没有明确未读") })
+        assertTrue(logs.any { it.contains("顶部完整有效视口全部明确已读") })
         assertFalse(logs.any { it.contains("底部边界经延迟独立快照复核通过") })
         assertFalse(logs.any { it.contains("随机待机") || it.contains("模拟回复人数") || it.contains("模拟处理目标") })
+
+        // A fully searched but absent greeting entry is normal completion in the inbox.
+        port.provideMessageTabPositionEvidence = true
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND
+        runUntilLog(scheduler, logs, "跨任务交接[ENTRY_ABSENT]")
+        runUntilLog(scheduler, logs, "跨任务交接[PRIVATE_LEASE_TRANSFERRED]")
+        assertEquals(0, port.receivedGreetingsPriorityReturns)
+        assertEquals(1, port.receivedGreetingsConfirmedReturns)
+        assertTrue(logs.any { it.contains("AI Reply 低频待机") })
     }
 
     @Test
@@ -3948,6 +6100,77 @@ class AiReplyObservationRuntimeTest {
             assertEquals("scenario=$scenario", 0, drafts)
             assertFalse("scenario=$scenario", logs.any { it.contains("GREETING_CHAT_BINDING_CREATED") })
             assertTrue("scenario=$scenario logs=$logs", logs.any { it.contains("GREETING_CHAT_BINDING_REJECTED") })
+        }
+    }
+
+    @Test
+    fun repeatedGreetingObservationsDoNotRestartOcrBeforeCallbackDelivery() {
+        for (sendPending in listOf(false, true)) {
+            val scheduler = FakeScheduler()
+            val logs = ArrayList<String>()
+            val port = greetingDraftTestPort().apply { deferNextOcrRead = true }
+            var drafts = 0
+            var confirmations = 0
+            val runtime = greetingRuntimeFixture(
+                scheduler, port, logs, greetingDraft = { drafts++; true },
+                sendConfirmation = {
+                    if (sendPending) confirmations++
+                    if (sendPending) com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+                    else com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+                },
+                sendConfirmationPending = { sendPending }
+            )
+            activateGreetingTestFlow(runtime)
+            readGreetingTestMessages(runtime, port.page)
+            repeat(100) { readGreetingTestMessages(runtime, port.page) }
+            assertEquals(1, port.ocrAsyncReadRequests)
+            val structureReads = port.messageReads
+            port.completeDeferredOcrRead()
+            repeat(100) { readGreetingTestMessages(runtime, port.page) }
+            assertEquals(1, port.ocrAsyncReadRequests)
+            assertEquals(structureReads + 1, port.messageReads)
+            assertEquals(0, drafts)
+            assertEquals(0, confirmations)
+            runUntil(scheduler, 40) { if (sendPending) confirmations == 1 else drafts == 1 }
+            assertEquals(1, port.ocrAsyncReadRequests)
+            assertEquals(0, port.navigateBackCalls)
+        }
+    }
+
+    @Test
+    fun busyGreetingOcrIsDeferredWithoutFailureBudgetOrSendProof() {
+        for (sendPending in listOf(false, true)) {
+            val scheduler = FakeScheduler()
+            val logs = ArrayList<String>()
+            val port = greetingDraftTestPort().apply { deferNextOcrAdmission = true }
+            var drafts = 0
+            var confirmations = 0
+            val runtime = greetingRuntimeFixture(
+                scheduler, port, logs, greetingDraft = { drafts++; true },
+                sendConfirmation = {
+                    if (sendPending) confirmations++
+                    if (sendPending) com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+                    else com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+                },
+                sendConfirmationPending = { sendPending }
+            )
+            activateGreetingTestFlow(runtime)
+            readGreetingTestMessages(runtime, port.page)
+            runUntil(scheduler, 30) { logs.any { it.contains("AI OCR[ADMISSION_DEFERRED]") } }
+            assertEquals(1, port.ocrAsyncReadRequests)
+            repeat(100) { readGreetingTestMessages(runtime, port.page) }
+            assertEquals(1, port.ocrAsyncReadRequests)
+            assertEquals(0, drafts)
+            assertEquals(0, confirmations)
+            assertEquals(0, port.persistedChatSamples)
+            assertEquals(0, port.navigateBackCalls)
+            assertFalse(logs.any { it.contains("AI 消息复读：") })
+            assertTrue(scheduler.hasPendingDelay(500L))
+            scheduler.runNextWithDelay(500L)
+            // Re-admission is a new read of the current page, not the deferred batch.
+            readGreetingTestMessages(runtime, port.page)
+            assertEquals(2, port.ocrAsyncReadRequests)
+            runUntil(scheduler, 40) { if (sendPending) confirmations == 1 else drafts == 1 }
         }
     }
 
@@ -4285,6 +6508,80 @@ class AiReplyObservationRuntimeTest {
         assertEquals(1, port.greetingDetailCompletionCalls)
         assertEquals(2, port.persistedChatSamples)
         assertEquals(1, sendIdReads)
+    }
+
+    @Test
+    fun unmatchedGreetingDetailBackKeepsOnlyTheVerifiedBusinessReturnInItsOriginalTask() {
+        for (scenario in listOf("VERIFIED_RETURN", "NO_RETURN_PROOF", "WRONG_ROUTE")) {
+            val scheduler = FakeScheduler()
+            val logs = ArrayList<String>()
+            val port = greetingDraftTestPort()
+            var sendOutcome = com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+            var draftCalls = 0
+            val runtime = greetingRuntimeFixture(
+                scheduler = scheduler, port = port, logs = logs,
+                greetingDraft = { draftCalls++; true },
+                sendConfirmation = { sendOutcome },
+                consumeSendId = { "confirmed-greeting-return" }
+            )
+            val flow = activateGreetingTestFlow(runtime)
+            val source = port.page
+            readGreetingTestMessages(runtime, source)
+            runUntil(scheduler, 50) { draftCalls == 1 && port.persistedChatSamples == 1 }
+
+            // The real send-confirmation path persists the fact and submits the existing BACK.
+            sendOutcome = com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED
+            handleGreetingTestBatch(runtime, requireNotNull(port.lastPersistedBatch), source)
+            assertEquals(1, port.greetingSendJournalWrites)
+            assertEquals(1, port.greetingDetailSuccessfulCompletions)
+            assertTrue(logs.any { it.contains("GREETING_RETURN_BACK_ACCEPTED") })
+
+            // Match the device trace: the last observed page is the source chat, and
+            // global BACK does not have a matching generic navigation receipt.
+            AiReplyObservationRuntime::class.java.getDeclaredField("lastPageInspection").apply {
+                isAccessible = true
+            }.set(runtime, source)
+            port.greetingDetailReturnProof = scenario != "NO_RETURN_PROOF"
+            port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.NAVIGATING
+            val listActivity = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
+            port.page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = if (scenario == "WRONG_ROUTE") "OtherActivity" else listActivity,
+                pageKind = ChatPageKind.NON_CHAT,
+                scannedNodeCount = 20,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null
+            )
+            port.receivedGreetingsCheckpointFingerprint =
+                if (scenario == "WRONG_ROUTE") null else "verified-greeting-list-window"
+            val stepsBefore = port.receivedGreetingsIdleSteps
+            runtime.onUnmatchedNavigationObserved(port.page.activityClass)
+            scheduler.runNextWithDelay(0L)
+
+            if (scenario == "VERIFIED_RETURN") {
+                assertTrue(logs.any { it.contains("收到招呼业务导航[DETAIL_RETURN_PENDING]") })
+                assertFalse(logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") })
+                assertFalse(runtime.isReceivedGreetingsRecoveryPending())
+                assertTrue(flow.ownsTask())
+                // Only the adapter's existing return-confirmation step is advanced.
+                assertEquals(stepsBefore + 1, port.receivedGreetingsIdleSteps)
+            } else {
+                assertFalse(logs.any { it.contains("收到招呼业务导航[DETAIL_RETURN_PENDING]") })
+                assertTrue(logs.any {
+                    it.contains("统一恢复[PAUSED_CHECKPOINT_SAVED]") && it.contains("PAGE_ROUTE_CHANGED")
+                })
+                assertTrue(runtime.isReceivedGreetingsRecoveryPending())
+                assertEquals(stepsBefore, port.receivedGreetingsIdleSteps)
+            }
+            assertEquals(1, draftCalls)
+            assertEquals(1, port.greetingSendJournalWrites)
+            assertEquals(1, port.greetingDetailCompletionCalls)
+        }
     }
 
     @Test
@@ -4781,7 +7078,7 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun receivedGreetingsListTraversalCompletesAndStaysOnCurrentPage() {
+    fun receivedGreetingsListTraversalCompletesAndRequestsReturn() {
         val scheduler = FakeScheduler()
         val readCandidate = sessionCandidate(
             completeBoundaryEvidence = true,
@@ -4817,6 +7114,8 @@ class AiReplyObservationRuntimeTest {
             pageAfterReceivedGreetingsReturn = ordinaryList
         }
         val logs = ArrayList<String>()
+        var active = true
+        var draftPending = false
         val runtime = AiReplyObservationRuntime(
             scheduler = scheduler,
             sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
@@ -4833,7 +7132,8 @@ class AiReplyObservationRuntimeTest {
                 }
             },
             targetPackage = { "com.immomo.momo" },
-            isAiReplyActive = { true },
+            isAiReplyActive = { active },
+            isConversationDraftPending = { draftPending },
             onLog = logs::add,
             inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
@@ -4856,12 +7156,74 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("GREETING_DEFERRED_EVIDENCE_ONLY") })
         port.greetingAwaitingSafeTargetEvidenceOnly = false
         port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
-        runUntilLog(scheduler, logs, "收到的招呼任务[COMPLETE_STAY_ON_PAGE]")
+        port.receivedGreetingsBackDeferred = true
+        runUntilLog(scheduler, logs, "result=GESTURE_IN_FLIGHT")
         assertEquals(0, port.receivedGreetingsPriorityReturns)
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
         assertEquals(nonChat, port.page)
-        assertTrue(logs.any { it.contains("保持当前页面") })
-        assertFalse(logs.any { it.contains("已请求返回普通消息页") })
+
+        port.receivedGreetingsBackDeferred = false
+        runUntilLog(scheduler, logs, "收到的招呼任务[BACK_SUBMITTED]")
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertTrue(port.receivedGreetingsBackAttempts >= 2)
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals(ordinaryList, port.page)
+        assertTrue(logs.any { it.contains("返回步骤已受理") })
         assertFalse(logs.any { it.contains("模拟回复人数") })
+
+        port.provideMessageTabPositionEvidence = true
+        runUntilLog(scheduler, logs, "跨任务交接[INBOX_VERIFYING]")
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        runUntilLog(scheduler, logs, "跨任务交接[PRIVATE_LEASE_TRANSFERRED]")
+        assertEquals(1, port.receivedGreetingsConfirmedReturns)
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertTrue(logs.any { it.contains("AI Reply 低频待机") })
+
+        // No user event and no unread are required for the second round.
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        draftPending = true
+        repeat(4) {
+            if (logs.none { it.contains("自主轮询[ROUND_DUE]") }) {
+                scheduler.runNextWithDelay(60_000L)
+            }
+        }
+        assertTrue(logs.any { it.contains("自主轮询[ROUND_DUE]") })
+        runUntilLog(scheduler, logs, "reason=DRAFT_PENDING")
+        assertEquals(1, port.receivedGreetingsNavigationTaskStarts)
+        assertFalse(logs.any { it.contains("自主轮询[ROUND_STARTED]") })
+        draftPending = false
+        // No new page event: the read-only retry must resume the due round.
+        runUntilLog(scheduler, logs, "自主轮询[ROUND_VERIFYING]")
+        assertEquals(1, port.receivedGreetingsNavigationTaskStarts)
+        runUntilLog(scheduler, logs, "自主轮询[ROUND_STARTED]")
+        repeat(100) {
+            if (port.receivedGreetingsNavigationTaskStarts < 2) scheduler.runNextShortestDelay()
+        }
+        assertEquals(2, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+
+        // Complete a second full pair, rather than merely entering its greeting task.
+        port.page = nonChat
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
+        repeat(100) {
+            if (port.receivedGreetingsConfirmedReturns < 2) scheduler.runNextShortestDelay()
+        }
+        assertEquals(2, port.receivedGreetingsConfirmedReturns)
+        assertEquals(2, port.receivedGreetingsPriorityReturns)
+        assertEquals(2, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(2, logs.count { it.contains("跨任务交接[PRIVATE_LEASE_TRANSFERRED]") })
+
+        // Stopping with a pending next-round timer must not start a third round.
+        assertTrue(scheduler.hasPendingDelay(60_000L))
+        active = false
+        runtime.reset("P5 explicit stop")
+        repeat(20) {
+            if (scheduler.pendingCount() > 0) scheduler.runNextShortestDelay()
+        }
+        assertEquals(2, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(2, port.receivedGreetingsPriorityReturns)
+        assertEquals(1, logs.count { it.contains("自主轮询[ROUND_STARTED]") })
     }
 
     @Test
@@ -4922,7 +7284,7 @@ class AiReplyObservationRuntimeTest {
         runtime.scheduleInitialObservation()
         runUntilLog(scheduler, logs, "AI Reply 启动准入[UNREAD_STATE_UNKNOWN]")
 
-        assertTrue(logs.any { it.contains("AI Reply 启动准入[UNREAD_STATE_UNKNOWN]") && it.contains("首次成功滑动后的视口") })
+        assertTrue(logs.any { it.contains("AI Reply 启动准入[UNREAD_STATE_UNKNOWN]") && it.contains("当前已确认列表视口") })
         assertEquals(0, port.receivedGreetingsIdleSteps)
         assertFalse(scheduler.hasPendingDelay(1_200L))
         assertFalse(scheduler.hasPendingDelay(30_000L))
@@ -4987,7 +7349,7 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("AI Reply 启动准入[UNREAD_LOCKING]") })
         assertEquals(listOf(GestureKind.TAP), actions.filter { it == GestureKind.TAP })
         assertTrue(actions.first() == GestureKind.SWIPE)
-        assertTrue(logs.any { it.contains("未读身份集合已冻结；进入从底部向顶部的处理阶段") })
+        assertTrue(logs.any { it.contains("本轮未读边界已确认，候选仍可补充；进入从底部向顶部的处理阶段") })
         assertTrue(logs.none { it.contains("安全上限=1000") })
     }
 
@@ -5943,7 +8305,10 @@ class AiReplyObservationRuntimeTest {
         val request: GestureIntentRequest,
         val listener: GestureExecutionListener,
         val savedCheckpoint: () -> PrivateMessagesTraversalCheckpoint?,
-        val dispatchedGestures: () -> Int
+        val dispatchedGestures: () -> Int,
+        val cancelledRequests: List<String>,
+        val latestRequest: () -> GestureIntentRequest?,
+        val latestListener: () -> GestureExecutionListener?
     )
 
     private fun capturedScrollRecoveryFixture(): CapturedScrollRecoveryFixture {
@@ -5971,6 +8336,7 @@ class AiReplyObservationRuntimeTest {
         var request: GestureIntentRequest? = null
         var listener: GestureExecutionListener? = null
         var dispatchCount = 0
+        val cancelledRequests = mutableListOf<String>()
         var saved: PrivateMessagesTraversalCheckpoint? = null
         val repo = object : PrivateMessagesTraversalCheckpointRepository {
             override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = saved
@@ -5984,6 +8350,11 @@ class AiReplyObservationRuntimeTest {
             chatMessagePort = port,
             chatSessionManagementPort = port,
             gesturePolicy = object : TestGestureApi {
+                override fun cancelActive(commandId: String, reason: String): Boolean {
+                    cancelledRequests += commandId
+                    return true
+                }
+
                 override fun execute(
                     command: GestureIntentRequest,
                     callback: GestureExecutionListener
@@ -6008,7 +8379,7 @@ class AiReplyObservationRuntimeTest {
         runUntil(scheduler, 60) { request?.intent is GestureIntent.VerticalSwipe && listener != null }
         return CapturedScrollRecoveryFixture(
             scheduler, runtime, logs, requireNotNull(request), requireNotNull(listener),
-            { saved }, { dispatchCount }
+            { saved }, { dispatchCount }, cancelledRequests, { request }, { listener }
         )
     }
 
@@ -6057,6 +8428,15 @@ class AiReplyObservationRuntimeTest {
         assertTrue("Expected log marker not reached: $marker; recent logs=${logs.takeLast(12)}", logs.any { it.contains(marker) })
     }
 
+    private fun runUntilShortestDelay(scheduler: FakeScheduler, maxSteps: Int, condition: () -> Boolean) {
+        var steps = 0
+        while (!condition() && steps < maxSteps && scheduler.pendingCount() > 0) {
+            scheduler.runNextShortestDelay()
+            steps++
+        }
+        assertTrue("Condition not reached after $steps delay-ordered scheduler steps", condition())
+    }
+
     private fun runUntil(scheduler: FakeScheduler, maxSteps: Int, condition: () -> Boolean) {
         var steps = 0
         while (!condition() && steps < maxSteps && scheduler.pendingCount() > 0) {
@@ -6066,6 +8446,168 @@ class AiReplyObservationRuntimeTest {
         assertTrue("Condition not reached after $steps scheduler steps", condition())
     }
 
+
+    @Test
+    fun privateOcrFailureAfterFastRetriesSchedulesFreshReadOnlyObservation() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            messageReadStatuses = List(12) { MessageReadStatus.OCR_FAILED }
+            page = inbox
+        }
+        val logs = ArrayList<String>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) { logs.any { it.contains("READ_ONLY_RECHECK_SCHEDULED") } }
+        assertEquals(0, port.navigateBackCalls)
+        assertEquals(0, port.persistedChatSamples)
+        assertTrue(logs.any { it.contains("OCR_READ_NOT_CONFIRMED") })
+        assertTrue(scheduler.hasPendingDelay(500L))
+        val earlierReads = port.messageReads
+        runUntil(scheduler, 160) { port.messageReads > earlierReads }
+        assertTrue(port.messageReads > earlierReads)
+        assertEquals(0, port.navigateBackCalls)
+        assertTrue(logs.none { it.contains("AI 发送成功记录") })
+    }
+
+    @Test
+    fun privateTechnicalModelFailureWaitsForFreshComposerThenRestartsOcrWithoutBack() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            page = inbox
+        }
+        val logs = ArrayList<String>()
+        var draftCalls = 0
+        var emptyComposerVerified = false
+        var verificationCalls = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            onDraftConversationObserved = { _, _, _, _ -> draftCalls++; true },
+            verifyPrivatePreSendModelFailure = { _, _ ->
+                verificationCalls++
+                emptyComposerVerified
+            }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) { logs.any { it.contains("聊天样本已保存") } }
+        assertEquals(1, draftCalls)
+        val originalChat = port.page
+        val window = requireNotNull(originalChat.inputFieldTarget).window
+        val conversation = requireNotNull(originalChat.conversationIdentityKey())
+        val sessionKey = "${window.packageName}|${window.windowId}|${window.generation}|conversation=$conversation"
+        val visit = AiReplyObservationRuntime::class.java.getDeclaredField("draftVisitToken")
+            .apply { isAccessible = true }.get(runtime) as String
+        runtime.onPreSendModelFailure(com.freedom.features.aireply.ai.AiReplyPreSendModelFailure(
+            requestId = "private-technical-failure",
+            requestKey = "private-failed-request-key",
+            conversationKey = conversation,
+            windowSessionKey = sessionKey,
+            visitToken = visit,
+            taskLease = null,
+            reasonCode = "MODEL_DECISION_MODEL_CALL_FAILED",
+            attempts = 2,
+            retryDelayMs = 30_000L,
+            readyToDefer = true
+        ))
+        // The legacy fake scheduler is FIFO, not deadline-prioritized. Deliver the
+        // zero-delay model failure callback before the previously queued delayed BACK,
+        // matching runtime scheduling without changing its actual delay algorithm.
+        scheduler.runNextWithDelay(0L)
+        runUntil(scheduler, 40) { logs.any { it.contains("PRE_SEND_FAILURE_RECORDED") } }
+        assertEquals(0, port.navigateBackCalls)
+        // A separate page read during cooldown must not bypass durable proof and
+        // launch another draft before the private recovery verifier admits it.
+        val readHandler = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+            "handleMessageReadBatch", ChatMessageBatch::class.java, ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        readHandler.invoke(runtime, requireNotNull(port.lastPersistedBatch), port.page)
+        assertTrue(logs.any { it.contains("MODEL_FAILURE_READ_HELD") })
+        assertEquals(1, draftCalls)
+        runUntil(scheduler, 60) { logs.any { it.contains("READ_ONLY_WAIT") } }
+        assertEquals(1, draftCalls)
+        assertTrue(verificationCalls > 0)
+        assertEquals(0, port.navigateBackCalls)
+        emptyComposerVerified = true
+        runUntil(scheduler, 80) { logs.any { it.contains("RETRY_ADMITTED") } }
+        runUntil(scheduler, 80) { draftCalls > 1 }
+        assertEquals(2, draftCalls)
+        assertTrue(logs.any { it.contains("DRAFT_RESTARTED") })
+        assertEquals(0, port.navigateBackCalls)
+        assertTrue(logs.none { it.contains("GREETING_REPLY_DEFERRED") })
+    }
 
     @Test
     fun retryableOcrFailureAfterBoundedReadsNeverCompletesSessionOrNavigatesBack() {
@@ -6126,6 +8668,243 @@ class AiReplyObservationRuntimeTest {
         assertEquals(3, port.messageReads)
         assertEquals(0, port.persistedChatSamples)
         assertEquals(0, port.navigateBackCalls)
+    }
+
+    @Test
+    fun confirmedPrivateSendReturnsEvenWhenSamplePersistenceFails() {
+        for (confirmationId in listOf<String?>(null, "confirmed-private-send-id")) {
+            val scheduler = FakeScheduler()
+            val candidate = sessionCandidate(completeBoundaryEvidence = true)
+            val inbox = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                resolvedTapBounds = candidate.rowBounds
+                persistChatSampleResult = 0
+                page = inbox
+                pageAfterBack = inbox
+            }
+            val logs = ArrayList<String>()
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = object : TestGestureApi {
+                    override fun execute(
+                        command: GestureIntentRequest,
+                        listener: GestureExecutionListener
+                    ): GestureSubmission {
+                        if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                        listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                        return GestureSubmission.ACCEPTED
+                    }
+                },
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L,
+                onDraftConversationObserved = { _, _, _, _ -> true }
+            )
+            runtime.scheduleInitialObservation()
+            runUntil(scheduler, 180) {
+                logs.any { it.contains("聊天样本保存失败或当前存储会话不可用") }
+            }
+            assertEquals(1, port.persistedChatSamples)
+            assertEquals(0, port.navigateBackCalls)
+
+            // Simulate the final outgoing-bubble receipt after the sample store failed.
+            // The exact production confirmation handler must retain the stable-ID gate.
+            val handler = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+                "handleSendConfirmationResult",
+                com.freedom.features.aireply.ai.ReplySendTransactionOutcome::class.java,
+                ChatMessageBatch::class.java,
+                ChatPageSnapshot::class.java
+            ).apply { isAccessible = true }
+            val confirmed = com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED,
+                confirmationId
+            )
+            assertTrue(handler.invoke(runtime, confirmed, requireNotNull(port.lastPersistedBatch), port.page) as Boolean)
+            if (confirmationId == null) {
+                assertTrue(logs.any { it.contains("缺少稳定 sendConfirmationId") })
+                assertEquals("Missing receipt must never authorize BACK", 0, port.navigateBackCalls)
+                continue
+            }
+            assertTrue(logs.any { it.contains("CHAT_SAMPLE_NOT_PERSISTED") })
+            runUntil(scheduler, 80) { port.navigateBackCalls == 1 }
+            assertTrue(logs.any { it.contains("已提交系统返回动作") })
+        }
+    }
+
+    @Test
+    fun confirmedPrivateBackRecoversFromRejectedOrNoOpNavigationWithoutResending() {
+        for (scenario in listOf("REJECTED", "ACCEPTED_NO_NAVIGATION")) {
+            val scheduler = FakeScheduler()
+            val candidate = sessionCandidate(completeBoundaryEvidence = true)
+            val inbox = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+            val port = FakeChatPort().apply {
+                sessionRunEnabled = true
+                resolvedTapBounds = candidate.rowBounds
+                page = inbox
+                pageAfterBack = inbox
+                rejectBackAttempts = if (scenario == "REJECTED") 1 else 0
+                backNoOpAttempts = if (scenario == "ACCEPTED_NO_NAVIGATION") 1 else 0
+            }
+            val logs = ArrayList<String>()
+            val runtime = AiReplyObservationRuntime(
+                scheduler = scheduler,
+                sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+                chatPagePort = port,
+                chatMessagePort = port,
+                chatSessionManagementPort = port,
+                gesturePolicy = object : TestGestureApi {
+                    override fun execute(
+                        command: GestureIntentRequest,
+                        listener: GestureExecutionListener
+                    ): GestureSubmission {
+                        if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                        listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                        return GestureSubmission.ACCEPTED
+                    }
+                },
+                targetPackage = { "com.immomo.momo" },
+                isAiReplyActive = { true },
+                onLog = logs::add,
+                inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+                fullInspectionDebounceMs = 300L,
+                regionRefreshDebounceMs = 500L,
+                onDraftConversationObserved = { _, _, _, _ -> true }
+            )
+            runtime.scheduleInitialObservation()
+            runUntil(scheduler, 180) { logs.any { it.contains("聊天样本已保存") } }
+            val handler = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+                "handleSendConfirmationResult",
+                com.freedom.features.aireply.ai.ReplySendTransactionOutcome::class.java,
+                ChatMessageBatch::class.java,
+                ChatPageSnapshot::class.java
+            ).apply { isAccessible = true }
+            val confirmed = com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED,
+                "p1-back-recovery-send-id"
+            )
+            assertTrue(handler.invoke(runtime, confirmed, requireNotNull(port.lastPersistedBatch), port.page) as Boolean)
+            runUntil(scheduler, 200) { port.navigateBackCalls >= 2 }
+            assertEquals("scenario=$scenario only two safe BACK submissions", 2, port.navigateBackCalls)
+            assertTrue("scenario=$scenario logs=$logs", logs.any { it.contains("DETAIL_STABILITY_WAIT") })
+            assertTrue("scenario=$scenario logs=$logs", logs.any { it.contains("BACK_RETRY_ACCEPTED") })
+            runUntil(scheduler, 80) { logs.any { it.contains("INBOX_VERIFIED") } }
+            assertEquals("scenario=$scenario must not re-submit BACK after inbox", 2, port.navigateBackCalls)
+            assertFalse("scenario=$scenario must not start an unsafe recovery", logs.any {
+                it.contains("PRIVATE_SEND_RETURN_PAGE_UNVERIFIED")
+            })
+        }
+    }
+
+    @Test
+    fun confirmedPrivateBackOnDifferentChatRoutesToCheckpointWithoutSecondBack() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val inbox = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "com.immomo.momo.maintab.MaintabActivity",
+            pageKind = ChatPageKind.CHAT_LIST,
+            scannedNodeCount = 80,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = true,
+            messageListTarget = null,
+            inputFieldTarget = null,
+            chatListViewport = ScreenRect(0, 120, 720, 1480),
+            chatListCandidates = listOf(candidate),
+            windowGeneration = 1L
+        )
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            page = inbox
+            pageAfterBack = chatDetailSnapshot().copy(chatTitleText = "与Another Contact对话")
+        }
+        val logs = ArrayList<String>()
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(
+                    command: GestureIntentRequest,
+                    listener: GestureExecutionListener
+                ): GestureSubmission {
+                    if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                    listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                    return GestureSubmission.ACCEPTED
+                }
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            onDraftConversationObserved = { _, _, _, _ -> true }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) { logs.any { it.contains("聊天样本已保存") } }
+        val handler = AiReplyObservationRuntime::class.java.getDeclaredMethod(
+            "handleSendConfirmationResult",
+            com.freedom.features.aireply.ai.ReplySendTransactionOutcome::class.java,
+            ChatMessageBatch::class.java,
+            ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        assertTrue(handler.invoke(
+            runtime,
+            com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED,
+                "p1-different-chat-send-id"
+            ),
+            requireNotNull(port.lastPersistedBatch),
+            port.page
+        ) as Boolean)
+        runUntil(scheduler, 100) { logs.any { it.contains("PAGE_UNVERIFIED") } }
+        assertEquals(1, port.navigateBackCalls)
+        assertTrue(logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") && it.contains("PRIVATE_SEND_RETURN_PAGE_UNVERIFIED") })
+        assertFalse(logs.any { it.contains("BACK_RETRY_ACCEPTED") })
     }
 
     @Test
@@ -6194,7 +8973,8 @@ class AiReplyObservationRuntimeTest {
         unreadStatus: com.freedom.features.aireply.ports.ChatUnreadStatus =
             com.freedom.features.aireply.ports.ChatUnreadStatus.UNREAD,
         completeBoundaryEvidence: Boolean = false,
-        windowGeneration: Long = 1L
+        windowGeneration: Long = 1L,
+        previewBoundsValid: Boolean = true
     ) = ChatListCandidateSnapshot(
         rowIndex = rowIndex,
         rowTarget = NodeTarget(
@@ -6224,7 +9004,7 @@ class AiReplyObservationRuntimeTest {
         previewNodeVisibleToUser = completeBoundaryEvidence,
         previewBoundsIntersectViewport = true,
         previewBoundsFullyInsideViewport = true,
-        previewBoundsValid = true,
+        previewBoundsValid = previewBoundsValid,
         unreadStatus = unreadStatus,
         timestampText = "10:20",
         timestampSource = com.freedom.features.aireply.ports.ChatNodeTextSource.NODE_TEXT,
@@ -6325,6 +9105,7 @@ class AiReplyObservationRuntimeTest {
         var simulateStructureThenOcr = false
         var ocrAsyncReadRequests = 0
         var deferNextOcrRead = false
+        var deferNextOcrAdmission = false
         private var deferredOcrRead: Pair<ChatPageSnapshot, (ChatMessageBatch) -> Unit>? = null
         fun completeDeferredOcrRead() {
             val pending = requireNotNull(deferredOcrRead)
@@ -6344,6 +9125,7 @@ class AiReplyObservationRuntimeTest {
         var messageContentQuality = MessageContentQuality.VERIFIED
         var messageDirection = ChatMessageDirection.INCOMING
         var persistedChatSamples = 0
+        var persistChatSampleResult = 1
         var lastPersistedChatSessionName: String? = "UNSET"
         var lastPersistedBatch: ChatMessageBatch? = null
         var throwOnMessageRead = false
@@ -6368,11 +9150,17 @@ class AiReplyObservationRuntimeTest {
         var sessionSwipeViewportResolutions = 0
         var sessionTapResolutions = 0
         var sessionListSamples = 0
+        var verifiedListMetadataSamples = 0
+        var supportVerifiedListMetadata = false
+        var deferSessionListSample = false
+        var pendingSessionListSample: ((String?) -> Unit)? = null
         var headerValidationDiagnostics = 0
         var lastHeaderValidationDiagnostic: ChatHeaderNodeDiagnostic? = null
         var lastExpectedSessionCandidate: ChatListCandidateSnapshot? = null
         var pageAfterBack: ChatPageSnapshot? = null
         var navigateBackCalls: Int = 0
+        var rejectBackAttempts = 0
+        var backNoOpAttempts = 0
         var receivedGreetingsWorkflowEnabled: Boolean = false
         var receivedGreetingsIdleSteps: Int = 0
         var receivedGreetingsNavigationTaskStarts: Int = 0
@@ -6386,6 +9174,9 @@ class AiReplyObservationRuntimeTest {
         var receivedGreetingsPageObservations: Int = 0
         var receivedGreetingsPageObservationResult: Boolean = true
         var receivedGreetingsPriorityReturns: Int = 0
+        var receivedGreetingsBackAttempts: Int = 0
+        var receivedGreetingsConfirmedReturns: Int = 0
+        var receivedGreetingsBackDeferred: Boolean = false
         var greetingDetailCompletionCalls = 0
         var greetingDetailSuccessfulCompletions = 0
         var greetingDetailReturnAccepted = true
@@ -6400,6 +9191,8 @@ class AiReplyObservationRuntimeTest {
         var receivedGreetingsRowKeyHash: String? = null
         var receivedGreetingsDisplayName: String? = null
         var receivedGreetingsIdentityProfileProof = false
+        var receivedGreetingsNavigationEvidencePending = false
+        var greetingDetailReturnProof = false
         var receivedGreetingsCheckpointFingerprint: String? = null
         var receivedGreetingsRecoverySyncAccepted: Boolean = false
         var pageAfterReceivedGreetingsReturn: ChatPageSnapshot? = null
@@ -6413,9 +9206,15 @@ class AiReplyObservationRuntimeTest {
             identityCaptureOutcomeOverride
                 ?: super<ChatSessionManagementPort>.observeContactIdentityCapture(candidate)
         override fun finishSessionManagement(): String? = "test-run.zip"
+        override fun persistVerifiedSessionListMetadata(snapshot: ChatPageSnapshot): Boolean {
+            if (!supportVerifiedListMetadata) return false
+            verifiedListMetadataSamples++
+            sessionListSamples++
+            return true
+        }
         override fun captureSessionListSample(snapshot: ChatPageSnapshot, onComplete: (String?) -> Unit) {
             sessionListSamples++
-            onComplete(null)
+            if (deferSessionListSample) pendingSessionListSample = onComplete else onComplete(null)
         }
         override fun resolveSessionTapBounds(snapshot: ChatPageSnapshot, candidate: ChatListCandidateSnapshot): ScreenRect? {
             sessionTapResolutions++
@@ -6437,7 +9236,7 @@ class AiReplyObservationRuntimeTest {
             persistedChatSamples++
             lastPersistedChatSessionName = sessionName
             lastPersistedBatch = batch
-            return 1
+            return persistChatSampleResult
         }
         override fun persistChatHeaderValidationDiagnostic(
             snapshot: ChatPageSnapshot,
@@ -6451,7 +9250,8 @@ class AiReplyObservationRuntimeTest {
         }
         override fun navigateBackToSessionList(): Boolean {
             navigateBackCalls++
-            pageAfterBack?.let { page = it }
+            if (navigateBackCalls <= rejectBackAttempts) return false
+            if (navigateBackCalls > backNoOpAttempts) pageAfterBack?.let { page = it }
             return true
         }
 
@@ -6515,18 +9315,40 @@ class AiReplyObservationRuntimeTest {
             if (success) greetingDetailSuccessfulCompletions++
             return true
         }
+        override fun isReceivedGreetingsNavigationAwaitingPageEvidence(snapshot: ChatPageSnapshot): Boolean =
+            receivedGreetingsNavigationEvidencePending &&
+                snapshot.packageName == "com.immomo.momo" &&
+                (snapshot.pageKind == ChatPageKind.NON_CHAT || snapshot.pageKind == ChatPageKind.UNKNOWN ||
+                    snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE)
         override fun isReceivedGreetingsIdentityProfileNavigationActive(snapshot: ChatPageSnapshot): Boolean =
             receivedGreetingsIdentityProfileProof &&
                 snapshot.packageName == "com.immomo.momo" &&
                 snapshot.activityClass == "com.immomo.momo.personalprofile.presentation.activity.PersonalProfileActivityK" &&
                 snapshot.pageKind == ChatPageKind.NON_CHAT
+        override fun isReceivedGreetingsDetailReturnNavigationActive(source: ChatPageSnapshot): Boolean =
+            greetingDetailReturnProof && greetingDetailCompletionCalls > 0 &&
+                source.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE
         override fun receivedGreetingsRecoveryFingerprint(): String? =
             receivedGreetingsCheckpointFingerprint
+        override fun receivedGreetingsCompletionReturnSourceFingerprint(): String? =
+            receivedGreetingsCheckpointFingerprint ?: page.takeIf {
+                it.pageKind == ChatPageKind.NON_CHAT &&
+                    it.activityClass.contains("NewSayHi")
+            }?.let { "test-greeting-source:${it.windowGeneration}" }
         override fun synchronizeReceivedGreetingsRecoveryConfirmation(): Boolean =
             receivedGreetingsRecoverySyncAccepted
-        override fun returnFromReceivedGreetingsForPriorityCheck(): Boolean {
+        override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult {
+            receivedGreetingsBackAttempts++
+            if (receivedGreetingsBackDeferred) return ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT
+            if (receivedGreetingsPriorityReturns > receivedGreetingsConfirmedReturns) {
+                return ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
+            }
             receivedGreetingsPriorityReturns++
             pageAfterReceivedGreetingsReturn?.let { page = it }
+            return ReceivedGreetingsBackResult.BACK_SUBMITTED
+        }
+        override fun confirmReceivedGreetingsCompletionReturn(): Boolean {
+            receivedGreetingsConfirmedReturns++
             return true
         }
 
@@ -6595,7 +9417,14 @@ class AiReplyObservationRuntimeTest {
             onResult: (ChatMessageBatch) -> Unit
         ) {
             ocrAsyncReadRequests++
-            if (deferNextOcrRead) {
+            if (deferNextOcrAdmission) {
+                deferNextOcrAdmission = false
+                onResult(readRecentMessages(page, limit).copy(
+                    ocrAdmissionDeferred = true, ocrAttempted = false,
+                    ocrAttemptedTargetCount = 0, ocrRecognizedTargetCount = 0, ocrFailedTargetCount = 0,
+                    messages = emptyList(), ocrDebugTextByRowIndex = null
+                ))
+            } else if (deferNextOcrRead) {
                 deferNextOcrRead = false
                 deferredOcrRead = page to onResult
             } else {

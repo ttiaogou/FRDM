@@ -2,6 +2,7 @@ package com.freedom.adapters.runtime.android
 
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.runtime.ModeRuntimePort
+import com.freedom.core.runtime.PageRuntimeSessionState
 import com.freedom.core.runtime.RunMode
 import com.freedom.features.aireply.AiReplyObservationRuntime
 
@@ -13,13 +14,33 @@ internal class AiReplyModeRuntimeAdapter(
     private val onReadinessInvalidated: (String) -> Unit = {}
 ) : ModeRuntimePort {
     override val mode: RunMode = RunMode.AI_REPLY
+
     private var awaitingServiceReconnect = false
 
-    override fun onRunStarted() {
-        onReadinessStarting(mode, "AI Reply 已启动；等待目标应用正式就绪")
+    override fun onRunStarted(taskId: String, retry: Boolean): Boolean {
+        if (!retry) {
+            onReadinessStarting(mode, "AI Reply 页面运行时启动；等待目标应用正式就绪")
+            awaitingServiceReconnect = false
+            runtime().reset("开始新页面运行前清理")
+        }
+        // Configuration/consent and archive admission remain mandatory.
+        if (!runtime().preparePageSelectedStartup(taskId)) return false
+        runtime().requestPageRouteObservation()
+        return true
+    }
+
+    override fun onPageTaskChanged(session: PageRuntimeSessionState) {
+        runtime().requestPageRouteObservation()
+    }
+
+    override fun saveProgressBeforeExit(reason: String, serviceBoundary: Boolean) {
+        runtime().persistTaskProgressBeforeExit(reason, serviceBoundary)
+    }
+
+    override fun onRunPaused(reason: String) {
+        onReadinessInvalidated("AI Reply 页面任务暂停：$reason")
         awaitingServiceReconnect = false
-        runtime().reset("开始新运行前清理")
-        runtime().scheduleInitialObservation()
+        runtime().reset("页面任务暂停：$reason", preservePendingRecovery = false)
     }
 
     override fun onRunStopped(reason: String) {
@@ -89,5 +110,4 @@ internal class AiReplyModeRuntimeAdapter(
         activeRuntime.reset("无障碍服务销毁")
     }
 
-    override fun resetRuntime(reason: String) = runtime().reset("运行时外部重置：$reason")
 }

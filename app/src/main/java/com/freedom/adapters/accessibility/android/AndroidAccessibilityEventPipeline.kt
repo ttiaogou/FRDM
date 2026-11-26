@@ -32,13 +32,12 @@ internal class AndroidAccessibilityEventPipeline(
     private val updateAppPage: (appLabel: String, pageLabel: String) -> Unit,
     private val appendLog: (String) -> Unit,
     private val currentActivityClass: () -> String,
-    private val updateCurrentActivityClass: (String) -> Unit,
+    private val observeWindowStateEvent: (className: String, windowId: Int, generation: Long) -> Unit,
     private val onBrowseEventLogged: () -> Unit,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val currentWindowGeneration: () -> Long = { 0L },
     private val inputOriginClassifier: InputOriginClassifier = InputOriginClassifier(),
     private val onDuplicateSuppressed: (AccessibilityEventEnvelope) -> Unit = {},
-    private val observeWindowStateEvent: (className: String, windowId: Int) -> Unit = { _, _ -> },
     private val pageObservationCoordinator: PageObservationCoordinator? = null,
     private val onActivityWindowEventDiagnostic: (
         className: String, windowId: Int, generation: Long, tracked: Boolean
@@ -47,7 +46,11 @@ internal class AndroidAccessibilityEventPipeline(
 ) : AccessibilityEventPipelinePort {
 
     /** Entry point for Android callbacks. The platform event is normalized synchronously. */
-    override fun process(event: AccessibilityEvent, runMode: RunMode) {
+    override fun process(event: AccessibilityEvent, runMode: RunMode) = processEvent(event, runMode)
+
+    override fun processWithoutRuntime(event: AccessibilityEvent) = processEvent(event, null)
+
+    private fun processEvent(event: AccessibilityEvent, runMode: RunMode?) {
         val androidEventType = event.eventType
         if (androidEventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START ||
             androidEventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END
@@ -82,16 +85,16 @@ internal class AndroidAccessibilityEventPipeline(
         processNormalized(normalizedEvent, androidEventType, runMode)
     }
 
-    internal fun shouldCaptureText(runMode: RunMode): Boolean = runMode == RunMode.ACCOUNT_BROWSE
+    internal fun shouldCaptureText(runMode: RunMode?): Boolean = runMode == RunMode.ACCOUNT_BROWSE
 
     /** Testable normalized-event seam; production callers should use [process]. */
     internal fun processNormalized(
         normalizedEvent: AccessibilityEventEnvelope,
         androidEventType: Int,
-        runMode: RunMode,
+        runMode: RunMode?,
         now: Long? = null
     ) {
-        val eventForRouting = if (runMode == RunMode.AI_REPLY) {
+        val eventForRouting = if (runMode != RunMode.ACCOUNT_BROWSE) {
             normalizedEvent.copy(pageGeneration = currentWindowGeneration())
         } else normalizedEvent
         val eventRoute = routePolicy.route(
@@ -127,8 +130,10 @@ internal class AndroidAccessibilityEventPipeline(
                                 "异常=${it.javaClass.simpleName}"
                         )
                     }
-            } else {
+            } else if (runMode == RunMode.AI_REPLY) {
                 appendLog("全局触摸链路[PIPELINE_DROPPED]：AI Reply 不使用全局触摸事件决定任务或中断调度")
+            } else {
+                appendLog("全局触摸链路[PIPELINE_OBSERVATION_ONLY]：尚无活动业务运行时")
             }
             return
         }
@@ -141,21 +146,18 @@ internal class AndroidAccessibilityEventPipeline(
 
         val routedTargetEvent = eventForRouting
 
-        pageObservationCoordinator?.signal(routedTargetEvent.type)
-
+        // Publish window-bound Activity evidence before waking page readers or delivering
+        // a target event. Visible-log dedup must not suppress fresh evidence.
         if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && className.isNotBlank()) {
-            runCatching { observeWindowStateEvent(className, eventForRouting.windowId) }
+            observeWindowStateEvent(className, eventForRouting.windowId, currentWindowGeneration())
         }
+        pageObservationCoordinator?.signal(routedTargetEvent.type)
 
         // AccountBrowse consumes target events before visible-log de-duplication. This updates
         // scroll counters and refresh verification even when the matching log line is suppressed.
         if (runMode == RunMode.ACCOUNT_BROWSE) {
             // AccountBrowse must receive this before the visible-log dedup gate.
             unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.TargetApplication(normalizedEvent))
-        } else if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            classNameEndsWithActivity(className)
-        ) {
-            updateCurrentActivityClass(className)
         }
 
         // Report activity clue classification before visible-log deduplication. This callback
@@ -171,11 +173,11 @@ internal class AndroidAccessibilityEventPipeline(
 
         val rawEventName = AccessibilityEventFormatter.rawEventName(androidEventType)
         // AI-mode content is redacted at normalization and never enters ordinary event logs.
-        val content = if (runMode == RunMode.AI_REPLY) "" else eventForRouting.eventText
+        val content = if (runMode != RunMode.ACCOUNT_BROWSE) "" else eventForRouting.eventText
             .joinToString(" ")
             .trim()
             .take(MAX_EVENT_CONTENT_CHARS)
-        val description = if (runMode == RunMode.AI_REPLY) "" else
+        val description = if (runMode != RunMode.ACCOUNT_BROWSE) "" else
             normalizedEvent.contentDescription?.take(180).orEmpty()
         val signature = "$eventPackage|$rawEventName|$className|$content|$description"
 
@@ -189,9 +191,23 @@ internal class AndroidAccessibilityEventPipeline(
         }
 
         if (androidEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && className.isNotBlank()) {
-            if (classNameEndsWithActivity(className)) updateCurrentActivityClass(className)
-            unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.ActivityTransition(className))
+            if (runMode != null) unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.ActivityTransition(className))
         }
+
+        // AccountBrowse click attribution uses the actual platform dispatch ledger,
+        // not the time when a gesture was queued. Keep AI observation unchanged.
+        val browseInteractionEvent = if (runMode == RunMode.ACCOUNT_BROWSE &&
+            normalizedEvent.type == AccessibilityEventType.VIEW_CLICKED
+        ) {
+            normalizedEvent.copy(
+                inputOriginDecision = inputOriginClassifier.classify(
+                    event = normalizedEvent,
+                    currentActivityClass = currentActivityClass(),
+                    currentPageGeneration = currentWindowGeneration(),
+                    targetPackage = targetPackage()
+                )
+            )
+        } else normalizedEvent
 
         val appLabel = resolveAppLabel(eventPackage)
         // Page labels are persisted in SharedPreferences. Use only the control class so
@@ -215,7 +231,7 @@ internal class AndroidAccessibilityEventPipeline(
             if (description.isNotBlank()) add("内容描述=$description")
             if (isTrackedInteractionEvent(eventForRouting.type)) {
                 if (runMode == RunMode.ACCOUNT_BROWSE) {
-                    addAll(interactionDiagnostics(normalizedEvent, eventNow))
+                    addAll(interactionDiagnostics(browseInteractionEvent, eventNow))
                 } else {
                     add("当前 Activity=${currentActivityClass().ifBlank { "未知" }}")
                     add("AI Reply 仅将目标事件用于页面结构观察；UNKNOWN 不参与任务调度")
@@ -226,9 +242,9 @@ internal class AndroidAccessibilityEventPipeline(
         appendLog("$friendlyEvent$LOG_DETAIL_SEPARATOR$technicalDetails")
 
         if (runMode == RunMode.ACCOUNT_BROWSE) {
-            handleManualInteractionFallback(normalizedEvent)
+            handleManualInteractionFallback(browseInteractionEvent)
             onBrowseEventLogged()
-        } else {
+        } else if (runMode != null) {
             // AI event delivery intentionally follows visible-event de-duplication and logging.
             unifiedAccessibilityEntry.accept(UnifiedAccessibilityEvent.TargetApplication(routedTargetEvent))
         }
@@ -245,9 +261,6 @@ internal class AndroidAccessibilityEventPipeline(
         AccessibilityEventType.VIEW_CONTEXT_CLICKED -> true
         else -> false
     }
-
-    private fun classNameEndsWithActivity(className: String): Boolean =
-        isActivityWindowClassName(className)
 
     private companion object {
         const val LOG_DETAIL_SEPARATOR = "\u001F"

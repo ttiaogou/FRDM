@@ -42,6 +42,60 @@ class DynamicPageRecoveryTest {
     }
 
     @Test
+    fun observationHintsReuseManagedVerificationWithoutRewindingOrWaivingFreshEvidence() {
+        val manager = UnifiedRecoveryTransactionManager({ 7L })
+        var plan: RecoveryScheduleSnapshot? = null
+        var saves = 0
+        val repository = object : RecoveryScheduleRepository {
+            override fun load() = plan
+            override fun save(snapshot: RecoveryScheduleSnapshot) { plan = snapshot; saves++ }
+            override fun clear() { plan = null }
+        }
+        val recovery = DynamicPageRecovery(noOpScheduler, { "com.immomo.momo" }, { 7L },
+            scheduleRepository = repository, sharedManager = manager)
+        val unknown = BrowsePageEvidence("com.immomo.momo", "FeedActivity", BrowsePageKind.UNKNOWN, "", 0, "unknown")
+        recovery.observePage(unknown)
+        assertFalse(recovery.observeFingerprint("feed-a"))
+        val before = plan
+        val writes = saves
+        repeat(300) { assertTrue(recovery.continuePendingObservation()) }
+        assertEquals(before, plan)
+        assertEquals(writes, saves)
+        assertEquals(1, recovery.stableSamples())
+        assertEquals(RecoveryTransactionState.VERIFYING, manager.snapshot("ACCOUNT_BROWSE")?.state)
+        recovery.observePage(unknown.copy(reason = "actual_window_changed"))
+        assertEquals(0, recovery.stableSamples())
+        assertFalse(recovery.observeFingerprint("feed-b"))
+        assertTrue(recovery.observeFingerprint("feed-b"))
+        assertEquals(RecoveryTransactionState.ACTIVE, recovery.state())
+        assertFalse(recovery.continuePendingObservation())
+        assertEquals(null, manager.snapshot("ACCOUNT_BROWSE"))
+    }
+
+    @Test
+    fun actualTouchEdgesReachTheSameRecoveryPlanWithoutCreatingAnotherTransaction() {
+        var plan: RecoveryScheduleSnapshot? = null
+        val repository = object : RecoveryScheduleRepository {
+            override fun load() = plan
+            override fun save(snapshot: RecoveryScheduleSnapshot) { plan = snapshot }
+            override fun clear() { plan = null }
+        }
+        val recovery = DynamicPageRecovery(noOpScheduler, { "com.immomo.momo" }, { 7L },
+            scheduleRepository = repository)
+        recovery.observePage(BrowsePageEvidence("", "", BrowsePageKind.UNKNOWN, "", 0, "touch"))
+        recovery.onUserInteractionStarted()
+        assertEquals(true, plan?.touchActive)
+        assertEquals(5, plan?.backoffStage)
+        val duringTouch = plan
+        repeat(100) { assertTrue(recovery.continuePendingObservation()) }
+        assertEquals(duringTouch, plan)
+        recovery.onUserInteractionEnded()
+        assertEquals(false, plan?.touchActive)
+        assertEquals(0, plan?.backoffStage)
+        assertEquals(RecoveryTransactionState.RECOVERING, recovery.state())
+    }
+
+    @Test
     fun target_mismatch_is_not_authorized_for_dynamic_recovery() {
         val recovery = DynamicPageRecovery(
             scheduler = noOpScheduler,

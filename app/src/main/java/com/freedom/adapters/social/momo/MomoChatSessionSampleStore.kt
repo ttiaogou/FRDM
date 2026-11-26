@@ -76,7 +76,6 @@ internal class MomoChatSessionSampleStore(
             runDirectory = { runDirectory },
             appendJsonLine = ::appendJsonLine,
             relativeSamplePath = ::relativeSamplePath,
-            blockSessionIdentityKey = ::blockSessionIdentityKey,
             onWriteFailure = { screenshotWriteFailureCount++ }
         )
     }

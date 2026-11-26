@@ -3,8 +3,8 @@ package com.freedom.features.aireply
 /**
  * 收到的招呼任务状态所有者。
  *
- * 本类只管理任务生命周期与页面离开等待状态；页面指纹判断、OCR 和列表
- * 遍历仍通过既有 ChatPagePort 执行。任务完成时继续采用 A 方案：留在当前页面并释放租约。
+ * 本类只管理任务生命周期与完成后的返回待确认状态；页面指纹判断、OCR 和列表
+ * 遍历仍通过既有 ChatPagePort 执行。列表遍历完成不等于任务结束。
  */
 internal class ReceivedGreetingsTaskController(
     private val ownership: AiReplyTaskOwnership
@@ -13,12 +13,18 @@ internal class ReceivedGreetingsTaskController(
         const val TASK_ID = "AI_REPLY_RECEIVED_GREETINGS"
     }
 
-    var isActive: Boolean = false
-        private set
-    var completedAwaitingUserExit: Boolean = false
-        private set
-    var awaitingNormalInboxAfterReturn: Boolean = false
-        private set
+    private enum class Lifecycle { IDLE, TRAVERSING, RETURN_PENDING, RETURN_REQUESTED, INBOX_CONFIRMED }
+
+    private var lifecycle = Lifecycle.IDLE
+    val isActive: Boolean
+        get() = lifecycle != Lifecycle.IDLE
+    val awaitingNormalInboxAfterReturn: Boolean
+        get() = lifecycle == Lifecycle.RETURN_PENDING || lifecycle == Lifecycle.RETURN_REQUESTED ||
+            lifecycle == Lifecycle.INBOX_CONFIRMED
+    val inboxConfirmed: Boolean
+        get() = lifecycle == Lifecycle.INBOX_CONFIRMED
+    val returnRequested: Boolean
+        get() = lifecycle == Lifecycle.RETURN_REQUESTED
 
     fun claimOwnership(reason: String): Boolean = ownership.claim(TASK_ID, reason)
 
@@ -27,46 +33,38 @@ internal class ReceivedGreetingsTaskController(
     fun releaseOwnership(reason: String): Boolean = ownership.release(TASK_ID, reason)
 
     fun markNavigationStarted() {
-        isActive = true
+        if (!isActive) lifecycle = Lifecycle.TRAVERSING
     }
 
     fun markStarted() {
-        isActive = true
-        completedAwaitingUserExit = false
-        awaitingNormalInboxAfterReturn = false
+        lifecycle = Lifecycle.TRAVERSING
     }
 
-    fun markCompletedAwaitingUserExit() {
-        isActive = false
-        completedAwaitingUserExit = true
-        awaitingNormalInboxAfterReturn = false
+    /** Traversal completion does not end the task or release its lease. */
+    fun markTraversalCompleted() {
+        if (lifecycle == Lifecycle.TRAVERSING) lifecycle = Lifecycle.RETURN_PENDING
     }
 
-    fun markAwaitingNormalInboxAfterReturn() {
-        awaitingNormalInboxAfterReturn = true
+    /** The adapter accepted a return step; this is not proof of arrival. */
+    fun markReturnRequested() {
+        if (lifecycle == Lifecycle.RETURN_PENDING) lifecycle = Lifecycle.RETURN_REQUESTED
     }
 
-    /** Mirrors the traversal-return transition without changing the completed-page latch. */
+    /** Adapter cleanup was acknowledged; lease handoff may still need retry. */
+    fun markInboxConfirmed() {
+        if (awaitingNormalInboxAfterReturn) lifecycle = Lifecycle.INBOX_CONFIRMED
+    }
+
     fun markTraversalReturnedToInbox() {
-        isActive = false
-        awaitingNormalInboxAfterReturn = false
+        if (awaitingNormalInboxAfterReturn) lifecycle = Lifecycle.IDLE
     }
 
     /** Pauses this branch for an externally verified business-page handoff without clearing context. */
     fun pauseForBusinessSwitch() {
-        isActive = false
-        completedAwaitingUserExit = false
-        awaitingNormalInboxAfterReturn = false
-    }
-
-    /** Clears only the A-plan page-exit latch after the message-list page is independently confirmed. */
-    fun acknowledgeCompletedTaskExit() {
-        completedAwaitingUserExit = false
+        lifecycle = Lifecycle.IDLE
     }
 
     fun reset() {
-        isActive = false
-        completedAwaitingUserExit = false
-        awaitingNormalInboxAfterReturn = false
+        lifecycle = Lifecycle.IDLE
     }
 }

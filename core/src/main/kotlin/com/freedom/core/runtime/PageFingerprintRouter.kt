@@ -102,3 +102,19 @@ class PageFingerprintRouter {
     @Synchronized
     fun registeredRouteIds(): Set<String> = routes.keys.toSet()
 }
+
+
+enum class PageRuntimeLifecycle {
+    UNCLASSIFIED,
+    STARTING,
+    READY,
+    STOPPING
+}
+
+data class PageRuntimeSessionState(
+    val runGeneration: Long,
+    val taskId: String,
+    val mode: RunMode,
+    val lifecycle: PageRuntimeLifecycle,
+    val routeRevision: Long = 0L
+)

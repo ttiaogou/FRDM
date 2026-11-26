@@ -23,7 +23,9 @@ class EngineBackedAiDecisionGateway(
                 cooldownActive = request.constraints.cooldownActive,
                 requestId = request.requestId,
                 personalization = request.constraints.personalization,
-                promptOnlyJsonSchema = request.responseMode == ModelResponseMode.PROMPT_ONLY_JSON
+                promptOnlyJsonSchema = request.responseMode == ModelResponseMode.PROMPT_ONLY_JSON,
+                responseMode = request.responseMode,
+                attemptIndex = request.attemptIndex
             )
         )
     }

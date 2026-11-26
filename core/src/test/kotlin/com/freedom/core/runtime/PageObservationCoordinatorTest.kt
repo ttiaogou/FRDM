@@ -13,35 +13,39 @@ class PageObservationCoordinatorTest {
         var now = 0L
         var fullPageSnapshots = 0
         var regionSnapshots = 0
-        val coordinator = PageObservationCoordinator(
-            scheduler = scheduler,
-            fullPageDebounceMs = 250L,
-            knownRegionDebounceMs = 450L,
-            maxEventBurstWaitMs = 1_200L,
-            runFullPageSnapshot = { fullPageSnapshots++ },
-            runKnownRegionSnapshot = { regionSnapshots++ },
-            nowMillis = { now }
+        val coordinator = PageObservationCoordinator(scheduler, nowMillis = { now })
+        val fullPage = coordinator.registerChannel(
+            channelId = "full-page",
+            quietPeriodMs = 250L,
+            maxWaitMs = 1_200L,
+            onObservationRequested = { fullPageSnapshots++ }
+        )
+        val knownRegion = coordinator.registerChannel(
+            channelId = "known-region",
+            quietPeriodMs = 450L,
+            maxWaitMs = 1_200L,
+            onObservationRequested = { regionSnapshots++ }
         )
 
-        coordinator.requestFullPageSnapshot()
+        fullPage.requestSnapshot()
         now = 50L
-        coordinator.requestFullPageSnapshot()
-        coordinator.requestKnownRegionSnapshot()
+        fullPage.requestSnapshot()
+        knownRegion.requestSnapshot()
 
-        assertTrue(coordinator.isFullPageSnapshotPending())
-        assertTrue(coordinator.isKnownRegionSnapshotPending())
+        assertTrue(fullPage.isPending())
+        assertTrue(knownRegion.isPending())
         assertEquals(2, scheduler.pendingCount())
 
         scheduler.runNextWithDelay(250L)
         assertEquals(1, fullPageSnapshots)
         assertEquals(0, regionSnapshots)
-        assertFalse(coordinator.isFullPageSnapshotPending())
-        assertTrue(coordinator.isKnownRegionSnapshotPending())
+        assertFalse(fullPage.isPending())
+        assertTrue(knownRegion.isPending())
 
         scheduler.runNextWithDelay(450L)
         assertEquals(1, fullPageSnapshots)
         assertEquals(1, regionSnapshots)
-        assertFalse(coordinator.isKnownRegionSnapshotPending())
+        assertFalse(knownRegion.isPending())
     }
 
     @Test
@@ -49,21 +53,26 @@ class PageObservationCoordinatorTest {
         val scheduler = FakeScheduler()
         var fullPageSnapshots = 0
         var regionSnapshots = 0
-        val coordinator = PageObservationCoordinator(
-            scheduler = scheduler,
-            fullPageDebounceMs = 300L,
-            knownRegionDebounceMs = 500L,
-            maxEventBurstWaitMs = 1_200L,
-            runFullPageSnapshot = { fullPageSnapshots++ },
-            runKnownRegionSnapshot = { regionSnapshots++ }
+        val coordinator = PageObservationCoordinator(scheduler)
+        val fullPage = coordinator.registerChannel(
+            channelId = "full-page",
+            quietPeriodMs = 300L,
+            maxWaitMs = 1_200L,
+            onObservationRequested = { fullPageSnapshots++ }
+        )
+        val knownRegion = coordinator.registerChannel(
+            channelId = "known-region",
+            quietPeriodMs = 500L,
+            maxWaitMs = 1_200L,
+            onObservationRequested = { regionSnapshots++ }
         )
 
-        coordinator.requestFullPageSnapshot()
-        coordinator.requestKnownRegionSnapshot()
-        coordinator.cancelKnownRegionSnapshot()
+        fullPage.requestSnapshot()
+        knownRegion.requestSnapshot()
+        knownRegion.cancel()
 
-        assertTrue(coordinator.isFullPageSnapshotPending())
-        assertFalse(coordinator.isKnownRegionSnapshotPending())
+        assertTrue(fullPage.isPending())
+        assertFalse(knownRegion.isPending())
         scheduler.runNextWithDelay(300L)
         assertEquals(1, fullPageSnapshots)
         assertEquals(0, regionSnapshots)
@@ -72,22 +81,27 @@ class PageObservationCoordinatorTest {
     @Test
     fun resetCancelsBothObservationChannels() {
         val scheduler = FakeScheduler()
-        val coordinator = PageObservationCoordinator(
-            scheduler = scheduler,
-            fullPageDebounceMs = 250L,
-            knownRegionDebounceMs = 450L,
-            maxEventBurstWaitMs = 1_200L,
-            runFullPageSnapshot = {},
-            runKnownRegionSnapshot = {}
+        val coordinator = PageObservationCoordinator(scheduler)
+        val fullPage = coordinator.registerChannel(
+            channelId = "full-page",
+            quietPeriodMs = 250L,
+            maxWaitMs = 1_200L,
+            onObservationRequested = {}
+        )
+        val knownRegion = coordinator.registerChannel(
+            channelId = "known-region",
+            quietPeriodMs = 450L,
+            maxWaitMs = 1_200L,
+            onObservationRequested = {}
         )
 
-        coordinator.requestFullPageSnapshot()
-        coordinator.requestKnownRegionSnapshot()
-        coordinator.reset()
+        fullPage.requestSnapshot()
+        knownRegion.requestSnapshot()
+        coordinator.resetAll()
 
         assertEquals(0, scheduler.pendingCount())
-        assertFalse(coordinator.isFullPageSnapshotPending())
-        assertFalse(coordinator.isKnownRegionSnapshotPending())
+        assertFalse(fullPage.isPending())
+        assertFalse(knownRegion.isPending())
     }
 
     @Test

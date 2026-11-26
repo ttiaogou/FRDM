@@ -1,8 +1,15 @@
 package com.freedom.architecture
 
 import java.io.File
+import com.freedom.app.registerEntryPageRoutes
+import com.freedom.core.runtime.PageFingerprint
+import com.freedom.core.runtime.PageObservationCoordinator
+import com.freedom.core.runtime.PageRecoveryRouteAdapter
+import com.freedom.core.runtime.ScheduledTask
+import com.freedom.core.runtime.TaskScheduler
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,6 +23,29 @@ class ArchitectureBoundaryTest {
         }
 
     private fun projectFile(path: String): File = TestSourceResolver.resolve(projectRoot, path)
+
+    @Test
+    fun readOnlyReadinessAndActualDispatchShareLiveEvaluationWithoutFalseRejectionLogs() {
+        val source = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt").readText()
+        val readOnly = source.substringAfter("fun inspectRecoveryReadiness()").substringBefore("private fun inspectAutonomousDispatchReadiness()")
+        val dispatch = source.substringAfter("private fun inspectAutonomousDispatchReadiness()").substringBefore("private fun evaluateCurrentReadiness()")
+        val evaluation = source.substringAfter("private fun evaluateCurrentReadiness()").substringBefore("private fun currentActiveWindowPackage()")
+        assertTrue(readOnly.contains("evaluateCurrentReadiness()"))
+        assertFalse(readOnly.contains("emitReadinessRejection"))
+        assertTrue(dispatch.contains("evaluateCurrentReadiness()"))
+        assertTrue(dispatch.contains("emitReadinessRejection("))
+        assertTrue(evaluation.contains("targetAppReadinessController.evaluate("))
+        assertTrue(evaluation.contains("inspectPageReadiness(root, currentActivity, mode)"))
+        assertFalse(evaluation.contains("emitReadinessRejection"))
+    }
+
+    @Test
+    fun avatarScreenshotDiagnosticsCannotWriteIdentityBlockCache() {
+        val imageStore = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoChatSampleImageStore.kt").readText()
+        assertTrue("Avatar difference evidence must remain observable", imageStore.contains("visualConflictCandidate"))
+        assertFalse("Screenshot diagnostics cannot quarantine a business identity", imageStore.contains("blockSessionIdentityKey"))
+        assertFalse("A visual warning is not a confirmed identity conflict", imageStore.contains("BLOCKED_NAME_ONLY_IDENTITY"))
+    }
 
     private fun kotlinFiles(relativeDirectory: String): List<File> =
         TestSourceResolver.resolveAll(projectRoot, relativeDirectory)
@@ -207,6 +237,61 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
+    fun momoGreetingProfileReadsIdBeforeRequiringScrollSafetyAndCountsOnlyCompletedSwipe() {
+        val source = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt").readText()
+        val scan = source.substringAfter("private fun inspectPendingSayHiAvatarProfile(")
+            .substringBefore("private fun dispatchSayHiProfileIdentityScroll(")
+        val scroll = source.substringAfter("private fun dispatchSayHiProfileIdentityScroll(")
+            .substringBefore("private fun isIdentityProfileActionWindow(")
+        val parse = scan.indexOf("MomoSayHiPlatformIdentityParser.parse(tree.nodes)")
+        val currentWindow = scan.indexOf("!accessibilityGateway.isWindowCurrent(tree.window)")
+        val sourcePage = scan.indexOf("if (isReceivedGreetingsListConfirmed())")
+        val confirmed = scan.indexOf("if (readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED)")
+        val missingScroll = scan.indexOf("return dispatchSayHiProfileIdentityScroll(tree)")
+        assertTrue("Only current target snapshots may be parsed", currentWindow >= 0 && parse > currentWindow)
+        assertFalse("No complete-profile fingerprint gate for ID extraction", scan.contains("isSayHiProfileTree"))
+        assertTrue("Known source page must not bind an identity", sourcePage > parse && confirmed > sourcePage)
+        assertTrue("Resolve and save a confirmed ID before considering any swipe", confirmed > parse && missingScroll > confirmed)
+        assertTrue("Missing ID must use current profile action safety", scroll.contains("!isIdentityProfileActionWindow(tree)"))
+        val unavailable = scroll.substringAfter("if (viewport == null) {").substringBefore("sayHiSelectedIdentityStatus =")
+        assertTrue("Transient missing viewport must wait without consuming the swipe", unavailable.contains("SAYHI_PROFILE_PAGE_TIMEOUT_MS") && unavailable.contains("return true"))
+        val completed = scroll.indexOf("if (result.status == GestureExecutionStatus.COMPLETED)")
+        val consumed = scroll.indexOf("sayHiProfileScrollAttempted = true")
+        val deferred = scroll.indexOf("else if (result.status == GestureExecutionStatus.DEFERRED)")
+        assertTrue("Only a completed swipe consumes the single swipe opportunity", completed >= 0 && consumed > completed && deferred > consumed)
+        assertEquals(1, Regex("sayHiProfileScrollAttempted = true").findAll(scroll).count())
+    }
+
+    @Test
+    fun momoPrivateProfileUsesSameIdAndWindowSafetyBeforeOriginalChatTitleBinding() {
+        val source = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt").readText()
+        val scan = source.substringAfter("private fun inspectPendingInboxIdentityCapture(")
+            .substringBefore("private fun failPendingInboxIdentityCapture(")
+        val scroll = source.substringAfter("private fun dispatchInboxProfileIdentityScroll(")
+            .substringBefore("private val sayHiRunGenerationGuard")
+        val parse = scan.indexOf("MomoSayHiPlatformIdentityParser.parse(tree.nodes)")
+        val current = scan.indexOf("!accessibilityGateway.isWindowCurrent(tree.window)")
+        val confirmed = scan.indexOf("if (pending.platformUserId != null)")
+        val missing = scan.indexOf("else if (!pending.profileScrollAttempted)")
+        assertTrue(current >= 0 && parse > current && confirmed > parse && missing > confirmed)
+        assertFalse(scan.contains("isInboxProfileTree"))
+        assertTrue(scan.contains("!isIdentityProfileActionWindow(tree)"))
+        assertTrue(scan.contains("restoredTitle == anchorTitle"))
+        assertTrue(scan.indexOf("completePendingInboxIdentityBinding(") > scan.indexOf("restoredTitle == anchorTitle"))
+        assertTrue(scroll.contains("MomoSayHiProfileScrollPolicy.resolveIdentityViewport("))
+        val completed = scroll.indexOf("GestureExecutionStatus.COMPLETED ->")
+        val consumed = scroll.indexOf("pending.profileScrollAttempted = true")
+        val deferred = scroll.indexOf("GestureExecutionStatus.DEFERRED ->")
+        assertTrue(completed >= 0 && consumed > completed && deferred > consumed)
+        assertEquals(1, Regex("pending.profileScrollAttempted = true").findAll(scroll).count())
+        val back = source.substringAfter("private fun submitVerifiedProfileBackNavigation(")
+            .substringBefore("private fun selectedContactId(")
+        assertTrue(back.contains("!isIdentityProfileActionWindow(profileTree)"))
+        assertTrue(back.contains("!safety.complete || !safety.blockingReason.isNullOrBlank()"))
+        assertTrue(back.contains("!accessibilityGateway.isWindowCurrent(inspection.window)"))
+    }
+
+    @Test
     fun momoProfileBackRebuildsRowTargetAndRebindsCurrentWindowGenerationOnlyAfterRevalidation() {
         val adapter = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt")
         val source = adapter.readText()
@@ -237,12 +322,48 @@ class ArchitectureBoundaryTest {
         )
     }
 
+    private val forbiddenTouchAction = Regex(
+        "(?:AccessibilityNodeInfo\\.)?ACTION_(?:CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD)"
+    )
+
+    // The exact boolean-only projection is a read, not a touch action. Do not exempt
+    // any source file, arbitrary constant reference, action ID, or execution call.
+    private val readOnlyScrollCapabilityProjection = Regex(
+        """(?m)^[ \t]*val scrollCapabilities = runCatching \{\s*listNode\.actionList\.let \{ actions ->\s*Pair\(\s*actions\.any \{ it\.id == AccessibilityNodeInfo\.ACTION_SCROLL_FORWARD \},\s*actions\.any \{ it\.id == AccessibilityNodeInfo\.ACTION_SCROLL_BACKWARD \}\s*\)\s*\}\s*\}\.getOrNull\(\)[ \t]*$"""
+    )
+
+    private fun hasForbiddenAndroidTouchAction(source: String): Boolean =
+        forbiddenTouchAction.containsMatchIn(readOnlyScrollCapabilityProjection.replace(source, ""))
+
+    @Test
+    fun touchActionGuardDistinguishesOnlyBooleanScrollCapabilityReadFromActionUse() {
+        val projection = """
+            val scrollCapabilities = runCatching {
+                listNode.actionList.let { actions ->
+                    Pair(
+                        actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD },
+                        actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD }
+                    )
+                }
+            }.getOrNull()
+        """.trimIndent()
+        assertFalse("A boolean-only capability observation must not be mistaken for dispatch",
+            hasForbiddenAndroidTouchAction(projection))
+        assertTrue("A standalone touch action constant must still be rejected",
+            hasForbiddenAndroidTouchAction("val id = AccessibilityNodeInfo.ACTION_SCROLL_FORWARD"))
+        assertTrue("A touch action import must still be rejected",
+            hasForbiddenAndroidTouchAction("import android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD"))
+        assertTrue("An action invocation must still be rejected next to a capability read",
+            hasForbiddenAndroidTouchAction(projection + "\nnode.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)"))
+        assertTrue("An action ID or action object must not escape through the projection",
+            hasForbiddenAndroidTouchAction(projection.replace("actions.any", "actions.first")))
+        assertTrue("Click action references are never exempt",
+            hasForbiddenAndroidTouchAction(projection.replace("ACTION_SCROLL_FORWARD", "ACTION_CLICK")))
+    }
+
     @Test
     fun allAutomatedScreenTapsAndScrollsUseCoordinateGesturesOnly() {
         val productionFiles = kotlinFiles("app/src/main/java/com/freedom")
-        val forbiddenTouchAction = Regex(
-            "(?:AccessibilityNodeInfo\\.)?ACTION_(?:CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD)"
-        )
         val forbiddenNodeAction = Regex(
             "NodeAction\\.(?:CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD)"
         )
@@ -252,7 +373,7 @@ class ArchitectureBoundaryTest {
         val violations = productionFiles.flatMap { file ->
             val source = file.readText()
             buildList {
-                if (forbiddenTouchAction.containsMatchIn(source)) add("${file.relativeTo(projectRoot)}: Android touch Action")
+                if (hasForbiddenAndroidTouchAction(source)) add("${file.relativeTo(projectRoot)}: Android touch Action")
                 if (forbiddenNodeAction.containsMatchIn(source)) add("${file.relativeTo(projectRoot)}: NodeAction touch enum")
                 if (forbiddenCalls.containsMatchIn(source)) add("${file.relativeTo(projectRoot)}: performAction touch call")
                 if (source.contains("performClickAndRecycle")) add("${file.relativeTo(projectRoot)}: legacy node click helper")
@@ -435,16 +556,40 @@ class ArchitectureBoundaryTest {
             Regex("\\bGestureGeometryPolicy\\b"),
             Regex("\\.dispatchGesture\\s*\\(")
         )
+        // Horizontal geometry is a narrow, data-only owner, not a command or dispatch owner.
+        // Permit exactly these three existing geometry types in exactly this source file.
+        val horizontalGeometryPath =
+            "gesture/gesture-core/src/main/kotlin/com/freedom/core/accessibility/gesture/HorizontalSwipePolicy.kt"
+        val horizontalGeometryTypes = setOf(
+            Regex("\\bGesturePoint\\b").pattern,
+            Regex("\\bGesturePathCommand\\b").pattern,
+            Regex("\\bGestureStrokeSpec\\b").pattern
+        )
         val unauthorizedGestureApi = sourceFiles.filter { file ->
             file.relativeTo(projectRoot).invariantSeparatorsPath !in trustedGestureInfrastructure
         }.flatMap { file ->
+            val path = file.relativeTo(projectRoot).invariantSeparatorsPath
             val code = maskKotlinNonCode(file.readText())
-            rawGestureApi.filter { it.containsMatchIn(code) }
-                .map { "${file.relativeTo(projectRoot)}: ${it.pattern}" }
+            rawGestureApi.filter { pattern ->
+                pattern.containsMatchIn(code) &&
+                    !(path == horizontalGeometryPath && pattern.pattern in horizontalGeometryTypes)
+            }.map { "$path: " + it.pattern }
         }
         assertTrue(
             "Raw gesture construction and dispatch APIs are restricted to the trusted gesture infrastructure:\n${unauthorizedGestureApi.joinToString("\n")}",
             unauthorizedGestureApi.isEmpty()
+        )
+
+        // Independent geometry may not become an alternate public business entry.
+        val directHorizontalConsumers = (sourceFiles + businessFiles).distinct().filter { file ->
+            val path = file.relativeTo(projectRoot).invariantSeparatorsPath
+            path != horizontalGeometryPath && path !in trustedGestureInfrastructure &&
+                Regex("\\bHorizontalSwipePolicy\\b").containsMatchIn(maskKotlinNonCode(file.readText()))
+        }
+        assertTrue(
+            "Horizontal geometry must remain behind trusted gesture infrastructure: " +
+                directHorizontalConsumers.map { it.relativeTo(projectRoot) },
+            directHorizontalConsumers.isEmpty()
         )
 
         val rawCommandConstruction = sourceFiles.filter { file ->
@@ -880,6 +1025,43 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
+    fun pageDrivenRuntimeNeverReadsOrWritesLegacyModePreferences() {
+        val base = "app/src/main/java/com/freedom/"
+        val core = "core/src/main/kotlin/com/freedom/core/runtime/"
+        val command = projectFile(base + "application/runtime/RunSessionCommandUseCase.kt").readText()
+        val coordinator = projectFile(base + "application/runtime/RunSessionCoordinator.kt").readText()
+        val repository = projectFile(base + "data/MonitorStoreRepository.kt").readText()
+        val store = projectFile(base + "data/MonitorStore.kt").readText()
+        val migration = projectFile(base + "data/RunModePreferences.kt").readText()
+        val runState = projectFile(core + "RunStatePorts.kt").readText()
+        val recovery = projectFile(base + "adapters/accessibility/android/AndroidAccessibilityServiceRecoveryCoordinator.kt").readText()
+        assertTrue("Start command must persist only run authorization", command.contains("fun requestStart(): Boolean") &&
+            command.contains("state.setRunRequested(true)"))
+        assertFalse("Run-state port cannot expose legacy selection", listOf("activeMode(", "setActiveMode(", "RunModeSelectionSource").any(runState::contains))
+        assertFalse("Coordinator must not consult or restore a persisted mode",
+            listOf("state.activeMode(", "observedMode", "pageRoutedMode", "resolveActiveModeForRestore", "onObserveCurrentPage == null").any(coordinator::contains))
+        assertFalse("READY must not accept a generation-only callback",
+            coordinator.contains("fun markPageRuntimeReady(runGeneration: Long)"))
+        assertFalse("Service recovery cannot choose a legacy mode",
+            listOf("resolveActiveModeForRestore", "pageDriven: Boolean", "restoredRunMode").any(recovery::contains))
+        assertTrue("Upgrade cleanup must be invoked before restoring diagnostics",
+            repository.contains("LegacyRunModeMigration.removeObsoleteSelection(appContext)") &&
+                repository.contains("MonitorStore.removeObsoleteRunMode(appContext)"))
+        assertTrue("Both obsolete UI keys must be removed, not read",
+            migration.contains(".remove(\"keep_account_mode_enabled\")") &&
+                migration.contains(".remove(\"ai_reply_mode_enabled\")"))
+        assertFalse("Migration cannot reinterpret old mode selections",
+            migration.contains(".getBoolean(") || migration.contains(".putBoolean("))
+        assertTrue("The old active-mode key may only be deleted, not restored",
+            store.contains(".remove(LEGACY_ACTIVE_RUN_MODE)") &&
+                !store.contains("getString(LEGACY_ACTIVE_RUN_MODE") &&
+                !store.contains("putString(LEGACY_ACTIVE_RUN_MODE"))
+        assertTrue("The user's run authorization must remain persisted",
+            store.contains("KEY_RUNNING = \"monitor_running\"") &&
+                store.contains("putBoolean(KEY_RUNNING, running)"))
+    }
+
+    @Test
     fun serviceDelegatesConnectionRecoveryAndReceiverRegistrationLifecycle() {
         val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
         val recovery = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityServiceRecoveryCoordinator.kt")
@@ -980,6 +1162,10 @@ class ArchitectureBoundaryTest {
         assertTrue("GestureDynamicsPolicy tests must not compile in :core", coreBuild.contains("GestureDynamicsPolicyTest.kt"))
         assertTrue("GestureDynamicsPolicy and its tests must compile in :gesture-core",
             gestureCoreBuild.contains("GestureDynamicsPolicy.kt") && gestureCoreBuild.contains("GestureDynamicsPolicyTest.kt"))
+        listOf("HorizontalSwipeConfig.kt", "HorizontalSwipePolicy.kt", "HorizontalSwipePolicyTest.kt").forEach { name ->
+            assertTrue("Independent horizontal geometry and tests must compile in :gesture-core: $name",
+                gestureCoreBuild.contains(name))
+        }
     }
 
     @Test
@@ -1091,6 +1277,128 @@ class ArchitectureBoundaryTest {
         ":gesture-runtime" -> projectFile("gesture/gesture-runtime/build.gradle.kts")
         ":gesture-android" -> projectFile("gesture/gesture-android/build.gradle.kts")
         else -> error("Unknown module: $module")
+    }
+
+    @Test
+    fun originalObservationRouterSelectsOnlyVerifiedTopLevelEntryAndNeverSavesCheckpoint() {
+        var scheduled = 0
+        var saved = 0
+        var targetPackage = "com.immomo.momo"
+        val coordinator = PageObservationCoordinator(object : TaskScheduler {
+            override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledTask {
+                scheduled++
+                return ScheduledTask { }
+            }
+        })
+        coordinator.registerEntryPageRoutes { targetPackage }
+        coordinator.registerRecoveryAdapter(object : PageRecoveryRouteAdapter {
+            override val routeId = "AI_REPLY_RECEIVED_GREETINGS"
+            override fun matches(fingerprint: PageFingerprint) = !fingerprint.adapterFingerprint.isNullOrBlank()
+            override fun saveCheckpoint() { saved++ }
+        })
+        fun page(kind: String, evidence: String? = null, pkg: String = "com.immomo.momo") =
+            PageFingerprint(pkg, "Activity", kind, evidence)
+
+        assertEquals("ENTRY:AI_REPLY_PRIVATE_MESSAGES", coordinator.matchFingerprint(page("CHAT_LIST")))
+        assertEquals("ENTRY:AI_REPLY_RECEIVED_GREETINGS",
+            coordinator.matchFingerprint(page("NON_CHAT", "window|page=RECEIVED_GREETINGS_LIST|identity")))
+        assertEquals("ENTRY:ACCOUNT_BROWSE", coordinator.matchFingerprint(page("DYNAMIC_FEED", "fresh-feed")))
+        assertNull(coordinator.matchFingerprint(page("UNKNOWN", "fresh-feed")))
+        assertNull(coordinator.matchFingerprint(page("CHAT_DETAIL_CANDIDATE", "fresh-chat")))
+        assertNull(coordinator.matchFingerprint(page("NON_CHAT", "unrelated")))
+        assertNull(coordinator.matchFingerprint(page("DYNAMIC_FEED")))
+        assertNull(coordinator.matchFingerprint(page("CHAT_LIST", pkg = "another.app")))
+        assertNull(coordinator.matchFingerprint(page("CHAT_LIST", "other-evidence")))
+        targetPackage = "another.app"
+        assertNull(coordinator.matchFingerprint(page("CHAT_LIST")))
+        assertEquals(0, scheduled)
+        assertEquals(0, saved)
+        assertEquals(setOf("AI_REPLY_RECEIVED_GREETINGS"), coordinator.registeredRecoveryAdapterIds())
+    }
+
+    @Test
+    fun independentEntryKeepsObservingAndFilteredWindowMetadataNeverDispatchesBusiness() {
+        val root = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        val forwarder = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityEventForwarder.kt").readText()
+        val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
+        val filtered = forwarder.substringAfter("if (!accepted) {").substringBefore("if (isGlobalTouch) onLog(\"全局触摸链路[SERVICE_ACCEPTED]")
+        assertTrue(filtered.contains("if (isWindowEvent && isRunRequested() && !eventPackage.isNullOrBlank())"))
+        assertTrue(filtered.contains("onFilteredWindowObservation(eventPackage)"))
+        assertTrue(filtered.contains("return"))
+        assertFalse(filtered.contains("pipeline.process"))
+        assertTrue(service.contains("onFilteredWindowObservation = { sourcePackage ->"))
+        assertTrue(service.contains("if (sourcePackage != packageName) dependencies.requestIndependentPageObservation()"))
+        assertTrue(root.contains("entryPageRetry.update(shouldRetry, keepObserving = true)"))
+        assertTrue(root.contains("routeIndependentPageTask(mode, targetTask, generation)"))
+        assertTrue(root.contains("pageObservationCoordinator.matchFingerprint(fingerprint)"))
+        assertTrue(root.contains("registerEntryPageRoutes(monitorRepository::targetPackage)"))
+        assertTrue(root.contains("scheduleReadOnlyObservation = pageObservationCoordinator::scheduleReadOnlyObservation"))
+        assertFalse(root.contains("UnifiedPageObservationBus("))
+        assertFalse(root.contains("pageObservationSnapshotSource ="))
+        val request = root.substringAfter("fun requestIndependentPageObservation()").substringBefore("val activityEvidenceReader")
+        assertTrue(request.contains("if (runSessionCoordinator.isPageObservationAllowed()) entryPageObservation.requestSnapshot()"))
+        assertFalse(request.contains("routePageTask("))
+    }
+
+    @Test
+    fun pageSelectedBrowseStartupDoesNotPublishPreparationWhileWorkflowIsIdle() {
+        val source = projectFile("app/src/main/java/com/freedom/adapters/runtime/android/AccountBrowseModeRuntimeAdapter.kt").readText()
+        val start = source.substringAfter("override fun onRunStarted(taskId: String, retry: Boolean): Boolean")
+            .substringBefore("override fun saveProgressBeforeExit(")
+        val retry = start.substringAfter("if (retry) {")
+            .substringBefore("taskExecutionController.beginRun(")
+        assertTrue(start.contains("require(taskId == TASK_ID)"))
+        assertTrue(retry.contains("ensureTaskOwnership("))
+        assertTrue(retry.contains("if (workflow().phase == AccountBrowsePhase.IDLE) workflow().startIfIdle()"))
+        assertTrue(retry.contains("return workflow().phase != AccountBrowsePhase.IDLE"))
+        assertFalse(retry.contains("restoreRecoveryAfterServiceReconnect()"))
+        assertFalse(retry.contains("beginRun("))
+        assertTrue(start.substringAfter("taskExecutionController.beginRun(")
+            .contains("return workflow().phase != AccountBrowsePhase.IDLE"))
+        assertFalse(source.contains("override fun onPageRuntimeStarted("))
+        assertFalse(source.contains("override fun onPageRuntimePreparationRetry("))
+    }
+
+    @Test
+    fun ordinaryPagePauseDoesNotInvokeServiceInterruptionOrUserStop() {
+        val browse = projectFile("app/src/main/java/com/freedom/adapters/runtime/android/AccountBrowseModeRuntimeAdapter.kt").readText()
+        val ai = projectFile("app/src/main/java/com/freedom/adapters/runtime/android/AiReplyModeRuntimeAdapter.kt").readText()
+        for (source in listOf(browse, ai)) {
+            val pause = source.substringAfter("override fun onRunPaused(")
+                .substringBefore("override fun onRunStopped(")
+            assertFalse(pause.contains("onAccessibilityServiceDisconnected("))
+            assertFalse(pause.contains("persistCheckpointBeforeServiceInterruption("))
+            assertFalse(pause.contains("clearRecoverySchedulesAfterRunStop("))
+            assertTrue(pause.contains("awaitingServiceReconnect = false"))
+        }
+        assertTrue(browse.substringAfter("override fun onRunPaused(")
+            .substringBefore("override fun onRunStopped(").contains("workflow().suspendForPageExit()"))
+        assertTrue(ai.substringAfter("override fun onRunPaused(")
+            .substringBefore("override fun onRunStopped(").contains("preservePendingRecovery = false"))
+    }
+
+    @Test
+    fun presentationRefreshCannotWakeTheBusinessRuntime() {
+        val root = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        val service = projectFile("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt").readText()
+        val main = projectFile("app/src/main/java/com/freedom/MainActivity.kt").readText()
+        val actions = projectFile("app/src/main/java/com/freedom/adapters/android/MonitorActions.kt").readText()
+        val presenterWiring = root.substringAfter("val monitorLogPresenter by lazy").substringBefore("val targetAppReadinessController")
+        val runtimeReceiver = service.substringAfter("private val refreshReceiver").substringBefore("private val bootRecoveryReceiver")
+
+        assertTrue(actions.contains("ACTION_PRESENTATION_REFRESH = \"com.freedom.ACTION_PRESENTATION_REFRESH\""))
+        assertTrue(actions.contains("ACTION_REFRESH = \"com.freedom.ACTION_REFRESH\""))
+        assertTrue(presenterWiring.contains("Intent(MonitorActions.ACTION_PRESENTATION_REFRESH)"))
+        assertFalse(presenterWiring.contains("Intent(MonitorActions.ACTION_REFRESH)"))
+        assertTrue(presenterWiring.contains("MonitorOverlay.update(service)"))
+        assertTrue(service.contains("IntentFilter(MonitorActions.ACTION_REFRESH)"))
+        assertFalse(service.contains("MonitorActions.ACTION_PRESENTATION_REFRESH"))
+        val actionGuard = runtimeReceiver.indexOf("if (intent?.action != MonitorActions.ACTION_REFRESH) return")
+        val runtimeRefresh = runtimeReceiver.indexOf("runSessionCoordinator.onExternalRefresh()")
+        assertTrue(actionGuard >= 0 && runtimeRefresh > actionGuard)
+        assertTrue(main.contains("IntentFilter(MonitorActions.ACTION_REFRESH)"))
+        assertTrue(main.contains("addAction(MonitorActions.ACTION_PRESENTATION_REFRESH)"))
+        assertTrue(main.contains("sendBroadcast(Intent(MonitorActions.ACTION_REFRESH).setPackage(packageName))"))
     }
 
     @Test

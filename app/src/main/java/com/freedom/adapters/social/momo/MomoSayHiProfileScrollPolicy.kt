@@ -13,12 +13,112 @@ import com.freedom.core.accessibility.api.ScreenRect
  * so rejecting the un-clipped Rect would incorrectly discard the only valid content scroller.
  */
 internal object MomoSayHiProfileScrollPolicy {
+    // Identical five view IDs to the existing business profile fingerprint.
+    private val PROFILE_SURFACE_IDS = setOf(
+        "root_layout", "personal_profile_name", "toolbar_id", "tabs", "pagertabcontent"
+    )
+
+    fun matchesProfileSurface(viewIds: Iterable<String>): Boolean {
+        val observed = viewIds.map { it.substringAfterLast('/') }.toSet()
+        return PROFILE_SURFACE_IDS.all(observed::contains)
+    }
+
+    fun permitsPendingProfileScroll(
+        mode: com.freedom.core.runtime.RunMode,
+        pendingOnCurrentWindow: Boolean,
+        activeWindowId: Int,
+        currentRootViewIds: Iterable<String>
+    ): Boolean =
+        mode == com.freedom.core.runtime.RunMode.AI_REPLY &&
+            pendingOnCurrentWindow && activeWindowId >= 0 &&
+            matchesProfileSurface(currentRootViewIds)
+
+    /** Shared permit for both identity tasks; exact window and pending transaction are mandatory. */
+    fun permitsIdentityProfileScroll(
+        mode: com.freedom.core.runtime.RunMode,
+        pendingOnCurrentWindow: Boolean,
+        activeWindowId: Int,
+        expectedWindowId: Int
+    ): Boolean =
+        mode == com.freedom.core.runtime.RunMode.AI_REPLY && pendingOnCurrentWindow &&
+            activeWindowId >= 0 && activeWindowId == expectedWindowId
+
     data class Decision(
         val viewport: ScreenRect?,
         val candidateCount: Int,
         val reason: String,
         val targetPath: List<Int>? = null
     )
+
+    /**
+     * Prefer the previously verified viewport when available. If optional layout
+     * containers are absent, accept only one current, usable vertical content scroller.
+     * Never fall back to fixed coordinates, horizontal pagers, or ambiguous candidates.
+     */
+    fun resolveIdentityViewport(
+        nodes: List<AccessibilityNodeSnapshot>,
+        displayWidth: Int,
+        displayHeight: Int
+    ): Decision {
+        val existing = resolveViewport(nodes, displayWidth, displayHeight)
+        if (displayWidth <= 0 || displayHeight <= 0) return existing
+        if (existing.viewport != null) {
+            return restrictIdentitySwipeSpace(existing, nodes, displayWidth, displayHeight, allowProfileHeader = true)
+        }
+        val candidates = nodes.mapNotNull { node ->
+            if (!node.visible || !node.enabled || !node.scrollable ||
+                node.className.substringAfterLast('.') !in setOf(
+                    "RecyclerView", "ScrollView", "NestedScrollView", "ListView"
+                )
+            ) return@mapNotNull null
+            val clipped = intersectWithDisplay(node.bounds, displayWidth, displayHeight)
+                ?: return@mapNotNull null
+            if (!hasUsableViewport(clipped, displayWidth, displayHeight)) return@mapNotNull null
+            node to clipped
+        }
+        val selected = candidates.singleOrNull() ?: return Decision(
+            null, candidates.size, "IDENTITY_SCROLL_VIEWPORT_NOT_UNIQUE"
+        )
+        return restrictIdentitySwipeSpace(
+            Decision(selected.second, 1, "IDENTITY_SCROLL_VIEWPORT_UNIQUE", selected.first.path.childIndices),
+            nodes, displayWidth, displayHeight, allowProfileHeader = false
+        )
+    }
+
+    /**
+     * The verified RecyclerView's reported bounds can include fixed bottom controls.
+     * For identity swipes use the observed collapsible profile name/content band, not
+     * those controls. Preserve the original structural selection and its target path.
+     */
+    private fun restrictIdentitySwipeSpace(
+        decision: Decision,
+        nodes: List<AccessibilityNodeSnapshot>,
+        displayWidth: Int,
+        displayHeight: Int,
+        allowProfileHeader: Boolean
+    ): Decision {
+        val viewport = decision.viewport ?: return decision
+        val name = if (allowProfileHeader) nodes.filter {
+            it.visible && it.enabled && localId(it.viewId) == "personal_profile_name" &&
+                !it.bounds.isEmpty && it.bounds.left >= viewport.left && it.bounds.right <= viewport.right &&
+                it.bounds.top >= displayHeight / 3 && it.bounds.bottom <= viewport.top
+        }.singleOrNull() else null
+        val top = minOf(viewport.top, name?.bounds?.top ?: viewport.top)
+        // The annotated device photo places the lower safe boundary at about 82% of
+        // the visible display. A visible fixed-action label above that boundary tightens it.
+        val lowerBand = (displayHeight * IDENTITY_SWIPE_BOTTOM_RATIO).toInt()
+        val fixedActionTop = nodes.filter {
+            it.visible && it.enabled && !it.bounds.isEmpty &&
+                it.text?.trim() in setOf("对话", "关注") &&
+                it.bounds.top >= displayHeight * 3 / 4 &&
+                it.bounds.right > viewport.left && it.bounds.left < viewport.right
+        }.minOfOrNull { it.bounds.top } ?: lowerBand
+        val safe = ScreenRect(viewport.left, top, viewport.right, minOf(viewport.bottom, lowerBand, fixedActionTop))
+        if (safe.isEmpty || !hasUsableViewport(safe, displayWidth, displayHeight)) {
+            return decision.copy(viewport = null, reason = "IDENTITY_SCROLL_SAFE_SPACE_INSUFFICIENT")
+        }
+        return decision.copy(viewport = safe)
+    }
 
     fun resolveViewport(
         nodes: List<AccessibilityNodeSnapshot>,
@@ -141,6 +241,7 @@ internal object MomoSayHiProfileScrollPolicy {
             bounds.width.toLong() * bounds.height >=
             (displayWidth.toLong() * displayHeight * MIN_AREA_RATIO).toLong()
 
+    private const val IDENTITY_SWIPE_BOTTOM_RATIO = 0.82f
     private const val PROFILE_PAGER_VIEW_ID = "pagertabcontent"
     private const val PROFILE_CONTENT_HEADING = "个人信息"
     private const val MIN_WIDTH_RATIO = 0.60f

@@ -47,6 +47,7 @@ class TaskExecutionController(
         val taskCoordinator = coordinator
         if (taskCoordinator == null) {
             val current = isolatedTaskId
+            if (current == taskId) return true
             // Legacy/platform-neutral fixtures have no second controller that could contend for
             // the slot. Preserve the shared controller's atomic handoff semantics: a new task
             // requested through this same execution boundary replaces the previous local owner.
@@ -58,7 +59,7 @@ class TaskExecutionController(
         val current = lease
         val next = when {
             current == null -> taskCoordinator.tryAcquire(taskId, generation)
-            taskCoordinator.isCurrent(current) && current.taskId == taskId -> current
+            taskCoordinator.isCurrent(current) && current.taskId == taskId -> return true
             taskCoordinator.isCurrent(current) -> taskCoordinator.transfer(current, taskId)
             else -> {
                 lease = null
@@ -99,7 +100,7 @@ class TaskExecutionController(
         if (coordinator == null) {
             if (isolatedTaskId != taskId) return false
             isolatedTaskId = null
-            onLog("任务协调[RELEASED]：task=$taskId；reason=$reason；已释放本地隔离租约")
+            runCatching { onLog("任务协调[RELEASED]：task=$taskId；reason=$reason；已释放本地隔离租约") }
             return true
         }
         val current = lease ?: return false
@@ -118,7 +119,7 @@ class TaskExecutionController(
         if (coordinator == null) {
             val taskId = isolatedTaskId ?: return
             isolatedTaskId = null
-            onLog("任务协调[RELEASED]：task=$taskId；reason=$reason；已释放本地隔离租约")
+            runCatching { onLog("任务协调[RELEASED]：task=$taskId；reason=$reason；已释放本地隔离租约") }
             return
         }
         val current = lease ?: return
@@ -135,12 +136,16 @@ class TaskExecutionController(
     }
 
     private fun logRelease(lease: TaskLease, reason: String, released: Boolean) {
-        onLog(
-            if (released) {
-                "任务协调[RELEASED]：task=${lease.taskId}；reason=$reason；已释放 UI 操作权"
-            } else {
-                "任务协调[STALE_RELEASE_IGNORED]：task=${lease.taskId}；reason=$reason；租约已过期或已转交"
-            }
-        )
+        // A completed or stale release must not be reported as a cleanup failure
+        // merely because its diagnostic sink is unavailable.
+        runCatching {
+            onLog(
+                if (released) {
+                    "任务协调[RELEASED]：task=${lease.taskId}；reason=$reason；已释放 UI 操作权"
+                } else {
+                    "任务协调[STALE_RELEASE_IGNORED]：task=${lease.taskId}；reason=$reason；租约已过期或已转交"
+                }
+            )
+        }
     }
 }

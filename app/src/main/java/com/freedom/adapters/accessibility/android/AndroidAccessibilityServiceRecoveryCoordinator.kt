@@ -1,6 +1,5 @@
 package com.freedom.adapters.accessibility.android
 
-import com.freedom.core.runtime.RunMode
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 
@@ -15,13 +14,9 @@ internal class AndroidAccessibilityServiceRecoveryCoordinator(
 ) {
     interface Host {
         fun isRunRequested(): Boolean
-        fun resolveActiveModeForRestore(): RunMode?
         fun isBootRecoveryPending(): Boolean
         fun clearBootRecoveryPending()
-        fun stopRun(reason: String)
-        fun stopKeepAlive()
         fun appendLog(message: String)
-        fun resetRuntime(mode: RunMode, reason: String)
         fun clearActivityContext()
         fun connectRuntime()
         fun canDrawOverlays(): Boolean
@@ -41,28 +36,10 @@ internal class AndroidAccessibilityServiceRecoveryCoordinator(
 
         val bootRecoveryPending = host.isBootRecoveryPending()
 
-        val restoredRunMode = if (host.isRunRequested()) {
-            host.resolveActiveModeForRestore()
-        } else {
-            null
-        }
-
-        if (host.isRunRequested() && restoredRunMode == null) {
-            // No business runtime is selected by design. Keep the service connected so the user
-            // can manually capture the current window without entering AI Reply or Account Browse.
-            host.appendLog("已恢复人工采集待命：未选择 AI 回复或自动浏览；手动节点采集仍可使用")
-            host.connectRuntime()
-        } else {
-            if (restoredRunMode == RunMode.AI_REPLY) {
-                // Clear stale browse-side state; AI observation remains isolated from browse takeover.
-                host.resetRuntime(RunMode.ACCOUNT_BROWSE, "AI 模式恢复")
-                host.clearActivityContext()
-                host.appendLog("已恢复 AI 回复模式运行状态；聊天页面观察独立运行，尚未接入消息解析与回复执行器")
-            }
-            host.connectRuntime()
-        }
-
-        if (bootRecoveryPending) completeBootRecovery(restoredRunMode)
+        host.clearActivityContext()
+        host.connectRuntime()
+        if (host.isRunRequested()) host.appendLog("服务重连：重新观察当前页面")
+        if (bootRecoveryPending) completeBootRecovery()
 
         // The floating launcher is an independent user feature. It must recover whenever the
         // AccessibilityService reconnects, even when no AccountBrowse/AI monitoring run is active.
@@ -83,8 +60,7 @@ internal class AndroidAccessibilityServiceRecoveryCoordinator(
     /** Handles the boot signal when the system had already connected this service. */
     fun onBootRecoverySignal() {
         if (!host.isBootRecoveryPending()) return
-        val restoredMode = if (host.isRunRequested()) host.resolveActiveModeForRestore() else null
-        completeBootRecovery(restoredMode)
+        completeBootRecovery()
     }
 
     /** Cancels only this coordinator's delayed recovery action when the Service is destroyed. */
@@ -107,13 +83,13 @@ internal class AndroidAccessibilityServiceRecoveryCoordinator(
         pendingKeepAliveStart = null
     }
 
-    private fun completeBootRecovery(restoredMode: RunMode?) {
+    private fun completeBootRecovery() {
         if (!host.isRunRequested()) {
             host.appendLog("开机恢复[SKIPPED]：系统连接无障碍服务前，用户运行请求已清除；不恢复旧业务")
         } else {
             host.appendLog(
                 "开机恢复[RECONCILED]：系统无障碍服务已连接并完成持久化运行意图协调；" +
-                    "mode=${restoredMode?.name ?: "MANUAL_OBSERVATION"}；未通过开机广播强制启动服务"
+                    "mode=PAGE_OBSERVATION；未通过开机广播强制启动服务"
             )
         }
         host.clearBootRecoveryPending()

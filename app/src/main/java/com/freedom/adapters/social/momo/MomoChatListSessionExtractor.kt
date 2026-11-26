@@ -20,7 +20,11 @@ internal data class MomoChatListSessionExtraction(
     val truncated: Boolean,
     val invalidRowBoundsCount: Int = 0,
     val unreadDiagnostics: ChatListUnreadDiagnostics = ChatListUnreadDiagnostics(),
-    val reason: String? = null
+    val reason: String? = null,
+    val collectionRowCount: Int? = null,
+    val visibleCollectionRows: List<Int> = emptyList(),
+    val canScrollForward: Boolean? = null,
+    val canScrollBackward: Boolean? = null
 )
 
 /**
@@ -116,6 +120,19 @@ internal class MomoChatListSessionExtractor(
                 )
             }
 
+            val collectionRowCount = runCatching { listNode.collectionInfo?.rowCount }
+                .getOrNull()?.takeIf { it > 0 }
+            // Project the live action list to read-only booleans; never retain a touch action ID.
+            val scrollCapabilities = runCatching {
+                listNode.actionList.let { actions ->
+                    Pair(
+                        actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD },
+                        actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD }
+                    )
+                }
+            }.getOrNull()
+            val visibleCollectionRows = ArrayList<Int>()
+            var collectionRowsComplete = true
             val rowCount = safeInt { listNode.childCount }.coerceAtMost(maxRows)
             var scanned = found.visited
             var truncated = found.truncated || safeInt { listNode.childCount } > maxRows
@@ -124,7 +141,27 @@ internal class MomoChatListSessionExtractor(
             var unreadDiagnostics = ChatListUnreadDiagnostics()
 
             for (rowIndex in 0 until rowCount) {
-                val row = safeNode { listNode.getChild(rowIndex) } ?: continue
+                val row = safeNode { listNode.getChild(rowIndex) }
+                if (row == null) {
+                    collectionRowsComplete = false
+                    continue
+                }
+                // Collect the outer holder's collection position before filtering cards and
+                // system entries. These occupy collection rows but are never chat identities.
+                val visible = runCatching { row.isVisibleToUser }.getOrNull()
+                if (visible == null) collectionRowsComplete = false
+                val holderBounds = boundsOf(row)
+                if (visible == true && !MomoChatListSessionPolicy.hasValidBounds(holderBounds)) {
+                    collectionRowsComplete = false
+                }
+                if (visible == true && MomoChatListSessionPolicy.intersectsViewport(holderBounds, viewport)) {
+                    val position = runCatching { row.collectionItemInfo?.rowIndex }.getOrNull()
+                    if (position == null || collectionRowCount == null || position !in 0 until collectionRowCount) {
+                        collectionRowsComplete = false
+                    } else {
+                        visibleCollectionRows += position
+                    }
+                }
                 val rowClass = safeString { row.className?.toString().orEmpty() }
                 val rowViewId = safeString { row.viewIdResourceName.orEmpty() }
                 // Momo's notification entry is a known non-session holder. It is intentionally
@@ -174,6 +211,7 @@ internal class MomoChatListSessionExtractor(
                     rowPath = userContainer.path,
                     rowIndex = rowIndex,
                     rowBounds = rowBounds,
+                    rowClippedAtViewportEdge = clippedAtViewportEdge(itemLayout, rowBounds, viewport),
                     rowClass = userContainer.className,
                     rowVisible = rowVisibleToUser,
                     viewport = viewport,
@@ -213,7 +251,11 @@ internal class MomoChatListSessionExtractor(
                 truncated = truncated,
                 invalidRowBoundsCount = invalidRowBoundsCount,
                 unreadDiagnostics = finalUnreadDiagnostics,
-                reason = if (snapshots.isEmpty()) "视口内没有提取到会话候选" else null
+                reason = if (snapshots.isEmpty()) "视口内没有提取到会话候选" else null,
+                collectionRowCount = collectionRowCount,
+                visibleCollectionRows = if (collectionRowsComplete && !truncated) visibleCollectionRows.toList() else emptyList(),
+                canScrollForward = scrollCapabilities?.first,
+                canScrollBackward = scrollCapabilities?.second
             )
         } finally {
             recycle(listNode)
@@ -233,6 +275,7 @@ internal class MomoChatListSessionExtractor(
         val rowPath: List<Int>,
         val rowClassName: String,
         val rowBounds: ScreenRect,
+        val rowClippedAtViewportEdge: Boolean,
         val rowVisibleToUser: Boolean,
         val intersectsViewport: Boolean,
         val avatarPath: List<Int>?,
@@ -318,7 +361,8 @@ internal class MomoChatListSessionExtractor(
             statusPointNodeObservationCount = statusPointNodeObservationCount,
             statusPointVisibleNodeCount = statusPointVisibleNodeCount,
             statusPointValidBoundsNodeCount = statusPointValidBoundsNodeCount,
-            statusPointContainedInRowNodeCount = statusPointContainedInRowNodeCount
+            statusPointContainedInRowNodeCount = statusPointContainedInRowNodeCount,
+            rowClippedAtViewportEdge = rowClippedAtViewportEdge
             )
         }
     }
@@ -413,6 +457,7 @@ internal class MomoChatListSessionExtractor(
         rowPath: List<Int>,
         rowIndex: Int,
         rowBounds: ScreenRect,
+        rowClippedAtViewportEdge: Boolean,
         rowClass: String,
         rowVisible: Boolean,
         viewport: ScreenRect,
@@ -751,6 +796,7 @@ internal class MomoChatListSessionExtractor(
                 rowPath = rowPath,
                 rowClassName = rowClass,
                 rowBounds = rowBounds,
+                rowClippedAtViewportEdge = rowClippedAtViewportEdge,
                 rowVisibleToUser = rowVisible,
                 intersectsViewport = MomoChatListSessionPolicy.intersectsViewport(rowBounds, viewport),
                 avatarPath = avatarPath,
@@ -872,6 +918,21 @@ internal class MomoChatListSessionExtractor(
     )
 
     private fun TextNodeSample.valueAsPolicy() = MomoChatListTextValue(value, source)
+
+    // Android may clamp the screen rectangle to the viewport even while the
+    // parent-relative layout retains the full height. Compare dimensions only;
+    // never convert parent coordinates into a gesture target.
+    @Suppress("DEPRECATION")
+    private fun clippedAtViewportEdge(
+        node: AccessibilityNodeInfo, screen: ScreenRect, viewport: ScreenRect
+    ): Boolean {
+        if (screen.isEmpty || (screen.top != viewport.top && screen.bottom != viewport.bottom)) return false
+        val layout = Rect()
+        return runCatching {
+            node.getBoundsInParent(layout)
+            layout.width() == screen.width && layout.height() > screen.height
+        }.getOrDefault(false)
+    }
 
     private fun boundsOf(node: AccessibilityNodeInfo): ScreenRect {
         val rect = Rect()

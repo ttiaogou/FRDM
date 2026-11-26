@@ -3,6 +3,7 @@ package com.freedom.features.aireply
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 
@@ -46,10 +47,10 @@ internal class ReceivedGreetingsTaskFlowController(
 
     val isActive: Boolean
         get() = lifecycle.isActive
-    val completedAwaitingUserExit: Boolean
-        get() = lifecycle.completedAwaitingUserExit
     val awaitingNormalInboxAfterReturn: Boolean
         get() = lifecycle.awaitingNormalInboxAfterReturn
+    val returnRequested: Boolean
+        get() = lifecycle.returnRequested
 
     fun claimOwnership(reason: String): Boolean = lifecycle.claimOwnership(reason)
 
@@ -118,22 +119,37 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun performInitialIdleStep(): Boolean = executor.performIdleStep()
 
-    fun returnForPriorityCheck(): Boolean = executor.returnForPriorityCheck()
+    fun returnForPriorityCheck(): ReceivedGreetingsBackResult =
+        if (lifecycle.inboxConfirmed) ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
+        else executor.returnForPriorityCheck()
+
+    fun isCompletionReturnIntermediate(): Boolean =
+        lifecycle.awaitingNormalInboxAfterReturn && lifecycle.returnRequested &&
+            executor.isCompletionReturnIntermediate()
+
+    fun confirmCompletionReturn(): Boolean {
+        if (!lifecycle.awaitingNormalInboxAfterReturn || !lifecycle.ownsTask()) return false
+        if (lifecycle.inboxConfirmed) return true
+        if (!executor.confirmCompletionReturn()) return false
+        lifecycle.markInboxConfirmed()
+        return true
+    }
 
     fun completeDetailInspection(success: Boolean): Boolean =
         executor.completeDetailInspection(success)
 
     fun deferAfterModelFailure(): Boolean = executor.deferAfterModelFailure()
 
-    fun markAwaitingNormalInboxAfterReturn() = lifecycle.markAwaitingNormalInboxAfterReturn()
+    fun deferReceivedGreetingAfterManualReturn(): Boolean =
+        executor.deferReceivedGreetingAfterManualReturn()
+
+    fun markTraversalCompleted() = lifecycle.markTraversalCompleted()
+
+    fun markReturnRequested() = lifecycle.markReturnRequested()
 
     fun markTraversalReturnedToInbox() = lifecycle.markTraversalReturnedToInbox()
 
     fun pauseForBusinessSwitch() = lifecycle.pauseForBusinessSwitch()
-
-    fun markCompletedAwaitingUserExit() = lifecycle.markCompletedAwaitingUserExit()
-
-    fun acknowledgeCompletedTaskExit() = lifecycle.acknowledgeCompletedTaskExit()
 
     /**
      * Converts a fresh classified page snapshot into one stable task decision. A classified
@@ -141,6 +157,9 @@ internal class ReceivedGreetingsTaskFlowController(
      * condition, matching the existing admission branch.
      */
     fun evaluatePageSnapshot(pageKind: ChatPageKind): Decision {
+        if (lifecycle.awaitingNormalInboxAfterReturn) {
+            return Decision(DecisionKind.COMPLETE, ReceivedGreetingsTraversalStatus.COMPLETE, DecisionOrigin.PAGE_PROGRESS)
+        }
         val progress = executor.evaluatePageProgress(pageKind)
         return when (progress.decision) {
             ReceivedGreetingsTaskExecutor.PageDecision.ENTRY_NOT_FOUND ->

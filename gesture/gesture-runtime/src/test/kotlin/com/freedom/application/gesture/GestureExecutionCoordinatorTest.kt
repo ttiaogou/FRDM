@@ -217,6 +217,38 @@ class GestureExecutionCoordinatorTest {
     }
 
     @Test
+    fun delayedBusinessTargetRevalidationRejectsBeforeDispatchAndReleasesFifo() {
+        val events = mutableListOf<String>()
+        val dispatcher = FakeDispatcher(events)
+        val scheduler = FakeTaskScheduler()
+        val coordinator = GestureExecutionCoordinator(
+            displayMetrics = { DisplayMetricsSnapshot(1_080, 2_400, 3f) },
+            dispatcher = dispatcher,
+            visualizer = FakeVisualizer(events),
+            scheduler = scheduler
+        )
+        var targetCurrent = true
+        var result: GestureExecutionResult? = null
+        val listener = object : com.freedom.core.accessibility.gesture.GestureExecutionListener {
+            override fun isDispatchTargetCurrent(commandId: String) = targetCurrent
+            override fun onResult(value: GestureExecutionResult) { result = value }
+            override fun onDispatched(commandId: String, dispatchedAtUptimeMs: Long) {
+                events += "unexpected-old-dispatch"
+            }
+        }
+        assertEquals(GestureSubmission.ACCEPTED, coordinator.executeApproved(
+            validSwipe(id = "stale-target", preDispatchDelayMs = 250L), listener))
+        assertEquals(GestureSubmission.ACCEPTED, coordinator.executeApproved(
+            validSwipe(id = "next-command"), {}))
+        targetCurrent = false
+        scheduler.runNext()
+        assertEquals(GestureExecutionStatus.REJECTED, result?.status)
+        assertEquals("dispatch_target_unverified", result?.reason)
+        assertTrue("Old command must not report a platform dispatch", "unexpected-old-dispatch" !in events)
+        assertEquals(1, dispatcher.callbacks.size)
+    }
+
+    @Test
     fun dispatchTimestampIsReportedAfterPreDispatchDelayAtThePlatformBoundary() {
         val events = mutableListOf<String>()
         val dispatcher = FakeDispatcher(events)

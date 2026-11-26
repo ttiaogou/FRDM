@@ -1,6 +1,5 @@
 package com.freedom.adapters.accessibility.android
 
-import com.freedom.features.accountbrowse.ports.BrowsePageKind
 import com.freedom.features.accountbrowse.ports.BrowsePageEvidence
 
 /** Stateless recovery identity policy. It never owns retry counters or Feature session state. */
@@ -15,6 +14,6 @@ internal class AccountBrowseRecoveryExecutor {
     }
 
     fun isConfirmedDetailPage(page: BrowsePageEvidence): Boolean =
-        page.pageKind == BrowsePageKind.DETAIL &&
+        page.pageKind.isDynamicContent &&
             page.confidence >= 80 && !isRetainedObstructionEvidence(page.reason)
 }

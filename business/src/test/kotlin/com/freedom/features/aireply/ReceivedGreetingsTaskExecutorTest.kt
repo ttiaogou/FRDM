@@ -5,6 +5,7 @@ import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.ChatRegionSnapshot
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -19,7 +20,9 @@ class ReceivedGreetingsTaskExecutorTest {
 
         assertFalse(executor.performIdleStep())
         assertEquals(ReceivedGreetingsTaskExecutor.StartResult.START_FAILED, executor.beginFromConfirmedList())
-        assertFalse(executor.returnForPriorityCheck())
+        assertEquals(ReceivedGreetingsBackResult.OWNERSHIP_REJECTED, executor.returnForPriorityCheck())
+        assertFalse(executor.confirmCompletionReturn())
+        assertEquals(0, port.confirmedReturns)
         assertFalse(executor.completeDetailInspection(success = true))
         assertEquals(0, port.idleSteps)
         assertEquals(0, port.currentListStarts)
@@ -35,13 +38,32 @@ class ReceivedGreetingsTaskExecutorTest {
         assertEquals(ReceivedGreetingsTaskExecutor.StartResult.STARTED, executor.beginNavigationTask())
         assertTrue(executor.performIdleStep())
         assertEquals(ReceivedGreetingsTaskExecutor.StartResult.STARTED, executor.beginFromConfirmedList())
-        assertTrue(executor.returnForPriorityCheck())
+        assertEquals(ReceivedGreetingsBackResult.BACK_SUBMITTED, executor.returnForPriorityCheck())
+        assertEquals(0, port.confirmedReturns)
+        assertTrue(executor.confirmCompletionReturn())
+        assertEquals(1, port.confirmedReturns)
         assertTrue(executor.completeDetailInspection(success = false))
         assertEquals(1, port.navigationStarts)
         assertEquals(1, port.idleSteps)
         assertEquals(1, port.currentListStarts)
         assertEquals(1, port.priorityReturns)
         assertEquals(false, port.lastDetailSuccess)
+    }
+
+    @Test
+    fun deferredAndRejectedBackNeverBecomeSubmittedOrConfirmed() {
+        val port = FakePagePort()
+        val executor = ReceivedGreetingsTaskExecutor(port) { true }
+        for (result in listOf(
+            ReceivedGreetingsBackResult.GESTURE_IN_FLIGHT,
+            ReceivedGreetingsBackResult.REJECTED,
+            ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION,
+            ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+        )) {
+            port.backResult = result
+            assertEquals(result, executor.returnForPriorityCheck())
+            assertEquals(0, port.confirmedReturns)
+        }
     }
 
     @Test
@@ -114,6 +136,32 @@ class ReceivedGreetingsTaskExecutorTest {
     }
 
     @Test
+    fun deferredListStepRemainsRetryableAndContinuesAfterReadinessWithoutRestartingTask() {
+        val port = FakePagePort()
+        var ownsTask = true
+        val executor = ReceivedGreetingsTaskExecutor(port) { ownsTask }
+        port.traversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        port.stepAccepted = false
+
+        repeat(6) {
+            val observation = executor.performIdleStepAndInspect()
+            assertFalse(observation.accepted)
+            assertEquals(ReceivedGreetingsTaskExecutor.StepDecision.RETRY_REQUIRED, observation.decision)
+        }
+        port.stepAccepted = true
+        val resumed = executor.performIdleStepAndInspect()
+        assertTrue(resumed.accepted)
+        assertEquals(ReceivedGreetingsTaskExecutor.StepDecision.LIST_CONTINUES, resumed.decision)
+        assertEquals(0, port.navigationStarts)
+        assertEquals(0, port.currentListStarts)
+        assertEquals(0, port.priorityReturns)
+
+        ownsTask = false
+        assertFalse(executor.performIdleStepAndInspect().accepted)
+        assertEquals(7, port.idleSteps)
+    }
+
+    @Test
     fun readOnlyStatusAndManualPageObservationRemainAvailableWithoutUiLease() {
         val port = FakePagePort()
         val executor = ReceivedGreetingsTaskExecutor(port) { false }
@@ -134,6 +182,8 @@ class ReceivedGreetingsTaskExecutorTest {
         var idleSteps = 0
         var currentListStarts = 0
         var priorityReturns = 0
+        var confirmedReturns = 0
+        var backResult = ReceivedGreetingsBackResult.BACK_SUBMITTED
         var detailCompletions = 0
         var manualObservations = 0
         var readOnlyObservations = 0
@@ -149,7 +199,11 @@ class ReceivedGreetingsTaskExecutorTest {
         override fun beginReceivedGreetingsNavigationTask() { navigationStarts++ }
         override fun performReceivedGreetingsIdleStep(): Boolean { idleSteps++; return stepAccepted }
         override fun beginReceivedGreetingsTaskFromCurrentList(): Boolean { currentListStarts++; return true }
-        override fun returnFromReceivedGreetingsForPriorityCheck(): Boolean { priorityReturns++; return true }
+        override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult {
+            priorityReturns++
+            return backResult
+        }
+        override fun confirmReceivedGreetingsCompletionReturn(): Boolean { confirmedReturns++; return true }
         override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean {
             detailCompletions++
             lastDetailSuccess = success

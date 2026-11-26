@@ -1,5 +1,7 @@
 package com.freedom.core.runtime
 
+import com.freedom.core.accessibility.api.WindowRef
+
 /**
  * Formal readiness of the target application for autonomous screen interaction.
  * This is deliberately separate from AccessibilityService connection/initialization state.
@@ -42,7 +44,16 @@ data class TargetAppReadinessSnapshot(
     val pageGeneration: Long = -1L,
     val observedAtUptimeMs: Long = 0L,
     val reason: String = "尚未执行目标应用就绪检查"
-)
+) {
+    /** Match a freshly evaluated observation to an exact action window; never a reusable write permit. */
+    fun isReadyForWindow(window: WindowRef, mode: RunMode): Boolean =
+        status == TargetAppReadinessStatus.READY && runMode == mode &&
+            targetPackage.isNotBlank() && targetPackage == foregroundPackage &&
+            targetPackage == window.packageName &&
+            activityClass.isNotBlank() && activityClass == window.activityClass &&
+            windowId >= 0 && windowId == window.windowId &&
+            pageGeneration >= 0L && pageGeneration == window.generation
+}
 
 /**
  * Owns the last observed readiness state. A fresh evidence evaluation is required for every
@@ -75,16 +86,19 @@ class TargetAppReadinessController(
 
     fun current(): TargetAppReadinessSnapshot = snapshot
 
+    /** Read-only wait hint, never an authorization to dispatch. */
+    fun foregroundQuietRemainingMs(nowUptimeMs: Long): Long? = synchronized(lock) {
+        targetForegroundSinceUptimeMs?.let {
+            (foregroundQuietPeriodMs - (nowUptimeMs - it)).coerceAtLeast(0L)
+        }
+    }
+
     fun evaluate(evidence: TargetAppReadinessEvidence, nowUptimeMs: Long): TargetAppReadinessSnapshot {
         observeForegroundPackage(evidence.targetPackage, evidence.foregroundPackage.takeIf {
             evidence.activeWindowAvailable
         }.orEmpty(), nowUptimeMs)
         val foregroundQuietRemainingMs = if (evidence.runMode == RunMode.AI_REPLY) {
-            synchronized(lock) {
-                targetForegroundSinceUptimeMs?.let {
-                    (foregroundQuietPeriodMs - (nowUptimeMs - it)).coerceAtLeast(0L)
-                }
-            }
+            foregroundQuietRemainingMs(nowUptimeMs)
         } else {
             0L
         }

@@ -35,7 +35,8 @@ internal class MessageListCheckpointVerification(
         val savedAtEpochMs: Long,
         val phase: String,
         val runGeneration: Long,
-        val pageFingerprint: String
+        val pageFingerprint: String,
+        val admittedFaultEvidence: PrivateListRecoveryFaultEvidence?
     )
 
     private val adapter = PrivateMessagesRecoveryCheckpointAdapter()
@@ -52,7 +53,9 @@ internal class MessageListCheckpointVerification(
         snapshot: ChatPageSnapshot,
         pageFingerprint: String,
         routeVerified: Boolean,
-        observationGeneration: Long
+        observationGeneration: Long,
+        originalFaultEvidence: PrivateListRecoveryFaultEvidence =
+            assessPrivateListRecoveryFault(checkpoint, recoveryReason, snapshot)
     ): RecoveryCheckpointVerificationResult {
         if (observationGeneration <= lastObservationGeneration) {
             return RecoveryCheckpointVerificationResult.StaleEvidence
@@ -69,7 +72,10 @@ internal class MessageListCheckpointVerification(
             savedAtEpochMs = checkpoint.savedAtEpochMs,
             phase = checkpoint.phase,
             runGeneration = currentRunGeneration(),
-            pageFingerprint = pageFingerprint
+            pageFingerprint = pageFingerprint,
+            // A scope transition (local remediation vs fully cleared) requires its
+            // own two samples without changing the adapter's actual page fingerprint.
+            admittedFaultEvidence = originalFaultEvidence.takeIf { it.allowsResume }
         )
         if (verifier == null || binding != newBinding) {
             // A fresh binding invalidates only this checkpoint's verification lane.
@@ -104,14 +110,21 @@ internal class MessageListCheckpointVerification(
             ).also { it.restore(unified, restoreSource) }
             binding = newBinding
         }
-        return requireNotNull(verifier).observe(
-            CheckpointVerificationWiring.verifiedEvidence(
-                snapshot = snapshot,
-                pageFingerprint = pageFingerprint,
+        val evidence = if (!originalFaultEvidence.allowsResume) {
+            // Both outcomes must cross the same shared observation boundary.
+            onLog("消息列表统一检查点[ORIGINAL_FAULT_WAIT]：reason=$recoveryReason；" +
+                "evidence=${originalFaultEvidence.name}；原始业务阻塞未解除，不确认恢复")
+            CheckpointVerificationWiring.rejectedEvidence(
                 runGeneration = currentRunGeneration(),
                 observationGeneration = observationGeneration
             )
+        } else CheckpointVerificationWiring.verifiedEvidence(
+            snapshot = snapshot,
+            pageFingerprint = pageFingerprint,
+            runGeneration = currentRunGeneration(),
+            observationGeneration = observationGeneration
         )
+        return requireNotNull(verifier).observe(evidence)
     }
 
     /** A new non-matching observation invalidates earlier stable samples, not the checkpoint. */
@@ -135,6 +148,14 @@ internal class MessageListCheckpointVerification(
         verifier = null
         binding = null
     }
+
+    /** A verified cross-task handoff suspends callbacks, not the original retry plan. */
+    fun suspendForTaskHandoff() {
+        deferOwnership()
+        schedule?.suspendForServiceDisconnect()
+    }
+
+    fun hasRetainedObservationPlan(): Boolean = schedule?.currentPlan() != null
 
     /** Only the task owner can acknowledge the shared proof after reclaiming its UI lease. */
     fun completeResume(): Boolean {

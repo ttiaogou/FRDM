@@ -124,6 +124,18 @@ class TaskCoordinator(
         return action()
     }
 
+    /** Serialize publication/revocation of page-write authority with final UI submissions.
+     * The callback must only publish immutable state; it must not invoke a runtime. */
+    @Synchronized
+    fun <T> withOwnershipBarrier(action: () -> T): T = action()
+
+    /** No separate admission lease is needed: a rollback can refer only to the
+     * latest issued capability after release, never a superseded task revision. */
+    @Synchronized
+    fun isLatestReleasedLease(lease: TaskLease): Boolean =
+        activeLease == null && lease.runGeneration == latestRunGeneration &&
+            lease.revision == nextRevision && uiOperationOwnership.currentOwnerId() == null
+
     @Synchronized
     fun activeTaskId(): String? = currentLease()?.taskId
 

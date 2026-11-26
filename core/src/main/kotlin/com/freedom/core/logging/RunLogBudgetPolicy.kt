@@ -196,7 +196,22 @@ object RunLogBudgetPolicy {
         val safeNavigationPause = value.contains("收到的招呼导航暂停") ||
             value.contains("收到招呼详情页返回暂停") ||
             value.contains("收到招呼身份页返回暂停")
-        return directionUnknown || partialOcr || safeNavigationPause
+        // These exact business observation states describe retained, retryable
+        // row evidence. The component name itself contains "异常", not a crash.
+        val privateRowState = Regex(
+            "^AI 私聊异常会话\\[(INCOMPLETE_UNREAD_RETRYABLE|ROW_SCOPED_BLOCK|LIST_EVIDENCE_INSUFFICIENT|HANDOFF_BLOCKED|PRE_SCROLL_EVIDENCE_LOST|RELOCATION_WAIT|RELOCATION_STARTED)\\]：",
+            RegexOption.IGNORE_CASE
+        ).find(message)
+        val privateRowWarning = privateRowState != null && run {
+            val body = message.substring(privateRowState.range.last + 1).uppercase(Locale.ROOT)
+            // Only this exact waiting phrase describes retained evidence, not a new failure.
+            val severityBody = if (privateRowState.groupValues[1] == "RELOCATION_WAIT") {
+                body.replace("原异常未解决", "")
+            } else body
+            listOf("失败", "异常", "错误", "TIMEOUT", "超时", "ERROR", "EXCEPTION")
+                .none { severityBody.contains(it) }
+        }
+        return directionUnknown || partialOcr || safeNavigationPause || privateRowWarning
     }
 
     /**
@@ -236,6 +251,13 @@ object RunLogBudgetPolicy {
             return RunLogLevel.INFO
         }
         if (isNonFatalQualityWarningMessage(severityValue)) return RunLogLevel.WARN
+        // A routine STARTING observation is not a failed action. Only the exact
+        // established transition and normal wait reasons are informational; any
+        // extra failure or timeout evidence stays on the general severity path.
+        val normalReadinessWait = Regex(
+            "^目标应用就绪状态\\[TRANSITION\\]：[A-Z]+->STARTING；MODE=[A-Z_]+；PACKAGE=[^；]+；ACTIVITY=[^；]+；WINDOWID=-?\\d+；PAGEGENERATION=-?\\d+；REASON=(?:当前 ACTIVITY 身份尚未确认|当前活动窗口身份尚未确认|尚未取得当前活动窗口；等待目标应用完成前台启动|目标应用已进入前台；启动保护静默观察中；剩余=\\d+MS；禁止自主手势)$"
+        ).matches(severityValue)
+        if (normalReadinessWait) return RunLogLevel.INFO
         return when {
             listOf("FATAL", "致命", "CRASH", "崩溃").any(severityValue::contains) -> RunLogLevel.FATAL
             listOf("ERROR", "异常", "失败", "WRITE_FAILURE", "写入失败").any(severityValue::contains) -> RunLogLevel.ERROR

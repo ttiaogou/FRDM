@@ -7,6 +7,7 @@ import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.ChatRegionSnapshot
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -153,19 +154,46 @@ class ReceivedGreetingsTaskFlowControllerTest {
     }
 
     @Test
-    fun lifecycleOwnsExitLatchIndependentlyOfRecoveryScheduling() {
+    fun lifecycleOwnsReturnPendingIndependentlyOfRecoveryScheduling() {
         val port = FakePagePort()
         val flow = createFlow(port)
+        assertTrue(flow.claimOwnership("start"))
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
 
-        flow.markCompletedAwaitingUserExit()
-        assertTrue(flow.completedAwaitingUserExit)
-        flow.acknowledgeCompletedTaskExit()
-        assertFalse(flow.completedAwaitingUserExit)
-
-        flow.markAwaitingNormalInboxAfterReturn()
+        flow.markTraversalCompleted()
+        assertTrue(flow.isActive)
         assertTrue(flow.awaitingNormalInboxAfterReturn)
+        assertTrue(flow.ownsTask())
+        assertFalse(flow.returnRequested)
+        flow.markReturnRequested()
+        port.status = ReceivedGreetingsTraversalStatus.UNKNOWN
+        assertEquals(ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE,
+            flow.evaluatePageSnapshot(ChatPageKind.NON_CHAT).kind)
+        assertTrue(flow.returnRequested)
+        assertEquals(0, port.idleSteps)
         flow.markTraversalReturnedToInbox()
+        assertFalse(flow.isActive)
         assertFalse(flow.awaitingNormalInboxAfterReturn)
+        assertFalse(flow.returnRequested)
+    }
+
+    @Test
+    fun confirmedInboxCleanupIsIdempotentUntilLeaseHandoffCompletes() {
+        val port = FakePagePort()
+        val flow = createFlow(port)
+        assertTrue(flow.claimOwnership("start"))
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
+        flow.markTraversalCompleted()
+        flow.markReturnRequested()
+        assertTrue(flow.confirmCompletionReturn())
+        assertTrue(flow.confirmCompletionReturn())
+        assertEquals(1, port.confirmedReturns)
+        assertTrue(flow.isActive)
+        assertTrue(flow.awaitingNormalInboxAfterReturn)
+        assertEquals(ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION, flow.returnForPriorityCheck())
+        flow.markTraversalReturnedToInbox()
+        assertFalse(flow.confirmCompletionReturn())
+        assertFalse(flow.isActive)
     }
 
     private fun createFlow(port: FakePagePort): ReceivedGreetingsTaskFlowController {
@@ -182,6 +210,7 @@ class ReceivedGreetingsTaskFlowControllerTest {
         var navigationStarts = 0
         var idleSteps = 0
         var currentListStarts = 0
+        var confirmedReturns = 0
         var status = ReceivedGreetingsTraversalStatus.SCANNING
         var stepAccepted = true
         var workflowSupported = true
@@ -197,7 +226,12 @@ class ReceivedGreetingsTaskFlowControllerTest {
             currentListStarts++
             return currentListStartAccepted
         }
-        override fun returnFromReceivedGreetingsForPriorityCheck(): Boolean = true
+        override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult =
+            ReceivedGreetingsBackResult.BACK_SUBMITTED
+        override fun confirmReceivedGreetingsCompletionReturn(): Boolean {
+            confirmedReturns++
+            return true
+        }
         override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean = true
         override fun observeManuallyOpenedReceivedGreetingsPage(): ReceivedGreetingsPageArrivalStatus =
             ReceivedGreetingsPageArrivalStatus.LIST_CONFIRMED

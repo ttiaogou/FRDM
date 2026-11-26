@@ -19,7 +19,8 @@ internal class AndroidAccessibilityEventForwarder(
     private val onWindowTransition: (AccessibilityEvent, RunMode?) -> Unit,
     private val pipeline: AccessibilityEventPipelinePort,
     private val currentRunGeneration: () -> Long = { -1L },
-    private val currentWindowGeneration: () -> Long = { -1L }
+    private val currentWindowGeneration: () -> Long = { -1L },
+    private val onFilteredWindowObservation: (String) -> Unit = {}
 ) {
     private var windowCallbackSequence = 0L
     fun accept(event: AccessibilityEvent?) {
@@ -33,7 +34,8 @@ internal class AndroidAccessibilityEventForwarder(
             eventPackage = eventPackage,
             eventType = event.eventType,
             targetPackage = targetPackage(),
-            runMode = mode
+            runMode = mode,
+            runRequested = isRunRequested()
         )
         if (isGlobalTouch) {
             onLog(
@@ -73,11 +75,18 @@ internal class AndroidAccessibilityEventForwarder(
                     mode = mode,
                     runGeneration = currentRunGeneration(),
                     windowGeneration = currentWindowGeneration(),
-                    sequence = windowCallbackSequence
+                    sequence = windowCallbackSequence,
+                    observeWithoutRuntime = true
                 ))
             }
         }
         if (!accepted) {
+            // Explicit foreign-window metadata is only a wake-up hint. Null-package
+            // window churn is covered by the independent timer, not fed back into it.
+            // Do not normalize foreign events, access nodes or dispatch to a business.
+            if (isWindowEvent && isRunRequested() && !eventPackage.isNullOrBlank()) {
+                onFilteredWindowObservation(eventPackage)
+            }
             logWindowEvent(false)
             if (isGlobalTouch) onLog("全局触摸链路[SERVICE_DROPPED]：回调入口过滤拒绝；事件=$eventTypeName")
             return
@@ -90,8 +99,9 @@ internal class AndroidAccessibilityEventForwarder(
         val runRequested = isRunRequested()
         logWindowEvent(runRequested)
         if (!runRequested) return
-        val runMode = mode ?: return
-        pipeline.process(event, runMode)
+        val runMode = mode
+        if (runMode == null) pipeline.processWithoutRuntime(event)
+        else pipeline.process(event, runMode)
     }
 }
 
@@ -115,7 +125,8 @@ internal fun formatActivityWindowCallbackDiagnostic(
     mode: RunMode?,
     runGeneration: Long,
     windowGeneration: Long,
-    sequence: Long
+    sequence: Long,
+    observeWithoutRuntime: Boolean = false
 ): String {
     val source = when {
         targetPackage.isBlank() -> "TARGET_UNCONFIGURED"
@@ -123,11 +134,11 @@ internal fun formatActivityWindowCallbackDiagnostic(
         eventPackage == null -> "NULL"
         else -> "OTHER"
     }
-    val pipelineEligible = callbackAccepted && runRequested && mode != null
+    val pipelineEligible = callbackAccepted && runRequested && (mode != null || observeWithoutRuntime)
     val reason = when {
         !callbackAccepted -> "CALLBACK_FILTER_REJECTED"
         !runRequested -> "RUN_NOT_REQUESTED"
-        mode == null -> "MODE_UNAVAILABLE"
+        mode == null && !observeWithoutRuntime -> "MODE_UNAVAILABLE"
         eventTypeName != "TYPE_WINDOW_STATE_CHANGED" -> "WINDOW_CHANGE_ONLY"
         !isActivityWindowClassName(eventClassName.orEmpty()) -> "NO_ACTIVITY_CLASS_CANDIDATE"
         else -> "FORWARDED_ACTIVITY_CANDIDATE"

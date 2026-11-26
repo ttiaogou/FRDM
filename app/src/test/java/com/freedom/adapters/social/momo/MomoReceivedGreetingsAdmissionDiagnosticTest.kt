@@ -19,6 +19,7 @@ class MomoReceivedGreetingsAdmissionDiagnosticTest {
     @Test fun allReadyHasNoRejectedGateAndSignalsAnAsyncRace() {
         val snapshot = ready()
         assertTrue(snapshot.rejectedGates().isEmpty())
+        assertTrue(snapshot.isReadyForCurrentList())
         assertTrue(snapshot.toLogFields().contains("rejectReason=STATE_CHANGED_AFTER_REJECTION"))
     }
 
@@ -32,6 +33,7 @@ class MomoReceivedGreetingsAdmissionDiagnosticTest {
             readOnlyStage = "WAITING_PROFILE",
             entrySearchGestureInFlight = true
         )
+        assertFalse(snapshot.isReadyForCurrentList())
         assertEquals(
             listOf(
                 "LIST_NOT_CONFIRMED", "LIST_STRUCTURE_NOT_VISIBLE", "WINDOW_TARGET_MISSING",
@@ -46,6 +48,7 @@ class MomoReceivedGreetingsAdmissionDiagnosticTest {
 
     @Test fun reportsSingleResidualStageEvenWhenPageAndWindowAreValid() {
         val snapshot = ready().copy(readOnlyStage = "PROFILE_SCROLL_PENDING")
+        assertFalse(snapshot.isReadyForCurrentList())
         assertEquals(listOf("READ_ONLY_STAGE_NOT_IDLE"), snapshot.rejectedGates())
         assertTrue(snapshot.toLogFields().contains("rejectReason=READ_ONLY_STAGE_NOT_IDLE"))
         assertFalse(snapshot.toLogFields().contains("userId="))

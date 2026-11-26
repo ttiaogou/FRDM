@@ -17,13 +17,14 @@ internal object DraftHistoryMerger {
         if (history == null ||
             (history.lookupSource != "LOCAL_PLATFORM_CONTACT" && history.accountKey.isBlank()) || history.contactId.isBlank() ||
             history.conversationId != "momo-direct-${history.contactId}") return visible
-        val current = batch.messages.filter(VisibleDraftContext::eligible)
+        val current = batch.messages.filter { VisibleDraftContext.eligible(batch, it) }
         val ids = current.map { it.stableLogicalMessageId }.toSet()
         val records = history.messages.filter {
             it.contactId == history.contactId && it.conversationId == history.conversationId &&
                 it.identityConfidence == "PLATFORM_ID_VERIFIED" && it.type == "TEXT" &&
                 it.contentQuality == "VERIFIED" && it.directionEvidence != "AMBIGUOUS" &&
-                !it.content.isNullOrBlank() && it.direction in setOf("INCOMING", "OUTGOING")
+                AiSafeConversationText.legacy(it.content) != null &&
+                it.direction in setOf("INCOMING", "OUTGOING")
         }.sortedWith(
             compareBy<StoredConversationMessage> { it.firstObservedAtMillis }
                 .thenBy { it.observationBatchId }
@@ -55,7 +56,14 @@ internal object DraftHistoryMerger {
             } else return visible
         val prefix = earlier.filter { it.messageFingerprint !in ids }
             .distinctBy { it.messageFingerprint }.takeLast((30 - visible.messages.size).coerceAtLeast(0))
-            .map { AiModelMessage(if (it.direction == "INCOMING") AiModelMessage.Role.USER else AiModelMessage.Role.ASSISTANT, it.content!!.take(2_000)) }
+            .mapNotNull { record ->
+                AiSafeConversationText.legacy(record.content)?.let { safe ->
+                    AiModelMessage(
+                        if (record.direction == "INCOMING") AiModelMessage.Role.USER else AiModelMessage.Role.ASSISTANT,
+                        safe.take(2_000)
+                    )
+                }
+            }
         return visible.copy(messages = prefix + visible.messages)
     }
 }

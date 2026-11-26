@@ -48,7 +48,8 @@ internal enum class GestureAlgorithmId {
     FEED_CUBIC_BEZIER,
     FEED_CUBIC_BEZIER_WITH_MICRO_PERTURBATION,
     CALIBRATION_CUBIC_BEZIER,
-    DIRECTIONAL_MOTION_PROFILE
+    DIRECTIONAL_MOTION_PROFILE,
+    IMAGE_PAGING_HORIZONTAL
 }
 
 internal data class GesturePolicyDecision(
@@ -97,9 +98,22 @@ internal class GesturePolicyManager(
                 GestureIntentAxis.FREE_ANGLE -> GestureAxis.FREE_ANGLE
             }
         )
+        is GestureIntent.ImagePagingSwipe -> selectImagePaging()
         is GestureIntent.CalibrationSwipe -> selectMotion(
             GestureAlgorithmId.CALIBRATION_CUBIC_BEZIER,
             baseAngle = -90f, axis = GestureAxis.VERTICAL
+        )
+    }
+
+    private fun selectImagePaging(): GesturePolicyDecision? {
+        val settings = runCatching(settingsProvider::loadDynamicsSettings).getOrNull() ?: return null
+        if (!settings.isValid()) return null
+        val delay = GestureDynamicsPolicy.sampleLogNormalDelay(settings.preDispatchDelay, random) ?: return null
+        return GesturePolicyDecision(
+            algorithmId = GestureAlgorithmId.IMAGE_PAGING_HORIZONTAL,
+            preDispatchDelay = settings.preDispatchDelay,
+            touch = settings.touch,
+            preDispatchDelayMs = delay
         )
     }
 

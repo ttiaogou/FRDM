@@ -90,6 +90,93 @@ class MessageListCheckpointVerificationTest {
 
 
     @Test
+    fun p2StablePageDoesNotCompleteWhileOriginalBusinessFaultIsBlocked() {
+        val (verifier, scheduler) = fixture()
+        fun sample(gen: Long, evidence: PrivateListRecoveryFaultEvidence) = verifier.observe(
+            checkpoint = original,
+            checkpointId = "P2_ORIGINAL_FAULT",
+            recoveryReason = "PRIVATE_INCOMPLETE_UNREAD_ROW",
+            restoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION,
+            snapshot = page(),
+            pageFingerprint = "same-stable-structure",
+            routeVerified = true,
+            observationGeneration = gen,
+            originalFaultEvidence = evidence
+        )
+        val blocked = PrivateListRecoveryFaultEvidence.ORIGINAL_INCOMPLETE_STILL_BLOCKED
+        val cleared = PrivateListRecoveryFaultEvidence.CLEARED
+        assertTrue(sample(1L, blocked) is RecoveryCheckpointVerificationResult.Recovering)
+        assertTrue(sample(2L, blocked) is RecoveryCheckpointVerificationResult.Recovering)
+        assertFalse(verifier.completeResume())
+        assertEquals(listOf(500L), scheduler.pendingDelays())
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), sample(3L, cleared))
+        assertTrue(sample(4L, blocked) is RecoveryCheckpointVerificationResult.Recovering)
+        assertFalse(verifier.completeResume())
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), sample(5L, cleared))
+        assertEquals(RecoveryCheckpointVerificationResult.StaleEvidence, sample(5L, cleared))
+        assertTrue(sample(6L, cleared) is RecoveryCheckpointVerificationResult.ResumeReady)
+        assertTrue(verifier.completeResume())
+        assertTrue(scheduler.pendingDelays().isEmpty())
+    }
+
+    @Test
+    fun p3BlockedSamplesAndChangedScopePreserveSameBackoffAcrossRebinds() {
+        val (verifier, scheduler) = fixture()
+        fun sample(gen: Long, fingerprint: String, evidence: PrivateListRecoveryFaultEvidence) =
+            verifier.observe(
+                checkpoint = original,
+                checkpointId = "P3_SAME_CHECKPOINT",
+                recoveryReason = "PRIVATE_INCOMPLETE_UNREAD_ROW",
+                restoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION,
+                snapshot = page(),
+                pageFingerprint = fingerprint,
+                routeVerified = true,
+                observationGeneration = gen,
+                originalFaultEvidence = evidence
+            )
+        val blocked = PrivateListRecoveryFaultEvidence.ORIGINAL_INCOMPLETE_STILL_BLOCKED
+        val cleared = PrivateListRecoveryFaultEvidence.CLEARED
+        assertTrue(sample(1L, "A", blocked) is RecoveryCheckpointVerificationResult.Recovering)
+        scheduler.runNext(500L)
+        assertEquals(listOf(1_000L), scheduler.pendingDelays())
+        assertTrue(sample(2L, "B", blocked) is RecoveryCheckpointVerificationResult.Recovering)
+        assertEquals(listOf(1_000L), scheduler.pendingDelays())
+        scheduler.runNext(1_000L)
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), sample(3L, "B", cleared))
+        assertEquals(listOf(2_000L), scheduler.pendingDelays())
+        verifier.deferOwnership()
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), sample(4L, "B", cleared))
+        assertEquals(listOf(2_000L), scheduler.pendingDelays())
+        assertFalse(verifier.completeResume())
+        assertTrue(sample(5L, "B", cleared) is RecoveryCheckpointVerificationResult.ResumeReady)
+        assertTrue(verifier.completeResume())
+        assertTrue(scheduler.pendingDelays().isEmpty())
+    }
+
+    @Test
+    fun p2ClearedAndLocalRemediationProofsCannotShareStableSamples() {
+        val (verifier, _) = fixture()
+        fun sample(gen: Long, evidence: PrivateListRecoveryFaultEvidence) = verifier.observe(
+            checkpoint = original,
+            checkpointId = "P2_SCOPE",
+            recoveryReason = "PRIVATE_INCOMPLETE_UNREAD_ROW",
+            restoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION,
+            snapshot = page(),
+            pageFingerprint = "same-structure",
+            routeVerified = true,
+            observationGeneration = gen,
+            originalFaultEvidence = evidence
+        )
+        val local = PrivateListRecoveryFaultEvidence.LOCAL_REMEDIATION
+        val cleared = PrivateListRecoveryFaultEvidence.CLEARED
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), sample(1L, local))
+        assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), sample(2L, cleared))
+        assertFalse(verifier.completeResume())
+        assertTrue(sample(3L, cleared) is RecoveryCheckpointVerificationResult.ResumeReady)
+        assertTrue(verifier.completeResume())
+    }
+
+    @Test
     fun temporarilyUnavailableSnapshotRejectsPriorSampleAndRetainsCheckpoint() {
         val (verifier, _) = fixture()
         assertEquals(RecoveryCheckpointVerificationResult.Verifying(1), verifier.sample(1L))
@@ -371,6 +458,12 @@ class MessageListCheckpointVerificationTest {
 
         fun runCancelled(delay: Long) {
             val entry = entries.first { it.cancelled && it.delay == delay }
+            entry.callback()
+        }
+
+        fun runNext(delay: Long) {
+            val entry = entries.first { !it.cancelled && it.delay == delay }
+            entry.cancelled = true
             entry.callback()
         }
     }

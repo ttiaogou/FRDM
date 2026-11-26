@@ -6,8 +6,13 @@ import com.freedom.features.aireply.domain.message.*
 internal object VisibleDraftContext {
     data class Admission(val accepted: Boolean, val retryable: Boolean, val reason: String)
 
+    // Legacy callers without a batch cannot upgrade AMBIGUOUS OCR evidence.
     fun eligible(message: ChatMessage): Boolean = message.isAiInputEligible &&
-        message.directionEvidence != DirectionEvidence.AMBIGUOUS
+        message.directionEvidence != DirectionEvidence.AMBIGUOUS &&
+        AiSafeConversationText.legacy(message.content) != null
+
+    fun eligible(batch: ChatMessageBatch, message: ChatMessage): Boolean =
+        AiSafeConversationText.visible(batch, message) != null
 
     fun assess(batch: ChatMessageBatch): Admission {
         fun retry(reason: String) = Admission(false, true, reason)
@@ -31,7 +36,7 @@ internal object VisibleDraftContext {
         if (batch.truncated) return retry("MESSAGE_LIST_TRUNCATED")
         if (latest.type != ChatMessageType.TEXT) return Admission(false, false, "LATEST_MESSAGE_UNSUPPORTED")
         if (latest.direction == ChatMessageDirection.OUTGOING) return Admission(false, false, "LATEST_MESSAGE_OUTGOING")
-        if (!eligible(latest)) return retry("LATEST_TEXT_OR_DIRECTION_UNVERIFIED")
+        if (!eligible(batch, latest)) return retry("LATEST_TEXT_OR_DIRECTION_UNVERIFIED")
         if (latest.content!!.length > 2_000) return Admission(false, false, "LATEST_MESSAGE_EXCEEDS_CONTEXT_LIMIT")
         return Admission(true, false, "LATEST_INCOMING_VERIFIED")
     }
@@ -39,10 +44,14 @@ internal object VisibleDraftContext {
     fun build(batch: ChatMessageBatch, visitToken: String = batch.windowSessionKey.orEmpty()): ConversationContext? {
         if (!assess(batch).accepted || visitToken.isBlank()) return null
         val key = batch.windowSessionKey.orEmpty()
-        val messages = batch.messagesBottomToTop.asReversed().filter(::eligible).takeLast(30).map {
-            AiModelMessage(if (it.direction == ChatMessageDirection.INCOMING) AiModelMessage.Role.USER else AiModelMessage.Role.ASSISTANT,
-                it.content!!.take(2_000))
-        }
+        val messages = batch.messagesBottomToTop.asReversed().mapNotNull { message ->
+            AiSafeConversationText.visible(batch, message)?.let { safeText ->
+                AiModelMessage(
+                    if (message.direction == ChatMessageDirection.INCOMING) AiModelMessage.Role.USER else AiModelMessage.Role.ASSISTANT,
+                    safeText.take(2_000)
+                )
+            }
+        }.takeLast(30)
         return ConversationContext(key, key, messages, 0, 0, 0, true, currentWindowDraft = true)
     }
 }

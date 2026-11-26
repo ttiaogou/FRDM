@@ -241,7 +241,8 @@ class AiModelFailureDiagnosticsTest {
         assertTrue(bodies[0].contains("\"type\":\"json_object\""))
         assertTrue(bodies[1].contains("\"type\":\"json_object\""))
         assertFalse(bodies[2].contains("\"response_format\""))
-        assertTrue(bodies[2].contains("请严格匹配以下 JSON Schema"))
+        assertFalse(bodies[2].contains("JSON Schema"))
+        assertTrue(bodies[2].contains("只输出最终回复文字"))
         assertEquals(listOf("你好"), fixture.sentTexts)
         assertTrue(fixture.coordinator.isSendConfirmationPending)
         assertTrue(fixture.coordinator.isConversationReturnBlocked)
@@ -251,7 +252,7 @@ class AiModelFailureDiagnosticsTest {
         assertEquals(2, fixture.logs.count { it.startsWith("AI 模型调用失败：") })
         assertTrue(fixture.logs.any { it.contains("responseContentState=BLANK") })
         assertTrue(fixture.logs.any { it.contains("responseContentState=NULL") })
-        assertTrue(fixture.logs.any { it.contains("responseMode=PROMPT_ONLY_JSON") })
+        assertTrue(fixture.logs.any { it.contains("responseMode=PLAIN_TEXT") })
         assertFalse(fixture.logs.joinToString("\n").contains(privateText))
         assertFalse(fixture.logs.joinToString("\n").contains(secret))
 
@@ -262,6 +263,20 @@ class AiModelFailureDiagnosticsTest {
         assertEquals(SendConfirmationResult.CONFIRMED, fixture.coordinator.confirmSendResult(after, fixture.snapshot))
         assertFalse(fixture.coordinator.isConversationReturnBlocked)
         assertEquals(1, fixture.sendCount)
+    }
+
+    @Test fun reasoningOnlyThenStructuredPhoneDraftNeverReachesComposer() {
+        val empty = """{"choices":[{"message":{"content":"","reasoning_content":"$privateText"},"finish_reason":"stop"}]}"""
+        val third = """{"choices":[{"message":{"content":"{\"action\":\"REPLY\",\"reason\":\"READY\",\"reasonDetail\":\"测试\",\"draft\":\"电话13800138000\"}"},"finish_reason":"stop"}]}"""
+        val fixture = EmptyHttpRecoveryFixture(listOf(empty, empty, third))
+        assertTrue(fixture.coordinator.generateVisibleDraft(fixture.batch, fixture.snapshot))
+        fixture.drain()
+        assertEquals(3, fixture.requests.size)
+        assertEquals("", fixture.text)
+        assertEquals(0, fixture.sendCount)
+        assertTrue(fixture.logs.any { it.contains("responseContentState=BLANK") &&
+            it.contains("reasoningContentState=PRESENT") && it.contains("finishReason=stop") })
+        assertFalse(fixture.logs.any { it.contains(privateText) })
     }
 
     @Test fun realHttp200ThreeEmptyResponsesEndWithoutWritingOrSending() {

@@ -688,6 +688,74 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
         self.assertTrue(any("duplicate recovery identity logic" in issue
                             for issue in guard.legacy_architecture_bypass_violations(changed)))
 
+    def test_pp_reduction_guard_accepts_current_production_graph(self):
+        self.assertEqual(guard.runtime_architecture_reduction_violations(self.recovery_code), [])
+
+    def test_pp_reduction_guard_rejects_new_runtime_file_even_with_unrelated_name(self):
+        changed = dict(self.recovery_code)
+        changed["core/src/main/kotlin/com/freedom/core/runtime/Extra.kt"] = "class Extra"
+        self.assertTrue(any("unreviewed core/runtime source" in item
+                            for item in guard.runtime_architecture_reduction_violations(changed)))
+
+    def test_pp_reduction_guard_rejects_new_or_duplicate_declaration_in_existing_runtime(self):
+        owner = "core/src/main/kotlin/com/freedom/core/runtime/PageFingerprintRouter.kt"
+        for declaration in ("class AlternatePageResolver", "class PageFingerprintRouter"):
+            with self.subTest(declaration=declaration):
+                changed = dict(self.recovery_code)
+                changed[owner] += "\n" + declaration + "\n"
+                self.assertTrue(any("unreviewed core/runtime declarations" in item
+                                    for item in guard.runtime_architecture_reduction_violations(changed)))
+
+    def test_pp_reduction_guard_rejects_new_observation_channel_in_existing_or_external_owner(self):
+        root = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        for owner in (root, "business/src/main/kotlin/com/freedom/features/bad/Extra.kt"):
+            with self.subTest(owner=owner):
+                changed = dict(self.recovery_code)
+                changed[owner] = changed.get(owner, "") + "\nval extra = observer.registerChannel()\n"
+                self.assertTrue(any("control surface expanded" in item and "registerChannel" in item
+                                    for item in guard.runtime_architecture_reduction_violations(changed)))
+
+    def test_pp_reduction_guard_rejects_duplicate_control_reference_and_new_consumer(self):
+        root = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        for owner in (root, "business/src/main/kotlin/com/freedom/features/bad/Extra.kt"):
+            with self.subTest(owner=owner):
+                changed = dict(self.recovery_code)
+                changed[owner] = changed.get(owner, "") + "\nval extra = UnifiedPageObservationBus()\n"
+                self.assertTrue(any("control surface expanded" in item and "UnifiedPageObservationBus" in item
+                                    for item in guard.runtime_architecture_reduction_violations(changed)))
+
+    def test_pp_reduction_guard_rejects_retired_page_control_symbols_anywhere(self):
+        owner = "business/src/main/kotlin/com/freedom/features/bad/Extra.kt"
+        for name in sorted(guard.RETIRED_PAGE_CONTROL_SYMBOLS):
+            with self.subTest(name=name):
+                changed = dict(self.recovery_code)
+                changed[owner] = "val extra = " + name + "()"
+                self.assertTrue(any("control surface expanded" in item and name in item
+                                    for item in guard.runtime_architecture_reduction_violations(changed)))
+
+    def test_pp_reduction_guard_rejects_retired_shared_observation_reset_alias(self):
+        owner = "core/src/main/kotlin/com/freedom/core/runtime/PageObservationCoordinator.kt"
+        changed = dict(self.recovery_code)
+        changed[owner] += "\nfun reset() = resetAll()\n"
+        self.assertTrue(any("retired shared observation reset alias" in item
+                            for item in guard.runtime_architecture_reduction_violations(changed)))
+        # A feature-local reset remains valid and is not a retired global entry.
+        feature = "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt"
+        changed = dict(self.recovery_code)
+        changed[feature] += "\nfun reset() = Unit\n"
+        self.assertEqual(guard.runtime_architecture_reduction_violations(changed), [])
+
+    def test_pp_reduction_guard_permits_retiring_debt_and_ignores_comments(self):
+        changed = dict(self.recovery_code)
+        root = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        changed[root] = changed[root].replace("UnifiedPageObservationBus", "")
+        changed.pop("app/src/main/java/com/freedom/application/runtime/EntryPageObservationRetry.kt")
+        changed[root] += guard.mask_kotlin_non_code(
+            '\n// UnifiedPageObservationBus() observer.registerChannel()\n'
+            'val diagnostic = "PageRuntimeSessionState"\n'
+        )
+        self.assertEqual(guard.runtime_architecture_reduction_violations(changed), [])
+
     def test_p0_authority_guard_accepts_current_production_graph(self):
         self.assertEqual(guard.architecture_authority_violations(self.recovery_code), [])
 

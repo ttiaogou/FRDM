@@ -6,4 +6,7 @@ import com.freedom.core.runtime.RunMode
 /** Named boundary between the Android event entry adapter and event normalization/routing. */
 internal fun interface AccessibilityEventPipelinePort {
     fun process(event: AccessibilityEvent, runMode: RunMode)
+
+    /** No business runtime is selected yet; production still observes pages. */
+    fun processWithoutRuntime(event: AccessibilityEvent) = Unit
 }

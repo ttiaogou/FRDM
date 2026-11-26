@@ -29,6 +29,10 @@ fun interface GestureExecutionListener {
     /** Called immediately before the coordinator submits this command to the platform dispatcher. */
     fun onResult(result: GestureExecutionResult)
 
+    /** Read-only business target proof, evaluated at the first actual platform dispatch.
+     * Default preserves existing commands without a mutable business target. */
+    fun isDispatchTargetCurrent(commandId: String): Boolean = true
+
     /**
      * Actual dispatch time in the Android uptime clock domain. Queueing, visualization and
      * pre-dispatch delays are deliberately excluded from event-feedback deadlines.

@@ -52,7 +52,9 @@ class DynamicPageRecovery(
     private val recoveryScheduler = RecoveryScheduler(
         scheduler = scheduler,
         nowEpochMs = System::currentTimeMillis,
-        onReadOnlyObservation = { onReadOnlyObservation() },
+        onReadOnlyObservation = { plan ->
+            if (plan.runGeneration == currentRunGeneration()) onReadOnlyObservation()
+        },
         onLog = onLog,
         scheduleRepository = scheduleRepository
     )
@@ -215,6 +217,20 @@ class DynamicPageRecovery(
         recoveryScheduler.begin(eventIdentity)
     }
 
+    /**
+     * An unclassified interaction notification is not a new page sample. Keep the
+     * current transaction and its already armed read-only deadline. Real UNKNOWN
+     * page observations still go through observePage and invalidate the samples.
+     */
+    fun continuePendingObservation(): Boolean {
+        val active = dispatcher.currentIdentity() ?: return false
+        if (active.runGeneration != currentRunGeneration() ||
+            dispatcher.state !in setOf(RecoveryTransactionState.RECOVERING, RecoveryTransactionState.VERIFYING)
+        ) return false
+        recoveryScheduler.begin(active)
+        return true
+    }
+
     fun observePage(page: BrowsePageEvidence): RecoveryTransactionState {
         val unknown = page.pageKind == BrowsePageKind.UNKNOWN ||
             page.packageName.isBlank() ||
@@ -223,31 +239,42 @@ class DynamicPageRecovery(
             page.confidence < 80
         if (!unknown) return dispatcher.state
 
-        dispatcher.activate(identity(page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }))
-        dispatcher.dispatch(
-            RecoveryTransactionEvent.UnknownPage(
-                page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
-            )
-        )
-        recoveryScheduler.begin(identity(page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }))
+        val reason = page.reason.ifBlank { "ACCOUNT_BROWSE_PAGE_UNKNOWN" }
+        dispatcher.activate(identity(reason))
+        val eventIdentity = requireNotNull(dispatcher.currentIdentity())
+        dispatcher.dispatch(RecoveryTransactionEvent.UnknownPage(reason), eventIdentity)
+        // Both the reducer and the observation plan must accept the same touch edges.
+        recoveryScheduler.begin(eventIdentity)
         return dispatcher.state
     }
 
     fun observeFingerprint(fingerprint: String): Boolean {
         // Even the pre-UNKNOWN feed stability gate must use the identified
         // manager route, not the dispatcher's former unbound fingerprint bypass.
-        dispatcher.activate(identity("DYNAMIC_FEED_FINGERPRINT_OBSERVATION"))
-        if (fingerprint.isNotBlank() && dispatcher.state == RecoveryTransactionState.RECOVERING) {
+        val eventIdentity = identity("DYNAMIC_FEED_FINGERPRINT_OBSERVATION")
+        dispatcher.activate(eventIdentity)
+        if (fingerprint.isNotBlank() &&
+            (dispatcher.state == RecoveryTransactionState.RECOVERING ||
+                dispatcher.state == RecoveryTransactionState.ACTIVE)
+        ) {
+            // A new feed verification needs fresh samples even when its fingerprint
+            // equals the last completed verification's fingerprint.
             dispatcher.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
         }
         dispatcher.observeFingerprint(fingerprint)
         if (dispatcher.state != RecoveryTransactionState.VERIFYING ||
             dispatcher.stableVerificationSamples < UnifiedRecoveryTransactionStateMachine.REQUIRED_STABLE_SAMPLES
         ) {
+            // The normal phase scheduler is deliberately blocked while VERIFYING.
+            // Arm the existing read-only recovery lane, not the automatic action lane.
+            if (dispatcher.state == RecoveryTransactionState.VERIFYING ||
+                dispatcher.state == RecoveryTransactionState.RECOVERING
+            ) recoveryScheduler.begin(eventIdentity)
             return false
         }
         dispatcher.dispatch(RecoveryTransactionEvent.ResumeRequested)
         dispatcher.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        if (dispatcher.state != RecoveryTransactionState.ACTIVE) return false
         recoveryScheduler.completeRecovery(identity("RECOVERY_VERIFIED"))
         return true
     }
@@ -273,6 +300,16 @@ class DynamicPageRecovery(
 
     fun onUserInteractionEnded() {
         dispatcher.currentIdentity()?.let(recoveryScheduler::onUserInteractionEnded)
+    }
+
+    /** Discard volatile verification, never the durable observation plan. */
+    fun suspendAndResetVolatileState() {
+        recoveryScheduler.suspendForServiceDisconnect()
+        checkpointVerifier = null
+        checkpointDispatcher.reset()
+        verifiedCheckpointFingerprint = null
+        checkpointObservationGeneration = 0L
+        dispatcher.reset()
     }
 
     fun reset() {

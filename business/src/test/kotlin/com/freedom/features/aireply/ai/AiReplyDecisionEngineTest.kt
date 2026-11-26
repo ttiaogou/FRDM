@@ -65,10 +65,23 @@ class AiReplyDecisionEngineTest {
         assertEquals(AiReplyAction.REPLY, model(result).action)
         val request = provider.lastRequest!!
         assertEquals(AiModelResponseFormat.PlainText, request.responseFormat)
-        assertTrue(request.systemInstruction.contains("请严格匹配以下 JSON Schema"))
+        assertTrue(request.systemInstruction.contains("请只返回一个有效的 JSON 对象"))
         assertTrue(request.systemInstruction.contains("\"reasonDetail\""))
         assertTrue(request.systemInstruction.contains("additionalProperties"))
-        assertTrue(request.systemInstruction.contains("如果对方直接询问你是否为人工智能，必须如实回答"))
+        assertTrue(request.systemInstruction.contains("如果对方询问你是否为人工智能，必须如实回答"))
+    }
+
+    @Test fun simpleJsonDelegatesSchemaToProviderTransportOnlyOnce() {
+        val provider = FakeProvider(replyJson("你好"))
+        AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(
+                context(), contactIdentityVerified = true, requestId = "simple-json",
+                responseMode = ModelResponseMode.SIMPLE_JSON
+            )
+        )
+        val request = provider.lastRequest!!
+        val schema = (request.responseFormat as AiModelResponseFormat.JsonSchema).schema
+        assertFalse(request.systemInstruction.contains(schema))
     }
 
     @Test fun promptOnlyJsonRecoveryRejectsNonJsonAndDoesNotTurnItIntoDraft() {
@@ -81,6 +94,19 @@ class AiReplyDecisionEngineTest {
         assertEquals(AiModelResponseFormat.PlainText, provider.lastRequest?.responseFormat)
     }
 
+    @Test fun localSafetyBlocksSensitiveDraftWithoutBlockingOrdinaryDigits() {
+        val safe = AiReplyDecisionEngine(FakeProvider(replyJson("123456")), grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "safe-digits")
+        )
+        assertEquals(AiReplyAction.REPLY, model(safe).action)
+
+        val blocked = AiReplyDecisionEngine(FakeProvider(replyJson("请把验证码发给我")), grantedConsent).decide(
+            AiReplyDecisionInput(context(), true, requestId = "unsafe-draft")
+        )
+        assertEquals(AiReplyAction.WAIT, model(blocked).action)
+        assertEquals("LOCAL_SAFETY_BLOCK", model(blocked).reason)
+    }
+
     @Test fun defaultPersonalizationUsesDailyChatGenerationPresets() {
         val provider = FakeProvider(replyJson("收到"))
         AiReplyDecisionEngine(provider, grantedConsent).decide(
@@ -89,7 +115,7 @@ class AiReplyDecisionEngineTest {
 
         val request = provider.lastRequest!!
         assertEquals(0.4, request.temperature, 0.0)
-        assertEquals(512, request.maxOutputTokens)
+        assertEquals(256, request.maxOutputTokens)
         assertTrue(request.systemInstruction.contains("轻微、克制的暧昧和试探感"))
         assertTrue(request.systemInstruction.contains("尽量用最少的文字直接回答"))
         assertTrue(request.systemInstruction.contains("根据语境自然表达关心或积极态度"))
@@ -129,11 +155,11 @@ class AiReplyDecisionEngineTest {
         assertTrue(request.systemInstruction.contains("不要刻意讨好我。"))
     }
 
-    @Test fun multiReplyInstructionUsesOnlySingleNewlines() {
+    @Test fun baseInstructionDoesNotCarryStructuredOutputRules() {
         val instruction = AiReplyDecisionEngine.DEFAULT_SYSTEM_INSTRUCTION
-        assertTrue(instruction.contains("多条回复之间必须采用单一换行分隔"))
-        assertTrue(instruction.contains("在 JSON 字符串中用 \\n 表示换行"))
-        assertFalse(instruction.contains("<MSG>"))
+        assertFalse(instruction.contains("reasonDetail"))
+        assertFalse(instruction.contains("JSON Schema"))
+        assertFalse(instruction.contains("\\n"))
     }
 
     @Test fun jsonEscapedNewlineParsesIntoSeparateMessages() {
@@ -148,8 +174,7 @@ class AiReplyDecisionEngineTest {
 
     @Test fun systemInstructionDoesNotRequireFalseClaimsAboutAiIdentity() {
         val instruction = AiReplyDecisionEngine.DEFAULT_SYSTEM_INSTRUCTION
-        assertTrue(instruction.contains("如果对方直接询问你是否为人工智能，必须如实回答"))
-        assertTrue(instruction.contains("不得谎称自己是人类"))
+        assertTrue(instruction.contains("如果对方询问你是否为人工智能，必须如实回答"))
     }
 
     @Test fun personalIdentifiersAreRedactedBeforeProviderCall() {
@@ -255,8 +280,7 @@ class AiReplyDecisionEngineTest {
         )
         assertEquals(AiReplyAction.REPLY, model(outcome).action)
         assertEquals("你说的是哪件事呀？", model(outcome).draft)
-        assertTrue(provider.lastRequest!!.systemInstruction.contains("语义模糊"))
-        assertTrue(provider.lastRequest!!.systemInstruction.contains("低承诺"))
+        assertTrue(provider.lastRequest!!.systemInstruction.contains("根据上下文选择最值得回应的内容"))
     }
 
     @Test fun parserDiagnosticReasonsDoNotChangeValidationOrDraft() {
@@ -339,4 +363,45 @@ class AiReplyDecisionEngineTest {
 
     private fun replyJson(draft: String) =
         """{"action":"REPLY","reason":"GREETING","draft":"${draft.replace("\\", "\\\\").replace("\"", "\\\"")}"}"""
+
+    @Test fun finalOutboundGateSanitizesDirectMixedContextsBeforeModelCall() {
+        val provider = FakeProvider(replyJson("你好"))
+        val context = context().copy(messages = listOf(
+            AiModelMessage(AiModelMessage.Role.USER, "早上好😊"),
+            AiModelMessage(AiModelMessage.Role.ASSISTANT, "昨天见"),
+            AiModelMessage(AiModelMessage.Role.USER, "在吗[表情/图形未识别]"),
+            AiModelMessage(AiModelMessage.Role.USER, "今晚有空吗")
+        ))
+        AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context, true, requestId = "p3-final-safe")
+        )
+        assertEquals(1, provider.callCount)
+        assertEquals(listOf("早上好", "昨天见", "今晚有空吗"),
+            provider.lastRequest!!.conversation.map { it.content })
+    }
+
+    @Test fun finalOutboundGateRefusesContextWithOnlyVisualPlaceholders() {
+        val provider = FakeProvider(replyJson("你好"))
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context("[图形/符号内容待确认] 在吗a"),
+                true, requestId = "p3-no-unverified")
+        )
+        assertEquals(AiReplyExecutionStatus.EMPTY_CONTEXT, execution(result).status)
+        assertEquals(0, provider.callCount)
+    }
+
+    @Test fun finalOutboundGateRejectsOnlyOutgoingHistoryAfterFiltering() {
+        val provider = FakeProvider(replyJson("你好"))
+        val context = context().copy(messages = listOf(
+            AiModelMessage(AiModelMessage.Role.USER, "😊"),
+            AiModelMessage(AiModelMessage.Role.ASSISTANT, "你好呀")
+        ))
+        val result = AiReplyDecisionEngine(provider, grantedConsent).decide(
+            AiReplyDecisionInput(context, true, requestId = "p3-no-user")
+        )
+        assertEquals(AiReplyExecutionStatus.MESSAGE_EVIDENCE_UNAVAILABLE, execution(result).status)
+        assertEquals(0, provider.callCount)
+    }
+
+
 }

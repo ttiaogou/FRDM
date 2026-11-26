@@ -29,6 +29,7 @@ class VisibleDraftFlowTest {
         val inputWriteTargets = mutableListOf<ChatDraftInputTarget>()
         val logs = mutableListOf<String>()
         val preSendFailures = mutableListOf<AiReplyPreSendModelFailure>()
+        var completionObservationRequests = 0
         var configuredModelName = "test"
         var modelOutput = """{"action":"REPLY","reason":"OK","draft":"你好呀"}"""
         var calls = 0
@@ -104,18 +105,21 @@ class VisibleDraftFlowTest {
             replySegmentTaskRepository = segmentRepository,
             replyTaskRepository = taskRepository,
             onPreSendModelFailure = { preSendFailures.add(it) },
-            policyRegistry = policyRegistry)
+            policyRegistry = policyRegistry,
+            onSendConfirmationObservationRequested = { completionObservationRequests++ })
         fun drain() { while (tasks.isNotEmpty()) tasks.removeAt(0).invoke() }
         fun step() { assertTrue("Expected a scheduled task", tasks.isNotEmpty()); tasks.removeAt(0).invoke() }
     }
 
     private class SegmentLedger : ReplySegmentTaskRepository {
         val records = linkedMapOf<String, ReplySegmentTaskRecord>()
+        var failUnknownUpdate = false
         override fun find(taskId: String) = records[taskId]
         override fun findByRequest(requestId: String) = records.values.filter { it.requestId == requestId }
         override fun findByConversation(conversationKey: String) = records.values.filter { it.conversationKey == conversationKey }
         override fun save(record: ReplySegmentTaskRecord) { records[record.taskId] = record }
         override fun update(record: ReplySegmentTaskRecord): Boolean {
+            if (failUnknownUpdate && record.status == ReplySegmentTaskStatus.UNKNOWN) error("journal temporarily unavailable")
             val before = records[record.taskId] ?: return false
             if (!ReplySegmentTaskTransitions.isAllowed(before.status, record.status)) return false
             records[record.taskId] = record
@@ -431,8 +435,8 @@ class VisibleDraftFlowTest {
             f.drain()
             assertEquals(3, f.calls)
             assertEquals(listOf(taskId, taskId, taskId), f.decisionRequests.map { it.taskId })
-            assertEquals(listOf(ModelResponseMode.STRICT_JSON, ModelResponseMode.STRICT_JSON,
-                ModelResponseMode.PROMPT_ONLY_JSON), f.decisionRequests.map { it.responseMode })
+            assertEquals(listOf(ModelResponseMode.STRICT_JSON, ModelResponseMode.SIMPLE_JSON,
+                ModelResponseMode.PLAIN_TEXT), f.decisionRequests.map { it.responseMode })
             assertEquals("", f.text)
         }
     }
@@ -470,8 +474,8 @@ class VisibleDraftFlowTest {
         assertEquals(3, greeting.decisionRequests.size)
         assertTrue(greeting.decisionRequests.all { it.taskId == AiDecisionTaskIds.RECEIVED_GREETINGS })
         assertEquals(
-            listOf(ModelResponseMode.STRICT_JSON, ModelResponseMode.STRICT_JSON,
-                ModelResponseMode.PROMPT_ONLY_JSON),
+            listOf(ModelResponseMode.STRICT_JSON, ModelResponseMode.SIMPLE_JSON,
+                ModelResponseMode.PLAIN_TEXT),
             greeting.decisionRequests.map { it.responseMode }
         )
         assertTrue(greeting.decisionRequests.all { it.outputContract == AiReplyModelContracts.currentOutput() })
@@ -728,7 +732,7 @@ class VisibleDraftFlowTest {
         assertEquals("你好呀", f.text)
     }
 
-    @Test fun compatibleResponseModeOnlyOnFinalDeepSeekRetryAndStillRequiresJson() {
+    @Test fun plainTextResponseModeIsUsedOnlyOnFinalDeepSeekRetry() {
         val f = Fixture()
         f.emptyFailuresRemaining = 2
         assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
@@ -737,11 +741,11 @@ class VisibleDraftFlowTest {
         assertEquals(listOf(2_500L, 6_000L), f.scheduledDelays.filter { it > 0L }.take(2))
         assertTrue(f.requests.take(2).all { it.responseFormat is AiModelResponseFormat.JsonSchema })
         assertEquals(AiModelResponseFormat.PlainText, f.requests[2].responseFormat)
-        assertTrue(f.requests[2].systemInstruction.contains("JSON Schema"))
+        assertFalse(f.requests[2].systemInstruction.contains("JSON Schema"))
         assertEquals("你好呀", f.text)
     }
 
-    @Test fun compatibleResponseModeInvalidJsonIsRejectedWithoutSending() {
+    @Test fun plainTextResponseModeAcceptsNonJsonWithoutSendingJsonEnvelope() {
         val f = Fixture()
         f.emptyFailuresRemaining = 2
         f.modelOutput = "not-json"
@@ -749,9 +753,9 @@ class VisibleDraftFlowTest {
         f.drain()
         assertEquals(3, f.calls)
         assertEquals(AiModelResponseFormat.PlainText, f.requests.last().responseFormat)
-        assertEquals("", f.text)
-        assertFalse(f.coordinator.isConversationReturnBlocked)
-        assertTrue(f.logs.any { it.contains("MODEL_OUTPUT_SCHEMA_INVALID") })
+        assertEquals("not-json", f.text)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertFalse(f.logs.any { it.contains("MODEL_OUTPUT_SCHEMA_INVALID") })
     }
 
     @Test fun otherProvidersKeepStrictResponseModeOnEveryRetry() {
@@ -1464,6 +1468,62 @@ class VisibleDraftFlowTest {
         assertTrue(f.logs.any { it.contains("DRAFT_SEND_SEND_PORT_UNAVAILABLE") })
     }
 
+    @Test fun platformCompletionRequestsOneReadOnlyObservationWithoutConfirmingOrResending() {
+        var sends = 0
+        lateinit var completed: () -> Unit
+        val ledger = SegmentLedger()
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
+                error("Completion-capable send port must be used")
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String,
+                onGestureCompleted: () -> Unit): ChatDraftInputResult {
+                sends++
+                completed = onGestureCompleted
+                // Exercise a platform callback delivered before the submission returns.
+                onGestureCompleted()
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, ledger, TaskLedger())
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertEquals(1, sends)
+        assertEquals(1, f.completionObservationRequests)
+        assertTrue(f.coordinator.isSendConfirmationPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, ledger.records.values.single().status)
+        completed()
+        f.drain()
+        assertEquals(1, f.completionObservationRequests)
+        val outgoing = ChatMessage("new-outgoing", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        assertEquals(SendConfirmationResult.CONFIRMED, f.coordinator.confirmSendResult(
+            f.batch.copy(messages = listOf(outgoing), capturedAtMillis = f.now + 1L), f.snapshot))
+        assertEquals(1, sends)
+        assertEquals(ReplySegmentTaskStatus.SENT, ledger.records.values.single().status)
+    }
+
+    @Test fun platformCompletionAfterRuntimeResetCannotRequestObservation() {
+        lateinit var completed: () -> Unit
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
+                error("Completion-capable send port must be used")
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String,
+                onGestureCompleted: () -> Unit): ChatDraftInputResult {
+                completed = onGestureCompleted
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, SegmentLedger(), TaskLedger())
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertTrue(f.coordinator.isSendConfirmationPending)
+        assertEquals(0, f.completionObservationRequests)
+        f.coordinator.resetForRuntimeReset()
+        completed()
+        f.drain()
+        assertEquals(0, f.completionObservationRequests)
+    }
+
     @Test fun returnGateOpensOnlyAfterNewOutgoingBubbleConfirmsSend() {
         val f = Fixture(object : ChatDraftSendPort {
             override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
@@ -1481,6 +1541,44 @@ class VisibleDraftFlowTest {
         assertFalse(f.coordinator.isConversationReturnBlocked)
     }
 
+
+    @Test fun taskIsolationStillRevokesPendingCallbacksWhenUnknownJournalUpdateThrows() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        var submitted = 0
+        lateinit var completed: () -> Unit
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
+                error("completion capable send port required")
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String,
+                onGestureCompleted: () -> Unit): ChatDraftInputResult {
+                submitted++
+                completed = onGestureCompleted
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+        first.drain()
+        assertEquals(1, submitted)
+        assertTrue(first.coordinator.isSendConfirmationPending)
+        val durable = segments.records.values.single()
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, durable.status)
+        segments.failUnknownUpdate = true
+        first.coordinator.resetForRuntimeReset()
+        completed()
+        first.drain()
+        assertFalse(first.coordinator.isSendConfirmationPending)
+        assertEquals(0, first.completionObservationRequests)
+        assertEquals(durable, segments.records.values.single())
+        assertEquals(1, submitted)
+        assertTrue(first.logs.any { it.contains("UNKNOWN_JOURNAL_UPDATE_UNCONFIRMED") })
+        // The original conversation still has its non-replayable send proof, even
+        // though the in-memory pending flag no longer globally blocks another task.
+        first.text = ""
+        first.coordinator.generateVisibleDraft(first.batch, first.snapshot)
+        first.drain()
+        assertEquals(1, submitted)
+    }
 
     @Test fun restoredUnknownSendRequiresTwoFreshMatchingObservationsAndNeverResends() {
         val segments = SegmentLedger()
@@ -1841,5 +1939,40 @@ class VisibleDraftFlowTest {
         assertFalse(f.coordinator.verifyGreetingPreSendFailure(
             failure, f.snapshot.copy(chatTitleText = "其他聊天")))
     }
+
+
+    @Test fun partialOcrProjectionReachesModelWithoutChangingRawMessageOrDedupeIdentity() {
+        val f = Fixture()
+        val marker = OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY
+        val raw = "今晚有空吗\n${marker} 在吗a"
+        val first = OcrContentRect(0, 0, 100, 23)
+        val second = OcrContentRect(0, 30, 100, 53)
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED, "今晚有空吗",
+                OcrTokenSource.OCR_LINE, 0, first),
+            OcrContentToken(OcrContentKind.PLACEHOLDER, OcrTokenStatus.UNVERIFIED, marker,
+                OcrTokenSource.VISUAL_GUARD, 1, second),
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.AMBIGUOUS, " 在吗a",
+                OcrTokenSource.OCR_LINE, 1, second)
+        )
+        val projection = OcrTextProjection("今晚有空吗", OcrTextProjectionStatus.PARTIAL,
+            listOf(0), listOf(1))
+        val original = f.batch.messages.single()
+        val current = original.copy(
+            content = raw, contentQuality = MessageContentQuality.AMBIGUOUS,
+            observationRowIndex = 0
+        )
+        val batch = f.batch.copy(
+            messages = listOf(current),
+            ocrTokensByRowIndex = mapOf(0 to tokens),
+            ocrTextProjectionsByRowIndex = mapOf(0 to projection)
+        )
+        assertTrue(f.coordinator.generateVisibleDraft(batch, f.snapshot))
+        assertEquals(1, f.calls)
+        assertEquals(listOf("今晚有空吗"), f.requests.single().conversation.map { it.content })
+        assertEquals(raw, batch.messages.single().content)
+        assertEquals(original.id, batch.messages.single().id)
+    }
+
 
 }

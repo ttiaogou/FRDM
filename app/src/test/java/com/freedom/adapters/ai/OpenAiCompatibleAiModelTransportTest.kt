@@ -35,7 +35,7 @@ class OpenAiCompatibleAiModelTransportTest {
         val body = connection.requestBody.toString(StandardCharsets.UTF_8.name())
         assertTrue(body.contains("\"model\":\"test-model\""))
         assertTrue(body.contains("\"temperature\":0.7"))
-        assertTrue(body.contains("\"max_completion_tokens\":1024"))
+        assertTrue(body.contains("\"max_completion_tokens\":256"))
         assertTrue(body.contains("\"type\":\"json_schema\""))
         assertTrue(body.contains("\"role\":\"system\""))
         assertTrue(body.contains("\"role\":\"user\""))
@@ -103,7 +103,7 @@ class OpenAiCompatibleAiModelTransportTest {
             AiModelMessage(AiModelMessage.Role.USER, "今天天气怎么样？")
         ),
         temperature = 0.7,
-        maxOutputTokens = 1_024,
+        maxOutputTokens = 256,
         requestId = "request-1",
         responseFormat = format
     )

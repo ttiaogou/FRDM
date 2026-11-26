@@ -188,6 +188,22 @@ class OcrManager(context: android.content.Context) : Closeable {
                             "OCR_CLIENT_BINDER_CALL_SUCCESS requestId=$requestId;attempt=$attempt;" +
                                 "durationMs=${SystemClock.elapsedRealtime() - binderCallStartedAt};results=${it.size}"
                         )
+                        val extras = it.firstOrNull()?.extras
+                        val timingKeys = listOf(
+                            "decodeMs" to OcrPluginContract.EXTRA_IMAGE_DECODE_TIME_MS,
+                            "engineLockWaitMs" to OcrPluginContract.EXTRA_ENGINE_LOCK_WAIT_MS,
+                            "modelPrepareMs" to OcrPluginContract.EXTRA_MODEL_PREPARE_TIME_MS,
+                            "engineAcquireMs" to OcrPluginContract.EXTRA_ENGINE_ACQUIRE_TIME_MS,
+                            "inferenceWallMs" to OcrPluginContract.EXTRA_INFERENCE_WALL_TIME_MS,
+                            "detectionMs" to OcrPluginContract.EXTRA_DETECTION_TIME_MS,
+                            "recognitionMs" to OcrPluginContract.EXTRA_RECOGNITION_TIME_MS,
+                            "coldLoadMs" to OcrPluginContract.EXTRA_COLD_LOAD_TIME_MS,
+                            "engineTotalMs" to OcrPluginContract.EXTRA_TOTAL_TIME_MS
+                        )
+                        emitDiagnostic("OCR_CLIENT_PLUGIN_TIMINGS requestId=$requestId;attempt=$attempt;" +
+                            timingKeys.joinToString(";") { (label, key) ->
+                                "$label=${extras?.takeIf { bundle -> bundle.containsKey(key) }?.getLong(key) ?: "UNAVAILABLE"}"
+                            })
                     }
                 } catch (failure: Throwable) {
                     detectFailure = failure

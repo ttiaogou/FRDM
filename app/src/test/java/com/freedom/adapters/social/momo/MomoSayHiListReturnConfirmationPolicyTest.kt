@@ -1,5 +1,9 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.core.accessibility.api.WindowRef
+import com.freedom.core.runtime.RunMode
+import com.freedom.core.runtime.TargetAppReadinessController
+import com.freedom.core.runtime.TargetAppReadinessEvidence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -45,6 +49,37 @@ class MomoSayHiListReturnConfirmationPolicyTest {
         assertFalse(policy.observe("list:window-7:generation-12", 1_200L))
         assertEquals(1, policy.stableSampleCount)
         assertTrue(policy.observe("list:window-7:generation-12", 1_800L))
+    }
+
+    @Test
+    fun structurallyVerifiedReturnDoesNotAuthorizeActionUntilFreshActivityAndReady() {
+        val pkg = "com.immomo.momo"
+        val listActivity = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"
+        val unknownWindow = WindowRef(pkg, "", 24L, 3083)
+        val restoredWindow = unknownWindow.copy(activityClass = listActivity)
+        val listKey = requireNotNull(MomoWindowPageFingerprint.windowIdentity(
+            unknownWindow, pkg, "RECEIVED_GREETINGS_LIST"
+        ))
+        assertEquals(listKey, MomoWindowPageFingerprint.windowIdentity(
+            restoredWindow, pkg, "RECEIVED_GREETINGS_LIST"
+        ))
+        assertFalse(policy.observe(listKey, 1_000L))
+        assertTrue(policy.observe(listKey, 1_500L))
+
+        val readiness = TargetAppReadinessController(foregroundQuietPeriodMs = 0L)
+        val evidence = TargetAppReadinessEvidence(
+            targetPackage = pkg, foregroundPackage = pkg, activityClass = "",
+            runMode = RunMode.AI_REPLY, windowId = 3083, pageGeneration = 24L,
+            activeWindowAvailable = true, businessPageReady = true
+        )
+        assertFalse(readiness.evaluate(evidence, 1_500L).isReadyForWindow(unknownWindow, RunMode.AI_REPLY))
+        val ready = readiness.evaluate(evidence.copy(activityClass = listActivity), 1_850L)
+        assertTrue(ready.isReadyForWindow(restoredWindow, RunMode.AI_REPLY))
+        assertFalse(ready.isReadyForWindow(unknownWindow, RunMode.AI_REPLY))
+        assertFalse(ready.isReadyForWindow(restoredWindow.copy(generation = 25L), RunMode.AI_REPLY))
+        assertFalse(ready.isReadyForWindow(restoredWindow.copy(windowId = 3097), RunMode.AI_REPLY))
+        readiness.invalidate("stop", 2_000L)
+        assertFalse(readiness.current().isReadyForWindow(restoredWindow, RunMode.AI_REPLY))
     }
 
     @Test

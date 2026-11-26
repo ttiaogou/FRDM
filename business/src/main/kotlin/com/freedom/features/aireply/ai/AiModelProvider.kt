@@ -12,16 +12,21 @@ data class AiModelRequest(
     val systemInstruction: String,
     val conversation: List<AiModelMessage>,
     val temperature: Double = 0.3,
-    val maxOutputTokens: Int = 512,
+    val maxOutputTokens: Int = 256,
     val requestId: String,
-    val responseFormat: AiModelResponseFormat = AiModelResponseFormat.PlainText
+    val responseFormat: AiModelResponseFormat = AiModelResponseFormat.PlainText,
+    val attemptIndex: Int = 0
 ) {
     init {
         require(systemInstruction.isNotBlank())
         require(conversation.isNotEmpty())
         require(temperature in 0.0..2.0)
-        require(maxOutputTokens in 1..8192)
+        require(maxOutputTokens in 1..MAX_OUTPUT_TOKENS)
         require(requestId.isNotBlank())
+    }
+
+    companion object {
+        const val MAX_OUTPUT_TOKENS = 256
     }
 }
 
@@ -66,7 +71,8 @@ class AiModelEmptyOutputException(
     override val responseContentState: String,
     override val responseFinishReason: String?,
     override val responseInputTokens: Int? = null,
-    override val responseOutputTokens: Int? = null
+    override val responseOutputTokens: Int? = null,
+    override val responseReasoningContentState: String? = null
 ) : IllegalArgumentException("Model provider returned empty output"), AiModelCallFailureDetails {
     override val safeCode = "EMPTY_MODEL_OUTPUT"
     override val retryable = responseFinishReason == null || responseFinishReason == "stop"

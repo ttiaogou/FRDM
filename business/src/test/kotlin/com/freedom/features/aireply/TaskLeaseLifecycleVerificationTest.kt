@@ -10,6 +10,7 @@ import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.ChatRegionSnapshot
+import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import org.junit.Assert.assertEquals
@@ -85,7 +86,22 @@ class TaskLeaseLifecycleVerificationTest {
         val flow = ReceivedGreetingsTaskFlowController(ownership, FakePagePort())
         assertTrue(flow.claimOwnership("test"))
         flow.markStarted()
-        flow.markCompletedAwaitingUserExit()
+        flow.markTraversalCompleted()
+        assertTrue(flow.isActive)
+        assertTrue(flow.awaitingNormalInboxAfterReturn)
+        assertTrue(flow.ownsTask())
+        assertEquals(ReceivedGreetingsTaskController.TASK_ID, coordinator.activeTaskId())
+
+        assertEquals(ReceivedGreetingsBackResult.BACK_SUBMITTED, flow.returnForPriorityCheck())
+        flow.markReturnRequested()
+        assertTrue(flow.isActive)
+        assertTrue(flow.returnRequested)
+        assertTrue(flow.ownsTask())
+
+        flow.markTraversalReturnedToInbox()
+        assertFalse(flow.isActive)
+        assertFalse(flow.awaitingNormalInboxAfterReturn)
+        assertFalse(flow.returnRequested)
 
         assertTrue(flow.releaseOwnership("completed"))
         assertFalse(flow.ownsTask())
@@ -185,7 +201,8 @@ class TaskLeaseLifecycleVerificationTest {
         override fun observeReceivedGreetingsPage(): Boolean = true
         override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus =
             ReceivedGreetingsTraversalStatus.SCANNING
-        override fun returnFromReceivedGreetingsForPriorityCheck(): Boolean = true
+        override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult =
+            ReceivedGreetingsBackResult.BACK_SUBMITTED
         override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean = true
     }
 }

@@ -200,6 +200,22 @@ class RunLogBudgetPolicyTest {
     }
 
     @Test
+    fun privateRowObservationWarningsDoNotHideRealFailures() {
+        val retry = "AI 私聊异常会话[INCOMPLETE_UNREAD_RETRYABLE]：unresolved=1；cacheWrite=false；保持检查点"
+        val blocked = "AI 私聊异常会话[ROW_SCOPED_BLOCK]：仅隔离待复核会话；禁止提前完成本轮"
+        val relocation = "AI 私聊异常会话[RELOCATION_WAIT]：已确认顶部但原异常未解决；按现有退避等待下一次新鲜列表观察"
+        for (message in listOf(retry, blocked, relocation)) {
+            assertEquals(RunLogLevel.WARN, RunLogBudgetPolicy.inferLevel(message))
+            assertEquals(RunLogCategory.DATA_QUALITY, RunLogBudgetPolicy.inferCategory(message))
+            assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("$message；读取失败"))
+            assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("$message；IllegalStateException"))
+            assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("$message；写入失败"))
+            assertEquals(RunLogLevel.FATAL, RunLogBudgetPolicy.inferLevel("$message；FATAL"))
+        }
+        assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("AI 私聊异常会话[OTHER]：异常"))
+    }
+
+    @Test
     fun receivedGreetingsNavigationPauseAfterTimeoutIsWarning() {
         val message = "收到的招呼导航暂停：异步页面切换等待失败或超时；不把中间页面当作消息列表"
 
@@ -243,6 +259,23 @@ class RunLogBudgetPolicyTest {
         ))
         assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel(
             "AI 联系人身份采集[OBSERVE_WAITING]：资料页读取失败"
+        ))
+    }
+
+    @Test
+    fun routineReadOnlyReadinessWaitIsInfoButActualRejectionAndFailuresRemainVisible() {
+        val waiting = "目标应用就绪状态[TRANSITION]：READY->STARTING；mode=AI_REPLY；" +
+            "package=com.immomo.momo；activity=UNKNOWN；windowId=3083；pageGeneration=24；" +
+            "reason=当前 Activity 身份尚未确认"
+        assertEquals(RunLogLevel.INFO, RunLogBudgetPolicy.inferLevel(waiting))
+        assertEquals(RunLogLevel.WARN, RunLogBudgetPolicy.inferLevel(
+            "自主手势派发拒绝[APP_NOT_READY]：status=STARTING；mode=AI_REPLY；windowId=3083；reason=当前 Activity 身份尚未确认"
+        ))
+        assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("$waiting；读取失败"))
+        assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("$waiting；读取异常：IllegalStateException"))
+        assertEquals(RunLogLevel.WARN, RunLogBudgetPolicy.inferLevel("$waiting；TIMEOUT"))
+        assertEquals(RunLogLevel.WARN, RunLogBudgetPolicy.inferLevel(
+            waiting.replace("READY->STARTING", "READY->BLOCKED")
         ))
     }
 

@@ -12,11 +12,15 @@ import com.freedom.core.accessibility.gesture.GestureExecutionResult
 import com.freedom.core.accessibility.gesture.GestureExecutionStatus
 import com.freedom.core.accessibility.gesture.GestureExecutionListener
 import com.freedom.core.accessibility.gesture.GestureIntentRequest
+import com.freedom.core.accessibility.gesture.GestureIntent
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatNodeTextSource
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
+import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
+import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.gesture.api.GestureApi
 import org.junit.Assert.assertEquals
@@ -35,7 +39,7 @@ class PrivateMessagesTaskExecutorTest {
             onDispatch = { dispatches++ }
         )
 
-        val result = executor.openSession(candidate(), emptySet()) { _, _, _, _ -> }
+        val result = executor.openSession(key(candidate()), candidate().rowTarget.window, emptySet()) { _, _, _, _ -> }
 
         assertTrue(result is PrivateMessagesTaskExecutor.Attempt.Rejected)
         assertEquals(
@@ -55,7 +59,7 @@ class PrivateMessagesTaskExecutorTest {
             onDispatch = { dispatches++ }
         )
 
-        val result = executor.openSession(candidate(), emptySet()) { _, _, _, _ -> }
+        val result = executor.openSession(key(candidate()), candidate().rowTarget.window, emptySet()) { _, _, _, _ -> }
 
         assertTrue(result is PrivateMessagesTaskExecutor.Attempt.Rejected)
         assertEquals(
@@ -76,7 +80,7 @@ class PrivateMessagesTaskExecutorTest {
         )
         var callbackId: String? = null
 
-        val result = executor.openSession(candidate(), emptySet()) { requestId, _, _, _ ->
+        val result = executor.openSession(key(candidate()), candidate().rowTarget.window, emptySet()) { requestId, _, _, _ ->
             callbackId = requestId
         }
 
@@ -103,7 +107,7 @@ class PrivateMessagesTaskExecutorTest {
             onDispatch = { dispatches++ }
         )
 
-        val result = executor.openSession(candidate(), emptySet()) { _, _, _, _ -> }
+        val result = executor.openSession(key(candidate()), candidate().rowTarget.window, emptySet()) { _, _, _, _ -> }
 
         assertTrue(result is PrivateMessagesTaskExecutor.Attempt.Rejected)
         assertEquals(
@@ -114,9 +118,156 @@ class PrivateMessagesTaskExecutorTest {
         assertEquals(0, dispatches)
     }
 
+    @Test
+    fun reacquiresUniqueIdentityAfterChildIndexAndCoordinatesChange() {
+        val selected = candidate()
+        val moved = candidate(rowIndex = 3, top = 650)
+        val other = candidate(rowIndex = 0, top = 200, name = "Other")
+        var dispatched: GestureIntentRequest? = null
+        val executor = executor(
+            snapshotProvider = { validSnapshot().copy(chatListCandidates = listOf(other, moved)) },
+            onDispatch = { dispatched = it }
+        )
+        val result = executor.openSession(key(selected), selected.rowTarget.window, emptySet()) { _, _, _, _ -> }
+        assertTrue(result is PrivateMessagesTaskExecutor.Attempt.Submitted)
+        assertEquals(moved, (result as PrivateMessagesTaskExecutor.Attempt.Submitted).candidate)
+        val tap = requireNotNull(dispatched).intent as GestureIntent.Tap
+        assertEquals(moved.rowBounds, tap.targetBounds)
+        assertEquals(ScreenRect(100, 670, 300, 750), tap.preferredBounds)
+        assertTrue(requireNotNull(dispatched).description.contains("会话行 4"))
+    }
+
+    @Test
+    fun repeatedExtractionOfSameRowRejectsClickWithoutConfirmingIdentityConflict() {
+        val selected = candidate()
+        var dispatches = 0
+        val executor = executor(
+            snapshotProvider = { validSnapshot().copy(chatListCandidates = listOf(selected, selected)) },
+            onDispatch = { dispatches++ }
+        )
+        val result = executor.openSession(key(selected), selected.rowTarget.window, emptySet()) { _, _, _, _ -> }
+        val rejected = result as PrivateMessagesTaskExecutor.Attempt.Rejected
+        assertEquals(PrivateMessagesTaskExecutor.RejectionReason.AMBIGUOUS_SESSION_IDENTITY, rejected.reason)
+        assertFalse(rejected.confirmedIdentityBlock)
+        assertEquals(0, dispatches)
+    }
+
+    @Test
+    fun rejectsFreshDuplicateEvenWhenOneRowHasIncompletePreviewOrVerifiedIdentity() {
+        val selected = candidate()
+        val moved = candidate(rowIndex = 2, top = 500)
+        val incomplete = candidate(rowIndex = 3, top = 700, previewValid = false)
+        val verified = candidate(rowIndex = 3, top = 700).apply {
+            contactIdentity = ContactRowIdentity("snapshot", "temp", "verified", ContactIdentityConfidence.PLATFORM_ID_VERIFIED)
+        }
+        for (duplicate in listOf(incomplete, verified)) {
+            var dispatches = 0
+            val executor = executor(
+                snapshotProvider = { validSnapshot().copy(chatListCandidates = listOf(moved, duplicate)) },
+                onDispatch = { dispatches++ }
+            )
+            val result = executor.openSession(key(selected), selected.rowTarget.window, emptySet()) { _, _, _, _ -> }
+            assertEquals(PrivateMessagesTaskExecutor.RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
+                (result as PrivateMessagesTaskExecutor.Attempt.Rejected).reason)
+            assertTrue(result.confirmedIdentityBlock)
+            assertEquals(0, dispatches)
+        }
+    }
+
+    @Test
+    fun rejectsMissingIdentityAndNeverFallsBackToSameTitleForVerifiedContact() {
+        val selected = candidate().apply {
+            contactIdentity = ContactRowIdentity("snapshot", "temp", "selected-id", ContactIdentityConfidence.PLATFORM_ID_VERIFIED)
+        }
+        val other = candidate().apply {
+            contactIdentity = ContactRowIdentity("snapshot", "temp", "other-id", ContactIdentityConfidence.PLATFORM_ID_VERIFIED)
+        }
+        var dispatches = 0
+        val executor = executor(snapshotProvider = { validSnapshot(other) }, onDispatch = { dispatches++ })
+        val result = executor.openSession(key(selected), selected.rowTarget.window, emptySet()) { _, _, _, _ -> }
+        assertEquals(PrivateMessagesTaskExecutor.RejectionReason.SESSION_ROW_NOT_FOUND,
+            (result as PrivateMessagesTaskExecutor.Attempt.Rejected).reason)
+        assertEquals(0, dispatches)
+    }
+
+    @Test
+    fun rejectsChangedWindowGenerationAndTruncatedEvidenceBeforeResolvingRow() {
+        val selected = candidate()
+        for ((page, expected) in listOf(
+            validSnapshot(candidate(windowGeneration = 2L)).copy(windowGeneration = 2L) to
+                PrivateMessagesTaskExecutor.RejectionReason.WINDOW_CONTEXT_CHANGED,
+            validSnapshot().copy(chatListExtractionTruncated = true) to
+                PrivateMessagesTaskExecutor.RejectionReason.PAGE_CHANGED
+        )) {
+            var dispatches = 0
+            val executor = executor(snapshotProvider = { page }, onDispatch = { dispatches++ })
+            val result = executor.openSession(key(selected), selected.rowTarget.window, emptySet()) { _, _, _, _ -> }
+            assertEquals(expected, (result as PrivateMessagesTaskExecutor.Attempt.Rejected).reason)
+            assertEquals(0, dispatches)
+        }
+    }
+
+    @Test
+    fun delayedDispatchRejectsMovedReadDuplicateOrMissingTargetAndAcceptsUnchangedRow() {
+        val selected = candidate()
+        var current = validSnapshot(selected)
+        var listener: GestureExecutionListener? = null
+        val executor = executor(snapshotProvider = { current },
+            onListener = { listener = it }, onDispatch = {})
+        val attempt = executor.openSession(key(selected), selected.rowTarget.window, emptySet()) { _, _, _, _ -> }
+        val result = attempt as PrivateMessagesTaskExecutor.Attempt.Submitted
+        val guard = requireNotNull(listener)
+        assertTrue(guard.isDispatchTargetCurrent(result.requestId))
+        current = validSnapshot(candidate(rowIndex = 3, top = 650))
+        assertFalse(guard.isDispatchTargetCurrent(result.requestId))
+        current = validSnapshot(candidate(unreadStatus = ChatUnreadStatus.READ))
+        assertFalse(guard.isDispatchTargetCurrent(result.requestId))
+        current = validSnapshot().copy(chatListCandidates = listOf(selected, candidate(rowIndex = 1, top = 500)))
+        assertFalse(guard.isDispatchTargetCurrent(result.requestId))
+        current = validSnapshot().copy(chatListCandidates = listOf(candidate(name = "Other")))
+        assertFalse(guard.isDispatchTargetCurrent(result.requestId))
+        current = validSnapshot(selected)
+        assertTrue(guard.isDispatchTargetCurrent(result.requestId))
+    }
+
+    @Test
+    fun rejectsStaleTraversalOrderWithoutSubmittingGesture() {
+        val selected = candidate()
+        var dispatches = 0
+        val executor = executor(snapshotProvider = { validSnapshot() }, onDispatch = { dispatches++ })
+        val result = executor.openSession(key(selected), selected.rowTarget.window, emptySet(),
+            isCurrentTraversalSelection = { fresh, selectedKey ->
+                assertEquals(selectedKey, key(fresh.chatListCandidates.single()))
+                false
+            }) { _, _, _, _ -> }
+        assertEquals(PrivateMessagesTaskExecutor.RejectionReason.TRAVERSAL_ORDER_CHANGED,
+            (result as PrivateMessagesTaskExecutor.Attempt.Rejected).reason)
+        assertEquals(0, dispatches)
+    }
+
+    @Test
+    fun rechecksVisualIdentityQuarantineImmediatelyBeforeDispatch() {
+        val selected = candidate()
+        var blockedChecks = 0
+        var dispatches = 0
+        val executor = executor(
+            snapshotProvider = { validSnapshot() },
+            blocked = { ++blockedChecks >= 2 },
+            onDispatch = { dispatches++ }
+        )
+        val result = executor.openSession(key(selected), selected.rowTarget.window, emptySet()) { _, _, _, _ -> }
+        assertEquals(PrivateMessagesTaskExecutor.RejectionReason.AMBIGUOUS_SESSION_IDENTITY,
+            (result as PrivateMessagesTaskExecutor.Attempt.Rejected).reason)
+        assertEquals(0, dispatches)
+    }
+
+    private fun key(candidate: ChatListCandidateSnapshot) = ChatSessionManagementPolicy.stableSessionKey(candidate)
+
     private fun executor(
         snapshotProvider: () -> ChatPageSnapshot?,
         ownsTask: () -> Boolean = { true },
+        blocked: (String) -> Boolean = { false },
+        onListener: (GestureExecutionListener) -> Unit = {},
         onDispatch: (GestureIntentRequest) -> Unit
     ) = PrivateMessagesTaskExecutor(
         sessionPort = object : ChatSessionManagementPort {
@@ -124,10 +275,11 @@ class PrivateMessagesTaskExecutorTest {
             override fun finishSessionManagement(): String? = null
             override fun captureSessionListSample(snapshot: ChatPageSnapshot, onComplete: (String?) -> Unit) =
                 onComplete(null)
+            override fun isSessionIdentityBlocked(sessionKey: String): Boolean = blocked(sessionKey)
             override fun resolveSessionTapBounds(
                 snapshot: ChatPageSnapshot,
                 candidate: ChatListCandidateSnapshot
-            ): ScreenRect = ScreenRect(100, 220, 300, 300)
+            ): ScreenRect = ScreenRect(100, candidate.rowBounds.top + 20, 300, candidate.rowBounds.top + 100)
             override fun persistChatSample(
                 snapshot: ChatPageSnapshot,
                 batch: com.freedom.features.aireply.domain.message.ChatMessageBatch,
@@ -155,6 +307,7 @@ class PrivateMessagesTaskExecutorTest {
                 request: GestureIntentRequest,
                 listener: GestureExecutionListener
             ): GestureSubmission {
+                onListener(listener)
                 onDispatch(request)
                 listener.onResult(GestureExecutionResult(request.id, GestureExecutionStatus.COMPLETED))
                 return GestureSubmission.ACCEPTED
@@ -189,14 +342,19 @@ class PrivateMessagesTaskExecutorTest {
     )
 
     private fun candidate(
-        unreadStatus: ChatUnreadStatus = ChatUnreadStatus.UNREAD
+        unreadStatus: ChatUnreadStatus = ChatUnreadStatus.UNREAD,
+        rowIndex: Int = 0,
+        top: Int = 200,
+        name: String = "Sample Contact",
+        windowGeneration: Long = 1L,
+        previewValid: Boolean = true
     ): ChatListCandidateSnapshot {
-        val row = ScreenRect(0, 200, 720, 350)
+        val row = ScreenRect(0, top, 720, top + 150)
         return ChatListCandidateSnapshot(
-            rowIndex = 0,
+            rowIndex = rowIndex,
             rowTarget = NodeTarget(
-                window = WindowRef("com.immomo.momo", "MaintabActivity", 1L, 1),
-                path = NodePath(listOf(0, 0)),
+                window = WindowRef("com.immomo.momo", "MaintabActivity", windowGeneration, 1),
+                path = NodePath(listOf(0, rowIndex)),
                 expectedClassName = "android.widget.RelativeLayout"
             ),
             rowBounds = row,
@@ -204,24 +362,24 @@ class PrivateMessagesTaskExecutorTest {
             intersectsViewport = true,
             fullyInsideViewport = true,
             rowBoundsValid = true,
-            avatarBounds = ScreenRect(10, 210, 90, 330),
-            avatarPath = NodePath(listOf(0, 0, 0)),
-            nameText = "Sample Contact",
+            avatarBounds = ScreenRect(10, top + 10, 90, top + 130),
+            avatarPath = NodePath(listOf(0, rowIndex, 0)),
+            nameText = name,
             nameSource = ChatNodeTextSource.NODE_TEXT,
-            nameNodePath = NodePath(listOf(0, 0, 1)),
-            nameBounds = ScreenRect(120, 215, 360, 250),
+            nameNodePath = NodePath(listOf(0, rowIndex, 1)),
+            nameBounds = ScreenRect(120, top + 15, 360, top + 50),
             nameNodeVisibleToUser = true,
             nameBoundsIntersectViewport = true,
             nameBoundsFullyInsideViewport = true,
             nameBoundsValid = true,
             previewText = "Preview",
             previewSource = ChatNodeTextSource.NODE_TEXT,
-            previewNodePath = NodePath(listOf(0, 0, 2)),
-            previewBounds = ScreenRect(120, 260, 620, 300),
+            previewNodePath = NodePath(listOf(0, rowIndex, 2)),
+            previewBounds = ScreenRect(120, top + 60, 620, top + 100),
             previewNodeVisibleToUser = true,
             previewBoundsIntersectViewport = true,
             previewBoundsFullyInsideViewport = true,
-            previewBoundsValid = true,
+            previewBoundsValid = previewValid,
             timestampText = "10:20",
             timestampSource = ChatNodeTextSource.NODE_TEXT,
             timestampNodePath = null,

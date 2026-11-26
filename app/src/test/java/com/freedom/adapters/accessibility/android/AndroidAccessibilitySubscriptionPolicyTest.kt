@@ -10,6 +10,22 @@ import org.junit.Test
 
 class AndroidAccessibilitySubscriptionPolicyTest {
     @Test
+    fun authorizedObservationWithoutRuntimeSubscribesAndFiltersSafely() {
+        val subscription = AndroidAccessibilitySubscriptionPolicy.forRunMode(
+            "com.immomo.momo", "com.freedom", null, runRequested = true
+        )
+        assertNull(subscription.packageNames)
+        assertEquals(AndroidAccessibilitySubscriptionPolicy.targetApplicationEventTypes or
+            AndroidAccessibilitySubscriptionPolicy.globalTouchEventTypes, subscription.eventTypes)
+        assertTrue(AndroidAccessibilitySubscriptionPolicy.acceptsCallbackEvent(
+            null, AccessibilityEvent.TYPE_TOUCH_INTERACTION_START, "com.immomo.momo", null, true
+        ))
+        assertFalse(AndroidAccessibilitySubscriptionPolicy.acceptsCallbackEvent(
+            "com.other.app", AccessibilityEvent.TYPE_VIEW_SCROLLED, "com.immomo.momo", null, true
+        ))
+    }
+
+    @Test
     fun aiReplySubscribesToGlobalTouchWhileServiceGuardsTargetApplicationEvents() {
         val subscription = AndroidAccessibilitySubscriptionPolicy.forRunMode(
             targetPackage = "com.immomo.momo",
