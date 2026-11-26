@@ -84,8 +84,8 @@ enum class LanguageStyle(val displayName: String, val systemInstruction: String)
 }
 
 enum class ReplyLength(val displayName: String, val systemInstruction: String) {
-    MINIMAL("极简", "尽量用最少的文字直接回答，只保留必要信息。"),
-    SHORT("简短", "简洁回答，通常只说明核心内容，不做不必要的展开。"),
+    MINIMAL("极简", "短点保持口语化，尽量用最少的文字。"),
+    SHORT("简短", "20字以内，通常只回复内容，不做不必要的展开。"),
     MODERATE("适中", "提供适量背景和细节，完整回答问题但避免冗长。"),
     DETAILED("详细", "在问题需要时提供充分解释、必要背景和具体细节，保持结构清晰。")
 }
