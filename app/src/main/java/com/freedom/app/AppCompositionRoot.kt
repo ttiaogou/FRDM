@@ -572,10 +572,26 @@ internal class AccessibilityServiceDependencies internal constructor(
             isAiReplyActive = { runSessionCoordinator.isRuntimeReady(RunMode.AI_REPLY) },
             onLog = addLog,
             createGateway = { configuration ->
+                // Development evidence is automatic for an active diagnostic run. The sink is
+                // bound once, so a response from an old run cannot be written into a new one.
+                val contextRunId = diagnostics.activeRunId()
+                val contextSink: ((String) -> Unit)? = contextRunId?.let { runId ->
+                    { line: String -> diagnostics.recordAiContextDiagnostic(runId, line) }
+                }
+                val contextLog: (String) -> Unit = { line ->
+                    if (contextRunId != null && diagnostics.activeRunId() == contextRunId) addLog(line)
+                }
                 val transport = when (configuration.provider) {
-                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration).also { it.diagnosticLog = addLog }
+                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration).also {
+                        it.diagnosticLog = addLog
+                        it.wireDiagnostic = contextSink
+                        it.wireDiagnosticLog = contextLog
+                    }
                     AiModelServiceProvider.OPENAI,
-                    AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport(configuration)
+                    AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport(configuration).also {
+                        it.wireDiagnostic = contextSink
+                        it.wireDiagnosticLog = contextLog
+                    }
                 }
                 val providerName = when (configuration.provider) {
                     AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport.PROVIDER_NAME

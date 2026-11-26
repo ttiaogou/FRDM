@@ -24,11 +24,14 @@ class DeepSeekAiModelTransport(
 ) : AiModelTransport {
 
     internal var diagnosticLog: (String) -> Unit = {}
+    internal var wireDiagnostic: ((String) -> Unit)? = null
+    internal var wireDiagnosticLog: (String) -> Unit = {}
 
     override fun execute(request: AiModelRequest): Result<AiModelResult> = AiModelHttpCallTrace().capture { trace ->
         val config = configuration.normalized()
         require(config.provider == AiModelServiceProvider.DEEPSEEK) { "AI_MODEL_PROVIDER_MISMATCH" }
         require(config.isReadyForCloudProvider) { "AI_MODEL_NOT_CONFIGURED" }
+        val wire = AiContextWireDiagnostics(request, "DEEPSEEK", config.apiKey, wireDiagnostic, wireDiagnosticLog)
         trace.stage = AiModelCallStage.ENDPOINT
         val endpoint = chatCompletionsEndpoint(config.apiBaseUrl)
         trace.stage = AiModelCallStage.CONNECTION_OPEN
@@ -47,12 +50,15 @@ class DeepSeekAiModelTransport(
             val bodyBytes = buildRequestPayload(config.modelName, request)
                 .toByteArray(StandardCharsets.UTF_8)
             connection.setFixedLengthStreamingMode(bodyBytes.size)
+            wire.prepared(bodyBytes)
             trace.stage = AiModelCallStage.REQUEST_WRITE
             connection.outputStream.use { output -> output.write(bodyBytes) }
+            wire.event("REQUEST_WRITTEN")
 
             trace.stage = AiModelCallStage.RESPONSE_STATUS
             val status = connection.responseCode
             trace.httpStatus = status
+            wire.event("HTTP_RESPONSE", status)
             if (status !in 200..299) {
                 runCatching { connection.errorStream?.use {
                     trace.captureProviderError(String(readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8))
@@ -66,10 +72,13 @@ class DeepSeekAiModelTransport(
             trace.stage = AiModelCallStage.RESPONSE_PARSE
             parseResponse(responseText, config.modelName, request, connection.getHeaderField("x-request-id"))
         } catch (timeout: SocketTimeoutException) {
+            wire.event("TRANSPORT_FAILED", trace.httpStatus)
             throw AiModelHttpException("HTTP_TIMEOUT", retryable = true, cause = timeout)
         } catch (failure: AiModelHttpException) {
+            wire.event("TRANSPORT_FAILED", trace.httpStatus)
             throw failure
         } catch (failure: Exception) {
+            wire.event("TRANSPORT_FAILED", trace.httpStatus)
             throw AiModelHttpException("HTTP_TRANSPORT_FAILED", retryable = true, cause = failure)
         } finally {
             connection.disconnect()

@@ -87,9 +87,79 @@ fun interface AiHttpConnectionFactory {
 }
 
 /**
- * 兼容 OpenAI 的 Chat Completions 传输实现；配置的 API 基础地址被视为
- * 地址前缀（通常以 /v1 结尾），若未包含 /chat/completions 则自动补齐。
- * 不记录请求正文、响应正文、API Key 或对话文本。
+ * Development run evidence from the exact serialized request, not a reconstruction of context.
+ * Only conversation role/content pairs leave this helper for the local diagnostic archive.
+ * System prompt text, headers, configured credentials, URL and response body are excluded.
+ * A second redaction is diagnostic-only and never mutates the transmitted bytes.
+ */
+internal class AiContextWireDiagnostics(
+    private val request: AiModelRequest,
+    private val provider: String,
+    private val credential: String,
+    private val sink: ((String) -> Unit)?,
+    private val log: (String) -> Unit
+) {
+    private val requestId = request.requestId.takeIf { it.matches(Regex("[A-Za-z0-9._-]{1,128}")) } ?: "UNKNOWN"
+
+    fun prepared(bodyBytes: ByteArray) {
+        if (sink == null) return
+        runCatching {
+            val payload = MiniJson.parse(String(bodyBytes, StandardCharsets.UTF_8)) as Map<*, *>
+            val wire = payload["messages"] as List<*>
+            var additionalRedaction = false
+            val messages = wire.mapIndexedNotNull { index, item ->
+                val message = item as Map<*, *>
+                val role = message["role"] as String
+                val content = message["content"] as String
+                if (role == "system") return@mapIndexedNotNull null
+                require(role == "user" || role == "assistant")
+                val safe = com.freedom.features.aireply.ai.AiModelDataRedactor.redact(
+                    if (credential.isNotBlank()) content.replace(credential, "[API_KEY_REDACTED]") else content
+                )
+                if (safe != content) additionalRedaction = true
+                linkedMapOf("wireIndex" to index, "role" to role, "content" to safe, "wireChars" to content.length)
+            }
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bodyBytes)
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            val fields = linkedMapOf<String, Any?>(
+                "logicalConversationMessages" to request.conversation.size,
+                "wireMessageCount" to wire.size,
+                "wireConversationMessages" to messages.size,
+                "systemPromptCaptured" to false,
+                "bodyBytes" to bodyBytes.size,
+                "bodySha256" to digest,
+                "additionalDiagnosticRedaction" to additionalRedaction,
+                "messages" to messages
+            )
+            emit("REQUEST_PREPARED", fields)
+            log("AI_CONTEXT_EGRESS requestId=$requestId;attemptIndex=${request.attemptIndex};provider=$provider;" +
+                "logicalMessages=${request.conversation.size};wireMessages=${wire.size};wireConversationMessages=${messages.size};" +
+                "bodyBytes=${bodyBytes.size};stage=REQUEST_PREPARED")
+        }.onFailure { runCatching { log("AI_CONTEXT_EGRESS requestId=$requestId;attemptIndex=${request.attemptIndex};stage=CAPTURE_FAILED") } }
+    }
+
+    fun event(stage: String, status: Int? = null) {
+        if (sink == null) return
+        runCatching {
+            emit(stage, if (status == null) emptyMap() else mapOf("httpStatus" to status))
+            log("AI_CONTEXT_EGRESS requestId=$requestId;attemptIndex=${request.attemptIndex};provider=$provider;" +
+                "stage=$stage;httpStatus=${status ?: "NONE"}")
+        }
+    }
+
+    private fun emit(stage: String, fields: Map<String, Any?>) {
+        val record = linkedMapOf<String, Any?>(
+            "schemaVersion" to 1, "requestId" to requestId, "attemptIndex" to request.attemptIndex,
+            "provider" to provider, "stage" to stage, "capturedAtEpochMs" to System.currentTimeMillis()
+        )
+        record.putAll(fields)
+        sink?.invoke(MiniJson.stringify(record))
+    }
+}
+
+/**
+ * 兼容 OpenAI 的 Chat Completions 传输实现；配置的 API 基础地址被视为地址前缀。
+ * 普通日志不记录正文；本地运行取证仅经独立诊断出口保存脱敏对话。
  */
 class OpenAiCompatibleAiModelTransport(
     private val configuration: AiModelConfiguration,
@@ -97,10 +167,13 @@ class OpenAiCompatibleAiModelTransport(
         url.openConnection() as HttpURLConnection
     }
 ) : AiModelTransport {
+    internal var wireDiagnostic: ((String) -> Unit)? = null
+    internal var wireDiagnosticLog: (String) -> Unit = {}
 
     override fun execute(request: AiModelRequest): Result<AiModelResult> = AiModelHttpCallTrace().capture { trace ->
         val config = configuration.normalized()
         require(config.isReadyForCloudProvider) { "AI_MODEL_NOT_CONFIGURED" }
+        val wire = AiContextWireDiagnostics(request, config.provider.name, config.apiKey, wireDiagnostic, wireDiagnosticLog)
         trace.stage = AiModelCallStage.ENDPOINT
         val endpoint = chatCompletionsEndpoint(config.apiBaseUrl)
         trace.stage = AiModelCallStage.REQUEST_ENCODING
@@ -119,12 +192,15 @@ class OpenAiCompatibleAiModelTransport(
             connection.setRequestProperty("Accept", "application/json")
             val bodyBytes = payload.toByteArray(StandardCharsets.UTF_8)
             connection.setFixedLengthStreamingMode(bodyBytes.size)
+            wire.prepared(bodyBytes)
             trace.stage = AiModelCallStage.REQUEST_WRITE
             connection.outputStream.use { output -> output.write(bodyBytes) }
+            wire.event("REQUEST_WRITTEN")
 
             trace.stage = AiModelCallStage.RESPONSE_STATUS
             val status = connection.responseCode
             trace.httpStatus = status
+            wire.event("HTTP_RESPONSE", status)
             if (status !in 200..299) {
                 // 仅在长度限制内读取并释放响应流，不向日志暴露服务商返回文本。
                 runCatching { connection.errorStream?.use {
@@ -139,10 +215,13 @@ class OpenAiCompatibleAiModelTransport(
             trace.stage = AiModelCallStage.RESPONSE_PARSE
             parseResponse(responseText, config.modelName)
         } catch (timeout: SocketTimeoutException) {
+            wire.event("TRANSPORT_FAILED", trace.httpStatus)
             throw AiModelHttpException("HTTP_TIMEOUT", retryable = true, cause = timeout)
         } catch (failure: AiModelHttpException) {
+            wire.event("TRANSPORT_FAILED", trace.httpStatus)
             throw failure
         } catch (failure: Exception) {
+            wire.event("TRANSPORT_FAILED", trace.httpStatus)
             throw AiModelHttpException("HTTP_TRANSPORT_FAILED", retryable = true, cause = failure)
         } finally {
             connection.disconnect()

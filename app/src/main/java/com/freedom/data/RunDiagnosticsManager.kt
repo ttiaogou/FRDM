@@ -38,6 +38,8 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
     private const val MAX_RECENT_EVENTS = 512
     private const val DEDUP_WINDOW_MS = RunLogBudgetPolicy.DEDUPLICATION_WINDOW_MS
     private const val MARKER_FILE = "active_run.json"
+    private const val AI_CONTEXT_RECORD_LIMIT = 512 * 1024
+    private const val AI_CONTEXT_RUN_LIMIT = 2L * 1024L * 1024L
 
     @Volatile private var instance: RunDiagnosticsManager? = null
 
@@ -68,6 +70,10 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         var writtenErrorDetailBytes: Long = 0L,
         var errorDetailDroppedCount: Long = 0L,
         var errorDetailDroppedBytes: Long = 0L,
+        var aiContextReservedBytes: Long = 0L,
+        var aiContextWrittenBytes: Long = 0L,
+        var aiContextWrittenRecords: Long = 0L,
+        var aiContextDroppedRecords: Long = 0L,
         var lastCounterPersistAtMs: Long = 0L,
         var lastSignature: String = "",
         var lastEventAt: Long = 0L,
@@ -226,6 +232,36 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             event,
             allowDedup = event.level != RunLogLevel.ERROR && event.level != RunLogLevel.FATAL
         )
+    }
+
+    /** The caller binds the sink to the original run; late callbacks cannot enter another run. */
+    @Synchronized
+    override fun recordAiContextDiagnostic(runId: String, jsonLine: String) {
+        val state = activeRun?.takeIf { it.runId == runId && !it.finishRequested } ?: return
+        val bytes = jsonLine.toByteArray(Charsets.UTF_8).size.toLong() + 1L
+        if (bytes > AI_CONTEXT_RECORD_LIMIT || state.aiContextReservedBytes + bytes > AI_CONTEXT_RUN_LIMIT ||
+            jsonLine.isBlank() || '\n' in jsonLine || '\r' in jsonLine
+        ) {
+            state.aiContextDroppedRecords++
+            return
+        }
+        state.aiContextReservedBytes += bytes
+        try {
+            writer.execute {
+                runCatching {
+                    File(state.directory, "ai_context_diagnostics.jsonl").appendText(jsonLine + "\n", Charsets.UTF_8)
+                }.onSuccess {
+                    synchronized(this) {
+                        state.aiContextWrittenRecords++
+                        state.aiContextWrittenBytes += bytes
+                    }
+                }.onFailure {
+                    synchronized(this) { state.aiContextDroppedRecords++ }
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            state.aiContextDroppedRecords++
+        }
     }
 
     /** Explicit structured event entry point for modules that already have typed event data. */
@@ -399,6 +435,18 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                     loadHistoricalIssueCodes(excludingRunId = state.runId)
                 )
                 writeReport(state.directory, report)
+                if (state.aiContextWrittenRecords > 0L || state.aiContextDroppedRecords > 0L) {
+                    runCatching {
+                        File(state.directory, "ai_context_diagnostics_summary.json").writeText(JSONObject()
+                            .put("schemaVersion", 1)
+                            .put("writtenRecords", state.aiContextWrittenRecords)
+                            .put("writtenBytes", state.aiContextWrittenBytes)
+                            .put("droppedRecords", state.aiContextDroppedRecords)
+                            .put("recordLimitBytes", AI_CONTEXT_RECORD_LIMIT)
+                            .put("runLimitBytes", AI_CONTEXT_RUN_LIMIT)
+                            .toString(), Charsets.UTF_8)
+                    }
+                }
                 writeDiagnosticManifest(state.directory, state.runId)
                 writeMarker(
                     JSONObject()
@@ -778,6 +826,8 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         val names = listOf(
             "events.jsonl",
             "errors.jsonl",
+            "ai_context_diagnostics.jsonl",
+            "ai_context_diagnostics_summary.json",
             "diagnostic_counters.json",
             "diagnostic_report.json",
             "diagnostic_report.txt",

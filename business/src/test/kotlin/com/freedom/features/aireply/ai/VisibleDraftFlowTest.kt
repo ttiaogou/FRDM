@@ -210,8 +210,36 @@ class VisibleDraftFlowTest {
             privateMessage.requests.single().conversation.map { it.content })
         assertEquals(ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW,
             privateMessage.decisionRequests.single().constraints.contextScope)
+        assertTrue(greeting.logs.single { it.startsWith("AI_CONTEXT_MERGED") }.contains("history=0;current=1;total=1"))
+        assertTrue(privateMessage.logs.single { it.startsWith("AI_CONTEXT_MERGED") }.contains("history=1;current=1;total=2"))
+        assertTrue(privateMessage.logs.filter { it.startsWith("AI_CONTEXT_") }.none { it.contains("昨日的历史消息") })
         assertEquals(greeting.decisionRequests.single().outputContract,
             privateMessage.decisionRequests.single().outputContract)
+    }
+
+    @Test fun contextDiagnosticsExplainRejectedRowsWithoutChangingModelInput() {
+        val f = Fixture()
+        val latest = f.batch.messages.single().copy(observationRowIndex = 2,
+            bounds = ScreenRect(0, 60, 100, 80))
+        val earlier = latest.copy(id = "earlier", content = "独立上下文文字",
+            bounds = ScreenRect(0, 0, 100, 20), observationRowIndex = 0)
+        val rejected = latest.copy(id = "rejected", content = "不应提交的文字",
+            bounds = ScreenRect(0, 30, 100, 50), observationRowIndex = 1,
+            contentQuality = MessageContentQuality.AMBIGUOUS)
+        val batch = f.batch.copy(messages = listOf(earlier, rejected, latest),
+            scannedRowCount = 3, candidateRowCount = 3, completeTailRowBounds = latest.bounds)
+        assertTrue(f.coordinator.generateVisibleDraft(batch, f.snapshot))
+        assertEquals(listOf("独立上下文文字", "你好"), f.requests.single().conversation.map { it.content })
+        val requestId = f.requests.single().requestId
+        val logs = f.logs.filter { it.startsWith("AI_CONTEXT_") }
+        val rows = logs.filter { it.startsWith("AI_CONTEXT_ADMISSION ") }
+        assertEquals(3, rows.size)
+        assertTrue(rows[0].contains("row=0;") && rows[0].contains("accepted=true;reason=ACCEPTED"))
+        assertTrue(rows[1].contains("row=1;") && rows[1].contains("accepted=false;reason=CONTENT_QUALITY_UNVERIFIED"))
+        assertTrue(rows[2].contains("row=2;") && rows[2].contains("accepted=true;reason=ACCEPTED"))
+        assertTrue(logs.all { it.contains("requestId=$requestId;") })
+        assertTrue(logs.none { it.contains("独立上下文文字") || it.contains("不应提交的文字") || it.contains("你好") })
+        assertTrue(logs.single { it.startsWith("AI_CONTEXT_MERGED") }.contains("history=0;current=2;total=2;roles=USER,USER"))
     }
 
     private fun traceField(log: String, field: String): String =

@@ -43,6 +43,32 @@ class OpenAiCompatibleAiModelTransportTest {
     }
 
     @Test
+    fun wireDiagnosticsCaptureRoleArrayAndProtectCredentialInDiagnosticOnly() {
+        val connection = FakeConnection(URL("https://api.example.com/v1/chat/completions"), 200,
+            """{"choices":[{"message":{"content":"ok"}}]}""")
+        val transport = OpenAiCompatibleAiModelTransport(configuration()) { connection }
+        val records = mutableListOf<String>()
+        transport.wireDiagnostic = { records.add(it) }
+        val input = request().copy(attemptIndex = 2, conversation = listOf(
+            AiModelMessage(AiModelMessage.Role.USER, "早上好"),
+            AiModelMessage(AiModelMessage.Role.ASSISTANT, "你好"),
+            AiModelMessage(AiModelMessage.Role.USER, "test-secret-key")))
+        transport.execute(input).getOrThrow()
+        val decoded = records.map { MiniJson.parse(it) as Map<*, *> }
+        assertEquals(listOf("REQUEST_PREPARED", "REQUEST_WRITTEN", "HTTP_RESPONSE"), decoded.map { it["stage"] })
+        val prepared = decoded.first()
+        val actualPayload = MiniJson.parse(connection.requestBody.toString(StandardCharsets.UTF_8.name())) as Map<*, *>
+        val actual = actualPayload["messages"] as List<*>
+        val captured = (prepared["messages"] as List<*>).map { it as Map<*, *> }
+        assertEquals(listOf("user", "assistant", "user"), captured.map { it["role"] })
+        assertEquals(listOf("早上好", "你好", "[API_KEY_REDACTED]"), captured.map { it["content"] })
+        assertEquals(true, prepared["additionalDiagnosticRedaction"])
+        assertEquals("test-secret-key", (actual.last() as Map<*, *>)["content"])
+        assertTrue(records.none { it.contains("test-secret-key") })
+        assertEquals(200, (decoded.last()["httpStatus"] as Number).toInt())
+    }
+
+    @Test
     fun appendsChatCompletionsPathToBaseUrl() {
         var openedUrl: URL? = null
         val transport = OpenAiCompatibleAiModelTransport(configuration()) { url ->

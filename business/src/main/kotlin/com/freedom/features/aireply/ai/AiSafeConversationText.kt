@@ -64,6 +64,23 @@ internal object AiSafeConversationText {
         return if (message.contentQuality == MessageContentQuality.VERIFIED) legacy(message.content) else null
     }
 
+    /** Diagnostic explanation only, called after visible() has rejected the row. */
+    fun diagnosticRejectionReason(batch: ChatMessageBatch, message: ChatMessage): String {
+        if (message.type != ChatMessageType.TEXT) return "UNSUPPORTED_MESSAGE_TYPE"
+        if (message.direction == ChatMessageDirection.UNKNOWN ||
+            message.directionEvidence == DirectionEvidence.AMBIGUOUS) return "DIRECTION_UNVERIFIED"
+        if (message.contentQuality !in setOf(MessageContentQuality.VERIFIED, MessageContentQuality.AMBIGUOUS))
+            return "CONTENT_QUALITY_UNVERIFIED"
+        if (batch.ocrTokensByRowIndex.isNotEmpty() || batch.ocrTextProjectionsByRowIndex.isNotEmpty()) {
+            val row = message.observationRowIndex ?: return "OCR_ROW_MISSING"
+            if (row !in batch.ocrTokensByRowIndex) return "OCR_TOKENS_MISSING"
+            if (row !in batch.ocrTextProjectionsByRowIndex) return "OCR_PROJECTION_MISSING"
+            return "OCR_PROJECTION_REJECTED"
+        }
+        return if (message.contentQuality != MessageContentQuality.VERIFIED)
+            "CONTENT_QUALITY_UNVERIFIED" else "LEGACY_TEXT_REJECTED"
+    }
+
     /** Last defense before any remote model request, including manually assembled contexts. */
     fun outbound(messages: List<AiModelMessage>): List<AiModelMessage> =
         messages.mapNotNull { message ->

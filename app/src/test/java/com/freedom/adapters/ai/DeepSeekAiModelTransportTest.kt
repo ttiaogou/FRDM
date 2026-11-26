@@ -51,6 +51,42 @@ class DeepSeekAiModelTransportTest {
     }
 
     @Test
+    fun wireDiagnosticsCaptureActualFlattenedMessagesWithoutHeadersOrSystemPrompt() {
+        val connection = FakeConnection(URL("https://api.deepseek.com/chat/completions"), 200,
+            """{"choices":[{"message":{"content":"ok"}}]}""")
+        val transport = DeepSeekAiModelTransport(configuration()) { connection }
+        val records = mutableListOf<String>()
+        val logs = mutableListOf<String>()
+        transport.wireDiagnostic = { records.add(it) }
+        transport.diagnosticLog = { logs.add(it) }
+        transport.wireDiagnosticLog = { logs.add(it) }
+        val input = request().copy(attemptIndex = 1, conversation = listOf(
+            AiModelMessage(AiModelMessage.Role.ASSISTANT, "还没睡"),
+            AiModelMessage(AiModelMessage.Role.USER, "出来吃烧烤吗"),
+            AiModelMessage(AiModelMessage.Role.USER, "我请你"),
+            AiModelMessage(AiModelMessage.Role.USER, "怎么说")))
+        transport.execute(input).getOrThrow()
+        val decoded = records.map { MiniJson.parse(it) as Map<*, *> }
+        assertEquals(listOf("REQUEST_PREPARED", "REQUEST_WRITTEN", "HTTP_RESPONSE"), decoded.map { it["stage"] })
+        val prepared = decoded.first()
+        val actual = wireMessages(requestPayload(connection)).drop(1)
+        val captured = prepared["messages"] as List<*>
+        assertEquals(actual, captured.map { entry ->
+            val item = entry as Map<*, *>
+            mapOf("role" to item["role"], "content" to item["content"])
+        })
+        assertEquals(4, (prepared["logicalConversationMessages"] as Number).toInt())
+        assertEquals(1, (prepared["wireConversationMessages"] as Number).toInt())
+        assertEquals(200, (decoded.last()["httpStatus"] as Number).toInt())
+        assertTrue(decoded.all { it["requestId"] == input.requestId && (it["attemptIndex"] as Number).toInt() == 1 })
+        assertTrue(records.none { it.contains("deepseek-secret-key") || it.contains(input.systemInstruction) })
+        assertTrue(logs.none { it.contains("我请你") || it.contains("出来吃烧烤吗") })
+        // A diagnostic exception cannot prevent the actual request from being sent.
+        transport.wireDiagnostic = { error("diagnostic unavailable") }
+        assertEquals("ok", transport.execute(input).getOrThrow().text)
+    }
+
+    @Test
     fun mixedRoleJsonRequestsPreserveAllTextAndOrderInOneUserMessage() {
         val role = AiModelMessage.Role.USER
         val assistant = AiModelMessage.Role.ASSISTANT

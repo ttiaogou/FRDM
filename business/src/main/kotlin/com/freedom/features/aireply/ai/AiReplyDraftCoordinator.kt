@@ -585,7 +585,14 @@ class AiReplyDraftCoordinator(
                              recoveredPrivateRequestKey: String? = null): Boolean {
         val policy = policyRegistry.resolve(taskId)?.takeIf { it.taskId == taskId }
             ?: return reject("AI_TASK_POLICY_NOT_REGISTERED")
-        val visible = VisibleDraftContext.build(batch, visitToken) ?: return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
+        val visible = VisibleDraftContext.build(batch, visitToken) ?: run {
+            runCatching {
+                val admission = VisibleDraftContext.assess(batch)
+                onLog("AI_CONTEXT_SOURCE batchAccepted=false;observation=${diagnosticHash(batch.effectiveObservationBatchId)};" +
+                    "sourceMessages=${batch.messages.size};reason=${if (visitToken.isBlank()) "VISIT_TOKEN_MISSING" else admission.reason}")
+            }
+            return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
+        }
         val context = DraftHistoryMerger.merge(visible, batch, policy.contextPolicy().selectHistory(history))
         val contextScope = if (context.messages.size > visible.messages.size) {
             ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW
@@ -837,6 +844,9 @@ class AiReplyDraftCoordinator(
                 modelLifecycleTrace = ModelLifecycleTrace(requestId, policy.taskId, requestGeneration)
             }
         }
+        // Diagnostics observe the already selected context; they do not select, repair or
+        // change it. A diagnostic failure cannot change the claimed model transaction.
+        runCatching { logContextDiagnostics(batch, visible, context, requestId, contextScope) }
         val accepted = runCatching {
             backgroundExecutor.execute {
                 try {
@@ -854,6 +864,49 @@ class AiReplyDraftCoordinator(
         }
         onLog("AI 回复草稿：已提交后台模型请求；不会自动发送")
         return true
+    }
+
+    private fun logContextDiagnostics(
+        batch: ChatMessageBatch, visible: ConversationContext?, context: ConversationContext,
+        requestId: String, scope: ModelContextScope
+    ) {
+        val observation = diagnosticHash(batch.effectiveObservationBatchId)
+        val rows = batch.messagesBottomToTop.asReversed()
+        onLog("AI_CONTEXT_SOURCE requestId=$requestId;observation=$observation;sourceMessages=${rows.size};" +
+            "batchStatus=${batch.status};truncated=${batch.truncated};scope=$scope")
+        if (visible != null) {
+            val evaluated = rows.map { it to AiSafeConversationText.visible(batch, it) }
+            // Use the size and actual text lengths of the selected context rather than
+            // duplicating the context limit or modifying its admission policy.
+            val selected = evaluated.indices.filter { evaluated[it].second != null }
+                .takeLast(visible.messages.size).withIndex().associate { it.value to it.index }
+            for ((index, pair) in evaluated.withIndex()) {
+                val (message, safeText) = pair
+                val row = message.observationRowIndex
+                val projection = row?.let { batch.ocrTextProjectionsByRowIndex[it] }
+                val included = index in selected
+                val contextChars = selected[index]?.let { visible.messages[it].content.length } ?: 0
+                val visualRegions = row?.let { batch.ocrTokensByRowIndex[it] }.orEmpty().sumOf { token ->
+                    if (token.visualRegions.isNotEmpty()) token.visualRegions.size
+                    else if (token.symbolBounds != null) 1 else 0
+                }
+                val reason = when {
+                    safeText == null -> AiSafeConversationText.diagnosticRejectionReason(batch, message)
+                    !included -> "VISIBLE_CONTEXT_LIMIT"
+                    else -> "ACCEPTED"
+                }
+                onLog("AI_CONTEXT_ADMISSION requestId=$requestId;sourceIndex=$index;row=${row ?: -1};" +
+                    "direction=${message.direction};type=${message.type};quality=${message.contentQuality};" +
+                    "projection=${projection?.status ?: "NONE"};visualRegions=$visualRegions;accepted=$included;reason=$reason;" +
+                    "sourceChars=${message.content?.length ?: 0};contextChars=$contextChars")
+            }
+            onLog("AI_CONTEXT_ADMISSION_SUMMARY requestId=$requestId;accepted=${selected.size};" +
+                "rejected=${rows.size - selected.size}")
+        }
+        val roles = context.messages.joinToString(",") { it.role.name }
+        val counts = if (visible != null) "history=${context.messages.size - visible.messages.size};current=${visible.messages.size}"
+            else "history=UNKNOWN;current=UNKNOWN"
+        onLog("AI_CONTEXT_MERGED requestId=$requestId;$counts;total=${context.messages.size};roles=$roles;scope=$scope")
     }
 
     private fun generateOnBackground(
