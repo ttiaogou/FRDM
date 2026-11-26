@@ -4,6 +4,7 @@ import com.freedom.application.TaskLaunchParameters
 import com.freedom.application.ports.TaskLaunchParametersRepository
 import com.freedom.features.aireply.policy.ConversationFilterSettings
 import android.content.Context
+import org.json.JSONArray
 
 class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersRepository {
     private val preferences = context.applicationContext.getSharedPreferences(
@@ -24,8 +25,7 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
             KEY_IMAGE_SEND_THRESHOLD,
             preferences.getInt(LEGACY_KEY_IMAGE_PRE_REPLY_LIMIT, 0)
         ).coerceAtLeast(0),
-        imageResourceUris = preferences.getStringSet(KEY_IMAGE_RESOURCE_URIS, emptySet())
-            .orEmpty().asSequence().map(String::trim).filter(String::isNotBlank).distinct().toList()
+        imageResourceUris = readImageResourceUris()
     )
 
     override fun write(parameters: TaskLaunchParameters) {
@@ -37,9 +37,26 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
             .remove(LEGACY_KEY_ONLINE_ONLY)
             .putInt(KEY_MESSAGE_INTERCEPTION_THRESHOLD, parameters.messageInterceptionThreshold.coerceAtLeast(0))
             .putInt(KEY_IMAGE_SEND_THRESHOLD, parameters.imageSendThreshold.coerceAtLeast(0))
+            .putString(KEY_IMAGE_RESOURCE_URIS_ORDERED, JSONArray(parameters.imageResourceUris
+                .asSequence().map(String::trim).filter(String::isNotBlank).distinct().toList()).toString())
+            // Compatibility snapshot for previous versions; only the JSON list is order-preserving.
             .putStringSet(KEY_IMAGE_RESOURCE_URIS, parameters.imageResourceUris
                 .asSequence().map(String::trim).filter(String::isNotBlank).distinct().toSet())
             .apply()
+
+    private fun readImageResourceUris(): List<String> {
+        val ordered = preferences.getString(KEY_IMAGE_RESOURCE_URIS_ORDERED, null)
+        if (ordered != null) {
+            runCatching {
+                val array = JSONArray(ordered)
+                (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
+                    .map(String::trim).filter(String::isNotBlank).distinct()
+            }.getOrNull()?.let { return it }
+        }
+        // Legacy StringSet has no recoverable order; sort once for a stable migration.
+        return preferences.getStringSet(KEY_IMAGE_RESOURCE_URIS, emptySet()).orEmpty()
+            .asSequence().map(String::trim).filter(String::isNotBlank).distinct().sorted().toList()
+    }
     }
 
     // The old Boolean was never enforced by the runtime. Initialize the new setting
@@ -63,6 +80,7 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
         const val KEY_MESSAGE_INTERCEPTION_THRESHOLD = "message_interception_threshold"
         const val KEY_IMAGE_SEND_THRESHOLD = "image_send_threshold"
         const val KEY_IMAGE_RESOURCE_URIS = "image_resource_uris"
+        const val KEY_IMAGE_RESOURCE_URIS_ORDERED = "image_resource_uris_ordered_json"
         const val LEGACY_KEY_REPLY_LIMIT = "reply_limit"
         const val LEGACY_KEY_IMAGE_PRE_REPLY_LIMIT = "image_pre_reply_limit"
     }

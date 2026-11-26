@@ -48,6 +48,7 @@ import com.freedom.ui.logs.LogTextFormatter
 import com.freedom.ui.logs.SessionSampleArchive
 import com.freedom.ui.logs.SessionSampleArchiveManager
 import com.freedom.ui.theme.FreedomUi
+import com.freedom.data.ImagePoolMediaStore
 import com.freedom.ocr.OcrPluginInstaller
 import com.freedom.ocr.OcrPluginInstallAction
 import com.freedom.ocr.OcrPluginHost
@@ -91,6 +92,7 @@ class MainActivity : Activity() {
     private val archiveSealHandler = Handler(Looper.getMainLooper())
     private var archiveSealWaitRunnable: Runnable? = null
     private var activityResumed = false
+    private var imagePoolOperationRunning = false
     private enum class Screen { CONFIGURATION, PERSONALIZATION, AI_MODEL_CONFIGURATION }
     private var currentScreen = Screen.CONFIGURATION
 
@@ -1314,6 +1316,7 @@ class MainActivity : Activity() {
                 taskParameters = { taskLaunchParametersStore.read() },
                 onTaskParametersChanged = taskLaunchParametersStore::write,
                 onImageResourceImportRequested = ::launchImageResourceImport,
+                onImageResourceClearRequested = ::clearImportedImageResources,
                 loadAiReplyPersonalization = aiReplyPersonalizationRepository::load,
                 onAiReplyPersonalizationChanged = aiReplyPersonalizationRepository::save
             ).create()
@@ -1321,6 +1324,10 @@ class MainActivity : Activity() {
     }
 
     private fun launchImageResourceImport() {
+        if (imagePoolOperationRunning) {
+            Toast.makeText(this, "图片池正在处理，请勿重复提交", Toast.LENGTH_SHORT).show()
+            return
+        }
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "image/*"
@@ -1331,6 +1338,39 @@ class MainActivity : Activity() {
             .onFailure {
                 Toast.makeText(this, "无法打开图片选择器", Toast.LENGTH_SHORT).show()
             }
+    }
+
+    private fun clearImportedImageResources() {
+        if (imagePoolOperationRunning) {
+            Toast.makeText(this, "图片池正在处理，请勿重复提交", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val originalUris = taskLaunchParametersStore.read().imageResourceUris
+        if (originalUris.isEmpty()) return
+        imagePoolOperationRunning = true
+        Toast.makeText(this, "正在清理图片池", Toast.LENGTH_SHORT).show()
+        Thread({
+            val failed = ImagePoolMediaStore(applicationContext).removeFromPool(originalUris)
+            runOnUiThread {
+                val original = originalUris.toSet()
+                val remaining = failed.toSet()
+                val current = taskLaunchParametersStore.read()
+                val remainingResources = current.imageResourceUris.filter {
+                    it !in original || it in remaining
+                }
+                val updated = current.copy(
+                    imageResourceUris = remainingResources,
+                    // Removing the final picture must not leave a nonzero, unfulfillable threshold.
+                    imageSendThreshold = if (remainingResources.isEmpty()) 0 else current.imageSendThreshold
+                )
+                taskLaunchParametersStore.write(updated)
+                imagePoolOperationRunning = false
+                if (currentScreen == Screen.PERSONALIZATION) showPersonalizationPage()
+                Toast.makeText(this,
+                    if (failed.isEmpty()) "图片池已清空" else "部分图片无法移除，保留 ${failed.size} 张",
+                    Toast.LENGTH_LONG).show()
+            }
+        }, "Freedom-Image-Pool-Clear").apply { isDaemon = true }.start()
     }
 
     /** Opens the locally encrypted model configuration and its cloud-processing consent. */
@@ -2312,21 +2352,32 @@ class MainActivity : Activity() {
                         for (index in 0 until clip.itemCount) clip.getItemAt(index).uri?.let(::add)
                     }
                 }.distinct()
-                val grantedFlags = data.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION
-                selectedUris.forEach { uri ->
-                    if (grantedFlags != 0) {
-                        runCatching { contentResolver.takePersistableUriPermission(uri, grantedFlags) }
+                if (selectedUris.isNotEmpty()) {
+                    if (imagePoolOperationRunning) {
+                        Toast.makeText(this, "图片池正在处理，请稍后重试", Toast.LENGTH_SHORT).show()
+                    } else {
+                        imagePoolOperationRunning = true
+                        Toast.makeText(this, "正在导入图片到 Freedom 专用相册", Toast.LENGTH_SHORT).show()
+                        Thread({
+                            val result = ImagePoolMediaStore(applicationContext).importImages(selectedUris)
+                            runOnUiThread {
+                                val current = taskLaunchParametersStore.read()
+                                val updated = current.withImportedImageResourceUris(result.publishedUris)
+                                taskLaunchParametersStore.write(updated)
+                                imagePoolOperationRunning = false
+                                if (currentScreen == Screen.PERSONALIZATION) showPersonalizationPage()
+                                val added = updated.imageResourceUris.size - current.imageResourceUris.size
+                                val message = if (result.unsupportedSystem) {
+                                    "Android 9 及以下未授权公共媒体写入；未导入图片"
+                                } else {
+                                    "新增 $added 张图片；失败 ${result.failedCount} 张"
+                                }
+                                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                            }
+                        }, "Freedom-Image-Pool-Import").apply { isDaemon = true }.start()
                     }
                 }
-                if (selectedUris.isNotEmpty()) {
-                    val current = taskLaunchParametersStore.read()
-                    taskLaunchParametersStore.write(
-                        current.copy(imageResourceUris = (current.imageResourceUris + selectedUris.map { it.toString() }).distinct())
-                    )
-                    Toast.makeText(this, "已导入 ${selectedUris.size} 张图片", Toast.LENGTH_SHORT).show()
-                }
             }
-            if (currentScreen == Screen.PERSONALIZATION) showPersonalizationPage()
             return
         }
         if (requestCode == REQUEST_OCR_IMAGE_TEST) {

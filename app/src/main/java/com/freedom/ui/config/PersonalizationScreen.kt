@@ -35,6 +35,7 @@ internal class PersonalizationScreen(
     private val taskParameters: () -> TaskLaunchParameters,
     private val onTaskParametersChanged: (TaskLaunchParameters) -> Unit,
     private val onImageResourceImportRequested: () -> Unit,
+    private val onImageResourceClearRequested: () -> Unit,
     private val loadAiReplyPersonalization: () -> AiReplyPersonalization,
     private val onAiReplyPersonalizationChanged: (AiReplyPersonalization) -> Unit
 ) {
@@ -485,6 +486,22 @@ internal class PersonalizationScreen(
                 onImageResourceImportRequested()
             }
         })
+        if (parameters.imageResourceUris.isNotEmpty()) {
+            content.addView(Button(activity).apply {
+                text = "清空图片池"
+                setOnClickListener {
+                    AlertDialog.Builder(activity)
+                        .setTitle("清空图片池")
+                        .setMessage("将移除 Freedom 专用相册中的已导入副本，不删除原始图片。确定继续？")
+                        .setNegativeButton("取消", null)
+                        .setPositiveButton("清空") { _, _ ->
+                            dialog.dismiss()
+                            onImageResourceClearRequested()
+                        }
+                        .show()
+                }
+            })
+        }
         dialog.show()
         FreedomUi.styleAlertDialog(dialog, activity, dp)
     }

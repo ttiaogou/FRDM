@@ -29,6 +29,11 @@ data class TaskLaunchParameters(
         else -> null
     }
 
+    /** Append verified MediaStore resources, preserving import order and avoiding duplicate media. */
+    fun withImportedImageResourceUris(imported: List<String>): TaskLaunchParameters =
+        copy(imageResourceUris = (imageResourceUris + imported)
+            .map(String::trim).filter(String::isNotBlank).distinct())
+
     fun conversationFilterSettings(): ConversationFilterSettings = ConversationFilterSettings(
         maxLastActiveMinutes = maxLastActiveMinutes,
         maxDistanceKm = maxDistanceKm,

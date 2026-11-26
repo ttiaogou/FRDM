@@ -30,4 +30,20 @@ class TaskLaunchParametersTest {
         assertNotNull(configured.imageSendThresholdValidationError(4))
         assertNull(configured.copy(messageInterceptionThreshold = 0).imageSendThresholdValidationError(4))
     }
+    @Test fun importedImagePoolPreservesOrderAndDeduplicates() {
+        val original = TaskLaunchParameters(imageResourceUris = listOf("content://media/a"))
+        val updated = original.withImportedImageResourceUris(listOf(
+            "content://media/b", "content://media/a", "content://media/c", "content://media/b"
+        ))
+        assertEquals(listOf("content://media/a", "content://media/b", "content://media/c"),
+            updated.imageResourceUris)
+        assertTrue(original.imageResourceUris.size == 1)
+    }
+
+    @Test fun imagePoolNormalizesBlankImportedResources() {
+        val updated = TaskLaunchParameters().withImportedImageResourceUris(
+            listOf("", " ", " content://media/a ", "content://media/a")
+        )
+        assertEquals(listOf("content://media/a"), updated.imageResourceUris)
+    }
 }
