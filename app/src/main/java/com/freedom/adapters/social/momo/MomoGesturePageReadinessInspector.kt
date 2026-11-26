@@ -29,7 +29,8 @@ internal class MomoGesturePageReadinessInspector(
     fun inspect(
         root: AccessibilityNodeInfo,
         currentActivity: String,
-        mode: RunMode
+        mode: RunMode,
+        albumPermit: MomoAlbumGesturePermit? = null
     ): TargetAppPageReadiness {
         val packageName = safeString { root.packageName?.toString().orEmpty() }
         if (packageName != targetPackage) {
@@ -100,6 +101,19 @@ internal class MomoGesturePageReadinessInspector(
             onLog(
                 "页面安全检查[PASS]：单次有限范围扫描完成；visited=${safetyInspection.visitedNodes}；" +
                     "elapsedMs=${safetyInspection.elapsedMs}；Activity=$currentActivity"
+            )
+        }
+
+        // Explicit media capability only; never grant generic AI_REPLY album access.
+        // All existing popup and independent-window checks above still apply.
+        if (albumPermit != null) {
+            val permitted = albumPermit.permits(mode, packageName, rootWindowId, currentActivity) &&
+                MomoAlbumSelectorInspector.inspect(root, targetPackage) != null
+            return TargetAppPageReadiness(
+                permitted,
+                if (permitted) "AI Reply: verified media transaction album selector"
+                else "Media transaction album permission not confirmed",
+                retryable = !permitted
             )
         }
 
