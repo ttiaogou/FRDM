@@ -1,6 +1,7 @@
 package com.freedom.features.aireply.ports
 
 import com.freedom.core.accessibility.api.ScreenRect
+import com.freedom.core.accessibility.api.WindowRef
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
@@ -64,6 +65,28 @@ data class ContactIdentityCaptureOutcome(
     }
 }
 
+/** Real observed detail evidence for one visit, never a synthetic list row or gesture receipt. */
+data class ObservedPrivateChatIdentityTarget(
+    val snapshot: ChatPageSnapshot,
+    val runGeneration: Long,
+    val visitToken: String
+) {
+    fun sourceWindow(): WindowRef? {
+        val message = snapshot.messageListTarget?.window ?: return null
+        val input = snapshot.inputFieldTarget?.window ?: return null
+        return message.takeIf {
+            runGeneration >= 0L && visitToken.isNotBlank() &&
+                snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+                snapshot.packageName.isNotBlank() && snapshot.packageName == message.packageName &&
+                message == input && snapshot.windowIdentityKey() != null &&
+                snapshot.conversationIdentityKey() != null && !snapshot.nodeTreeProbeTruncated
+        }
+    }
+
+    override fun toString(): String =
+        "ObservedPrivateChatIdentityTarget(runGeneration=$runGeneration,sourceValid=${sourceWindow() != null})"
+}
+
 /**
  * Read-only session navigation and local sample-storage boundary.
  * Implementations must revalidate every row locator immediately before returning tap bounds.
@@ -106,6 +129,24 @@ interface ChatSessionManagementPort {
                 ContactIdentityCaptureOutcome.failed(request, "IDENTITY_CAPTURE_REJECTED")
         }
     }
+
+    /** Explicit adapter opt-in; a missing capability cannot admit a name-only detail. */
+    fun supportsObservedPrivateChatIdentityCapture(): Boolean = false
+
+    /** Same profile-ID transaction, using the actual detail surface as its source. */
+    fun observeContactIdentityCapture(target: ObservedPrivateChatIdentityTarget): ContactIdentityCaptureOutcome =
+        ContactIdentityCaptureOutcome.failed(
+            ContactIdentityCaptureRequestResult.NOT_SUPPORTED, "OBSERVED_DETAIL_IDENTITY_NOT_SUPPORTED"
+        )
+
+    fun hasPendingObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget): Boolean = false
+
+    /** Unlike the legacy row receipt, the observed detail receipt is visit-scoped. */
+    fun hasObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean = false
+
+    fun consumeObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean = false
+
+    fun cancelObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget) { }
 
     /** Delivers transient event evidence; persists redacted metadata only while a collection run is active. */
     fun recordAccessibilityEvent(event: AccessibilityEventEnvelope) { }

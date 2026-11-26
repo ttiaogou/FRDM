@@ -58,6 +58,7 @@ import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
 import com.freedom.features.aireply.ports.ContactIdentityCaptureOutcome
+import com.freedom.features.aireply.ports.ObservedPrivateChatIdentityTarget
 import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
@@ -3289,6 +3290,81 @@ class AiReplyObservationRuntimeTest {
         runtime.reset("test stop")
         assertNull(tasks.currentLease())
         assertTrue(submitted.isEmpty())
+    }
+
+    @Test
+    fun r04bObservedDetailUsesRealWindowIdentityAndSharedMessageAdmissionWithoutSend() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply {
+            verifiedMessageWorkAreaNavigationSupported = true
+            receivedGreetingsWorkflowEnabled = true
+            sessionRunEnabled = true
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+            observedDetailIdentityEnabled = true
+            simulateStructureThenOcr = true
+            ocrDebugTextByRowIndex = mapOf(1 to "PRIVATE_CHAT_BODY_SENTINEL")
+            page = chatDetailSnapshot()
+        }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val logs = mutableListOf<String>()
+        var draftCalls = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission =
+                    error("Observed detail preflight must not submit traversal/send gestures")
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            onDraftConversationObserved = { _, _, _, _ -> draftCalls++; true },
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L },
+            pageSelectedStartup = true
+        )
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
+        runtime.requestPageRouteObservation()
+        runUntilShortestDelay(scheduler, 30) { port.observedDetailTarget != null }
+        val target = requireNotNull(port.observedDetailTarget)
+        assertEquals(port.page.messageListTarget?.window, target.sourceWindow())
+        assertTrue(target.snapshot.chatListCandidates.isEmpty())
+        assertNull(target.copy(snapshot = target.snapshot.copy(inputFieldTarget = null)).sourceWindow())
+        assertNull(target.copy(snapshot = target.snapshot.copy(pageKind = ChatPageKind.CHAT_LIST)).sourceWindow())
+        assertEquals(0, port.messageReads)
+        assertEquals(0, draftCalls)
+
+        // An identity alone cannot admit reading without the original profile return receipt.
+        port.observedDetailOutcome = ContactIdentityCaptureOutcome.completed(ContactRowIdentity(
+            snapshotId = "observed-detail-test", temporaryUserId = "observed-visit",
+            contactId = "verified-platform-id", confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        ))
+        repeat(2) { if (scheduler.pendingCount() > 0) scheduler.runNextShortestDelay() }
+        assertEquals(0, port.messageReads)
+        // A legacy row receipt cannot authorize this detail-origin visit.
+        port.pendingIdentityReturnReinspection = true
+        repeat(2) { if (scheduler.pendingCount() > 0) scheduler.runNextShortestDelay() }
+        assertEquals(0, port.messageReads)
+        port.observedDetailReturnPending = true
+        port.page = chatDetailSnapshot(2L)
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilShortestDelay(scheduler, 40) { logs.any { it.contains("OBSERVED_PRIVATE_BUSINESS_STATUS") } }
+        assertTrue(logs.any { it.contains("OBSERVED_PRIVATE_CHAT_IDENTITY_VERIFIED") })
+        assertTrue(port.messageReads > 0)
+        assertTrue(port.ocrAsyncReadRequests > 0)
+        assertEquals(0, draftCalls)
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        assertFalse(port.observedDetailReturnPending)
+        assertTrue(port.pendingIdentityReturnReinspection)
+
+        runtime.reset("test stop")
+        assertNull(tasks.currentLease())
+        assertNull(port.observedDetailTarget)
     }
 
     @Test
@@ -9531,6 +9607,11 @@ class AiReplyObservationRuntimeTest {
         var lastRefreshInput: ChatPageSnapshot? = null
         var messageReads = 0
         var identityCaptureOutcomeOverride: ContactIdentityCaptureOutcome? = null
+        var observedDetailIdentityEnabled = false
+        var observedDetailTarget: ObservedPrivateChatIdentityTarget? = null
+        var observedDetailReturnPending = false
+        var observedDetailOutcome: ContactIdentityCaptureOutcome =
+            ContactIdentityCaptureOutcome.waiting(ContactIdentityCaptureRequestResult.RETRY_LATER)
         var pendingIdentityReturnReinspection = false
         var simulateStructureThenOcr = false
         var ocrAsyncReadRequests = 0
@@ -9635,6 +9716,21 @@ class AiReplyObservationRuntimeTest {
         override fun observeContactIdentityCapture(candidate: ChatListCandidateSnapshot): ContactIdentityCaptureOutcome =
             identityCaptureOutcomeOverride
                 ?: super<ChatSessionManagementPort>.observeContactIdentityCapture(candidate)
+        override fun supportsObservedPrivateChatIdentityCapture(): Boolean = observedDetailIdentityEnabled
+        override fun observeContactIdentityCapture(target: ObservedPrivateChatIdentityTarget): ContactIdentityCaptureOutcome {
+            observedDetailTarget = target
+            return observedDetailOutcome
+        }
+        override fun hasObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean =
+            observedDetailTarget == target && observedDetailReturnPending
+        override fun consumeObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean =
+            hasObservedPrivateChatIdentityReturn(target).also { if (it) observedDetailReturnPending = false }
+        override fun cancelObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget) {
+            if (observedDetailTarget == target) {
+                observedDetailTarget = null
+                observedDetailReturnPending = false
+            }
+        }
         override fun finishSessionManagement(): String? = "test-run.zip"
         override fun persistVerifiedSessionListMetadata(snapshot: ChatPageSnapshot): Boolean {
             if (!supportVerifiedListMetadata) return false

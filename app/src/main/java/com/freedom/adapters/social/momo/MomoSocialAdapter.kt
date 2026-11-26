@@ -63,6 +63,7 @@ import com.freedom.features.aireply.ports.ChatDraftSendPort
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
 import com.freedom.features.aireply.ports.ContactIdentityCaptureOutcome
+import com.freedom.features.aireply.ports.ObservedPrivateChatIdentityTarget
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import kotlin.math.abs
 import java.io.File
@@ -192,20 +193,40 @@ internal class MomoSocialAdapter(
      * Exact, short-lived row evidence used only to bind a profile ID back to the row that opened
      * it. A nickname by itself is deliberately insufficient to restore the association.
      */
+    private sealed interface InboxIdentityAnchor {
+        val displayName: String
+        fun opaqueKey(): String
+        fun matches(candidate: ChatListCandidateSnapshot): Boolean = false
+    }
+
+    private data class ObservedDetailIdentityAnchor(
+        override val displayName: String,
+        val sourceWindow: WindowRef,
+        val runGeneration: Long,
+        val visitToken: String
+    ) : InboxIdentityAnchor {
+        override fun opaqueKey(): String = listOf(
+            "OBSERVED_DETAIL", sourceWindow.packageName, sourceWindow.windowId,
+            sourceWindow.generation, runGeneration, visitToken
+        ).joinToString("|").let(::sha256IdentityAnchor)
+
+        override fun toString(): String = "ObservedDetailIdentityAnchor(anchor=[REDACTED])"
+    }
+
     private data class InboxIdentityRowAnchor(
         val rowIndex: Int,
         val rowPath: List<Int>,
-        val displayName: String,
+        override val displayName: String,
         val rowBounds: ScreenRect
-    ) {
-        fun matches(candidate: ChatListCandidateSnapshot): Boolean =
+    ) : InboxIdentityAnchor {
+        override fun matches(candidate: ChatListCandidateSnapshot): Boolean =
             candidate.selectionClass == "PRIVATE_CHAT" &&
                 candidate.rowIndex == rowIndex &&
                 candidate.rowTarget.path.childIndices == rowPath &&
                 normalizeIdentityDisplayName(candidate.nameText) == normalizeIdentityDisplayName(displayName) &&
                 candidate.rowBounds == rowBounds
 
-        fun opaqueKey(): String = listOf(
+        override fun opaqueKey(): String = listOf(
             rowIndex,
             rowPath.joinToString("."),
             normalizeIdentityDisplayName(displayName),
@@ -214,7 +235,7 @@ internal class MomoSocialAdapter(
     }
 
     private class PendingInboxIdentityCapture(
-        val anchor: InboxIdentityRowAnchor,
+        val anchor: InboxIdentityAnchor,
         stage: InboxIdentityCaptureStage,
         lastTransitionAtMs: Long
     ) {
@@ -403,6 +424,7 @@ internal class MomoSocialAdapter(
     private val inboxIdentityCaptureLock = Any()
     @Volatile private var pendingInboxIdentityCapture: PendingInboxIdentityCapture? = null
     @Volatile private var identityReturnReinspectionPending: Boolean = false
+    private var observedDetailIdentityReturnKey: String? = null
     @Volatile private var lastConfirmedChatDetailSnapshot: ChatPageSnapshot? = null
     private val failedInboxIdentityCaptureKeys = LinkedHashSet<String>()
     private val loggedInboxIdentityFailureKeys = LinkedHashSet<String>()
@@ -5901,6 +5923,10 @@ internal class MomoSocialAdapter(
                 onLog("AI 联系人身份采集失败：CANDIDATE_ANCHOR_INVALID；未进入聊天详情头像采集")
                 return ContactIdentityCaptureRequestResult.REJECTED
             }
+        return requestContactIdentityCapture(anchor)
+    }
+
+    private fun requestContactIdentityCapture(anchor: InboxIdentityAnchor): ContactIdentityCaptureRequestResult {
         onLog("AI 头像点击事务：进入 AVATAR_CLICK_PREPARING；准备基于当前聊天详情重新定位头像")
         val anchorKey = anchor.opaqueKey()
         synchronized(inboxIdentityCaptureLock) {
@@ -5923,6 +5949,13 @@ internal class MomoSocialAdapter(
                     "gestureInFlight=$sayHiGestureInFlight"
             )
             return ContactIdentityCaptureRequestResult.RETRY_LATER
+        }
+
+        if (anchor is ObservedDetailIdentityAnchor) {
+            val current = inspectCurrentChatDetailFingerprint(anchor.displayName)
+            if (current == null || current.first != anchor.sourceWindow ||
+                extractChatPeerName(current.second.chatTitleText) != normalizeIdentityDisplayName(anchor.displayName)
+            ) return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
 
         val pending = PendingInboxIdentityCapture(
@@ -5957,7 +5990,8 @@ internal class MomoSocialAdapter(
             return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
         if (tree.truncated || tree.window.packageName != targetPackage ||
-            !accessibilityGateway.isWindowCurrent(tree.window)
+            !accessibilityGateway.isWindowCurrent(tree.window) ||
+            (anchor is ObservedDetailIdentityAnchor && tree.window != anchor.sourceWindow)
         ) {
             onLog(
                 "AI 联系人身份采集失败：CHAT_DETAIL_WINDOW_NOT_READY；" +
@@ -6079,6 +6113,63 @@ internal class MomoSocialAdapter(
                 ContactIdentityCaptureRequestResult.REJECTED,
                 "IDENTITY_CAPTURE_CANDIDATE_ANCHOR_INVALID"
             )
+        // Preserve the established row entry's verified-identity check and diagnostics.
+        return observeContactIdentityCapture(anchor) { requestContactIdentityCapture(candidate) }
+    }
+
+    override fun supportsObservedPrivateChatIdentityCapture(): Boolean = true
+
+    private fun createObservedDetailIdentityAnchor(target: ObservedPrivateChatIdentityTarget): ObservedDetailIdentityAnchor? {
+        val window = target.sourceWindow() ?: return null
+        if (window.packageName != targetPackage) return null
+        val peer = extractChatPeerName(target.snapshot.chatTitleText)
+        if (peer.isBlank()) return null
+        return ObservedDetailIdentityAnchor(peer, window, target.runGeneration, target.visitToken)
+    }
+
+    override fun observeContactIdentityCapture(target: ObservedPrivateChatIdentityTarget): ContactIdentityCaptureOutcome {
+        val anchor = createObservedDetailIdentityAnchor(target) ?: return ContactIdentityCaptureOutcome.failed(
+            ContactIdentityCaptureRequestResult.REJECTED, "OBSERVED_DETAIL_ANCHOR_INVALID"
+        )
+        return observeContactIdentityCapture(anchor)
+    }
+
+    override fun hasPendingObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget): Boolean {
+        val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
+        return synchronized(inboxIdentityCaptureLock) {
+            pendingInboxIdentityCapture?.anchor?.opaqueKey() == key
+        }
+    }
+
+    override fun hasObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean {
+        val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
+        return synchronized(inboxIdentityCaptureLock) { observedDetailIdentityReturnKey == key }
+    }
+
+    override fun consumeObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean {
+        val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
+        return synchronized(inboxIdentityCaptureLock) {
+            if (observedDetailIdentityReturnKey != key) false else {
+                observedDetailIdentityReturnKey = null
+                true
+            }
+        }
+    }
+
+    override fun cancelObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget) {
+        val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return
+        synchronized(inboxIdentityCaptureLock) {
+            if (pendingInboxIdentityCapture?.anchor?.opaqueKey() == key) pendingInboxIdentityCapture = null
+            completedInboxIdentityOutcomes.remove(key)
+            if (observedDetailIdentityReturnKey == key) observedDetailIdentityReturnKey = null
+            failedInboxIdentityCaptureKeys.remove(key)
+        }
+    }
+
+    private fun observeContactIdentityCapture(
+        anchor: InboxIdentityAnchor,
+        requestCapture: () -> ContactIdentityCaptureRequestResult = { requestContactIdentityCapture(anchor) }
+    ): ContactIdentityCaptureOutcome {
         val key = anchor.opaqueKey()
         synchronized(inboxIdentityCaptureLock) {
             completedInboxIdentityOutcomes[key]?.let { return it }
@@ -6093,7 +6184,7 @@ internal class MomoSocialAdapter(
                 }
             }
         }
-        return when (val request = requestContactIdentityCapture(candidate)) {
+        return when (val request = requestCapture()) {
             ContactIdentityCaptureRequestResult.STARTED,
             ContactIdentityCaptureRequestResult.IN_PROGRESS,
             ContactIdentityCaptureRequestResult.RETRY_LATER ->
@@ -6154,7 +6245,10 @@ internal class MomoSocialAdapter(
             val anchorKey = pending.anchor.opaqueKey()
             if (identityVerified && !pending.platformUserId.isNullOrBlank()) {
                 failedInboxIdentityCaptureKeys.remove(anchorKey)
-                verifiedInboxIdentityByAnchor[anchorKey] = pending.platformUserId!!
+                // An observed detail has no list row to populate in the row cache.
+                if (pending.anchor is InboxIdentityRowAnchor) {
+                    verifiedInboxIdentityByAnchor[anchorKey] = pending.platformUserId!!
+                }
                 val identity = sessionComponents.contactIdentityManager.resolveSnapshot(
                     snapshotId = "inbox-identity-${System.nanoTime()}",
                     observations = listOf(
@@ -6336,10 +6430,16 @@ internal class MomoSocialAdapter(
                 // Inspect the stable three-anchor chat fingerprint directly; calling
                 // inspectChatPage() here would re-enter this pending transaction and keep
                 // returning UNKNOWN.
-                val restoredChat = inspectCurrentChatDetailFingerprint(pending.anchor.displayName)?.second
+                val restoredEvidence = inspectCurrentChatDetailFingerprint(pending.anchor.displayName)
+                val restoredChat = restoredEvidence?.second
                 val restoredTitle = extractChatPeerName(restoredChat?.chatTitleText)
                 val anchorTitle = normalizeIdentityDisplayName(pending.anchor.displayName)
-                val restored = restoredChat != null &&
+                val detailAnchor = pending.anchor as? ObservedDetailIdentityAnchor
+                // Without list-row evidence, require the actual original chat window ID too.
+                val originalDetailWindow = detailAnchor == null ||
+                    (restoredEvidence?.first?.packageName == detailAnchor.sourceWindow.packageName &&
+                        restoredEvidence?.first?.windowId == detailAnchor.sourceWindow.windowId)
+                val restored = restoredChat != null && originalDetailWindow &&
                     restoredTitle.isNotBlank() && anchorTitle.isNotBlank() &&
                     restoredTitle == anchorTitle
                 if (restored) {
@@ -6361,7 +6461,14 @@ internal class MomoSocialAdapter(
                         "资料页身份读取完成并返回原聊天详情"
                     )
                     synchronized(inboxIdentityCaptureLock) {
-                        identityReturnReinspectionPending = true
+                        if (pending.anchor is ObservedDetailIdentityAnchor) {
+                            val key = pending.anchor.opaqueKey()
+                            if (completedInboxIdentityOutcomes[key]?.verifiedIdentity != null) {
+                                observedDetailIdentityReturnKey = key
+                            }
+                        } else {
+                            identityReturnReinspectionPending = true
+                        }
                     }
                     onLog(
                         "AI 身份回接[REQUEST_PRODUCED]：result=PRODUCED；" +
@@ -6564,6 +6671,7 @@ internal class MomoSocialAdapter(
         synchronized(inboxIdentityCaptureLock) {
             pendingInboxIdentityCapture = null
             identityReturnReinspectionPending = false
+            observedDetailIdentityReturnKey = null
             lastConfirmedChatDetailSnapshot = null
             failedInboxIdentityCaptureKeys.clear()
             loggedInboxIdentityFailureKeys.clear()
@@ -6595,6 +6703,7 @@ internal class MomoSocialAdapter(
         synchronized(inboxIdentityCaptureLock) {
             pendingInboxIdentityCapture = null
             identityReturnReinspectionPending = false
+            observedDetailIdentityReturnKey = null
             lastConfirmedChatDetailSnapshot = null
             failedInboxIdentityCaptureKeys.clear()
             loggedInboxIdentityFailureKeys.clear()
