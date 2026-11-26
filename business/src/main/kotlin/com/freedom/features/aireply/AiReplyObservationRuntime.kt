@@ -7724,16 +7724,6 @@ class AiReplyObservationRuntime(
             }
 
             val current = runCatching { readPageSnapshot(AiReplyPageReadPurpose.RETURN_NAVIGATION_VERIFY) }.getOrNull()
-            val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
-            if (observedVisit && (current == null || !observedPrivateDetailVerified(current) ||
-                    !AndroidRecoveryExecutionGate.assess(current, targetPackage(),
-                        runCatching { inspectAndroidRecoveryReadiness(current) }.getOrNull()).allowed ||
-                    isSendConfirmationPending() || isSendControlRecoveryPending()
-                )) {
-                requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "OBSERVED_DETAIL_RETURN_UNVERIFIED")
-                scheduleFullInspectionAfter(0L)
-                return@schedule
-            }
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 current.packageName != targetPackage() || windowSessionKey(current) != rejectedWindowKey
             ) {
@@ -7999,6 +7989,16 @@ class AiReplyObservationRuntime(
                 return@schedule
             }
             val current = runCatching { readPageSnapshot(AiReplyPageReadPurpose.RETURN_NAVIGATION_VERIFY) }.getOrNull()
+            val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
+            if (observedVisit && (current == null || !observedPrivateDetailVerified(current) ||
+                    !AndroidRecoveryExecutionGate.assess(current, targetPackage(),
+                        runCatching { inspectAndroidRecoveryReadiness(current) }.getOrNull()).allowed ||
+                    isSendConfirmationPending() || isSendControlRecoveryPending()
+                )) {
+                requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "OBSERVED_DETAIL_RETURN_UNVERIFIED")
+                scheduleFullInspectionAfter(0L)
+                return@schedule
+            }
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 current.packageName != snapshot.packageName || !hasSameWindowSession(snapshot, current)
             ) {
