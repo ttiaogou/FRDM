@@ -5476,6 +5476,21 @@ internal class MomoSocialAdapter(
         } == true
     }
 
+    /** Read-only dropdown evidence while the page router is resolving the window change. */
+    internal fun inspectImageAlbumDirectory(albumWindow: WindowRef): Boolean {
+        if (albumWindow.packageName != targetPackage || albumWindow.windowId < 0) return false
+        val snapshot = accessibilityGateway.inspectActiveWindow(
+            TreeInspectionRequest(
+                maxNodes = NAVIGATION_EVIDENCE_MAX_NODES,
+                textCapture = NodeTextCapture.EPHEMERAL
+            )
+        ) ?: return false
+        return snapshot.window.windowId != albumWindow.windowId &&
+            snapshot.window.generation >= albumWindow.generation &&
+            MomoAlbumDirectoryInspector.isConfirmed(snapshot, targetPackage) &&
+            accessibilityGateway.isWindowCurrent(snapshot.window)
+    }
+
     override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
         sendDraft(target, expectedText) {}
 
