@@ -1511,6 +1511,9 @@ class PrivateMessagesTraversalTaskExecutorTest {
         val original = candidate(0, "Interrupted", ChatUnreadStatus.UNREAD)
         val read = candidate(0, "Interrupted", ChatUnreadStatus.READ)
         val other = candidate(1, "Other read", ChatUnreadStatus.READ)
+        // The previous viewport must be verified before departure. R02 must not
+        // treat an empty checkpoint viewport as proof of continuous traversal.
+        executor.recordVerifiedViewport(snapshot(original, other))
         executor.beginSession(original, key(original), "original-window")
         executor.attemptedSessionKeys += key(original)
         val detail = snapshot(original).copy(
@@ -1529,7 +1532,8 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertFalse(restored.canRecoverInterruptedRow(snapshot(read, candidate(1, "Interrupted", ChatUnreadStatus.READ)), read))
         val unknown = candidate(0, "Interrupted", ChatUnreadStatus.UNKNOWN)
         assertFalse(restored.canRecoverInterruptedRow(snapshot(unknown), unknown))
-        val decision = restored.evaluateListSnapshot(list,  false, 2)
+        val decision = restored.evaluateListSnapshot(list, false, 2)
+        assertFalse(decision.viewportPositionInvalidated)
         assertEquals(read, decision.nextCandidate)
         assertEquals(setOf(key(original)), restored.pendingKnownUnreadKeys())
         restored.beginSession(read, key(read), "new-window")
