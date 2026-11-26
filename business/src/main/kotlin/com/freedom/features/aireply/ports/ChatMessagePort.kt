@@ -31,6 +31,14 @@ interface ChatMessagePort {
         onResult: (ChatMessageBatch) -> Unit
     ) = readRecentMessagesAsync(page, limit, onResult)
 
+    /** Same send-proof read, with the owning read transaction's thread-safe validity predicate. */
+    fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesForSendConfirmationAsync(page, limit, onResult)
+
     /**
      * Async extension for adapters that need a screenshot or an on-device recognizer. The default
      * keeps existing providers synchronous and source-compatible. Implementations must return
@@ -43,4 +51,12 @@ interface ChatMessagePort {
     ) {
         onResult(readRecentMessages(page, limit))
     }
+
+    /** Same OCR continuation; asynchronous adapters check this before each new request. */
+    fun readRecentMessagesAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesAsync(page, limit, onResult)
 }

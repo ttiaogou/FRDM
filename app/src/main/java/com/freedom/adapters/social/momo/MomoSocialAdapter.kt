@@ -7012,20 +7012,56 @@ internal class MomoSocialAdapter(
         page: ChatPageSnapshot,
         limit: Int,
         onResult: (ChatMessageBatch) -> Unit
-    ) = readRecentMessagesWithOcr(page, limit, false, onResult)
+    ) = readRecentMessagesAsync(page, limit, { true }, onResult)
+
+    override fun readRecentMessagesAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesWithOcr(page, limit, false, isRequestCurrent, onResult)
 
     override fun readRecentMessagesForSendConfirmationAsync(
         page: ChatPageSnapshot,
         limit: Int,
         onResult: (ChatMessageBatch) -> Unit
-    ) = readRecentMessagesWithOcr(page, limit, true, onResult)
+    ) = readRecentMessagesForSendConfirmationAsync(page, limit, { true }, onResult)
+
+    override fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesWithOcr(page, limit, true, isRequestCurrent, onResult)
 
     private fun readRecentMessagesWithOcr(
         page: ChatPageSnapshot,
         limit: Int,
         reuseVerifiedIncoming: Boolean,
+        isRequestCurrent: () -> Boolean,
         onResult: (ChatMessageBatch) -> Unit
     ) {
+        val expectedWindow = page.messageListTarget?.window
+        // Read-only live root identity, not a new page recognizer or a full tree traversal.
+        // Once an observation is lost, the old screenshot may never become current again.
+        val isCurrent = retainOcrReadValidity {
+            isRequestCurrent() && expectedWindow != null && expectedWindow.windowId >= 0 &&
+                rootAccess.withActiveTargetRoot { _, current ->
+                    current.packageName == expectedWindow.packageName &&
+                        current.windowId == expectedWindow.windowId &&
+                        current.generation == expectedWindow.generation
+                } == true && isRequestCurrent()
+        }
+        fun staleBatch() = ChatMessageBatch(
+            status = MessageReadStatus.WINDOW_STALE,
+            windowSessionKey = null,
+            messages = emptyList(),
+            scannedRowCount = 0,
+            candidateRowCount = 0,
+            truncated = false,
+            capturedAtMillis = System.currentTimeMillis(),
+            messageListUnavailableReason = "OCR_READ_INVALIDATED"
+        )
         // Hide the monitor before the structural node read, not only before the screenshot.
         // The nested screenshot lease in AndroidAccessibilityGateway keeps the same hidden
         // state through capture/OCR; reference counting prevents either layer restoring early.
@@ -7034,7 +7070,7 @@ internal class MomoSocialAdapter(
             val deliver: (ChatMessageBatch) -> Unit = { batch ->
                 if (resultDelivered.compareAndSet(false, true)) {
                     try {
-                        onResult(batch)
+                        onResult(if (isCurrent()) batch else staleBatch())
                     } catch (_: Exception) {
                         onLog("AI 模式消息读取结果回调异常；监控悬浮窗已安排恢复")
                     } finally {
@@ -7043,6 +7079,11 @@ internal class MomoSocialAdapter(
                 }
             }
 
+            if (!isCurrent()) {
+                onLog("OCR_BATCH_INVALIDATED stage=BEFORE_STRUCTURE;nextRequest=false")
+                deliver(staleBatch())
+                return@acquireObservationVisibility
+            }
             val structuralBatch = try {
                 messageComponents.reader.readRecentMessages(page, limit)
             } catch (_: Exception) {
@@ -7073,8 +7114,13 @@ internal class MomoSocialAdapter(
                     batch = structuralBatch,
                     expectedPackage = page.packageName,
                     expectedActivity = page.activityClass,
-                    reuseVerifiedIncoming = reuseVerifiedIncoming
+                    reuseVerifiedIncoming = reuseVerifiedIncoming,
+                    isRequestCurrent = isCurrent
                 ) { ocrResult ->
+                    if (ocrResult.invalidated || !isCurrent()) {
+                        deliver(staleBatch())
+                        return@recognize
+                    }
                     if (ocrResult.admissionDeferred) {
                         // The worker gate belongs to actual worker exit, not caller timeout.
                         // Never merge this as an empty OCR result or charge failure counters.

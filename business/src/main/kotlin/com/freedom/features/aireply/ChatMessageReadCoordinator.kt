@@ -3,6 +3,7 @@ package com.freedom.features.aireply
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
+import com.freedom.features.aireply.domain.message.MessageReadStatus
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import java.util.concurrent.atomic.AtomicBoolean
@@ -42,7 +43,8 @@ internal class ChatMessageReadCoordinator(
         const val DEFAULT_MESSAGE_LIMIT = 20
     }
 
-    private var requestGeneration = 0L
+    // The adapter worker may only read this generation, not scheduler-owned runtime state.
+    @Volatile private var requestGeneration = 0L
     private var requestInFlight = false
     private var ocrInFlight = false
     private var timeoutTask: ScheduledTask? = null
@@ -71,7 +73,7 @@ internal class ChatMessageReadCoordinator(
         }
         pendingSnapshot = null
         startRead(
-            read = { callback -> messagePort.readRecentMessagesStructureAsync(snapshot, messageLimit, callback) },
+            read = { _, callback -> messagePort.readRecentMessagesStructureAsync(snapshot, messageLimit, callback) },
             forceScheduledDelivery = false,
             timedOut = onTimeout,
             failed = onAdapterFailure
@@ -94,9 +96,9 @@ internal class ChatMessageReadCoordinator(
         pendingSnapshot = null
         ocrInFlight = true
         startRead(
-            read = { callback ->
-                if (sendConfirmation) messagePort.readRecentMessagesForSendConfirmationAsync(snapshot, limit, callback)
-                else messagePort.readRecentMessagesAsync(snapshot, limit, callback)
+            read = { isCurrent, callback ->
+                if (sendConfirmation) messagePort.readRecentMessagesForSendConfirmationAsync(snapshot, limit, isCurrent, callback)
+                else messagePort.readRecentMessagesAsync(snapshot, limit, isCurrent, callback)
             },
             forceScheduledDelivery = forceScheduledDelivery,
             timedOut = onTimeout,
@@ -106,7 +108,7 @@ internal class ChatMessageReadCoordinator(
                 closeRead()
                 // The owning runtime applies the existing draft/send-specific page,
                 // identity and lease checks before accepting the batch.
-                onResult(batch, revalidate)
+                onResult(batch, revalidate || batch.status == MessageReadStatus.WINDOW_STALE)
             }
         }
         return true
@@ -120,7 +122,7 @@ internal class ChatMessageReadCoordinator(
     }
 
     private fun startRead(
-        read: ((ChatMessageBatch) -> Unit) -> Unit,
+        read: (() -> Boolean, (ChatMessageBatch) -> Unit) -> Unit,
         forceScheduledDelivery: Boolean,
         timedOut: (Long) -> Unit,
         failed: () -> Unit,
@@ -162,7 +164,7 @@ internal class ChatMessageReadCoordinator(
         val callThread = Thread.currentThread()
         val callReturned = AtomicBoolean(false)
         try {
-            read { batch ->
+            read({ expectedGeneration == requestGeneration }) { batch ->
                 val shouldDeliver = synchronized(callbackGate) {
                     if (callbackReceived) {
                         false
