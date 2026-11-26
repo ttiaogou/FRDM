@@ -5189,7 +5189,8 @@ class AiReplyObservationRuntime(
                 return@sendOcr
             }
             if (deferBusyOcrResult(ocrBatch)) return@sendOcr
-            deferredSendProofRetryAttempt = 0
+            // Fresh page evidence alone is not progress in send proof. Keep the
+            // read-only backoff until the matcher reports progress or confirmation.
             // The full validated OCR batch, not the preceding geometry-only read, is the
             // immediate diff baseline. Never publish a failed or empty OCR as a new baseline.
             if (ocrBatch.status == MessageReadStatus.SUCCESS &&
@@ -5241,6 +5242,7 @@ class AiReplyObservationRuntime(
     ): Boolean {
         when (transaction.status) {
             com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED -> {
+                deferredSendProofRetryAttempt = 0
                 if (receivedGreetingsTaskActive) {
                     val bound = greetingChatBinding ?: run {
                         onLog("GREETING_SEND_RETURN_BLOCKED reason=BINDING_MISSING")
@@ -5320,6 +5322,36 @@ class AiReplyObservationRuntime(
                     }
                     return true
                 }
+                // A send UNKNOWN is not a page UNKNOWN. Recheck the live surface
+                // after the matcher callback; only retain the read-only route if the
+                // original conversation, window and lease still hold.
+                if (!isAiReplyActive() || !sessionRunStarted) return true
+                if (recoveryContext.pending) return true
+                if (isSendConfirmationPending()) {
+                    val visit = draftVisitToken
+                    val runGeneration = currentRunGeneration()
+                    val fresh = runCatching {
+                        readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
+                    }.getOrNull()
+                    if (!isAiReplyActive() || !sessionRunStarted || recoveryContext.pending ||
+                        !isSendConfirmationPending() || receivedGreetingsTaskActive ||
+                        visit != draftVisitToken || runGeneration != currentRunGeneration()
+                    ) return true
+                    if (fresh != null && !userInteractionActive &&
+                        sessionManagerState == SessionManagerState.READING_SESSION &&
+                        canPerformPrivateMessagesUiAction() &&
+                        isVerifiedRecoveredPrivateDetail(fresh) &&
+                        currentSessionWindowKey != null &&
+                        currentSessionWindowKey == windowSessionKey(fresh) &&
+                        hasSameWindowSession(snapshot, fresh)
+                    ) {
+                        onLog("AI 发送确认[UNKNOWN_PROOF_ONLY]：原聊天、窗口和任务租约仍有效；仅等待新鲜发送证据，不创建页面恢复、不重发")
+                        scheduleDeferredSendProofRecheck("SEND_CONFIRMATION_EVIDENCE_UNAVAILABLE")
+                        return true
+                    }
+                }
+                // Missing binding/page evidence or a historical obligation that has not
+                // yet been rehydrated still follows the existing checkpoint route.
                 if (!requestSendConfirmationRecovery("SEND_CONFIRMATION_UNKNOWN")) {
                     onLog("AI 发送结果核验：UNKNOWN；恢复事务已在等待新鲜页面证据；不返回列表、不重发")
                 }

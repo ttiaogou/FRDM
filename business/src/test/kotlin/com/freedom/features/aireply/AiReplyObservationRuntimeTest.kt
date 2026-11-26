@@ -3530,6 +3530,168 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun r03e3ObservedUnknownKeepsReadOnlyBackoffAndCompletesWithoutPageRecovery() {
+        assertR03e3ObservedUnknown()
+    }
+
+    @Test
+    fun r03e3UnknownWithChangedLiveChatStillRequestsOriginalPageRecovery() {
+        assertR03e3ObservedUnknown(changeChat = true)
+    }
+
+    @Test
+    fun r03e3UserStopCancelsProofOnlyRetry() {
+        assertR03e3ObservedUnknown(stopAfterUnknown = true)
+    }
+
+    private fun assertR03e3ObservedUnknown(changeChat: Boolean = false, stopAfterUnknown: Boolean = false) {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply {
+            verifiedMessageWorkAreaNavigationSupported = true
+            receivedGreetingsWorkflowEnabled = true
+            sessionRunEnabled = true
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+            observedDetailIdentityEnabled = true
+            simulateStructureThenOcr = true
+            ocrDebugTextByRowIndex = mapOf(1 to "PRIVATE_CHAT_BODY_SENTINEL")
+            page = chatDetailSnapshot()
+        }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val logs = mutableListOf<String>()
+        val requestKey = "a".repeat(64)
+        var saved: PrivateMessagesTraversalCheckpoint? = null
+        val repository = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long) = saved
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { saved = checkpoint }
+            override fun clear() { saved = null }
+        }
+        var draftCalls = 0
+        var pendingSend = false
+        var receiptReturned = false
+        var confirmationCalls = 0
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission =
+                    error("No traversal/send gesture may originate from the observation runtime")
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            privateMessagesCheckpointRepository = repository,
+            observedPrivateJournalAdmitted = { _, _, _, _ -> true },
+            privateReplyRequestKey = { _, _ -> requestKey },
+            isConversationDraftPending = { pendingSend },
+            isSendConfirmationPending = { pendingSend },
+            onDraftConversationObserved = { _, _, identity, _ ->
+                assertEquals("verified-platform-id", identity?.contactId)
+                assertEquals(requestKey, saved?.unfinishedSessions?.singleOrNull()?.replyRequestKey)
+                draftCalls++
+                pendingSend = true
+                true
+            },
+            onRecoveredPrivateSendTransaction = { _, _, openedAt ->
+                if (pendingSend) {
+                    assertEquals(openedAt, saved?.unfinishedSessions?.singleOrNull()?.openedAtMillis)
+                    confirmationCalls++
+                    if (confirmationCalls <= 2) {
+                        // Change the real surface after OCR validation, during the
+                        // external matcher callback; the old snapshot is not sufficient.
+                        if (changeChat) port.page = port.page.copy(chatTitleText = "与Another Contact对话")
+                        com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                            com.freedom.features.aireply.ai.SendConfirmationResult.UNKNOWN
+                        )
+                    } else {
+                        pendingSend = false
+                        receiptReturned = true
+                        com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                            com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED, "verified-send-receipt"
+                        )
+                    }
+                } else com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                    com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+                )
+            },
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L },
+            pageSelectedStartup = true
+        )
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
+        runtime.requestPageRouteObservation()
+        runUntilShortestDelay(scheduler, 30) { port.observedDetailTarget != null }
+        port.observedDetailOutcome = ContactIdentityCaptureOutcome.completed(ContactRowIdentity(
+            snapshotId = "observed-detail-test", temporaryUserId = "observed-visit",
+            contactId = "verified-platform-id", confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        ))
+        port.observedDetailReturnPending = true
+        port.page = chatDetailSnapshot(2L)
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilShortestDelay(scheduler, 40) { draftCalls == 1 }
+        val before = requireNotNull(saved)
+        assertEquals(1, before.unfinishedSessions.size)
+        assertEquals(0, port.navigateBackCalls)
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        val beforeUnknown = logs.size
+        val beforeReads = port.ocrAsyncReadRequests
+        runtime.onSendConfirmationObservationRequested()
+        if (changeChat) {
+            runUntilShortestDelay(scheduler, 80) {
+                logs.drop(beforeUnknown).any { it.contains("PAUSED_CHECKPOINT_SAVED") &&
+                    it.contains("SEND_CONFIRMATION_UNKNOWN") }
+            }
+            assertFalse(logs.drop(beforeUnknown).any { it.contains("UNKNOWN_PROOF_ONLY") })
+            assertEquals(1, confirmationCalls)
+            assertEquals(1, draftCalls)
+            assertTrue(pendingSend)
+            assertEquals(0, port.navigateBackCalls)
+            assertFalse(receiptReturned)
+            runtime.reset("test stop")
+            assertNull(tasks.currentLease())
+            return
+        }
+        runUntilShortestDelay(scheduler, 80) {
+            logs.drop(beforeUnknown).any { it.contains("UNKNOWN_PROOF_ONLY") }
+        }
+        assertTrue(scheduler.hasPendingDelay(500L))
+        assertEquals(1, confirmationCalls)
+        assertEquals(before.unfinishedSessions, saved?.unfinishedSessions)
+        assertEquals(0, port.navigateBackCalls)
+        if (stopAfterUnknown) {
+            runtime.reset("user stopped")
+            assertFalse(scheduler.hasPendingDelay(500L))
+            assertNull(tasks.currentLease())
+            assertEquals(1, confirmationCalls)
+            assertFalse(receiptReturned)
+            return
+        }
+        runUntilShortestDelay(scheduler, 80) {
+            logs.drop(beforeUnknown).any { it.contains("reason=SEND_CONFIRMATION_EVIDENCE_UNAVAILABLE") &&
+                it.contains("attempt=2") && it.contains("delayMs=1000") }
+        }
+        assertTrue(scheduler.hasPendingDelay(1_000L))
+        assertEquals(2, confirmationCalls)
+        assertTrue(port.ocrAsyncReadRequests > beforeReads)
+        assertEquals(0, port.navigateBackCalls)
+        assertFalse(logs.drop(beforeUnknown).any { it.contains("PAUSED_CHECKPOINT_SAVED") ||
+            it.contains("AI 发送恢复[RECOVERY_VERIFIED]") })
+        runUntilShortestDelay(scheduler, 80) { receiptReturned }
+        assertEquals(3, confirmationCalls)
+        assertEquals(1, draftCalls)
+        assertTrue(requireNotNull(saved).unfinishedSessions.isEmpty())
+        assertEquals(before.nextCursorKey, saved?.nextCursorKey)
+        assertEquals(before.lockedUnreadSessionKeys, saved?.lockedUnreadSessionKeys)
+        assertEquals("verified-send-receipt", saved?.lastSuccessfulTaskId)
+        runtime.reset("test stop")
+        assertNull(tasks.currentLease())
+    }
+
+    @Test
     fun pageSelectedPrivateStartupRunsOriginalWorkAreaProofBeforeFirstGesture() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(
