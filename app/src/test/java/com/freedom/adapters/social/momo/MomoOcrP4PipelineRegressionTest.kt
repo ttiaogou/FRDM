@@ -313,7 +313,13 @@ class MomoOcrP4PipelineRegressionTest {
         assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(key, rendered.text, 1, rendered.tokens, projection))
         val outgoing = incoming.copy(explicitDirectionHint = ChatMessageDirection.OUTGOING,
             identityDirectionHint = ChatMessageDirection.OUTGOING)
-        val outgoingKey = MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(batch, outgoing, byteArrayOf(1, 2, 3))!!
+        // Outgoing proof keys require a verified window structure signature. Test
+        // both missing evidence rejection and the ambiguous-content cache gate.
+        val png = byteArrayOf(1, 2, 3)
+        assertNull(MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(batch, outgoing, png))
+        val signedBatch = batch.copy(windowSnapshotSignature = "structure-one")
+        val outgoingKey = requireNotNull(
+            MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(signedBatch, outgoing, png))
         assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(outgoingKey, rendered.text, 1, tokens, projection))
         val unicode = MomoOcrVisualSymbolGuard.reconcileWithTokens(
             listOf(rawLine.copy(text = "🤔🤔我请你")), regions)
