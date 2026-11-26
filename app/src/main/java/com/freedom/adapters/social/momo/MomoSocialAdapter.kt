@@ -5418,6 +5418,56 @@ internal class MomoSocialAdapter(
         } ?: false
     }
 
+    /** M02.2: caller owns the media transaction and must not resubmit while awaiting arrival. */
+    internal fun openImageAlbum(
+        target: ChatDraftInputTarget,
+        onGestureResult: (GestureExecutionStatus) -> Unit
+    ): GestureSubmission {
+        if (!isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease) ||
+            !isCurrentDraftTarget(target) || target.packageName != targetPackage ||
+            activityClass() != target.activityClass) return GestureSubmission.DEFERRED_NOT_READY
+        return rootAccess.withActiveTargetRoot { root, window ->
+            if (window != target.nodeTarget.window ||
+                !inspectGesturePageReadiness(root, window.activityClass, RunMode.AI_REPLY).ready ||
+                MomoAlbumArrivalInspector.isConfirmed(root, targetPackage)) {
+                return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            }
+            val entry = chatComponents.pageInspector.inspectImageEntry(
+                AccessibilityNodeInfo.obtain(root), targetPackage, window.activityClass
+            ) ?: return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            val bounds = ScreenRect(entry.left, entry.top, entry.right, entry.bottom)
+            val executionContext = gesturePolicy.captureContext(window)
+                ?: return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            if (!accessibilityGateway.isWindowCurrent(window) ||
+                !isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease)) {
+                return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            }
+            gesturePolicy.execute(
+                GestureIntentRequest(
+                    id = "momo-image-entry-${System.nanoTime()}",
+                    intent = GestureIntent.Tap(
+                        preferredBounds = bounds, targetBounds = bounds,
+                        durationMs = SEND_TAP_DURATION_MS,
+                        feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
+                    ),
+                    description = "Open verified Momo image album",
+                    executionContext = executionContext
+                ),
+                GestureExecutionListener { result ->
+                    if (isBoundAiReplyUiOperationOwned(target.taskLease)) onGestureResult(result.status)
+                }
+            )
+        } ?: GestureSubmission.DEFERRED_NOT_READY
+    }
+
+    /** Observe a new active target root; a completed tap alone never confirms arrival. */
+    internal fun inspectImageAlbumArrival(target: ChatDraftInputTarget): Boolean {
+        if (!isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease)) return false
+        return rootAccess.withActiveTargetRoot { root, _ ->
+            MomoAlbumArrivalInspector.isConfirmed(root, targetPackage)
+        } == true
+    }
+
     override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
         sendDraft(target, expectedText) {}
 
