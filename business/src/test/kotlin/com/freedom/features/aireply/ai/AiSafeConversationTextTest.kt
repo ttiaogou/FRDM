@@ -109,6 +109,35 @@ class AiSafeConversationTextTest {
         ), message))
     }
 
+    @Test fun sharedProjectionRuleRejectsSameLineUncertaintyEvenWithPermissiveTextPolicy() {
+        val marker = OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.PLACEHOLDER, OcrTokenStatus.UNVERIFIED, marker,
+                OcrTokenSource.VISUAL_GUARD, 0, line, OcrContentRect(70, 2, 80, 25)),
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.AMBIGUOUS, " 哈哈，我也是，牛马生活",
+                OcrTokenSource.OCR_LINE, 0, line)
+        )
+        val raw = tokens.joinToString("") { it.text }
+        assertNull(OcrTextProjection.derive(raw, tokens, { it }, { it }))
+        // Even a forged RECOGNIZED flag cannot replace missing independent evidence.
+        val changed = tokens.map { it.copy(status = if (it.kind == OcrContentKind.TEXT)
+            OcrTokenStatus.RECOGNIZED else it.status) }
+        assertNull(OcrTextProjection.derive(raw, changed, { it }, { it }))
+    }
+
+    @Test fun sharedProjectionStillEnforcesLineGeometryAndTokenOrder() {
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED, "你好",
+                OcrTokenSource.OCR_LINE, 0, line),
+            OcrContentToken(OcrContentKind.EMOJI, OcrTokenStatus.UNVERIFIED, "😊",
+                OcrTokenSource.UNICODE_EMOJI, 0, line)
+        )
+        val expected = OcrTextProjection("你好", OcrTextProjectionStatus.PARTIAL, listOf(0), emptyList())
+        assertEquals(expected, OcrTextProjection.derive("你好😊", tokens, { it }, { it.takeIf(String::isNotBlank) }))
+        assertNull(OcrTextProjection.derive("你好😊", tokens.reversed(), { it }, { it }))
+        assertNull(OcrTextProjection.derive("你好😊", tokens.map { it.copy(lineBounds = null) }, { it }, { it }))
+    }
+
     @Test fun missingProjectionNeverUpgradesAmbiguousContent() {
         val marker = OcrUncertaintyMarkers.UNKNOWN_VISUAL_SYMBOL
         val raw = "你好${marker}"

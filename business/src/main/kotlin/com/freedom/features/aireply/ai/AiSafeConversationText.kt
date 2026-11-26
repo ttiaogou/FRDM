@@ -75,58 +75,21 @@ internal object AiSafeConversationText {
         tokens: List<OcrContentToken>,
         projection: OcrTextProjection
     ): String? {
-        if (rawContent.isNullOrBlank() || tokens.isEmpty() ||
-            tokens.any { it.lineIndex < 0 } ||
-            tokens.zipWithNext().any { (a, b) -> a.lineIndex > b.lineIndex }
-        ) return null
-        val groups = tokens.groupBy { it.lineIndex }
-        if (groups.keys.toList() != (0 until groups.size).toList()) return null
-        val full = groups.values.joinToString("\n") { parts -> parts.joinToString("") { it.text } }
-        if (normalize(full) != normalize(rawContent)) return null
-
-        val included = ArrayList<Int>()
-        val excluded = ArrayList<Int>()
-        val textLines = ArrayList<String>()
-        var omittedEmoji = false
-        for ((index, parts) in groups) {
-            val bounds = parts.first().lineBounds
-            val supported = bounds != null && bounds.right > bounds.left && bounds.bottom > bounds.top &&
-                parts.all { token ->
-                    token.lineBounds == bounds && when (token.kind) {
-                        OcrContentKind.TEXT ->
-                            token.status == OcrTokenStatus.RECOGNIZED &&
-                                token.source == OcrTokenSource.OCR_LINE &&
-                                token.symbolBounds == null && '\n' !in token.text
-                        OcrContentKind.EMOJI ->
-                            token.status == OcrTokenStatus.UNVERIFIED &&
-                                token.source == OcrTokenSource.UNICODE_EMOJI &&
-                                token.symbolBounds == null
-                        OcrContentKind.PLACEHOLDER -> false
-                    }
-                }
-            val originalText = parts.filter { it.kind == OcrContentKind.TEXT }
-                .joinToString("") { it.text }.trim()
-            val clean = if (supported) legacy(originalText) else null
-            // Do not accept a text line where a second, unsupported emoji was hidden in TEXT.
-            if (clean == null || clean != normalize(originalText)) {
-                excluded += index
-                continue
+        val expected = OcrTextProjection.derive(
+            rawContent,
+            tokens,
+            canonicalize = ::normalize,
+            verifiedLineText = { originalText ->
+                // Retain the stricter model boundary: a hidden emoji in TEXT is not a valid token.
+                legacy(originalText)?.takeIf { it == normalize(originalText) }
             }
-            included += index
-            textLines += clean
-            if (parts.any { it.kind == OcrContentKind.EMOJI }) omittedEmoji = true
-        }
-        if (included.isEmpty()) return null
-        val expected = normalize(textLines.joinToString("\n"))
-        val status = if (excluded.isNotEmpty() || omittedEmoji) {
-            OcrTextProjectionStatus.PARTIAL
-        } else OcrTextProjectionStatus.COMPLETE
-        if (projection.includedLineIndices != included ||
-            projection.excludedLineIndices != excluded ||
-            projection.status != status ||
-            normalize(projection.text) != expected
+        ) ?: return null
+        if (projection.includedLineIndices != expected.includedLineIndices ||
+            projection.excludedLineIndices != expected.excludedLineIndices ||
+            projection.status != expected.status ||
+            normalize(projection.text) != expected.text
         ) return null
-        return expected
+        return expected.text
     }
 
     private fun normalize(value: String): String = value.replace('\u00A0', ' ')
