@@ -604,9 +604,13 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
         assertEquals(setOf(key(pending)), executor.lockedUnreadSessionKeys)
         assertEquals(setOf("processed"), executor.attemptedSessionKeys)
-        // Only the verified checkpoint-resume path may accept this position.
-        executor.recordVerifiedViewport(fresh)
-        assertFalse(executor.evaluateListSnapshot(fresh, false, 2).viewportPositionInvalidated)
+        // Page recovery must not accept a disconnected position as the scan origin.
+        executor.beginScanContinuityRecovery()
+        val positioning = executor.evaluateListSnapshot(fresh, false, 2)
+        assertFalse(positioning.viewportPositionInvalidated)
+        assertEquals(null, positioning.nextCandidate)
+        assertTrue(executor.scanContinuityRecoveryPending)
+        assertEquals(executor.visibleSessionKeys(old), executor.checkpoint().lastStableVisibleKeys)
     }
 
     @Test
@@ -636,6 +640,27 @@ class PrivateMessagesTraversalTaskExecutorTest {
         )
         assertEquals(PrivateMessagesScrollObservationDecision.POSITION_UNVERIFIED,
             executor.consumePendingScrollObservation(executor.scrollPositionKeys(reverse), 2, false))
+        assertEquals(null, executor.pendingScrollBaseline)
+    }
+
+    @Test
+    fun collectionGapInRequestedDirectionIsNotProofOfScanContinuity() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val before = snapshot(candidate(0, "Original", ChatUnreadStatus.UNREAD)).copy(
+            windowGeneration = 1L,
+            chatListCollectionRowCount = 67,
+            chatListVisibleCollectionRows = (20..29).toList(),
+            chatListCanScrollForward = true,
+            chatListCanScrollBackward = true
+        )
+        val gap = before.copy(
+            chatListVisibleCollectionRows = (5..14).toList(),
+            chatListCandidates = listOf(candidate(1, "After gap", ChatUnreadStatus.UNREAD))
+        )
+        executor.pendingScrollBaseline = executor.scrollPositionKeys(before)
+        executor.pendingScrollToTop = true
+        assertEquals(PrivateMessagesScrollObservationDecision.POSITION_UNVERIFIED,
+            executor.consumePendingScrollObservation(executor.scrollPositionKeys(gap), 2, false))
         assertEquals(null, executor.pendingScrollBaseline)
     }
 
@@ -1378,13 +1403,15 @@ class PrivateMessagesTraversalTaskExecutorTest {
     @Test
     fun restoredViewportMismatchReanchorsBySessionNameWithoutReusingCoordinates() {
         val executor = PrivateMessagesTraversalTaskExecutor()
-        val saved = candidate(0, "Alice", ChatUnreadStatus.UNREAD, top = 100)
-        executor.lastStableSessionListVisibleKeys = executor.visibleSessionKeys(snapshot(saved))
+        val saved = candidate(0, "Alice", ChatUnreadStatus.UNREAD, top = 400)
+        val neighbor = candidate(1, "Other", ChatUnreadStatus.READ, top = 100)
+        executor.lastStableSessionListVisibleKeys = executor.visibleSessionKeys(snapshot(saved, neighbor))
         executor.rememberRecoveryAnchor(saved)
 
         val moved = candidate(4, "Alice", ChatUnreadStatus.UNREAD, top = 900)
         val current = snapshot(candidate(1, "Other", ChatUnreadStatus.READ), moved)
         assertFalse(executor.isRestoredViewportCompatible(current))
+        assertTrue("Fresh neighboring identity proves continuity", executor.hasRestoredViewportContinuity(current))
 
         val result = executor.reanchorRestoredCheckpoint(current)
 

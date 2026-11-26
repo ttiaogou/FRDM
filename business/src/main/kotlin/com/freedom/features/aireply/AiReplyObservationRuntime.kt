@@ -1527,13 +1527,18 @@ class AiReplyObservationRuntime(
                 executor.hasRestoredViewportContinuity(inspection))
         ) {
             executor.recordVerifiedViewport(inspection)
-            if (executor.collectionBoundaryEvidence(inspection, toTop = true) == false) executor.atTop = false
+            // A restored top assertion needs fresh position evidence as well.
+            if (executor.atTop && executor.collectionBoundaryEvidence(inspection, toTop = true) != true) {
+                executor.atTop = false
+            }
             onLog("消息列表检查点恢复[CONTINUE]：原视口连续；保留本轮记录与遍历游标")
         } else {
             val continuous = executor.hasRestoredViewportContinuity(inspection)
             val reanchor = executor.reanchorRestoredCheckpoint(inspection)
             if (continuous && reanchor.status != PrivateMessagesTraversalTaskExecutor.RestoreReanchorStatus.AMBIGUOUS) {
-                executor.recordVerifiedViewport(inspection)
+                if (reanchor.status != PrivateMessagesTraversalTaskExecutor.RestoreReanchorStatus.REANCHORED) {
+                    executor.recordVerifiedViewport(inspection)
+                }
                 executor.atTop = false
                 onLog("消息列表检查点恢复[REANCHOR]：status=${reanchor.status.name}；邻接身份连续；重新获取当前行，不复用旧坐标")
             } else if (executor.initialInboxTopPositioningCompleted) {

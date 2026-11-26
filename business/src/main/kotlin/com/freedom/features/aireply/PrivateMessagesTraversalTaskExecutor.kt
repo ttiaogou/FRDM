@@ -1350,8 +1350,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
             val towardBottom = after.first >= before.first && after.last >= before.last && after != before
             val skippedRange = after.first > before.last + 1 || before.first > after.last + 1
             if (!sameIdentitySequence && (skippedRange || (if (wasScrollingToTop) towardBottom else towardTop))) {
-                // The observed movement contradicts the submitted direction. Do not
-                // infer a completed scroll or boundary from the changed range.
+                // A range gap or reverse movement cannot prove a completed
+                // scroll or boundary, even when the destination page is valid.
                 return PrivateMessagesScrollObservationDecision.POSITION_UNVERIFIED
             }
             !sameIdentitySequence && (if (wasScrollingToTop) towardTop else towardBottom)
