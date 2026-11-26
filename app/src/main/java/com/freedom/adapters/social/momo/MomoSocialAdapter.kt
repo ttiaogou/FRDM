@@ -5616,7 +5616,7 @@ internal class MomoSocialAdapter(
                         it.images.single() == candidate }?.finish
             },
             boundsOf = { it.bounds },
-            onDispatched = { commandId, atUptimeMs ->
+            onPlatformDispatched = { commandId, atUptimeMs ->
                 onDispatched(MomoImageSendAttempt(baseline, commandId, atUptimeMs))
             },
             onGestureResult = onGestureResult
@@ -5635,7 +5635,7 @@ internal class MomoSocialAdapter(
         action: String,
         resolve: (AccessibilityNodeInfo, WindowRef) -> T?,
         boundsOf: (T) -> ScreenRect,
-        onDispatched: (String, Long) -> Unit = { _, _ -> },
+        onPlatformDispatched: (String, Long) -> Unit = { _, _ -> },
         onGestureResult: (GestureExecutionStatus) -> Unit
     ): GestureSubmission {
         val lease = target.taskLease ?: return GestureSubmission.DEFERRED_NOT_READY
@@ -5700,7 +5700,7 @@ internal class MomoSocialAdapter(
 
                         override fun onDispatched(commandId: String, dispatchedAtUptimeMs: Long) {
                             if (activeAlbumSelectorPermit.get() === permit && permit.matchesCommand(commandId) && ownsWrite()) {
-                                onDispatched(commandId, dispatchedAtUptimeMs)
+                                onPlatformDispatched(commandId, dispatchedAtUptimeMs)
                             }
                         }
 
