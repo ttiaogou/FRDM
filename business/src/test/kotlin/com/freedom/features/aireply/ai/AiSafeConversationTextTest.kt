@@ -255,12 +255,23 @@ class AiSafeConversationTextTest {
             id = "first", logicalMessageId = "first", bounds = ScreenRect(0, 0, 100, 9))
         val last = msg(lastTokens.joinToString("") { it.text }, MessageContentQuality.AMBIGUOUS, 4)
             .copy(id = "last", logicalMessageId = "last", bounds = ScreenRect(0, 31, 100, 60))
+        // A real OCR batch also includes row-bound evidence for the pure-text message.
+        // Do not bypass the mixed-batch safety gate by relying on its VERIFIED flag alone.
+        val firstTokens = listOf(OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED,
+            "出来吃烧烤吗", OcrTokenSource.OCR_LINE, 0, OcrContentRect(0, 0, 192, 59)))
+        val firstProjection = OcrTextProjection("出来吃烧烤吗", OcrTextProjectionStatus.COMPLETE,
+            listOf(0), emptyList())
         val all = batch.copy(messages = listOf(first, message, last),
-            ocrTokensByRowIndex = mapOf(3 to tokens, 4 to lastTokens),
-            ocrTextProjectionsByRowIndex = mapOf(3 to projection,
+            scannedRowCount = 3, candidateRowCount = 3,
+            ocrTokensByRowIndex = mapOf(2 to firstTokens, 3 to tokens, 4 to lastTokens),
+            ocrTextProjectionsByRowIndex = mapOf(2 to firstProjection, 3 to projection,
                 4 to OcrTextProjection("怎么说", OcrTextProjectionStatus.PARTIAL, listOf(0), emptyList())))
         assertEquals(listOf("出来吃烧烤吗", "我请你", "怎么说"),
             VisibleDraftContext.build(all)!!.messages.map { it.content })
+        assertNull(AiSafeConversationText.visible(all.copy(
+            ocrTokensByRowIndex = all.ocrTokensByRowIndex - 2), first))
+        assertNull(AiSafeConversationText.visible(all.copy(
+            ocrTextProjectionsByRowIndex = all.ocrTextProjectionsByRowIndex - 2), first))
         val rejected = listOf(
             listOf(marker, text.copy(isolatedTextEvidence = null)),
             listOf(marker, text.copy(isolatedTextEvidence = proof.copy(confidence = 0.79f))),
