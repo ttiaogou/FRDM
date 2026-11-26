@@ -5460,6 +5460,14 @@ internal class MomoSocialAdapter(
         } ?: GestureSubmission.DEFERRED_NOT_READY
     }
 
+    /** M02.3: read-only evidence for the current album selector, never a cached tap target. */
+    internal fun inspectImageAlbumSelector(target: ChatDraftInputTarget): MomoAlbumSelectorEvidence? {
+        if (!isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease)) return null
+        return rootAccess.withActiveTargetRoot { root, _ ->
+            MomoAlbumSelectorInspector.inspect(root, targetPackage)
+        }
+    }
+
     /** Observe a new active target root; a completed tap alone never confirms arrival. */
     internal fun inspectImageAlbumArrival(target: ChatDraftInputTarget): Boolean {
         if (!isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease)) return false
