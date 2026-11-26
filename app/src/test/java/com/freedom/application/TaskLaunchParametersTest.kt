@@ -48,6 +48,17 @@ class TaskLaunchParametersTest {
         assertNotNull(empty.copy(imageResourceUris = listOf("content://media/a", "content://media/b")).imageSendTestValidationError())
     }
 
+    @Test fun interceptionTestIsIndependentAndDoesNotRequireImagePool() {
+        val interception = TaskLaunchParameters(imageSendTestRequestId = "interception:test")
+        assertTrue(interception.isInterceptionTestRequested)
+        assertFalse(interception.isImageTestRequested)
+        assertNull(interception.childTestValidationError())
+        val image = interception.copy(imageSendTestRequestId = "image-test")
+        assertFalse(image.isInterceptionTestRequested)
+        assertTrue(image.isImageTestRequested)
+        assertNotNull(image.childTestValidationError())
+    }
+
     @Test fun imagePoolNormalizesBlankImportedResources() {
         val updated = TaskLaunchParameters().withImportedImageResourceUris(
             listOf("", " ", " content://media/a ", "content://media/a")

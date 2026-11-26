@@ -1,6 +1,7 @@
 package com.freedom.features.aireply.ports
 
-/** Existing AI observer drives one explicitly authorized platform image transaction. */
+/** Existing AI observer drives one explicitly authorized chat-detail child transaction. */
+const val INTERCEPTION_TEST_REQUEST_PREFIX = "interception:"
 enum class ImageSendTestProgress { IDLE, ACTIVE, TERMINAL }
 
 interface ChatImageSendTestPort {

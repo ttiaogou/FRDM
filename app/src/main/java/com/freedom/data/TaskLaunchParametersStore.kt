@@ -54,7 +54,7 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
     override fun isImageSendTestRequestAvailable(requestId: String): Boolean {
         val settings = read()
         return requestId.isNotBlank() && settings.imageSendTestRequestId == requestId &&
-            settings.imageSendTestValidationError() == null &&
+            settings.childTestValidationError() == null &&
             preferences.getString(KEY_IMAGE_SEND_TEST_CONSUMED, null) != requestId
     }
 

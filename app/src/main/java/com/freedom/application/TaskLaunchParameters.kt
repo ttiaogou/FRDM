@@ -1,6 +1,7 @@
 package com.freedom.application
 
 import com.freedom.features.aireply.policy.ConversationFilterSettings
+import com.freedom.features.aireply.ports.INTERCEPTION_TEST_REQUEST_PREFIX
 
 /**
  * Editable filter and launch-form values shared by the launcher and its persistence adapter.
@@ -19,9 +20,18 @@ data class TaskLaunchParameters(
     val imageSendThreshold: Int = 0,
     /** Persistable document URIs selected by the user for the future image-send transaction. */
     val imageResourceUris: List<String> = emptyList(),
-    /** Explicit single-use development test authorization; null keeps normal AI Reply unchanged. */
+    /** Single-use child-test authorization; interception: prefix selects interception, otherwise image. */
     val imageSendTestRequestId: String? = null
 ) {
+    val isInterceptionTestRequested: Boolean
+        get() = imageSendTestRequestId?.startsWith(INTERCEPTION_TEST_REQUEST_PREFIX) == true
+
+    val isImageTestRequested: Boolean
+        get() = imageSendTestRequestId != null && !isInterceptionTestRequested
+
+    fun childTestValidationError(): String? =
+        if (isInterceptionTestRequested) null else imageSendTestValidationError()
+
     fun imageSendTestValidationError(): String? = when {
         imageResourceUris.count { it.isNotBlank() } != 1 -> "图片测试请先导入且仅保留一张图片"
         else -> null

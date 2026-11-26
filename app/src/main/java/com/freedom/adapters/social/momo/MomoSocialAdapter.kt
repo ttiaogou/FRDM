@@ -56,6 +56,7 @@ import com.freedom.features.aireply.ports.MessageWorkAreaNavigationOutcome
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
 import com.freedom.features.aireply.ports.ChatImageSendTestPort
+import com.freedom.features.aireply.ports.INTERCEPTION_TEST_REQUEST_PREFIX
 import com.freedom.features.aireply.ports.ImageSendTestProgress
 import com.freedom.features.aireply.ports.ChatDraftInputPort
 import com.freedom.features.aireply.ports.ChatDraftInputTarget
@@ -5625,7 +5626,7 @@ internal class MomoSocialAdapter(
                         intent = GestureIntent.Tap(
                             preferredBounds = bounds, targetBounds = bounds,
                             durationMs = SEND_TAP_DURATION_MS,
-                            feedbackIntent = if (action == "select-image")
+                            feedbackIntent = if (action == "select-image" || action == "interception-switch")
                                 com.freedom.core.accessibility.api.GestureFeedbackIntent.STANDARD
                             else com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
                         ),
@@ -5730,7 +5731,9 @@ internal class MomoSocialAdapter(
     // The existing Momo adapter owns this short-lived platform navigation transaction.
     // The AI runtime owns scheduling/admission; TaskCoordinator remains the only lease owner.
     private enum class ImageTestStage {
-        OPEN_ALBUM, WAIT_ALBUM, WAIT_DIRECTORY, WAIT_FREEDOM, WAIT_SELECTION, VERIFY_SEND, TERMINAL
+        OPEN_ALBUM, WAIT_ALBUM, WAIT_DIRECTORY, WAIT_FREEDOM, WAIT_SELECTION, VERIFY_SEND,
+        INTERCEPTION_OPEN_SETTINGS, INTERCEPTION_OPEN_CONTROL, INTERCEPTION_TAP_SWITCH,
+        INTERCEPTION_DISMISS, INTERCEPTION_BACK, INTERCEPTION_RETURN, TERMINAL
     }
 
     private class ImageTestTransaction(
@@ -5739,7 +5742,9 @@ internal class MomoSocialAdapter(
         val baseline: MomoImageSendBaseline?,
         val owner: () -> Boolean
     ) {
-        @Volatile var stage = ImageTestStage.OPEN_ALBUM
+        val interception = id.startsWith(INTERCEPTION_TEST_REQUEST_PREFIX)
+        val logPrefix = if (interception) "MESSAGE_INTERCEPTION_TEST" else "MEDIA_IMAGE_TEST"
+        @Volatile var stage = if (interception) ImageTestStage.INTERCEPTION_OPEN_SETTINGS else ImageTestStage.OPEN_ALBUM
         @Volatile var inFlight = false
         @Volatile var statusReadInFlight = false
         @Volatile var stageStartedAt = SystemClock.uptimeMillis()
@@ -5789,7 +5794,8 @@ internal class MomoSocialAdapter(
         val live = accessibilityGateway.currentGestureWindow() ?: return false
         return live.packageName == targetPackage && live.windowId >= 0 &&
             live.generation >= test.target.nodeTarget.window.generation &&
-            (test.stage != ImageTestStage.OPEN_ALBUM || originalImageTestChat(test))
+            (test.stage !in setOf(ImageTestStage.OPEN_ALBUM, ImageTestStage.INTERCEPTION_OPEN_SETTINGS) ||
+                originalImageTestChat(test))
     }
 
     override fun begin(
@@ -5801,21 +5807,24 @@ internal class MomoSocialAdapter(
         if (imageSendTest != null || requestId.isBlank() || target.packageName != targetPackage ||
             !runCatching(ownsTransaction).getOrDefault(false) ||
             !isBoundAiReplyUiOperationOwned(target.taskLease)) return
-        val baseline = runCatching { captureImageSendBaseline(target, requestId, ownsTransaction) }.getOrNull()
-        if (baseline == null) onLog("MEDIA_IMAGE_TEST BASELINE_UNAVAILABLE nonBlocking=true")
+        val interception = requestId.startsWith(INTERCEPTION_TEST_REQUEST_PREFIX)
+        val baseline = if (interception) null else
+            runCatching { captureImageSendBaseline(target, requestId, ownsTransaction) }.getOrNull()
+        if (!interception && baseline == null) onLog("MEDIA_IMAGE_TEST BASELINE_UNAVAILABLE nonBlocking=true")
         // A crash/reconnect after claim is never permission to send another image.
         if (!runCatching(claim).getOrDefault(false)) {
             onLog("MEDIA_IMAGE_TEST WAIT reason=ONE_SHOT_CLAIM_REJECTED")
             return
         }
         imageSendTest = ImageTestTransaction(target, requestId, baseline, ownsTransaction)
-        onLog("MEDIA_IMAGE_TEST BEGIN parentLeaseInherited=true;baselineAvailable=${baseline != null};oneShotClaimed=true")
+        val test = requireNotNull(imageSendTest)
+        onLog("${test.logPrefix} BEGIN parentLeaseInherited=true;baselineAvailable=${baseline != null};oneShotClaimed=true")
     }
 
     private fun testWait(test: ImageTestTransaction, reason: String) {
         if (test.lastWaitReason != reason) {
             test.lastWaitReason = reason
-            onLog("MEDIA_IMAGE_TEST WAIT stage=${test.stage};reason=$reason")
+            onLog("${test.logPrefix} WAIT stage=${test.stage};reason=$reason")
         }
     }
 
@@ -5825,7 +5834,7 @@ internal class MomoSocialAdapter(
         test.stage = ImageTestStage.TERMINAL
         test.inFlight = false
         test.statusReadInFlight = false
-        onLog("MEDIA_IMAGE_TEST TERMINAL result=$result;stage=$previous;reason=$reason;retrySend=false")
+        onLog("${test.logPrefix} TERMINAL result=$result;stage=$previous;reason=$reason;retrySend=false")
     }
 
     override fun abort(reason: String) {
@@ -5857,11 +5866,21 @@ internal class MomoSocialAdapter(
             action { status ->
                 if (testCurrent(test)) {
                     test.inFlight = false
-                    onLog("MEDIA_IMAGE_TEST GESTURE_RESULT stage=$next;status=$status;arrivalProofRequired=true")
+                    onLog("${test.logPrefix} GESTURE_RESULT stage=$next;status=$status")
+                    if (test.interception && status != GestureExecutionStatus.COMPLETED) {
+                        if (status == GestureExecutionStatus.DEFERRED) {
+                            // Platform explicitly did not dispatch. Reacquire the current target.
+                            test.stage = previous
+                            test.stageStartedAt = previousStartedAt
+                        } else {
+                            // Never repeat a possibly executed toggle.
+                            testTerminal(test, "UNKNOWN", "INTERCEPTION_GESTURE_NOT_CONFIRMED")
+                        }
+                    }
                 }
             }
         }.getOrDefault(GestureSubmission.REJECTED)
-        onLog("MEDIA_IMAGE_TEST SUBMISSION from=$previous;to=$next;submission=$submission")
+        onLog("${test.logPrefix} SUBMISSION from=$previous;to=$next;submission=$submission")
         when (submission) {
             GestureSubmission.ACCEPTED -> Unit
             GestureSubmission.DEFERRED_NOT_READY -> {
@@ -5872,6 +5891,87 @@ internal class MomoSocialAdapter(
             }
             else -> testTerminal(test, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
         }
+    }
+
+    /**
+     * Interception uses the same parent-bound serial tap pipeline as image sending.
+     * Resolve only the current action's target; no page fingerprint or checked-state query.
+     */
+    private fun interceptionNodeBounds(
+        root: AccessibilityNodeInfo,
+        id: String,
+        className: String,
+        clickable: Boolean = false,
+        checkable: Boolean = false,
+        text: String? = null
+    ): ScreenRect? = runCatching {
+        val nodes = root.findAccessibilityNodeInfosByViewId("$targetPackage:id/$id").orEmpty()
+        try {
+            val node = nodes.singleOrNull {
+                it.packageName?.toString() == targetPackage && it.className?.toString() == className &&
+                    it.isVisibleToUser && it.isEnabled && (!clickable || it.isClickable) &&
+                    (!checkable || it.isCheckable) && (text == null || it.text?.toString()?.trim() == text)
+            } ?: return null
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            bounds.toScreenRect().takeUnless { it.isEmpty }
+        } finally {
+            nodes.forEach { runCatching { it.recycle() } }
+        }
+    }.getOrNull()
+
+    private fun submitInterceptionStep(
+        test: ImageTestTransaction,
+        next: ImageTestStage,
+        action: String,
+        resolve: (AccessibilityNodeInfo, WindowRef) -> ScreenRect?
+    ) {
+        val window = accessibilityGateway.currentGestureWindow() ?: return
+        if (window.packageName != targetPackage || window.windowId < 0) return
+        submitImageTestStep(test, next) { callback ->
+            submitVerifiedAlbumTap(
+                test.target, window, test.id, { testCurrent(test) }, action,
+                resolve = resolve, boundsOf = { it }, onGestureResult = callback
+            )
+        }
+    }
+
+    private fun interceptionDismissBounds(root: AccessibilityNodeInfo): ScreenRect? {
+        val title = interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息")
+            ?: return null
+        val rootBounds = Rect()
+        root.getBoundsInScreen(rootBounds)
+        // The user-confirmed safe scrim is ABOVE the title, not the entire FrameLayout.
+        // Derive it from the live window and title; never reuse screenshot coordinates.
+        return ScreenRect(rootBounds.left, rootBounds.top, rootBounds.right, title.top)
+            .takeUnless { it.isEmpty || title.top > rootBounds.bottom }
+    }
+
+    /** Return evidence is only used after the toggle; it never gates initial execution. */
+    private fun interceptionReturnedToChat(test: ImageTestTransaction): Boolean =
+        rootAccess.withActiveTargetRoot { root, window ->
+            window.packageName == test.target.packageName &&
+                window.generation >= test.target.nodeTarget.window.generation &&
+                interceptionNodeBounds(root, "chat_toolbar_avatar", "android.widget.ImageView", clickable = true) != null &&
+                interceptionNodeBounds(root, "chat_user_name", "android.widget.TextView",
+                    text = test.target.expectedChatTitle?.trim()?.takeIf { it.isNotEmpty() } ?: return@withActiveTargetRoot false) != null &&
+                accessibilityGateway.currentGestureWindow() == window
+        } == true
+
+    private fun interceptionBackBounds(window: WindowRef): ScreenRect? {
+        val snapshot = freshMediaSnapshot(window) ?: return null
+        val nodes = snapshot.nodes.filter { it.packageName == targetPackage && it.windowId == window.windowId }
+        val root = nodes.singleOrNull { it.path.childIndices.isEmpty() }?.bounds ?: return null
+        if (root.isEmpty) return null
+        // The supplied return ImageButton has no id. Its local top-left header position
+        // identifies the safe target; never fall back to a fixed absolute point.
+        return nodes.singleOrNull {
+            val b = it.bounds
+            it.className == "android.widget.ImageButton" && it.clickable && it.enabled && it.visible &&
+                !b.isEmpty && b.left >= root.left && b.top >= root.top &&
+                b.right <= root.left + root.width / 3 &&
+                b.bottom <= root.top + root.height / 5
+        }?.bounds
     }
 
     override fun observe() {
@@ -5964,6 +6064,41 @@ internal class MomoSocialAdapter(
                         }
                     }
                 }
+            }
+            ImageTestStage.INTERCEPTION_OPEN_SETTINGS -> {
+                if (!originalImageTestChat(test)) return
+                submitInterceptionStep(test, ImageTestStage.INTERCEPTION_OPEN_CONTROL, "interception-avatar") { root, _ ->
+                    interceptionNodeBounds(root, "chat_toolbar_avatar", "android.widget.ImageView", clickable = true)
+                }
+            }
+            ImageTestStage.INTERCEPTION_OPEN_CONTROL -> {
+                submitInterceptionStep(test, ImageTestStage.INTERCEPTION_TAP_SWITCH, "interception-layout") { root, _ ->
+                    interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true)
+                }
+            }
+            ImageTestStage.INTERCEPTION_TAP_SWITCH -> {
+                submitInterceptionStep(test, ImageTestStage.INTERCEPTION_DISMISS, "interception-switch") { root, _ ->
+                    interceptionNodeBounds(root, "btn_switch", "android.widget.CompoundButton", checkable = true)
+                }
+            }
+            ImageTestStage.INTERCEPTION_DISMISS -> {
+                submitInterceptionStep(test, ImageTestStage.INTERCEPTION_BACK, "interception-dismiss") { root, _ ->
+                    interceptionDismissBounds(root)
+                }
+            }
+            ImageTestStage.INTERCEPTION_BACK -> {
+                if (interceptionReturnedToChat(test)) {
+                    testTerminal(test, "COMPLETED", "SWITCH_TAPPED_ONCE_AND_CHAT_RETURNED_STATE_NOT_READ")
+                    return
+                }
+                submitInterceptionStep(test, ImageTestStage.INTERCEPTION_RETURN, "interception-back") { _, window ->
+                    interceptionBackBounds(window)
+                }
+            }
+            ImageTestStage.INTERCEPTION_RETURN -> {
+                if (interceptionReturnedToChat(test)) {
+                    testTerminal(test, "COMPLETED", "SWITCH_TAPPED_ONCE_AND_CHAT_RETURNED_STATE_NOT_READ")
+                } else testWait(test, "ORIGINAL_CHAT_RETURN_PENDING")
             }
             ImageTestStage.TERMINAL -> Unit
         }
