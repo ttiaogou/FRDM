@@ -32,7 +32,9 @@ data class OcrContentToken(
     val lineIndex: Int,
     val lineBounds: OcrContentRect? = null,
     val symbolBounds: OcrContentRect? = null,
-    val isolatedTextEvidence: OcrIsolatedTextEvidence? = null
+    val isolatedTextEvidence: OcrIsolatedTextEvidence? = null,
+    /** Original components of a grouped edge marker; empty for the legacy single region. */
+    val visualRegions: List<OcrContentRect> = emptyList()
 ) {
     override fun toString(): String =
         "OcrContentToken(kind=$kind,status=$status,source=$source,lineIndex=$lineIndex," +

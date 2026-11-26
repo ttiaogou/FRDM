@@ -7,6 +7,7 @@ import com.freedom.features.aireply.domain.message.OcrContentRect
 import com.freedom.features.aireply.domain.message.OcrContentToken
 import com.freedom.features.aireply.domain.message.OcrTokenSource
 import com.freedom.features.aireply.domain.message.OcrTokenStatus
+import com.freedom.features.aireply.domain.message.OcrTextProjection
 
 /** A rectangle in OCR-crop-local pixel coordinates. */
 internal data class OcrVisualRect(
@@ -156,7 +157,7 @@ internal object MomoOcrVisualSymbolGuard {
         val sorted = lines.sortedWith(compareBy<OcrVisualLine> { it.bounds.top }.thenBy { it.bounds.left })
         val usedRegions = HashSet<Int>()
         val rendered = sorted.mapIndexed { index, line ->
-            reconcileLine(line, colorRegions, usedRegions, index)
+            reconcileLine(line, colorRegions, usedRegions, index, sorted.size == 1)
         }
         return OcrVisualReconciliation(
             rendered.joinToString("\n") { it.text },
@@ -179,7 +180,8 @@ internal object MomoOcrVisualSymbolGuard {
         line: OcrVisualLine,
         allRegions: List<OcrVisualRect>,
         usedRegions: MutableSet<Int>,
-        lineIndex: Int
+        lineIndex: Int,
+        singleLine: Boolean
     ): ReconciledLine {
         if (line.text.isBlank()) return ReconciledLine("", emptyList())
         val indexedSymbols = indexSymbols(line)
@@ -211,11 +213,22 @@ internal object MomoOcrVisualSymbolGuard {
 
         // Without per-character boxes, never guess a visual symbol's location in text.
         if (lineRegions.isNotEmpty() && indexedSymbols.isEmpty()) {
-            val markerBounds = lineRegions.singleOrNull()?.value
+            val components = if (singleLine && lineRegions.size == allRegions.size &&
+                lineRegions.size > 1
+            ) lineRegions.map { it.value.asContentRect() } else emptyList()
+            val grouped = OcrTextProjection.groupedEdgeRegion(line.bounds.asContentRect(), components)
+            val markerBounds = lineRegions.singleOrNull()?.value ?: grouped?.let {
+                OcrVisualRect(it.left, it.top, it.right, it.bottom)
+            }
             val chars = (UNCERTAIN_SYMBOL_ONLY.map {
                 AnnotatedChar(it, OcrTokenSource.VISUAL_GUARD, markerBounds)
             } + AnnotatedChar(' ') + line.text.map { AnnotatedChar(it) })
-            return renderLine(chars, lineIndex, line.bounds, ambiguous = true)
+            val rendered = renderLine(chars, lineIndex, line.bounds, ambiguous = true)
+            if (grouped == null) return rendered
+            return rendered.copy(tokens = rendered.tokens.map {
+                if (it.kind == OcrContentKind.PLACEHOLDER)
+                    it.copy(visualRegions = components) else it
+            })
         }
 
         for ((regionIndex, region) in lineRegions) {

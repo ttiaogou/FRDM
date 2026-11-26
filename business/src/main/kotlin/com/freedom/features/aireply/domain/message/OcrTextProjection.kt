@@ -44,14 +44,48 @@ data class OcrTextProjection(
         }
 
         /**
-         * A single edge visual region may also have been rendered as an unverified Unicode emoji
-         * by OCR. The extra token is never proof of its identity or of adjacent text. Only a
-         * matching isolated read can admit the single contiguous TEXT token.
+         * Group only adjacent components on a common horizontal band at exactly one line edge.
+         * Keep individual rectangles so consumers can recompute the union, rather than trusting
+         * an arbitrary producer-supplied bounding box. Independent text proof is still required.
+         */
+        fun groupedEdgeRegion(line: OcrContentRect, regions: List<OcrContentRect>): OcrContentRect? {
+            if (!line.valid() || regions.size < 2 || regions.distinct().size != regions.size ||
+                regions.any { !it.valid() || !line.overlapsVertically(it) }
+            ) return null
+            val ordered = regions.sortedBy { it.left }
+            val minHeight = minOf(line.bottom - line.top, ordered.minOf { it.bottom - it.top })
+            val maxGap = maxOf(4, minHeight / 4)
+            val bandTop = maxOf(line.top, ordered.maxOf { it.top })
+            val bandBottom = minOf(line.bottom, ordered.minOf { it.bottom })
+            if (bandBottom - bandTop < maxOf(1, minHeight / 2)) return null
+            var right = ordered.first().right
+            for (region in ordered.drop(1)) {
+                if (region.left - right > maxGap) return null
+                right = maxOf(right, region.right)
+            }
+            val union = OcrContentRect(ordered.first().left, ordered.minOf { it.top },
+                right, ordered.maxOf { it.bottom })
+            val tolerance = maxOf(4, (line.bottom - line.top) / 4)
+            val leading = union.left <= line.left + tolerance && union.right > line.left
+            val trailing = union.right >= line.right - tolerance && union.left < line.right
+            return union.takeIf { leading != trailing }
+        }
+
+        /**
+         * An edge visual region (single or grouped) may also have been rendered as an unverified
+         * Unicode emoji span by OCR. Only a matching isolated read can admit contiguous text.
          */
         fun isolatedTextCandidate(parts: List<OcrContentToken>): OcrContentToken? {
-            if (parts.size !in 2..3) return null
-            val text = parts.singleOrNull { it.kind == OcrContentKind.TEXT } ?: return null
             val marker = parts.singleOrNull { it.kind == OcrContentKind.PLACEHOLDER } ?: return null
+            val grouped = marker.visualRegions.isNotEmpty()
+            // The producer inserts a literal separator after the marker. When OCR also
+            // renders leading emoji, that separator is its own TEXT token, not message text.
+            val separator = if (grouped && parts.size == 4 && parts.first() === marker) {
+                parts[1].takeIf { it.kind == OcrContentKind.TEXT && it.text == " " }
+            } else null
+            val content = parts.filterNot { it === separator }
+            if (content.size !in 2..3) return null
+            val text = content.singleOrNull { it.kind == OcrContentKind.TEXT } ?: return null
             val line = text.lineBounds ?: return null
             val region = marker.symbolBounds ?: return null
             if (text.status != OcrTokenStatus.AMBIGUOUS || text.source != OcrTokenSource.OCR_LINE ||
@@ -59,19 +93,27 @@ data class OcrTextProjection(
                 marker.status != OcrTokenStatus.UNVERIFIED || marker.source != OcrTokenSource.VISUAL_GUARD ||
                 marker.text != OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY ||
                 marker.isolatedTextEvidence != null || !line.valid() || !region.valid() ||
-                parts.any { it.lineIndex != text.lineIndex || it.lineBounds != line }
+                parts.any { it.lineIndex != text.lineIndex || it.lineBounds != line ||
+                    (it !== marker && it.visualRegions.isNotEmpty()) }
+            ) return null
+            if (grouped && (parts.first() !== marker || groupedEdgeRegion(line, marker.visualRegions) != region))
+                return null
+            if (separator != null && (separator.status != OcrTokenStatus.AMBIGUOUS ||
+                separator.source != OcrTokenSource.OCR_LINE || separator.symbolBounds != null ||
+                separator.isolatedTextEvidence != null)
             ) return null
             val tolerance = maxOf(4, (line.bottom - line.top) / 4)
             val leading = region.left <= line.left + tolerance && region.right > line.left
             val trailing = region.right >= line.right - tolerance && region.left < line.right
             if (!line.overlapsVertically(region) || leading == trailing) return null
-            if (parts.size == 3) {
-                val emoji = parts.singleOrNull { it.kind == OcrContentKind.EMOJI } ?: return null
+            if (separator != null && !leading) return null
+            if (content.size == 3) {
+                val emoji = content.singleOrNull { it.kind == OcrContentKind.EMOJI } ?: return null
                 if (emoji.status != OcrTokenStatus.UNVERIFIED ||
                     emoji.source != OcrTokenSource.UNICODE_EMOJI ||
                     emoji.symbolBounds != null || emoji.isolatedTextEvidence != null ||
                     emoji.text.isBlank() || '\n' in emoji.text ||
-                    parts.indexOf(emoji) != (if (leading) parts.indexOf(text) - 1 else parts.indexOf(text) + 1)
+                    content.indexOf(emoji) != (if (leading) content.indexOf(text) - 1 else content.indexOf(text) + 1)
                 ) return null
             }
             return text
@@ -136,7 +178,8 @@ data class OcrTextProjection(
                 val bounds = parts.first().lineBounds
                 val supported = bounds != null && bounds.right > bounds.left && bounds.bottom > bounds.top &&
                     parts.all { token ->
-                        token.lineBounds == bounds && token.isolatedTextEvidence == null && when (token.kind) {
+                        token.lineBounds == bounds && token.isolatedTextEvidence == null &&
+                            token.visualRegions.isEmpty() && when (token.kind) {
                             OcrContentKind.TEXT ->
                                 token.status == OcrTokenStatus.RECOGNIZED &&
                                     token.source == OcrTokenSource.OCR_LINE &&

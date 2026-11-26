@@ -595,9 +595,9 @@ internal class MomoChatMessageOcrProcessor(
         }
         val reconciled = MomoOcrVisualSymbolGuard.reconcileWithTokens(lines, colorRegions)
         val finalText = normalizeRecognizedText(reconciled.text)
-        val evidenceTokens = if (allowIsolatedText && lines.size == 1 && colorRegions.size == 1 &&
+        val evidenceTokens = if (allowIsolatedText && lines.size == 1 && colorRegions.isNotEmpty() &&
             reconciled.text.length <= MAX_RECOGNIZED_TEXT_LENGTH && isRequestCurrent()
-        ) isolateEdgeText(crop, reconciled, isRequestCurrent) else reconciled.tokens
+        ) isolateEdgeText(crop, reconciled, colorRegions, isRequestCurrent) else reconciled.tokens
         // Projection is separate from the existing P0 text/quality. A truncated OCR render
         // cannot prove that its tokens align with the complete captured message.
         val textProjection = reconciled.text.takeIf { it.length <= MAX_RECOGNIZED_TEXT_LENGTH }
@@ -638,6 +638,7 @@ internal class MomoChatMessageOcrProcessor(
     private fun isolateEdgeText(
         crop: Bitmap,
         reconciled: OcrVisualReconciliation,
+        colorRegions: List<OcrVisualRect>,
         isRequestCurrent: () -> Boolean
     ): List<OcrContentToken> {
         val tokens = reconciled.tokens
@@ -646,6 +647,11 @@ internal class MomoChatMessageOcrProcessor(
         if (MomoOcrQualityPolicy.classify(text.text) != MessageContentQuality.VERIFIED) return tokens
         val line = text.lineBounds ?: return tokens
         val region = marker.symbolBounds ?: return tokens
+        // Every detected component must be covered by the same marker. Do not isolate a
+        // subset of a message's visual evidence, even if its remaining crop looks clean.
+        val detected = colorRegions.map { OcrContentRect(it.left, it.top, it.right, it.bottom) }
+        val represented = marker.visualRegions.ifEmpty { listOf(region) }
+        if (represented.size != detected.size || represented.toSet() != detected.toSet()) return tokens
         val bounds = OcrTextProjection.isolatedCropBounds(line, region, crop.width, crop.height) ?: return tokens
         if (!isRequestCurrent()) return tokens
         val isolated = Bitmap.createBitmap(crop, bounds.left, bounds.top,
@@ -686,7 +692,7 @@ internal class MomoChatMessageOcrProcessor(
                 onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=REJECTED;reason=GEOMETRY_OR_PROJECTION")
                 return tokens
             }
-            onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=VERIFIED;originalQualityUnchanged=true")
+            onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=VERIFIED;originalQualityUnchanged=true;visualRegions=${represented.size}")
             return updated
         } finally {
             if (isolated !== crop) isolated.recycle()

@@ -286,6 +286,72 @@ class MomoOcrP4PipelineRegressionTest {
         assertNull(OcrTextProjection.isolatedTextCandidate(split.tokens))
     }
 
+    @Test fun groupedLeadingRegionsFromDeviceSampleRequireIndependentTextAndReuseProof() {
+        val rawLine = OcrVisualLine("我请你", OcrVisualRect(0, 0, 176, 59), emptyList())
+        val regions = listOf(OcrVisualRect(3, 14, 37, 49), OcrVisualRect(43, 14, 77, 49))
+        val rendered = MomoOcrVisualSymbolGuard.reconcileWithTokens(listOf(rawLine), regions)
+        assertEquals("${OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY} 我请你", rendered.text)
+        val marker = rendered.tokens.single { it.kind == OcrContentKind.PLACEHOLDER }
+        assertEquals(OcrContentRect(3, 14, 77, 49), marker.symbolBounds)
+        assertEquals(regions.map { OcrContentRect(it.left, it.top, it.right, it.bottom) }, marker.visualRegions)
+        val text = OcrTextProjection.isolatedTextCandidate(rendered.tokens)!!
+        assertNull(MomoOcrTextProjector.extract(rendered.text, rendered.tokens))
+        val bounds = OcrTextProjection.isolatedCropBounds(text.lineBounds!!, marker.symbolBounds!!, 176, 59)!!
+        assertEquals(OcrContentRect(79, 0, 176, 59), bounds)
+        val proof = OcrIsolatedTextEvidence(bounds, OcrContentRect(81, 16, 173, 47), "我请你", 0.95f)
+        val tokens = rendered.tokens.map { if (it === text) it.copy(isolatedTextEvidence = proof) else it }
+        val projection = MomoOcrTextProjector.extract(rendered.text, tokens)!!
+        assertEquals("我请你", projection.text)
+        assertEquals(OcrTextProjectionStatus.PARTIAL, projection.status)
+        assertEquals(MessageContentQuality.AMBIGUOUS, map(rendered.text).contentQuality)
+        val incoming = target().copy(explicitDirectionHint = ChatMessageDirection.INCOMING,
+            identityDirectionHint = ChatMessageDirection.INCOMING, structureSignature = "verified-row")
+        val batch = ChatMessageBatch(MessageReadStatus.SUCCESS, "momo|1|13|conversation=42",
+            emptyList(), 1, 1, false, 1L)
+        val key = MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, incoming, byteArrayOf(1, 2, 3))!!
+        assertTrue(MomoChatMessageOcrProcessor.canCacheCropRecognition(key, rendered.text, 1, tokens, projection))
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(key, rendered.text, 1, rendered.tokens, projection))
+        val outgoing = incoming.copy(explicitDirectionHint = ChatMessageDirection.OUTGOING,
+            identityDirectionHint = ChatMessageDirection.OUTGOING)
+        val outgoingKey = MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(batch, outgoing, byteArrayOf(1, 2, 3))!!
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(outgoingKey, rendered.text, 1, tokens, projection))
+        val unicode = MomoOcrVisualSymbolGuard.reconcileWithTokens(
+            listOf(rawLine.copy(text = "🤔🤔我请你")), regions)
+        val unicodeText = OcrTextProjection.isolatedTextCandidate(unicode.tokens)!!
+        assertEquals("我请你", unicodeText.text)
+        assertEquals("我请你", MomoOcrTextProjector.extract(unicode.text, unicode.tokens.map {
+            if (it === unicodeText) it.copy(isolatedTextEvidence = proof) else it
+        })!!.text)
+    }
+
+    @Test fun groupedRegionsRejectNonContiguousMiddleBothEdgesAndSeparateLineEvidence() {
+        val rawLine = OcrVisualLine("我请你", OcrVisualRect(0, 0, 176, 59), emptyList())
+        val leading = OcrVisualRect(3, 14, 37, 49)
+        val second = OcrVisualRect(43, 14, 77, 49)
+        val trailing = listOf(OcrVisualRect(99, 14, 133, 49), OcrVisualRect(139, 14, 173, 49))
+        val accepted = MomoOcrVisualSymbolGuard.reconcileWithTokens(listOf(rawLine), trailing)
+        assertEquals(OcrContentRect(99, 14, 173, 49), accepted.tokens.first().symbolBounds)
+        assertNotNull(OcrTextProjection.isolatedTextCandidate(accepted.tokens))
+        val rejected = listOf(
+            listOf(leading, OcrVisualRect(90, 14, 124, 49)),
+            listOf(leading, trailing.last()),
+            listOf(OcrVisualRect(45, 14, 79, 49), OcrVisualRect(85, 14, 119, 49)),
+            listOf(leading, OcrVisualRect(43, 44, 77, 58)),
+            listOf(leading, second, OcrVisualRect(139, 14, 173, 49))
+        )
+        rejected.forEach { regions ->
+            val rendered = MomoOcrVisualSymbolGuard.reconcileWithTokens(listOf(rawLine), regions)
+            assertNull(OcrTextProjection.isolatedTextCandidate(rendered.tokens))
+            assertNull(MomoOcrTextProjector.extract(rendered.text, rendered.tokens))
+        }
+        val split = MomoOcrVisualSymbolGuard.reconcileWithTokens(
+            listOf(rawLine.copy(text = "我🤔请你")), listOf(leading, second))
+        assertNull(OcrTextProjection.isolatedTextCandidate(split.tokens))
+        val multiLine = MomoOcrVisualSymbolGuard.reconcileWithTokens(
+            listOf(rawLine, line("你好", 60)), listOf(leading, second))
+        assertTrue(multiLine.tokens.all { it.visualRegions.isEmpty() })
+    }
+
     @Test fun pureTextKeepsOriginalContentTypeDirectionAndCompleteProjection() {
         val result = MomoOcrVisualSymbolGuard.reconcileWithTokens(
             listOf(line("今晚有空吗")), emptyList()
