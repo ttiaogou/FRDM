@@ -39,6 +39,21 @@ class MomoAlbumDirectoryInspectorTest {
         assertFalse(MomoAlbumDirectoryInspector.isConfirmed(snapshot.copy(nodes = otherWindowRow), target))
     }
 
+    @Test
+    fun freedomNameNotWholeRowIsTheTapTarget() {
+        val name = ScreenRect(40, 35, 95, 55)
+        val updated = nodes.map {
+            if (it.viewId.endsWith(":id/diretory_name")) it.copy(bounds = name) else it
+        }
+        val targetEvidence = MomoAlbumDirectoryInspector.resolveFreedom(snapshot.copy(nodes = updated), target)
+        org.junit.Assert.assertEquals(name, targetEvidence?.nameBounds)
+        org.junit.Assert.assertEquals(1, targetEvidence?.imageCount)
+        val duplicate = updated + updated[4].copy(path = NodePath(listOf(0, 0, 0, 2)))
+        org.junit.Assert.assertNull(MomoAlbumDirectoryInspector.resolveFreedom(snapshot.copy(nodes = duplicate), target))
+        org.junit.Assert.assertNull(MomoAlbumDirectoryInspector.resolveFreedom(
+            snapshot.copy(nodes = updated.map { if (it.viewId.endsWith(":id/image_count")) it.copy(text = "0张") else it }), target))
+    }
+
     private fun node(id: String, type: String, path: List<Int>) = AccessibilityNodeSnapshot(
         path = NodePath(path),
         className = if (type == "RecyclerView") "androidx.recyclerview.widget.RecyclerView"

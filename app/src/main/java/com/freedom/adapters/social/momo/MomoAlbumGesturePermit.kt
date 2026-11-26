@@ -11,8 +11,12 @@ internal class MomoAlbumGesturePermit(
     private val expectedWindow: WindowRef,
     private val currentWindow: () -> WindowRef?,
     private val ownsTransaction: () -> Boolean,
-    private val commandId: String = transactionId
+    private val commandId: String = transactionId,
+    /** Reacquires the exact action-specific target; no Android node survives a read. */
+    private val targetStillCurrent: () -> Boolean = { false }
 ) {
+    fun confirmsCurrentTarget(): Boolean = runCatching(targetStillCurrent).getOrDefault(false)
+
     /** No ordinary gesture or read-only readiness probe inherits this request capability. */
     fun matchesCommand(candidate: String?): Boolean =
         commandId.isNotBlank() && candidate == commandId

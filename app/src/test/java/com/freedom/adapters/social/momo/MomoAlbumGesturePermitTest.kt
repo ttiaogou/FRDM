@@ -19,6 +19,16 @@ class MomoAlbumGesturePermitTest {
     }
 
     @Test
+    fun freshTargetEvidenceIsExplicitAndFailsClosed() {
+        var current = true
+        val permit = MomoAlbumGesturePermit("media-1", album, { album }, { true }, "selector-1", { current })
+        assertTrue(permit.confirmsCurrentTarget())
+        current = false
+        assertFalse(permit.confirmsCurrentTarget())
+        assertFalse(MomoAlbumGesturePermit("media-1", album, { album }, { true }).confirmsCurrentTarget())
+    }
+
+    @Test
     fun staleWindowOwnerOrModeCannotDispatch() {
         var current = album
         var owns = true

@@ -108,10 +108,10 @@ internal class MomoGesturePageReadinessInspector(
         // All existing popup and independent-window checks above still apply.
         if (albumPermit != null) {
             val permitted = albumPermit.permits(mode, packageName, rootWindowId, currentActivity) &&
-                MomoAlbumSelectorInspector.inspect(root, targetPackage) != null
+                albumPermit.confirmsCurrentTarget()
             return TargetAppPageReadiness(
                 permitted,
-                if (permitted) "AI Reply: verified media transaction album selector"
+                if (permitted) "AI Reply: verified media transaction action target"
                 else "Media transaction album permission not confirmed",
                 retryable = !permitted
             )
