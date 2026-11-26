@@ -68,6 +68,7 @@ import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import kotlin.math.abs
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import com.freedom.features.aireply.application.message.ChatMessageParser
 import com.freedom.application.ports.GestureSettingsRepository
 import com.freedom.features.aireply.ports.ChatPageSnapshot
@@ -509,8 +510,15 @@ internal class MomoSocialAdapter(
     fun inspectGesturePageReadiness(
         root: AccessibilityNodeInfo,
         currentActivity: String,
-        mode: RunMode
-    ): TargetAppPageReadiness = pageInspectionComponents.gestureReadinessInspector.inspect(root, currentActivity, mode)
+        mode: RunMode,
+        commandId: String? = null
+    ): TargetAppPageReadiness = pageInspectionComponents.gestureReadinessInspector.inspect(
+        root, currentActivity, mode,
+        activeAlbumSelectorPermit.get()?.takeIf { it.matchesCommand(commandId) }
+    )
+
+    // A single short-lived dispatch capability, not a second media workflow or task owner.
+    private val activeAlbumSelectorPermit = AtomicReference<MomoAlbumGesturePermit?>(null)
 
     override fun isDetailActivity(activityClass: String): Boolean =
         activityClass == detailActivityClass
@@ -5476,6 +5484,95 @@ internal class MomoSocialAdapter(
         } == true
     }
 
+    /**
+     * M02.4-B.2: submit exactly one album selector tap for a caller-owned media transaction.
+     * The caller retains the source WindowRef and awaits fresh directory evidence before
+     * advancing or retrying. Gesture completion alone is never directory-arrival proof.
+     */
+    internal fun openImageAlbumDirectory(
+        target: ChatDraftInputTarget,
+        albumWindow: WindowRef,
+        transactionId: String,
+        ownsTransaction: () -> Boolean,
+        onGestureResult: (GestureExecutionStatus) -> Unit
+    ): GestureSubmission {
+        val lease = target.taskLease ?: return GestureSubmission.DEFERRED_NOT_READY
+        fun ownsWrite(): Boolean = runCatching {
+            ownsTransaction() && isAiReplyUiOperationOwned() && isBoundAiReplyUiOperationOwned(lease)
+        }.getOrDefault(false)
+        if (transactionId.isBlank() || target.packageName != targetPackage ||
+            albumWindow.packageName != targetPackage || albumWindow.windowId < 0 ||
+            albumWindow.activityClass.isBlank() || !ownsWrite()
+        ) return GestureSubmission.DEFERRED_NOT_READY
+
+        return rootAccess.withActiveTargetRoot { root, window ->
+            if (window != albumWindow || accessibilityGateway.currentGestureWindow() != window) {
+                return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            }
+            val selector = MomoAlbumSelectorInspector.inspect(root, targetPackage)
+                ?: return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            val bounds = ScreenRect(selector.left, selector.top, selector.right, selector.bottom)
+            val executionContext = gesturePolicy.captureContext(window)
+                ?: return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            if (executionContext.taskLease != lease || executionContext.targetWindow != window || !ownsWrite()) {
+                return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            }
+            val commandId = "momo-album-selector-${System.nanoTime()}"
+            val permit = MomoAlbumGesturePermit(
+                transactionId = transactionId,
+                expectedWindow = window,
+                currentWindow = accessibilityGateway::currentGestureWindow,
+                ownsTransaction = ::ownsWrite,
+                commandId = commandId
+            )
+            if (!activeAlbumSelectorPermit.compareAndSet(null, permit)) {
+                return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            }
+            val submission = runCatching {
+                if (!inspectGesturePageReadiness(root, window.activityClass, RunMode.AI_REPLY, commandId).ready ||
+                    !ownsWrite() || accessibilityGateway.currentGestureWindow() != window
+                ) GestureSubmission.DEFERRED_NOT_READY
+                else gesturePolicy.execute(
+                    GestureIntentRequest(
+                        id = commandId,
+                        intent = GestureIntent.Tap(
+                            preferredBounds = bounds, targetBounds = bounds,
+                            durationMs = SEND_TAP_DURATION_MS,
+                            feedbackIntent = com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
+                        ),
+                        description = "Open verified Momo album directory",
+                        executionContext = executionContext
+                    ),
+                    object : GestureExecutionListener {
+                        override fun isDispatchTargetCurrent(commandId: String): Boolean {
+                            if (activeAlbumSelectorPermit.get() !== permit || !permit.matchesCommand(commandId) ||
+                                !ownsWrite()) return false
+                            // Reacquire the selector at actual dispatch; reject moved bounds or
+                            // changed title rather than sending the queued coordinates.
+                            return rootAccess.withActiveTargetRoot { freshRoot, freshWindow ->
+                                freshWindow == window &&
+                                    accessibilityGateway.currentGestureWindow() == window &&
+                                    MomoAlbumSelectorInspector.inspect(freshRoot, targetPackage) == selector
+                            } == true
+                        }
+
+                        override fun onResult(result: com.freedom.core.accessibility.gesture.GestureExecutionResult) {
+                            if (!permit.matchesCommand(result.commandId) ||
+                                !activeAlbumSelectorPermit.compareAndSet(permit, null)) return
+                            // A legitimate window transition may temporarily revoke write readiness.
+                            // The caller's exact transaction ownership is the callback admission gate.
+                            if (runCatching(ownsTransaction).getOrDefault(false)) onGestureResult(result.status)
+                        }
+                    }
+                )
+            }.getOrDefault(GestureSubmission.REJECTED)
+            if (submission != GestureSubmission.ACCEPTED) {
+                activeAlbumSelectorPermit.compareAndSet(permit, null)
+            }
+            submission
+        } ?: GestureSubmission.DEFERRED_NOT_READY
+    }
+
     /** Read-only dropdown evidence while the page router is resolving the window change. */
     internal fun inspectImageAlbumDirectory(albumWindow: WindowRef): Boolean {
         if (albumWindow.packageName != targetPackage || albumWindow.windowId < 0) return false
@@ -5488,7 +5585,8 @@ internal class MomoSocialAdapter(
         return snapshot.window.windowId != albumWindow.windowId &&
             snapshot.window.generation >= albumWindow.generation &&
             MomoAlbumDirectoryInspector.isConfirmed(snapshot, targetPackage) &&
-            accessibilityGateway.isWindowCurrent(snapshot.window)
+            accessibilityGateway.isWindowCurrent(snapshot.window) &&
+            accessibilityGateway.currentGestureWindow() == snapshot.window
     }
 
     override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =

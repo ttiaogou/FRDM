@@ -10,8 +10,13 @@ internal class MomoAlbumGesturePermit(
     private val transactionId: String,
     private val expectedWindow: WindowRef,
     private val currentWindow: () -> WindowRef?,
-    private val ownsTransaction: () -> Boolean
+    private val ownsTransaction: () -> Boolean,
+    private val commandId: String = transactionId
 ) {
+    /** No ordinary gesture or read-only readiness probe inherits this request capability. */
+    fun matchesCommand(candidate: String?): Boolean =
+        commandId.isNotBlank() && candidate == commandId
+
     fun permits(mode: RunMode, packageName: String, windowId: Int, activity: String): Boolean =
         runCatching {
             mode == RunMode.AI_REPLY && transactionId.isNotBlank() &&

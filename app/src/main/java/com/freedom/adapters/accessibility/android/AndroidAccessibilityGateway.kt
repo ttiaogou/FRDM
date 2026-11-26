@@ -82,7 +82,8 @@ internal class AndroidAccessibilityGateway(
     private val targetAppReadinessController: TargetAppReadinessController,
     private val uiWriteAuthorization: UiWriteAuthorization,
     private val onReadinessDiagnostic: (String) -> Unit = {},
-    private val onActivityBindingMissing: () -> Unit = {}
+    private val onActivityBindingMissing: () -> Unit = {},
+    private val inspectBoundPageReadiness: ((AccessibilityNodeInfo, String, RunMode, String) -> TargetAppPageReadiness)? = null
 ) : AccessibilityGateway, GestureExecutionPort, AndroidActiveWindowRootAccess, AndroidScreenshotCapture {
 
     @Volatile
@@ -111,7 +112,10 @@ internal class AndroidAccessibilityGateway(
             currentWindowGeneration = { windowGeneration },
             activeWindowId = ::activeWindowId,
             currentActiveWindowPackage = ::currentActiveWindowPackage,
-            inspectAutonomousDispatchReadiness = ::inspectAutonomousDispatchReadiness
+            inspectAutonomousDispatchReadiness = ::inspectAutonomousDispatchReadiness,
+            inspectBoundAutonomousDispatchReadiness = { commandId ->
+                inspectAutonomousDispatchReadiness(commandId)
+            }
         )
     }
     private val screenshotCapture by lazy(LazyThreadSafetyMode.NONE) {
@@ -637,6 +641,17 @@ internal class AndroidAccessibilityGateway(
             gestureDispatcher.dispatchGesture(spec, listener, canDispatch, onPlatformDispatch)
         }
 
+    override fun dispatchGesture(
+        spec: GestureSpec,
+        listener: GestureResultListener,
+        commandId: String?,
+        canDispatch: () -> Boolean,
+        onPlatformDispatch: () -> Unit
+    ): GestureSubmission =
+        authorizedGestureDispatch(spec) {
+            gestureDispatcher.dispatchGesture(spec, listener, commandId, canDispatch, onPlatformDispatch)
+        }
+
     /**
      * Forces the same read-only Android safety evaluation used before dispatch.
      * This does not dispatch a gesture or grant UI ownership. The cached current()
@@ -644,15 +659,19 @@ internal class AndroidAccessibilityGateway(
      */
     fun inspectRecoveryReadiness(): TargetAppReadinessSnapshot = evaluateCurrentReadiness()
 
-    private fun inspectAutonomousDispatchReadiness(): String? {
-        val snapshot = evaluateCurrentReadiness()
+    private fun inspectAutonomousDispatchReadiness(): String? = inspectAutonomousDispatchReadiness(null)
+
+    private fun inspectAutonomousDispatchReadiness(commandId: String?): String? {
+        val snapshot = if (commandId == null) evaluateCurrentReadiness() else evaluateCurrentReadiness(commandId)
         if (snapshot.status == TargetAppReadinessStatus.READY) return null
         emitReadinessRejection(snapshot.status, snapshot.reason, snapshot.runMode, snapshot.windowId)
         return snapshot.reason
     }
 
     /** Shared live safety evaluation. Observing readiness is not a rejected dispatch. */
-    private fun evaluateCurrentReadiness(): TargetAppReadinessSnapshot {
+    private fun evaluateCurrentReadiness(): TargetAppReadinessSnapshot = evaluateCurrentReadiness(null)
+
+    private fun evaluateCurrentReadiness(commandId: String?): TargetAppReadinessSnapshot {
         val expectedPackage = targetPackage()
         val mode = runCatching { activeRunMode() }.getOrNull()
         val root = runCatching { service.rootInActiveWindow }.getOrNull()
@@ -684,8 +703,12 @@ internal class AndroidAccessibilityGateway(
                 onActivityBindingMissing()
             }
             val pageReadiness = if (mode != null && foregroundPackage == expectedPackage) {
-                runCatching { inspectPageReadiness(root, currentActivity, mode) }
-                    .getOrElse {
+                runCatching {
+                    val boundInspector = inspectBoundPageReadiness
+                    if (commandId != null && boundInspector != null) {
+                        boundInspector(root, currentActivity, mode, commandId)
+                    } else inspectPageReadiness(root, currentActivity, mode)
+                }.getOrElse {
                         TargetAppPageReadiness(
                             ready = false,
                             reason = "页面准入检查异常：${it.javaClass.simpleName}"

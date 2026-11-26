@@ -487,6 +487,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             inspectPageReadiness = { root, activity, mode ->
                 momoSocialAdapter.inspectGesturePageReadiness(root, activity, mode)
             },
+            inspectBoundPageReadiness = { root, activity, mode, commandId ->
+                momoSocialAdapter.inspectGesturePageReadiness(root, activity, mode, commandId)
+            },
             targetAppReadinessController = targetAppReadinessController,
             inputOriginClassifier = inputOriginClassifier,
             currentRunGeneration = { runSessionCoordinator.currentRunGeneration() },

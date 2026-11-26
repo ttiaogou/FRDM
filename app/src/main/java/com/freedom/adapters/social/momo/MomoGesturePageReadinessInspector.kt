@@ -117,6 +117,11 @@ internal class MomoGesturePageReadinessInspector(
             )
         }
 
+        if (mode == RunMode.AI_REPLY && MomoAlbumArrivalInspector.isConfirmed(root, targetPackage)) {
+            return TargetAppPageReadiness(false,
+                "Media transaction album requires an exact command permit", retryable = true)
+        }
+
         if (mode == RunMode.AI_REPLY && isSayHiProfileScrollPending(rootWindowId)) {
             // The adapter has prepared the swipe from a fresh profile window; require
             // the exact in-flight transaction window again after the popup checks.
