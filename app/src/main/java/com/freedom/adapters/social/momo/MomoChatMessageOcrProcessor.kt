@@ -25,6 +25,7 @@ import com.freedom.features.aireply.domain.message.OcrTokenStatus
 import com.freedom.features.aireply.domain.message.OcrTokenSource
 import com.freedom.features.aireply.domain.message.OcrUncertaintyMarkers
 import com.freedom.features.aireply.domain.message.OcrTextProjection
+import com.freedom.features.aireply.domain.message.OcrTextProjectionStatus
 import com.freedom.features.aireply.domain.message.MessageContentQuality
 import com.freedom.ocr.OcrManager
 import kotlin.math.ceil
@@ -423,6 +424,9 @@ internal class MomoChatMessageOcrProcessor(
                 onLog("OCR_OUTGOING_BASELINE_CROP_REUSED row=${target.rowIndex};purpose=NEXT_SEGMENT_BASELINE;newBinderRequest=false")
             } else {
                 onLog("OCR_INCOMING_CROP_REUSED：当前截图正文像素、会话窗口和行结构一致；row=${target.rowIndex}；己方发送核验仍须独立识别")
+                if (MomoOcrQualityPolicy.classify(reused.finalText) == MessageContentQuality.AMBIGUOUS) {
+                    onLog("OCR_INCOMING_ISOLATED_EVIDENCE_REUSED row=${target.rowIndex};originalQualityUnchanged=true;newBinderRequest=false")
+                }
             }
         }
         if (isCompleted() || !isRequestCurrent()) {
@@ -473,9 +477,9 @@ internal class MomoChatMessageOcrProcessor(
         annotatedCrop?.let { runCatching { it.recycle() } }
         val finalText = normalizeRecognizedText(recognition.finalText)
         val modelText = normalizeRecognizedText(recognition.chineseText)
-        if (reuseKey != null && finalText.isNotBlank() && recognition.lineCount > 0 &&
-            MomoOcrQualityPolicy.classify(finalText) == MessageContentQuality.VERIFIED &&
-            !MomoChatUiTextFilter.isNonMessageUiText(finalText) && !isCompleted() && !closed
+        if (reuseKey != null && canCacheCropRecognition(
+                reuseKey, finalText, recognition.lineCount, recognition.tokens, recognition.textProjection
+            ) && !isCompleted() && !closed
         ) {
             currentVerified[reuseKey] = recognition
         }
@@ -702,6 +706,35 @@ internal class MomoChatMessageOcrProcessor(
     }
 
     companion object {
+        /**
+         * Cache recognition evidence, never message admission. Only incoming single-line
+         * visual placeholders with independently proved text extend the original verified path.
+         * Re-derive the projection using the existing evidence rules; keep raw quality ambiguous.
+         */
+        internal fun canCacheCropRecognition(
+            key: CropReuseKey,
+            finalText: String,
+            lineCount: Int,
+            tokens: List<OcrContentToken>,
+            projection: OcrTextProjection?
+        ): Boolean {
+            if (finalText.isBlank() || lineCount <= 0 ||
+                MomoChatUiTextFilter.isNonMessageUiText(finalText)
+            ) return false
+            val quality = MomoOcrQualityPolicy.classify(finalText)
+            if (quality == MessageContentQuality.VERIFIED) return true
+            if (key.outgoingTarget != null || quality != MessageContentQuality.AMBIGUOUS ||
+                lineCount != 1 || tokens.size != 2 || projection == null ||
+                projection.status != OcrTextProjectionStatus.PARTIAL
+            ) return false
+            val text = tokens.singleOrNull { it.kind == OcrContentKind.TEXT } ?: return false
+            val marker = tokens.singleOrNull { it.kind == OcrContentKind.PLACEHOLDER } ?: return false
+            if (text.isolatedTextEvidence == null ||
+                marker.text != OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY
+            ) return false
+            return MomoOcrTextProjector.extract(finalText, tokens) == projection
+        }
+
         internal fun incomingCropReuseKey(
             batch: ChatMessageBatch,
             target: ChatMessageOcrTarget,

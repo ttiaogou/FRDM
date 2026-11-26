@@ -136,6 +136,76 @@ class MomoOcrP4PipelineRegressionTest {
             "confirmed", "confirmed", "", ""))
     }
 
+    @Test fun incomingIsolatedTextReusePreservesAmbiguousQualityAndFullEvidence() {
+        val rawLine = OcrVisualLine("哈哈，我也是，牛马生活", OcrVisualRect(0, 0, 392, 59), emptyList())
+        val region = OcrVisualRect(355, 14, 391, 48)
+        val rendered = MomoOcrVisualSymbolGuard.reconcileWithTokens(listOf(rawLine), listOf(region))
+        val bounds = OcrTextProjection.isolatedCropBounds(
+            OcrContentRect(0, 0, 392, 59), OcrContentRect(355, 14, 391, 48), 392, 59
+        )!!
+        val proof = OcrIsolatedTextEvidence(bounds, OcrContentRect(1, 16, 350, 47), rawLine.text, 0.95f)
+        val tokens = rendered.tokens.map {
+            if (it.kind == OcrContentKind.TEXT) it.copy(isolatedTextEvidence = proof) else it
+        }
+        val projection = MomoOcrTextProjector.extract(rendered.text, tokens)!!
+        val incoming = target().copy(
+            explicitDirectionHint = ChatMessageDirection.INCOMING,
+            identityDirectionHint = ChatMessageDirection.INCOMING,
+            structureSignature = "verified-row"
+        )
+        val batch = ChatMessageBatch(
+            MessageReadStatus.SUCCESS, "momo|1|13|conversation=42", emptyList(), 1, 1, false, 1L,
+            windowSnapshotSignature = "structure-one"
+        )
+        val png = byteArrayOf(1, 2, 3)
+        val key = MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, incoming, png)!!
+        val moved = incoming.copy(rowIndex = 2)
+        assertEquals(key, MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, moved, png))
+        assertTrue(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, rendered.text, 1, tokens, projection))
+        val message = map(rendered.text, moved)
+        assertEquals(MessageContentQuality.AMBIGUOUS, message.contentQuality)
+        assertEquals(rendered.text, message.content)
+        assertFalse(message.isAiInputEligible)
+        assertEquals(OcrTextProjectionStatus.PARTIAL, projection.status)
+        assertEquals(rawLine.text, projection.text)
+
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, rendered.text, 1, rendered.tokens, projection))
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, rendered.text, 1, tokens, null))
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, rendered.text, 1, tokens, projection.copy(text = "different")))
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, rendered.text, 1, tokens.map {
+                if (it.kind == OcrContentKind.TEXT) it.copy(isolatedTextEvidence = proof.copy(confidence = 0.2f))
+                else it
+            }, projection))
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, rendered.text, 1, tokens.map {
+                if (it.kind == OcrContentKind.TEXT) it.copy(isolatedTextEvidence = proof.copy(
+                    recognizedBounds = OcrContentRect(355, 16, 390, 47)))
+                else it
+            }, projection))
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, rendered.text, 2, tokens, projection))
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, "😊", 1, emptyList(), null))
+
+        val outgoing = incoming.copy(
+            explicitDirectionHint = ChatMessageDirection.OUTGOING,
+            identityDirectionHint = ChatMessageDirection.OUTGOING
+        )
+        val outgoingKey = MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(batch, outgoing, png)!!
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            outgoingKey, rendered.text, 1, tokens, projection))
+        // Preserve the original pure-text admission on both directions.
+        assertTrue(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, "你好", 1, emptyList(), null))
+        assertTrue(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            outgoingKey, "你好", 1, emptyList(), null))
+    }
+
     @Test fun pureTextKeepsOriginalContentTypeDirectionAndCompleteProjection() {
         val result = MomoOcrVisualSymbolGuard.reconcileWithTokens(
             listOf(line("今晚有空吗")), emptyList()
