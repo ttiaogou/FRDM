@@ -108,6 +108,14 @@ internal object MomoSayHiProfileParser {
     private val femaleTokenPattern = Regex("(^|[\\s·,:：])女(?:性)?($|[\\s·,:：])")
     private val maleTokenPattern = Regex("(^|[\\s·,:：])男(?:性)?($|[\\s·,:：])")
 
+    /** A complete, independently delimited distance field, not arbitrary profile text. */
+    fun parseDistanceToken(token: String): Double? {
+        val match = distancePattern.matchEntire(token.trim()) ?: return null
+        val amount = match.groupValues[1].toDoubleOrNull() ?: return null
+        val km = if (match.groupValues[2].equals("m", ignoreCase = true)) amount / 1_000.0 else amount
+        return km.takeIf { it.isFinite() && it >= 0.0 }
+    }
+
     /** Parses only explicit metadata found inside one already-isolated greeting row. */
     fun parseListMetadata(nodeTexts: List<String>): MomoSayHiListMetadata {
         val texts = nodeTexts.map(String::trim).filter(String::isNotBlank).distinct()

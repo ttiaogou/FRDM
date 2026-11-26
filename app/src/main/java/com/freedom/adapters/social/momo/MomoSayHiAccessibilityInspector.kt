@@ -1,6 +1,7 @@
 package com.freedom.adapters.social.momo
 
 import com.freedom.core.accessibility.api.AccessibilityNodeSnapshot
+import com.freedom.features.aireply.policy.ConversationFilterEvidence
 import com.freedom.core.accessibility.api.AccessibilityTreeSnapshot
 import com.freedom.core.accessibility.api.NodePath
 import com.freedom.core.accessibility.query.NodeSelector
@@ -54,7 +55,9 @@ internal data class MomoSayHiListRow(
     val namePath: NodePath? = null,
     val nameBounds: com.freedom.core.accessibility.api.ScreenRect? = null,
     val avatarTapTarget: MomoSayHiTapTarget? = null,
-    val rowTapTarget: MomoSayHiTapTarget? = null
+    val rowTapTarget: MomoSayHiTapTarget? = null,
+    /** Strict filter-only evidence; never part of the existing row identity or send journal. */
+    val filterEvidence: ConversationFilterEvidence = ConversationFilterEvidence()
 )
 
 /**
@@ -632,7 +635,9 @@ internal class MomoSayHiAccessibilityInspector(
                 namePath = nameNode.path,
                 nameBounds = nameNode.bounds,
                 avatarTapTarget = MomoSayHiAvatarTargetPolicy.resolveAvatarTarget(index, rowNodePath),
-                rowTapTarget = MomoSayHiAvatarTargetPolicy.resolveRowTarget(index, rowNodePath, nameNode.path)
+                rowTapTarget = MomoSayHiAvatarTargetPolicy.resolveRowTarget(index, rowNodePath, nameNode.path),
+                filterEvidence = if (completeTree) MomoConversationFilterEvidenceParser.fromListRow(rowNodes)
+                    else ConversationFilterEvidence()
             )
         }.distinctBy { it.rowPath }
     }
