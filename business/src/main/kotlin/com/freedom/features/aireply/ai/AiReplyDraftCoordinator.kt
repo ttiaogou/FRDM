@@ -1,5 +1,6 @@
 package com.freedom.features.aireply.ai
 
+import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
 import com.freedom.features.aireply.domain.message.MessageContentQuality
@@ -556,10 +557,25 @@ class AiReplyDraftCoordinator(
     }
 
     /** 无生成前确认；合并已解析联系人历史与当前窗口消息。 */
+    private fun replyRequestKey(contactId: String, conversation: String, incoming: ChatMessage): String =
+        fingerprint("$contactId|$conversation|${incoming.stableLogicalMessageId}|${incoming.effectiveContentRevision}")
+
+    /** Same key used by the shared visible-draft entry, with no side effects or model call. */
+    fun privateVisibleReplyRequestKey(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): String? {
+        val conversation = snapshot.conversationIdentityKey() ?: return null
+        val contact = batch.windowSessionKey ?: return null
+        if (!VisibleDraftContext.assess(batch).accepted) return null
+        val incoming = batch.messagesBottomToTop.firstOrNull {
+            it.direction == ChatMessageDirection.INCOMING && VisibleDraftContext.eligible(batch, it)
+        } ?: return null
+        return replyRequestKey(contact, conversation, incoming)
+    }
+
     fun generateVisibleDraft(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
                              visitToken: String = batch.windowSessionKey.orEmpty(),
                              history: VerifiedDraftHistory? = null,
-                             taskId: String = AiDecisionTaskIds.PRIVATE_MESSAGES): Boolean {
+                             taskId: String = AiDecisionTaskIds.PRIVATE_MESSAGES,
+                             recoveredPrivateRequestKey: String? = null): Boolean {
         val policy = policyRegistry.resolve(taskId)?.takeIf { it.taskId == taskId }
             ?: return reject("AI_TASK_POLICY_NOT_REGISTERED")
         val visible = VisibleDraftContext.build(batch, visitToken) ?: return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
@@ -569,7 +585,8 @@ class AiReplyDraftCoordinator(
         } else {
             ModelContextScope.CURRENT_WINDOW_ONLY
         }
-        return generateAndFill(batch, null, snapshot, context, visitToken, taskId, contextScope)
+        return generateAndFill(batch, null, snapshot, context, visitToken, taskId, contextScope,
+            recoveredPrivateRequestKey)
     }
 
     /** 仅在平台身份和当前聊天标题均已验证后调用。 */
@@ -584,7 +601,8 @@ class AiReplyDraftCoordinator(
             ModelContextScope.CURRENT_WINDOW_ONLY
         } else {
             ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW
-        }
+        },
+        recoveredPrivateRequestKey: String? = null
     ): Boolean {
         val policy = policyRegistry.resolve(taskId)?.takeIf { it.taskId == taskId }
             ?: return reject("AI_TASK_POLICY_NOT_REGISTERED")
@@ -652,7 +670,17 @@ class AiReplyDraftCoordinator(
         )
         // 窗口代次用于防止旧回调继续执行，不代表新的模型任务身份。
         val dedupeConversationKey = conversationIdentity
-        val dedupeKey = fingerprint("$contactId|$dedupeConversationKey|${latestIncoming.stableLogicalMessageId}|${latestIncoming.effectiveContentRevision}")
+        val currentDedupeKey = replyRequestKey(contactId, dedupeConversationKey, latestIncoming)
+        val dedupeKey = if (recoveredPrivateRequestKey == null) currentDedupeKey else {
+            if (taskId != AiDecisionTaskIds.PRIVATE_MESSAGES || !localDraft) return reject("PRIVATE_PENDING_RESTORE_SCOPE_MISMATCH")
+            val original = replyTaskRepository?.find(recoveredPrivateRequestKey)
+            if (original == null || original.conversationKey != dedupeConversationKey ||
+                original.logicalMessageId != latestIncoming.stableLogicalMessageId ||
+                original.contentRevision != latestIncoming.effectiveContentRevision ||
+                original.status != ReplyTaskStatus.PENDING_SEND
+            ) return reject("PRIVATE_PENDING_RESTORE_REQUEST_MISMATCH")
+            recoveredPrivateRequestKey
+        }
         // 新的已验证聊天观察可以将尚未提交的待发送动作重新绑定到新的
         // 窗口代次；不得重新生成模型回复，也不得重写输入框内容。
         val awaitingControl = synchronized(lock) { pendingSendControl }
@@ -723,6 +751,9 @@ class AiReplyDraftCoordinator(
             schedulePendingSendControlRetry()
             return true
         }
+        // A linked restore is not a request to create a model draft. Missing queue or
+        // composer proof must retain the old obligation rather than regenerate it.
+        if (recoveredPrivateRequestKey != null) return reject("PRIVATE_PENDING_RESTORE_QUEUE_NOT_VERIFIED")
         // UNKNOWN and SENT_UNCONFIRMED may already have reached the platform. A missing
         // outgoing bubble is not proof the send gesture was never submitted.
         // Resume only by read-only send verification; never recreate draft chunks here.
@@ -1603,6 +1634,80 @@ class AiReplyDraftCoordinator(
      * or invoke the send port during recovery. Legacy records without a pre-send
      * baseline remain unresolved rather than accepting a same-text historical bubble.
      */
+    /**
+     * A manually observed detail has already matched its platform-ID visit ledger.
+     * Refuse title-indexed obligations outside that visit, or an old unsent draft
+     * that the existing exact composer/dedupe restore path cannot safely own.
+     * This is read-only and never creates a receipt or a new send.
+     */
+    fun observedPrivateJournalAdmitted(
+        batch: ChatMessageBatch, snapshot: ChatPageSnapshot, openedAtMillis: Long,
+        visitRequestKey: String?
+    ): Boolean {
+        val conversation = snapshot.conversationIdentityKey() ?: return false
+        if (openedAtMillis <= 0L || batch.windowSessionKey.isNullOrBlank()) return false
+        val repository = replySegmentTaskRepository ?: return false
+        val groups = runCatching { repository.findByConversation(conversation).groupBy { it.requestId }.values }
+            .getOrNull() ?: return false
+        val latest = batch.messagesBottomToTop.firstOrNull {
+            it.direction == ChatMessageDirection.INCOMING && VisibleDraftContext.eligible(batch, it)
+        }
+        val linkedOwner = visitRequestKey?.let { replyTaskRepository?.find(it) }
+        for (group in groups) {
+            val started = group.any { it.status in setOf(
+                ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.SENT_UNCONFIRMED,
+                ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT
+            ) }
+            val unsent = group.any { it.status in setOf(
+                ReplySegmentTaskStatus.CREATED, ReplySegmentTaskStatus.DRAFT_APPLIED,
+                ReplySegmentTaskStatus.PENDING_SEND
+            ) }
+            if (!started && !unsent) continue
+            val fullyConfirmed = group.sortedBy { it.segmentIndex }.let { records ->
+                val last = records.last()
+                records.size == last.segmentCount && records.indices.all { index ->
+                    records[index].segmentIndex == index && records[index].segmentCount == records.size &&
+                        hasConfirmedSendReceipt(records[index])
+                } && last.sendRequestKey?.let { key ->
+                    replyTaskRepository?.find(key)?.let { it.requestId == last.requestId &&
+                        it.conversationKey == conversation && it.status == ReplyTaskStatus.SENT }
+                } == true
+            }
+            val old = group.any { it.createdAt < openedAtMillis }
+            if (fullyConfirmed && group.all { it.createdAt < openedAtMillis }) {
+                // A previously confirmed identical incoming revision must not be sent
+                // again just because this visit has a different window generation.
+                val previous = group.last().sendRequestKey?.let { replyTaskRepository?.find(it) }
+                if (latest != null && previous != null &&
+                    previous.logicalMessageId == latest.stableLogicalMessageId &&
+                    previous.contentRevision == latest.effectiveContentRevision) return false
+                continue
+            }
+            // No title-only association, including a complete receipt from a different
+            // visit created after this visit opened. Old unlinked obligations stay held.
+            if (old || visitRequestKey.isNullOrBlank() || linkedOwner == null ||
+                linkedOwner.requestId != group.first().requestId || linkedOwner.conversationKey != conversation ||
+                linkedOwner.requestKey != visitRequestKey ||
+                group.any { it.sendRequestKey != null && it.sendRequestKey != visitRequestKey } ||
+                group.any { it.status in setOf(ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.SENT_UNCONFIRMED,
+                    ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT) && it.sendRequestKey != visitRequestKey }
+            ) return false
+            if (fullyConfirmed) continue
+            if (!started && unsent) {
+                val live = synchronized(lock) { activeRequestId == group.first().requestId &&
+                    activeMessageKey == visitRequestKey && (pending.get() || pendingSendControl != null) }
+                if (!live) {
+                    val pending = group.singleOrNull { it.status == ReplySegmentTaskStatus.PENDING_SEND }
+                    if (pending == null || latest == null ||
+                        linkedOwner.logicalMessageId != latest.stableLogicalMessageId ||
+                        linkedOwner.contentRevision != latest.effectiveContentRevision ||
+                        linkedOwner.status != ReplyTaskStatus.PENDING_SEND) return false
+                }
+            }
+        }
+        return true
+    }
+
     private fun restoreUncertainSendConfirmation(
         batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
         recoveredPrivateOpenedAtMillis: Long? = null

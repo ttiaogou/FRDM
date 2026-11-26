@@ -75,6 +75,7 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
                     .put("verifiedKey", entry.verifiedKey.orEmpty())
                     .put("conversationKey", entry.conversationKey).put("openedAtMillis", entry.openedAtMillis)
                     .put("disposition", entry.disposition.name)
+                    .put("replyRequestKey", entry.replyRequestKey.orEmpty())
             }))
         preferences.edit().putString(KEY, json.toString()).apply()
     }
@@ -93,7 +94,8 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
             else UnfinishedPrivateSession(source, title,
                 entry.optString("verifiedKey").takeIf(String::isNotBlank), conversation, opened,
                 runCatching { UnfinishedPrivateSessionDisposition.valueOf(entry.optString("disposition")) }
-                    .getOrDefault(UnfinishedPrivateSessionDisposition.INTERRUPTED))
+                    .getOrDefault(UnfinishedPrivateSessionDisposition.INTERRUPTED),
+                entry.optString("replyRequestKey").takeIf { it.matches(Regex("[0-9a-f]{64}")) })
         }.distinctBy { it.sourceKey }
     }
 

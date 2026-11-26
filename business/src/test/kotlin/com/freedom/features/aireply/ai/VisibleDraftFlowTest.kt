@@ -1074,6 +1074,45 @@ class VisibleDraftFlowTest {
         assertEquals(1, f.calls)
     }
 
+    @Test fun r04cObservedJournalRequiresExactLinkedRequestEvenWithSameTitleAndTime() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+        }, segments, tasks)
+        f.now = 100L
+        val key = requireNotNull(f.coordinator.privateVisibleReplyRequestKey(f.batch, f.snapshot))
+        assertTrue(f.coordinator.observedPrivateJournalAdmitted(f.batch, f.snapshot, 50L, null))
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertTrue(f.coordinator.deferPrivateUnconfirmedSendForManualReturn())
+        assertFalse(f.coordinator.observedPrivateJournalAdmitted(f.batch, f.snapshot, 50L, null))
+        assertFalse(f.coordinator.observedPrivateJournalAdmitted(f.batch, f.snapshot, 50L, "b".repeat(64)))
+        assertFalse(f.coordinator.observedPrivateJournalAdmitted(f.batch, f.snapshot, 150L, key))
+        assertTrue(f.coordinator.observedPrivateJournalAdmitted(f.batch, f.snapshot, 50L, key))
+        val conversation = f.snapshot.conversationIdentityKey()!!
+        val other = ReplySegmentTaskFactory.create("different-contact", conversation, listOf("sent"), 110L).single()
+        segments.save(other.copy(status = ReplySegmentTaskStatus.SENT, confirmationId = "other-receipt",
+            sendRequestKey = "other-owner"))
+        tasks.save(ReplyTaskRecord("other-owner", conversation, "other-message", "revision",
+            ReplyTaskStatus.SENT, "different-contact", 111L))
+        assertFalse(f.coordinator.observedPrivateJournalAdmitted(f.batch, f.snapshot, 50L, key))
+        assertEquals(1, f.calls)
+    }
+
+    @Test fun r04cLinkedPendingRestoreNeverFallsThroughToNewModelWithoutExactOwner() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val f = Fixture(segmentRepository = segments, taskRepository = tasks)
+        val wrongKey = "c".repeat(64)
+        assertFalse(f.coordinator.generateVisibleDraft(f.batch, f.snapshot, recoveredPrivateRequestKey = wrongKey))
+        f.drain()
+        assertEquals(0, f.calls)
+        assertTrue(f.inputWriteTargets.isEmpty())
+        assertTrue(segments.records.isEmpty())
+    }
+
     @Test fun r03CompleteDurableSendReceiptCanCloseInterruptedVisitWithoutNewModelOrSend() {
         val segments = SegmentLedger()
         val tasks = TaskLedger()

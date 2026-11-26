@@ -44,7 +44,9 @@ data class UnfinishedPrivateSession(
     val verifiedKey: String?,
     val conversationKey: String,
     val openedAtMillis: Long,
-    val disposition: UnfinishedPrivateSessionDisposition = UnfinishedPrivateSessionDisposition.INTERRUPTED
+    val disposition: UnfinishedPrivateSessionDisposition = UnfinishedPrivateSessionDisposition.INTERRUPTED,
+    /** Opaque SHA-256 request key linking this verified visit to its existing reply journal. */
+    val replyRequestKey: String? = null
 )
 
 /** A submitted send is an outstanding obligation, not a completed visit or a round-wide hold. */

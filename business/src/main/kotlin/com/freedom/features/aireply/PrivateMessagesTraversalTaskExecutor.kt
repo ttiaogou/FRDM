@@ -458,6 +458,63 @@ internal class PrivateMessagesTraversalTaskExecutor {
     fun currentUnfinishedSession(): UnfinishedPrivateSession? =
         activeUnfinishedSourceKey?.let(unfinishedSessions::get)
 
+    /**
+     * A detail-origin visit has no selected list row. Match only a unique verified
+     * platform key; a title-only or competing unresolved record is not a new visit.
+     * Do not change the list cursor, unread admission or row navigation evidence.
+     */
+    fun beginVerifiedObservedDetail(
+        snapshot: ChatPageSnapshot,
+        verifiedKey: String,
+        peerName: String,
+        windowKey: String,
+        nowMillis: Long
+    ): Boolean {
+        if (snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            snapshot.windowIdentityKey() == null || verifiedKey.isBlank() ||
+            windowKey.isBlank() || nowMillis <= 0L ||
+            ChatSessionManagementPolicy.matchChatHeader(peerName, snapshot.chatTitleText) == null
+        ) return false
+        val conversation = snapshot.conversationIdentityKey() ?: return false
+        val title = ChatSessionManagementPolicy.stableSessionKeyForTitle(peerName)
+        if (title.isBlank() || verifiedKey == title ||
+            verifiedKey in ambiguousSessionIdentityKeys ||
+            activeUnfinishedSourceKey != null || currentSessionKey != null ||
+            currentSessionCandidate != null
+        ) return false
+        val matches = unfinishedSessions.values.filter { it.verifiedKey == verifiedKey }
+        if (matches.size > 1) return false
+        val original = matches.singleOrNull()
+        if (original != null && (original.conversationKey != conversation || original.titleKey != title ||
+                original.sourceKey in ambiguousSessionIdentityKeys)) return false
+        // Historical segment journals are indexed by title-derived conversation key.
+        // Never disambiguate a weak or different contact's outstanding visit by nickname.
+        if (unfinishedSessions.values.any { it != original &&
+                (it.sourceKey == verifiedKey || it.titleKey == title || it.conversationKey == conversation)
+            }) return false
+        val entry = original ?: UnfinishedPrivateSession(
+            verifiedKey, title, verifiedKey, conversation, nowMillis
+        )
+        unfinishedSessions[entry.sourceKey] = entry
+        activeUnfinishedSourceKey = entry.sourceKey
+        recoveringUnfinishedSession = original != null
+        currentSessionKey = verifiedKey
+        currentSessionName = peerName
+        currentSessionWindowKey = windowKey
+        currentSessionReadCaptured = false
+        executionState = SessionManagerState.READING_SESSION
+        return true
+    }
+
+    /** Link the actual request before its model/segment work starts; never replace an old key. */
+    fun recordVerifiedVisitReplyRequestKey(key: String): Boolean {
+        val entry = currentUnfinishedSession() ?: return false
+        if (entry.verifiedKey.isNullOrBlank() || !key.matches(Regex("[0-9a-f]{64}")) ||
+            (entry.replyRequestKey != null && entry.replyRequestKey != key)) return false
+        unfinishedSessions[entry.sourceKey] = entry.copy(replyRequestKey = key)
+        return true
+    }
+
     /** Existing unfinished-session ledger owns the round-local parking decision. */
     fun isDeferredForCurrentRound(key: String): Boolean =
         unfinishedSessions.values.any { entry ->

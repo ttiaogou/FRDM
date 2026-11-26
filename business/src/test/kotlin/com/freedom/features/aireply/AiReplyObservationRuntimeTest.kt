@@ -3368,6 +3368,98 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun r04cObservedVisitPersistsExactRequestBeforeSharedDraftAndConfirmation() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply {
+            verifiedMessageWorkAreaNavigationSupported = true
+            receivedGreetingsWorkflowEnabled = true
+            sessionRunEnabled = true
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+            observedDetailIdentityEnabled = true
+            page = chatDetailSnapshot()
+        }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val logs = mutableListOf<String>()
+        val requestKey = "a".repeat(64)
+        var saved: PrivateMessagesTraversalCheckpoint? = null
+        val repository = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long) = saved
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { saved = checkpoint }
+            override fun clear() { saved = null }
+        }
+        var draftCalls = 0
+        var pendingSend = false
+        var receiptReturned = false
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission =
+                    error("No traversal/send gesture may originate from the observation runtime")
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            privateMessagesCheckpointRepository = repository,
+            observedPrivateJournalAdmitted = { _, _, _, _ -> true },
+            privateReplyRequestKey = { _, _ -> requestKey },
+            isConversationDraftPending = { pendingSend },
+            isSendConfirmationPending = { pendingSend },
+            onDraftConversationObserved = { _, _, identity, _ ->
+                assertEquals("verified-platform-id", identity?.contactId)
+                assertEquals(requestKey, saved?.unfinishedSessions?.singleOrNull()?.replyRequestKey)
+                draftCalls++
+                pendingSend = true
+                true
+            },
+            onRecoveredPrivateSendTransaction = { _, _, openedAt ->
+                if (pendingSend) {
+                    assertEquals(openedAt, saved?.unfinishedSessions?.singleOrNull()?.openedAtMillis)
+                    pendingSend = false
+                    receiptReturned = true
+                    com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                        com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED, "verified-send-receipt"
+                    )
+                } else com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                    com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+                )
+            },
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L },
+            pageSelectedStartup = true
+        )
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
+        runtime.requestPageRouteObservation()
+        runUntilShortestDelay(scheduler, 30) { port.observedDetailTarget != null }
+        port.observedDetailOutcome = ContactIdentityCaptureOutcome.completed(ContactRowIdentity(
+            snapshotId = "observed-detail-test", temporaryUserId = "observed-visit",
+            contactId = "verified-platform-id", confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        ))
+        port.observedDetailReturnPending = true
+        port.page = chatDetailSnapshot(2L)
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilShortestDelay(scheduler, 40) { draftCalls == 1 }
+        val before = requireNotNull(saved)
+        assertEquals(1, before.unfinishedSessions.size)
+        assertEquals(0, port.navigateBackCalls)
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        runtime.onSendConfirmationObservationRequested()
+        runUntilShortestDelay(scheduler, 40) { receiptReturned }
+        assertEquals(1, draftCalls)
+        assertTrue(requireNotNull(saved).unfinishedSessions.isEmpty())
+        assertEquals(before.nextCursorKey, saved?.nextCursorKey)
+        assertEquals(before.lockedUnreadSessionKeys, saved?.lockedUnreadSessionKeys)
+        assertEquals("verified-send-receipt", saved?.lastSuccessfulTaskId)
+        runtime.reset("test stop")
+        assertNull(tasks.currentLease())
+    }
+
+    @Test
     fun pageSelectedPrivateStartupRunsOriginalWorkAreaProofBeforeFirstGesture() {
         val scheduler = FakeScheduler()
         val inbox = ChatPageSnapshot(

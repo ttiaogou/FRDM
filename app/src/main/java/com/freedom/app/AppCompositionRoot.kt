@@ -461,8 +461,10 @@ internal class AccessibilityServiceDependencies internal constructor(
                 runSessionCoordinator.currentWriteRoute()?.takeUnless { route ->
                     // A reserved greeting lease and READY page route do not authorize
                     // platform mutations while that business is recovering.
-                    route.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
-                        aiReplyObservationRuntime.isReceivedGreetingsRecoveryPending()
+                    (route.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                        aiReplyObservationRuntime.isReceivedGreetingsRecoveryPending()) ||
+                        (route.taskId == "AI_REPLY_PRIVATE_MESSAGES" &&
+                            aiReplyObservationRuntime.isObservedPrivateRecoveryPending())
                 }
             }
         )
@@ -727,6 +729,17 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             onRecoveredPrivateSendTransaction = { batch, snapshot, openedAt ->
                 aiReplyDraftCoordinator.confirmSendTransaction(batch, snapshot, openedAt)
+            },
+            observedPrivateJournalAdmitted = { batch, snapshot, openedAt, requestKey ->
+                aiReplyDraftCoordinator.observedPrivateJournalAdmitted(batch, snapshot, openedAt, requestKey)
+            },
+            privateReplyRequestKey = { batch, snapshot ->
+                aiReplyDraftCoordinator.privateVisibleReplyRequestKey(batch, snapshot)
+            },
+            restoreObservedPrivatePendingDraft = { batch, snapshot, visitToken, requestKey ->
+                aiReplyDraftCoordinator.generateVisibleDraft(
+                    batch, snapshot, visitToken = visitToken, recoveredPrivateRequestKey = requestKey
+                )
             },
             verifyGreetingPreSendModelFailure = { failure, snapshot ->
                 aiReplyDraftCoordinator.verifyGreetingPreSendFailure(failure, snapshot)
