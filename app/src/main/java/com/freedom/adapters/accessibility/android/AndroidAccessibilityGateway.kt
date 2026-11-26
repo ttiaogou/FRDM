@@ -695,10 +695,6 @@ internal class AndroidAccessibilityGateway(
             val currentActivity = if (foregroundPackage == expectedPackage) {
                 windowActivityClass(windowId, generation)
             } else ""
-            if (foregroundPackage == expectedPackage && currentActivity.isBlank()) {
-                // A missing or mismatched clue may only wake the existing read-only recovery.
-                onActivityBindingMissing()
-            }
             val pageReadiness = if (mode != null && foregroundPackage == expectedPackage) {
                 runCatching {
                     val boundInspector = inspectBoundPageReadiness
@@ -717,6 +713,12 @@ internal class AndroidAccessibilityGateway(
                     reason = "未进入目标应用页面检查；前台包名或运行模式不匹配"
                 )
             }
+            val childWindowConfirmed = commandId != null && inspectBoundPageReadiness != null &&
+                pageReadiness.ready && pageReadiness.transactionChildWindowConfirmed
+            if (foregroundPackage == expectedPackage && currentActivity.isBlank() && !childWindowConfirmed) {
+                // Ordinary missing Activity evidence still wakes the existing read-only recovery.
+                onActivityBindingMissing()
+            }
             val snapshot = targetAppReadinessController.evaluate(
                 TargetAppReadinessEvidence(
                     targetPackage = expectedPackage,
@@ -731,7 +733,8 @@ internal class AndroidAccessibilityGateway(
                     // is diagnostic only; exhaustion never authorizes an action or ends the task.
                     blockingReason = pageReadiness.blockingReason.takeUnless { pageReadiness.retryable },
                     businessPageReady = pageReadiness.ready,
-                    businessPageReason = pageReadiness.reason
+                    businessPageReason = pageReadiness.reason,
+                    transactionChildWindowConfirmed = childWindowConfirmed
                 ),
                 SystemClock.uptimeMillis()
             )

@@ -5535,7 +5535,7 @@ internal class MomoSocialAdapter(
     internal fun inspectImageAlbumDirectory(albumWindow: WindowRef): Boolean {
         val snapshot = freshMediaSnapshot() ?: return false
         return isAlbumDirectoryArrival(albumWindow, snapshot) &&
-            MomoAlbumDirectoryInspector.isConfirmed(snapshot, targetPackage)
+            MomoAlbumDirectoryInspector.resolveFreedomName(snapshot, targetPackage) != null
     }
 
     private fun isAlbumDirectoryArrival(albumWindow: WindowRef, snapshot: AccessibilityTreeSnapshot): Boolean =
@@ -5547,7 +5547,7 @@ internal class MomoSocialAdapter(
     internal fun inspectFreedomDirectory(albumWindow: WindowRef): MomoFreedomDirectoryTarget? {
         val snapshot = freshMediaSnapshot() ?: return null
         if (!isAlbumDirectoryArrival(albumWindow, snapshot)) return null
-        return MomoAlbumDirectoryInspector.resolveFreedom(snapshot, targetPackage)
+        return MomoAlbumDirectoryInspector.resolveFreedomName(snapshot, targetPackage)
     }
 
     /** M02.6: click only the name; caller must observe the Freedom title before selecting. */
@@ -5563,7 +5563,7 @@ internal class MomoSocialAdapter(
             target, directory.window, transactionId, ownsTransaction, "freedom-name",
             resolve = { _, window ->
                 freshMediaSnapshot(window)?.takeIf { isAlbumDirectoryArrival(albumWindow, it) }
-                    ?.let { MomoAlbumDirectoryInspector.resolveFreedom(it, targetPackage) }
+                    ?.let { MomoAlbumDirectoryInspector.resolveFreedomName(it, targetPackage) }
             },
             boundsOf = { it.nameBounds },
             onGestureResult = onGestureResult
@@ -5599,7 +5599,7 @@ internal class MomoSocialAdapter(
     }
 
     private fun isSingleImageAlbum(directory: MomoFreedomDirectoryTarget, album: MomoFreedomAlbumEvidence): Boolean =
-        directory.imageCount == 1 && directory.window.packageName == targetPackage &&
+        (directory.imageCount == null || directory.imageCount == 1) && directory.window.packageName == targetPackage &&
             album.window.packageName == targetPackage && album.window.windowId != directory.window.windowId &&
             album.window.generation >= directory.window.generation && album.entireGridVisible && album.images.size == 1
 
@@ -5658,9 +5658,12 @@ internal class MomoSocialAdapter(
         fun ownsWrite(): Boolean = runCatching {
             ownsTransaction() && isAiReplyUiOperationOwned() && isBoundAiReplyUiOperationOwned(lease)
         }.getOrDefault(false)
+        // Only the Freedom-name tap is directed at the transaction's separate directory
+        // window, which has no independent Activity. All other actions still require one.
+        val directoryChildAction = action == "freedom-name"
         if (transactionId.isBlank() || target.packageName != targetPackage ||
             expectedWindow.packageName != targetPackage || expectedWindow.windowId < 0 ||
-            expectedWindow.activityClass.isBlank() || !ownsWrite()
+            (!directoryChildAction && expectedWindow.activityClass.isBlank()) || !ownsWrite()
         ) return GestureSubmission.DEFERRED_NOT_READY
         return rootAccess.withActiveTargetRoot { root, window ->
             if (window != expectedWindow || accessibilityGateway.currentGestureWindow() != window) {
@@ -5687,7 +5690,8 @@ internal class MomoSocialAdapter(
                 currentWindow = accessibilityGateway::currentGestureWindow,
                 ownsTransaction = ::ownsWrite,
                 commandId = commandId,
-                targetStillCurrent = ::targetStillCurrent
+                targetStillCurrent = ::targetStillCurrent,
+                directoryChildAction = directoryChildAction
             )
             if (!activeAlbumSelectorPermit.compareAndSet(null, permit)) {
                 return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
@@ -5877,13 +5881,19 @@ internal class MomoSocialAdapter(
         if (!testCurrent(test)) return false
         val live = accessibilityGateway.currentGestureWindow() ?: return false
         if (live.packageName != targetPackage || live.windowId < 0) return false
-        // Wake the already existing exact-window Activity recovery when necessary.
+        val sourceAlbum = test.albumWindow
+        // This is an owned transaction child, not an independent business page. A fresh
+        // exact-name lookup is sufficient; never wait for an Activity event from the popup.
+        if (sourceAlbum != null &&
+            (test.stage == ImageTestStage.WAIT_DIRECTORY || test.stage == ImageTestStage.WAIT_FREEDOM) &&
+            inspectImageAlbumDirectory(sourceAlbum) && accessibilityGateway.currentGestureWindow() == live
+        ) return true
+        // Keep normal Activity recovery for the actual album and chat windows.
         if (live.activityClass.isBlank()) {
             runCatching { inspectReceivedGreetingsReadiness() }
             return false
         }
         val album = currentTestAlbumWindow()
-        val sourceAlbum = test.albumWindow
         val sameAlbum = album != null && sourceAlbum != null &&
             album.windowId == sourceAlbum.windowId && album.activityClass == sourceAlbum.activityClass &&
             album.generation >= sourceAlbum.generation
@@ -5891,10 +5901,8 @@ internal class MomoSocialAdapter(
             ImageTestStage.OPEN_ALBUM -> originalImageTestChat(test)
             ImageTestStage.WAIT_ALBUM -> originalImageTestChat(test) ||
                 (album != null && album.generation >= test.target.nodeTarget.window.generation)
-            ImageTestStage.WAIT_DIRECTORY -> sameAlbum ||
-                (sourceAlbum != null && inspectImageAlbumDirectory(sourceAlbum))
-            ImageTestStage.WAIT_FREEDOM -> (sourceAlbum != null && inspectImageAlbumDirectory(sourceAlbum)) ||
-                (sameAlbum && inspectFreedomAlbum()?.window == album)
+            ImageTestStage.WAIT_DIRECTORY -> sameAlbum
+            ImageTestStage.WAIT_FREEDOM -> sameAlbum && inspectFreedomAlbum()?.window == album
             ImageTestStage.WAIT_SELECTION -> sameAlbum && inspectFreedomAlbum()?.window == album
             ImageTestStage.VERIFY_SEND -> (sameAlbum && inspectFreedomAlbum()?.window == album) ||
                 originalImageTestChat(test)
@@ -6024,15 +6032,12 @@ internal class MomoSocialAdapter(
             ImageTestStage.WAIT_DIRECTORY -> {
                 val window = test.albumWindow ?: return
                 val directory = inspectFreedomDirectory(window)
-                if (directory == null || directory.window.activityClass.isBlank()) {
-                    testWait(test, "FREEDOM_DIRECTORY_OR_ACTIVITY_NOT_CONFIRMED")
-                    return
-                }
-                if (directory.imageCount != 1) {
-                    testTerminal(test, "UNKNOWN", "FREEDOM_ALBUM_MUST_CONTAIN_EXACTLY_ONE_IMAGE")
+                if (directory == null) {
+                    testWait(test, "FREEDOM_NAME_NOT_FOUND_IN_CURRENT_CHILD_WINDOW")
                     return
                 }
                 test.directory = directory
+                onLog("MEDIA_IMAGE_TEST DIRECTORY_NAME_FOUND windowId=${directory.window.windowId};activityRequired=false;name=Freedom")
                 submitImageTestStep(test, ImageTestStage.WAIT_FREEDOM) { callback ->
                     openFreedomAlbum(test.target, window, test.id, owns, callback)
                 }

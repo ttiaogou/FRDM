@@ -29,6 +29,30 @@ class MomoAlbumGesturePermitTest {
     }
 
     @Test
+    fun directoryPermitBindsActualBlankActivityWindowAndFreshTarget() {
+        val child = WindowRef(album.packageName, "", 11L, 4)
+        var live = child
+        var owns = true
+        var target = true
+        val permit = MomoAlbumGesturePermit("media-1", child, { live }, { owns },
+            "freedom-name", { target }, directoryChildAction = true)
+        assertTrue(permit.directoryChildAction)
+        assertTrue(permit.matchesCommand("freedom-name"))
+        assertFalse(permit.matchesCommand("selector"))
+        assertTrue(permit.permits(RunMode.AI_REPLY, child.packageName, child.windowId, ""))
+        assertTrue(permit.confirmsCurrentTarget())
+        target = false
+        assertFalse(permit.confirmsCurrentTarget())
+        target = true
+        live = child.copy(generation = 12L)
+        assertFalse(permit.permits(RunMode.AI_REPLY, child.packageName, child.windowId, ""))
+        live = child
+        owns = false
+        assertFalse(permit.permits(RunMode.AI_REPLY, child.packageName, child.windowId, ""))
+        assertFalse(MomoAlbumGesturePermit("media-1", child, { child }, { true }).directoryChildAction)
+    }
+
+    @Test
     fun staleWindowOwnerOrModeCannotDispatch() {
         var current = album
         var owns = true

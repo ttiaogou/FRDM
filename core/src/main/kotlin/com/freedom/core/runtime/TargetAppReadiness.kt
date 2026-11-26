@@ -18,7 +18,9 @@ data class TargetAppPageReadiness(
     val reason: String,
     val blockingReason: String? = null,
     /** A fresh inspection may be retried; this does not authorize a gesture. */
-    val retryable: Boolean = false
+    val retryable: Boolean = false,
+    /** Bound action proof for an owned subwindow with no independent Activity. */
+    val transactionChildWindowConfirmed: Boolean = false
 )
 
 data class TargetAppReadinessEvidence(
@@ -31,7 +33,9 @@ data class TargetAppReadinessEvidence(
     val activeWindowAvailable: Boolean,
     val blockingReason: String? = null,
     val businessPageReady: Boolean = false,
-    val businessPageReason: String = ""
+    val businessPageReason: String = "",
+    /** Only a fresh command-bound page inspection may set this; ordinary probes default false. */
+    val transactionChildWindowConfirmed: Boolean = false
 )
 
 data class TargetAppReadinessSnapshot(
@@ -116,7 +120,9 @@ class TargetAppReadinessController(
                 TargetAppReadinessStatus.STARTING to "当前活动窗口身份尚未确认"
             !evidence.blockingReason.isNullOrBlank() ->
                 TargetAppReadinessStatus.BLOCKED to evidence.blockingReason
-            evidence.activityClass.isBlank() ->
+            evidence.activityClass.isBlank() &&
+                !(evidence.runMode == RunMode.AI_REPLY && evidence.businessPageReady &&
+                    evidence.transactionChildWindowConfirmed) ->
                 TargetAppReadinessStatus.STARTING to "当前 Activity 身份尚未确认"
             !evidence.businessPageReady ->
                 TargetAppReadinessStatus.STARTING to evidence.businessPageReason.ifBlank {
@@ -126,7 +132,9 @@ class TargetAppReadinessController(
                 TargetAppReadinessStatus.STARTING to
                     "目标应用已进入前台；启动保护静默观察中；剩余=${foregroundQuietRemainingMs ?: foregroundQuietPeriodMs}ms；禁止自主手势"
             else -> TargetAppReadinessStatus.READY to
-                "目标应用前台静默${foregroundQuietPeriodMs}ms已完成，Activity、窗口及业务页面条件均已确认"
+                if (evidence.activityClass.isBlank())
+                    "当前事务子窗口及本次动作已确认；无需独立 Activity"
+                else "目标应用前台静默${foregroundQuietPeriodMs}ms已完成，Activity、窗口及业务页面条件均已确认"
         }
 
         val next = TargetAppReadinessSnapshot(

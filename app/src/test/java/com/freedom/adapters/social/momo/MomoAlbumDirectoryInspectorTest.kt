@@ -54,6 +54,24 @@ class MomoAlbumDirectoryInspectorTest {
             snapshot.copy(nodes = updated.map { if (it.viewId.endsWith(":id/image_count")) it.copy(text = "0张") else it }), target))
     }
 
+    @Test
+    fun ownedChildFindsUniqueFreedomNameWithoutActivityOrDirectoryFingerprint() {
+        val name = nodes[4].copy(viewId = "", text = "freedom", path = NodePath(listOf(4)))
+        val simple = snapshot.copy(nodes = listOf(name))
+        val found = MomoAlbumDirectoryInspector.resolveFreedomName(simple, target)
+        org.junit.Assert.assertEquals(name.bounds, found?.nameBounds)
+        org.junit.Assert.assertNull(found?.imageCount)
+        org.junit.Assert.assertFalse(MomoAlbumDirectoryInspector.isConfirmed(simple, target))
+        org.junit.Assert.assertNull(MomoAlbumDirectoryInspector.resolveFreedomName(
+            simple.copy(nodes = listOf(name, name.copy(path = NodePath(listOf(5))))), target))
+        org.junit.Assert.assertNull(MomoAlbumDirectoryInspector.resolveFreedomName(
+            simple.copy(nodes = listOf(name.copy(windowId = 8))), target))
+        org.junit.Assert.assertNull(MomoAlbumDirectoryInspector.resolveFreedomName(
+            simple.copy(nodes = listOf(name.copy(visible = false))), target))
+        org.junit.Assert.assertNull(MomoAlbumDirectoryInspector.resolveFreedomName(
+            simple.copy(truncated = true), target))
+    }
+
     private fun node(id: String, type: String, path: List<Int>) = AccessibilityNodeSnapshot(
         path = NodePath(path),
         className = if (type == "RecyclerView") "androidx.recyclerview.widget.RecyclerView"

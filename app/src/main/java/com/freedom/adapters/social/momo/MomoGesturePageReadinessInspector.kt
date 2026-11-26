@@ -113,7 +113,8 @@ internal class MomoGesturePageReadinessInspector(
                 permitted,
                 if (permitted) "AI Reply: verified media transaction action target"
                 else "Media transaction album permission not confirmed",
-                retryable = !permitted
+                retryable = !permitted,
+                transactionChildWindowConfirmed = permitted && albumPermit.directoryChildAction
             )
         }
 
