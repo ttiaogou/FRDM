@@ -1074,6 +1074,97 @@ class VisibleDraftFlowTest {
         assertEquals(1, f.calls)
     }
 
+    @Test fun r03eOriginalPrivateSendWithVisitScopeUsesLiveDiffAndKeepsSegmentOrder() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val submitted = mutableListOf<String>()
+        lateinit var f: Fixture
+        f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                submitted += expectedText
+                f.text = ""
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        f.now = 100L
+        f.modelOutput = """{"action":"REPLY","reason":"OK","draft":"第一条消息\n第二条消息"}"""
+        val old = ChatMessage("old-own", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "第一条消息", ScreenRect(0, 0, 100, 8),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val before = f.batch.copy(messages = listOf(old) + f.batch.messages)
+        assertTrue(f.coordinator.generateVisibleDraft(before, f.snapshot))
+        f.drain()
+        assertEquals(listOf("第一条消息"), submitted)
+        val afterOldOnly = before.copy(capturedAtMillis = 101L)
+        // The manual-visit scope must not authorize an old outgoing bubble or replay.
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(afterOldOnly, f.snapshot, 50L).status)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.first().status)
+        assertEquals(ReplySegmentTaskStatus.CREATED, segments.records.values.last().status)
+        val first = old.copy(id = "new-own-first", content = "第一条\n消息",
+            bounds = ScreenRect(0, 40, 100, 80))
+        val afterFirst = before.copy(messages = before.messages + first, capturedAtMillis = 102L)
+        val partial = f.coordinator.confirmSendTransaction(afterFirst, f.snapshot, 50L)
+        assertEquals(SendConfirmationResult.WAITING, partial.status)
+        assertNull(partial.finalSendConfirmationId)
+        assertEquals(ReplySegmentTaskStatus.SENT, segments.records.values.first().status)
+        assertEquals(ReplySegmentTaskStatus.CREATED, segments.records.values.last().status)
+        assertEquals(afterFirst.effectiveObservationBatchId, f.coordinator.nextSegmentConfirmedObservationId)
+        assertEquals(listOf("第一条消息"), submitted)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(afterFirst.copy(capturedAtMillis = 103L), f.snapshot, 50L).status)
+        f.drain()
+        assertEquals(listOf("第一条消息", "第二条消息"), submitted)
+        val second = first.copy(id = "new-own-second", content = "第二条\n消息",
+            bounds = ScreenRect(0, 90, 100, 130))
+        val completed = f.coordinator.confirmSendTransaction(
+            afterFirst.copy(messages = afterFirst.messages + second, capturedAtMillis = 104L), f.snapshot, 50L)
+        assertEquals(SendConfirmationResult.CONFIRMED, completed.status)
+        assertTrue(completed.finalSendConfirmationId?.isNotBlank() == true)
+        assertEquals(listOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.SENT),
+            segments.records.values.map { it.status })
+        assertEquals(ReplyTaskStatus.SENT, tasks.records.values.single().status)
+        assertEquals(1, f.calls)
+        assertEquals(2, submitted.size)
+    }
+
+    @Test fun r03eRehydratedPrivateSendWithVisitScopeStillNeedsExactContentAndTwoReads() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        var submitted = 0
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                submitted++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        f.now = 100L
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertTrue(f.coordinator.deferPrivateUnconfirmedSendForManualReturn())
+        val outgoing = ChatMessage("historical-new-outgoing", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "你好\n呀", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val after = f.batch.copy(messages = listOf(outgoing), capturedAtMillis = 101L)
+        // Rehydrate the journal, then reject the non-exact OCR text.
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(after, f.snapshot, 50L).status)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(after.copy(capturedAtMillis = 102L), f.snapshot, 50L).status)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.single().status)
+        val exact = after.copy(messages = listOf(outgoing.copy(content = "你好呀")), capturedAtMillis = 103L)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(exact, f.snapshot, 50L).status)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.single().status)
+        val confirmed = f.coordinator.confirmSendTransaction(exact.copy(capturedAtMillis = 104L), f.snapshot, 50L)
+        assertEquals(SendConfirmationResult.CONFIRMED, confirmed.status)
+        assertTrue(confirmed.finalSendConfirmationId?.isNotBlank() == true)
+        assertEquals(ReplySegmentTaskStatus.SENT, segments.records.values.single().status)
+        assertEquals(ReplyTaskStatus.SENT, tasks.records.values.single().status)
+        assertEquals(1, submitted)
+        assertEquals(1, f.calls)
+    }
+
     @Test fun r04cObservedJournalRequiresExactLinkedRequestEvenWithSameTitleAndTime() {
         val segments = SegmentLedger()
         val tasks = TaskLedger()

@@ -1902,7 +1902,11 @@ class AiReplyDraftCoordinator(
             onLog("AI 发送结果核验：WAITING；当前批次不属于发送后的稳定聊天观察；检查次数=$checks")
             return SendConfirmationResult.WAITING
         }
-        val diffTransaction = synchronized(lock) {
+        // The visit timestamp scopes durable journal lookup only. An admitted
+        // detail-origin visit can submit a new send through that same entry point.
+        // Select the existing live diff policy by the pending transaction's origin,
+        // never by how the chat was entered. Rehydrated sends retain strict proof.
+        val liveDiffTransaction = !pending.recoveredFromLedger && synchronized(lock) {
             activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS ||
                 activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES
         }
@@ -1910,7 +1914,7 @@ class AiReplyDraftCoordinator(
             message.direction == ChatMessageDirection.OUTGOING &&
                 messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys &&
                 fingerprint(messageKey(message.stableLogicalMessageId, message.effectiveContentRevision)) !in pending.previousOutgoingKeyHashes
-                && ((diffTransaction && recoveredPrivateOpenedAtMillis == null && !pending.recoveredFromLedger) || (
+                && (liveDiffTransaction || (
                     message.contentQuality == MessageContentQuality.VERIFIED &&
                     fingerprint(message.content.orEmpty()) == pending.segmentContentHash
                 ))
