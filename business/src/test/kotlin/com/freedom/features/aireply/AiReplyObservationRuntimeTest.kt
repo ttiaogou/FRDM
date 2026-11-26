@@ -1305,6 +1305,76 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun r04dCancelledListScrollCanAdmitVerifiedDetailWithoutCompletingListRecovery() {
+        val fixture = capturedScrollRecoveryFixture(observedDetail = true)
+        val list = fixture.port.page
+        fixture.listener.onResult(GestureExecutionResult(fixture.request.id, GestureExecutionStatus.CANCELLED))
+        runUntilShortestDelay(fixture.scheduler, 40) {
+            fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") && it.contains("GESTURE_SCROLL_CANCELLED") }
+        }
+        fixture.port.page = chatDetailSnapshot()
+        fixture.runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilShortestDelay(fixture.scheduler, 40) {
+            fixture.logs.any { it.contains("OBSERVED_PRIVATE_RECOVERY_ROUTE_REBOUND") }
+        }
+        val original = requireNotNull(fixture.savedCheckpoint())
+        assertNull(fixture.port.observedDetailTarget)
+        assertEquals(0, fixture.port.messageReads)
+        assertEquals(1, fixture.dispatchedGestures())
+        assertEquals("AI_REPLY_CHAT_DETAIL",
+            fixture.recoveryManager?.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.routeId)
+        runUntilShortestDelay(fixture.scheduler, 40) { fixture.port.observedDetailTarget != null }
+        assertTrue(fixture.logs.any { it.contains("OBSERVED_PRIVATE_RECOVERY_DETAIL_READY") })
+        assertNull(fixture.recoveryManager?.snapshot("AI_REPLY_PRIVATE_MESSAGES"))
+        assertEquals(original, fixture.savedCheckpoint())
+        assertEquals(1, fixture.dispatchedGestures())
+        assertEquals(0, fixture.port.messageReads)
+        assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
+
+        // Leaving before identity confirmation must re-arm the original list fault.
+        fixture.port.page = list
+        fixture.runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilShortestDelay(fixture.scheduler, 80) {
+            fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") && it.contains("目标路由=AI_REPLY_PRIVATE_MESSAGES") }
+        }
+        assertNull(fixture.port.observedDetailTarget)
+        assertEquals(0, fixture.port.messageReads)
+        assertTrue(fixture.logs.any { it.contains("GESTURE_SCROLL_CANCELLED") })
+        fixture.runtime.reset("test stop")
+    }
+
+    @Test
+    fun r04dLeavingBeforeSecondDetailSampleRebindsOriginalListWithoutIdentityCapture() {
+        val fixture = capturedScrollRecoveryFixture(observedDetail = true)
+        val list = fixture.port.page
+        fixture.listener.onResult(GestureExecutionResult(fixture.request.id, GestureExecutionStatus.CANCELLED))
+        runUntilShortestDelay(fixture.scheduler, 40) {
+            fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") && it.contains("GESTURE_SCROLL_CANCELLED") }
+        }
+        fixture.port.page = chatDetailSnapshot()
+        fixture.runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilShortestDelay(fixture.scheduler, 40) {
+            fixture.logs.any { it.contains("OBSERVED_PRIVATE_RECOVERY_ROUTE_REBOUND") }
+        }
+        val original = requireNotNull(fixture.savedCheckpoint())
+        assertNull(fixture.port.observedDetailTarget)
+        fixture.port.page = list
+        fixture.runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilShortestDelay(fixture.scheduler, 40) {
+            fixture.logs.any { it.contains("DETAIL_TO_LIST_ROUTE_REBOUND") }
+        }
+        assertEquals(original.nextCursorKey, fixture.savedCheckpoint()?.nextCursorKey)
+        assertEquals(original.unfinishedSessions, fixture.savedCheckpoint()?.unfinishedSessions)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES",
+            fixture.recoveryManager?.snapshot("AI_REPLY_PRIVATE_MESSAGES")?.routeId)
+        assertFalse(fixture.logs.any { it.contains("OBSERVED_PRIVATE_RECOVERY_DETAIL_READY") })
+        assertNull(fixture.port.observedDetailTarget)
+        assertEquals(0, fixture.port.messageReads)
+        assertEquals(1, fixture.dispatchedGestures())
+        fixture.runtime.reset("test stop")
+    }
+
+    @Test
     fun cancelledRejectedAndFailedScrollsEnterCheckpointRecoveryInsteadOfTerminalPause() {
         for (status in listOf(
             GestureExecutionStatus.CANCELLED, GestureExecutionStatus.REJECTED,
@@ -8906,14 +8976,17 @@ class AiReplyObservationRuntimeTest {
         val dispatchedGestures: () -> Int,
         val cancelledRequests: List<String>,
         val latestRequest: () -> GestureIntentRequest?,
-        val latestListener: () -> GestureExecutionListener?
+        val latestListener: () -> GestureExecutionListener?,
+        val port: FakeChatPort,
+        val recoveryManager: UnifiedRecoveryTransactionManager?
     )
 
-    private fun capturedScrollRecoveryFixture(): CapturedScrollRecoveryFixture {
+    private fun capturedScrollRecoveryFixture(observedDetail: Boolean = false): CapturedScrollRecoveryFixture {
         val scheduler = FakeScheduler()
         val viewport = ScreenRect(0, 120, 720, 1480)
         val port = FakeChatPort().apply {
             sessionRunEnabled = true
+            observedDetailIdentityEnabled = observedDetail
             page = ChatPageSnapshot(
                 packageName = "com.immomo.momo",
                 activityClass = "com.immomo.momo.maintab.MaintabActivity",
@@ -8931,6 +9004,7 @@ class AiReplyObservationRuntimeTest {
             )
         }
         val logs = mutableListOf<String>()
+        val recoveryManager = if (observedDetail) UnifiedRecoveryTransactionManager({ 6L }, logs::add) else null
         var request: GestureIntentRequest? = null
         var listener: GestureExecutionListener? = null
         var dispatchCount = 0
@@ -8971,13 +9045,14 @@ class AiReplyObservationRuntimeTest {
             regionRefreshDebounceMs = 500L,
             taskCoordinator = TaskCoordinator(UiOperationOwnershipCoordinator()),
             currentRunGeneration = { 6L },
-            privateMessagesCheckpointRepository = repo
+            privateMessagesCheckpointRepository = repo,
+            recoveryTransactionManager = recoveryManager
         )
         runtime.scheduleInitialObservation()
         runUntil(scheduler, 60) { request?.intent is GestureIntent.VerticalSwipe && listener != null }
         return CapturedScrollRecoveryFixture(
             scheduler, runtime, logs, requireNotNull(request), requireNotNull(listener),
-            { saved }, { dispatchCount }, cancelledRequests, { request }, { listener }
+            { saved }, { dispatchCount }, cancelledRequests, { request }, { listener }, port, recoveryManager
         )
     }
 

@@ -53,6 +53,7 @@ import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
 import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
 import com.freedom.features.recovery.RecoveryTransactionEvent
+import com.freedom.features.recovery.RecoveryTransactionState
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 import com.freedom.features.recovery.RecoveryContext
 import com.freedom.features.recovery.RecoveryEventDispatcher
@@ -439,6 +440,9 @@ class AiReplyObservationRuntime(
     /** The private UNKNOWN/checkpoint identity is suspended, never completed, during a
      * separately verified manual Received Greetings task. The persisted cursor is untouched. */
     private var suspendedPrivateRecovery: RecoveryContext.Snapshot? = null
+    // A verified child visit can temporarily replace list execution, not list proof.
+    // Recheck the original list fault against the updated durable cursor on return.
+    private var privateListRecoveryReasonAfterObservedDetail: String? = null
     private var receivedGreetingsCheckpointForUnified: MomoSayHiTraversalCheckpointRecord? = null
     private var receivedGreetingsCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PROCESS_RESTART
     private val messageListRecoveryRoute: PageRecoveryRouteAdapter by lazy(LazyThreadSafetyMode.NONE) {
@@ -1747,6 +1751,20 @@ class AiReplyObservationRuntime(
             return
         }
 
+        // A detail-origin visit may be retired before identity capture finishes. Its
+        // deferred list recovery must still earn independent list proof on return.
+        if (privateListRecoveryReasonAfterObservedDetail != null &&
+            !recoveryContext.pending && sessionRunStarted && !receivedGreetingsTaskActive &&
+            currentSessionBinding == null && currentSessionKey == null &&
+            matchedRouteId == messageListRecoveryRoute.routeId &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE
+        ) {
+            if (requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "OBSERVED_DETAIL_RETURN")) {
+                scheduleFullInspectionAfter(0L)
+                return
+            }
+        }
+
         // A pending recovery owns verification of this observation, including the existing
         // verified private-to-greetings handoff below. Ordinary list admission would reject
         // the pending recovery and return before its verifier could consume this snapshot.
@@ -2536,6 +2554,7 @@ class AiReplyObservationRuntime(
                 }
                 readVisibleMessages(inspection)
             } else if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
+                privateListRecoveryReasonAfterObservedDetail = null
                 sessionManagerState = if (confirmedPrivateReturnAwaitingRecovery &&
                     currentSessionSendConfirmed
                 ) {
@@ -3573,6 +3592,7 @@ class AiReplyObservationRuntime(
         receivedGreetingsCheckpointVerifier.reset()
         receivedGreetingsCheckpointForUnified = null
         suspendedPrivateRecovery = null
+        privateListRecoveryReasonAfterObservedDetail = null
         if (!preservePendingRecovery || !recoveryContext.pending) recoveryContext.clear()
         messageListRecoveryVerificationPending = false
         messageListCheckpointRestored = false
@@ -3663,11 +3683,19 @@ class AiReplyObservationRuntime(
                 SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM,
                 SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
             )
-        val eligible = (pageSelectedPrivateStartupVerificationPending || alreadyOwnedIdleList) &&
+        val pendingListRecovery = observedDetailSupported && recoveryContext.pending &&
+            recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+            recoveryContext.runGeneration == currentRunGeneration() &&
+            messageListCheckpointForUnified != null &&
+            (recoveryContext.routeId == messageListRecoveryRoute.routeId ||
+                (recoveryContext.routeId == chatDetailRecoveryRoute.routeId &&
+                    privateListRecoveryReasonAfterObservedDetail != null))
+        val eligible = (pendingListRecovery || pageSelectedPrivateStartupVerificationPending || alreadyOwnedIdleList) &&
             sessionRunStarted && isAiReplyActive() && !receivedGreetingsTaskActive &&
             !receivedGreetingsOwnershipRecheckPending && !awaitingNormalInboxAfterGreetingsReturn &&
-            !recoveryContext.pending && !messageListRecoveryVerificationPending &&
+            (pendingListRecovery || (!recoveryContext.pending && !messageListRecoveryVerificationPending)) &&
             !pollingRoundPending && suspendedPrivateRecovery == null &&
+            !confirmedPrivateReturnAwaitingRecovery && !currentSessionSendConfirmed &&
             currentSessionCandidate == null && currentSessionKey == null &&
             currentSessionBinding == null && expectedPrivateSessionDetailNavigation == null &&
             privateMessagesTraversalTaskExecutor.currentUnfinishedSession() == null &&
@@ -3696,6 +3724,7 @@ class AiReplyObservationRuntime(
         val admission = AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(), readiness)
         if (!verified || !admission.allowed) {
             pageRecoveryVerificationGate.reset(gate)
+            if (pendingListRecovery) recoveryContext.invalidateFingerprint()
             onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_WAIT reason=${if (!verified) "PAGE_EVIDENCE" else admission.reasonCode}")
             scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return true
@@ -3706,8 +3735,22 @@ class AiReplyObservationRuntime(
             return true
         }
         val generation = currentRunGeneration()
-        val key = "$generation|$windowKey|$surfaceKey"
-        if (!pageRecoveryVerificationGate.observe(gate, key)) {
+        // Check the actual detail evidence before changing any pending recovery route.
+        val target = if (observedDetailSupported) ObservedPrivateChatIdentityTarget(
+            snapshot, generation, java.util.UUID.randomUUID().toString()
+        ) else null
+        if (pendingListRecovery && (target?.sourceWindow() == null ||
+                !prepareUnboundPrivateDetailRecovery(observation.observationGeneration))
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            recoveryContext.invalidateFingerprint()
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        val key = "$generation|$windowKey|$surfaceKey|${if (pendingListRecovery) recoveryContext.checkpointId else ""}"
+        val stable = pageRecoveryVerificationGate.observe(gate, key)
+        val recoveryStable = !pendingListRecovery || recoveryContext.observeTarget(chatDetailRecoveryRoute.routeId, key)
+        if (!stable || !recoveryStable) {
             onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_VERIFYING samples=1/2;binding=false")
             scheduleFullInspectionAfter(350L)
             return true
@@ -3716,19 +3759,28 @@ class AiReplyObservationRuntime(
         val beforeClaim = runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()
         if (generation != currentRunGeneration() || !isAiReplyActive() ||
             !AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(), beforeClaim).allowed ||
-            (!ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
-                !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "已启动私人消息任务的聊天子页面双快照验证完成"))
+            ((pendingListRecovery || !ownsTask(PRIVATE_MESSAGES_TASK_ID)) &&
+                !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "已启动私人消息任务的聊天子页面双快照验证完成",
+                    verifiedHandoff = pendingListRecovery))
         ) {
             pageRecoveryVerificationGate.reset(gate)
+            if (pendingListRecovery) recoveryContext.invalidateFingerprint()
             onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_WAIT reason=LEASE_OR_READINESS")
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        if (pendingListRecovery && (!ensureAndroidRecoveryReady(snapshot, "OBSERVED_DETAIL_BEFORE_RESUME_ACK") ||
+                !completeUnboundPrivateDetailRecovery(observation.observationGeneration))
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            recoveryContext.invalidateFingerprint()
             scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return true
         }
         pageRecoveryVerificationGate.reset(gate)
         onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_RESTORED task=$PRIVATE_MESSAGES_TASK_ID;binding=false;listStartupPreserved=true")
         // The list initialization and cursor stay unchanged. No synthetic row/tap ticket.
-        if (observedDetailSupported) {
-            val target = ObservedPrivateChatIdentityTarget(snapshot, generation, java.util.UUID.randomUUID().toString())
+        if (target != null) {
             val sourceWindowKey = snapshot.windowIdentityKey()
             if (target.sourceWindow() != null && sourceWindowKey != null && windowKey != null && surfaceKey != null) {
                 invalidatePendingMessageRead()
@@ -3740,6 +3792,73 @@ class AiReplyObservationRuntime(
                 scheduleFullInspectionAfter(0L)
             }
         }
+        return true
+    }
+
+    /** Rebind only the execution destination of the original persisted list checkpoint.
+     * Neither a route selection nor a retained lease authorizes identity capture.
+     */
+    private fun prepareUnboundPrivateDetailRecovery(observationGeneration: Long): Boolean {
+        val checkpoint = messageListCheckpointForUnified ?: return false
+        val saved = recoveryContext.snapshot()
+        val old = recoveryTransaction.currentIdentity() ?: return false
+        if (!recoveryContext.matches(old) || old.taskId != PRIVATE_MESSAGES_TASK_ID ||
+            old.runGeneration != currentRunGeneration() || observationGeneration <= old.observationGeneration ||
+            (!saved.checkpointSaved && !saved.checkpointLoaded) ||
+            runCatching { privateMessagesCheckpointRepository?.load() }.getOrNull() != checkpoint
+        ) return false
+        if (old.routeId == chatDetailRecoveryRoute.routeId &&
+            privateListRecoveryReasonAfterObservedDetail != null
+        ) return true
+        if (old.routeId != messageListRecoveryRoute.routeId) return false
+        val reason = saved.reason ?: return false
+        val next = old.copy(routeId = chatDetailRecoveryRoute.routeId, observationGeneration = observationGeneration)
+        if (recoveryTransactionManager?.rebindPendingRoute(old, next) == false) return false
+
+        // Cancel only the stale list verifier. The live executor and durable cursor
+        // are not restored/reset; they will be independently verified on the list.
+        messageListCheckpointVerifier.reset()
+        privateListRecoveryReasonAfterObservedDetail = reason
+        recoveryContext.request(next.taskId, reason, next.routeId, next.runGeneration,
+            next.checkpointId, next.observationGeneration)
+        recoveryContext.markCheckpointSaved()
+        if (saved.checkpointLoaded) recoveryContext.markCheckpointLoaded()
+        recoveryTransaction.reset()
+        recoveryTransaction.activate(next)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.CheckpointLoaded(
+            RecoveryTransactionEvent.Source.PAGE_OBSERVATION))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        onLog("OBSERVED_PRIVATE_RECOVERY_ROUTE_REBOUND checkpointId=${next.checkpointId};listCursorPreserved=true;listVerified=false")
+        return true
+    }
+
+    /** Two fresh detail samples and the current lease have already been verified.
+     * Complete the detail destination only, never acknowledge a list checkpoint proof.
+     */
+    private fun completeUnboundPrivateDetailRecovery(observationGeneration: Long): Boolean {
+        val old = recoveryTransaction.currentIdentity() ?: return false
+        if (!recoveryContext.matches(old) || old.routeId != chatDetailRecoveryRoute.routeId ||
+            old.runGeneration != currentRunGeneration() || !recoveryContext.fingerprintVerified ||
+            !ownsTask(PRIVATE_MESSAGES_TASK_ID) || userInteractionActive ||
+            observationGeneration <= old.observationGeneration
+        ) return false
+        val identity = old.copy(observationGeneration = observationGeneration)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true), identity)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true), identity)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested, identity)
+        if (recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted, identity) !=
+            RecoveryTransactionState.ACTIVE ||
+            recoveryTransactionManager?.snapshot(PRIVATE_MESSAGES_TASK_ID) != null
+        ) return false
+        recoveryContext.markUiOwnershipTransferred()
+        recoveryContext.clear()
+        recoveryTransaction.reset()
+        messageListCheckpointForUnified = null
+        messageListRecoveryVerificationPending = false
+        // A fresh list recovery will revalidate the original fault and the latest
+        // ledger. Do not mark the list initialized or advance its scan phase here.
+        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+        onLog("OBSERVED_PRIVATE_RECOVERY_DETAIL_READY checkpointId=${identity.checkpointId};listVerified=false;identityVerified=false")
         return true
     }
 
@@ -4047,9 +4166,11 @@ class AiReplyObservationRuntime(
         var checkpoint = if (privateMessagesCheckpointRepository != null) {
             privateMessagesCheckpointRepository.load() ?: return false
         } else traversal.checkpoint()
+        val listReason = privateListRecoveryReasonAfterObservedDetail ?: saved.reason ?: return false
         val next = old.copy(
             routeId = messageListRecoveryRoute.routeId,
-            observationGeneration = observationGeneration
+            observationGeneration = observationGeneration,
+            unknownReason = listReason
         )
         // Only the independently recognized private inbox may retire a submitted
         // send's live hold. The coordinator checks its existing durable journal
@@ -4099,7 +4220,7 @@ class AiReplyObservationRuntime(
         pageRecoveryVerificationGate.reset()
         recoveryContext.request(
             taskId = next.taskId,
-            recoveryReason = requireNotNull(saved.reason),
+            recoveryReason = listReason,
             routeId = next.routeId,
             generation = next.runGeneration,
             recoveryCheckpointId = next.checkpointId,
@@ -4207,12 +4328,15 @@ class AiReplyObservationRuntime(
             RECEIVED_GREETINGS_TASK_ID -> receivedGreetingsCheckpointForUnified?.savedAtEpochMs
             else -> null
         }
+        val recoveryReason = if (taskId == PRIVATE_MESSAGES_TASK_ID && route.routeId == messageListRecoveryRoute.routeId) {
+            privateListRecoveryReasonAfterObservedDetail ?: reason
+        } else reason
         activateRecoveryIdentity(
-            taskId, reason, durableRecoveryCheckpointId(taskId, savedAtEpochMs, reason),
+            taskId, recoveryReason, durableRecoveryCheckpointId(taskId, savedAtEpochMs, recoveryReason),
             routeId = route.routeId
         )
         recoveryContext.markCheckpointSaved()
-        recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(recoveryReason))
         recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
         // A new recovery transaction also invalidates pending structure/OCR callbacks.
         // Their old batch cannot resume identity processing or start a draft before route proof.
@@ -4466,6 +4590,7 @@ class AiReplyObservationRuntime(
         startupReadinessCoordinator.cancelRecovery()
         recoveryContext.clear()
         suspendedPrivateRecovery = null
+        privateListRecoveryReasonAfterObservedDetail = null
         messageListCheckpointVerifier.reset()
         receivedGreetingsCheckpointVerifier.reset()
         messageListCheckpointForUnified = null
