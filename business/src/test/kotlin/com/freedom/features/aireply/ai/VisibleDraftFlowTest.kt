@@ -945,6 +945,63 @@ class VisibleDraftFlowTest {
         assertTrue(f.inputWriteTargets.isEmpty())
     }
 
+    @Test fun r03aDeferralKeepsDurableRecordAndInvalidatesLateSendCompletion() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        var completed: (() -> Unit)? = null
+        var submitted = 0
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String,
+                                   onGestureCompleted: () -> Unit): ChatDraftInputResult {
+                submitted++
+                completed = onGestureCompleted
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        f.now = 100L
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val record = segments.records.values.single()
+        val owner = tasks.records.values.single()
+        val writes = f.inputWriteTargets.size
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, record.status)
+        assertTrue(f.coordinator.isSendConfirmationPending)
+        assertTrue(f.coordinator.deferPrivateUnconfirmedSendForManualReturn())
+        assertFalse(f.coordinator.isSendConfirmationPending)
+        assertFalse(f.coordinator.isConversationReturnBlocked)
+        assertEquals(record, segments.records.values.single())
+        assertEquals(owner, tasks.records.values.single())
+        requireNotNull(completed).invoke()
+        f.drain()
+        assertEquals(0, f.completionObservationRequests)
+        assertEquals(1, submitted)
+        assertEquals(writes, f.inputWriteTargets.size)
+        assertFalse(f.coordinator.deferPrivateUnconfirmedSendForManualReturn())
+    }
+
+    @Test fun r03aMissingDurableEvidenceCannotReleaseOriginalSendHold() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+        }, segments, tasks)
+        f.now = 100L
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        val record = segments.records.values.single()
+        segments.save(record.copy(sendAttemptStartedAt = null))
+        val owner = tasks.records.values.single()
+        assertFalse(f.coordinator.deferPrivateUnconfirmedSendForManualReturn())
+        assertTrue(f.coordinator.isSendConfirmationPending)
+        assertTrue(f.coordinator.isConversationReturnBlocked)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.single().status)
+        assertEquals(owner, tasks.records.values.single())
+        assertTrue(f.logs.any { it.contains("DEFER_JOURNAL_NOT_VERIFIED") })
+    }
+
     @Test fun r03UnprovableHistoricalSendRetainsUnknownInsteadOfArchivingSuccess() {
         val segments = SegmentLedger()
         val tasks = TaskLedger()

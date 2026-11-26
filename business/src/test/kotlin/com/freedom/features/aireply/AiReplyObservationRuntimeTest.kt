@@ -4930,6 +4930,181 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun r03aConfirmedInboxDefersSubmittedSendAfterDirectReturn() {
+        assertR03aSubmittedSendReturnsToInbox(false)
+    }
+
+    @Test
+    fun r03aConfirmedInboxDefersSubmittedSendAfterEmptySnapshot() {
+        assertR03aSubmittedSendReturnsToInbox(true)
+    }
+
+    private fun assertR03aSubmittedSendReturnsToInbox(emptyFirst: Boolean) {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            // Structure read -> identity terminal -> OCR callback -> draft, as in Momo.
+            simulateStructureThenOcr = true
+            ocrDebugTextByRowIndex = mapOf(1 to "OCR_CONFIRMED_BODY")
+            identityCaptureOutcomeOverride = ContactIdentityCaptureOutcome.waiting(
+                ContactIdentityCaptureRequestResult.RETRY_LATER
+            )
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+        }
+        val inbox = port.page
+        val logs = ArrayList<String>()
+        val manager = UnifiedRecoveryTransactionManager({ 0L }, logs::add)
+        var draftCalls = 0
+        var pendingSend = false
+        var deferCalls = 0
+        lateinit var runtime: AiReplyObservationRuntime
+        val gesture = object : TestGestureApi {
+            override fun execute(
+                command: GestureIntentRequest,
+                listener: GestureExecutionListener
+            ): GestureSubmission {
+                if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                return GestureSubmission.ACCEPTED
+            }
+        }
+        runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            recoveryTransactionManager = manager,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = gesture,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            isSendConfirmationPending = { pendingSend },
+            isConversationDraftPending = { pendingSend },
+            deferPrivateSendForManualReturn = {
+                deferCalls++
+                pendingSend = false
+                true
+            },
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            onDraftConversationObserved = { _, _, _, _ ->
+                draftCalls++
+                true
+            }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) {
+            logs.any { it.contains("AI 联系人身份采集中") }
+        }
+        assertEquals(0, draftCalls)
+        port.deferNextStructureRead = true
+        val freshInspection = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
+            isAccessible = true
+        }
+        freshInspection.invoke(runtime)
+        assertTrue("Expected a pre-recovery in-flight read", port.hasDeferredStructureRead())
+
+        pendingSend = true
+        if (emptyFirst) {
+            port.page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "ChatActivity",
+                pageKind = ChatPageKind.UNKNOWN,
+                scannedNodeCount = 0,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = false,
+                messageListTarget = null,
+                inputFieldTarget = null
+            )
+            freshInspection.invoke(runtime)
+            assertTrue(logs.any { it.contains("AI 发送恢复[DETAIL_ROUTE_HELD]") })
+            assertTrue(pendingSend)
+            assertEquals(0, deferCalls)
+        }
+        val readsBeforeRecovery = port.messageReads
+        val traversal = runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(runtime) as PrivateMessagesTraversalTaskExecutor
+        val originalUnfinished = traversal.checkpoint().unfinishedSessions.single()
+
+        // A stale row generation cannot release the hold or authorize the inbox.
+        port.pendingIdentityReturnReinspection = true
+        port.page = inbox.copy(windowGeneration = 2L)
+        freshInspection.invoke(runtime)
+        assertFalse(logs.any { it.contains("统一恢复[DETAIL_TO_LIST_ROUTE_REBOUND]") })
+        assertTrue(pendingSend)
+        assertEquals(0, deferCalls)
+        val originalIdentity = manager.snapshot(PrivateMessagesTaskController.TASK_ID)
+        assertEquals("AI_REPLY_CHAT_DETAIL", originalIdentity?.routeId)
+        assertTrue(originalIdentity != null)
+        assertFalse(logs.any { it.contains("outcome=ResumeCompleted") })
+
+        // Supply the freshly extracted row from the same new window generation.
+        port.page = inbox.copy(
+            windowGeneration = 2L,
+            chatListCandidates = listOf(sessionCandidate(completeBoundaryEvidence = true, windowGeneration = 2L))
+        )
+        port.completeDeferredStructureRead()
+        // The fake completes its previously submitted read by incrementing
+        // messageReads once; this is not a newly admitted runtime read.
+        assertEquals(readsBeforeRecovery + 1, port.messageReads)
+        val readsAfterOldCallback = port.messageReads
+        repeat(8) {
+            if (scheduler.hasPendingDelay(0L)) scheduler.runNextWithDelay(0L)
+        }
+        assertEquals("Late structure callback must not submit OCR", 0, port.ocrAsyncReadRequests)
+        assertEquals("Late structure callback must not draft", 0, draftCalls)
+        freshInspection.invoke(runtime)
+        assertFalse("One list sample cannot complete recovery",
+            logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertEquals(0, draftCalls)
+        assertFalse(logs.any { it.contains("outcome=ResumeCompleted") &&
+            it.contains("routeId=AI_REPLY_CHAT_DETAIL") })
+
+        var samples = 0
+        while (logs.none { it.contains("统一页面恢复[RECOVERY_VERIFIED]") } && samples < 16) {
+            freshInspection.invoke(runtime)
+            samples++
+        }
+        assertEquals("The live send hold must be deferred once", 1, deferCalls)
+        assertFalse(pendingSend)
+        assertTrue(logs.any { it.contains("私聊手动返回[CONTINUE_LIST]") })
+        assertTrue(logs.any { it.contains("统一恢复[DETAIL_TO_LIST_ROUTE_REBOUND]") &&
+            it.contains(originalIdentity!!.checkpointId) })
+        assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") &&
+            it.contains("目标路由=AI_REPLY_PRIVATE_MESSAGES") })
+        assertFalse(logs.any { it.contains("outcome=ResumeCompleted") &&
+            it.contains("routeId=AI_REPLY_CHAT_DETAIL") })
+        assertEquals("No stale detail draft", 0, draftCalls)
+        assertEquals("List recovery must not submit a new detail read", readsAfterOldCallback, port.messageReads)
+        assertEquals("List recovery must not submit OCR", 0, port.ocrAsyncReadRequests)
+        assertFalse(port.pendingIdentityReturnReinspection)
+        assertEquals(0, port.navigateBackCalls)
+        assertEquals(listOf(originalUnfinished), traversal.checkpoint().unfinishedSessions)
+    }
+
+    @Test
     fun boundPrivateDetailEmptySnapshotRecoversOnlyAfterFreshTargetAndIdentityReturnProof() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)

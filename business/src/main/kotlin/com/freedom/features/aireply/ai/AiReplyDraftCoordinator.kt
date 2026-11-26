@@ -425,19 +425,46 @@ class AiReplyDraftCoordinator(
         true
     }
 
-    /** Same handoff for the ordinary private-message traversal. */
+    /** Release only a submitted private send backed by the existing durable journal. */
     fun deferPrivateUnconfirmedSendForManualReturn(): Boolean = synchronized(lock) {
-        if (activeTaskId != AiDecisionTaskIds.PRIVATE_MESSAGES ||
-            pendingSendConfirmation == null
+        val confirmation = pendingSendConfirmation ?: return false
+        if ((activeTaskId != AiDecisionTaskIds.PRIVATE_MESSAGES &&
+                !(activeTaskId == null && confirmation.recoveredFromLedger)) ||
+            pendingSendControl != null || pendingNextMessageSegment != null ||
+            !isCurrentGeneration(confirmation.requestGeneration) ||
+            activeRequestId != confirmation.requestId
         ) return false
+        val requestKey = activeMessageKey ?: return false
+        val durable = runCatching {
+            val record = replySegmentTaskRepository?.find(
+                "${confirmation.requestId}:segment:${confirmation.segmentIndex}"
+            ) ?: return@runCatching false
+            val owner = replyTaskRepository?.find(requestKey) ?: return@runCatching false
+            record.requestId == confirmation.requestId &&
+                record.conversationKey == confirmation.conversationKey &&
+                record.segmentIndex == confirmation.segmentIndex &&
+                record.segmentCount == confirmation.segmentCount &&
+                record.segmentContentHash == confirmation.segmentContentHash &&
+                record.status in setOf(ReplySegmentTaskStatus.SENDING,
+                    ReplySegmentTaskStatus.SENT_UNCONFIRMED, ReplySegmentTaskStatus.UNKNOWN) &&
+                record.sendAttemptStartedAt != null &&
+                record.sendWindowSessionKey?.endsWith("|conversation=${confirmation.conversationKey}") == true &&
+                !record.sendChatTitleHash.isNullOrBlank() && record.sendRequestKey == requestKey &&
+                owner.requestId == confirmation.requestId &&
+                owner.conversationKey == confirmation.conversationKey &&
+                owner.status in setOf(ReplyTaskStatus.PENDING_SEND, ReplyTaskStatus.SENDING,
+                    ReplyTaskStatus.SENT_UNCONFIRMED, ReplyTaskStatus.UNKNOWN)
+        }.getOrDefault(false)
+        if (!durable) {
+            onLog("私聊未确认发送[DEFER_JOURNAL_NOT_VERIFIED]：原发送持久化证据未复核；保留当前只读核验")
+            return false
+        }
+        // Retire the live hold first so reset does not rewrite a durable
+        // SENT_UNCONFIRMED as UNKNOWN. The existing reset invalidates generations,
+        // queued model/input/send callbacks and all old in-memory locators.
         pendingSendConfirmation = null
-        pendingNextMessageSegment = null
-        pendingSendControl = null
-        pending.set(false)
-        awaitingUserSend.set(false)
-        replyAwaitingConfirmedSend = false
-        sendConfirmationChecks = 0
-        onLog("私聊未确认发送[MANUAL_RETURN_DEFERRED]：保留SENT_UNCONFIRMED记录；释放当前聊天页，不重发")
+        resetForRuntimeReset()
+        onLog("私聊未确认发送[MANUAL_RETURN_DEFERRED]：保留原发送记录；释放当前聊天页，不重发")
         true
     }
 

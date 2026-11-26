@@ -2063,6 +2063,15 @@ class AiReplyObservationRuntime(
             !verifiedGreetingsInboxReturn && !verifiedGreetingsReturnIntermediate &&
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
+        // The submitted send belongs to its original conversation, not to the
+        // current inbox UI. A confirmed inbox must reach the existing checkpoint
+        // handoff even when the last observation was already a list.
+        val privateSendReturnedToInbox = sessionRunStarted &&
+            activeTaskId == PRIVATE_MESSAGES_TASK_ID && !receivedGreetingsTaskActive &&
+            isSendConfirmationPending() && !isSendControlRecoveryPending() &&
+            matchedRouteId == messageListRecoveryRoute.routeId &&
+            inspection.packageName == targetPackage() && inspection.pageKind == ChatPageKind.CHAT_LIST &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE
         val interruptedPrivateVisitReturned = sessionRunStarted && !recoveryContext.pending &&
             activeTaskId == PRIVATE_MESSAGES_TASK_ID && !receivedGreetingsTaskActive &&
             sessionManagerState == SessionManagerState.READING_SESSION &&
@@ -2071,6 +2080,7 @@ class AiReplyObservationRuntime(
             observation.status == ObservationStatus.CONFIRMED_PAGE &&
             !isSendConfirmationPending() && !isSendControlRecoveryPending()
         if ((shouldCreateRouteRecovery || interruptedPrivateVisitReturned ||
+                (privateSendReturnedToInbox && !recoveryContext.pending) ||
                 (unmatchedReturnToOwnedRoute && !pendingGreetingDetailReturn)) &&
             activeTaskId != null
         ) {
@@ -2099,11 +2109,11 @@ class AiReplyObservationRuntime(
             (matchedRouteId == messageListRecoveryRoute.routeId ||
                 matchedRouteId == receivedGreetingsRecoveryRoute.routeId) &&
             observation.status == ObservationStatus.CONFIRMED_PAGE &&
-            !receivedGreetingsTaskActive &&
-            !isSendConfirmationPending() && !isSendControlRecoveryPending()
+            !receivedGreetingsTaskActive && !isSendControlRecoveryPending() &&
+            (!isSendConfirmationPending() || privateSendReturnedToInbox)
         ) {
             if (!ensureAndroidRecoveryReady(inspection, "PRIVATE_DETAIL_ROUTE_HANDOFF") ||
-                !retargetInterruptedPrivateDetail(observation.observationGeneration)
+                !retargetInterruptedPrivateDetail(observation.observationGeneration, privateSendReturnedToInbox)
             ) {
                 lastPageInspection = inspection
                 scheduleFullInspectionAfter(350L)
@@ -2789,20 +2799,6 @@ class AiReplyObservationRuntime(
                                 onLog("收到招呼手动返回[CONTINUE_LIST]：未确认发送已落盘；当前行延期，继续处理其他招呼")
                             } else {
                                 onLog("收到招呼手动返回[DEFER_REJECTED]：未确认发送仍由原聊天事务持有；保持只读恢复")
-                                return
-                            }
-                        }
-                        if (!receivedGreetingsTaskActive && isSendConfirmationPending()) {
-                            if (deferPrivateSendForManualReturn()) {
-                                privateMessagesTraversalTaskExecutor.clearCurrentSession()
-                                currentSessionSendConfirmed = false
-                                privateMessagesCheckpointRepository?.save(
-                                    privateMessagesTraversalTaskExecutor.checkpoint()
-                                )
-                                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                                onLog("私聊手动返回[CONTINUE_LIST]：未确认发送已落盘；当前会话延期，继续处理其他会话")
-                            } else {
-                                onLog("私聊手动返回[DEFER_REJECTED]：未确认发送仍由原聊天事务持有；保持只读恢复")
                                 return
                             }
                         }
@@ -3678,7 +3674,10 @@ class AiReplyObservationRuntime(
      * with a freshly confirmed destination and Android readiness. The existing
      * list verifier (or cross-task handoff) must still earn fresh proof and ownership.
      */
-    private fun retargetInterruptedPrivateDetail(observationGeneration: Long): Boolean {
+    private fun retargetInterruptedPrivateDetail(
+        observationGeneration: Long,
+        confirmedPrivateInboxWithPendingSend: Boolean = false
+    ): Boolean {
         val old = recoveryTransaction.currentIdentity() ?: return false
         val saved = recoveryContext.snapshot()
         if (!sessionRunStarted || !isAiReplyActive() || receivedGreetingsTaskActive ||
@@ -3686,8 +3685,8 @@ class AiReplyObservationRuntime(
             old.routeId != chatDetailRecoveryRoute.routeId ||
             old.runGeneration != currentRunGeneration() ||
             observationGeneration <= old.observationGeneration ||
-            !saved.checkpointSaved ||
-            isSendConfirmationPending() || isSendControlRecoveryPending()
+            !saved.checkpointSaved || isSendControlRecoveryPending() ||
+            (isSendConfirmationPending() && !confirmedPrivateInboxWithPendingSend)
         ) return false
 
         val checkpoint = if (privateMessagesCheckpointRepository != null) {
@@ -3697,8 +3696,24 @@ class AiReplyObservationRuntime(
             routeId = messageListRecoveryRoute.routeId,
             observationGeneration = observationGeneration
         )
+        // Only the independently recognized private inbox may retire a submitted
+        // send's live hold. The coordinator checks its existing durable journal
+        // before invalidating callbacks; neither this step nor route selection
+        // grants the list lease or claims that the message was sent.
+        if (isSendConfirmationPending()) {
+            if (!runCatching { deferPrivateSendForManualReturn() }.getOrDefault(false) ||
+                isSendConfirmationPending() || isSendControlRecoveryPending() ||
+                isConversationDraftPending()
+            ) {
+                onLog("私聊手动返回[DEFER_REJECTED]：原发送证据或执行资格尚未安全释放；保持只读恢复")
+                return false
+            }
+            deferredSendProofRetryAttempt = 0
+            currentSessionSendConfirmed = false
+            onLog("私聊手动返回[CONTINUE_LIST]：未确认发送已落盘；原会话延期；等待列表双快照和操作权")
+        }
         // Existing runtime reset invalidates model callbacks and preserves durable
-        // send evidence. A pending send/control transaction must never enter here.
+        // evidence for ordinary pre-send detail interruption.
         if (isConversationDraftPending()) {
             if (runCatching { onDraftRuntimeReset() }.isFailure ||
                 isConversationDraftPending() || isSendConfirmationPending() ||
@@ -3774,11 +3789,10 @@ class AiReplyObservationRuntime(
             confirmedPrivateReturnAwaitingRecovery = true
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
         }
-        // A submitted but unconfirmed private send must keep its chat-detail recovery
-        // destination across any route change. A list checkpoint cannot authorize new
-        // traversal while the original send still requires read-only verification.
-        // This only selects the recovery route: fresh target identity, Android READY,
-        // two independent snapshots and the UI lease remain mandatory for resumption.
+        // Initially keep a submitted send on its detail recovery route. Only a
+        // fresh confirmed private inbox and a durable deferral may rebind it;
+        // UNKNOWN and a different chat never release the original send hold.
+        // Android READY, two independent snapshots and the UI lease remain mandatory.
         val pendingPrivateSend = taskId == PRIVATE_MESSAGES_TASK_ID &&
             !receivedGreetingsTaskActive && isSendConfirmationPending()
         // Other private recoveries retain the primary list route, except the existing
