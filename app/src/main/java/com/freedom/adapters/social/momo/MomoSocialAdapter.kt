@@ -5750,6 +5750,8 @@ internal class MomoSocialAdapter(
         var albumWindow: WindowRef? = null
         var directoryRejectedRetries = 0
         var interceptionLayoutRejectedRetries = 0
+        var interceptionBackCancelledRetries = 0
+        @Volatile var interceptionBackDispatched = false
         var lastWaitReason: String? = null
     }
 
@@ -5894,6 +5896,16 @@ internal class MomoSocialAdapter(
                         test.stage = previous
                         test.stageStartedAt = previousStartedAt
                         testWait(test, "DIRECTORY_TAP_REJECTED_REACQUIRE")
+                    } else if (previous == ImageTestStage.INTERCEPTION_BACK &&
+                        status == GestureExecutionStatus.CANCELLED &&
+                        !test.interceptionBackDispatched && test.interceptionBackCancelledRetries == 0
+                    ) {
+                        // Only the final return tap may be retried after cancellation before
+                        // platform dispatch. Never replay the switch or an actual back tap.
+                        test.interceptionBackCancelledRetries++
+                        test.stage = previous
+                        test.stageStartedAt = previousStartedAt
+                        testWait(test, "INTERCEPTION_BACK_CANCELLED_BEFORE_DISPATCH_REACQUIRE")
                     } else if (status != GestureExecutionStatus.COMPLETED) {
                         // An ambiguous send/toggle is never replayed.
                         testTerminal(test, "UNKNOWN", "GESTURE_NOT_CONFIRMED")
@@ -5978,6 +5990,7 @@ internal class MomoSocialAdapter(
         if (window.packageName != targetPackage || window.windowId < 0) return
         submitImageTestStep(test, next) { callback ->
             var layoutBoundsLogged = false
+            if (action == "interception-back") test.interceptionBackDispatched = false
             submitVerifiedAlbumTap(
                 test.target, window, test.id, { testCurrent(test) }, action,
                 resolve = { root, liveWindow ->
@@ -5988,7 +6001,11 @@ internal class MomoSocialAdapter(
                                 "generation=${liveWindow.generation};bounds=$bounds")
                         }
                     }
-                }, boundsOf = { it }, onGestureResult = callback
+                }, boundsOf = { it },
+                onPlatformDispatched = { _, _ ->
+                    if (action == "interception-back") test.interceptionBackDispatched = true
+                },
+                onGestureResult = callback
             )
         }
     }
