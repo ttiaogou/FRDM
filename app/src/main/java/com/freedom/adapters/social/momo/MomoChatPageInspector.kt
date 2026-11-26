@@ -592,27 +592,21 @@ internal class MomoChatPageInspector(
      * M02.1: read-only, on-demand locator. Owns the fresh root and returns no Android node.
      * The ordinary chat fingerprint and its early-exit scan remain unchanged.
      */
-    fun inspectImageEntry(root: AccessibilityNodeInfo, targetPackage: String, activityClass: String): MomoImageEntryEvidence? {
+    fun inspectImageEntry(root: AccessibilityNodeInfo, targetPackage: String): MomoImageEntryEvidence? {
         try {
-            val page = inspectRoot(AccessibilityNodeInfo.obtain(root), targetPackage, activityClass)
-            if (page.pageType != MomoChatPageType.CHAT_DETAIL_CANDIDATE ||
-                !page.hasStableChatDetailFingerprint) return null
             val nodes = root.findAccessibilityNodeInfosByViewId(MomoImageEntryPolicy.ENTRY_ID).orEmpty()
             try {
                 val candidates = nodes.map { node ->
                     val bounds = Rect()
                     node.getBoundsInScreen(bounds)
-                    val parent = node.parent
-                    val parentId = try { parent?.viewIdResourceName.orEmpty() }
-                        finally { parent?.let { runCatching { it.recycle() } } }
                     MomoImageEntryEvidence(
-                        node.viewIdResourceName.orEmpty(), parentId,
+                        node.viewIdResourceName.orEmpty(), "",
                         node.className?.toString().orEmpty(), node.packageName?.toString().orEmpty(),
                         node.isVisibleToUser, node.isEnabled, node.isClickable,
                         bounds.left, bounds.top, bounds.right, bounds.bottom
                     )
                 }
-                return MomoImageEntryPolicy.resolve(targetPackage, candidates)
+                return MomoImageEntryPolicy.resolveOwned(targetPackage, candidates)
             } finally {
                 nodes.forEach { runCatching { it.recycle() } }
             }

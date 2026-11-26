@@ -52,6 +52,22 @@ class MomoFreedomAlbumInspectorTest {
         assertEquals(2, MomoFreedomAlbumInspector.selectionCount("发送(2)"))
     }
 
+    @Test
+    fun ownedStepsRequireOnlyCurrentActionTargetNotGridOrOtherControls() {
+        val title = nodes[1]
+        val select = nodes.last()
+        val finish = nodes[2].copy(text = "发送(1)")
+        assertEquals(selectBounds, MomoFreedomAlbumInspector.ownedSelectionTarget(
+            snapshot(listOf(title, select)), pkg)?.second)
+        assertEquals(finishBounds, MomoFreedomAlbumInspector.ownedSendTarget(
+            snapshot(listOf(title, finish)), pkg)?.bounds)
+        assertNull(MomoFreedomAlbumInspector.ownedSelectionTarget(
+            snapshot(listOf(title, select, select.copy(path = NodePath(listOf(9))))), pkg))
+        assertNull(MomoFreedomAlbumInspector.ownedSendTarget(snapshot(listOf(title, finish.copy(text = "发送(2)"))), pkg))
+        assertNull(MomoFreedomAlbumInspector.ownedSendTarget(snapshot(listOf(title.copy(text = "相册"), finish)), pkg))
+        assertNull(MomoFreedomAlbumInspector.ownedSelectionTarget(snapshot(listOf(title, select.copy(clickable = false))), pkg))
+    }
+
     private fun snapshot(nodes: List<AccessibilityNodeSnapshot>) =
         AccessibilityTreeSnapshot(window, nodes, nodes.size, false, textCapture = NodeTextCapture.EPHEMERAL)
 

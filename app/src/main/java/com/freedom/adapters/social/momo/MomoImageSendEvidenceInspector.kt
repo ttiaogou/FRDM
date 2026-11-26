@@ -27,7 +27,7 @@ internal data class MomoImageSendBaseline(
 }
 /** Immutable dispatch provenance, retained only by the caller's media transaction. */
 internal data class MomoImageSendAttempt(
-    val baseline: MomoImageSendBaseline,
+    val baseline: MomoImageSendBaseline?,
     val commandId: String,
     val dispatchedAtUptimeMs: Long
 )
@@ -48,9 +48,17 @@ internal object MomoImageSendEvidenceInspector {
         val lease = target.taskLease ?: return null
         if (transactionId.isBlank() || snapshot.window != target.nodeTarget.window ||
             target.conversationIdentityKey.isBlank()) return null
-        val list = confirmedTailList(snapshot, target) ?: return null
+        // Best-effort evidence only. Missing title/composer/emotes or a non-visible tail
+        // must not prevent collecting the count from the already admitted parent chat.
+        if (snapshot.truncated || snapshot.timeBudgetExceeded || snapshot.textCapture != NodeTextCapture.EPHEMERAL)
+            return null
+        val list = scopedNodes(snapshot).singleOrNull {
+            it.viewId == MomoChatPageContract.MESSAGE_LIST_VIEW_ID &&
+                it.className == MomoChatPageContract.MESSAGE_LIST_CLASS_NAME
+        } ?: return null
+        val count = list.collection?.rowCount?.takeIf { it >= 0 } ?: return null
         return MomoImageSendBaseline(transactionId, snapshot.window, target.conversationIdentityKey,
-            lease, list.collection!!.rowCount)
+            lease, count)
     }
 
     fun newImage(snapshot: AccessibilityTreeSnapshot, baseline: MomoImageSendBaseline, target: ChatDraftInputTarget): MomoImageSendProof? {

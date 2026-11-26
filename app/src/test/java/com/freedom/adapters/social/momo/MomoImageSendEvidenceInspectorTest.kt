@@ -36,6 +36,17 @@ class MomoImageSendEvidenceInspectorTest {
     }
 
     @Test
+    fun baselineOnlyNeedsOptionalCountNotComposerEmotesOrVisibleTail() {
+        val before = snapshot(original, 1)
+        val countOnly = before.copy(nodes = before.nodes.filter {
+            it.viewId.endsWith(":id/message_chat_recycler_view")
+        })
+        val baseline = MomoImageSendEvidenceInspector.baseline(countOnly, target, "media-1")
+        assertEquals(1, baseline?.rowCount)
+        assertNull(MomoImageSendEvidenceInspector.baseline(countOnly.copy(nodes = emptyList()), target, "media-1"))
+    }
+
+    @Test
     fun orangeUnreadAndGreenReadAreSuccessOnlyWithNonClickableStatus() {
         val orange = IntArray(1024) { 0xFFFFA020.toInt() }
         val green = IntArray(1024) { 0xFF20BB60.toInt() }

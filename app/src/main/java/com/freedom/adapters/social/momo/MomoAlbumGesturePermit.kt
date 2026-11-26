@@ -14,8 +14,8 @@ internal class MomoAlbumGesturePermit(
     private val commandId: String = transactionId,
     /** Reacquires the exact action-specific target; no Android node survives a read. */
     private val targetStillCurrent: () -> Boolean = { false },
-    /** Only the existing request-bound Freedom directory name action can supply this proof. */
-    val directoryChildAction: Boolean = false
+    /** A request-bound media step inherits the already admitted chat's operation rights. */
+    val transactionChildAction: Boolean = false
 ) {
     fun confirmsCurrentTarget(): Boolean = runCatching(targetStillCurrent).getOrDefault(false)
 

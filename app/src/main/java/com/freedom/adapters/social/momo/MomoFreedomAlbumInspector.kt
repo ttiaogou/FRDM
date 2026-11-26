@@ -25,6 +25,40 @@ internal object MomoFreedomAlbumInspector {
         return Regex("^发送\\(([0-9]+)\\)$").matchEntire(normalized)?.groupValues?.get(1)?.toIntOrNull()
     }
 
+    /** The selected directory is proven by its name alone, not a full album fingerprint. */
+    private fun ownedNodes(snapshot: AccessibilityTreeSnapshot, targetPackage: String): List<AccessibilityNodeSnapshot>? {
+        if (targetPackage != "com.immomo.momo" || snapshot.window.packageName != targetPackage ||
+            snapshot.window.windowId < 0 || snapshot.truncated || snapshot.timeBudgetExceeded ||
+            snapshot.textCapture != NodeTextCapture.EPHEMERAL) return null
+        val nodes = snapshot.nodes.filter { it.packageName == targetPackage && it.windowId == snapshot.window.windowId }
+        val title = nodes.singleOrNull {
+            it.viewId == "$targetPackage:id/tab_title" && it.usable() &&
+                it.text?.trim()?.equals("Freedom", ignoreCase = true) == true
+        } ?: return null
+        if (title.className != "android.widget.TextView") return null
+        return nodes
+    }
+
+    /** Only the unique, usable select control is required for the current step. */
+    fun ownedSelectionTarget(snapshot: AccessibilityTreeSnapshot, targetPackage: String): Pair<NodePath, ScreenRect>? {
+        val nodes = ownedNodes(snapshot, targetPackage) ?: return null
+        val select = nodes.singleOrNull {
+            it.viewId == "$targetPackage:id/iv_item_select" && it.usable() &&
+                it.className == "android.view.View" && it.clickable
+        } ?: return null
+        return select.path to select.bounds
+    }
+
+    /** Send only one selected image; the grid and the previous target need not remain visible. */
+    fun ownedSendTarget(snapshot: AccessibilityTreeSnapshot, targetPackage: String): MomoAlbumFinishTarget? {
+        val nodes = ownedNodes(snapshot, targetPackage) ?: return null
+        val finish = nodes.singleOrNull {
+            it.viewId == "$targetPackage:id/finish" && it.usable() &&
+                it.className == "android.widget.TextView" && it.clickable && selectionCount(it.text) == 1
+        } ?: return null
+        return MomoAlbumFinishTarget(finish.path, finish.bounds)
+    }
+
     fun inspect(snapshot: AccessibilityTreeSnapshot, targetPackage: String): MomoFreedomAlbumEvidence? {
         if (targetPackage != "com.immomo.momo" || snapshot.window.packageName != targetPackage ||
             snapshot.window.windowId < 0 || snapshot.truncated || snapshot.timeBudgetExceeded ||

@@ -17,38 +17,32 @@ internal object MomoAlbumSelectorInspector {
 
     /** Borrows root. All acquired nodes are released before returning immutable evidence. */
     fun inspect(root: AccessibilityNodeInfo, targetPackage: String): MomoAlbumSelectorEvidence? = runCatching {
-        if (!MomoAlbumArrivalInspector.isConfirmed(root, targetPackage)) return null
+        if (root.packageName?.toString() != targetPackage) return null
         val owned = mutableListOf<AccessibilityNodeInfo>()
         try {
-            fun find(id: String): List<AccessibilityNodeInfo> =
-                root.findAccessibilityNodeInfosByViewId("$targetPackage:id/$id").orEmpty().also { owned.addAll(it) }
-            fun parent(node: AccessibilityNodeInfo): AccessibilityNodeInfo? = node.parent?.also { owned.add(it) }
+            val titles = root.findAccessibilityNodeInfosByViewId("$targetPackage:id/tab_title").orEmpty()
+                .also { owned.addAll(it) }
+            val title = titles.singleOrNull() ?: return null
             fun usable(node: AccessibilityNodeInfo): Boolean =
                 node.packageName?.toString() == targetPackage && node.isVisibleToUser && node.isEnabled
-            val titles = find("tab_title")
-            val arrows = find("tab_coustom_img")
-            val title = titles.singleOrNull() ?: return null
-            val arrow = arrows.singleOrNull() ?: return null
-            val group = parent(title) ?: return null
-            val arrowGroup = parent(arrow) ?: return null
-            val scale = parent(group) ?: return null
-            val click = parent(scale) ?: return null
-            val hierarchy = group == arrowGroup &&
-                scale.viewIdResourceName == "$targetPackage:id/tab_title_scale_layout" &&
-                title.className?.toString() == "android.widget.TextView" &&
-                arrow.className?.toString() == "android.widget.ImageView" &&
-                click.className?.toString() == "android.widget.RelativeLayout"
-            val bounds = Rect()
-            click.getBoundsInScreen(bounds)
+            if (!usable(title) || title.className?.toString() != "android.widget.TextView") return null
             val titleBounds = Rect()
             title.getBoundsInScreen(titleBounds)
-            val arrowBounds = Rect()
-            arrow.getBoundsInScreen(arrowBounds)
-            val valid = listOf(title, arrow, group, scale, click).all(::usable) &&
-                click.isClickable && !titleBounds.isEmpty && !arrowBounds.isEmpty &&
-                bounds.contains(titleBounds) && bounds.contains(arrowBounds)
-            resolve(title.text?.toString().orEmpty(), titles.size, arrows.size, hierarchy, valid,
-                bounds.left, bounds.top, bounds.right, bounds.bottom)
+            if (titleBounds.isEmpty) return null
+            // Find the local clickable selector, not a whole album page fingerprint.
+            var current = title
+            repeat(4) {
+                if (!usable(current)) return null
+                if (current.isClickable) {
+                    val bounds = Rect()
+                    current.getBoundsInScreen(bounds)
+                    if (bounds.isEmpty || !bounds.contains(titleBounds)) return null
+                    return MomoAlbumSelectorEvidence(title.text?.toString().orEmpty(),
+                        bounds.left, bounds.top, bounds.right, bounds.bottom)
+                }
+                current = current.parent?.also { owned.add(it) } ?: return null
+            }
+            return null
         } finally {
             owned.forEach { runCatching { it.recycle() } }
         }

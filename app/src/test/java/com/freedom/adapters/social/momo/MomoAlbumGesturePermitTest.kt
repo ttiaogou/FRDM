@@ -35,8 +35,8 @@ class MomoAlbumGesturePermitTest {
         var owns = true
         var target = true
         val permit = MomoAlbumGesturePermit("media-1", child, { live }, { owns },
-            "freedom-name", { target }, directoryChildAction = true)
-        assertTrue(permit.directoryChildAction)
+            "freedom-name", { target }, transactionChildAction = true)
+        assertTrue(permit.transactionChildAction)
         assertTrue(permit.matchesCommand("freedom-name"))
         assertFalse(permit.matchesCommand("selector"))
         assertTrue(permit.permits(RunMode.AI_REPLY, child.packageName, child.windowId, ""))
@@ -49,7 +49,7 @@ class MomoAlbumGesturePermitTest {
         live = child
         owns = false
         assertFalse(permit.permits(RunMode.AI_REPLY, child.packageName, child.windowId, ""))
-        assertFalse(MomoAlbumGesturePermit("media-1", child, { child }, { true }).directoryChildAction)
+        assertFalse(MomoAlbumGesturePermit("media-1", child, { child }, { true }).transactionChildAction)
     }
 
     @Test
