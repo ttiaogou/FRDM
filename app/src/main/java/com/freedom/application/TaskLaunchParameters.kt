@@ -4,8 +4,8 @@ import com.freedom.features.aireply.policy.ConversationFilterSettings
 
 /**
  * Editable filter and launch-form values shared by the launcher and its persistence adapter.
- * Distance, age and activity-time filters are persisted here; the current runtime does not yet
- * consume these filter preferences, so the UI must not imply that candidate filtering is active.
+ * Distance, age and activity-time filters are persisted here and consumed by the
+ * received-greetings new-conversation admission path.
  */
 data class TaskLaunchParameters(
     val maxDistanceKm: Int = 0,

@@ -7,6 +7,10 @@ data class ConversationFilterSettings(
     val minAge: Int = 0,
     val maxAge: Int = 0
 ) {
+    /** Invalid non-zero configuration still reaches the policy and fails closed. */
+    val hasEnabledConditions: Boolean
+        get() = maxLastActiveMinutes != 0 || maxDistanceKm != 0 || minAge != 0 || maxAge != 0
+
     companion object {
         const val DEFAULT_MAX_LAST_ACTIVE_MINUTES = 60
     }
@@ -17,7 +21,15 @@ data class ConversationFilterEvidence(
     val lastActiveMinutes: Long? = null,
     val distanceKm: Double? = null,
     val age: Int? = null
-)
+) {
+    /** The receiver is the preferred observation; the other source only fills missing fields. */
+    fun supplementedBy(other: ConversationFilterEvidence): ConversationFilterEvidence =
+        ConversationFilterEvidence(
+            lastActiveMinutes = lastActiveMinutes ?: other.lastActiveMinutes,
+            distanceKm = distanceKm ?: other.distanceKm,
+            age = age ?: other.age
+        )
+}
 
 enum class ConversationFilterResult { ALLOW, EXCLUDE, UNKNOWN }
 

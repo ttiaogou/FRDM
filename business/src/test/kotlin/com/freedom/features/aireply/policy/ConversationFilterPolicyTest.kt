@@ -53,4 +53,18 @@ class ConversationFilterPolicyTest {
         assertEquals(ConversationFilterResult.UNKNOWN,
             ConversationFilterPolicy.evaluate(ConversationFilterSettings(0, minAge = 18), ConversationFilterEvidence(age = 0)).result)
     }
+    @Test fun profileEvidenceFillsOnlyMissingFieldsAndCombinedPolicyStaysInclusive() {
+        val profile = ConversationFilterEvidence(lastActiveMinutes = 60, age = 30)
+        val returnedRow = ConversationFilterEvidence(distanceKm = 10.0, age = 99)
+        val evidence = profile.supplementedBy(returnedRow)
+        assertEquals(ConversationFilterEvidence(60, 10.0, 30), evidence)
+        assertEquals(ConversationFilterResult.ALLOW,
+            ConversationFilterPolicy.evaluate(ConversationFilterSettings(60, 10, 25, 40), evidence).result)
+        assertEquals(ConversationFilterResult.UNKNOWN,
+            ConversationFilterPolicy.evaluate(ConversationFilterSettings(), returnedRow).result)
+        assertFalse(ConversationFilterSettings(maxLastActiveMinutes = 0).hasEnabledConditions)
+        assertTrue(ConversationFilterSettings(maxLastActiveMinutes = 0, minAge = 18).hasEnabledConditions)
+        assertTrue(ConversationFilterSettings(maxLastActiveMinutes = -1).hasEnabledConditions)
+    }
+
 }

@@ -1,5 +1,6 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.features.aireply.policy.ConversationFilterSettings
 import com.freedom.features.aireply.ports.MomoSayHiDeferredRowCheckpointRecord
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRecord
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
@@ -371,5 +372,56 @@ class MomoSayHiTraversalStateTest {
         assertFalse(restarted.isProcessedRow("unsafe"))
     }
 
+
+    @Test
+    fun filterSkipsAreVolatileAndNeverModifyDurableTraversalFacts() {
+        val repository = InMemoryRepository()
+        val store = MomoSayHiTraversalCheckpointStore(repository)
+        val state = MomoSayHiTraversalState(store)
+        state.markProcessedRow("sent")
+        state.deferRow("recover", "DRAFT_MODEL_FAILURE", 1_000L)
+        val before = repository.value
+        state.updateFilterSettings(ConversationFilterSettings())
+        assertTrue(state.markFilterSkipped("excluded"))
+        assertFalse(state.markFilterSkipped("excluded"))
+        assertTrue(state.isFilterSkipped("excluded"))
+        assertFalse(state.isProcessedRow("excluded"))
+        assertFalse(state.isDeferredRow("excluded"))
+        assertFalse(state.markFilterSkipped("recover"))
+        assertFalse(state.isFilterSkipped("recover"))
+        assertTrue(state.isDeferredRetryDue("recover", 2_500L))
+        assertEquals(before, repository.value)
+
+        val restored = MomoSayHiTraversalState(store)
+        restored.restore()
+        restored.updateFilterSettings(ConversationFilterSettings())
+        assertFalse(restored.isFilterSkipped("excluded"))
+        assertTrue(restored.isProcessedRow("sent"))
+        assertTrue(restored.isDeferredRow("recover"))
+    }
+
+    @Test
+    fun filterConfigurationChangeAndNewScanReleaseSkipsButNotRecovery() {
+        val state = MomoSayHiTraversalState(MomoSayHiTraversalCheckpointStore(InMemoryRepository()))
+        val settings = ConversationFilterSettings()
+        state.updateFilterSettings(settings)
+        assertTrue(state.markFilterSkipped("a"))
+        state.updateFilterSettings(settings.copy())
+        assertTrue(state.isFilterSkipped("a"))
+        state.updateFilterSettings(settings.copy(maxLastActiveMinutes = 120))
+        assertFalse(state.isFilterSkipped("a"))
+        assertTrue(state.markFilterSkipped("a"))
+        state.deferRow("a", "MANUAL_RETURN_BEFORE_SEND_CONFIRMATION", 1_000L)
+        assertFalse(state.isFilterSkipped("a"))
+        assertTrue(state.isDeferredRow("a"))
+        state.updateFilterSettings(ConversationFilterSettings(maxLastActiveMinutes = 0))
+        assertFalse(state.markFilterSkipped("b"))
+        state.updateFilterSettings(settings)
+        assertTrue(state.markFilterSkipped("b"))
+        state.resetFilterSkips()
+        assertFalse(state.isFilterSkipped("b"))
+        assertTrue(state.isDeferredRow("a"))
+        assertTrue(state.isDeferredRetryDue("a", 2_500L))
+    }
 
 }

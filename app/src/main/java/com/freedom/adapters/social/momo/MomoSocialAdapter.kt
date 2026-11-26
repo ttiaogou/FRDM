@@ -81,6 +81,11 @@ import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnJournal
 import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnPhase
 import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnRepository
+import com.freedom.features.aireply.policy.ConversationFilterDecision
+import com.freedom.features.aireply.policy.ConversationFilterEvidence
+import com.freedom.features.aireply.policy.ConversationFilterPolicy
+import com.freedom.features.aireply.policy.ConversationFilterResult
+import com.freedom.features.aireply.policy.ConversationFilterSettings
 
 /**
  * Android-side Momo adapter. It owns app-specific inspectors and controllers and exposes
@@ -108,6 +113,7 @@ internal class MomoSocialAdapter(
     private val sampleArchivePort: SessionSampleArchivePort,
     /** Fresh observation from the existing Android READY owner; not a UI write grant. */
     private val inspectReceivedGreetingsReadiness: () -> TargetAppReadinessSnapshot,
+    private val conversationFilterSettings: () -> ConversationFilterSettings,
     /** The AI task lease must still be current when a send gesture is admitted. */
     private val isAiReplyUiOperationOwned: () -> Boolean = { true },
     /** Exact lease captured at model admission; task handoff revokes old async callbacks. */
@@ -171,7 +177,9 @@ internal class MomoSocialAdapter(
         val greetingText: String?,
         val timestampText: String?,
         val sourceWindow: WindowRef,
-        val sourceStructureFingerprint: String
+        val sourceStructureFingerprint: String,
+        val listFilterEvidence: ConversationFilterEvidence = ConversationFilterEvidence(),
+        val profileFilterEvidence: ConversationFilterEvidence? = null
     )
 
     private enum class InboxIdentityCaptureStage {
@@ -353,6 +361,7 @@ internal class MomoSocialAdapter(
     @Volatile private var sayHiReadOnlyStage: SayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
     /** Business-visible read-only wait; never a permission to click or mark a row complete. */
     @Volatile private var sayHiDeferredSafeEvidenceOnlyWait = false
+    private var sayHiFilterSettingsUnavailableLogged = false
     @Volatile private var sayHiSelectedGreeting: SayHiSelectedGreeting? = null
     @Volatile private var sayHiSelectedContactIdentity: ContactRowIdentity? = null
     @Volatile private var sayHiSelectedIdentityStatus: MomoSayHiPlatformIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
@@ -1227,6 +1236,7 @@ internal class MomoSocialAdapter(
         completionBackRetryGate.reset()
         resetReceivedGreetingsEntrySearch()
         sayHiAutonomousBrowseController.reset()
+        sayHiTraversalState.resetFilterSkips()
         clearSayHiSelectedGreeting()
         resetSayHiRowTapTransaction()
         receivedGreetingsEntryTapPending = false
@@ -2402,6 +2412,26 @@ internal class MomoSocialAdapter(
                 clearSayHiSelectedGreeting()
                 return false
             }
+            // A new conversation needs final admission only after the existing return,
+            // platform identity and durable send/duplicate recovery gates have succeeded.
+            if (!sayHiTraversalState.isDeferredRow(selected.rowKey)) {
+                val settings = readSayHiFilterSettings() ?: return true
+                val evidence = (selected.profileFilterEvidence ?: ConversationFilterEvidence())
+                    .supplementedBy(row.filterEvidence)
+                val decision = ConversationFilterPolicy.evaluate(settings, evidence)
+                if (decision.result != ConversationFilterResult.ALLOW) {
+                    if (sayHiTraversalState.markFilterSkipped(selected.rowKey)) {
+                        logSayHiFilterDecision(decision, settings, evidence, "PROFILE_RETURN")
+                    }
+                    clearSayHiSelectedGreeting()
+                    // Let the normal next idle step select another visible candidate before
+                    // the outer list is allowed to scroll. No extra collection is scheduled.
+                    return true
+                }
+                if (settings.hasEnabledConditions) {
+                    logSayHiFilterDecision(decision, settings, evidence, "PROFILE_RETURN")
+                }
+            }
             val namePath = row.namePath ?: run {
                 deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
                 onLog("收到招呼详情点击跳过：重新定位的原始消息行缺少姓名节点路径；不使用旧节点路径或坐标")
@@ -2473,9 +2503,16 @@ internal class MomoSocialAdapter(
         val candidates = inspection.listRows.filter { row ->
             row.unread.status == EvidenceStatus.CONFIRMED && row.unread.value == true
         }
+        val settings = readSayHiFilterSettings()
         val unprocessedCandidates = candidates.filter { row ->
             val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
-            key !in confirmedRows && !sayHiTraversalState.isProcessedRow(key) && !sayHiTraversalState.isDeferredRow(key)
+            key !in confirmedRows && !sayHiTraversalState.isProcessedRow(key) && !sayHiTraversalState.isDeferredRow(key) &&
+                settings != null && (!settings.hasEnabledConditions ||
+                    (!sayHiTraversalState.isFilterSkipped(key) &&
+                        // Keep the existing duplicate-row safety path authoritative. An ambiguous row
+                        // key must not be used to cache a filter exclusion for another visible row.
+                        (inspection.listRows.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1 ||
+                            passesSayHiListFilter(key, settings, row.filterEvidence))))
         }
         // Read-only recovery probe: the old finite click budget is never reset just
         // because a timer fired. Inspect a NEW unique and independently safe row target.
@@ -2500,7 +2537,8 @@ internal class MomoSocialAdapter(
             sayHiStableCandidateTarget = null
             sayHiStableCandidateWindow = null
             // Do not scroll away while the second safe-evidence observation is pending.
-            return exhaustedProbePending
+            // A configuration read failure is not evidence that the scan is complete.
+            return exhaustedProbePending || settings == null
         }
         sayHiDeferredSafeEvidenceOnlyWait = false
         val key = MomoSayHiIdentityFingerprintPolicy.rowKey(candidate)
@@ -2531,9 +2569,59 @@ internal class MomoSocialAdapter(
             greetingText = candidate.greetingText.value,
             timestampText = candidate.timestampText.value,
             sourceWindow = tree.window,
-            sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree)
+            sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree),
+            listFilterEvidence = candidate.filterEvidence
         )
         return dispatchSayHiReadOnlyAvatarTap(tree, selected, target)
+    }
+
+    private fun readSayHiFilterSettings(): ConversationFilterSettings? {
+        val settings = runCatching { conversationFilterSettings() }.getOrNull()
+        if (settings == null) {
+            if (!sayHiFilterSettingsUnavailableLogged) {
+                sayHiFilterSettingsUnavailableLogged = true
+                onLog("CONVERSATION_FILTER_SETTINGS_UNAVAILABLE nextAction=WAIT_FOR_SETTINGS")
+            }
+            return null
+        }
+        sayHiFilterSettingsUnavailableLogged = false
+        sayHiTraversalState.updateFilterSettings(settings)
+        return settings
+    }
+
+    private fun passesSayHiListFilter(
+        rowKey: String, settings: ConversationFilterSettings, evidence: ConversationFilterEvidence
+    ): Boolean {
+        if (sayHiTraversalState.isDeferredRow(rowKey) || !settings.hasEnabledConditions) return true
+        if (sayHiTraversalState.isFilterSkipped(rowKey)) return false
+        val decision = ConversationFilterPolicy.evaluate(settings, evidence)
+        // Missing list evidence is not a rejection: the original profile visit can fill it.
+        if (decision.result != ConversationFilterResult.EXCLUDE) return true
+        if (sayHiTraversalState.markFilterSkipped(rowKey)) {
+            logSayHiFilterDecision(decision, settings, evidence, "LIST")
+        }
+        return false
+    }
+
+    private fun logSayHiFilterDecision(
+        decision: ConversationFilterDecision,
+        settings: ConversationFilterSettings,
+        evidence: ConversationFilterEvidence,
+        stage: String
+    ) {
+        val nextAction = if (decision.result == ConversationFilterResult.ALLOW)
+            "CONTINUE_ORIGINAL_WORKFLOW" else "CONTINUE_TRAVERSAL"
+        val event = when (decision.result) {
+            ConversationFilterResult.ALLOW -> "CONVERSATION_FILTER_ALLOWED"
+            ConversationFilterResult.EXCLUDE -> "CONVERSATION_FILTER_EXCLUDED"
+            ConversationFilterResult.UNKNOWN -> "CONVERSATION_FILTER_UNKNOWN"
+        }
+        // Only normalized threshold/decision information; no raw identifiers or profile text.
+        onLog("$event stage=$stage reason=${decision.reason ?: "NONE"};" +
+            "thresholdMinutes=${settings.maxLastActiveMinutes};" +
+            "observedMinutes=${evidence.lastActiveMinutes ?: "UNKNOWN"};" +
+            "maxDistanceKm=${settings.maxDistanceKm};minAge=${settings.minAge};maxAge=${settings.maxAge};" +
+            "nextAction=$nextAction")
     }
 
     private fun dispatchSayHiReadOnlyAvatarTap(
@@ -2622,11 +2710,21 @@ internal class MomoSocialAdapter(
                 tree = freshTree,
                 selected = selected.copy(
                     sourceWindow = freshTree.window,
-                    sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(freshTree)
+                    sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(freshTree),
+                    listFilterEvidence = matchingRows.single().filterEvidence
                 ),
                 target = freshTarget,
                 allowFreshRevalidation = false
             )
+        }
+        if (!sayHiTraversalState.isDeferredRow(selected.rowKey)) {
+            val settings = readSayHiFilterSettings() ?: return true
+            if (!passesSayHiListFilter(selected.rowKey, settings, selected.listFilterEvidence)) {
+                sayHiStableCandidateKey = ""
+                sayHiStableCandidateTarget = null
+                sayHiStableCandidateWindow = null
+                return true
+            }
         }
         val metrics = accessibilityGateway.displayMetrics()
         val executionContext = gesturePolicy.captureContext(tree.window, metrics.toGestureCoordinateContext())
@@ -3299,6 +3397,19 @@ internal class MomoSocialAdapter(
         if (inspectCurrentChatDetailFingerprint() != null ||
             !accessibilityGateway.isWindowCurrent(tree.window)
         ) return true
+        // Reuse only the already acquired identity snapshot. Keep the first-screen evidence
+        // across the existing one allowed ID swipe; later available fields may fill gaps.
+        // None of these optional fields can authorize a profile, ID or navigation action.
+        if (!sayHiTraversalState.isDeferredRow(selected.rowKey) &&
+            readSayHiFilterSettings()?.hasEnabledConditions == true
+        ) {
+            val observed = MomoConversationFilterEvidenceParser.fromProfile(tree)
+            if (sayHiSelectedGreeting === selected) {
+                sayHiSelectedGreeting = selected.copy(
+                    profileFilterEvidence = selected.profileFilterEvidence?.supplementedBy(observed) ?: observed
+                )
+            }
+        }
         if (readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED) {
             val resolved = sessionComponents.contactIdentityManager.resolveSnapshot(
                 snapshotId = "sayhi-${System.currentTimeMillis()}-${selected.rowKey.take(12)}",
@@ -6414,6 +6525,8 @@ internal class MomoSocialAdapter(
         clearSayHiSelectedGreeting()
         resetSayHiRowTapTransaction()
         sayHiRestoredReturnConfirmation.reset()
+        sayHiTraversalState.resetFilterSkips()
+        sayHiFilterSettingsUnavailableLogged = false
 
         sayHiGestureInFlight = false
         sayHiDeferredSafeEvidenceOnlyWait = false
