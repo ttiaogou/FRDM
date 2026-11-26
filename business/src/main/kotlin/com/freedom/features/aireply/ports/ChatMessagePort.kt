@@ -9,6 +9,9 @@ import com.freedom.features.aireply.domain.message.ChatMessageBatch
 interface ChatMessagePort {
     fun readRecentMessages(page: ChatPageSnapshot, limit: Int = 10): ChatMessageBatch
 
+    /** Retire adapter-local OCR recognition evidence at a read/task boundary; no I/O or UI action. */
+    fun invalidateOcrRecognitionReuse() {}
+
     /**
      * Reads message structure only. Implementations must not capture the screen or start OCR.
      * This is the pre-identity/context stage of the AI reply pipeline.

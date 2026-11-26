@@ -26,6 +26,7 @@ class ChatMessageReadCoordinatorTest {
         val oldCallback = requireNotNull(port.pendingCallback)
         assertTrue(old())
         coordinator.invalidatePending()
+        assertEquals(1, port.ocrReuseInvalidations)
         assertFalse(old())
         assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {},
             sendConfirmation = true) { _, _ -> })
@@ -36,6 +37,7 @@ class ChatMessageReadCoordinatorTest {
         scheduler.runNext(0L)
         assertTrue(replacement())
         scheduler.runNext(ChatMessageReadCoordinator.DEFAULT_CALLBACK_TIMEOUT_MS)
+        assertEquals(2, port.ocrReuseInvalidations)
         assertFalse(replacement())
         assertFalse(old())
     }
@@ -420,6 +422,11 @@ class ChatMessageReadCoordinatorTest {
     )
 
     private class TestMessagePort : ChatMessagePort {
+        var ocrReuseInvalidations = 0
+        override fun invalidateOcrRecognitionReuse() {
+            ocrReuseInvalidations++
+        }
+
         var sendProofReads = 0
         var workerAdmission: (() -> Boolean)? = null
         var confirmedBaselineObservationId: String? = null

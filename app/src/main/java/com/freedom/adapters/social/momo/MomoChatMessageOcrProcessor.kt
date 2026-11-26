@@ -77,8 +77,9 @@ internal class MomoChatMessageOcrProcessor(
         val outgoingTarget: ChatMessageOcrTarget? = null
     )
 
-    private data class PreviousVerifiedBatch(
+    private data class PreviousRecognitionBatch(
         val capturedAtMillis: Long,
+        val windowSessionKey: String,
         val observationId: String,
         val windowSnapshotSignature: String,
         val entries: Map<CropReuseKey, CropRecognition>
@@ -86,7 +87,37 @@ internal class MomoChatMessageOcrProcessor(
 
     // One previous fully completed batch, bounded by MAX_TARGETS_PER_BATCH. Recognition
     // evidence only: no new conversation identity, node handles, or send receipts.
-    @Volatile private var previousVerifiedBatch: PreviousVerifiedBatch? = null
+    // Taking or invalidating the slot retires every earlier publication token.
+    internal class RecognitionReuseSlot<T> {
+        internal data class Read<T>(val generation: Long, val previous: T?)
+        private var generation = 0L
+        private var previous: T? = null
+        private var closed = false
+
+        @Synchronized fun begin(): Read<T> {
+            val read = Read(++generation, previous)
+            previous = null
+            return read
+        }
+
+        @Synchronized fun publish(read: Read<T>, value: T): Boolean {
+            if (closed || generation != read.generation) return false
+            previous = value
+            return true
+        }
+
+        @Synchronized fun invalidate() {
+            generation++
+            previous = null
+        }
+
+        @Synchronized fun close() {
+            closed = true
+            invalidate()
+        }
+    }
+
+    private val recognitionReuse = RecognitionReuseSlot<PreviousRecognitionBatch>()
 
     private val executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "Freedom-Momo-Local-OCR").apply { isDaemon = true }
@@ -140,16 +171,17 @@ internal class MomoChatMessageOcrProcessor(
         }
 
         lastEngineFailureReason = null
-        val prior = previousVerifiedBatch
-        previousVerifiedBatch = null
+        val reuseRead = recognitionReuse.begin()
+        val prior = reuseRead.previous?.takeIf {
+            reuseVerifiedIncoming && canReusePreviousRecognitionBatch(
+                batch, it.windowSessionKey, it.capturedAtMillis
+            )
+        }
         val allowOutgoingReuse = canReuseConfirmedOutgoingBaseline(
             confirmedBaselineObservationId, prior?.observationId,
             batch.windowSnapshotSignature, prior?.windowSnapshotSignature
         )
-        val reuseCandidates = prior?.takeIf {
-            reuseVerifiedIncoming &&
-                batch.capturedAtMillis - it.capturedAtMillis in 0L..OCR_BATCH_TIMEOUT_MS
-        }?.entries.orEmpty().filterKeys { it.outgoingTarget == null || allowOutgoingReuse }
+        val reuseCandidates = prior?.entries.orEmpty().filterKeys { it.outgoingTarget == null || allowOutgoingReuse }
         if (confirmedBaselineObservationId != null) {
             onLog("OCR_NEXT_SEGMENT_BASELINE_REUSE eligible=$allowOutgoingReuse;cachedRows=${reuseCandidates.size}")
         }
@@ -194,7 +226,7 @@ internal class MomoChatMessageOcrProcessor(
                     .onFailure { failure -> onLog("OCR_CAPTURE_SAMPLE_SAVE_FAILED：${failure.javaClass.simpleName}") }
                     .getOrNull()
                 val completionDelivered = java.util.concurrent.atomic.AtomicBoolean(false)
-                val currentVerified = LinkedHashMap<CropReuseKey, CropRecognition>()
+                val currentRecognition = LinkedHashMap<CropReuseKey, CropRecognition>()
                 val timeoutHandler = Handler(Looper.getMainLooper())
                 lateinit var timeoutRunnable: Runnable
                 val captureDescription = when (frame.scope) {
@@ -207,13 +239,17 @@ internal class MomoChatMessageOcrProcessor(
                         // Only the winning, complete recognition callback can publish reuse
                         // evidence. A timed-out worker must never seed a later batch.
                         val validResult = if (isCurrent()) result else invalidatedResult("BEFORE_DELIVERY")
+                        val session = batch.windowSessionKey
                         if (!validResult.invalidated && validResult.failureReason == null &&
-                            validResult.failedTargetCount == 0 && validResult.attemptedTargetCount == targets.size
+                            validResult.failedTargetCount == 0 &&
+                            validResult.attemptedTargetCount == targets.size &&
+                            session != null && canRetainRecognitionBatch(batch) &&
+                            currentRecognition.isNotEmpty()
                         ) {
-                            previousVerifiedBatch = PreviousVerifiedBatch(
-                                batch.capturedAtMillis, batch.effectiveObservationBatchId,
-                                batch.windowSnapshotSignature, currentVerified.toMap()
-                            )
+                            recognitionReuse.publish(reuseRead, PreviousRecognitionBatch(
+                                batch.capturedAtMillis, session, batch.effectiveObservationBatchId,
+                                batch.windowSnapshotSignature, currentRecognition.toMap()
+                            ))
                         }
                         try {
                             // Keep the monitor hidden while the consumer synchronously merges and
@@ -288,7 +324,7 @@ internal class MomoChatMessageOcrProcessor(
                                 failed = 0,
                                 batch = batch,
                                 reuseCandidates = reuseCandidates,
-                                currentVerified = currentVerified,
+                                currentRecognition = currentRecognition,
                                 isCompleted = { completionDelivered.get() },
                                 isRequestCurrent = isCurrent,
                                 onComplete = deliver
@@ -346,7 +382,7 @@ internal class MomoChatMessageOcrProcessor(
         failed: Int,
         batch: ChatMessageBatch,
         reuseCandidates: Map<CropReuseKey, CropRecognition>,
-        currentVerified: LinkedHashMap<CropReuseKey, CropRecognition>,
+        currentRecognition: LinkedHashMap<CropReuseKey, CropRecognition>,
         isCompleted: () -> Boolean,
         isRequestCurrent: () -> Boolean,
         onComplete: (MomoChatOcrResult) -> Unit
@@ -408,7 +444,7 @@ internal class MomoChatMessageOcrProcessor(
                 latinRecognized, qualityByRowIndex, tokensByRowIndex, textProjectionsByRowIndex,
                 confidenceByRowIndex, lineCountByRowIndex,
                 captureDescription, sampleScreenshotPath, reviewBatchId, cropPaths, failed + 1,
-                batch, reuseCandidates, currentVerified, isCompleted, isRequestCurrent, onComplete
+                batch, reuseCandidates, currentRecognition, isCompleted, isRequestCurrent, onComplete
             )
             return
         }
@@ -481,7 +517,7 @@ internal class MomoChatMessageOcrProcessor(
                 reuseKey, finalText, recognition.lineCount, recognition.tokens, recognition.textProjection
             ) && !isCompleted() && !closed
         ) {
-            currentVerified[reuseKey] = recognition
+            currentRecognition[reuseKey] = recognition
         }
         if (finalText.isNotBlank()) {
             recognized[target.rowIndex] = finalText
@@ -515,7 +551,7 @@ internal class MomoChatMessageOcrProcessor(
             failed = failed + if (finalText.isBlank()) 1 else 0,
             batch = batch,
             reuseCandidates = reuseCandidates,
-            currentVerified = currentVerified,
+            currentRecognition = currentRecognition,
             isCompleted = isCompleted,
             isRequestCurrent = isRequestCurrent,
             onComplete = onComplete
@@ -695,9 +731,13 @@ internal class MomoChatMessageOcrProcessor(
         .trim()
         .take(MAX_RECOGNIZED_TEXT_LENGTH)
 
+    fun invalidateRecognitionReuse() {
+        recognitionReuse.invalidate()
+    }
+
     override fun close() {
         closed = true
-        previousVerifiedBatch = null
+        recognitionReuse.close()
         // 这是进程级共享管理器：关闭当前 Momo 采集器只撤销日志订阅并安排空闲释放，
         // 不立即解绑启动预检刚建立、其他采集批次仍可复用的 Binder 连接。
         ocrDiagnosticSubscription.close()
@@ -706,6 +746,22 @@ internal class MomoChatMessageOcrProcessor(
     }
 
     companion object {
+        internal fun canRetainRecognitionBatch(batch: ChatMessageBatch): Boolean {
+            val session = batch.windowSessionKey
+            return !batch.truncated && batch.coordinateSpaceReliable &&
+                !session.isNullOrBlank() && !session.endsWith("conversation=unknown") &&
+                batch.ocrTargets.size in 1..MAX_TARGETS_PER_BATCH
+        }
+
+        internal fun canReusePreviousRecognitionBatch(
+            batch: ChatMessageBatch,
+            previousWindowSessionKey: String,
+            previousCapturedAtMillis: Long
+        ): Boolean = canRetainRecognitionBatch(batch) &&
+            batch.windowSessionKey == previousWindowSessionKey &&
+            batch.capturedAtMillis >= previousCapturedAtMillis &&
+            batch.capturedAtMillis - previousCapturedAtMillis in 0L..OCR_BATCH_TIMEOUT_MS
+
         /**
          * Cache recognition evidence, never message admission. Only incoming single-line
          * visual placeholders with independently proved text extend the original verified path.

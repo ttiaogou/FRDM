@@ -26,6 +26,51 @@ class MomoOcrP4PipelineRegressionTest {
             listOf(target), mapOf(target.rowIndex to text), listBounds, ChatMessageParser(), 10
         ).single()
 
+    @Test fun recognitionReuseSlotRetiresPreviousBatchAndLatePublications() {
+        val slot = MomoChatMessageOcrProcessor.RecognitionReuseSlot<String>()
+        val first = slot.begin()
+        assertNull(first.previous)
+        assertTrue(slot.publish(first, "first"))
+        val second = slot.begin()
+        assertEquals("first", second.previous)
+        assertFalse(slot.publish(first, "stale-first"))
+        // A failed/timed-out batch never publishes, and its consumed predecessor stays retired.
+        val third = slot.begin()
+        assertNull(third.previous)
+        assertFalse(slot.publish(second, "late-second"))
+        assertTrue(slot.publish(third, "third"))
+        slot.invalidate()
+        assertFalse(slot.publish(third, "late-third"))
+        val fourth = slot.begin()
+        assertNull(fourth.previous)
+        slot.close()
+        assertFalse(slot.publish(fourth, "after-close"))
+        val afterClose = slot.begin()
+        assertNull(afterClose.previous)
+        assertFalse(slot.publish(afterClose, "closed"))
+    }
+
+    @Test fun previousRecognitionBatchRequiresCurrentCompleteSameWindowAndBoundedAge() {
+        val session = "momo|1|13|conversation=42"
+        val batch = ChatMessageBatch(MessageReadStatus.SUCCESS, session, emptyList(), 1, 1, false,
+            61_000L, ocrTargets = listOf(target()))
+        fun eligible(current: ChatMessageBatch, previousSession: String = session, previousAt: Long = 1_000L) =
+            MomoChatMessageOcrProcessor.canReusePreviousRecognitionBatch(current, previousSession, previousAt)
+        assertTrue(eligible(batch))
+        assertFalse(eligible(batch.copy(capturedAtMillis = 61_001L)))
+        assertFalse(eligible(batch.copy(capturedAtMillis = 999L)))
+        assertFalse(eligible(batch, previousSession = "momo|1|14|conversation=42"))
+        assertFalse(eligible(batch, previousSession = "momo|1|13|conversation=99"))
+        assertFalse(eligible(batch.copy(windowSessionKey = null)))
+        assertFalse(eligible(batch.copy(windowSessionKey = "momo|1|13|conversation=unknown"),
+            previousSession = "momo|1|13|conversation=unknown"))
+        assertFalse(eligible(batch.copy(truncated = true)))
+        assertFalse(eligible(batch.copy(coordinateSpaceReliable = false)))
+        assertFalse(eligible(batch.copy(ocrTargets = emptyList())))
+        assertFalse(eligible(batch.copy(ocrTargets = List(21) { target(it) })))
+        assertTrue(MomoChatMessageOcrProcessor.canRetainRecognitionBatch(batch))
+    }
+
     @Test fun sendProofReuseRequiresExactIncomingCropWindowAndStructure() {
         val incoming = target().copy(
             explicitDirectionHint = ChatMessageDirection.INCOMING,

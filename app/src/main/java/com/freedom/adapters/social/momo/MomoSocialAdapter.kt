@@ -7204,6 +7204,13 @@ internal class MomoSocialAdapter(
         } ?: ChatRegionSnapshot(false, 0, 0, 0, 0, false)
     }
 
+    override fun invalidateOcrRecognitionReuse() {
+        // Do not initialize the lazy OCR processor just to retire recognition evidence.
+        if (messageComponents.ocrProcessorDelegate.isInitialized()) {
+            messageComponents.ocrProcessor.invalidateRecognitionReuse()
+        }
+    }
+
     override fun readRecentMessages(page: ChatPageSnapshot, limit: Int): ChatMessageBatch =
         messageComponents.reader.readRecentMessages(page, limit)
 
@@ -7318,6 +7325,7 @@ internal class MomoSocialAdapter(
             val structuralBatch = try {
                 messageComponents.reader.readRecentMessages(page, limit)
             } catch (_: Exception) {
+                invalidateOcrRecognitionReuse()
                 deliver(
                     ChatMessageBatch(
                         status = com.freedom.features.aireply.domain.message.MessageReadStatus.READ_FAILED,
@@ -7336,6 +7344,7 @@ internal class MomoSocialAdapter(
             val formalBodyRows = (structuralBatch.messages.map { it.bounds } + structuralBatch.ocrTargets.map { it.rowBounds }).distinct().size
             onLog("AI 正文容器读取：扫描行=${structuralBatch.scannedRowCount}；正式正文行=$formalBodyRows；正文OCR=${structuralBatch.ocrTargets.size}；仅采集正式文本容器，不分类卡片")
             if (structuralBatch.ocrTargets.isEmpty()) {
+                invalidateOcrRecognitionReuse()
                 deliver(structuralBatch)
                 return@acquireObservationVisibility
             }

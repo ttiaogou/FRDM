@@ -158,6 +158,7 @@ internal class ChatMessageReadCoordinator(
             requestGeneration += 1L
             closeRead()
             pendingSnapshot = null
+            messagePort.invalidateOcrRecognitionReuse()
             timedOut(timeoutMs)
         }
         timeoutTask = scheduledTimeout
@@ -208,6 +209,7 @@ internal class ChatMessageReadCoordinator(
                 timeoutTaskRef.get()?.cancel()
                 closeRead()
                 pendingSnapshot = null
+                messagePort.invalidateOcrRecognitionReuse()
                 failed()
             }
         } finally {
@@ -220,6 +222,7 @@ internal class ChatMessageReadCoordinator(
         requestGeneration += 1L
         closeRead()
         pendingSnapshot = null
+        messagePort.invalidateOcrRecognitionReuse()
     }
 
     private fun completeRequest(
