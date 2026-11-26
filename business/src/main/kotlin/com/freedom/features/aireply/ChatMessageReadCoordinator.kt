@@ -90,6 +90,7 @@ internal class ChatMessageReadCoordinator(
         onTimeout: (Long) -> Unit,
         onFailure: () -> Unit,
         sendConfirmation: Boolean = false,
+        confirmedBaselineObservationId: String? = null,
         onResult: (ChatMessageBatch, Boolean) -> Unit
     ): Boolean {
         if (!isReadRequestAllowed() || requestInFlight) return false
@@ -97,8 +98,9 @@ internal class ChatMessageReadCoordinator(
         ocrInFlight = true
         startRead(
             read = { isCurrent, callback ->
-                if (sendConfirmation) messagePort.readRecentMessagesForSendConfirmationAsync(snapshot, limit, isCurrent, callback)
-                else messagePort.readRecentMessagesAsync(snapshot, limit, isCurrent, callback)
+                if (sendConfirmation) messagePort.readRecentMessagesForSendConfirmationAsync(
+                    snapshot, limit, isCurrent, confirmedBaselineObservationId, callback
+                ) else messagePort.readRecentMessagesAsync(snapshot, limit, isCurrent, callback)
             },
             forceScheduledDelivery = forceScheduledDelivery,
             timedOut = onTimeout,

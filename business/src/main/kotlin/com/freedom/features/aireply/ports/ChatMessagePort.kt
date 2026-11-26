@@ -40,6 +40,19 @@ interface ChatMessagePort {
     ) = readRecentMessagesForSendConfirmationAsync(page, limit, onResult)
 
     /**
+     * Only preparation of a later segment may reuse outgoing recognition from the exact
+     * confirmed observation. A null ID means independent outgoing recognition for send proof.
+     * Adapters without reuse support retain the existing full OCR behavior.
+     */
+    fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        confirmedBaselineObservationId: String?,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesForSendConfirmationAsync(page, limit, isRequestCurrent, onResult)
+
+    /**
      * Async extension for adapters that need a screenshot or an on-device recognizer. The default
      * keeps existing providers synchronous and source-compatible. Implementations must return
      * message text only through the in-memory result callback; never log or persist it.

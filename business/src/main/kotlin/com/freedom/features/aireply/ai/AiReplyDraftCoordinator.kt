@@ -290,6 +290,7 @@ class AiReplyDraftCoordinator(
         val segmentIndex: Int,
         val requestGeneration: Long,
         val confirmedObservationAtMillis: Long,
+        val confirmedObservationBatchId: String,
         val previousTarget: ChatDraftInputTarget
     )
 
@@ -387,6 +388,13 @@ class AiReplyDraftCoordinator(
     /** A submitted send requires fresh read-only confirmation; draft generation alone does not. */
     val isSendConfirmationPending: Boolean get() = synchronized(lock) {
         pendingSendConfirmation != null || pendingNextMessageSegment != null
+    }
+    /** Only a durably confirmed preceding segment may authorize cached outgoing baseline evidence. */
+    val nextSegmentConfirmedObservationId: String? get() = synchronized(lock) {
+        pendingNextMessageSegment?.takeIf {
+            pendingSendConfirmation == null && isCurrentGeneration(it.requestGeneration) &&
+                activeRequestId == it.requestId
+        }?.confirmedObservationBatchId
     }
     val isConversationReturnBlocked: Boolean get() = synchronized(lock) {
         pending.get() || awaitingUserSend.get() ||
@@ -1126,12 +1134,18 @@ class AiReplyDraftCoordinator(
         // was in flight; only messages appearing after this baseline can prove this send.
         if (synchronized(lock) { activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS }) {
             captureGreetingPreSendOutgoingKeys(target)?.let { keys ->
-                synchronized(lock) { activeExistingOutgoingKeys = keys.toSet() }
+                synchronized(lock) {
+                    activeExistingOutgoingKeys = if (segmentIndex == 0) keys.toSet()
+                        else activeExistingOutgoingKeys + keys
+                }
                 onLog("收到招呼发送前快照[BASELINE_CAPTURED]：己方消息=${keys.size}；发送前重新建立差分基线")
             }
         } else if (synchronized(lock) { activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES }) {
             capturePrivatePreSendOutgoingKeys(target)?.let { keys ->
-                synchronized(lock) { activeExistingOutgoingKeys = keys.toSet() }
+                synchronized(lock) {
+                    activeExistingOutgoingKeys = if (segmentIndex == 0) keys.toSet()
+                        else activeExistingOutgoingKeys + keys
+                }
                 onLog("私聊发送前快照[BASELINE_CAPTURED]：己方消息=${keys.size}；发送前重新建立差分基线")
             }
         }
@@ -1788,7 +1802,7 @@ class AiReplyDraftCoordinator(
                     if (nextIndex < activeMessageSegments.size) {
                         pendingNextMessageSegment = PendingNextMessageSegment(
                             pending.requestId, nextIndex, pending.requestGeneration,
-                            batch.capturedAtMillis, pending.target
+                            batch.capturedAtMillis, batch.effectiveObservationBatchId, pending.target
                         )
                     }
                 }
@@ -1897,6 +1911,11 @@ class AiReplyDraftCoordinator(
             if (pendingNextMessageSegment != next || pendingSendConfirmation != null ||
                 activeRequestId != next.requestId || !isCurrentGeneration(next.requestGeneration)) false
             else {
+                // Preserve all previously confirmed outgoing keys, including the just-confirmed
+                // segment, and augment them with the fresh pre-next-segment observation.
+                activeExistingOutgoingKeys = activeExistingOutgoingKeys + batch.messages
+                    .filter { it.direction == ChatMessageDirection.OUTGOING }
+                    .map { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
                 pendingNextMessageSegment = null
                 pending.set(true)
                 true

@@ -95,6 +95,8 @@ class AiReplyObservationRuntime(
     private val isConversationDraftPending: () -> Boolean = { false },
     /** Read-only proof that an already submitted send still needs confirmation. */
     private val isSendConfirmationPending: () -> Boolean = { false },
+    /** Existing draft coordinator owns the confirmed segment and its exact observation ID. */
+    private val nextSegmentConfirmedObservationId: () -> String? = { null },
     /** Releases only a greeting chat hold after a user-returned list; durable proof remains. */
     private val deferGreetingSendForManualReturn: () -> Boolean = { false },
     /** Releases only a private-chat send hold after a user-returned inbox; durable proof remains. */
@@ -4451,6 +4453,7 @@ class AiReplyObservationRuntime(
      * same-conversation and same-task check before giving it to the unchanged send matcher.
      */
     private fun requestPendingSendConfirmationOcr(snapshot: ChatPageSnapshot) {
+        val confirmedBaselineId = nextSegmentConfirmedObservationId()
         val visit = draftVisitToken
         val runGeneration = currentRunGeneration()
         val greetingBinding = greetingChatBinding.takeIf { receivedGreetingsTaskActive }
@@ -4459,6 +4462,7 @@ class AiReplyObservationRuntime(
             limit = 10,
             forceScheduledDelivery = true,
             sendConfirmation = true,
+            confirmedBaselineObservationId = confirmedBaselineId,
             onTimeout = { scheduleDeferredSendProofRecheck("OCR_CALLBACK_TIMEOUT") },
             onFailure = {
                 onLog("AI 发送确认[OCR_REQUEST_FAILED]：只读采集无法启动；保留待核验发送")
@@ -4469,6 +4473,12 @@ class AiReplyObservationRuntime(
                 visit != draftVisitToken || (sessionRunStarted && runGeneration != currentRunGeneration())
             ) {
                 onLog("AI 发送确认[OCR_STALE_IGNORED]：原发送事务或运行代次已变化")
+                return@sendOcr
+            }
+            // Baseline reuse may never become proof of a newly submitted message.
+            if (confirmedBaselineId != null && nextSegmentConfirmedObservationId() != confirmedBaselineId) {
+                onLog("AI 消息段基线[STALE_IGNORED]：原已确认段已变化；禁止将复用结果用于发送确认")
+                scheduleDeferredSendProofRecheck("SEGMENT_BASELINE_CHANGED")
                 return@sendOcr
             }
             val fresh = runCatching { readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY) }.getOrNull()
@@ -4491,7 +4501,19 @@ class AiReplyObservationRuntime(
             }
             if (deferBusyOcrResult(ocrBatch)) return@sendOcr
             deferredSendProofRetryAttempt = 0
-            onLog("AI 发送确认[OCR_REVALIDATED]：新鲜聊天页面与任务租约已验证；核对己方消息")
+            // The full validated OCR batch, not the preceding geometry-only read, is the
+            // immediate diff baseline. Never publish a failed or empty OCR as a new baseline.
+            if (ocrBatch.status == MessageReadStatus.SUCCESS &&
+                ocrBatch.ocrFailedTargetCount == 0 && !ocrBatch.truncated
+            ) {
+                if (receivedGreetingsTaskActive) latestGreetingMessageBatch = ocrBatch
+                else latestPrivateMessageBatch = ocrBatch
+            }
+            if (confirmedBaselineId == null) {
+                onLog("AI 发送确认[OCR_REVALIDATED]：新鲜聊天页面与任务租约已验证；核对己方消息")
+            } else {
+                onLog("AI 消息段基线[REVALIDATED]：新鲜聊天与任务租约已验证；仅准备下一段，不确认新发送")
+            }
             handleSendConfirmationResult(onSendTransaction(ocrBatch, snapshot), ocrBatch, snapshot)
         }
     }
@@ -4612,13 +4634,13 @@ class AiReplyObservationRuntime(
                 onLog("GREETING_CHAT_BATCH_REJECTED reason=${reason ?: "MESSAGE_WINDOW_MISMATCH"}")
                 return
             }
-            latestGreetingMessageBatch = batch
+            if (batch.ocrAttempted || batch.ocrTargets.isEmpty()) latestGreetingMessageBatch = batch
         } else if (sessionRunStarted && !receivedGreetingsTaskActive &&
             snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             currentSessionWindowKey == windowSessionKey(snapshot) &&
             currentSessionCandidate != null
         ) {
-            latestPrivateMessageBatch = batch
+            if (batch.ocrAttempted || batch.ocrTargets.isEmpty()) latestPrivateMessageBatch = batch
         }
         if (receivedGreetingsTaskActive && confirmedGreetingSend != null) {
             completeConfirmedGreetingSend(batch, snapshot)

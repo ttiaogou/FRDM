@@ -766,6 +766,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
             isSendConfirmationPending = { aiReplyDraftCoordinator.isSendConfirmationPending },
+            nextSegmentConfirmedObservationId = { aiReplyDraftCoordinator.nextSegmentConfirmedObservationId },
             deferGreetingSendForManualReturn = {
                 aiReplyDraftCoordinator.deferUnconfirmedSendForManualReturn()
             },

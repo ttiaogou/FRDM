@@ -59,6 +59,25 @@ class ChatMessageReadCoordinatorTest {
     }
 
     @Test
+    fun confirmedBaselineObservationIsForwardedOnlyForExplicitSegmentPreparation() {
+        val scheduler = FakeScheduler()
+        val page = snapshot("send-proof")
+        val port = TestMessagePort()
+        val coordinator = coordinator(scheduler, port, inspect = { page })
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {},
+            sendConfirmation = true, confirmedBaselineObservationId = "confirmed-batch") { _, _ -> })
+        assertEquals("confirmed-batch", port.confirmedBaselineObservationId)
+        requireNotNull(port.pendingCallback)(batch())
+        scheduler.runNext(0L)
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {},
+            sendConfirmation = true) { _, _ -> })
+        assertEquals(null, port.confirmedBaselineObservationId)
+        requireNotNull(port.pendingCallback)(batch())
+        scheduler.runNext(0L)
+        assertFalse(coordinator.isInFlight)
+    }
+
+    @Test
     fun structuralContinuationOwnsOcrUntilSchedulerDeliveryWithoutReplayingPendingSnapshots() {
         val page = snapshot("same-chat")
         val scheduler = FakeScheduler()
@@ -403,6 +422,15 @@ class ChatMessageReadCoordinatorTest {
     private class TestMessagePort : ChatMessagePort {
         var sendProofReads = 0
         var workerAdmission: (() -> Boolean)? = null
+        var confirmedBaselineObservationId: String? = null
+
+        override fun readRecentMessagesForSendConfirmationAsync(
+            page: ChatPageSnapshot, limit: Int, isRequestCurrent: () -> Boolean,
+            confirmedBaselineObservationId: String?, onResult: (ChatMessageBatch) -> Unit
+        ) {
+            this.confirmedBaselineObservationId = confirmedBaselineObservationId
+            readRecentMessagesForSendConfirmationAsync(page, limit, isRequestCurrent, onResult)
+        }
 
         override fun readRecentMessagesAsync(
             page: ChatPageSnapshot, limit: Int, isRequestCurrent: () -> Boolean,

@@ -53,6 +53,49 @@ class MomoOcrP4PipelineRegressionTest {
             batch.copy(windowSessionKey = "momo|1|13|conversation=unknown"), incoming, png))
     }
 
+    @Test fun outgoingBaselineReuseRequiresConfirmedBatchAndExactPixelsAndStructure() {
+        val outgoing = target().copy(
+            explicitDirectionHint = ChatMessageDirection.OUTGOING,
+            identityDirectionHint = ChatMessageDirection.OUTGOING,
+            structureSignature = "verified-row",
+            neighborSignature = "previous-row"
+        )
+        val batch = ChatMessageBatch(
+            MessageReadStatus.SUCCESS, "momo|1|13|conversation=42",
+            emptyList(), 1, 1, false, 1L,
+            windowSnapshotSignature = "structure-one"
+        )
+        val png = byteArrayOf(1, 2, 3)
+        val key = MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(batch, outgoing, png)
+        assertNotNull(key)
+        assertEquals(key, MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(batch, outgoing, png.copyOf()))
+        assertNotEquals(key, MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(batch, outgoing, byteArrayOf(1, 2, 4)))
+        assertNotEquals(key, MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(
+            batch, outgoing.copy(neighborSignature = "changed-neighbor"), png))
+        assertNotEquals(key, MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(
+            batch, outgoing.copy(bodyBounds = ScreenRect(140, 216, 450, 301)), png))
+        assertNotEquals(key, MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(
+            batch.copy(windowSessionKey = "momo|1|14|conversation=42"), outgoing, png))
+        assertNull(MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, outgoing, png))
+        assertNull(MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(
+            batch.copy(truncated = true), outgoing, png))
+        assertNull(MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(
+            batch.copy(windowSnapshotSignature = ""), outgoing, png))
+        assertNull(MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(
+            batch, outgoing.copy(identityDirectionHint = null), png))
+        assertTrue(MomoChatMessageOcrProcessor.canReuseConfirmedOutgoingBaseline(
+            "confirmed", "confirmed", "structure-one", "structure-one"))
+        // Actual send proof always has a null authorization, even with identical pixels.
+        assertFalse(MomoChatMessageOcrProcessor.canReuseConfirmedOutgoingBaseline(
+            null, "confirmed", "structure-one", "structure-one"))
+        assertFalse(MomoChatMessageOcrProcessor.canReuseConfirmedOutgoingBaseline(
+            "confirmed", "another-batch", "structure-one", "structure-one"))
+        assertFalse(MomoChatMessageOcrProcessor.canReuseConfirmedOutgoingBaseline(
+            "confirmed", "confirmed", "structure-two", "structure-one"))
+        assertFalse(MomoChatMessageOcrProcessor.canReuseConfirmedOutgoingBaseline(
+            "confirmed", "confirmed", "", ""))
+    }
+
     @Test fun pureTextKeepsOriginalContentTypeDirectionAndCompleteProjection() {
         val result = MomoOcrVisualSymbolGuard.reconcileWithTokens(
             listOf(line("今晚有空吗")), emptyList()

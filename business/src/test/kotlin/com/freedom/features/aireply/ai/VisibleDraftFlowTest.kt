@@ -1242,7 +1242,9 @@ class VisibleDraftFlowTest {
             "第一", ScreenRect(0, 10, 100, 30),
             DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
         val afterFirst = f.batch.copy(messages = listOf(first), capturedAtMillis = 2L)
+        assertNull(f.coordinator.nextSegmentConfirmedObservationId)
         val partial = f.coordinator.confirmSendTransaction(afterFirst, f.snapshot)
+        assertEquals(afterFirst.effectiveObservationBatchId, f.coordinator.nextSegmentConfirmedObservationId)
         assertEquals(SendConfirmationResult.WAITING, partial.status)
         assertNull(partial.finalSendConfirmationId)
         assertTrue(f.coordinator.isConversationReturnBlocked)
@@ -1256,6 +1258,7 @@ class VisibleDraftFlowTest {
         assertEquals(listOf("第一"), sentTexts)
         val fresh = afterFirst.copy(capturedAtMillis = 3L)
         val advancing = f.coordinator.confirmSendTransaction(fresh, f.snapshot)
+        assertNull(f.coordinator.nextSegmentConfirmedObservationId)
         assertEquals(SendConfirmationResult.WAITING, advancing.status)
         assertNull(advancing.finalSendConfirmationId)
         f.drain()
@@ -1263,6 +1266,7 @@ class VisibleDraftFlowTest {
         val second = first.copy(id = "second-message", content = "第二")
         val finalBatch = f.batch.copy(messages = listOf(first, second), capturedAtMillis = 4L)
         val completed = f.coordinator.confirmSendTransaction(finalBatch, f.snapshot)
+        assertNull(f.coordinator.nextSegmentConfirmedObservationId)
         assertEquals(SendConfirmationResult.CONFIRMED, completed.status)
         assertFalse(completed.finalSendConfirmationId.isNullOrBlank())
         assertEquals(listOf(ReplySegmentTaskStatus.SENT, ReplySegmentTaskStatus.SENT),

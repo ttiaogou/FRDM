@@ -7019,7 +7019,7 @@ internal class MomoSocialAdapter(
         limit: Int,
         isRequestCurrent: () -> Boolean,
         onResult: (ChatMessageBatch) -> Unit
-    ) = readRecentMessagesWithOcr(page, limit, false, isRequestCurrent, onResult)
+    ) = readRecentMessagesWithOcr(page, limit, false, isRequestCurrent, null, onResult)
 
     override fun readRecentMessagesForSendConfirmationAsync(
         page: ChatPageSnapshot,
@@ -7032,13 +7032,22 @@ internal class MomoSocialAdapter(
         limit: Int,
         isRequestCurrent: () -> Boolean,
         onResult: (ChatMessageBatch) -> Unit
-    ) = readRecentMessagesWithOcr(page, limit, true, isRequestCurrent, onResult)
+    ) = readRecentMessagesForSendConfirmationAsync(page, limit, isRequestCurrent, null, onResult)
+
+    override fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        confirmedBaselineObservationId: String?,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesWithOcr(page, limit, true, isRequestCurrent, confirmedBaselineObservationId, onResult)
 
     private fun readRecentMessagesWithOcr(
         page: ChatPageSnapshot,
         limit: Int,
         reuseVerifiedIncoming: Boolean,
         isRequestCurrent: () -> Boolean,
+        confirmedBaselineObservationId: String?,
         onResult: (ChatMessageBatch) -> Unit
     ) {
         val expectedWindow = page.messageListTarget?.window
@@ -7115,6 +7124,7 @@ internal class MomoSocialAdapter(
                     expectedPackage = page.packageName,
                     expectedActivity = page.activityClass,
                     reuseVerifiedIncoming = reuseVerifiedIncoming,
+                    confirmedBaselineObservationId = confirmedBaselineObservationId,
                     isRequestCurrent = isCurrent
                 ) { ocrResult ->
                     if (ocrResult.invalidated || !isCurrent()) {
