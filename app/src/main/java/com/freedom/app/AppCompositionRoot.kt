@@ -46,6 +46,7 @@ import com.freedom.application.ports.OcrReviewRepository
 import com.freedom.application.ports.RunDiagnosticsPort
 import com.freedom.application.ports.SessionSampleArchivePort
 import com.freedom.application.ports.TaskLaunchParametersRepository
+import com.freedom.application.ports.ImagePoolResourcePort
 import com.freedom.application.runtime.RunSessionCommandUseCase
 import com.freedom.application.runtime.RunGenerationClock
 import com.freedom.application.runtime.RunSessionCoordinator
@@ -75,6 +76,7 @@ import com.freedom.data.RunDiagnosticsManager
 import com.freedom.data.SharedPreferencesAiModelCloudConsent
 import com.freedom.data.SharedPreferencesGestureSettingsRepository
 import com.freedom.data.TaskLaunchParametersStore
+import com.freedom.data.ImagePoolMediaStore
 import com.freedom.data.ContactMessageLedgerDataStore
 import com.freedom.data.ai.EncryptedAiModelConfigurationRepository
 import com.freedom.data.ai.AiReplyPersonalizationStore
@@ -147,6 +149,9 @@ class AppCompositionRoot(context: Context) {
     }
     val taskLaunchParametersRepository: TaskLaunchParametersRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TaskLaunchParametersStore(appContext)
+    }
+    val imagePoolResourcePort: ImagePoolResourcePort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ImagePoolMediaStore(appContext)
     }
     val contactMessageLedgerRepository: ContactMessageLedgerRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         ContactMessageLedgerDataStore(appContext)
@@ -234,6 +239,7 @@ class AppCompositionRoot(context: Context) {
     fun createActivityDependencies(activity: Activity): ActivityDependencies = ActivityDependencies(
         monitorRepository = monitorRepository,
         taskLaunchParametersRepository = taskLaunchParametersRepository,
+        imagePoolResourcePort = imagePoolResourcePort,
         aiModelCloudConsent = aiModelCloudConsent,
         aiModelConfigurationRepository = aiModelConfigurationRepository,
         aiReplyPersonalizationRepository = aiReplyPersonalizationRepository,
@@ -269,6 +275,7 @@ class AppCompositionRoot(context: Context) {
 class ActivityDependencies internal constructor(
     val monitorRepository: MonitorControlRepository,
     val taskLaunchParametersRepository: TaskLaunchParametersRepository,
+    val imagePoolResourcePort: ImagePoolResourcePort,
     val aiModelCloudConsent: AiModelCloudConsentSettings,
     val aiModelConfigurationRepository: AiModelConfigurationRepository,
     val aiReplyPersonalizationRepository: AiReplyPersonalizationRepository,

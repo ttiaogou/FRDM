@@ -8,6 +8,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import com.freedom.application.ports.ImagePoolImportResult
+import com.freedom.application.ports.ImagePoolResourcePort
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -15,11 +17,6 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /** Results describe only media durably published to the public Freedom album. */
-internal data class ImagePoolImportResult(
-    val publishedUris: List<String>,
-    val failedCount: Int,
-    val unsupportedSystem: Boolean = false
-)
 
 /**
  * Android-only media adapter. Never touches AccessibilityService or chat controls.
@@ -28,12 +25,12 @@ internal data class ImagePoolImportResult(
  * The source SAF grant is requested persistently where supported. The published MediaStore
  * item is owned by this app and remains usable without the source document provider.
  */
-internal class ImagePoolMediaStore(context: Context) {
+internal class ImagePoolMediaStore(context: Context) : ImagePoolResourcePort {
     private val resolver = context.applicationContext.contentResolver
     private val cacheDir = context.applicationContext.cacheDir
 
-    fun importImages(sources: List<Uri>): ImagePoolImportResult {
-        val unique = sources.distinct()
+    override fun importImages(sourceUris: List<String>): ImagePoolImportResult {
+        val unique = sourceUris.map(Uri::parse).distinct()
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             // Public shared-album writes on API 26-28 require a separate runtime storage grant.
             // Never silently count a source URI as an exported picture.
@@ -142,7 +139,7 @@ internal class ImagePoolMediaStore(context: Context) {
      * Only delete verified FRDM-managed album items. Legacy source document URIs are detached
      * from the pool without deleting the user's original files.
      */
-    fun removeFromPool(uris: List<String>): List<String> {
+    override fun removeFromPool(uris: List<String>): List<String> {
         val failed = ArrayList<String>()
         uris.forEach { value ->
             val uri = runCatching { Uri.parse(value) }.getOrNull()

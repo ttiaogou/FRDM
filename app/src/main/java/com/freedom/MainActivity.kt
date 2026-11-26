@@ -48,7 +48,6 @@ import com.freedom.ui.logs.LogTextFormatter
 import com.freedom.ui.logs.SessionSampleArchive
 import com.freedom.ui.logs.SessionSampleArchiveManager
 import com.freedom.ui.theme.FreedomUi
-import com.freedom.data.ImagePoolMediaStore
 import com.freedom.ocr.OcrPluginInstaller
 import com.freedom.ocr.OcrPluginInstallAction
 import com.freedom.ocr.OcrPluginHost
@@ -63,6 +62,7 @@ class MainActivity : Activity() {
     }
     private val monitorRepository get() = dependencies.monitorRepository
     private val taskLaunchParametersStore get() = dependencies.taskLaunchParametersRepository
+    private val imagePoolResources get() = dependencies.imagePoolResourcePort
     private val aiModelCloudConsent get() = dependencies.aiModelCloudConsent
     private val aiModelConfigurationRepository get() = dependencies.aiModelConfigurationRepository
     private val aiReplyPersonalizationRepository get() = dependencies.aiReplyPersonalizationRepository
@@ -1350,7 +1350,7 @@ class MainActivity : Activity() {
         imagePoolOperationRunning = true
         Toast.makeText(this, "正在清理图片池", Toast.LENGTH_SHORT).show()
         Thread({
-            val failed = ImagePoolMediaStore(applicationContext).removeFromPool(originalUris)
+            val failed = imagePoolResources.removeFromPool(originalUris)
             runOnUiThread {
                 val original = originalUris.toSet()
                 val remaining = failed.toSet()
@@ -2359,7 +2359,7 @@ class MainActivity : Activity() {
                         imagePoolOperationRunning = true
                         Toast.makeText(this, "正在导入图片到 Freedom 专用相册", Toast.LENGTH_SHORT).show()
                         Thread({
-                            val result = ImagePoolMediaStore(applicationContext).importImages(selectedUris)
+                            val result = imagePoolResources.importImages(selectedUris.map(Uri::toString))
                             runOnUiThread {
                                 val current = taskLaunchParametersStore.read()
                                 val updated = current.withImportedImageResourceUris(result.publishedUris)
