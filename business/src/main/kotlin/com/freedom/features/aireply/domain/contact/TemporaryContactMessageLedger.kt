@@ -131,17 +131,33 @@ internal class ContactMessageLedger(
         )
     }
 
-    /** Remove a contact only after the application-level intercept switch is verified ON. */
+    /** Record an image only after positive, contact-bound external send confirmation. */
+    @Synchronized
+    fun confirmImageSent(contactIdentityKey: String?): Boolean {
+        val key = hashContactKey(contactIdentityKey) ?: return false
+        val state = contacts[key] ?: return false
+        if (state.imageStatus != ContactImageSendStatus.PENDING_SEND ||
+            state.pendingRecoveryAction != ContactPendingRecoveryAction.SEND_IMAGE) return false
+        state.imageStatus = ContactImageSendStatus.SENT_CONFIRMED
+        state.pendingRecoveryAction = if (state.interceptionStatus == ContactInterceptionStatus.PENDING_ENABLE) {
+            ContactPendingRecoveryAction.ENABLE_INTERCEPTION
+        } else {
+            ContactPendingRecoveryAction.NONE
+        }
+        persist(key, state)
+        return true
+    }
+
+    /** Retain the contact record and require due images to be confirmed before interception. */
     @Synchronized
     fun confirmInterceptionEnabled(contactIdentityKey: String?): Boolean {
         val key = hashContactKey(contactIdentityKey) ?: return false
         val state = contacts[key] ?: return false
-        if (!state.interceptionThresholdReached || state.interceptionStatus == ContactInterceptionStatus.ENABLED) return false
+        if (state.interceptionStatus != ContactInterceptionStatus.PENDING_ENABLE ||
+            state.imageStatus == ContactImageSendStatus.PENDING_SEND ||
+            state.pendingRecoveryAction != ContactPendingRecoveryAction.ENABLE_INTERCEPTION) return false
         state.interceptionStatus = ContactInterceptionStatus.ENABLED
-        state.pendingRecoveryAction = when {
-            state.imageStatus == ContactImageSendStatus.PENDING_SEND -> ContactPendingRecoveryAction.SEND_IMAGE
-            else -> ContactPendingRecoveryAction.NONE
-        }
+        state.pendingRecoveryAction = ContactPendingRecoveryAction.NONE
         persist(key, state)
         return true
     }

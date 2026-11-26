@@ -20,6 +20,15 @@ data class TaskLaunchParameters(
     /** Persistable document URIs selected by the user for the future image-send transaction. */
     val imageResourceUris: List<String> = emptyList()
 ) {
+    /** Validate the image setting without requiring a pool when the feature is disabled. */
+    fun imageSendThresholdValidationError(threshold: Int): String? = when {
+        threshold < 0 -> "请输入大于或等于 0 的数字"
+        threshold > 0 && imageResourceUris.none { it.isNotBlank() } -> "请先导入至少一张图片"
+        threshold > 0 && messageInterceptionThreshold > 0 &&
+            threshold > messageInterceptionThreshold -> "图片发送阈值大于消息拦截阈值；拦截会先阻断后续回复"
+        else -> null
+    }
+
     fun conversationFilterSettings(): ConversationFilterSettings = ConversationFilterSettings(
         maxLastActiveMinutes = maxLastActiveMinutes,
         maxDistanceKm = maxDistanceKm,

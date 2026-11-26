@@ -456,13 +456,13 @@ internal class PersonalizationScreen(
                     input.error = "请输入大于或等于 0 的数字"
                     return@setOnClickListener
                 }
-                if (parsed > 0 && parameters.messageInterceptionThreshold > 0 &&
-                    parsed > parameters.messageInterceptionThreshold
-                ) {
-                    input.error = "图片发送阈值大于消息拦截阈值；拦截会先阻断后续回复"
+                val latest = taskParameters()
+                val validationError = latest.imageSendThresholdValidationError(parsed)
+                if (validationError != null) {
+                    input.error = validationError
                     return@setOnClickListener
                 }
-                parameters = parameters.copy(imageSendThreshold = parsed)
+                parameters = latest.copy(imageSendThreshold = parsed)
                 onTaskParametersChanged(parameters)
                 imageSendThresholdValue?.apply {
                     text = parsed.toString()

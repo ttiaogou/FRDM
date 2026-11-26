@@ -102,4 +102,36 @@ class ContactMessageLedgerTest {
         assertEquals(1, restored.successfulSendCount("Contact A"))
         assertEquals(ContactPendingRecoveryAction.NONE, restored.pendingRecoveryAction("Contact A"))
     }
+    @Test
+    fun equalThresholdRequiresConfirmedImageBeforeInterceptionAcrossRestart() {
+        val repository = InMemoryContactMessageLedgerRepository()
+        val ledger = ContactMessageLedger(repository)
+        ledger.recordSuccessfulSend("Contact A", "event-1", 2, 2)
+        val due = ledger.recordSuccessfulSend("Contact A", "event-2", 2, 2)
+        assertTrue(due.thresholdReachedNow)
+        assertTrue(due.imageThresholdReachedNow)
+        assertEquals(ContactPendingRecoveryAction.SEND_IMAGE, ledger.pendingRecoveryAction("Contact A"))
+        assertFalse(ledger.confirmInterceptionEnabled("Contact A"))
+        assertFalse(ledger.confirmImageSent("Contact B"))
+
+        val restored = ContactMessageLedger(repository)
+        assertTrue(restored.confirmImageSent("Contact A"))
+        assertFalse(restored.confirmImageSent("Contact A"))
+        assertEquals(2, restored.successfulSendCount("Contact A"))
+        assertEquals(ContactPendingRecoveryAction.ENABLE_INTERCEPTION, restored.pendingRecoveryAction("Contact A"))
+
+        val afterImage = ContactMessageLedger(repository)
+        assertTrue(afterImage.confirmInterceptionEnabled("Contact A"))
+        assertEquals(ContactPendingRecoveryAction.NONE, afterImage.pendingRecoveryAction("Contact A"))
+        assertEquals(2, afterImage.successfulSendCount("Contact A"))
+    }
+
+    @Test
+    fun zeroImageThresholdDoesNotCreateAnImageConfirmation() {
+        val ledger = ContactMessageLedger()
+        ledger.recordSuccessfulSend("Contact A", "event-1", 1, 0)
+        assertFalse(ledger.confirmImageSent("Contact A"))
+        assertEquals(ContactPendingRecoveryAction.ENABLE_INTERCEPTION, ledger.pendingRecoveryAction("Contact A"))
+        assertTrue(ledger.confirmInterceptionEnabled("Contact A"))
+    }
 }
