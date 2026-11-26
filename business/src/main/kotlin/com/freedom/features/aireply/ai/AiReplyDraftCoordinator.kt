@@ -3,7 +3,14 @@ package com.freedom.features.aireply.ai
 import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
+import com.freedom.features.aireply.domain.message.ChatMessageType
+import com.freedom.features.aireply.domain.message.DirectionEvidence
 import com.freedom.features.aireply.domain.message.MessageContentQuality
+import com.freedom.features.aireply.domain.message.MessageReadStatus
+import com.freedom.features.aireply.domain.message.OcrContentKind
+import com.freedom.features.aireply.domain.message.OcrTokenStatus
+import com.freedom.features.aireply.domain.message.OcrTokenSource
+import com.freedom.features.aireply.domain.message.OcrTextProjectionStatus
 import com.freedom.features.aireply.ports.ChatDraftInputPort
 import com.freedom.features.aireply.ports.ChatDraftSendPort
 import com.freedom.features.aireply.ports.ChatDraftInputResult
@@ -722,7 +729,9 @@ class AiReplyDraftCoordinator(
                 if (batch.messages.any {
                         it.direction == ChatMessageDirection.OUTGOING &&
                             it.contentQuality == MessageContentQuality.VERIFIED &&
-                            fingerprint(it.content.orEmpty()) == pendingRecord.segmentContentHash
+                            (fingerprint(it.content.orEmpty()) == pendingRecord.segmentContentHash ||
+                                matchesWrappedSendText(batch, it, pendingRecord.segmentContent,
+                                    pendingRecord.segmentContentHash))
                     }
                 ) return@mapNotNull null
                 sorted
@@ -1208,11 +1217,13 @@ class AiReplyDraftCoordinator(
     private fun sendMessageSegment(target: ChatDraftInputTarget, message: String, segmentIndex: Int, requestGeneration: Long) {
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || !hasActiveTaskOwner()) return
         if (synchronized(lock) { pendingSendConfirmation != null }) return
+        var capturedOutgoingBaseline = false
         // For received greetings, refresh the outgoing baseline immediately before the
         // local gesture. The model-request observation may be stale while the remote call
         // was in flight; only messages appearing after this baseline can prove this send.
         if (synchronized(lock) { activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS }) {
             captureGreetingPreSendOutgoingKeys(target)?.let { keys ->
+                capturedOutgoingBaseline = true
                 synchronized(lock) {
                     activeExistingOutgoingKeys = if (segmentIndex == 0) keys.toSet()
                         else activeExistingOutgoingKeys + keys
@@ -1221,6 +1232,7 @@ class AiReplyDraftCoordinator(
             }
         } else if (synchronized(lock) { activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES }) {
             capturePrivatePreSendOutgoingKeys(target)?.let { keys ->
+                capturedOutgoingBaseline = true
                 synchronized(lock) {
                     activeExistingOutgoingKeys = if (segmentIndex == 0) keys.toSet()
                         else activeExistingOutgoingKeys + keys
@@ -1247,7 +1259,9 @@ class AiReplyDraftCoordinator(
                     sendAttemptStartedAt = nowMillis(),
                     sendWindowSessionKey = target.windowSessionKey,
                     sendChatTitleHash = fingerprint(normalizeTitle(target.expectedChatTitle)),
-                    preSendOutgoingKeyHashes = synchronized(lock) { activeExistingOutgoingKeys.mapTo(LinkedHashSet()) { fingerprint(it) } },
+                    preSendOutgoingKeyHashes = synchronized(lock) {
+                        durableOutgoingBaselineHashes(activeExistingOutgoingKeys, capturedOutgoingBaseline)
+                    },
                     sendRequestKey = requestKey
                 )
                 requestId.isNotBlank() && requestKey.isNotBlank() &&
@@ -1914,15 +1928,15 @@ class AiReplyDraftCoordinator(
             message.direction == ChatMessageDirection.OUTGOING &&
                 messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys &&
                 fingerprint(messageKey(message.stableLogicalMessageId, message.effectiveContentRevision)) !in pending.previousOutgoingKeyHashes
-                && (liveDiffTransaction || (
-                    message.contentQuality == MessageContentQuality.VERIFIED &&
-                    fingerprint(message.content.orEmpty()) == pending.segmentContentHash
-                ))
+                && (liveDiffTransaction || matchesStrictSendEvidence(batch, message, pending))
         }
         // A reconstructed transaction needs a single, stable bubble on two fresh reads;
         // a matching string on one OCR pass is never sufficient proof.
         val matched = if (pending.recoveredFromLedger) eligibleMatches.singleOrNull() else eligibleMatches.firstOrNull()
         if (matched != null) {
+            if (!liveDiffTransaction && fingerprint(matched.content.orEmpty()) != pending.segmentContentHash) {
+                onLog("AI 发送结果核验[OCR_LINE_WRAP_MATCHED]：同一完整己方消息行；原正文Hash一致；继续原发送核验门禁")
+            }
             if (pending.recoveredFromLedger) {
                 val matchKey = messageKey(matched.stableLogicalMessageId, matched.effectiveContentRevision)
                 val prior = synchronized(lock) { readOnlyRecoveredMatch }
@@ -2325,6 +2339,95 @@ class AiReplyDraftCoordinator(
     private fun fingerprint(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(StandardCharsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
+
+    // Keep the existing content/version hashes and add domain-separated logical-row hashes
+    // in the same durable evidence set. Older records lack the marker and cannot use wrap
+    // fallback: their baseline cannot exclude an old row whose OCR line breaks changed.
+    private fun logicalBaselineMarker(): String = fingerprint("SEND_BASELINE_LOGICAL_V1")
+
+    private fun logicalBaselineHash(logicalId: String): String =
+        fingerprint("SEND_BASELINE_LOGICAL_V1|$logicalId")
+
+    private fun durableOutgoingBaselineHashes(keys: Set<String>, capturedBaseline: Boolean): Set<String> =
+        keys.mapTo(LinkedHashSet()) { fingerprint(it) }.apply {
+            if (capturedBaseline && keys.all { it.lastIndexOf('|') > 0 && it.substringAfterLast('|').isNotBlank() }) {
+                add(logicalBaselineMarker())
+                keys.forEach { add(logicalBaselineHash(it.substringBeforeLast('|'))) }
+            }
+        }
+
+    private fun matchesStrictSendEvidence(
+        batch: ChatMessageBatch, message: ChatMessage, pending: PendingSendConfirmation
+    ): Boolean {
+        if (message.contentQuality != MessageContentQuality.VERIFIED) return false
+        val hasLogicalBaseline = logicalBaselineMarker() in pending.previousOutgoingKeyHashes
+        if (pending.recoveredFromLedger && hasLogicalBaseline &&
+            logicalBaselineHash(message.stableLogicalMessageId) in pending.previousOutgoingKeyHashes
+        ) return false
+        // Preserve the original exact-content path, including legacy journal records.
+        if (fingerprint(message.content.orEmpty()) == pending.segmentContentHash) return true
+        // Only a new, complete tail row may use the more conservative wrap proof.
+        if (batch.completeTailRowBounds != message.bounds ||
+            batch.messagesBottomToTop.firstOrNull() != message ||
+            (pending.recoveredFromLedger && !hasLogicalBaseline) ||
+            pending.existingOutgoingKeys.any { it.substringBeforeLast('|') == message.stableLogicalMessageId }
+        ) return false
+        return matchesWrappedSendText(batch, message, pending.draft, pending.segmentContentHash)
+    }
+
+    /**
+     * Send-only equality for a single-line draft displayed in several OCR line boxes.
+     * This cannot distinguish a real line break from a visual one in the source app.
+     * Consequently it requires exact original characters, full verified row evidence,
+     * and the surrounding send transaction's independent new-row/identity/time gates.
+     * No normalized text is stored or used as a message identity.
+     */
+    internal fun matchesWrappedSendText(
+        batch: ChatMessageBatch, message: ChatMessage, expected: String, expectedHash: String
+    ): Boolean {
+        val raw = message.content ?: return false
+        if (expected.isBlank() || expected.any { it == '\n' || it == '\r' || it == '\u2028' || it == '\u2029' } ||
+            fingerprint(expected) != expectedHash ||
+            message.direction != ChatMessageDirection.OUTGOING || message.type != ChatMessageType.TEXT ||
+            message.directionEvidence == DirectionEvidence.AMBIGUOUS ||
+            message.contentQuality != MessageContentQuality.VERIFIED ||
+            batch.status != MessageReadStatus.SUCCESS || !batch.coordinateSpaceReliable || batch.truncated ||
+            batch.windowSessionKey.isNullOrBlank() || batch.ocrAdmissionDeferred || !batch.ocrAttempted ||
+            batch.ocrFailedTargetCount != 0 || batch.ocrAttemptedTargetCount != batch.ocrTargets.size
+        ) return false
+        val row = message.observationRowIndex ?: return false
+        if (batch.messages.count { it.observationRowIndex == row } != 1 || message !in batch.messages) return false
+        val target = batch.ocrTargets.singleOrNull { it.rowIndex == row } ?: return false
+        val list = batch.coordinateListBounds ?: return false
+        if (!target.isMessageTextTarget || target.rowBounds != message.bounds ||
+            target.explicitDirectionHint != ChatMessageDirection.OUTGOING ||
+            target.identityDirectionHint != ChatMessageDirection.OUTGOING ||
+            message.bounds.isEmpty || list.isEmpty ||
+            message.bounds.left < list.left || message.bounds.top < list.top ||
+            message.bounds.right > list.right || message.bounds.bottom > list.bottom ||
+            batch.ocrSampleTextByRowIndex[row] != raw
+        ) return false
+        val lines = batch.ocrTokensByRowIndex[row] ?: return false
+        if (lines.size < 2 || batch.ocrLineCountByRowIndex[row] != lines.size) return false
+        val projection = batch.ocrTextProjectionsByRowIndex[row] ?: return false
+        if (projection.status != OcrTextProjectionStatus.COMPLETE || projection.text != raw ||
+            projection.includedLineIndices != lines.indices.toList() || projection.excludedLineIndices.isNotEmpty()
+        ) return false
+        for ((index, token) in lines.withIndex()) {
+            val bounds = token.lineBounds ?: return false
+            if (token.lineIndex != index || token.kind != OcrContentKind.TEXT ||
+                token.status != OcrTokenStatus.RECOGNIZED || token.source != OcrTokenSource.OCR_LINE ||
+                token.symbolBounds != null || token.isolatedTextEvidence != null ||
+                token.text.isBlank() || token.text.any { it == '\n' || it == '\r' || it == '\u2028' || it == '\u2029' } ||
+                bounds.left < 0 || bounds.top < 0 || bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
+                (index > 0 && (lines[index - 1].lineBounds?.bottom ?: return false) > bounds.top)
+            ) return false
+        }
+        if (lines.joinToString("\n") { it.text } != raw) return false
+        // Remove only separators introduced between the independently observed line boxes.
+        val joined = lines.joinToString("") { it.text }
+        return joined == expected && fingerprint(joined) == expectedHash
+    }
 
     private fun messageKey(id: String, revision: String): String = "$id|$revision"
 

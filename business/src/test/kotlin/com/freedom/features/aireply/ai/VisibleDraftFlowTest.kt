@@ -30,6 +30,7 @@ class VisibleDraftFlowTest {
         val logs = mutableListOf<String>()
         val preSendFailures = mutableListOf<AiReplyPreSendModelFailure>()
         var completionObservationRequests = 0
+        var capturedPrivateOutgoingKeys: Set<String>? = null
         var configuredModelName = "test"
         var modelOutput = """{"action":"REPLY","reason":"OK","draft":"你好呀"}"""
         var calls = 0
@@ -106,7 +107,8 @@ class VisibleDraftFlowTest {
             replyTaskRepository = taskRepository,
             onPreSendModelFailure = { preSendFailures.add(it) },
             policyRegistry = policyRegistry,
-            onSendConfirmationObservationRequested = { completionObservationRequests++ })
+            onSendConfirmationObservationRequested = { completionObservationRequests++ },
+            capturePrivatePreSendOutgoingKeys = { capturedPrivateOutgoingKeys })
         fun drain() { while (tasks.isNotEmpty()) tasks.removeAt(0).invoke() }
         fun step() { assertTrue("Expected a scheduled task", tasks.isNotEmpty()); tasks.removeAt(0).invoke() }
     }
@@ -1163,6 +1165,183 @@ class VisibleDraftFlowTest {
         assertEquals(ReplyTaskStatus.SENT, tasks.records.values.single().status)
         assertEquals(1, submitted)
         assertEquals(1, f.calls)
+    }
+
+    private fun wrappedSendBatch(
+        f: Fixture, message: ChatMessage, at: Long, first: String = "你好", second: String = "呀"
+    ): ChatMessageBatch {
+        val row = requireNotNull(message.observationRowIndex)
+        val raw = "$first\n$second"
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED, first,
+                OcrTokenSource.OCR_LINE, 0, OcrContentRect(3, 5, 65, 25)),
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED, second,
+                OcrTokenSource.OCR_LINE, 1, OcrContentRect(3, 30, 35, 50))
+        )
+        return f.batch.copy(messages = listOf(message), capturedAtMillis = at,
+            coordinateListBounds = ScreenRect(0, 0, 300, 300),
+            completeTailRowBounds = message.bounds,
+            ocrTargets = listOf(ChatMessageOcrTarget(row, message.bounds, message.bounds, message.bounds, null,
+                explicitDirectionHint = ChatMessageDirection.OUTGOING,
+                identityDirectionHint = ChatMessageDirection.OUTGOING)),
+            ocrAttempted = true, ocrAttemptedTargetCount = 1, ocrRecognizedTargetCount = 1,
+            ocrSampleTextByRowIndex = mapOf(row to raw),
+            ocrLineCountByRowIndex = mapOf(row to 2),
+            ocrTokensByRowIndex = mapOf(row to tokens),
+            ocrTextProjectionsByRowIndex = mapOf(row to OcrTextProjection(raw,
+                OcrTextProjectionStatus.COMPLETE, listOf(0, 1), emptyList())))
+    }
+
+    @Test fun r03e2WrapEvidenceRequiresExactSingleLineDraftAndCompleteOrderedRow() {
+        val f = Fixture()
+        val message = ChatMessage("new-row", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "你好\n呀", ScreenRect(0, 40, 100, 100),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED, observationRowIndex = 3)
+        val batch = wrappedSendBatch(f, message, 101L)
+        val hash = ReplySegmentTaskFactory.create("request", "conversation", listOf("你好呀"), 1L).single().segmentContentHash
+        fun matches(current: ChatMessageBatch = batch, candidate: ChatMessage = message,
+                    expected: String = "你好呀", expectedHash: String = hash) =
+            f.coordinator.matchesWrappedSendText(current, candidate, expected, expectedHash)
+        assertTrue(matches())
+        assertFalse(matches(expected = "你好 呀"))
+        assertFalse(matches(expected = "你好呀！"))
+        assertFalse(matches(expected = "你好\n呀"))
+        assertFalse(matches(expectedHash = "wrong"))
+        assertFalse(matches(batch.copy(ocrAttempted = false)))
+        assertFalse(matches(batch.copy(ocrFailedTargetCount = 1)))
+        assertFalse(matches(batch.copy(truncated = true)))
+        assertFalse(matches(batch.copy(coordinateSpaceReliable = false)))
+        assertFalse(matches(batch.copy(ocrSampleTextByRowIndex = emptyMap())))
+        assertFalse(matches(batch.copy(ocrLineCountByRowIndex = mapOf(3 to 1))))
+        assertFalse(matches(batch.copy(ocrTextProjectionsByRowIndex = emptyMap())))
+        assertFalse(matches(batch.copy(ocrTargets = emptyList())))
+        val tokens = batch.ocrTokensByRowIndex.getValue(3)
+        assertFalse(matches(batch.copy(ocrTokensByRowIndex = mapOf(3 to tokens.reversed()))))
+        assertFalse(matches(batch.copy(ocrTokensByRowIndex = mapOf(3 to listOf(tokens[0],
+            tokens[1].copy(lineBounds = OcrContentRect(3, 10, 35, 30)))))))
+        assertFalse(matches(batch.copy(ocrTokensByRowIndex = mapOf(3 to listOf(tokens[0],
+            tokens[1].copy(status = OcrTokenStatus.AMBIGUOUS))))))
+        assertFalse(matches(batch.copy(messages = listOf(message, message.copy(id = "duplicate")))))
+        assertFalse(matches(batch.copy(ocrTargets = batch.ocrTargets.map {
+            it.copy(identityDirectionHint = ChatMessageDirection.INCOMING)
+        })))
+        val altered = message.copy(content = "你好\n 呀")
+        assertFalse(matches(wrappedSendBatch(f, altered, 101L, second = " 呀"), altered))
+        val punctuated = message.copy(content = "你好\n呀！")
+        assertFalse(matches(wrappedSendBatch(f, punctuated, 101L, second = "呀！"), punctuated))
+    }
+
+    @Test fun r03e2RecoveredWrapNeedsNewLogicalRowAndTwoFreshMatchingObservations() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        var submitted = 0
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                submitted++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        f.now = 100L
+        val old = ChatMessage("old-row", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "你好呀", ScreenRect(0, 0, 100, 8), DirectionEvidence.LAYOUT_ID_AND_HIERARCHY,
+            MessageContentQuality.VERIFIED)
+        f.capturedPrivateOutgoingKeys = setOf("${old.stableLogicalMessageId}|${old.effectiveContentRevision}")
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch.copy(messages = listOf(old) + f.batch.messages), f.snapshot))
+        f.drain()
+        assertTrue(f.coordinator.deferPrivateUnconfirmedSendForManualReturn())
+        val oldWrapped = old.copy(content = "你好\n呀", bounds = ScreenRect(0, 40, 100, 100), observationRowIndex = 3)
+        val oldObservation = wrappedSendBatch(f, oldWrapped, 101L)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(oldObservation, f.snapshot, 50L).status)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(oldObservation.copy(capturedAtMillis = 102L), f.snapshot, 50L).status)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.single().status)
+        val fresh = wrappedSendBatch(f, oldWrapped.copy(id = "new-row"), 103L)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(fresh, f.snapshot, 50L).status)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.single().status)
+        val confirmed = f.coordinator.confirmSendTransaction(fresh.copy(capturedAtMillis = 104L), f.snapshot, 50L)
+        assertEquals(SendConfirmationResult.CONFIRMED, confirmed.status)
+        assertTrue(confirmed.finalSendConfirmationId?.isNotBlank() == true)
+        assertEquals(ReplySegmentTaskStatus.SENT, segments.records.values.single().status)
+        assertEquals(1, submitted)
+        assertEquals(1, f.calls)
+    }
+
+    @Test fun r03e2LegacyJournalWithoutLogicalBaselineStillRequiresExactText() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        var submitted = 0
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                submitted++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        f.now = 100L
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertTrue(f.coordinator.deferPrivateUnconfirmedSendForManualReturn())
+        val record = segments.records.values.single()
+        segments.save(record.copy(preSendOutgoingKeyHashes = emptySet()))
+        val outgoing = ChatMessage("new-row", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "你好\n呀", ScreenRect(0, 40, 100, 100), DirectionEvidence.LAYOUT_ID_AND_HIERARCHY,
+            MessageContentQuality.VERIFIED, observationRowIndex = 3)
+        val wrapped = wrappedSendBatch(f, outgoing, 101L)
+        assertEquals(SendConfirmationResult.WAITING, f.coordinator.confirmSendTransaction(wrapped, f.snapshot, 50L).status)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(wrapped.copy(capturedAtMillis = 102L), f.snapshot, 50L).status)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.single().status)
+        val exact = wrapped.copy(messages = listOf(outgoing.copy(content = "你好呀")), capturedAtMillis = 103L)
+        assertEquals(SendConfirmationResult.WAITING, f.coordinator.confirmSendTransaction(exact, f.snapshot, 50L).status)
+        assertEquals(SendConfirmationResult.CONFIRMED,
+            f.coordinator.confirmSendTransaction(exact.copy(capturedAtMillis = 104L), f.snapshot, 50L).status)
+        assertEquals(1, submitted)
+    }
+
+    @Test fun r03e2WrappedExistingBubbleBlocksPendingComposerRestore() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val first = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String) =
+                ChatDraftInputResult(ChatDraftInputStatus.SEND_CONTROL_NOT_FOUND, "SEND_CONTROL_NOT_READY")
+        }, segments, tasks)
+        assertTrue(first.coordinator.generateVisibleDraft(first.batch, first.snapshot))
+        repeat(8) { if (segments.records.values.none { it.status == ReplySegmentTaskStatus.PENDING_SEND }) first.step() }
+        assertEquals(ReplySegmentTaskStatus.PENDING_SEND, segments.records.values.single().status)
+        first.coordinator.resetForRuntimeReset()
+        var replayed = 0
+        val restored = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                replayed++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        restored.text = "你好呀"
+        val old = ChatMessage("existing-wrapped", ChatMessageDirection.OUTGOING, ChatMessageType.TEXT,
+            "你好\n呀", ScreenRect(0, 0, 100, 60), DirectionEvidence.LAYOUT_ID_AND_HIERARCHY,
+            MessageContentQuality.VERIFIED, observationRowIndex = 0)
+        val incoming = restored.batch.messages.single().copy(bounds = ScreenRect(0, 80, 100, 110))
+        // Include valid current-window evidence for the latest incoming as well, so
+        // draft admission cannot reject the test before it reaches the restore guard.
+        val incomingToken = OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED, "你好",
+            OcrTokenSource.OCR_LINE, 0, OcrContentRect(3, 5, 65, 25))
+        val wrapped = wrappedSendBatch(restored, old, 101L)
+        val before = wrapped.copy(
+            messages = listOf(old, incoming.copy(observationRowIndex = 1)),
+            completeTailRowBounds = incoming.bounds,
+            ocrTokensByRowIndex = wrapped.ocrTokensByRowIndex + (1 to listOf(incomingToken)),
+            ocrTextProjectionsByRowIndex = wrapped.ocrTextProjectionsByRowIndex +
+                (1 to OcrTextProjection("你好", OcrTextProjectionStatus.COMPLETE, listOf(0), emptyList())))
+        val key = requireNotNull(restored.coordinator.privateVisibleReplyRequestKey(before, restored.snapshot))
+        assertTrue(tasks.records.containsKey(key))
+        assertFalse(restored.coordinator.generateVisibleDraft(before, restored.snapshot, recoveredPrivateRequestKey = key))
+        assertTrue(restored.logs.any { it.contains("PRIVATE_PENDING_RESTORE_QUEUE_NOT_VERIFIED") })
+        assertFalse(restored.coordinator.isSendControlRecoveryPending)
+        assertEquals(ReplySegmentTaskStatus.PENDING_SEND, segments.records.values.single().status)
+        assertEquals(0, replayed)
+        assertEquals(0, restored.calls)
+        assertTrue(restored.inputWriteTargets.isEmpty())
     }
 
     @Test fun r04cObservedJournalRequiresExactLinkedRequestEvenWithSameTitleAndTime() {
