@@ -66,7 +66,9 @@ internal class MomoChatMessageOcrProcessor(
 
     internal data class CropReuseKey(
         val windowSessionKey: String,
-        val rowIndex: Int,
+        // Incoming reuse is recognition-only; visible row identity is rebuilt from the fresh batch.
+        // Outgoing baselines still require the exact row and full target geometry.
+        val rowIndex: Int?,
         val structureSignature: String,
         val timeHint: String?,
         val digest: String,
@@ -739,8 +741,9 @@ internal class MomoChatMessageOcrProcessor(
             ) return null
             val digest = java.security.MessageDigest.getInstance("SHA-256").digest(cropPng)
                 .joinToString("") { "%02x".format(it.toInt() and 0xff) }
-            return CropReuseKey(session, target.rowIndex, signature, target.timeHint, digest,
-                outgoingTarget = target.takeIf { direction == ChatMessageDirection.OUTGOING })
+            val outgoingTarget = target.takeIf { direction == ChatMessageDirection.OUTGOING }
+            return CropReuseKey(session, outgoingTarget?.rowIndex, signature, target.timeHint, digest,
+                outgoingTarget = outgoingTarget)
         }
 
         private val PROCESS_BATCH_ADMISSION = OcrBatchAdmissionGate()

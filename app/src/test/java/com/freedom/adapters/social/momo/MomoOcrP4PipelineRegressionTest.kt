@@ -53,6 +53,44 @@ class MomoOcrP4PipelineRegressionTest {
             batch.copy(windowSessionKey = "momo|1|13|conversation=unknown"), incoming, png))
     }
 
+    @Test fun incomingCropReuseAcrossVisibleRowsKeepsCurrentMessageIdentity() {
+        val original = target(4).copy(
+            explicitDirectionHint = ChatMessageDirection.INCOMING,
+            identityDirectionHint = ChatMessageDirection.INCOMING,
+            structureSignature = "verified-row",
+            timeHint = "same-time"
+        )
+        val moved = original.copy(
+            rowIndex = 3,
+            rowBounds = ScreenRect(0, 40, 720, 175),
+            bodyBounds = ScreenRect(140, 55, 450, 140),
+            bubbleBounds = ScreenRect(125, 42, 470, 158),
+            avatarBounds = ScreenRect(12, 45, 85, 120)
+        )
+        val another = original.copy(rowIndex = 5)
+        val batch = ChatMessageBatch(MessageReadStatus.SUCCESS, "momo|1|13|conversation=42",
+            emptyList(), 1, 1, false, 1L)
+        val png = byteArrayOf(1, 2, 3)
+        val key = MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, original, png)
+        assertNotNull(key)
+        assertEquals(key, MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, moved, png))
+        assertEquals(key, MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, another, png))
+        assertNotEquals(key, MomoChatMessageOcrProcessor.incomingCropReuseKey(batch,
+            moved.copy(timeHint = "changed-time"), png))
+        assertNull(MomoChatMessageOcrProcessor.incomingCropReuseKey(
+            batch.copy(coordinateSpaceReliable = false), moved, png))
+
+        // One recognition value can populate two current rows, never an old message object.
+        val messages = MomoChatOcrCandidateMapper.parse(
+            listOf(moved, another), mapOf(moved.rowIndex to "你好", another.rowIndex to "你好"),
+            listBounds, ChatMessageParser(), 10
+        )
+        assertEquals(2, messages.size)
+        assertEquals(listOf(3, 5), messages.map { it.observationRowIndex })
+        assertEquals(listOf(moved.rowBounds, another.rowBounds), messages.map { it.bounds })
+        assertNotEquals(messages[0].stableLogicalMessageId, messages[1].stableLogicalMessageId)
+    }
+
     @Test fun outgoingBaselineReuseRequiresConfirmedBatchAndExactPixelsAndStructure() {
         val outgoing = target().copy(
             explicitDirectionHint = ChatMessageDirection.OUTGOING,
@@ -69,6 +107,8 @@ class MomoOcrP4PipelineRegressionTest {
         val key = MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(batch, outgoing, png)
         assertNotNull(key)
         assertEquals(key, MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(batch, outgoing, png.copyOf()))
+        assertNotEquals(key, MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(
+            batch, outgoing.copy(rowIndex = outgoing.rowIndex + 1), png))
         assertNotEquals(key, MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(batch, outgoing, byteArrayOf(1, 2, 4)))
         assertNotEquals(key, MomoChatMessageOcrProcessor.outgoingBaselineCropReuseKey(
             batch, outgoing.copy(neighborSignature = "changed-neighbor"), png))
