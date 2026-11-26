@@ -3680,7 +3680,16 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, port.navigateBackCalls)
         assertFalse(logs.drop(beforeUnknown).any { it.contains("PAUSED_CHECKPOINT_SAVED") ||
             it.contains("AI 发送恢复[RECOVERY_VERIFIED]") })
+        // FakeScheduler orders relative delays, not absolute deadlines. A periodic
+        // shorter observation can starve a queued 1000ms task in this fixture.
+        // Advance the already asserted proof-only timer explicitly, then drain
+        // its fresh page/OCR callbacks without injecting a new observation.
+        val readsBeforeThirdProof = port.ocrAsyncReadRequests
+        scheduler.runNextWithDelay(1_000L)
         runUntilShortestDelay(scheduler, 80) { receiptReturned }
+        assertTrue(port.ocrAsyncReadRequests > readsBeforeThirdProof)
+        assertFalse(logs.drop(beforeUnknown).any { it.contains("PAUSED_CHECKPOINT_SAVED") ||
+            it.contains("AI 发送恢复[RECOVERY_VERIFIED]") })
         assertEquals(3, confirmationCalls)
         assertEquals(1, draftCalls)
         assertTrue(requireNotNull(saved).unfinishedSessions.isEmpty())
