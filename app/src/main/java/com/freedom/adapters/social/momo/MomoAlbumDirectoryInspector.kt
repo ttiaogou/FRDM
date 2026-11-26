@@ -16,6 +16,12 @@ internal data class MomoFreedomDirectoryTarget(
 
 /** Read-only structural evidence for the separate album directory window. */
 internal object MomoAlbumDirectoryInspector {
+    /** The new root can arrive before the unified window-change event advances its generation. */
+    fun isNewDirectoryWindow(album: WindowRef, directory: WindowRef, targetPackage: String): Boolean =
+        album.packageName == targetPackage && directory.packageName == targetPackage &&
+            album.windowId >= 0 && directory.windowId >= 0 &&
+            directory.windowId != album.windowId && directory.generation > album.generation
+
     fun isConfirmed(snapshot: AccessibilityTreeSnapshot, targetPackage: String): Boolean {
         if (snapshot.truncated || snapshot.timeBudgetExceeded ||
             snapshot.window.packageName != targetPackage || snapshot.window.windowId < 0 ||

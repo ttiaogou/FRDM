@@ -5489,9 +5489,7 @@ internal class MomoSocialAdapter(
     }
 
     private fun isAlbumDirectoryArrival(albumWindow: WindowRef, snapshot: AccessibilityTreeSnapshot): Boolean =
-        albumWindow.packageName == targetPackage && albumWindow.windowId >= 0 &&
-            snapshot.window.windowId != albumWindow.windowId &&
-            snapshot.window.generation >= albumWindow.generation
+        MomoAlbumDirectoryInspector.isNewDirectoryWindow(albumWindow, snapshot.window, targetPackage)
 
     /** M02.5: unique directory name, with the name's own safe bounds. */
     internal fun inspectFreedomDirectory(albumWindow: WindowRef): MomoFreedomDirectoryTarget? {
@@ -5655,7 +5653,10 @@ internal class MomoSocialAdapter(
             if (submission != GestureSubmission.ACCEPTED) {
                 activeAlbumSelectorPermit.compareAndSet(permit, null)
             }
-            onLog("MEDIA_ALBUM_ACTION action=$action;submission=$submission;windowId=${window.windowId}")
+            onLog("MEDIA_ALBUM_ACTION action=$action;submission=$submission;windowId=${window.windowId}" +
+                if (action == "freedom-name")
+                    ";generation=${window.generation};bounds=$bounds;display=${executionContext.coordinateContext.widthPixels}x${executionContext.coordinateContext.heightPixels}"
+                else "")
             submission
         } ?: GestureSubmission.DEFERRED_NOT_READY
     }
@@ -5750,6 +5751,7 @@ internal class MomoSocialAdapter(
         @Volatile var stageStartedAt = SystemClock.uptimeMillis()
         @Volatile var attempt: MomoImageSendAttempt? = null
         var albumWindow: WindowRef? = null
+        var directoryRejectedRetries = 0
         var lastWaitReason: String? = null
     }
 
@@ -5905,6 +5907,19 @@ internal class MomoSocialAdapter(
                 test.stageStartedAt = previousStartedAt
                 testWait(test, "FRESH_ADMISSION_REQUIRED")
             }
+            GestureSubmission.REJECTED -> {
+                // Directory navigation is not a send/toggle. A rejected submission may be
+                // retried once, only after the observer reacquires the current directory.
+                if (previous == ImageTestStage.WAIT_DIRECTORY &&
+                    test.directoryRejectedRetries == 0 && testCurrent(test)
+                ) {
+                    test.directoryRejectedRetries++
+                    test.inFlight = false
+                    test.stage = previous
+                    test.stageStartedAt = previousStartedAt
+                    testWait(test, "DIRECTORY_TAP_REJECTED_REACQUIRE")
+                } else testTerminal(test, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
+            }
             else -> testTerminal(test, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
         }
     }
@@ -6033,7 +6048,8 @@ internal class MomoSocialAdapter(
                     testWait(test, "FREEDOM_NAME_NOT_FOUND_IN_CURRENT_CHILD_WINDOW")
                     return
                 }
-                onLog("MEDIA_IMAGE_TEST DIRECTORY_NAME_FOUND windowId=${directory.window.windowId};activityRequired=false;name=Freedom")
+                onLog("MEDIA_IMAGE_TEST DIRECTORY_NAME_FOUND windowId=${directory.window.windowId};" +
+                    "generation=${directory.window.generation};bounds=${directory.nameBounds};activityRequired=false;name=Freedom")
                 submitImageTestStep(test, ImageTestStage.WAIT_FREEDOM) { callback ->
                     openFreedomAlbum(test.target, window, test.id, owns, callback)
                 }

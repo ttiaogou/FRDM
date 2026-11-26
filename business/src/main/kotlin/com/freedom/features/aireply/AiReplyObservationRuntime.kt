@@ -4670,6 +4670,12 @@ class AiReplyObservationRuntime(
             waitForEntry("FIRST_CONTROL_OR_CHAT_WINDOW_UNAVAILABLE")
             return
         }
+        // Reuse the existing startup protection; do not enqueue a first tap that the
+        // gesture coordinator must defer while the foreground quiet period is still running.
+        if (runCatching(foregroundQuietRemainingMs).getOrDefault(Long.MAX_VALUE) > 0L) {
+            waitForEntry("FOREGROUND_STARTUP_PROTECTION")
+            return
+        }
         val generation = currentRunGeneration()
         if (!ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
             !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "独立子任务测试：当前聊天首个目标控件已确认")

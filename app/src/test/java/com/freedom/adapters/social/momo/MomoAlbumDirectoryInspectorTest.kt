@@ -26,6 +26,16 @@ class MomoAlbumDirectoryInspectorTest {
     )
 
     @Test
+    fun waitsForUnifiedWindowGenerationWithoutRequiringChildActivity() {
+        val album = WindowRef(target, "AlbumActivity", 2, 6)
+        val earlyRoot = WindowRef(target, "", 3, 6)
+        assertFalse(MomoAlbumDirectoryInspector.isNewDirectoryWindow(album, earlyRoot, target))
+        assertTrue(MomoAlbumDirectoryInspector.isNewDirectoryWindow(album, window, target))
+        assertFalse(MomoAlbumDirectoryInspector.isNewDirectoryWindow(album, window.copy(windowId = 2), target))
+        assertFalse(MomoAlbumDirectoryInspector.isNewDirectoryWindow(album, window.copy(packageName = "other"), target))
+    }
+
+    @Test
     fun confirmsDropdownFromUniqueListAndDirectoryRow() {
         assertTrue(MomoAlbumDirectoryInspector.isConfirmed(snapshot, target))
     }

@@ -139,6 +139,7 @@ class AiReplyObservationRuntimeTest {
                 pageKind = ChatPageKind.UNKNOWN)
         }
         var entryAvailable = false
+        var quietRemaining = 5_000L
         var recoveryChecks = 0
         val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
         var available = true
@@ -197,7 +198,8 @@ class AiReplyObservationRuntimeTest {
             imageSendTestRequestId = { request },
             isImageSendTestRequestAvailable = { available },
             claimImageSendTestRequest = { if (!available) false else { available = false; true } },
-            imageSendTestPort = testPort
+            imageSendTestPort = testPort,
+            foregroundQuietRemainingMs = { quietRemaining }
         )
         runtime.reset("test startup")
         assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
@@ -208,6 +210,14 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, begins)
         assertNull(tasks.currentLease())
         entryAvailable = true
+        repeat(3) {
+            scheduler.runNextShortestDelay()
+            assertEquals(0, begins)
+            assertEquals(0, observations)
+            assertTrue(available)
+            assertNull(tasks.currentLease())
+        }
+        quietRemaining = 0L
         scheduler.runNextShortestDelay()
         assertEquals(1, begins)
         assertFalse(available)
