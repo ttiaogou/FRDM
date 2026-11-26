@@ -18,8 +18,15 @@ data class TaskLaunchParameters(
     /** Per-contact confirmed text-reply count after which a configured image is eligible; 0 disables it. */
     val imageSendThreshold: Int = 0,
     /** Persistable document URIs selected by the user for the future image-send transaction. */
-    val imageResourceUris: List<String> = emptyList()
+    val imageResourceUris: List<String> = emptyList(),
+    /** Explicit single-use development test authorization; null keeps normal AI Reply unchanged. */
+    val imageSendTestRequestId: String? = null
 ) {
+    fun imageSendTestValidationError(): String? = when {
+        imageResourceUris.count { it.isNotBlank() } != 1 -> "图片测试请先导入且仅保留一张图片"
+        else -> null
+    }
+
     /** Validate the image setting without requiring a pool when the feature is disabled. */
     fun imageSendThresholdValidationError(threshold: Int): String? = when {
         threshold < 0 -> "请输入大于或等于 0 的数字"

@@ -6,4 +6,8 @@ import com.freedom.application.TaskLaunchParameters
 interface TaskLaunchParametersRepository {
     fun read(): TaskLaunchParameters
     fun write(parameters: TaskLaunchParameters)
+
+    /** Separate durable consumption: unrelated form edits must not rearm the same request. */
+    fun isImageSendTestRequestAvailable(requestId: String): Boolean = false
+    fun claimImageSendTestRequest(requestId: String): Boolean = false
 }

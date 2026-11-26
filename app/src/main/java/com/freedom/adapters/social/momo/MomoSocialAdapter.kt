@@ -55,6 +55,8 @@ import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.MessageWorkAreaNavigationOutcome
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
+import com.freedom.features.aireply.ports.ChatImageSendTestPort
+import com.freedom.features.aireply.ports.ImageSendTestProgress
 import com.freedom.features.aireply.ports.ChatDraftInputPort
 import com.freedom.features.aireply.ports.ChatDraftInputTarget
 import com.freedom.features.aireply.ports.ChatDraftInputResult
@@ -121,7 +123,7 @@ internal class MomoSocialAdapter(
     /** Exact lease captured at model admission; task handoff revokes old async callbacks. */
     private val isBoundAiReplyUiOperationOwned: (com.freedom.core.runtime.TaskLease?) -> Boolean = { true }
 ) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort,
-    ChatDraftSendPort {
+    ChatDraftSendPort, ChatImageSendTestPort {
 
     override fun isReceivedGreetingsListActivity(activityClass: String): Boolean =
         activityClass == MomoSayHiPageContract.LIST_ACTIVITY
@@ -5429,9 +5431,10 @@ internal class MomoSocialAdapter(
     /** M02.2: caller owns the media transaction and must not resubmit while awaiting arrival. */
     internal fun openImageAlbum(
         target: ChatDraftInputTarget,
+        ownsTransaction: () -> Boolean = { true },
         onGestureResult: (GestureExecutionStatus) -> Unit
     ): GestureSubmission {
-        if (!isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease) ||
+        if (!runCatching(ownsTransaction).getOrDefault(false) || !isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease) ||
             !isCurrentDraftTarget(target) || target.packageName != targetPackage ||
             activityClass() != target.activityClass) return GestureSubmission.DEFERRED_NOT_READY
         return rootAccess.withActiveTargetRoot { root, window ->
@@ -5446,7 +5449,8 @@ internal class MomoSocialAdapter(
             val bounds = ScreenRect(entry.left, entry.top, entry.right, entry.bottom)
             val executionContext = gesturePolicy.captureContext(window)
                 ?: return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
-            if (!accessibilityGateway.isWindowCurrent(window) ||
+            if (executionContext.taskLease != target.taskLease || executionContext.targetWindow != window ||
+                !accessibilityGateway.isWindowCurrent(window) || !runCatching(ownsTransaction).getOrDefault(false) ||
                 !isAiReplyUiOperationOwned() || !isBoundAiReplyUiOperationOwned(target.taskLease)) {
                 return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
             }
@@ -5461,8 +5465,20 @@ internal class MomoSocialAdapter(
                     description = "Open verified Momo image album",
                     executionContext = executionContext
                 ),
-                GestureExecutionListener { result ->
-                    if (isBoundAiReplyUiOperationOwned(target.taskLease)) onGestureResult(result.status)
+                object : GestureExecutionListener {
+                    override fun isDispatchTargetCurrent(commandId: String): Boolean =
+                        runCatching(ownsTransaction).getOrDefault(false) &&
+                            isBoundAiReplyUiOperationOwned(target.taskLease) && isCurrentDraftTarget(target) &&
+                            rootAccess.withActiveTargetRoot { freshRoot, freshWindow ->
+                                freshWindow == window &&
+                                    chatComponents.pageInspector.inspectImageEntry(
+                                        AccessibilityNodeInfo.obtain(freshRoot), targetPackage, freshWindow.activityClass
+                                    ) == entry
+                            } == true
+
+                    override fun onResult(result: com.freedom.core.accessibility.gesture.GestureExecutionResult) {
+                        if (runCatching(ownsTransaction).getOrDefault(false)) onGestureResult(result.status)
+                    }
                 }
             )
         } ?: GestureSubmission.DEFERRED_NOT_READY
@@ -5781,6 +5797,295 @@ internal class MomoSocialAdapter(
                 onLog("MEDIA_IMAGE_SEND_EVIDENCE result=$result;windowId=${proof.window.windowId}")
                 onResult(result)
             }
+        }
+    }
+
+    // The existing Momo adapter owns this short-lived platform navigation transaction.
+    // The AI runtime owns scheduling/admission; TaskCoordinator remains the only lease owner.
+    private enum class ImageTestStage {
+        OPEN_ALBUM, WAIT_ALBUM, WAIT_DIRECTORY, WAIT_FREEDOM, WAIT_SELECTION, VERIFY_SEND, TERMINAL
+    }
+
+    private class ImageTestTransaction(
+        val target: ChatDraftInputTarget,
+        val id: String,
+        val baseline: MomoImageSendBaseline,
+        val owner: () -> Boolean
+    ) {
+        @Volatile var stage = ImageTestStage.OPEN_ALBUM
+        @Volatile var inFlight = false
+        @Volatile var statusReadInFlight = false
+        @Volatile var stageStartedAt = SystemClock.uptimeMillis()
+        @Volatile var attempt: MomoImageSendAttempt? = null
+        var albumWindow: WindowRef? = null
+        var directory: MomoFreedomDirectoryTarget? = null
+        var albumBeforeSelection: MomoFreedomAlbumEvidence? = null
+        var lastWaitReason: String? = null
+    }
+
+    @Volatile private var imageSendTest: ImageTestTransaction? = null
+
+    override fun progress(): ImageSendTestProgress = when (imageSendTest?.stage) {
+        null -> ImageSendTestProgress.IDLE
+        ImageTestStage.TERMINAL -> ImageSendTestProgress.TERMINAL
+        else -> ImageSendTestProgress.ACTIVE
+    }
+
+    /** Only the existing chat-detail fingerprint and private-title evidence admit manual test entry. */
+    internal fun inspectImageTestEntryPage(): Boolean =
+        rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                MomoAlbumArrivalInspector.isConfirmed(root, targetPackage)) return@withActiveTargetRoot false
+            val page = chatComponents.pageInspector.inspectRoot(
+                AccessibilityNodeInfo.obtain(root), targetPackage, window.activityClass
+            )
+            val title = page.chatTitleText?.trim().orEmpty()
+            page.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
+                page.hasStableChatDetailFingerprint && title.startsWith("与") && title.endsWith("对话") &&
+                accessibilityGateway.currentGestureWindow() == window
+        } == true
+
+    private fun testCurrent(test: ImageTestTransaction): Boolean =
+        imageSendTest === test && test.stage != ImageTestStage.TERMINAL &&
+            runCatching(test.owner).getOrDefault(false)
+
+    private fun originalImageTestChat(test: ImageTestTransaction): Boolean =
+        rootAccess.withActiveTargetRoot { root, window ->
+            val original = test.target.nodeTarget.window
+            if (window.packageName != original.packageName || window.windowId != original.windowId ||
+                window.activityClass != original.activityClass || window.generation < original.generation ||
+                MomoAlbumArrivalInspector.isConfirmed(root, targetPackage)) return@withActiveTargetRoot false
+            val page = chatComponents.pageInspector.inspectRoot(
+                AccessibilityNodeInfo.obtain(root), targetPackage, window.activityClass
+            )
+            page.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
+                page.hasStableChatDetailFingerprint &&
+                page.chatTitleText?.trim() == test.target.expectedChatTitle?.trim() &&
+                accessibilityGateway.currentGestureWindow() == window
+        } == true
+
+    private fun currentTestAlbumWindow(): WindowRef? =
+        rootAccess.withActiveTargetRoot { root, window ->
+            window.takeIf { window.packageName == targetPackage && window.windowId >= 0 &&
+                accessibilityGateway.currentGestureWindow() == window &&
+                MomoAlbumArrivalInspector.isConfirmed(root, targetPackage) }
+        }
+
+    /** Read-only nested-page evidence for the existing RunSessionCoordinator, never a write permit. */
+    internal fun inspectImageTestOwnedPage(): Boolean {
+        val test = imageSendTest ?: return false
+        if (!testCurrent(test)) return false
+        val live = accessibilityGateway.currentGestureWindow() ?: return false
+        if (live.packageName != targetPackage || live.windowId < 0) return false
+        // Wake the already existing exact-window Activity recovery when necessary.
+        if (live.activityClass.isBlank()) {
+            runCatching { inspectReceivedGreetingsReadiness() }
+            return false
+        }
+        val album = currentTestAlbumWindow()
+        val sourceAlbum = test.albumWindow
+        val sameAlbum = album != null && sourceAlbum != null &&
+            album.windowId == sourceAlbum.windowId && album.activityClass == sourceAlbum.activityClass &&
+            album.generation >= sourceAlbum.generation
+        return when (test.stage) {
+            ImageTestStage.OPEN_ALBUM -> originalImageTestChat(test)
+            ImageTestStage.WAIT_ALBUM -> originalImageTestChat(test) ||
+                (album != null && album.generation >= test.target.nodeTarget.window.generation)
+            ImageTestStage.WAIT_DIRECTORY -> sameAlbum ||
+                (sourceAlbum != null && inspectImageAlbumDirectory(sourceAlbum))
+            ImageTestStage.WAIT_FREEDOM -> (sourceAlbum != null && inspectImageAlbumDirectory(sourceAlbum)) ||
+                (sameAlbum && inspectFreedomAlbum()?.window == album)
+            ImageTestStage.WAIT_SELECTION -> sameAlbum && inspectFreedomAlbum()?.window == album
+            ImageTestStage.VERIFY_SEND -> (sameAlbum && inspectFreedomAlbum()?.window == album) ||
+                originalImageTestChat(test)
+            ImageTestStage.TERMINAL -> false
+        }
+    }
+
+    override fun begin(
+        target: ChatDraftInputTarget,
+        requestId: String,
+        claim: () -> Boolean,
+        ownsTransaction: () -> Boolean
+    ) {
+        if (imageSendTest != null || requestId.isBlank() || !isCurrentDraftTarget(target) ||
+            !isBoundAiReplyUiOperationOwned(target.taskLease)) return
+        val baseline = captureImageSendBaseline(target, requestId, ownsTransaction)
+        if (baseline == null) {
+            onLog("MEDIA_IMAGE_TEST WAIT reason=ORIGINAL_CHAT_TAIL_BASELINE_UNAVAILABLE")
+            return
+        }
+        // A crash/reconnect after claim is never permission to send another image.
+        if (!runCatching(claim).getOrDefault(false)) {
+            onLog("MEDIA_IMAGE_TEST WAIT reason=ONE_SHOT_CLAIM_REJECTED")
+            return
+        }
+        imageSendTest = ImageTestTransaction(target, requestId, baseline, ownsTransaction)
+        onLog("MEDIA_IMAGE_TEST BEGIN：原聊天及发送前列表末尾已确认；一次性授权已消耗")
+    }
+
+    private fun testWait(test: ImageTestTransaction, reason: String) {
+        if (test.lastWaitReason != reason) {
+            test.lastWaitReason = reason
+            onLog("MEDIA_IMAGE_TEST WAIT stage=${test.stage};reason=$reason")
+        }
+    }
+
+    private fun testTerminal(test: ImageTestTransaction, result: String, reason: String) {
+        if (imageSendTest !== test || test.stage == ImageTestStage.TERMINAL) return
+        val previous = test.stage
+        test.stage = ImageTestStage.TERMINAL
+        test.inFlight = false
+        test.statusReadInFlight = false
+        onLog("MEDIA_IMAGE_TEST TERMINAL result=$result;stage=$previous;reason=$reason;retrySend=false")
+    }
+
+    override fun abort(reason: String) {
+        imageSendTest?.let { testTerminal(it, "UNKNOWN", reason) }
+    }
+
+    override fun reset(reason: String) {
+        abort("RUNTIME_RESET")
+        imageSendTest = null
+    }
+
+    /** Move to a wait stage BEFORE submission; an accepted or ambiguous tap is never replayed. */
+    private fun submitImageTestStep(
+        test: ImageTestTransaction,
+        next: ImageTestStage,
+        action: ((GestureExecutionStatus) -> Unit) -> GestureSubmission
+    ) {
+        if (!testCurrent(test) || test.inFlight || !isBoundAiReplyUiOperationOwned(test.target.taskLease)) {
+            testWait(test, "PAGE_WRITE_LEASE_WAIT")
+            return
+        }
+        val previous = test.stage
+        val previousStartedAt = test.stageStartedAt
+        test.stage = next
+        test.stageStartedAt = SystemClock.uptimeMillis()
+        test.inFlight = true
+        test.lastWaitReason = null
+        val submission = runCatching {
+            action { status ->
+                if (testCurrent(test)) {
+                    test.inFlight = false
+                    onLog("MEDIA_IMAGE_TEST GESTURE_RESULT stage=$next;status=$status;arrivalProofRequired=true")
+                }
+            }
+        }.getOrDefault(GestureSubmission.REJECTED)
+        onLog("MEDIA_IMAGE_TEST SUBMISSION from=$previous;to=$next;submission=$submission")
+        when (submission) {
+            GestureSubmission.ACCEPTED -> Unit
+            GestureSubmission.DEFERRED_NOT_READY -> {
+                test.inFlight = false
+                test.stage = previous
+                test.stageStartedAt = previousStartedAt
+                testWait(test, "FRESH_ADMISSION_REQUIRED")
+            }
+            else -> testTerminal(test, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
+        }
+    }
+
+    override fun observe() {
+        val test = imageSendTest ?: return
+        if (test.stage == ImageTestStage.TERMINAL) return
+        if (!testCurrent(test)) {
+            testTerminal(test, "UNKNOWN", "EXACT_TRANSACTION_OWNERSHIP_LOST")
+            return
+        }
+        if (SystemClock.uptimeMillis() - test.stageStartedAt > 45_000L) {
+            testTerminal(test, "UNKNOWN", "STAGE_OBSERVATION_TIMEOUT")
+            return
+        }
+        if (test.inFlight || test.statusReadInFlight) return
+        val owns = { testCurrent(test) }
+        when (test.stage) {
+            ImageTestStage.OPEN_ALBUM -> {
+                if (!originalImageTestChat(test)) {
+                    testWait(test, "ORIGINAL_CHAT_NOT_CURRENT")
+                    return
+                }
+                submitImageTestStep(test, ImageTestStage.WAIT_ALBUM) { callback ->
+                    openImageAlbum(test.target, owns, callback)
+                }
+            }
+            ImageTestStage.WAIT_ALBUM -> {
+                val window = currentTestAlbumWindow()
+                if (window == null || window.activityClass.isBlank() ||
+                    !inspectImageAlbumArrival(test.target) || inspectImageAlbumSelector(test.target) == null) {
+                    testWait(test, "ALBUM_ARRIVAL_OR_SELECTOR_NOT_CONFIRMED")
+                    return
+                }
+                test.albumWindow = window
+                submitImageTestStep(test, ImageTestStage.WAIT_DIRECTORY) { callback ->
+                    openImageAlbumDirectory(test.target, window, test.id, owns, callback)
+                }
+            }
+            ImageTestStage.WAIT_DIRECTORY -> {
+                val window = test.albumWindow ?: return
+                val directory = inspectFreedomDirectory(window)
+                if (directory == null || directory.window.activityClass.isBlank()) {
+                    testWait(test, "FREEDOM_DIRECTORY_OR_ACTIVITY_NOT_CONFIRMED")
+                    return
+                }
+                if (directory.imageCount != 1) {
+                    testTerminal(test, "UNKNOWN", "FREEDOM_ALBUM_MUST_CONTAIN_EXACTLY_ONE_IMAGE")
+                    return
+                }
+                test.directory = directory
+                submitImageTestStep(test, ImageTestStage.WAIT_FREEDOM) { callback ->
+                    openFreedomAlbum(test.target, window, test.id, owns, callback)
+                }
+            }
+            ImageTestStage.WAIT_FREEDOM -> {
+                val directory = test.directory ?: return
+                val album = inspectFreedomAlbum()
+                if (album == null || !isSingleImageAlbum(directory, album) || album.selectionCount != 0 ||
+                    album.window.windowId != test.albumWindow?.windowId) {
+                    testWait(test, "FREEDOM_ALBUM_OR_UNSELECTED_SINGLE_IMAGE_NOT_CONFIRMED")
+                    return
+                }
+                test.albumBeforeSelection = album
+                submitImageTestStep(test, ImageTestStage.WAIT_SELECTION) { callback ->
+                    selectFreedomImage(test.target, album, directory, test.id, owns, callback)
+                }
+            }
+            ImageTestStage.WAIT_SELECTION -> {
+                val directory = test.directory ?: return
+                val before = test.albumBeforeSelection ?: return
+                val album = inspectFreedomAlbum()
+                if (album == null || !isSingleImageAlbum(directory, album) ||
+                    album.window.windowId != before.window.windowId || album.selectionCount != 1 ||
+                    album.images != before.images
+                ) {
+                    testWait(test, "SEND_COUNT_ONE_NOT_CONFIRMED")
+                    return
+                }
+                submitImageTestStep(test, ImageTestStage.VERIFY_SEND) { callback ->
+                    sendFreedomImage(test.target, before, directory, test.id, owns, test.baseline,
+                        onDispatched = { if (testCurrent(test)) test.attempt = it },
+                        onGestureResult = callback)
+                }
+            }
+            ImageTestStage.VERIFY_SEND -> {
+                val attempt = test.attempt
+                if (attempt == null || !originalImageTestChat(test)) {
+                    testWait(test, "SEND_DISPATCH_OR_ORIGINAL_CHAT_RETURN_NOT_CONFIRMED")
+                    return
+                }
+                test.statusReadInFlight = true
+                inspectImageSendResult(attempt, test.target, test.id, owns) { result ->
+                    if (testCurrent(test)) {
+                        test.statusReadInFlight = false
+                        when (result) {
+                            MomoImageSendResult.SUCCESS -> testTerminal(test, "SUCCESS", "NEW_OUTGOING_IMAGE_STATUS_CONFIRMED")
+                            MomoImageSendResult.FAILED -> testTerminal(test, "FAILED", "NEW_OUTGOING_IMAGE_ERROR_CONFIRMED")
+                            MomoImageSendResult.UNKNOWN -> testWait(test, "SEND_RESULT_UNKNOWN_READ_ONLY")
+                        }
+                    }
+                }
+            }
+            ImageTestStage.TERMINAL -> Unit
         }
     }
 

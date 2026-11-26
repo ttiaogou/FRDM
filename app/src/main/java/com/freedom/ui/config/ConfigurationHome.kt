@@ -35,7 +35,8 @@ internal class ConfigurationHome(
         val onPersonalization: () -> Unit,
         val onRecordsTab: () -> Unit,
         val onOpenDrawer: () -> Unit,
-        val onRunClick: () -> Unit
+        val onRunClick: () -> Unit,
+        val isRunRequested: () -> Boolean = { false }
     )
 
     private var runButton: ImageButton? = null
@@ -44,6 +45,7 @@ internal class ConfigurationHome(
     private var minAgeValue: TextView? = null
     private var maxAgeValue: TextView? = null
     private var activeTimeValue: TextView? = null
+    private var imageSendTestSwitch: Switch? = null
     private var parameters = callbacks.taskParameters()
 
     fun refresh(running: Boolean) {
@@ -52,6 +54,7 @@ internal class ConfigurationHome(
             contentDescription = if (running) "停止运行" else "开始运行"
         }
         targetValue?.text = callbacks.targetLabel()
+        imageSendTestSwitch?.isEnabled = !running
     }
 
     fun create(): View {
@@ -96,6 +99,7 @@ internal class ConfigurationHome(
         }
         content.addView(buildTargetSection())
         content.addView(buildPersonalizationRow(), spaced(18))
+        content.addView(buildImageSendTestRow(), spaced(18))
         content.addView(buildFilterPanel(), spaced(20))
         scroll.addView(content)
         installLeftEdgeGesture(scroll)
@@ -432,6 +436,51 @@ internal class ConfigurationHome(
             setTextColor(PANEL_MUTED)
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5) })
         return panel
+    }
+
+    /** Development-only one-shot action, deliberately outside the normal reply threshold. */
+    private fun buildImageSendTestRow(): View {
+        val wrapper = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        val row = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        row.addView(TextView(activity).apply {
+            text = "图片发送测试"
+            textSize = 15f
+            setTextColor(TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        val toggle = styledSwitch().apply {
+            isChecked = parameters.imageSendTestRequestId != null
+            isEnabled = !callbacks.isRunRequested()
+            contentDescription = "图片发送测试，一次性真实发送"
+        }
+        imageSendTestSwitch = toggle
+        var restoring = false
+        toggle.setOnCheckedChangeListener { _, checked ->
+            if (restoring) return@setOnCheckedChangeListener
+            val latest = callbacks.taskParameters()
+            val error = if (callbacks.isRunRequested()) "请先停止运行再修改图片测试开关"
+                else if (checked) latest.imageSendTestValidationError() else null
+            if (error != null) {
+                restoring = true
+                toggle.isChecked = latest.imageSendTestRequestId != null
+                restoring = false
+                android.widget.Toast.makeText(activity, error, android.widget.Toast.LENGTH_LONG).show()
+            } else {
+                saveParameters(latest.copy(imageSendTestRequestId =
+                    if (checked) java.util.UUID.randomUUID().toString() else null))
+            }
+        }
+        row.addView(toggle)
+        wrapper.addView(row)
+        wrapper.addView(TextView(activity).apply {
+            text = "仅限一张导入图片。开启后开始运行，手动进入陌陌私聊；真实发送一次，不调用 AI、不遍历列表。测试后停止运行，关再开可重新授权。"
+            textSize = 12f
+            setTextColor(MUTED)
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+        return wrapper
     }
 
     private fun buildMessageBlockingRow(): View {

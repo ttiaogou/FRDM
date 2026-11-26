@@ -120,6 +120,84 @@ private fun testAndroidRecoveryReadiness(page: ChatPageSnapshot): TargetAppReadi
 class AiReplyObservationRuntimeTest {
 
     @Test
+    fun explicitImageTestUsesManualChatLeaseAndOneShotWithoutNormalReplyWorkflow() {
+        val scheduler = FakeScheduler()
+        val chat = FakeChatPort().apply { page = chatDetailSnapshot() }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        var available = true
+        var begins = 0
+        var observations = 0
+        var modelChecks = 0
+        var draftCalls = 0
+        val testPort = object : com.freedom.features.aireply.ports.ChatImageSendTestPort {
+            private var state = com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE
+            override fun progress() = state
+            override fun begin(
+                target: com.freedom.features.aireply.ports.ChatDraftInputTarget,
+                requestId: String,
+                claim: () -> Boolean,
+                ownsTransaction: () -> Boolean
+            ) {
+                assertEquals("manual-test", requestId)
+                assertEquals(chat.page.inputFieldTarget?.window, target.nodeTarget.window)
+                assertEquals(tasks.currentLease(), target.taskLease)
+                assertTrue(ownsTransaction())
+                assertTrue(claim())
+                begins++
+                state = com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE
+            }
+            override fun observe() {
+                observations++
+                state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
+            }
+            override fun abort(reason: String) {
+                state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
+            }
+            override fun reset(reason: String) {
+                state = com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE
+            }
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler, sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = chat, chatMessagePort = chat, chatSessionManagementPort = chat,
+            gesturePolicy = NoOpGestureApi, targetPackage = { "com.immomo.momo" }, isAiReplyActive = { true },
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            onLog = {}, fullInspectionDebounceMs = 300L, regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L }, pageSelectedStartup = true,
+            draftStartupFailure = { modelChecks++; "MODEL_NOT_CONFIGURED" },
+            onDraftConversationObserved = { _, _, _, _ -> draftCalls++; false },
+            imageSendTestRequestId = { "manual-test" },
+            isImageSendTestRequestAvailable = { available },
+            claimImageSendTestRequest = { if (!available) false else { available = false; true } },
+            imageSendTestPort = testPort
+        )
+        runtime.reset("test startup")
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
+        assertTrue(runtime.isImageSendTestRun())
+        assertNull(tasks.currentLease())
+        runtime.requestPageRouteObservation()
+        scheduler.runNextWithDelay(300L)
+        assertEquals(0, begins)
+        assertNull(tasks.currentLease())
+        runUntilShortestDelay(scheduler, 10) { begins == 1 }
+        assertFalse(available)
+        runUntilShortestDelay(scheduler, 10) { observations == 1 }
+        assertNull(tasks.currentLease())
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        assertEquals(1, begins)
+        assertEquals(0, modelChecks)
+        assertEquals(0, draftCalls)
+        assertEquals(0, chat.messageReads)
+        assertEquals(0, chat.messageWorkAreaEntryAttempts)
+        runtime.reset("service reconnect")
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
+        runtime.requestPageRouteObservation()
+        repeat(5) { if (scheduler.pendingCount() > 0) scheduler.runNextShortestDelay() }
+        assertEquals(1, begins)
+        assertNull(tasks.currentLease())
+    }
+
+    @Test
     fun samePersistedCheckpointGetsOneIdAcrossUnknownReconnectAndRestart() {
         val task = "AI_REPLY_PRIVATE_MESSAGES"
         val otherTask = "AI_REPLY_RECEIVED_GREETINGS"

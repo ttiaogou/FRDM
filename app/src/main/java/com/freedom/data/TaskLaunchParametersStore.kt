@@ -12,6 +12,7 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
         Context.MODE_PRIVATE
     )
 
+    @Synchronized
     override fun read(): TaskLaunchParameters = TaskLaunchParameters(
         maxDistanceKm = preferences.getInt(KEY_MAX_DISTANCE_KM, 0).coerceAtLeast(0),
         minAge = preferences.getInt(KEY_MIN_AGE, 0).coerceIn(0, 120),
@@ -25,9 +26,12 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
             KEY_IMAGE_SEND_THRESHOLD,
             preferences.getInt(LEGACY_KEY_IMAGE_PRE_REPLY_LIMIT, 0)
         ).coerceAtLeast(0),
-        imageResourceUris = readImageResourceUris()
+        imageResourceUris = readImageResourceUris(),
+        imageSendTestRequestId = preferences.getString(KEY_IMAGE_SEND_TEST_REQUEST, null)
+            ?.takeIf { it.isNotBlank() }
     )
 
+    @Synchronized
     override fun write(parameters: TaskLaunchParameters) {
         preferences.edit()
             .putInt(KEY_MAX_DISTANCE_KM, parameters.maxDistanceKm.coerceAtLeast(0))
@@ -37,6 +41,7 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
             .remove(LEGACY_KEY_ONLINE_ONLY)
             .putInt(KEY_MESSAGE_INTERCEPTION_THRESHOLD, parameters.messageInterceptionThreshold.coerceAtLeast(0))
             .putInt(KEY_IMAGE_SEND_THRESHOLD, parameters.imageSendThreshold.coerceAtLeast(0))
+            .putString(KEY_IMAGE_SEND_TEST_REQUEST, parameters.imageSendTestRequestId)
             .putString(KEY_IMAGE_RESOURCE_URIS_ORDERED, JSONArray(parameters.imageResourceUris
                 .asSequence().map(String::trim).filter(String::isNotBlank).distinct().toList()).toString())
             // Compatibility snapshot for previous versions; only the JSON list is order-preserving.
@@ -44,6 +49,20 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
                 .asSequence().map(String::trim).filter(String::isNotBlank).distinct().toSet())
             .apply()
     }
+
+    @Synchronized
+    override fun isImageSendTestRequestAvailable(requestId: String): Boolean {
+        val settings = read()
+        return requestId.isNotBlank() && settings.imageSendTestRequestId == requestId &&
+            settings.imageSendTestValidationError() == null &&
+            preferences.getString(KEY_IMAGE_SEND_TEST_CONSUMED, null) != requestId
+    }
+
+    /** Consume BEFORE the first UI mutation, including when a later send result is unknown. */
+    @Synchronized
+    override fun claimImageSendTestRequest(requestId: String): Boolean =
+        isImageSendTestRequestAvailable(requestId) &&
+            preferences.edit().putString(KEY_IMAGE_SEND_TEST_CONSUMED, requestId).commit()
 
     private fun readImageResourceUris(): List<String> {
         val ordered = preferences.getString(KEY_IMAGE_RESOURCE_URIS_ORDERED, null)
@@ -79,6 +98,8 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
         const val LEGACY_KEY_ONLINE_ONLY = "online_only"
         const val KEY_MESSAGE_INTERCEPTION_THRESHOLD = "message_interception_threshold"
         const val KEY_IMAGE_SEND_THRESHOLD = "image_send_threshold"
+        const val KEY_IMAGE_SEND_TEST_REQUEST = "image_send_test_request"
+        const val KEY_IMAGE_SEND_TEST_CONSUMED = "image_send_test_consumed"
         const val KEY_IMAGE_RESOURCE_URIS = "image_resource_uris"
         const val KEY_IMAGE_RESOURCE_URIS_ORDERED = "image_resource_uris_ordered_json"
         const val LEGACY_KEY_REPLY_LIMIT = "reply_limit"

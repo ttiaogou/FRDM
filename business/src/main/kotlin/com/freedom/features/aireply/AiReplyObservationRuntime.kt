@@ -170,8 +170,19 @@ class AiReplyObservationRuntime(
         { _, _, _, _ -> false },
     private val privateReplyRequestKey: (ChatMessageBatch, ChatPageSnapshot) -> String? = { _, _ -> null },
     private val restoreObservedPrivatePendingDraft: (ChatMessageBatch, ChatPageSnapshot, String, String) -> Boolean =
-        { _, _, _, _ -> false }
+        { _, _, _, _ -> false },
+    private val imageSendTestRequestId: () -> String? = { null },
+    private val isImageSendTestRequestAvailable: (String) -> Boolean = { false },
+    private val claimImageSendTestRequest: (String) -> Boolean = { false },
+    private val imageSendTestPort: com.freedom.features.aireply.ports.ChatImageSendTestPort? = null,
+    private val isImageSendTestTouchActive: () -> Boolean = { false }
 ) {
+    // Test mode is latched for this page runtime; it never falls through to the normal reply
+    // workflow when the one-shot request is consumed or the switch changes.
+    @Volatile private var activeImageSendTestRequest: String? = null
+    private val imageSendTestGate = "IMAGE_SEND_TEST_INITIAL_CHAT"
+    fun isImageSendTestRun(): Boolean = activeImageSendTestRequest != null
+
     companion object {
         /**
          * The persisted business checkpoint identifies the observation schedule, not the
@@ -548,6 +559,10 @@ class AiReplyObservationRuntime(
 
     /** Receives business-neutral navigation provenance from the unified accessibility layer. */
     fun onSelfNavigationAttached(transition: SelfNavigationTransition) {
+        if (isImageSendTestRun()) {
+            requestPageRouteObservation()
+            return
+        }
         pendingNavigationSourceResult = transition
         onLog(
             "统一页面导航[SELF_NAVIGATION_ATTACHED]：" +
@@ -562,6 +577,10 @@ class AiReplyObservationRuntime(
      * still the authority that creates the recovery transaction.
      */
     fun onUnmatchedNavigationObserved(targetActivityClass: String) {
+        if (isImageSendTestRun()) {
+            requestPageRouteObservation()
+            return
+        }
         if (!isAiReplyActive() || !sessionRunStarted) return
         unmatchedNavigationObservationPending = true
         onLog(
@@ -1267,6 +1286,10 @@ class AiReplyObservationRuntime(
     private fun runFullInspection(purpose: AiReplyPageReadPurpose) {
         pageInspectionTask = null
         if (!isAiReplyActive()) return
+        if (isImageSendTestRun()) {
+            runImageSendTestObservation()
+            return
+        }
         if (!chatPagePort.supportsTargetPackage(targetPackage())) {
             pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
             if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
@@ -1611,6 +1634,17 @@ class AiReplyObservationRuntime(
     /** System touch boundaries pause received-greetings recovery without becoming page evidence. */
     fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
         if (!sessionRunStarted) return
+        if (isImageSendTestRun()) {
+            pageRecoveryVerificationGate.reset(imageSendTestGate)
+            if (event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER &&
+                imageSendTestPort?.progress() == com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE
+            ) {
+                imageSendTestPort?.abort("PHYSICAL_USER_INTERACTION")
+                releaseTaskOwnership("图片测试用户操作；禁止重发")
+            }
+            requestPageRouteObservation()
+            return
+        }
         pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
         val observedPhysicalInterruption = event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER &&
             currentSessionBinding?.observedDetailTarget != null
@@ -3507,6 +3541,7 @@ class AiReplyObservationRuntime(
 
     /** Passive progress persistence at the existing lifecycle boundary, not a recovery request. */
     fun persistTaskProgressBeforeExit(reason: String, serviceBoundary: Boolean) {
+        if (isImageSendTestRun()) return
         if (!sessionRunStarted || (serviceBoundary && serviceInterruptionCheckpointPersisted)) return
         val boundary = if (serviceBoundary) "SERVICE_BOUNDARY" else "PAGE_PAUSE"
         if (recoveryContext.pending) {
@@ -3546,11 +3581,25 @@ class AiReplyObservationRuntime(
      * but must preserve the saved schedule for a later intent-checked reconnect.
      */
     fun clearRecoverySchedulesAfterRunStop() {
+        if (imageSendTestRequestId() != null || isImageSendTestRun()) return
         privateMessagesRecoveryScheduleRepository?.clear()
         receivedGreetingsRecoveryScheduleRepository?.clear()
     }
 
     fun reset(reason: String = "未指定", preservePendingRecovery: Boolean = true) {
+        if (isImageSendTestRun() || (!sessionRunStarted && imageSendTestRequestId() != null)) {
+            imageSendTestPort?.reset(reason)
+            pageInspectionTask?.cancel()
+            pageInspectionTask = null
+            pageObservationCoordinator.reset()
+            pageRecoveryVerificationGate.reset(imageSendTestGate)
+            taskOwnership.reset("图片测试结束：$reason")
+            activeImageSendTestRequest = null
+            sessionRunStarted = false
+            sessionManagerState = SessionManagerState.STOPPED
+            // Do not touch the production reply ledger, draft, traversal or checkpoints.
+            return
+        }
         runCatching { onDraftRuntimeReset() }
         sessionActionGeneration += 1L
         incompleteUnreadRelocationWait = null
@@ -4555,11 +4604,106 @@ class AiReplyObservationRuntime(
                     receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING))
 
     fun requestPageRouteObservation() {
+        if (isImageSendTestRun()) {
+            val request = activeImageSendTestRequest ?: return
+            val progress = imageSendTestPort?.progress() ?: return
+            if (isAiReplyActive() && sessionRunStarted && pageInspectionTask == null &&
+                (progress == com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE ||
+                    (progress == com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE &&
+                        isImageSendTestRequestAvailable(request)))) {
+                scheduleFullInspection()
+            }
+            return
+        }
         if (!isAiReplyActive() || !sessionRunStarted ||
             hasProtectedPrivateInspection() || hasProtectedSendInspection()
         ) return
         if (pageInspectionTask != null) return
         scheduleFullInspection()
+    }
+
+    /** Existing observer and ownership controller drive the platform transaction one sample at a time. */
+    private fun runImageSendTestObservation() {
+        val request = activeImageSendTestRequest ?: return
+        val port = imageSendTestPort ?: return
+        fun retry() = scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+        if (imageSendTestRequestId() != request || !sessionRunStarted) {
+            port.abort("REQUEST_REVOKED")
+            releaseTaskOwnership("图片测试授权撤销")
+            return
+        }
+        when (port.progress()) {
+            com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL -> {
+                releaseTaskOwnership("图片测试已结束")
+                return
+            }
+            com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE -> {
+                if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
+                    port.abort("EXACT_LEASE_LOST")
+                    return
+                }
+                if (!isImageSendTestTouchActive()) port.observe()
+                if (port.progress() == com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE) retry()
+                else releaseTaskOwnership("图片测试已结束")
+                return
+            }
+            com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE -> Unit
+        }
+        if (!isImageSendTestRequestAvailable(request)) {
+            releaseTaskOwnership("图片测试授权已使用或图片池不满足条件")
+            return
+        }
+        if (isImageSendTestTouchActive()) {
+            pageRecoveryVerificationGate.reset(imageSendTestGate)
+            retry()
+            return
+        }
+        val snapshot = runCatching { readPageSnapshot(AiReplyPageReadPurpose.FULL_INSPECTION) }.getOrNull()
+        val input = snapshot?.inputFieldTarget
+        val conversation = snapshot?.conversationIdentityKey()
+        val windowKey = snapshot?.windowIdentityKey()
+        val sessionKey = snapshot?.let(::windowSessionKey)
+        if (snapshot == null || snapshot.packageName != targetPackage() ||
+            snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            snapshot.nodeTreeProbeTruncated || snapshot.messageListCount <= 0 ||
+            snapshot.editableInputCount <= 0 || input == null || conversation == null ||
+            windowKey == null || sessionKey == null
+        ) {
+            pageRecoveryVerificationGate.reset(imageSendTestGate)
+            retry()
+            return
+        }
+        val generation = currentRunGeneration()
+        val readiness = runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()
+        if (!AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(), readiness).allowed ||
+            !pageRecoveryVerificationGate.observe(imageSendTestGate, "$generation|$sessionKey")
+        ) {
+            retry()
+            return
+        }
+        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
+            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "图片测试：手动选择的聊天详情双快照确认")
+        ) {
+            retry()
+            return
+        }
+        val coordinator = taskCoordinator ?: return
+        val lease = coordinator.currentLease()?.takeIf {
+            it.taskId == PRIVATE_MESSAGES_TASK_ID && it.runGeneration == generation
+        } ?: return
+        val target = com.freedom.features.aireply.ports.ChatDraftInputTarget(
+            packageName = snapshot.packageName, activityClass = snapshot.activityClass,
+            windowIdentityKey = windowKey, conversationIdentityKey = conversation, windowSessionKey = sessionKey,
+            nodeTarget = input, expectedChatTitle = snapshot.chatTitleText, taskLease = lease
+        )
+        val owns = {
+            activeImageSendTestRequest == request && imageSendTestRequestId() == request &&
+                generation == currentRunGeneration() && isAiReplyActive() && coordinator.isCurrent(lease)
+        }
+        port.begin(target, request, claim = { claimImageSendTestRequest(request) }, ownsTransaction = owns)
+        if (port.progress() == com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL)
+            releaseTaskOwnership("图片测试已结束")
+        else retry()
     }
 
     /** Return true only after the selected AI business runtime has really initialized. */
@@ -4572,6 +4716,19 @@ class AiReplyObservationRuntime(
     fun scheduleInitialObservation() = scheduleInitialObservation(null)
 
     private fun scheduleInitialObservation(selectedTaskId: String?) {
+        val testRequest = imageSendTestRequestId()
+        if (testRequest != null) {
+            activeImageSendTestRequest = testRequest
+            if (selectedTaskId != PRIVATE_MESSAGES_TASK_ID || imageSendTestPort == null) {
+                sessionRunStarted = false
+                return
+            }
+            privateMessagesTaskController.beginRun(currentRunGeneration())
+            sessionRunStarted = true
+            pageRecoveryVerificationGate.reset(imageSendTestGate)
+            onLog("MEDIA_IMAGE_TEST ARMED：等待手动进入私人聊天；不调用模型、不读取生产断点、不遍历列表")
+            return
+        }
         pageSelectedPrivateStartupVerificationPending = false
         pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
         resetCrossTaskGreetingsHandoffRetry()
@@ -4761,6 +4918,7 @@ class AiReplyObservationRuntime(
 
     /** Re-reads the durable greetings checkpoint; current-page confirmation is still pending. */
     fun reloadReceivedGreetingsCheckpointAfterServiceReconnect(): Boolean = runCatching {
+        if (isImageSendTestRun() || imageSendTestRequestId() != null) return@runCatching false
         val pageVerified = chatPagePort.reloadReceivedGreetingsCheckpointAfterServiceReconnect()
         val checkpoint = receivedGreetingsCheckpointRepository?.load()
         if (checkpoint != null && (!recoveryContext.pending ||
@@ -4798,6 +4956,7 @@ class AiReplyObservationRuntime(
 
     /** Reloads the message-list checkpoint and accepts it only with a fresh list-page check. */
     fun reloadPrivateMessagesCheckpointAfterServiceReconnect(): Boolean {
+        if (isImageSendTestRun() || imageSendTestRequestId() != null) return false
         val checkpoint = privateMessagesCheckpointRepository?.load() ?: return false
         val retained = messageListCheckpointForUnified
         if (recoveryContext.pending && recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
@@ -4840,6 +4999,10 @@ class AiReplyObservationRuntime(
 
     /** Schedules bounded page or known-region inspection from a normalized, redacted event. */
     fun schedule(event: AccessibilityEventEnvelope) {
+        if (isImageSendTestRun()) {
+            requestPageRouteObservation()
+            return
+        }
         if (!chatPagePort.supportsTargetPackage(targetPackage())) return
         // Navigation-hit verification is an ephemeral adapter concern and must remain active
         // even when durable sample capture is off. The port implementation only persists events
