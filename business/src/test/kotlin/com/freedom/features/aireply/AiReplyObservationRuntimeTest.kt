@@ -4884,9 +4884,15 @@ class AiReplyObservationRuntimeTest {
             chatListCandidates = listOf(sessionCandidate(completeBoundaryEvidence = true, windowGeneration = 2L))
         )
         port.completeDeferredStructureRead()
+        // The fake completes its previously submitted read by incrementing
+        // messageReads once; this is not a newly admitted runtime read.
+        assertEquals(readsBeforeRecovery + 1, port.messageReads)
+        val readsAfterOldCallback = port.messageReads
         repeat(8) {
             if (scheduler.hasPendingDelay(0L)) scheduler.runNextWithDelay(0L)
         }
+        assertEquals("Late structure callback must not submit OCR", 0, port.ocrAsyncReadRequests)
+        assertEquals("Late structure callback must not draft", 0, draftCalls)
         freshInspection.invoke(runtime)
         assertFalse("One list sample cannot complete recovery",
             logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
@@ -4906,7 +4912,8 @@ class AiReplyObservationRuntimeTest {
         assertFalse(logs.any { it.contains("outcome=ResumeCompleted") &&
             it.contains("routeId=AI_REPLY_CHAT_DETAIL") })
         assertEquals("No stale detail draft", 0, draftCalls)
-        assertEquals(readsBeforeRecovery, port.messageReads)
+        assertEquals("List recovery must not submit a new detail read", readsAfterOldCallback, port.messageReads)
+        assertEquals("List recovery must not submit OCR", 0, port.ocrAsyncReadRequests)
         assertFalse(port.pendingIdentityReturnReinspection)
         assertEquals(0, port.navigateBackCalls)
     }
