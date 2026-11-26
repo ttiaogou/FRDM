@@ -43,22 +43,50 @@ data class OcrTextProjection(
                 it.right - it.left >= 8 && it.bottom - it.top >= 8 }
         }
 
+        /**
+         * A single edge visual region may also have been rendered as an unverified Unicode emoji
+         * by OCR. The extra token is never proof of its identity or of adjacent text. Only a
+         * matching isolated read can admit the single contiguous TEXT token.
+         */
+        fun isolatedTextCandidate(parts: List<OcrContentToken>): OcrContentToken? {
+            if (parts.size !in 2..3) return null
+            val text = parts.singleOrNull { it.kind == OcrContentKind.TEXT } ?: return null
+            val marker = parts.singleOrNull { it.kind == OcrContentKind.PLACEHOLDER } ?: return null
+            val line = text.lineBounds ?: return null
+            val region = marker.symbolBounds ?: return null
+            if (text.status != OcrTokenStatus.AMBIGUOUS || text.source != OcrTokenSource.OCR_LINE ||
+                text.symbolBounds != null || text.text.isBlank() || '\n' in text.text ||
+                marker.status != OcrTokenStatus.UNVERIFIED || marker.source != OcrTokenSource.VISUAL_GUARD ||
+                marker.text != OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY ||
+                marker.isolatedTextEvidence != null || !line.valid() || !region.valid() ||
+                parts.any { it.lineIndex != text.lineIndex || it.lineBounds != line }
+            ) return null
+            val tolerance = maxOf(4, (line.bottom - line.top) / 4)
+            val leading = region.left <= line.left + tolerance && region.right > line.left
+            val trailing = region.right >= line.right - tolerance && region.left < line.right
+            if (!line.overlapsVertically(region) || leading == trailing) return null
+            if (parts.size == 3) {
+                val emoji = parts.singleOrNull { it.kind == OcrContentKind.EMOJI } ?: return null
+                if (emoji.status != OcrTokenStatus.UNVERIFIED ||
+                    emoji.source != OcrTokenSource.UNICODE_EMOJI ||
+                    emoji.symbolBounds != null || emoji.isolatedTextEvidence != null ||
+                    emoji.text.isBlank() || '\n' in emoji.text ||
+                    parts.indexOf(emoji) != (if (leading) parts.indexOf(text) - 1 else parts.indexOf(text) + 1)
+                ) return null
+            }
+            return text
+        }
+
         private fun hasIndependentTextEvidence(
             parts: List<OcrContentToken>,
             canonicalize: (String) -> String
         ): Boolean {
-            if (parts.size != 2) return false
-            val text = parts.singleOrNull { it.kind == OcrContentKind.TEXT } ?: return false
-            val marker = parts.singleOrNull { it.kind == OcrContentKind.PLACEHOLDER } ?: return false
+            val text = isolatedTextCandidate(parts) ?: return false
+            val marker = parts.single { it.kind == OcrContentKind.PLACEHOLDER }
             val line = text.lineBounds ?: return false
             val region = marker.symbolBounds ?: return false
             val proof = text.isolatedTextEvidence ?: return false
-            if (text.status != OcrTokenStatus.AMBIGUOUS || text.source != OcrTokenSource.OCR_LINE ||
-                text.symbolBounds != null || '\n' in text.text ||
-                marker.status != OcrTokenStatus.UNVERIFIED || marker.source != OcrTokenSource.VISUAL_GUARD ||
-                marker.text != OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY ||
-                marker.lineBounds != line || marker.isolatedTextEvidence != null ||
-                !line.valid() || !region.valid() || !proof.cropBounds.valid() || !proof.recognizedBounds.valid() ||
+            if (!proof.cropBounds.valid() || !proof.recognizedBounds.valid() ||
                 !proof.confidence.isFinite() || proof.confidence !in MIN_ISOLATED_TEXT_CONFIDENCE..1f ||
                 !proof.cropBounds.contains(proof.recognizedBounds) ||
                 !line.overlapsVertically(proof.recognizedBounds) ||

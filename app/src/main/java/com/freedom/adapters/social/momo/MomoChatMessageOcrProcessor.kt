@@ -21,9 +21,6 @@ import com.freedom.features.aireply.domain.message.OcrContentToken
 import com.freedom.features.aireply.domain.message.OcrContentKind
 import com.freedom.features.aireply.domain.message.OcrContentRect
 import com.freedom.features.aireply.domain.message.OcrIsolatedTextEvidence
-import com.freedom.features.aireply.domain.message.OcrTokenStatus
-import com.freedom.features.aireply.domain.message.OcrTokenSource
-import com.freedom.features.aireply.domain.message.OcrUncertaintyMarkers
 import com.freedom.features.aireply.domain.message.OcrTextProjection
 import com.freedom.features.aireply.domain.message.OcrTextProjectionStatus
 import com.freedom.features.aireply.domain.message.MessageContentQuality
@@ -644,14 +641,9 @@ internal class MomoChatMessageOcrProcessor(
         isRequestCurrent: () -> Boolean
     ): List<OcrContentToken> {
         val tokens = reconciled.tokens
-        if (tokens.size != 2) return tokens
-        val text = tokens.singleOrNull { it.kind == OcrContentKind.TEXT } ?: return tokens
-        val marker = tokens.singleOrNull { it.kind == OcrContentKind.PLACEHOLDER } ?: return tokens
-        if (text.status != OcrTokenStatus.AMBIGUOUS || text.source != OcrTokenSource.OCR_LINE ||
-            marker.source != OcrTokenSource.VISUAL_GUARD ||
-            marker.text != OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY ||
-            MomoOcrQualityPolicy.classify(text.text) != MessageContentQuality.VERIFIED
-        ) return tokens
+        val text = OcrTextProjection.isolatedTextCandidate(tokens) ?: return tokens
+        val marker = tokens.single { it.kind == OcrContentKind.PLACEHOLDER }
+        if (MomoOcrQualityPolicy.classify(text.text) != MessageContentQuality.VERIFIED) return tokens
         val line = text.lineBounds ?: return tokens
         val region = marker.symbolBounds ?: return tokens
         val bounds = OcrTextProjection.isolatedCropBounds(line, region, crop.width, crop.height) ?: return tokens
@@ -780,14 +772,11 @@ internal class MomoChatMessageOcrProcessor(
             val quality = MomoOcrQualityPolicy.classify(finalText)
             if (quality == MessageContentQuality.VERIFIED) return true
             if (key.outgoingTarget != null || quality != MessageContentQuality.AMBIGUOUS ||
-                lineCount != 1 || tokens.size != 2 || projection == null ||
+                lineCount != 1 || projection == null ||
                 projection.status != OcrTextProjectionStatus.PARTIAL
             ) return false
-            val text = tokens.singleOrNull { it.kind == OcrContentKind.TEXT } ?: return false
-            val marker = tokens.singleOrNull { it.kind == OcrContentKind.PLACEHOLDER } ?: return false
-            if (text.isolatedTextEvidence == null ||
-                marker.text != OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY
-            ) return false
+            val text = OcrTextProjection.isolatedTextCandidate(tokens) ?: return false
+            if (text.isolatedTextEvidence == null) return false
             return MomoOcrTextProjector.extract(finalText, tokens) == projection
         }
 

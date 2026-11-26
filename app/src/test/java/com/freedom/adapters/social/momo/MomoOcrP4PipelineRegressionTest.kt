@@ -251,6 +251,41 @@ class MomoOcrP4PipelineRegressionTest {
             outgoingKey, "你好", 1, emptyList(), null))
     }
 
+    @Test fun ocrRenderedEmojiAtVisualEdgeStillRequiresIndependentTextForReuse() {
+        val rawLine = OcrVisualLine("怎么说😌", OcrVisualRect(0, 0, 145, 59), emptyList())
+        val region = OcrVisualRect(108, 15, 142, 47)
+        val rendered = MomoOcrVisualSymbolGuard.reconcileWithTokens(listOf(rawLine), listOf(region))
+        assertEquals(listOf(OcrContentKind.PLACEHOLDER, OcrContentKind.TEXT, OcrContentKind.EMOJI),
+            rendered.tokens.map { it.kind })
+        val text = OcrTextProjection.isolatedTextCandidate(rendered.tokens)!!
+        assertEquals("怎么说", text.text.trim())
+        assertNull(MomoOcrTextProjector.extract(rendered.text, rendered.tokens))
+        val bounds = OcrTextProjection.isolatedCropBounds(
+            text.lineBounds!!, OcrContentRect(108, 15, 142, 47), 145, 59
+        )!!
+        val proof = OcrIsolatedTextEvidence(bounds, OcrContentRect(1, 16, 94, 46), "怎么说", 0.95f)
+        val tokens = rendered.tokens.map { if (it === text) it.copy(isolatedTextEvidence = proof) else it }
+        val projection = MomoOcrTextProjector.extract(rendered.text, tokens)!!
+        assertEquals("怎么说", projection.text)
+        assertEquals(OcrTextProjectionStatus.PARTIAL, projection.status)
+        assertEquals(MessageContentQuality.AMBIGUOUS, map(rendered.text).contentQuality)
+        val incoming = target().copy(explicitDirectionHint = ChatMessageDirection.INCOMING,
+            identityDirectionHint = ChatMessageDirection.INCOMING, structureSignature = "verified-row")
+        val batch = ChatMessageBatch(MessageReadStatus.SUCCESS, "momo|1|13|conversation=42",
+            emptyList(), 1, 1, false, 1L)
+        val key = MomoChatMessageOcrProcessor.incomingCropReuseKey(batch, incoming, byteArrayOf(1, 2, 3))!!
+        assertTrue(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, rendered.text, 1, tokens, projection))
+        assertFalse(MomoChatMessageOcrProcessor.canCacheCropRecognition(
+            key, rendered.text, 1, rendered.tokens, projection))
+        val middle = MomoOcrVisualSymbolGuard.reconcileWithTokens(
+            listOf(rawLine), listOf(OcrVisualRect(55, 15, 89, 47)))
+        assertNull(OcrTextProjection.isolatedTextCandidate(middle.tokens))
+        val split = MomoOcrVisualSymbolGuard.reconcileWithTokens(
+            listOf(rawLine.copy(text = "怎么😌说")), listOf(region))
+        assertNull(OcrTextProjection.isolatedTextCandidate(split.tokens))
+    }
+
     @Test fun pureTextKeepsOriginalContentTypeDirectionAndCompleteProjection() {
         val result = MomoOcrVisualSymbolGuard.reconcileWithTokens(
             listOf(line("今晚有空吗")), emptyList()
