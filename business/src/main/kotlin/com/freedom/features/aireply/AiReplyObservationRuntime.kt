@@ -45,6 +45,7 @@ import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
+import com.freedom.features.aireply.ports.UnfinishedPrivateSessionDisposition
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRecord
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
@@ -3689,9 +3690,10 @@ class AiReplyObservationRuntime(
             (isSendConfirmationPending() && !confirmedPrivateInboxWithPendingSend)
         ) return false
 
-        val checkpoint = if (privateMessagesCheckpointRepository != null) {
+        val traversal = privateMessagesTraversalTaskExecutor
+        var checkpoint = if (privateMessagesCheckpointRepository != null) {
             privateMessagesCheckpointRepository.load() ?: return false
-        } else privateMessagesTraversalTaskExecutor.checkpoint()
+        } else traversal.checkpoint()
         val next = old.copy(
             routeId = messageListRecoveryRoute.routeId,
             observationGeneration = observationGeneration
@@ -3701,6 +3703,11 @@ class AiReplyObservationRuntime(
         // before invalidating callbacks; neither this step nor route selection
         // grants the list lease or claims that the message was sent.
         if (isSendConfirmationPending()) {
+            // The durable send must have a corresponding original visit.
+            if (traversal.currentUnfinishedSession() == null) {
+                onLog("私聊手动返回[DEFER_REJECTED]：缺少原未完成会话检查点；保持只读恢复")
+                return false
+            }
             if (!runCatching { deferPrivateSendForManualReturn() }.getOrDefault(false) ||
                 isSendConfirmationPending() || isSendControlRecoveryPending() ||
                 isConversationDraftPending()
@@ -3708,9 +3715,22 @@ class AiReplyObservationRuntime(
                 onLog("私聊手动返回[DEFER_REJECTED]：原发送证据或执行资格尚未安全释放；保持只读恢复")
                 return false
             }
+            if (!traversal.deferCurrentUnfinishedSend()) return false
             deferredSendProofRetryAttempt = 0
             currentSessionSendConfirmed = false
             onLog("私聊手动返回[CONTINUE_LIST]：未确认发送已落盘；原会话延期；等待列表双快照和操作权")
+        }
+        // A failed save/rebind keeps this route pending. Retry the same parked
+        // checkpoint before exposing it to the independent list verifier.
+        if (traversal.currentUnfinishedSession()?.disposition ==
+            UnfinishedPrivateSessionDisposition.SEND_DEFERRED_THIS_ROUND
+        ) {
+            checkpoint = traversal.checkpoint()
+            if (runCatching { privateMessagesCheckpointRepository?.save(checkpoint) }.isFailure) {
+                onLog("AI 私聊业务[DEFER_CHECKPOINT_WAIT]：延期记录尚未写入；保持原恢复路由")
+                return false
+            }
+            onLog("AI 私聊业务[DEFERRED_THIS_ROUND]：保留原业务；本轮不重新打开延期会话")
         }
         // Existing runtime reset invalidates model callbacks and preserves durable
         // evidence for ordinary pre-send detail interruption.
@@ -6260,7 +6280,7 @@ class AiReplyObservationRuntime(
             )
             return
         }
-        val unread = executor.unreadEvidence(snapshot).hasUnread
+        val unread = executor.hasUnparkedUnread(snapshot)
         if (!pollingRoundDue && !unread) return
         pollingRoundDue = true
         if (userInteractionActive || activeSessionGestureRequestId != null ||
@@ -6798,7 +6818,9 @@ class AiReplyObservationRuntime(
         sourceWindow: com.freedom.core.accessibility.api.WindowRef,
         selectedName: String?
     ) {
-        if (!isAiReplyActive() || !sessionRunStarted || !canPerformPrivateMessagesUiAction()) return
+        if (!isAiReplyActive() || !sessionRunStarted || !canPerformPrivateMessagesUiAction() ||
+            privateMessagesTraversalTaskExecutor.isDeferredForCurrentRound(selectedKey)
+        ) return
         if (waitForPrivateForegroundQuiet("会话行点击等待目标页面就绪")) return
         currentSessionSendConfirmed = false
         confirmedPrivateReturnBackRetryCount = 0
@@ -6822,6 +6844,7 @@ class AiReplyObservationRuntime(
             isCurrentTraversalSelection = { fresh, key ->
                 val traversal = privateMessagesTraversalTaskExecutor
                 actionGeneration == sessionActionGeneration &&
+                    !traversal.isDeferredForCurrentRound(key) &&
                     (!traversal.lockedUnreadSetFinalized ||
                         traversal.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
                         traversal.nextFreshReturnCandidate(

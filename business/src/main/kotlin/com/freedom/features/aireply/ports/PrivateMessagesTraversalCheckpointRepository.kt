@@ -43,8 +43,16 @@ data class UnfinishedPrivateSession(
     val titleKey: String,
     val verifiedKey: String?,
     val conversationKey: String,
-    val openedAtMillis: Long
+    val openedAtMillis: Long,
+    val disposition: UnfinishedPrivateSessionDisposition = UnfinishedPrivateSessionDisposition.INTERRUPTED
 )
+
+/** A submitted send is an outstanding obligation, not a completed visit or a round-wide hold. */
+enum class UnfinishedPrivateSessionDisposition {
+    INTERRUPTED,
+    SEND_DEFERRED_THIS_ROUND,
+    SEND_REVISIT_ELIGIBLE
+}
 
 interface PrivateMessagesTraversalCheckpointRepository {
     fun load(nowEpochMs: Long = System.currentTimeMillis()): PrivateMessagesTraversalCheckpoint?

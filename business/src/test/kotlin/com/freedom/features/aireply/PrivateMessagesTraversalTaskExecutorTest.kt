@@ -8,6 +8,7 @@ import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatNodeTextSource
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.ChatUnreadStatus
+import com.freedom.features.aireply.ports.UnfinishedPrivateSessionDisposition
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import org.junit.Assert.assertEquals
@@ -1552,6 +1553,118 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(restored.checkpoint().unfinishedSessions.isEmpty())
         assertTrue(restored.pendingKnownUnreadKeys().isEmpty())
         assertEquals(null, restored.selectNextCandidate(list.chatListCandidates))
+    }
+
+    @Test
+    fun r03bDeferredSendPreservesOriginalVisitAndLetsSevenOtherUnreadRowsProceed() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxPositionCheckCompleted = true
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        }
+        val original = candidate(7, "Deferred", ChatUnreadStatus.UNREAD)
+        val others = (0..6).map { candidate(it, "Other $it", ChatUnreadStatus.UNREAD) }
+        val inbox = snapshot(*(others + original).toTypedArray())
+        executor.recordVerifiedViewport(inbox)
+        executor.lockedUnreadSessionKeys += (others + original).map(::key)
+        executor.beginSession(original, key(original), "original-window")
+        executor.attemptedSessionKeys += key(original)
+        val detail = snapshot(original).copy(
+            pageKind = com.freedom.features.aireply.ports.ChatPageKind.CHAT_DETAIL_CANDIDATE,
+            chatTitleText = "与Deferred对话",
+            inputFieldTarget = original.rowTarget,
+            messageListTarget = original.rowTarget,
+            windowGeneration = 1L
+        )
+        assertTrue(executor.recordVerifiedDetailEntry(detail, 100L))
+        val verified = candidate(7, "Deferred", ChatUnreadStatus.UNREAD).apply {
+            contactIdentity = ContactRowIdentity("snapshot", "temp", "deferred-id", ContactIdentityConfidence.PLATFORM_ID_VERIFIED)
+        }
+        assertTrue(executor.verifyUnfinishedIdentity(verified))
+        val originalVisit = executor.currentUnfinishedSession()!!
+        assertTrue(executor.deferCurrentUnfinishedSend())
+        assertEquals(originalVisit.copy(disposition = UnfinishedPrivateSessionDisposition.SEND_DEFERRED_THIS_ROUND),
+            executor.currentUnfinishedSession())
+        val restored = PrivateMessagesTraversalTaskExecutor().apply {
+            restore(executor.checkpoint())
+            resumeAfterReturnedInbox()
+        }
+        assertEquals(others.map(::key).toSet(), restored.pendingKnownUnreadKeys())
+        assertTrue(restored.isDeferredForCurrentRound(key(verified)))
+        assertTrue(restored.isDeferredForCurrentRound(key(original)))
+        assertFalse(restored.canRecoverInterruptedRow(inbox, original))
+        assertFalse(restored.hasUnparkedUnread(snapshot(original)))
+        assertTrue(restored.hasUnparkedUnread(inbox))
+        // The preferred retry, ordinary selection and freshly verified return
+        // selection all reject the parked row even if it is still UNREAD.
+        assertEquals(others.last(), restored.selectNextCandidate(inbox.chatListCandidates, preferredRetryKey = key(original)))
+        assertEquals(others.last(), restored.nextFreshReturnCandidate(inbox, preferredRetryKey = key(original)))
+        val processed = mutableSetOf<String>()
+        repeat(7) {
+            val next = restored.selectNextCandidate(inbox.chatListCandidates)!!
+            assertTrue(processed.add(key(next)))
+            restored.attemptedSessionKeys += key(next)
+        }
+        assertEquals(others.map(::key).toSet(), processed)
+        assertEquals(null, restored.selectNextCandidate(inbox.chatListCandidates))
+        assertTrue(restored.pendingKnownUnreadKeys().isEmpty())
+        assertFalse(restored.hasPendingVisibleReturnWork(snapshot(original)))
+        assertEquals(originalVisit.openedAtMillis, restored.checkpoint().unfinishedSessions.single().openedAtMillis)
+        // The original obligation remains, without holding the completed scan.
+        restored.beginNextPollingRound()
+        assertEquals(UnfinishedPrivateSessionDisposition.SEND_REVISIT_ELIGIBLE,
+            restored.checkpoint().unfinishedSessions.single().disposition)
+        assertFalse(restored.isDeferredForCurrentRound(key(original)))
+        assertTrue(restored.pendingKnownUnreadKeys().isEmpty())
+        val read = candidate(7, "Deferred", ChatUnreadStatus.READ)
+        val unrelated = candidate(6, "Other read", ChatUnreadStatus.READ)
+        val readList = snapshot(read, unrelated)
+        assertTrue(restored.canRecoverInterruptedRow(readList, read))
+        assertFalse(restored.canRecoverInterruptedRow(readList, unrelated))
+        assertEquals(read, restored.selectNextCandidate(readList.chatListCandidates))
+        assertEquals(null, restored.selectNextCandidate(listOf(unrelated)))
+        restored.beginSession(read, key(read), "revisit-window")
+        assertTrue(restored.recoveringUnfinishedSession)
+        assertTrue(restored.recordVerifiedDetailEntry(detail, 200L))
+        assertEquals(originalVisit.openedAtMillis, restored.currentUnfinishedSession()?.openedAtMillis)
+        assertEquals(UnfinishedPrivateSessionDisposition.SEND_DEFERRED_THIS_ROUND,
+            restored.currentUnfinishedSession()?.disposition)
+        assertFalse(restored.verifyUnfinishedIdentity(read))
+        assertTrue(restored.verifyUnfinishedIdentity(verified))
+        assertTrue(restored.completeCurrentUnfinishedSession())
+        assertTrue(restored.checkpoint().unfinishedSessions.isEmpty())
+    }
+
+    @Test
+    fun r03bDeferralNeverClearsIndependentUnreadUnknownOrIncompleteEvidence() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxPositionCheckCompleted = true
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        }
+        val row = candidate(0, "Deferred", ChatUnreadStatus.UNREAD)
+        executor.beginSession(row, key(row), "original-window")
+        assertTrue(executor.recordVerifiedDetailEntry(snapshot(row).copy(
+            pageKind = com.freedom.features.aireply.ports.ChatPageKind.CHAT_DETAIL_CANDIDATE,
+            chatTitleText = "与Deferred对话",
+            inputFieldTarget = row.rowTarget,
+            messageListTarget = row.rowTarget,
+            windowGeneration = 1L
+        ), 100L))
+        assertTrue(executor.deferCurrentUnfinishedSend())
+        executor.clearCurrentSession()
+        val unknown = candidate(0, "Deferred", ChatUnreadStatus.UNKNOWN, badgePresent = true)
+        val fresh = snapshot(unknown)
+        assertTrue(executor.hasPendingVisibleReturnWork(fresh))
+        assertFalse(executor.canRecoverInterruptedRow(fresh, unknown))
+        assertTrue(executor.observeUnreadBlockers(fresh))
+        assertTrue(runCatching { executor.beginNextPollingRound() }.isFailure)
+        assertEquals(UnfinishedPrivateSessionDisposition.SEND_DEFERRED_THIS_ROUND,
+            executor.checkpoint().unfinishedSessions.single().disposition)
     }
 
     private fun key(candidate: ChatListCandidateSnapshot): String =

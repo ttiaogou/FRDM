@@ -5101,7 +5101,13 @@ class AiReplyObservationRuntimeTest {
         assertEquals("List recovery must not submit OCR", 0, port.ocrAsyncReadRequests)
         assertFalse(port.pendingIdentityReturnReinspection)
         assertEquals(0, port.navigateBackCalls)
-        assertEquals(listOf(originalUnfinished), traversal.checkpoint().unfinishedSessions)
+        assertEquals(listOf(originalUnfinished.copy(
+            disposition = com.freedom.features.aireply.ports.UnfinishedPrivateSessionDisposition.SEND_DEFERRED_THIS_ROUND
+        )), traversal.checkpoint().unfinishedSessions)
+        assertTrue(logs.any { it.contains("AI 私聊业务[DEFERRED_THIS_ROUND]") })
+        assertTrue(traversal.isDeferredForCurrentRound(originalUnfinished.sourceKey))
+        assertFalse(traversal.pendingKnownUnreadKeys().contains(originalUnfinished.sourceKey))
+        assertEquals(null, traversal.selectNextCandidate(port.page.chatListCandidates))
     }
 
     @Test

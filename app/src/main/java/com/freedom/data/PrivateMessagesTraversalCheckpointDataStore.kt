@@ -6,6 +6,7 @@ import org.json.JSONObject
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
 import com.freedom.features.aireply.ports.UnfinishedPrivateSession
+import com.freedom.features.aireply.ports.UnfinishedPrivateSessionDisposition
 
 /** SharedPreferences storage for message-list traversal identity/state only. */
 internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : PrivateMessagesTraversalCheckpointRepository {
@@ -73,6 +74,7 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
                 JSONObject().put("sourceKey", entry.sourceKey).put("titleKey", entry.titleKey)
                     .put("verifiedKey", entry.verifiedKey.orEmpty())
                     .put("conversationKey", entry.conversationKey).put("openedAtMillis", entry.openedAtMillis)
+                    .put("disposition", entry.disposition.name)
             }))
         preferences.edit().putString(KEY, json.toString()).apply()
     }
@@ -89,7 +91,9 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
             val opened = entry.optLong("openedAtMillis")
             if (source.isBlank() || title.isBlank() || conversation.isBlank() || opened <= 0L) null
             else UnfinishedPrivateSession(source, title,
-                entry.optString("verifiedKey").takeIf(String::isNotBlank), conversation, opened)
+                entry.optString("verifiedKey").takeIf(String::isNotBlank), conversation, opened,
+                runCatching { UnfinishedPrivateSessionDisposition.valueOf(entry.optString("disposition")) }
+                    .getOrDefault(UnfinishedPrivateSessionDisposition.INTERRUPTED))
         }.distinctBy { it.sourceKey }
     }
 
