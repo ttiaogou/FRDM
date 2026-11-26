@@ -4956,17 +4956,19 @@ class AiReplyObservationRuntime(
                             val before = ChatSessionManagementPolicy.stableSessionKey(candidate!!)
                             val expected = expectedPrivateSessionDetailNavigation
                             val boundBefore = hasBoundPrivateDetailRecoverySession()
+                            val previousIdentity = candidate.contactIdentity
                             candidate.contactIdentity = verifiedIdentity
+                            if (!privateMessagesTraversalTaskExecutor.verifyUnfinishedIdentity(candidate)) {
+                                candidate.contactIdentity = previousIdentity
+                                onLog("AI 私聊业务[RECOVERY_IDENTITY_MISMATCH]：原平台身份未匹配；保留待恢复记录，不启动草稿")
+                                schedulePrivatePreSendReadRetry("UNFINISHED_SESSION_IDENTITY_MISMATCH")
+                                return
+                            }
                             val after = ChatSessionManagementPolicy.stableSessionKey(candidate)
                             if (before != after && boundBefore && expected != null) {
                                 privateMessagesTraversalTaskExecutor.preserveAttemptAfterVerifiedIdentityUpgrade(before, after)
                                 currentSessionKey = after
                                 expectedPrivateSessionDetailNavigation = expected.copy(sessionKey = after)
-                            }
-                            if (!privateMessagesTraversalTaskExecutor.verifyUnfinishedIdentity(candidate)) {
-                                onLog("AI 私聊业务[RECOVERY_IDENTITY_MISMATCH]：原平台身份未匹配；保留待恢复记录，不启动草稿")
-                                schedulePrivatePreSendReadRetry("UNFINISHED_SESSION_IDENTITY_MISMATCH")
-                                return
                             }
                             privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
                             onLog("AI 身份升级：keyChanged=${before != after}；boundBefore=$boundBefore；" +
