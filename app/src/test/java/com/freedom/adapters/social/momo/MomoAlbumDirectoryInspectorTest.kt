@@ -12,7 +12,7 @@ import org.junit.Test
 
 class MomoAlbumDirectoryInspectorTest {
     private val target = "com.immomo.momo"
-    private val window = WindowRef(target, "", 3, 7)
+    private val window = WindowRef(target, "", generation = 3, windowId = 7)
     private val nodes = listOf(
         node("recycler_layout", "FrameLayout", emptyList()),
         node("recycler_view", "RecyclerView", listOf(0)).copy(scrollable = true),
@@ -27,11 +27,11 @@ class MomoAlbumDirectoryInspectorTest {
 
     @Test
     fun waitsForUnifiedWindowGenerationWithoutRequiringChildActivity() {
-        val album = WindowRef(target, "AlbumActivity", 2, 6)
-        val earlyRoot = WindowRef(target, "", 3, 6)
+        val album = WindowRef(target, "AlbumActivity", generation = 2, windowId = 6)
+        val earlyRoot = WindowRef(target, "", generation = album.generation, windowId = window.windowId)
         assertFalse(MomoAlbumDirectoryInspector.isNewDirectoryWindow(album, earlyRoot, target))
         assertTrue(MomoAlbumDirectoryInspector.isNewDirectoryWindow(album, window, target))
-        assertFalse(MomoAlbumDirectoryInspector.isNewDirectoryWindow(album, window.copy(windowId = 2), target))
+        assertFalse(MomoAlbumDirectoryInspector.isNewDirectoryWindow(album, window.copy(windowId = album.windowId), target))
         assertFalse(MomoAlbumDirectoryInspector.isNewDirectoryWindow(album, window.copy(packageName = "other"), target))
     }
 
