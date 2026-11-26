@@ -4633,6 +4633,9 @@ class AiReplyObservationRuntime(
         val visit = draftVisitToken
         val runGeneration = currentRunGeneration()
         val greetingBinding = greetingChatBinding.takeIf { receivedGreetingsTaskActive }
+        val recoveredVisit = if (!receivedGreetingsTaskActive &&
+            privateMessagesTraversalTaskExecutor.recoveringUnfinishedSession
+        ) privateMessagesTraversalTaskExecutor.currentUnfinishedSession() else null
         messageReadCoordinator.requestOcr(
             snapshot = snapshot,
             limit = 10,
@@ -4690,7 +4693,21 @@ class AiReplyObservationRuntime(
             } else {
                 onLog("AI 消息段基线[REVALIDATED]：新鲜聊天与任务租约已验证；仅准备下一段，不确认新发送")
             }
-            handleSendConfirmationResult(onSendTransaction(ocrBatch, snapshot), ocrBatch, snapshot)
+            val transaction = if (recoveredVisit != null) {
+                val traversal = privateMessagesTraversalTaskExecutor
+                val candidate = currentSessionCandidate
+                if (traversal.currentUnfinishedSession() != recoveredVisit || candidate == null ||
+                    recoveredVisit.conversationKey != fresh.conversationIdentityKey() ||
+                    currentSessionBinding?.matchesRestoredChatSurface(fresh) != true ||
+                    !traversal.verifyUnfinishedIdentity(candidate)
+                ) {
+                    onLog("AI 私聊历史发送[STALE_REVISIT_IGNORED]：原访问或平台身份未重新确认；不补登记")
+                    scheduleDeferredSendProofRecheck("UNFINISHED_SESSION_IDENTITY_WAIT")
+                    return@sendOcr
+                }
+                onRecoveredPrivateSendTransaction(ocrBatch, snapshot, recoveredVisit.openedAtMillis)
+            } else onSendTransaction(ocrBatch, snapshot)
+            handleSendConfirmationResult(transaction, ocrBatch, snapshot)
         }
     }
 

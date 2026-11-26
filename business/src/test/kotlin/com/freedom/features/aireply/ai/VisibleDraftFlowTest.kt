@@ -1022,6 +1022,58 @@ class VisibleDraftFlowTest {
         assertEquals(1, f.calls)
     }
 
+    @Test fun r03cLegacyUncertainArchiveCannotProduceSuccessfulVisitReceipt() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        val f = Fixture(segmentRepository = segments, taskRepository = tasks)
+        val conversation = f.snapshot.conversationIdentityKey()!!
+        val record = ReplySegmentTaskFactory.create("legacy-archive", conversation, listOf("sent"), 100L).single()
+        val archiveId = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("legacy-archive|$conversation|UNCERTAIN_ARCHIVED".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        segments.save(record.copy(status = ReplySegmentTaskStatus.SENT, confirmationId = archiveId, sendRequestKey = "owner-key"))
+        tasks.save(ReplyTaskRecord("owner-key", conversation, "original-logical-message", "revision",
+            ReplyTaskStatus.SENT, "legacy-archive", 110L))
+        val result = f.coordinator.confirmSendTransaction(f.batch, f.snapshot, 50L)
+        assertEquals(SendConfirmationResult.UNKNOWN, result.status)
+        assertNull(result.finalSendConfirmationId)
+        assertEquals(archiveId, segments.records.values.single().confirmationId)
+        assertEquals(0, f.calls)
+        assertTrue(f.inputWriteTargets.isEmpty())
+    }
+
+    @Test fun r03cDeferredPrivateSendRegistersOnlyAfterTwoFreshMatchingReads() {
+        val segments = SegmentLedger()
+        val tasks = TaskLedger()
+        var submitted = 0
+        val f = Fixture(object : ChatDraftSendPort {
+            override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult {
+                submitted++
+                return ChatDraftInputResult(ChatDraftInputStatus.SEND_SUBMITTED)
+            }
+        }, segments, tasks)
+        f.now = 100L
+        assertTrue(f.coordinator.generateVisibleDraft(f.batch, f.snapshot))
+        f.drain()
+        assertTrue(f.coordinator.deferPrivateUnconfirmedSendForManualReturn())
+        val outgoing = ChatMessage("historical-new-outgoing", ChatMessageDirection.OUTGOING,
+            ChatMessageType.TEXT, "你好呀", ScreenRect(0, 10, 100, 30),
+            DirectionEvidence.LAYOUT_ID_AND_HIERARCHY, MessageContentQuality.VERIFIED)
+        val after = f.batch.copy(messages = listOf(outgoing), capturedAtMillis = 101L)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(after, f.snapshot, 50L).status)
+        assertEquals(SendConfirmationResult.WAITING,
+            f.coordinator.confirmSendTransaction(after.copy(capturedAtMillis = 102L), f.snapshot, 50L).status)
+        assertEquals(ReplySegmentTaskStatus.SENT_UNCONFIRMED, segments.records.values.single().status)
+        val confirmed = f.coordinator.confirmSendTransaction(after.copy(capturedAtMillis = 103L), f.snapshot, 50L)
+        assertEquals(SendConfirmationResult.CONFIRMED, confirmed.status)
+        assertTrue(confirmed.finalSendConfirmationId?.isNotBlank() == true)
+        assertEquals(ReplySegmentTaskStatus.SENT, segments.records.values.single().status)
+        assertEquals(ReplyTaskStatus.SENT, tasks.records.values.single().status)
+        assertEquals(1, submitted)
+        assertEquals(1, f.calls)
+    }
+
     @Test fun r03CompleteDurableSendReceiptCanCloseInterruptedVisitWithoutNewModelOrSend() {
         val segments = SegmentLedger()
         val tasks = TaskLedger()

@@ -684,7 +684,7 @@ class AiReplyDraftCoordinator(
                 val pendingRecord = pendingRecords.singleOrNull() ?: return@mapNotNull null
                 if (sorted.size != pendingRecord.segmentCount ||
                     sorted.indices.any { sorted[it].segmentIndex != it } ||
-                    sorted.take(pendingRecord.segmentIndex).any { it.status != ReplySegmentTaskStatus.SENT } ||
+                    sorted.take(pendingRecord.segmentIndex).any { !hasConfirmedSendReceipt(it) } ||
                     sorted.any { it.status in setOf(ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) } ||
                     sorted.any { it.segmentContent.isBlank() || fingerprint(it.segmentContent) != it.segmentContentHash }
                 ) return@mapNotNull null
@@ -727,7 +727,7 @@ class AiReplyDraftCoordinator(
         // outgoing bubble is not proof the send gesture was never submitted.
         // Resume only by read-only send verification; never recreate draft chunks here.
         val uncertainSend = replySegmentTaskRepository?.findByConversation(dedupeConversationKey)
-            ?.firstOrNull { it.status in setOf(ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) }
+            ?.firstOrNull { it.status in setOf(ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) }
         if (uncertainSend != null) {
             onLog("AI 段任务恢复[READ_ONLY_REQUIRED]：requestId=${uncertainSend.requestId.take(12)}；" +
                 "segmentIndex=${uncertainSend.segmentIndex}；status=${uncertainSend.status.name}；禁止重新输入或发送")
@@ -1633,9 +1633,7 @@ class AiReplyDraftCoordinator(
                         group.indices.all { index ->
                             val record = group[index]
                             record.segmentIndex == index && record.segmentCount == group.size &&
-                                record.status == ReplySegmentTaskStatus.SENT &&
-                                !record.confirmationId.isNullOrBlank() &&
-                                record.confirmationId != fingerprint("${record.requestId}|${record.conversationKey}|UNCERTAIN_ARCHIVED")
+                                hasConfirmedSendReceipt(record)
                         } && owner != null && owner.requestId == last.requestId &&
                         owner.conversationKey == conversationKey && owner.status == ReplyTaskStatus.SENT
                     if (complete && !receipt.isNullOrBlank()) {
@@ -1677,7 +1675,7 @@ class AiReplyDraftCoordinator(
                 record.segmentIndex == index && record.segmentCount == candidate.segmentCount &&
                     record.segmentContent.isNotBlank() && fingerprint(record.segmentContent) == record.segmentContentHash &&
                     (when {
-                        index < candidate.segmentIndex -> record.status == ReplySegmentTaskStatus.SENT
+                        index < candidate.segmentIndex -> hasConfirmedSendReceipt(record)
                         index == candidate.segmentIndex -> record.status == candidate.status
                         else -> record.status == ReplySegmentTaskStatus.CREATED
                     })
@@ -1693,14 +1691,8 @@ class AiReplyDraftCoordinator(
         if (!valid || candidate == null || segments == null || targetNode == null ||
             windowIdentity == null || currentWindowKey == null || requestKey == null || startedAt == null
         ) {
-            if (recoveredPrivateOpenedAtMillis == null && candidate != null && (activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS ||
-                activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES
-            )) {
-                archiveUnconfirmedAttempt(candidate, segments.orEmpty())
-                val taskLabel = if (activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS) "收到招呼" else "私聊"
-                onLog("$taskLabel 历史发送[ARCHIVED_UNCONFIRMED]：补登记证据不足；本轮跳过历史发送，仅继续处理新消息")
-                return SendConfirmationResult.NOT_PENDING
-            }
+            // Insufficient proof never manufactures a success receipt. Keep the
+            // original journal untouched and non-replayable for a later observation.
             candidate?.let {
                 recordSendTrace(
                     "MESSAGE_SEND_UNCERTAIN", it.requestId, generation.get(),
@@ -1760,36 +1752,11 @@ class AiReplyDraftCoordinator(
         return SendConfirmationResult.WAITING
     }
 
-    /** Treats an unprovable historical send as handled for this round, never as resent. */
-    private fun archiveUnconfirmedAttempt(
-        candidate: ReplySegmentTaskRecord,
-        segments: List<ReplySegmentTaskRecord>
-    ) {
-        val archiveId = fingerprint("${candidate.requestId}|${candidate.conversationKey}|UNCERTAIN_ARCHIVED")
-        replySegmentTaskRepository?.let { repository ->
-            segments.filter {
-                it.status in setOf(
-                    ReplySegmentTaskStatus.SENDING,
-                    ReplySegmentTaskStatus.SENT_UNCONFIRMED,
-                    ReplySegmentTaskStatus.UNKNOWN
-                )
-            }.forEach { record ->
-                repository.update(record.copy(
-                    status = ReplySegmentTaskStatus.SENT,
-                    sentAt = record.sentAt ?: nowMillis(),
-                    confirmationId = record.confirmationId ?: archiveId
-                ))
-            }
-        }
-        candidate.sendRequestKey?.let { requestKey ->
-            replyTaskRepository?.updateStatus(
-                requestKey,
-                candidate.requestId,
-                ReplyTaskStatus.SENT,
-                nowMillis()
-            )
-        }
-    }
+    /** Legacy UNCERTAIN_ARCHIVED was stored as SENT only to suppress replay, not as proof. */
+    private fun hasConfirmedSendReceipt(record: ReplySegmentTaskRecord): Boolean =
+        record.status == ReplySegmentTaskStatus.SENT &&
+            !record.confirmationId.isNullOrBlank() &&
+            record.confirmationId != fingerprint("${record.requestId}|${record.conversationKey}|UNCERTAIN_ARCHIVED")
 
     fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
                           recoveredPrivateOpenedAtMillis: Long? = null): SendConfirmationResult {
@@ -1838,7 +1805,7 @@ class AiReplyDraftCoordinator(
             message.direction == ChatMessageDirection.OUTGOING &&
                 messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys &&
                 fingerprint(messageKey(message.stableLogicalMessageId, message.effectiveContentRevision)) !in pending.previousOutgoingKeyHashes
-                && ((diffTransaction && recoveredPrivateOpenedAtMillis == null) || (
+                && ((diffTransaction && recoveredPrivateOpenedAtMillis == null && !pending.recoveredFromLedger) || (
                     message.contentQuality == MessageContentQuality.VERIFIED &&
                     fingerprint(message.content.orEmpty()) == pending.segmentContentHash
                 ))
@@ -1865,13 +1832,27 @@ class AiReplyDraftCoordinator(
             }
             val confirmationId = fingerprint("${pending.requestId}|${pending.segmentIndex}|${pending.segmentContentHash}|${matched.stableLogicalMessageId}|${matched.effectiveContentRevision}")
             if (updateSegmentStatusAndContinue(pending, confirmationId)) {
+                val nextIndex = pending.segmentIndex + 1
+                if (nextIndex == pending.segmentCount) {
+                    val allSegmentsSent = runCatching {
+                        replySegmentTaskRepository?.findByRequest(pending.requestId)
+                            ?.let { records ->
+                                records.size == pending.segmentCount && records.all(::hasConfirmedSendReceipt)
+                            } ?: true
+                    }.getOrDefault(false)
+                    if (!allSegmentsSent ||
+                        !runCatching { updateTaskStatus(ReplyTaskStatus.SENT, pending.requestGeneration) }.getOrDefault(false)
+                    ) {
+                        onLog("AI 发送结果核验：整体任务完成门禁未通过；原收据尚未完整落盘；禁止返回列表")
+                        return SendConfirmationResult.WAITING
+                    }
+                }
                 recordSendTrace(
                     "MESSAGE_SEND_CONFIRMED", pending, "CONFIRMED",
                     sendConfirmationId = confirmationId
                 )
                 onLog("AI 发送结果核验：SENT；sendConfirmationId=${confirmationId.take(12)}；" +
                     "sendAttemptId=${pending.sendAttemptId.take(12)}")
-                val nextIndex = pending.segmentIndex + 1
                 synchronized(lock) {
                     pendingSendConfirmation = null
                     awaitingUserSend.set(false)
@@ -1894,16 +1875,7 @@ class AiReplyDraftCoordinator(
                         "等待新鲜聊天与空输入框复核后启动 segmentIndex=$nextIndex")
                     return SendConfirmationResult.WAITING
                 }
-                val allSegmentsSent = replySegmentTaskRepository?.findByRequest(pending.requestId)
-                    ?.let { records ->
-                        records.size == pending.segmentCount && records.all { it.status == ReplySegmentTaskStatus.SENT }
-                    } ?: true
-                if (!allSegmentsSent) {
-                    onLog("AI 发送结果核验：整体任务完成门禁未通过；仍存在未确认消息段；禁止返回列表")
-                    return SendConfirmationResult.WAITING
-                }
                 lastConfirmedSendId = confirmationId
-                updateTaskStatus(ReplyTaskStatus.SENT, pending.requestGeneration)
                 recordSendTrace(
                     "MESSAGE_SEND_COMPLETED", pending, "CONFIRMED",
                     reasonCode = "ALL_SEGMENTS_CONFIRMED", sendConfirmationId = confirmationId
@@ -1978,7 +1950,7 @@ class AiReplyDraftCoordinator(
             val segment = records.getOrNull(next.segmentIndex)
             val valid = records.size == activeMessageSegments.size &&
                 records.indices.all { records[it].segmentIndex == it && records[it].requestId == next.requestId } &&
-                records.take(next.segmentIndex).all { it.status == ReplySegmentTaskStatus.SENT } &&
+                records.take(next.segmentIndex).all(::hasConfirmedSendReceipt) &&
                 segment?.status == ReplySegmentTaskStatus.CREATED &&
                 segment?.segmentContentHash == activeMessageSegments.getOrNull(next.segmentIndex)?.let(::fingerprint)
             if (!valid) {
