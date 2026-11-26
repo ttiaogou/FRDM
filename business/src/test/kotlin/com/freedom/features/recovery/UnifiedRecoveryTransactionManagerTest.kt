@@ -58,6 +58,43 @@ class UnifiedRecoveryTransactionManagerTest {
     }
 
     @Test
+    fun verifiedDestinationRebindPreservesCheckpointAndRejectsOldRouteEvents() {
+        val manager = UnifiedRecoveryTransactionManager({ 7L })
+        val dispatcher = dispatcher(manager)
+        val detail = identity("AI_REPLY_PRIVATE_MESSAGES", route = "AI_REPLY_CHAT_DETAIL")
+        dispatcher.activate(detail)
+        dispatcher.dispatch(RecoveryTransactionEvent.UnknownPage("EMPTY_SNAPSHOT"))
+        dispatcher.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        dispatcher.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        val list = detail.copy(routeId = detail.taskId, observationGeneration = 2L)
+
+        assertFalse(manager.rebindPendingRoute(detail, list.copy(checkpointId = "different")))
+        assertFalse(manager.rebindPendingRoute(detail, list.copy(runGeneration = 8L)))
+        assertFalse(manager.rebindPendingRoute(detail, list.copy(observationGeneration = 1L)))
+        assertTrue(manager.rebindPendingRoute(detail, list))
+        assertEquals(detail.checkpointId, manager.snapshot(detail.taskId)?.checkpointId)
+        assertEquals(list.routeId, manager.snapshot(detail.taskId)?.routeId)
+        assertEquals(RecoveryTransactionState.RECOVERING, manager.snapshot(detail.taskId)?.state)
+        assertFalse(manager.completeVerified(detail))
+        assertFalse(manager.dispatch(detail, RecoveryTransactionEvent.ResumeCompleted,
+            RecoveryTransactionState.RESUMING) { RecoveryTransactionState.ACTIVE }.accepted)
+
+        dispatcher.reset()
+        dispatcher.activate(list)
+        dispatcher.dispatch(RecoveryTransactionEvent.CheckpointLoaded(
+            RecoveryTransactionEvent.Source.PAGE_OBSERVATION))
+        dispatcher.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        dispatcher.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        dispatcher.dispatch(RecoveryTransactionEvent.ResumeRequested)
+        assertEquals(RecoveryTransactionState.VERIFYING, dispatcher.state)
+        dispatcher.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
+        dispatcher.dispatch(RecoveryTransactionEvent.ResumeRequested)
+        dispatcher.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        assertEquals(RecoveryTransactionState.ACTIVE, dispatcher.state)
+        assertNull(manager.snapshot(detail.taskId))
+    }
+
+    @Test
     fun staleGenerationOrCheckpointCannotChangeCurrentRecoveryTransaction() {
         var generation = 8L
         val manager = UnifiedRecoveryTransactionManager({ generation })

@@ -1338,6 +1338,13 @@ class AiReplyObservationRuntime(
         }
         transientEmptySnapshotRecovery.reset()
         val recovered = inspection!!
+        // Once a business recovery owns the checkpoint, only its route verifier may
+        // advance the reducer or acknowledge completion. The legacy empty-snapshot
+        // timer is observation bookkeeping, not a second recovery authority.
+        if (recoveryContext.pending && snapshotRecoveryStartedAtMs != 0L) {
+            pageRecoveryVerificationGate.reset(SNAPSHOT_RECOVERY_ROUTE_ID)
+            snapshotRecoveryStartedAtMs = 0L
+        }
         if (sessionRunStarted &&
             (snapshotRecoveryStartedAtMs != 0L ||
                 (receivedGreetingsRecoveryVerificationPending && receivedGreetingsCheckpointForUnified == null)) &&
@@ -2049,6 +2056,28 @@ class AiReplyObservationRuntime(
             // The unattributed transition returned to the already-owned route. It was observed,
             // but it did not establish a new recovery destination.
             unmatchedNavigationObservationPending = false
+        }
+
+        // A confirmed list can replace the execution destination of an interrupted
+        // identity/detail read, but cannot replace its durable business checkpoint.
+        // Selection alone grants no lease; the existing list/greetings verifier
+        // below must still independently prove the destination.
+        if (recoveryContext.pending &&
+            recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+            recoveryContext.routeId == chatDetailRecoveryRoute.routeId &&
+            (matchedRouteId == messageListRecoveryRoute.routeId ||
+                matchedRouteId == receivedGreetingsRecoveryRoute.routeId) &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE &&
+            !receivedGreetingsTaskActive &&
+            !isSendConfirmationPending() && !isSendControlRecoveryPending()
+        ) {
+            if (!ensureAndroidRecoveryReady(inspection, "PRIVATE_DETAIL_ROUTE_HANDOFF") ||
+                !retargetInterruptedPrivateDetail(observation.observationGeneration)
+            ) {
+                lastPageInspection = inspection
+                scheduleFullInspectionAfter(350L)
+                return
+            }
         }
 
         if (tryVerifiedPrivateRecoveryToGreetingsHandoff(observation, inspection, matchedRouteId,
@@ -3606,6 +3635,80 @@ class AiReplyObservationRuntime(
             isExpectedPrivateSessionDetail(snapshot) &&
             currentSessionHeaderMatchMode(snapshot) != null &&
             windowSessionKey(snapshot) != null
+
+    /**
+     * Retire the old detail execution route, not its business progress. Only called
+     * with a freshly confirmed destination and Android readiness. The existing
+     * list verifier (or cross-task handoff) must still earn fresh proof and ownership.
+     */
+    private fun retargetInterruptedPrivateDetail(observationGeneration: Long): Boolean {
+        val old = recoveryTransaction.currentIdentity() ?: return false
+        val saved = recoveryContext.snapshot()
+        if (!sessionRunStarted || !isAiReplyActive() || receivedGreetingsTaskActive ||
+            !recoveryContext.matches(old) || old.taskId != PRIVATE_MESSAGES_TASK_ID ||
+            old.routeId != chatDetailRecoveryRoute.routeId ||
+            old.runGeneration != currentRunGeneration() ||
+            observationGeneration <= old.observationGeneration ||
+            !saved.checkpointSaved ||
+            isSendConfirmationPending() || isSendControlRecoveryPending()
+        ) return false
+
+        val checkpoint = if (privateMessagesCheckpointRepository != null) {
+            privateMessagesCheckpointRepository.load() ?: return false
+        } else privateMessagesTraversalTaskExecutor.checkpoint()
+        val next = old.copy(
+            routeId = messageListRecoveryRoute.routeId,
+            observationGeneration = observationGeneration
+        )
+        // Existing runtime reset invalidates model callbacks and preserves durable
+        // send evidence. A pending send/control transaction must never enter here.
+        if (isConversationDraftPending()) {
+            if (runCatching { onDraftRuntimeReset() }.isFailure ||
+                isConversationDraftPending() || isSendConfirmationPending() ||
+                isSendControlRecoveryPending()
+            ) return false
+        }
+        if (recoveryTransactionManager?.rebindPendingRoute(old, next) == false) return false
+
+        messageListCheckpointVerifier.reset()
+        pageRecoveryVerificationGate.reset()
+        recoveryContext.request(
+            taskId = next.taskId,
+            recoveryReason = requireNotNull(saved.reason),
+            routeId = next.routeId,
+            generation = next.runGeneration,
+            recoveryCheckpointId = next.checkpointId,
+            pageObservationGeneration = next.observationGeneration
+        )
+        recoveryContext.markCheckpointSaved()
+        if (saved.checkpointLoaded) recoveryContext.markCheckpointLoaded()
+        recoveryTransaction.reset()
+        recoveryTransaction.activate(next)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.CheckpointLoaded(
+            RecoveryTransactionEvent.Source.PAGE_OBSERVATION
+        ))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+
+        // Do not restore/reset the traversal executor: its existing cursor and
+        // round ledger belong to the checkpoint, not to the departed UI window.
+        messageListCheckpointForUnified = checkpoint
+        messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION
+        sessionActionGeneration += 1L
+        invalidatePendingMessageRead()
+        latestPrivateMessageBatch = null
+        expectedPrivateSessionDetailNavigation = null
+        currentSessionBinding = null
+        privateMessagesTraversalTaskExecutor.clearCurrentSession()
+        // Retire the obsolete one-shot signal; this is not detail-return proof.
+        if (chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()) {
+            onLog("AI 身份回接[REQUEST_RETIRED]：旧详情页执行路由已退出；不启动OCR或草稿")
+        }
+        lastIdentityReturnNotConsumedReason = null
+        sessionManagerState = SessionManagerState.PAUSED
+        onLog("统一恢复[DETAIL_TO_LIST_ROUTE_REBOUND]：checkpointId=${next.checkpointId}；" +
+            "原业务检查点保留；旧详情回调失效；等待列表独立验证及UI操作权")
+        return true
+    }
 
     /** Single pause/checkpoint entry used by page-route changes and UNKNOWN observations. */
     private fun requestUnifiedPauseAndCheckpoint(taskId: String, reason: String): Boolean {

@@ -4757,6 +4757,147 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun boundPrivateDetailManualReturnRebindsToFreshInboxWithoutCompletingOldRoute() {
+        val scheduler = FakeScheduler()
+        val candidate = sessionCandidate(completeBoundaryEvidence = true)
+        val port = FakeChatPort().apply {
+            sessionRunEnabled = true
+            resolvedTapBounds = candidate.rowBounds
+            // Structure read -> identity terminal -> OCR callback -> draft, as in Momo.
+            simulateStructureThenOcr = true
+            ocrDebugTextByRowIndex = mapOf(1 to "OCR_CONFIRMED_BODY")
+            identityCaptureOutcomeOverride = ContactIdentityCaptureOutcome.waiting(
+                ContactIdentityCaptureRequestResult.RETRY_LATER
+            )
+            page = ChatPageSnapshot(
+                packageName = "com.immomo.momo",
+                activityClass = "com.immomo.momo.maintab.MaintabActivity",
+                pageKind = ChatPageKind.CHAT_LIST,
+                scannedNodeCount = 80,
+                editableInputCount = 0,
+                messageListCount = 0,
+                sendActionCount = 0,
+                messageRelatedViewIdCount = 0,
+                hasChatTab = true,
+                messageListTarget = null,
+                inputFieldTarget = null,
+                chatListViewport = ScreenRect(0, 120, 720, 1480),
+                chatListCandidates = listOf(candidate),
+                windowGeneration = 1L
+            )
+        }
+        val inbox = port.page
+        val logs = ArrayList<String>()
+        val manager = UnifiedRecoveryTransactionManager({ 0L }, logs::add)
+        var draftCalls = 0
+        var draftHadOcrEvidence = false
+        var draftIdentityVerified = false
+        var boundAtRebind = false
+        var sendGateReasonAtRebind: String? = null
+        lateinit var runtime: AiReplyObservationRuntime
+        val gesture = object : TestGestureApi {
+            override fun execute(
+                command: GestureIntentRequest,
+                listener: GestureExecutionListener
+            ): GestureSubmission {
+                if (command.kind == GestureKind.TAP) port.page = chatDetailSnapshot()
+                listener.onResult(GestureExecutionResult(command.id, GestureExecutionStatus.COMPLETED))
+                return GestureSubmission.ACCEPTED
+            }
+        }
+        runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            recoveryTransactionManager = manager,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = gesture,
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = { entry ->
+            logs += entry
+            if (entry.contains("AI 会话绑定[VERIFIED_CHAT_REBOUND]")) {
+                boundAtRebind = runtime.javaClass.getDeclaredMethod("hasBoundPrivateDetailRecoverySession")
+                    .apply { isAccessible = true }.invoke(runtime) as Boolean
+                sendGateReasonAtRebind = runtime.javaClass.getDeclaredMethod(
+                    "privateSendConfirmationDetailReason", ChatPageSnapshot::class.java
+                ).apply { isAccessible = true }.invoke(runtime, port.page) as String
+            }
+        },
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            onDraftConversationObserved = { batch, _, identity, _ ->
+                draftCalls++
+                draftHadOcrEvidence = batch.ocrAttempted && batch.ocrRecognizedTargetCount > 0
+                draftIdentityVerified = identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+                true
+            }
+        )
+        runtime.scheduleInitialObservation()
+        runUntil(scheduler, 180) {
+            logs.any { it.contains("AI 联系人身份采集中") }
+        }
+        assertEquals(0, draftCalls)
+        port.deferNextStructureRead = true
+        val freshInspection = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
+            isAccessible = true
+        }
+        freshInspection.invoke(runtime)
+        assertTrue("Expected a pre-recovery in-flight read", port.hasDeferredStructureRead())
+
+        // Simulate a transient empty accessibility tree during profile-to-chat BACK.
+        port.page = ChatPageSnapshot(
+            packageName = "com.immomo.momo",
+            activityClass = "ChatActivity",
+            pageKind = ChatPageKind.UNKNOWN,
+            scannedNodeCount = 0,
+            editableInputCount = 0,
+            messageListCount = 0,
+            sendActionCount = 0,
+            messageRelatedViewIdCount = 0,
+            hasChatTab = false,
+            messageListTarget = null,
+            inputFieldTarget = null
+        )
+        freshInspection.invoke(runtime)
+        assertTrue(logs.any { it.contains("AI 聊天详情恢复[ROUTE_SELECTED]") })
+        val readsBeforeRecovery = port.messageReads
+
+
+        val originalIdentity = manager.snapshot(PrivateMessagesTaskController.TASK_ID)
+        assertEquals("AI_REPLY_CHAT_DETAIL", originalIdentity?.routeId)
+        assertTrue(originalIdentity != null)
+        assertFalse(logs.any { it.contains("outcome=ResumeCompleted") })
+
+        port.pendingIdentityReturnReinspection = true
+        port.page = inbox.copy(windowGeneration = 2L)
+        freshInspection.invoke(runtime)
+        assertFalse("One list sample cannot complete recovery",
+            logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") })
+        assertEquals(0, draftCalls)
+        assertFalse(logs.any { it.contains("outcome=ResumeCompleted") &&
+            it.contains("routeId=AI_REPLY_CHAT_DETAIL") })
+
+        var samples = 0
+        while (logs.none { it.contains("统一页面恢复[RECOVERY_VERIFIED]") } && samples < 16) {
+            freshInspection.invoke(runtime)
+            samples++
+        }
+        assertTrue(logs.any { it.contains("统一恢复[DETAIL_TO_LIST_ROUTE_REBOUND]") &&
+            it.contains(originalIdentity!!.checkpointId) })
+        assertTrue(logs.any { it.contains("统一页面恢复[RECOVERY_VERIFIED]") &&
+            it.contains("目标路由=AI_REPLY_PRIVATE_MESSAGES") })
+        assertFalse(logs.any { it.contains("outcome=ResumeCompleted") &&
+            it.contains("routeId=AI_REPLY_CHAT_DETAIL") })
+        assertEquals("No stale detail draft", 0, draftCalls)
+        assertEquals(readsBeforeRecovery, port.messageReads)
+        assertFalse(port.pendingIdentityReturnReinspection)
+        assertEquals(0, port.navigateBackCalls)
+    }
+
+    @Test
     fun boundPrivateDetailEmptySnapshotRecoversOnlyAfterFreshTargetAndIdentityReturnProof() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)
