@@ -117,7 +117,7 @@ class AiReplyDecisionEngineTest {
         assertEquals(0.4, request.temperature, 0.0)
         assertEquals(256, request.maxOutputTokens)
         assertTrue(request.systemInstruction.contains("轻微、克制的暧昧和试探感"))
-        assertTrue(request.systemInstruction.contains("尽量用最少的文字直接回答"))
+        assertTrue(request.systemInstruction.contains("回复长度：短点保持口语化，尽量用最少的文字。"))
         assertTrue(request.systemInstruction.contains("根据语境自然表达关心或积极态度"))
         assertTrue(request.systemInstruction.contains("偶尔加入轻松幽默"))
     }
