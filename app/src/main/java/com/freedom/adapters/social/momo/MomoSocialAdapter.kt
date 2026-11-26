@@ -5749,6 +5749,7 @@ internal class MomoSocialAdapter(
         @Volatile var stageStartedAt = SystemClock.uptimeMillis()
         var albumWindow: WindowRef? = null
         var directoryRejectedRetries = 0
+        var interceptionLayoutRejectedRetries = 0
         var lastWaitReason: String? = null
     }
 
@@ -5924,6 +5925,16 @@ internal class MomoSocialAdapter(
                     test.stage = previous
                     test.stageStartedAt = previousStartedAt
                     testWait(test, "DIRECTORY_TAP_REJECTED_REACQUIRE")
+                } else if (previous == ImageTestStage.INTERCEPTION_OPEN_CONTROL &&
+                    test.interceptionLayoutRejectedRetries == 0 && testCurrent(test)
+                ) {
+                    // The settings entry was rejected before admission. Re-resolve its
+                    // live bounds on the next observation; never replay an accepted tap.
+                    test.interceptionLayoutRejectedRetries++
+                    test.inFlight = false
+                    test.stage = previous
+                    test.stageStartedAt = previousStartedAt
+                    testWait(test, "INTERCEPTION_LAYOUT_TAP_REJECTED_REACQUIRE")
                 } else testTerminal(test, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
             }
             else -> testTerminal(test, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
@@ -5966,9 +5977,18 @@ internal class MomoSocialAdapter(
         val window = accessibilityGateway.currentGestureWindow() ?: return
         if (window.packageName != targetPackage || window.windowId < 0) return
         submitImageTestStep(test, next) { callback ->
+            var layoutBoundsLogged = false
             submitVerifiedAlbumTap(
                 test.target, window, test.id, { testCurrent(test) }, action,
-                resolve = resolve, boundsOf = { it }, onGestureResult = callback
+                resolve = { root, liveWindow ->
+                    resolve(root, liveWindow)?.also { bounds ->
+                        if (action == "interception-layout" && !layoutBoundsLogged) {
+                            layoutBoundsLogged = true
+                            onLog("MESSAGE_INTERCEPTION_TEST LAYOUT_TARGET windowId=${liveWindow.windowId};" +
+                                "generation=${liveWindow.generation};bounds=$bounds")
+                        }
+                    }
+                }, boundsOf = { it }, onGestureResult = callback
             )
         }
     }
