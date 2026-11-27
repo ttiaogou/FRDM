@@ -9908,6 +9908,7 @@ class AiReplyObservationRuntimeTest {
             manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
             observedDetailIdentityEnabled = true
             visualOnlyMessages = true
+            rejectBackAttempts = 1
             page = chatDetailSnapshot()
         }
         val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
@@ -9961,6 +9962,11 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, drafts)
         val reads = port.messageReads
         runUntilShortestDelay(scheduler, 30) { port.navigateBackCalls == 1 }
+        assertEquals(reads, port.messageReads)
+        // A rejected first BACK is not a completed visit. Require the existing two
+        // original-detail snapshots before retrying, without another OCR/model call.
+        runUntilShortestDelay(scheduler, 40) { port.navigateBackCalls == 2 }
+        assertTrue(logs.any { it.contains("AI 私聊延期返回[DETAIL_STABILITY_WAIT]") })
         assertEquals(reads, port.messageReads)
         assertTrue(logs.none { it.contains("PAIRED_QUOTA[COUNT]") || it.contains("TERMINAL_CONFIRMED") })
     }

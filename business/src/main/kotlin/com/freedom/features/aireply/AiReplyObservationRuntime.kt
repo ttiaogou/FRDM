@@ -8508,9 +8508,9 @@ class AiReplyObservationRuntime(
         ChatSessionManagementPolicy.normalizeSessionTitle(value)
 
     /**
-     * A confirmed private send owns its BACK recovery until a fresh inbox is recognized.
-     * Submission success alone is not navigation success; a no-op/rejected BACK may only be
-     * retried after two independently read, same-window, same-session detail snapshots.
+     * A confirmed private send or durably parked pre-send read owns BACK recovery until
+     * a fresh inbox is recognized. Submission is not navigation success; a no-op/rejected
+     * BACK may only be retried after two independent same-window, same-session snapshots.
      * UNKNOWN or foreign pages use the existing durable list-checkpoint recovery instead.
      */
     private fun scheduleConfirmedPrivateReturnVerification(
@@ -8525,14 +8525,16 @@ class AiReplyObservationRuntime(
     }
 
     private fun verifyConfirmedPrivateReturn(reason: String) {
+        val deferredRead = deferredPrivateReadReturnVisit == draftVisitToken
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
             sessionManagerState != SessionManagerState.RETURNING_TO_SESSION_LIST ||
-            !currentSessionSendConfirmed || recoveryContext.pending
+            (!currentSessionSendConfirmed && !deferredRead) || recoveryContext.pending
         ) return
+        val returnLog = if (deferredRead) "AI 私聊延期返回" else "AI 私聊发送返回"
         if (!canPerformPrivateMessagesUiAction()) {
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
-            onLog("AI 私聊发送返回[LEASE_NOT_HELD]：原任务失去操作权；进入检查点恢复，不派发 BACK")
-            recoverRetryablePrivateList("PRIVATE_SEND_RETURN_LEASE_NOT_HELD")
+            onLog("$returnLog[LEASE_NOT_HELD]：原任务失去操作权；进入检查点恢复，不派发 BACK")
+            recoverRetryablePrivateList(if (deferredRead) "PRIVATE_READ_RETURN_LEASE_NOT_HELD" else "PRIVATE_SEND_RETURN_LEASE_NOT_HELD")
             return
         }
 
@@ -8543,7 +8545,7 @@ class AiReplyObservationRuntime(
             observed.packageName == targetPackage() && !isSemanticallyUnconfirmed(observed)
         ) {
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
-            onLog("AI 私聊发送返回[INBOX_VERIFIED]：Back 后重新获取到私聊列表；恢复原遍历游标")
+            onLog("$returnLog[INBOX_VERIFIED]：Back 后重新获取到私聊列表；恢复原遍历游标")
             if (currentSessionBinding?.observedBusinessAdmitted == true) {
                 requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "OBSERVED_DETAIL_RETURN")
                 scheduleFullInspectionAfter(0L)
@@ -8562,9 +8564,9 @@ class AiReplyObservationRuntime(
             !isSemanticallyUnconfirmed(observed)
         if (!stillOriginalDetail || observed == null) {
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
-            onLog("AI 私聊发送返回[PAGE_UNVERIFIED]：reason=$reason；" +
+            onLog("$returnLog[PAGE_UNVERIFIED]：reason=$reason；" +
                 "page=${observed?.pageKind?.name ?: "NO_SNAPSHOT"}；停止额外 BACK；转入原消息列表检查点恢复")
-            recoverRetryablePrivateList("PRIVATE_SEND_RETURN_PAGE_UNVERIFIED")
+            recoverRetryablePrivateList(if (deferredRead) "PRIVATE_READ_RETURN_PAGE_UNVERIFIED" else "PRIVATE_SEND_RETURN_PAGE_UNVERIFIED")
             return
         }
 
@@ -8572,7 +8574,7 @@ class AiReplyObservationRuntime(
             runCatching { isConversationDraftPending() }.getOrDefault(true)
         ) {
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
-            onLog("AI 私聊发送返回[TRANSACTION_WAIT]：仍有用户操作或发送事务待核验；只读等待，不重新 BACK")
+            onLog("$returnLog[TRANSACTION_WAIT]：仍有用户操作或发送事务待核验；只读等待，不重新 BACK")
             scheduleConfirmedPrivateReturnVerification(
                 "TRANSACTION_WAIT", RecoveryScheduler.readOnlyRetryDelayMs(1)
             )
@@ -8583,7 +8585,7 @@ class AiReplyObservationRuntime(
                 CONFIRMED_PRIVATE_RETURN_DETAIL_GATE, recoveryStructuralKey(observed)
             )
         ) {
-            onLog("AI 私聊发送返回[DETAIL_STABILITY_WAIT]：第" +
+            onLog("$returnLog[DETAIL_STABILITY_WAIT]：第" +
                 "${pageRecoveryVerificationGate.stableSamples(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)}/2次原会话新鲜快照；不直接重试 BACK")
             scheduleConfirmedPrivateReturnVerification("DETAIL_STABILITY_WAIT", 350L)
             return
@@ -8594,11 +8596,12 @@ class AiReplyObservationRuntime(
             snapshot = observed, expectedPackage = targetPackage(), evidence = readiness
         )
         if (!admission.allowed || !canPerformPrivateMessagesUiAction() ||
+            (deferredRead && !privateReadDeferralPageReady(observed, returning = true)) ||
             isSendConfirmationPending() ||
             runCatching { isConversationDraftPending() }.getOrDefault(true)
         ) {
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
-            onLog("AI 私聊发送返回[RETRY_DEFERRED]：Android、操作权或发送状态尚未就绪；只读复核，不派发 BACK")
+            onLog("$returnLog[RETRY_DEFERRED]：Android、操作权或发送状态尚未就绪；只读复核，不派发 BACK")
             scheduleConfirmedPrivateReturnVerification(
                 "RETRY_DEFERRED", RecoveryScheduler.readOnlyRetryDelayMs(1)
             )
@@ -8613,8 +8616,8 @@ class AiReplyObservationRuntime(
             chatSessionManagementPort.navigateBackToSessionList()
         }.getOrDefault(false)
         onLog(
-            if (accepted) "AI 私聊发送返回[BACK_RETRY_ACCEPTED]：原会话双快照已验证；等待列表新快照"
-            else "AI 私聊发送返回[BACK_RETRY_REJECTED]：适配器未接受本次 BACK；保留确认发送记录并继续只读复核"
+            if (accepted) "$returnLog[BACK_RETRY_ACCEPTED]：原会话双快照已验证；等待列表新快照"
+            else "$returnLog[BACK_RETRY_REJECTED]：适配器未接受本次 BACK；保留业务检查点并继续只读复核"
         )
         // Keep the existing 900ms post-BACK verification floor; apply unbounded recovery
         // backoff after repeated failures instead of rapidly dispatching global BACK.
@@ -8745,6 +8748,13 @@ class AiReplyObservationRuntime(
             val accepted = runCatching {
                 chatSessionManagementPort.navigateBackToSessionList()
             }.getOrDefault(false)
+            if (deferredPrivateReadReturnVisit == draftVisitToken) {
+                onLog("AI 私聊延期返回[BACK_SUBMITTED]：accepted=$accepted；等待独立列表验证；不重新 OCR")
+                scheduleConfirmedPrivateReturnVerification(
+                    if (accepted) "READ_BACK_SUBMITTED" else "READ_BACK_REJECTED"
+                )
+                return@schedule
+            }
             if (currentSessionSendConfirmed) {
                 if (!accepted) {
                     onLog("AI 私聊发送返回[INITIAL_BACK_REJECTED]：系统未接受 BACK；保留发送检查点并重新确认页面")
@@ -9441,9 +9451,10 @@ class AiReplyObservationRuntime(
             confirmedGreetingSend == null && privateModelFailureRecovery == null &&
             !privateModelRetryAwaitingDraft && greetingModelFailureRecovery == null
 
-    private fun privateReadDeferralPageReady(snapshot: ChatPageSnapshot): Boolean =
+    private fun privateReadDeferralPageReady(snapshot: ChatPageSnapshot, returning: Boolean = false): Boolean =
         unreadableVisualReturnIdle() && !receivedGreetingsTaskActive &&
-            sessionManagerState == SessionManagerState.READING_SESSION &&
+            sessionManagerState == (if (returning) SessionManagerState.RETURNING_TO_SESSION_LIST
+                else SessionManagerState.READING_SESSION) &&
             canPerformPrivateMessagesUiAction() && hasBoundPrivateDetailRecoverySession() &&
             snapshot.packageName == targetPackage() && snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             currentSessionWindowKey == windowSessionKey(snapshot) &&
