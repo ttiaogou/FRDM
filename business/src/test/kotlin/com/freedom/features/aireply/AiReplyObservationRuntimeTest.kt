@@ -700,6 +700,7 @@ class AiReplyObservationRuntimeTest {
     )
 
     private fun preScrollPageRecoveryFixture(
+        checkpointSaveAllowed: () -> Boolean = { true },
         foregroundQuietRemainingMs: () -> Long = { 0L }
     ): PreScrollPageRecoveryFixture {
         val scheduler = FakeScheduler()
@@ -728,7 +729,10 @@ class AiReplyObservationRuntimeTest {
         var saved: PrivateMessagesTraversalCheckpoint? = null
         val repository = object : PrivateMessagesTraversalCheckpointRepository {
             override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = saved
-            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { saved = checkpoint }
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) {
+                check(checkpointSaveAllowed()) { "injected checkpoint save failure" }
+                saved = checkpoint
+            }
             override fun clear() = Unit
         }
         val logs = mutableListOf<String>()
@@ -1034,6 +1038,78 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, fixture.port.receivedGreetingsNavigationTaskStarts)
         assertEquals(0, fixture.dispatchedGestures())
         assertTrue(fixture.logs.any { it.contains("HANDOFF_BLOCKED") })
+    }
+
+    @Test
+    fun l06FailedPrivateCheckpointSaveDoesNotTransferLeaseAndCanRetry() {
+        var allowSave = true
+        val fixture = preScrollPageRecoveryFixture(checkpointSaveAllowed = { allowSave })
+        cancelFixtureStartupObservation(fixture)
+        fixture.port.receivedGreetingsWorkflowEnabled = true
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.lockedUnreadSessionKeys += "pending"
+        executor.attemptedSessionKeys += "done"
+        allowSave = false
+        invokeSafeSessionBoundaryHandoff(fixture)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(0, fixture.dispatchedGestures())
+        assertTrue(fixture.logs.any { it.contains("PRIVATE_CHECKPOINT_NOT_SAVED") })
+        allowSave = true
+        invokeSafeSessionBoundaryHandoff(fixture)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        assertEquals(1, fixture.port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(setOf("pending"), requireNotNull(fixture.checkpoint()).lockedUnreadSessionKeys)
+        assertEquals(setOf("done"), requireNotNull(fixture.checkpoint()).attemptedSessionKeys)
+    }
+
+    @Test
+    fun l06SafeBoundaryRoundTripPreservesPrivateCursorAndWaitsForAdapterAcknowledgement() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val port = fixture.port
+        port.receivedGreetingsWorkflowEnabled = true
+        port.provideMessageTabPositionEvidence = true
+        port.pageAfterReceivedGreetingsReturn = fixture.listPage
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.lockedUnreadSessionKeys += "offscreen-pending"
+        executor.attemptedSessionKeys += "done"
+        executor.checkpointNextCursorKey = "offscreen-pending"
+        invokeSafeSessionBoundaryHandoff(fixture)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        val flow = fixture.runtime.javaClass.getDeclaredField("receivedGreetingsTaskFlow")
+            .apply { isAccessible = true }.get(fixture.runtime) as ReceivedGreetingsTaskFlowController
+        port.page = fixture.listPage.copy(
+            activityClass = "com.immomo.momo.newsayhi.NewSayHiListActivity",
+            pageKind = ChatPageKind.NON_CHAT, hasChatTab = false, chatListCandidates = emptyList()
+        )
+        // The quota is intentionally not installed: inject only the safe yield intent.
+        assertTrue(flow.requestSafeHandoffReturn())
+        port.greetingReturnConfirmationAccepted = false
+        runUntilLog(fixture.scheduler, fixture.logs, "收到的招呼任务[BACK_SUBMITTED]")
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        runUntilLog(fixture.scheduler, fixture.logs, "跨任务交接[INBOX_VERIFYING]")
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        runUntil(fixture.scheduler, 40) { port.greetingReturnConfirmationAttempts > 0 }
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals(0, fixture.dispatchedGestures())
+
+        port.greetingReturnConfirmationAccepted = true
+        runUntilLog(fixture.scheduler, fixture.logs, "跨任务交接[PRIVATE_LEASE_TRANSFERRED]")
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals(1, port.receivedGreetingsConfirmedReturns)
+        assertTrue(port.lastGreetingsReturnPreservedTraversal)
+        assertEquals(setOf("offscreen-pending"), executor.lockedUnreadSessionKeys)
+        assertEquals(setOf("done"), executor.attemptedSessionKeys)
+        assertEquals("offscreen-pending", executor.checkpointNextCursorKey)
+        assertFalse(fixture.logs.any { it.contains("自主轮询[ROUND_STATE_REBUILT]") })
+        assertFalse(fixture.logs.any { it.contains("AI Reply 低频待机") })
     }
 
     @Test
@@ -10496,7 +10572,11 @@ class AiReplyObservationRuntimeTest {
             return ReceivedGreetingsBackResult.BACK_SUBMITTED
         }
         var lastGreetingsReturnPreservedTraversal = false
+        var greetingReturnConfirmationAccepted = true
+        var greetingReturnConfirmationAttempts = 0
         override fun confirmReceivedGreetingsCompletionReturn(preserveTraversal: Boolean): Boolean {
+            greetingReturnConfirmationAttempts++
+            if (!greetingReturnConfirmationAccepted) return false
             lastGreetingsReturnPreservedTraversal = preserveTraversal
             receivedGreetingsConfirmedReturns++
             return true

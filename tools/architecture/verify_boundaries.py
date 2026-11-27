@@ -583,6 +583,7 @@ def inspect_project(root: Path) -> list[str]:
     # 13) Stage 4-C: removed manual handoff must stay removed; all three checkpoint
     # routes must keep the common verifier and a bounded, non-terminal scheduler.
     issues.extend(automatic_recovery_hard_boundary_violations(code_by_path))
+    issues.extend(paired_ai_task_boundary_violations(code_by_path))
 
     return issues
 
@@ -1843,6 +1844,93 @@ def automatic_recovery_hard_boundary_violations(code_by_path: dict[str, str]) ->
     return issues
 
 
+def paired_ai_task_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
+    """Keep task yield independent of scan exhaustion and retain checkpoint/lease gates.
+
+    Input is masked Kotlin. These narrow source contracts complement behavioral tests;
+    they deliberately do not prescribe the traversal algorithm or physical gestures.
+    """
+    issues: list[str] = []
+    prefix = "business/src/main/kotlin/com/freedom/features/aireply/"
+    runtime = prefix + "AiReplyObservationRuntime.kt"
+    flow = prefix + "ReceivedGreetingsTaskFlowController.kt"
+    adapter = "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt"
+    controller = prefix + "ReceivedGreetingsTaskController.kt"
+
+    def body(path: str, name: str) -> str:
+        code = code_by_path.get(path, "")
+        match = re.search(r"\bfun\s+" + re.escape(name) + r"\s*\(", code)
+        start = code.find("{", match.end()) if match else -1
+        if start >= 0:
+            depth = 1
+            for index in range(start + 1, len(code)):
+                if code[index] == "{":
+                    depth += 1
+                elif code[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return code[start + 1:index]
+        issues.append(f"Paired task boundary missing {name}: {path}")
+        return ""
+
+    def require_order(path: str, name: str, *tokens: str) -> str:
+        source = body(path, name)
+        cursor = -1
+        for token in tokens:
+            cursor = source.find(token, cursor + 1)
+            if cursor < 0:
+                issues.append(f"Paired task boundary {name} lost ordered gate {token}: {path}")
+                break
+        return source
+
+    private_return = require_order(
+        runtime, "startReceivedGreetingsTask", "canPerformPrivateMessagesUiAction()",
+        "ensureAndroidRecoveryReady(", "repository?.save(executor.checkpoint())",
+        "claimAndBeginReceivedGreetingsTask(", "sessionActionGeneration += 1L",
+        "receivedGreetingsTaskFlow.performInitialIdleStep()",
+    )
+    for token in ("executor.atTop", "executor.lockedUnreadSetFinalized",
+                  "executor.pendingKnownUnreadKeys()", "executor.unresolvedUnknownUnreadKeys",
+                  "executor.unresolvedIncompleteUnreadKeys"):
+        if token in private_return:
+            issues.append(f"Paired task handoff must not require full private traversal: {token}")
+
+    require_order(
+        runtime, "verifyGreetingsToPrivateHandoff", "ownsTask(RECEIVED_GREETINGS_TASK_ID)",
+        "ensureAndroidRecoveryReady(", "pageRecoveryVerificationGate.observe(",
+        "ensureAndroidRecoveryReady(",
+    )
+    require_order(
+        runtime, "observePairWake", "ownsTask(PRIVATE_MESSAGES_TASK_ID)",
+        "ensureAndroidRecoveryReady(", "pageRecoveryVerificationGate.observe(",
+        "ensureAndroidRecoveryReady(", "executor.renewExhaustedPrivateSelection()",
+    )
+    greeting_return = require_order(
+        adapter, "returnFromReceivedGreetingsForPriorityCheck", "sayHiGestureInFlight",
+        "hasReceivedGreetingsListFingerprint(", "persistSayHiTraversalCheckpoint()",
+        "accessibilityGateway.performGlobalAction(",
+    )
+    for token in ("sayHiAutonomousBrowseController.isFinished()", "sayHiTraversalState.hasDeferredRows"):
+        if token in greeting_return:
+            issues.append(f"Paired task handoff must not require full greetings traversal: {token}")
+    confirmed = require_order(adapter, "confirmReceivedGreetingsCompletionReturn",
+                              "inboxConfirmed", "sayHiTraversalState.suspendTraversal(",
+                              "sayHiRunGenerationGuard.invalidatePreviousRun()")
+    if "sayHiTraversalState.clear()" in confirmed:
+        issues.append("Paired task handoff must preserve greetings checkpoint")
+    require_order(controller, "finishVerifiedHandoff", "if (!inboxConfirmed) return false",
+                  "lifecycle = Lifecycle.SUSPENDED")
+    require_order(flow, "evaluatePageSnapshot", "lifecycle.awaitingNormalInboxAfterReturn",
+                  "!lifecycle.isActive", "!lifecycle.ownsTask()", "executor.evaluatePageProgress(")
+    for path in (runtime, flow, controller):
+        code = code_by_path.get(path, "")
+        for token in ("privateRoundCompletedForGreetings", "pollingRoundPending",
+                      "pollingRoundDue", "markTraversalCompleted", "markTraversalReturnedToInbox"):
+            if re.search(r"\b" + token + r"\b", code):
+                issues.append(f"Legacy paired task lifecycle symbol {token}: {path}")
+    return issues
+
+
 def architecture_advisories(root: Path) -> list[str]:
     """Report high-LOC production classes as review signals, never automatic violations."""
     root = root.resolve()
@@ -1893,6 +1981,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(" - P7 bypass cleanup: mandatory event gateway, task-scoped recovery-only registry, managed fingerprint verification")
     print(" - Automatic recovery: legacy manual handoff forbidden; three checkpoint routes use shared verification")
     print(" - Recovery scheduler: bounded non-terminal backoff, touch reset, stale-callback and user-stop gates")
+    print(" - Paired AI tasks: independent yield, checkpoint preservation, verified handoff and wake gates")
     print(" - OCR runtime/models: confined to the separately installed :ocr-plugin APK")
     print(" - Host/plugin AIDL contract: identical; host does not package ONNX Runtime or OpenCV")
     print(" - AGENTS source integrity and Feature/Adapter/Data/UI ownership boundaries: valid")

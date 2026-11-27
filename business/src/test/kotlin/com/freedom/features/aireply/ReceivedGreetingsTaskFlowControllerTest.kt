@@ -64,6 +64,8 @@ class ReceivedGreetingsTaskFlowControllerTest {
     fun classifiedPageSnapshotProducesStableProgressDecisions() {
         val port = FakePagePort()
         val flow = createFlow(port)
+        assertTrue(flow.claimOwnership("test"))
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
 
         port.status = ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND
         assertEquals(
@@ -93,6 +95,7 @@ class ReceivedGreetingsTaskFlowControllerTest {
         val port = FakePagePort()
         val flow = createFlow(port)
         assertTrue(flow.claimOwnership("test"))
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
 
         port.status = ReceivedGreetingsTraversalStatus.SCANNING
         assertEquals(
@@ -120,6 +123,7 @@ class ReceivedGreetingsTaskFlowControllerTest {
         val port = FakePagePort()
         val flow = createFlow(port)
         assertTrue(flow.claimOwnership("test"))
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
 
         port.status = ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND
         port.stepAccepted = false
@@ -241,6 +245,31 @@ class ReceivedGreetingsTaskFlowControllerTest {
         flow.markReturnRequested()
         assertTrue(flow.confirmCompletionReturn())
         assertTrue(port.preservedTraversal)
+    }
+
+    @Test
+    fun retainedLeaseCannotAdvanceSuspendedOrReturningTask() {
+        val port = FakePagePort()
+        val flow = createFlow(port)
+        assertTrue(flow.claimOwnership("test"))
+        assertFalse(flow.performInitialIdleStep())
+        assertEquals(ReceivedGreetingsTaskFlowController.DecisionKind.RETRY_REQUIRED,
+            flow.evaluatePageSnapshot(ChatPageKind.NON_CHAT).kind)
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
+        flow.suspendForRecovery()
+        assertTrue(flow.ownsTask())
+        assertFalse(flow.performInitialIdleStep())
+        assertEquals(ReceivedGreetingsTaskFlowController.DecisionKind.RETRY_REQUIRED,
+            flow.evaluatePageSnapshot(ChatPageKind.NON_CHAT).kind)
+        assertEquals(0, port.idleSteps)
+
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
+        assertTrue(flow.performInitialIdleStep())
+        assertTrue(flow.requestSafeHandoffReturn())
+        assertFalse(flow.performInitialIdleStep())
+        assertEquals(ReceivedGreetingsTaskFlowController.DecisionKind.RETURN_PENDING,
+            flow.evaluatePageSnapshot(ChatPageKind.NON_CHAT).kind)
+        assertEquals(1, port.idleSteps)
     }
 
     @Test

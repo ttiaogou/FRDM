@@ -120,7 +120,8 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun markStarted() = lifecycle.markStarted()
 
-    fun performInitialIdleStep(): Boolean = executor.performIdleStep()
+    fun performInitialIdleStep(): Boolean =
+        lifecycle.isActive && !lifecycle.awaitingNormalInboxAfterReturn && executor.performIdleStep()
 
     fun returnForPriorityCheck(): ReceivedGreetingsBackResult = when {
         !lifecycle.ownsTask() -> ReceivedGreetingsBackResult.OWNERSHIP_REJECTED
@@ -183,6 +184,11 @@ internal class ReceivedGreetingsTaskFlowController(
     fun evaluatePageSnapshot(pageKind: ChatPageKind): Decision {
         if (lifecycle.awaitingNormalInboxAfterReturn) {
             return Decision(DecisionKind.RETURN_PENDING, executor.traversalStatus(), DecisionOrigin.PAGE_PROGRESS)
+        }
+        // A retained lease during recovery is not permission to advance a suspended
+        // or not-yet-admitted task. Old callbacks must not restart list navigation.
+        if (!lifecycle.isActive || !lifecycle.ownsTask()) {
+            return Decision(DecisionKind.RETRY_REQUIRED, executor.traversalStatus(), DecisionOrigin.PAGE_PROGRESS)
         }
         val progress = executor.evaluatePageProgress(pageKind)
         return when (progress.decision) {

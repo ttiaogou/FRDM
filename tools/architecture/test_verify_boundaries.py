@@ -25,6 +25,25 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
             guard.automatic_recovery_hard_boundary_violations(self.recovery_code), []
         )
 
+    def test_paired_ai_task_boundary_accepts_current_production_graph(self):
+        self.assertEqual(guard.paired_ai_task_boundary_violations(self.recovery_code), [])
+
+    def test_paired_ai_task_boundary_rejects_completion_gates_and_missing_checkpoint(self):
+        runtime = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        adapter = "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt"
+        for path, old, new in (
+            (runtime, "val executor = privateMessagesTraversalTaskExecutor\n        if (!canPerformPrivateMessagesUiAction()",
+             "val executor = privateMessagesTraversalTaskExecutor\n        if (!executor.atTop || !canPerformPrivateMessagesUiAction()"),
+            (runtime, "repository?.save(executor.checkpoint())", "Unit"),
+            (adapter, "persistSayHiTraversalCheckpoint()", "Unit"),
+            (adapter, "sayHiTraversalState.suspendTraversal(preserveTraversal)", "sayHiTraversalState.clear()"),
+        ):
+            with self.subTest(path=path, old=old):
+                code = dict(self.recovery_code)
+                self.assertIn(old, code[path])
+                code[path] = code[path].replace(old, new)
+                self.assertTrue(guard.paired_ai_task_boundary_violations(code))
+
     def test_automatic_recovery_hard_guards_reject_old_handoff_interfaces_and_files(self):
         runtime = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
         for token in (
