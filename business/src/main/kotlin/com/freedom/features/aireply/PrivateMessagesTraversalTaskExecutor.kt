@@ -779,7 +779,11 @@ internal class PrivateMessagesTraversalTaskExecutor {
         }
         val incomplete = rows.filter {
             it.unreadStatus != ChatUnreadStatus.READ &&
-                (!ChatSessionManagementPolicy.isEligible(it) || it.rowClippedAtViewportEdge)
+                (!ChatSessionManagementPolicy.isEligible(it) || it.rowClippedAtViewportEdge ||
+                    // Admission and retirement both require complete boundary evidence.
+                    // An eligible row with invisible/out-of-viewport child evidence
+                    // must enter the same recovery ledger rather than disappear from selection.
+                    !ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport))
         }
         // A named clipped row with positive/uncertain badge evidence is not READ,
         // even when it is not geometrically eligible. Never use its geometry as identity.
@@ -1172,14 +1176,11 @@ internal class PrivateMessagesTraversalTaskExecutor {
         preferredRetryKey: String? = null
     ): PrivateMessagesListSnapshotEvaluation {
         val snapshotAmbiguousKeys = ambiguousIdentityKeys(snapshot.chatListCandidates)
-        val incompleteUnreadEvidenceBlocked = observeIncompleteUnreadEvidence(snapshot)
+        observeIncompleteUnreadEvidence(snapshot)
         val newlyAmbiguousKeys = snapshotAmbiguousKeys - ambiguousSessionIdentityKeys
         if (snapshotAmbiguousKeys.isNotEmpty()) {
             ambiguousSessionIdentityKeys += snapshotAmbiguousKeys
         }
-
-        val incompleteUnreadAllowsIndependentTraversal =
-            incompleteUnreadEvidenceBlocked && canContinueWithIncompleteUnread(snapshot)
 
         // Diagnostic counters are deliberately not part of stableKey(), so audit updates cannot
         // invalidate a pending row or gesture operation.
@@ -1255,6 +1256,12 @@ internal class PrivateMessagesTraversalTaskExecutor {
             null
         }
 
+        // observeUnreadBlockers (including the call in evaluateUnreadAdmission) can
+        // add a named badge anomaly to the incomplete ledger during this very observation.
+        // Derive the packet from the final ledger, not the earlier structural probe.
+        val incompleteUnreadEvidenceBlocked = unresolvedIncompleteUnreadKeys.isNotEmpty()
+        val incompleteUnreadAllowsIndependentTraversal =
+            incompleteUnreadEvidenceBlocked && canContinueWithIncompleteUnread(snapshot)
         val explicitUnreadWhileWaiting = wasWaitingForUnread && hasUnparkedUnread(snapshot)
         // A viewport observation is not a round transition. Keep the previous round's
         // attempted identities intact until the runtime has independently confirmed

@@ -6677,6 +6677,7 @@ class AiReplyObservationRuntime(
         val wasWaitingForUnread = sessionManagerState == SessionManagerState.WAITING_FOR_UNREAD
         val originRecoveryPending = privateMessagesTraversalTaskExecutor.scanContinuityRecoveryPending
         val relocationPending = privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationActive
+        val incompleteBeforeObservation = privateMessagesTraversalTaskExecutor.unresolvedIncompleteUnreadKeys.toSet()
         val listEvaluation = privateMessagesTraversalTaskExecutor.evaluateListSnapshot(
             snapshot = snapshot,
             wasWaitingForUnread = wasWaitingForUnread,
@@ -6714,6 +6715,23 @@ class AiReplyObservationRuntime(
                     "关联可见行数=$affectedRows；本次运行将跳过这些身份，不执行点击或消息归并；" +
                     "当前列表节点未提供可验证联系人 ID"
             )
+        }
+
+        val incompleteAfterObservation = privateMessagesTraversalTaskExecutor.unresolvedIncompleteUnreadKeys
+        val newlyPendingIncomplete = incompleteAfterObservation - incompleteBeforeObservation
+        val repairedIncomplete = incompleteBeforeObservation - incompleteAfterObservation
+        if (newlyPendingIncomplete.isNotEmpty() || repairedIncomplete.isNotEmpty()) {
+            // Named hints already contain opaque traversal hashes; never expose anonymous
+            // geometry or the underlying display name. This is a delta, not a new ledger.
+            fun opaqueRows(hints: Set<String>): String = hints.mapNotNull { hint ->
+                hint.removePrefix("identity:").takeIf {
+                    hint.startsWith("identity:") && it.matches(Regex("[0-9a-f]{24}"))
+                }?.take(12)
+            }.sorted().joinToString(",")
+            onLog("AI 私聊异常会话[INCOMPLETE_UNREAD_EVIDENCE_DELTA]：task=PRIVATE_MESSAGES；" +
+                "added=${newlyPendingIncomplete.size}；addedRowHashes=${opaqueRows(newlyPendingIncomplete)}；" +
+                "resolved=${repairedIncomplete.size}；resolvedRowHashes=${opaqueRows(repairedIncomplete)}；" +
+                "remaining=${incompleteAfterObservation.size}；cacheWrite=false")
         }
 
         if (listEvaluation.incompleteUnreadEvidenceBlocked) {

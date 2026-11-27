@@ -2299,6 +2299,58 @@ class PrivateMessagesTraversalTaskExecutorTest {
             withoutCollection.copy(chatListCanScrollForward = null), toTop = false))
     }
 
+    @Test
+    fun f02InvisibleChildEvidenceIsTrackedUntilOriginalRowHasCompleteFreshProof() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+            lockedUnreadSetFinalized = true
+        }
+        val healthy = candidate(0, "Independent", ChatUnreadStatus.UNREAD)
+        val damagedName = candidate(1, "Pending name", ChatUnreadStatus.UNREAD, nameNodeVisible = false)
+        val damagedPreview = candidate(2, "Pending preview", ChatUnreadStatus.UNREAD, previewNodeVisible = false)
+        val first = executor.evaluateListSnapshot(snapshot(healthy, damagedName, damagedPreview), false, 2)
+        assertTrue(first.incompleteUnreadEvidenceBlocked)
+        assertTrue(first.incompleteUnreadAllowsIndependentTraversal)
+        assertEquals(healthy, first.nextCandidate)
+        assertEquals(2, executor.unresolvedIncompleteUnreadKeys.size)
+        assertTrue(executor.attemptedSessionKeys.isEmpty())
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(executor.checkpoint()) }
+        assertTrue(restored.observeIncompleteUnreadEvidence(snapshot(healthy)))
+        val repairedName = candidate(1, "Pending name", ChatUnreadStatus.UNREAD)
+        val repairedPreview = candidate(2, "Pending preview", ChatUnreadStatus.READ)
+        assertFalse(restored.observeIncompleteUnreadEvidence(snapshot(healthy, repairedName, repairedPreview)))
+        assertTrue(key(repairedName) in restored.pendingKnownUnreadKeys())
+        assertFalse(key(repairedPreview) in restored.attemptedSessionKeys)
+        assertTrue(restored.unresolvedIncompleteUnreadKeys.isEmpty())
+    }
+
+    @Test
+    fun f02DecisionPacketIncludesBadgeAnomalyDiscoveredDuringSameObservation() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+            lockedUnreadSetFinalized = true
+        }
+        val healthy = candidate(0, "Independent", ChatUnreadStatus.UNREAD)
+        val unknown = candidate(1, "Badge pending", ChatUnreadStatus.UNKNOWN, badgePresent = true)
+        val page = snapshot(healthy, unknown)
+        val first = executor.evaluateListSnapshot(page, false, 2)
+        assertEquals(healthy, first.nextCandidate)
+        assertTrue(first.incompleteUnreadEvidenceBlocked)
+        assertTrue(first.incompleteUnreadAllowsIndependentTraversal)
+        assertEquals(1, executor.unresolvedIncompleteUnreadKeys.size)
+        assertTrue(executor.unresolvedUnknownUnreadKeys.isEmpty())
+        val repaired = candidate(1, "Badge pending", ChatUnreadStatus.UNREAD, badgePresent = true)
+        val next = executor.evaluateListSnapshot(snapshot(healthy, repaired), false, 2)
+        assertFalse(next.incompleteUnreadEvidenceBlocked)
+        assertEquals(repaired, next.nextCandidate)
+        assertTrue(key(repaired) in executor.pendingKnownUnreadKeys())
+        assertTrue(executor.attemptedSessionKeys.isEmpty())
+    }
+
     private fun snapshot(vararg candidates: ChatListCandidateSnapshot) = ChatPageSnapshot(
         packageName = "com.immomo.momo",
         activityClass = "MaintabActivity",
@@ -2330,7 +2382,9 @@ class PrivateMessagesTraversalTaskExecutorTest {
         previewBoundsFullyInsideViewport: Boolean = true,
         rowVisible: Boolean = true,
         inViewport: Boolean = true,
-        windowGeneration: Long = 1L
+        windowGeneration: Long = 1L,
+        nameNodeVisible: Boolean = true,
+        previewNodeVisible: Boolean = true
     ): ChatListCandidateSnapshot {
         val row = ScreenRect(0, top, 720, top + rowHeight)
         val nameBounds = ScreenRect(150, top + 10, 380, top + 40)
@@ -2352,7 +2406,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
             nameSource = ChatNodeTextSource.NODE_TEXT,
             nameNodePath = NodePath(listOf(0, rowIndex, 1)),
             nameBounds = nameBounds,
-            nameNodeVisibleToUser = true,
+            nameNodeVisibleToUser = nameNodeVisible,
             nameBoundsIntersectViewport = true,
             nameBoundsFullyInsideViewport = true,
             nameBoundsValid = true,
@@ -2360,7 +2414,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
             previewSource = ChatNodeTextSource.NODE_TEXT,
             previewNodePath = NodePath(listOf(0, rowIndex, 2)),
             previewBounds = previewBounds,
-            previewNodeVisibleToUser = true,
+            previewNodeVisibleToUser = previewNodeVisible,
             previewBoundsIntersectViewport = previewBoundsIntersectViewport,
             previewBoundsFullyInsideViewport = previewBoundsFullyInsideViewport,
             previewBoundsValid = previewBoundsValid,
