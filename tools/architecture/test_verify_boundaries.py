@@ -64,7 +64,10 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
              "if (false) {"),
             ("app/src/main/java/com/freedom/adapters/social/momo/MomoPrivateFollowUpController.kt", "!isBoundAiReplyUiOperationOwned(child.target.taskLease)", "false"),
             ("app/src/main/java/com/freedom/adapters/social/momo/MomoPrivateFollowUpController.kt", "if (child.inFlight)", "if (false)"),
-            (adapter, "privateFollowUpController.submitPrivateFollowUpStep(child, next, action)", "uncheckedSubmission(child, next, action)"),
+            (adapter, "privateFollowUpController.submitPrivateFollowUpStep(child, next)", "uncheckedSubmission(child, next)"),
+            (adapter, "submitPrivateFollowUpStep = privateFollowUpController::submitPrivateFollowUpStep", "submitPrivateFollowUpStep = unchecked"),
+            (adapter, "followUpCurrent = privateFollowUpController::followUpCurrent", "followUpCurrent = unchecked"),
+            (adapter, "privateFollowUpController.submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT)", "uncheckedSubmission(child, PrivateFollowUpStage.WAIT_SEND_RESULT)"),
         ):
             with self.subTest(path=path, old=old):
                 code = dict(self.recovery_code)

@@ -105,7 +105,7 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "tools/architecture/test_pp_r00_freeze.py"
                 self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
                 # R04 also pins the reviewed relocation; R03 remains in the R00 gate.
-                expected[path] = "67b30a6e6a3d12199e2e95854cfe754bdfccfca8"
+                expected[path] = "f81e79bf686ed79206537b962b57cec5b98410dd"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -115,10 +115,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # and adds owner/recovery/delegation mutation checks.
                 path = "tools/architecture/verify_boundaries.py"
                 self.assertEqual("713a0cfc1ed4617a37a31c66e1a0b056f42db1a3", expected[path])
-                expected[path] = "164cd50cfaf551e489d7faf4bea1e69b806d215d"
+                expected[path] = "dfc47aef48e05d56e1540c27d08cc8490a2547bd"
                 path = "tools/architecture/test_verify_boundaries.py"
                 self.assertEqual("bec2d575a43477763c2309a04a9e6014ad39967a", expected[path])
-                expected[path] = "248f50be7fcfbf001d5caffd5ac7efc1c0da2304"
+                expected[path] = "06485947b2fda4007b4ef09d1371c06b2f745fb2"
             issues.extend(evidence_violations(ROOT, expected))
         # New R04 regression evidence is pinned independently of the historical inventory.
         issues.extend(evidence_violations(ROOT, {
@@ -150,9 +150,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         # R05-D adds an exact inverse reconstruction of the prior R05-C source.
         issues.extend(evidence_violations(ROOT, {
             "tools/architecture/test_pp_r05_draft_transaction_migration.py": "624e2df6d11189e26cbde371e413a12287cdb096",
-            "tools/architecture/test_pp_r05_image_transaction_migration.py": "368e6b3bd22cc44d28231667e73bd7ca4a7dd2e2",
+            "tools/architecture/test_pp_r05_image_transaction_migration.py": "b6c9382900c53b460de1bd403f98373dffde004b",
             "tools/architecture/test_pp_r05_interception_transaction_migration.py": "983a9908e70616b0298e48a532c0b8cadb1414d8",
-            "tools/architecture/test_pp_r05_follow_up_boundary_migration.py": "cf1cc27a763d845e4f60a7249f50ee0b6b650105",
+            "tools/architecture/test_pp_r05_follow_up_boundary_migration.py": "6d1103b2b8a7c7e4bdafd0e56d56436f4da5a573",
+            "tools/architecture/test_pp_r05_facade_convergence.py": "5422e057795e4b30d6dde17123f7301d8a98fe46",
         }))
         self.assertEqual([], issues)
 

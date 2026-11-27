@@ -237,6 +237,10 @@ class PpR00FreezeTest(unittest.TestCase):
         self.assertNotIn(path, reviewed_s1)
         self.assertNotIn(path, m["permanent_s0"])
         reviewed_s1[path] = "14c07c5bcfc97bbefd617ad68dc1d04a1d7f391d"
+        # R05-H: remove only the reviewed redundant wrappers; retain the historical baseline.
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt"
+        self.assertEqual("d68d98d536a7b54e955c2b150f2fbe79fdbd50e0", reviewed_s1[path])
+        reviewed_s1[path] = "e92cb4a3348146fa055fd3aa2b6abda2dac80824"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

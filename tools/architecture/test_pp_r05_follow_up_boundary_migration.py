@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r05_facade_convergence import restore_r05g_adapter
 
 ROOT = Path(__file__).resolve().parents[2]
 MOMO = ROOT / "app/src/main/java/com/freedom/adapters/social/momo/"
@@ -31,6 +32,7 @@ def restore_visibility(source):
     return source
 
 def restore_r05f_sources(adapter, image=None, owner=None):
+    adapter = restore_r05g_adapter(adapter)
     if image is None:
         image = (MOMO / "MomoImageSendTransactionController.kt").read_text(encoding="utf-8")
     if owner is None:

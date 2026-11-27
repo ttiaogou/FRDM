@@ -360,22 +360,6 @@ internal class MomoSocialAdapter(
     @Volatile private var sayHiUnverifiedBackAttemptActivity: String = ""
     /** True only when we safely backed out of a fingerprint-confirmed detail whose tap event never arrived. */
     @Volatile private var sayHiUnverifiedDetailReturnPending: Boolean = false
-    private fun transitionAvatarClickState(
-        pending: PendingInboxIdentityCapture?,
-        next: MomoAvatarClickTransactionState,
-        reason: String
-    ) = sessionComponents.inboxIdentity.transitionAvatarClickState(pending, next, reason, onLog)
-
-    private fun releaseAvatarCaptureForRetry(
-        pending: PendingInboxIdentityCapture,
-        reason: String
-    ) = sessionComponents.inboxIdentity.releaseAvatarCaptureForRetry(pending, reason, onLog)
-
-    private fun releaseAvatarCaptureAfterProfileMiss(
-        pending: PendingInboxIdentityCapture,
-        reason: MomoAvatarClickFailureReason
-    ) = sessionComponents.inboxIdentity.releaseAvatarCaptureAfterProfileMiss(pending, reason, onLog)
-
     init {
         sayHiTraversalState.restore()?.let { restored ->
             onLog(
@@ -495,7 +479,7 @@ internal class MomoSocialAdapter(
                             pageInspectionComponents.gestureReadinessInspector.hasVisibleViewId(
                                 root, setOf(MomoSayHiPageContract.CARD_CONTENT_VIEW_ID, MomoSayHiPageContract.CARD_CLOSE_VIEW_ID)
                             )
-                        val privateFollowUp = privateFollowUp?.takeIf {
+                        val privateFollowUp = privateFollowUpController.current()?.takeIf {
                             currentTaskId == "AI_REPLY_PRIVATE_MESSAGES"
                         }
                         if (privateFollowUp != null) {
@@ -5624,15 +5608,23 @@ internal class MomoSocialAdapter(
         }
     }
 
+    private val privateFollowUpController = MomoPrivateFollowUpController(
+        accessibilityGateway = accessibilityGateway,
+        targetPackage = targetPackage,
+        onLog = onLog,
+        isBoundAiReplyUiOperationOwned = isBoundAiReplyUiOperationOwned,
+        captureImageSendBaseline = ::captureImageSendBaseline
+    )
+
     private val imageTransaction = MomoImageSendTransactionController(
         accessibilityGateway = accessibilityGateway,
         targetPackage = targetPackage,
         onLog = onLog,
-        followUpCurrent = ::followUpCurrent,
+        followUpCurrent = privateFollowUpController::followUpCurrent,
         originalPrivateFollowUpChat = ::originalPrivateFollowUpChat,
-        followUpWait = ::followUpWait,
-        followUpTerminal = ::followUpTerminal,
-        submitPrivateFollowUpStep = ::submitPrivateFollowUpStep,
+        followUpWait = privateFollowUpController::followUpWait,
+        followUpTerminal = privateFollowUpController::followUpTerminal,
+        submitPrivateFollowUpStep = privateFollowUpController::submitPrivateFollowUpStep,
         openImageAlbum = ::openImageAlbum,
         openImageAlbumDirectory = ::openImageAlbumDirectory,
         inspectFreedomDirectory = ::inspectFreedomDirectory,
@@ -5645,21 +5637,7 @@ internal class MomoSocialAdapter(
         inspectImageSendResult = ::inspectImageSendResult
     )
 
-    private val privateFollowUpController = MomoPrivateFollowUpController(
-        accessibilityGateway = accessibilityGateway,
-        targetPackage = targetPackage,
-        onLog = onLog,
-        isBoundAiReplyUiOperationOwned = isBoundAiReplyUiOperationOwned,
-        captureImageSendBaseline = ::captureImageSendBaseline
-    )
-
-    private val privateFollowUp: PrivateFollowUpTransaction?
-        get() = privateFollowUpController.current()
-
     override fun progress(): PrivateChatFollowUpProgress = privateFollowUpController.progress()
-
-    private fun followUpCurrent(child: PrivateFollowUpTransaction): Boolean =
-        privateFollowUpController.followUpCurrent(child)
 
     private fun originalPrivateFollowUpChat(child: PrivateFollowUpTransaction): Boolean {
         val live = accessibilityGateway.currentGestureWindow() ?: return false
@@ -5672,14 +5650,14 @@ internal class MomoSocialAdapter(
     /** Positive evidence for this parent's child page, not permission for a generic gesture.
      * Reuse the action-specific inspectors; a target-package window alone is not a route. */
     private fun inspectPrivateFollowUpOwnedPage(root: AccessibilityNodeInfo, live: WindowRef): Boolean {
-        val child = privateFollowUp ?: return false
-        if (!followUpCurrent(child) || live.packageName != targetPackage || live.windowId < 0 ||
+        val child = privateFollowUpController.current() ?: return false
+        if (!privateFollowUpController.followUpCurrent(child) || live.packageName != targetPackage || live.windowId < 0 ||
             live.generation < child.target.nodeTarget.window.generation ||
             root.windowId != live.windowId || root.packageName?.toString() != targetPackage ||
             accessibilityGateway.currentGestureWindow() != live) return false
         val verified = if (child.interception) {
             child.stage != PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS &&
-                (interceptionSettingsPage(root, child) ||
+                (interceptionTransaction.interceptionSettingsPage(root, child) ||
                     (child.interceptionState.interceptionSettingsObserved &&
                         interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息") != null &&
                         interceptionNodeBounds(root, "btn_switch", "android.widget.CompoundButton", checkable = true) != null))
@@ -5707,7 +5685,7 @@ internal class MomoSocialAdapter(
                 } == true
             else -> false
         }
-        return verified && followUpCurrent(child) && accessibilityGateway.currentGestureWindow() == live
+        return verified && privateFollowUpController.followUpCurrent(child) && accessibilityGateway.currentGestureWindow() == live
     }
 
     /** Only the read-only readiness caller may use child-page evidence. Dispatch still requires
@@ -5737,21 +5715,9 @@ internal class MomoSocialAdapter(
 
     override fun privateFollowUpSucceeded(): Boolean = privateFollowUpController.privateFollowUpSucceeded()
 
-    private fun followUpWait(child: PrivateFollowUpTransaction, reason: String) =
-        privateFollowUpController.followUpWait(child, reason)
-
-    private fun followUpTerminal(child: PrivateFollowUpTransaction, result: String, reason: String) =
-        privateFollowUpController.followUpTerminal(child, result, reason)
-
     override fun abort(reason: String) = privateFollowUpController.abort(reason)
 
     override fun reset(reason: String) = privateFollowUpController.reset(reason)
-
-    private fun submitPrivateFollowUpStep(
-        child: PrivateFollowUpTransaction,
-        next: PrivateFollowUpStage,
-        action: ((GestureExecutionStatus) -> Unit) -> GestureSubmission
-    ) = privateFollowUpController.submitPrivateFollowUpStep(child, next, action)
 
     private val interceptionTransaction = MomoInterceptionTransactionController(
         rootAccess = rootAccess,
@@ -5760,28 +5726,19 @@ internal class MomoSocialAdapter(
         onLog = onLog,
         nodeBounds = ::interceptionNodeBounds,
         originalPrivateFollowUpChat = ::originalPrivateFollowUpChat,
-        followUpWait = ::followUpWait,
-        followUpTerminal = ::followUpTerminal,
+        followUpWait = privateFollowUpController::followUpWait,
+        followUpTerminal = privateFollowUpController::followUpTerminal,
         submitInterceptionStep = ::submitInterceptionStep,
         interceptionDismissBounds = ::interceptionDismissBounds,
         interceptionReturnedToChat = ::interceptionReturnedToChat,
         interceptionBackBounds = ::interceptionBackBounds
     )
 
-    private fun interceptionChecked(root: AccessibilityNodeInfo): Boolean? =
-        interceptionTransaction.interceptionChecked(root)
-
-    private fun interceptionSettingsPage(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean =
-        interceptionTransaction.interceptionSettingsPage(root, child)
-
-    private fun interceptionSettingsChecked(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean? =
-        interceptionTransaction.interceptionSettingsChecked(root, child)
-
     private fun submitImageRetryOpen(child: PrivateFollowUpTransaction, window: WindowRef) {
         child.stage = PrivateFollowUpStage.IMAGE_RETRY_OPEN
-        submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT) { callback ->
+        privateFollowUpController.submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT) { callback ->
             submitVerifiedAlbumTap(
-                child.target, window, child.id, { followUpCurrent(child) }, "image-retry-open",
+                child.target, window, child.id, { privateFollowUpController.followUpCurrent(child) }, "image-retry-open",
                 resolve = { _, live ->
                     freshMediaSnapshot(live)?.let { snapshot ->
                         if (MomoImageSendEvidenceInspector.networkDisconnected(snapshot)) null
@@ -5790,7 +5747,7 @@ internal class MomoSocialAdapter(
                     }
                 }, boundsOf = { it.statusBounds },
                 onPlatformDispatched = { _, _ ->
-                    if (followUpCurrent(child)) {
+                    if (privateFollowUpController.followUpCurrent(child)) {
                         child.image.imageRetryDialogRequested = true
                         child.image.imageRetryDialogWindowId = null
                         onLog("PRIVATE_IMAGE_SEND RETRY_OPEN_DISPATCHED")
@@ -5803,9 +5760,9 @@ internal class MomoSocialAdapter(
 
     private fun submitImageRetryConfirm(child: PrivateFollowUpTransaction, window: WindowRef) {
         child.stage = PrivateFollowUpStage.IMAGE_RETRY_CONFIRM
-        submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT) { callback ->
+        privateFollowUpController.submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT) { callback ->
             submitVerifiedAlbumTap(
-                child.target, window, child.id, { followUpCurrent(child) }, "image-retry-confirm",
+                child.target, window, child.id, { privateFollowUpController.followUpCurrent(child) }, "image-retry-confirm",
                 resolve = { _, live ->
                     if (!child.image.imageRetryDialogRequested || child.image.imageRetryDialogWindowId != live.windowId) null
                     else freshMediaSnapshot(live)?.let(MomoImageSendEvidenceInspector::retryConfirmation)
@@ -5850,10 +5807,10 @@ internal class MomoSocialAdapter(
     ) {
         val window = accessibilityGateway.currentGestureWindow() ?: return
         if (window.packageName != targetPackage || window.windowId < 0) return
-        submitPrivateFollowUpStep(child, next) { callback ->
+        privateFollowUpController.submitPrivateFollowUpStep(child, next) { callback ->
             var layoutBoundsLogged = false
             submitVerifiedAlbumTap(
-                child.target, window, child.id, { followUpCurrent(child) }, action,
+                child.target, window, child.id, { privateFollowUpController.followUpCurrent(child) }, action,
                 resolve = { root, liveWindow ->
                     // The toggle must still be OFF at dispatch revalidation.
                     val safe = when (action) {
@@ -5861,10 +5818,10 @@ internal class MomoSocialAdapter(
                             liveWindow.activityClass == child.target.nodeTarget.window.activityClass &&
                             interceptionNodeBounds(root, "chat_user_name", "android.widget.TextView",
                                 text = child.target.expectedChatTitle) != null
-                        "interception-layout" -> interceptionSettingsChecked(root, child) == false
-                        "interception-switch" -> interceptionChecked(root) == false
-                        "interception-dismiss" -> interceptionChecked(root) == true
-                        "interception-back" -> interceptionSettingsChecked(root, child) == true
+                        "interception-layout" -> interceptionTransaction.interceptionSettingsChecked(root, child) == false
+                        "interception-switch" -> interceptionTransaction.interceptionChecked(root) == false
+                        "interception-dismiss" -> interceptionTransaction.interceptionChecked(root) == true
+                        "interception-back" -> interceptionTransaction.interceptionSettingsChecked(root, child) == true
                         else -> true
                     }
                     (if (safe) resolve(root, liveWindow) else null)?.also { bounds ->
@@ -6070,10 +6027,10 @@ internal class MomoSocialAdapter(
                             !identity.contactId.isNullOrBlank()
                     }
                 } == true
-                completePendingInboxIdentityBinding(pendingIdentityCapture!!, verified)
+                sessionComponents.inboxIdentity.completePendingInboxIdentityBinding(pendingIdentityCapture!!, verified, onLog)
             }
         } else if (canConsumePendingIdentity) {
-            completePendingInboxIdentityBinding(pendingIdentityCapture!!, false)
+            sessionComponents.inboxIdentity.completePendingInboxIdentityBinding(pendingIdentityCapture!!, false, onLog)
         }
         val result = ChatPageSnapshot(
             packageName = inspection.windowPackage,
@@ -6283,7 +6240,7 @@ internal class MomoSocialAdapter(
         )
         sessionComponents.inboxIdentity.registerCapture(anchorKey, pending, onLog)?.let { return it }
 
-        transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_PAGE_READING, "开始读取当前聊天详情页")
+        sessionComponents.inboxIdentity.transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_PAGE_READING, "开始读取当前聊天详情页", onLog)
         onLog("AI 头像点击事务：进入 AVATAR_PAGE_READING；读取当前聊天详情页")
         val tree = accessibilityGateway.inspectActiveWindow(
             TreeInspectionRequest(
@@ -6295,7 +6252,7 @@ internal class MomoSocialAdapter(
             )
         ) ?: run {
             onLog("AI 联系人身份采集失败：${MomoAvatarClickFailureReason.CHAT_DETAIL_NOT_STABLE.name}；等待下一次窗口快照")
-            releaseAvatarCaptureForRetry(pending, "聊天详情节点树暂时不可用")
+            sessionComponents.inboxIdentity.releaseAvatarCaptureForRetry(pending, "聊天详情节点树暂时不可用", onLog)
             return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
         if (tree.truncated || tree.window.packageName != targetPackage ||
@@ -6307,31 +6264,31 @@ internal class MomoSocialAdapter(
                     "truncated=${tree.truncated}；package=${tree.window.packageName}；" +
                     "activity=${tree.window.activityClass}；current=${accessibilityGateway.isWindowCurrent(tree.window)}"
             )
-            releaseAvatarCaptureForRetry(pending, "聊天详情页面或窗口暂时不稳定")
+            sessionComponents.inboxIdentity.releaseAvatarCaptureForRetry(pending, "聊天详情页面或窗口暂时不稳定", onLog)
             return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
 
-        transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_LOCATING, "当前聊天详情页已读取")
+        sessionComponents.inboxIdentity.transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_LOCATING, "当前聊天详情页已读取", onLog)
         onLog("AI 头像点击事务：进入 AVATAR_LOCATING；从当前节点树重新定位目标头像")
         val index = NodeTreeIndex(tree)
         val target = MomoSayHiAvatarTargetPolicy.resolveConversationAvatarTarget(index)
             ?: run {
                 onLog("AI 联系人身份采集失败：${MomoAvatarClickFailureReason.AVATAR_NOT_FOUND.name}；不回退私人列表头像")
-                releaseAvatarCaptureForRetry(pending, "当前快照暂时未找到目标头像")
+                sessionComponents.inboxIdentity.releaseAvatarCaptureForRetry(pending, "当前快照暂时未找到目标头像", onLog)
                 return ContactIdentityCaptureRequestResult.RETRY_LATER
             }
         onLog("AI 联系人身份采集：已定位聊天详情页左侧消息头像；不使用右上角头像")
         val avatarClickNode = index.nodeAt(target.path)
             ?: run {
                 onLog("AI 联系人身份采集失败：${MomoAvatarClickFailureReason.AVATAR_NOT_FOUND.name}；当前快照目标已失效")
-                releaseAvatarCaptureForRetry(pending, "头像节点在同一快照中失效")
+                sessionComponents.inboxIdentity.releaseAvatarCaptureForRetry(pending, "头像节点在同一快照中失效", onLog)
                 return ContactIdentityCaptureRequestResult.RETRY_LATER
             }
-        transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_IDENTITY_VERIFYING, "当前头像节点已重新定位")
+        sessionComponents.inboxIdentity.transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_IDENTITY_VERIFYING, "当前头像节点已重新定位", onLog)
         onLog("AI 头像点击事务：进入 AVATAR_IDENTITY_VERIFYING；校验当前页面和头像目标")
         if (!avatarClickNode.visible || target.targetBounds.isEmpty) {
             onLog("AI 联系人身份采集失败：LEFT_AVATAR_TARGET_INVALID；不可见或边界为空")
-            releaseAvatarCaptureForRetry(pending, "头像目标不可见或边界无效")
+            sessionComponents.inboxIdentity.releaseAvatarCaptureForRetry(pending, "头像目标不可见或边界无效", onLog)
             return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
 
@@ -6341,10 +6298,10 @@ internal class MomoSocialAdapter(
             metrics.toGestureCoordinateContext()
         ) ?: run {
             onLog("AI 联系人身份采集失败：${MomoAvatarClickFailureReason.WINDOW_CONTEXT_CHANGED.name}；未提交头像点击")
-            releaseAvatarCaptureForRetry(pending, "手势坐标上下文暂时不可用")
+            sessionComponents.inboxIdentity.releaseAvatarCaptureForRetry(pending, "手势坐标上下文暂时不可用", onLog)
             return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
-        transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_CLICKING, "当前头像目标已通过身份与页面校验")
+        sessionComponents.inboxIdentity.transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_CLICKING, "当前头像目标已通过身份与页面校验", onLog)
 
         val request = GestureIntentRequest(
             id = "momo-inbox-identity-avatar-${System.nanoTime()}",
@@ -6374,10 +6331,11 @@ internal class MomoSocialAdapter(
         }
 
         if (submission != GestureSubmission.ACCEPTED) {
-            transitionAvatarClickState(
+            sessionComponents.inboxIdentity.transitionAvatarClickState(
                 pending,
                 MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
-                "头像手势未被接受；等待下一次当前页面重新定位"
+                "头像手势未被接受；等待下一次当前页面重新定位",
+                onLog
             )
             sessionComponents.inboxIdentity.releaseIfCurrent(pending)
             val reason = if (submission == GestureSubmission.DEFERRED_NOT_READY) {
@@ -6464,11 +6422,6 @@ internal class MomoSocialAdapter(
         )
     }
 
-    private fun completePendingInboxIdentityBinding(
-        pending: PendingInboxIdentityCapture,
-        identityVerified: Boolean
-    ) = sessionComponents.inboxIdentity.completePendingInboxIdentityBinding(pending, identityVerified, onLog)
-
     /** Returns true while the profile-navigation transaction owns the current foreground page. */
     private fun inspectPendingInboxIdentityCapture(): Boolean {
         val pending = sessionComponents.inboxIdentity.pendingInboxIdentityCapture ?: return false
@@ -6481,17 +6434,19 @@ internal class MomoSocialAdapter(
                 if (currentActivity == MomoSayHiPageContract.PROFILE_ACTIVITY) {
                     pending.stage = InboxIdentityCaptureStage.WAITING_PROFILE
                     pending.lastTransitionAtMs = System.currentTimeMillis()
-                    transitionAvatarClickState(
+                    sessionComponents.inboxIdentity.transitionAvatarClickState(
                         pending,
                         MomoAvatarClickTransactionState.AVATAR_ENTRY_VERIFYING,
-                        "超时窗口内观察到资料页"
+                        "超时窗口内观察到资料页",
+                        onLog
                     )
                     return true
                 }
                 if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS) {
-                    releaseAvatarCaptureAfterProfileMiss(
+                    sessionComponents.inboxIdentity.releaseAvatarCaptureAfterProfileMiss(
                         pending,
-                        MomoAvatarClickFailureReason.AVATAR_GESTURE_COMPLETED_BUT_PROFILE_NOT_OPENED
+                        MomoAvatarClickFailureReason.AVATAR_GESTURE_COMPLETED_BUT_PROFILE_NOT_OPENED,
+                        onLog
                     )
                     return false
                 }
@@ -6538,8 +6493,9 @@ internal class MomoSocialAdapter(
                     val readout = MomoSayHiPlatformIdentityParser.parse(tree.nodes)
                     if (inspectCurrentChatDetailFingerprint() != null || isReceivedGreetingsListConfirmed()) {
                         if (ageMs > SAYHI_PROFILE_PAGE_TIMEOUT_MS) {
-                            releaseAvatarCaptureAfterProfileMiss(
-                                pending, MomoAvatarClickFailureReason.PROFILE_PAGE_NOT_CONFIRMED
+                            sessionComponents.inboxIdentity.releaseAvatarCaptureAfterProfileMiss(
+                                pending, MomoAvatarClickFailureReason.PROFILE_PAGE_NOT_CONFIRMED,
+                                onLog
                             )
                             return false
                         }
@@ -6584,9 +6540,10 @@ internal class MomoSocialAdapter(
                 if (currentActivity == MomoAppDescriptor.MAIN_ACTIVITY_CLASS &&
                     !isReceivedGreetingsListStructureVisible()
                 ) {
-                    failPendingInboxIdentityCapture(
+                    sessionComponents.inboxIdentity.failPendingInboxIdentityCapture(
                         pending,
-                        "MANUAL_RETURN_TO_MESSAGE_LIST"
+                        "MANUAL_RETURN_TO_MESSAGE_LIST",
+                        onLog
                     )
                     onLog(
                         "AI 联系人身份采集[MANUAL_RETURN_DETECTED]：" +
@@ -6613,20 +6570,23 @@ internal class MomoSocialAdapter(
                 if (restored) {
                     if (!pending.profileEntryVerified) {
                         onLog("AI 身份回接[REQUEST_NOT_PRODUCED]：result=NOT_PRODUCED；reason=PROFILE_ENTRY_NOT_VERIFIED")
-                        releaseAvatarCaptureAfterProfileMiss(
+                        sessionComponents.inboxIdentity.releaseAvatarCaptureAfterProfileMiss(
                             pending,
-                            MomoAvatarClickFailureReason.PROFILE_PAGE_NOT_CONFIRMED
+                            MomoAvatarClickFailureReason.PROFILE_PAGE_NOT_CONFIRMED,
+                            onLog
                         )
                         return false
                     }
-                    completePendingInboxIdentityBinding(
+                    sessionComponents.inboxIdentity.completePendingInboxIdentityBinding(
                         pending,
-                        pending.platformUserId != null
+                        pending.platformUserId != null,
+                        onLog
                     )
-                    transitionAvatarClickState(
+                    sessionComponents.inboxIdentity.transitionAvatarClickState(
                         pending,
                         MomoAvatarClickTransactionState.AVATAR_COMPLETED,
-                        "资料页身份读取完成并返回原聊天详情"
+                        "资料页身份读取完成并返回原聊天详情",
+                        onLog
                     )
                     sessionComponents.inboxIdentity.publishVerifiedReturn(pending)
                     onLog(
@@ -6651,9 +6611,10 @@ internal class MomoSocialAdapter(
                     }
                 }
                 if (ageMs > SAYHI_PROFILE_PAGE_TIMEOUT_MS) {
-                    failPendingInboxIdentityCapture(
+                    sessionComponents.inboxIdentity.failPendingInboxIdentityCapture(
                         pending,
-                        "RETURNED_WINDOW_NOT_ORIGINAL_CHAT_DETAIL"
+                        "RETURNED_WINDOW_NOT_ORIGINAL_CHAT_DETAIL",
+                        onLog
                     )
                     onLog("AI 联系人身份采集终态：返回页未通过聊天三节点指纹/标题确认；降级当前窗口消息，不阻断回复生成")
                     return false
@@ -6662,11 +6623,6 @@ internal class MomoSocialAdapter(
             }
         }
     }
-
-    private fun failPendingInboxIdentityCapture(
-        pending: PendingInboxIdentityCapture,
-        reason: String
-    ) = sessionComponents.inboxIdentity.failPendingInboxIdentityCapture(pending, reason, onLog)
 
     private fun dispatchInboxProfileIdentityScroll(
         pending: PendingInboxIdentityCapture,

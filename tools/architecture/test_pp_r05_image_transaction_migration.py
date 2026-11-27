@@ -79,4 +79,4 @@ class PpR05ImageTransactionMigrationTest(unittest.TestCase):
             with self.subTest(old=old), self.assertRaises(AssertionError):
                 restore_r05d_adapter(adapter, owner.replace(old, new, 1))
         with self.assertRaises(AssertionError):
-            restore_r05d_adapter(adapter.replace("submitPrivateFollowUpStep = ::submitPrivateFollowUpStep", "submitPrivateFollowUpStep = unchecked", 1), owner)
+            restore_r05d_adapter(adapter.replace("submitPrivateFollowUpStep = privateFollowUpController::submitPrivateFollowUpStep", "submitPrivateFollowUpStep = unchecked", 1), owner)

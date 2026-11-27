@@ -1939,9 +1939,18 @@ def paired_ai_task_boundary_violations(code_by_path: dict[str, str]) -> list[str
     require_order(follow_up_owner, "observe", "privateFollowUp ?: return",
                   "!followUpCurrent(child)", "child.inFlight",
                   "!reconcileInterception(child)", "observeImage(child)", "observeInterception(child)")
-    # The adapter must delegate to the same shared execution owner, not a local gate.
-    if "privateFollowUpController.submitPrivateFollowUpStep(child, next, action)" not in code_by_path.get(adapter, ""):
-        issues.append("Paired task boundary lost shared child submission delegation")
+    # R05-H removes the redundant forwarding method. Check each actual caller
+    # and the direct image-owner binding instead of the former facade.
+    adapter_code = code_by_path.get(adapter, "")
+    for token in (
+        "submitPrivateFollowUpStep = privateFollowUpController::submitPrivateFollowUpStep",
+        "followUpCurrent = privateFollowUpController::followUpCurrent",
+        "privateFollowUpController.submitPrivateFollowUpStep(child, next)",
+    ):
+        if adapter_code.count(token) != 1:
+            issues.append(f"Paired task boundary lost shared child submission delegation: {token}")
+    if adapter_code.count("privateFollowUpController.submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT)") != 2:
+        issues.append("Paired task boundary lost shared image retry submission delegation")
     require_order(runtime, "runPrivateFollowUpObservation", "!ownsPrivateFollowUp(child)",
                   "port.observe()", "scheduleFullInspectionAfter(500L)",
                   "if (activePrivateFollowUp !== child) return",
