@@ -52,8 +52,9 @@ class OCREngine(
     }
 
     // Freedom adaptation: only the request's detection resize limit changes here.
-    fun run(bitmap: Bitmap, detMaxSideLimit: Int? = null, requestId: String = "sdk-bitmap"): OCREngineResult =
-        ortManager.withInferenceDeadline(requestId) {
+    fun run(bitmap: Bitmap, detMaxSideLimit: Int? = null, requestId: String = "sdk-bitmap",
+        inferenceStartedAtMs: Long? = null): OCREngineResult =
+        ortManager.withInferenceDeadline(requestId, inferenceStartedAtMs) {
             val srcMat = BitmapUtils.bitmapToBGRMat(bitmap)
             runWithOwnedMat(srcMat, detMaxSideLimit ?: config.detMaxSideLimit)
         }

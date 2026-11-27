@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.freedom.ocr.plugin.model.OcrModelManager
 import com.freedom.ocr.plugin.runtime.OcrEngineHolder
+import com.freedom.ocr.plugin.runtime.OcrEngineRecoveryGuard
 import com.freedom.ocr.plugin.runtime.OcrImageFdDecoder
 import com.paddle.ocr.model.OCRRunResult
 import com.paddle.ocr.engine.OcrInferenceTimeout
@@ -27,6 +28,9 @@ import org.autojs.plugin.paddle.ocr.api.PaddleOcrPluginCapabilityKeys
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import com.paddle.ocr.model.OCRResult as PaddleResult
 
 /**
@@ -229,6 +233,7 @@ class OcrPluginService : Service() {
         val lockWaitStartedAt = SystemClock.elapsedRealtime()
         logStage(requestId, "ENGINE_LOCK_WAIT_START")
         synchronized(engineLock) {
+            check(!PROCESS_QUARANTINED.get()) { "OCR plugin process is quarantined" }
             val lockWaitMs = SystemClock.elapsedRealtime() - lockWaitStartedAt
             timings?.put(OcrPluginContract.EXTRA_ENGINE_LOCK_WAIT_MS, lockWaitMs)
             logStage(requestId, "ENGINE_LOCK_ACQUIRED", "waitMs=$lockWaitMs")
@@ -248,14 +253,41 @@ class OcrPluginService : Service() {
             timings?.put(OcrPluginContract.EXTRA_DET_MAX_SIDE_LIMIT, acquisition.detMaxSideLimit.toLong())
             logStage(requestId, "ENGINE_REUSE", "cacheHit=${acquisition.cacheHit};creationCount=${acquisition.creationCount};detMaxSideLimit=${acquisition.detMaxSideLimit}")
             val inferenceStartedAt = SystemClock.elapsedRealtime()
-            return traceStage(requestId, "INFERENCE", "image=${bitmap.width}x${bitmap.height}") {
-                runBlocking(Dispatchers.IO) {
-                    acquisition.engine.recognize(bitmap, acquisition.detMaxSideLimit, requestId)
+            // A separate watchdog must still run if RunOptions.setTerminate or native cleanup hangs.
+            val recovery = OcrEngineRecoveryGuard(inferenceStartedAt, SystemClock::elapsedRealtime) { reason ->
+                PROCESS_QUARANTINED.set(true)
+                Log.e(LOG_TAG, "OCR_ENGINE_RECOVERY requestId=$requestId;phase=PROCESS_RESTART;reason=$reason;pid=${android.os.Process.myPid()}")
+                // This service belongs to the independently installed OCR APK, never the host.
+                // Do not close any live native objects and do not kill another process.
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }
+            val hardWatchdog = RECOVERY_WATCHDOG.schedule(
+                { recovery.escalateIfDue() },
+                OcrEngineRecoveryGuard.HARD_EXIT_BUDGET_MS,
+                TimeUnit.MILLISECONDS,
+            )
+            try {
+                return traceStage(requestId, "INFERENCE", "image=${bitmap.width}x${bitmap.height}") {
+                    runBlocking(Dispatchers.IO) {
+                        acquisition.engine.recognize(bitmap, acquisition.detMaxSideLimit, requestId, inferenceStartedAt)
+                    }
+                }.let { result ->
+                    timings?.put(OcrPluginContract.EXTRA_INFERENCE_WALL_TIME_MS, SystemClock.elapsedRealtime() - inferenceStartedAt)
+                    // SDK coldLoadTimeMs is the engine's lifetime initial load time, not per-request.
+                    result.copy(coldLoadTimeMs = if (acquisition.cacheHit) 0L else result.coldLoadTimeMs)
                 }
-            }.let { result ->
-                timings?.put(OcrPluginContract.EXTRA_INFERENCE_WALL_TIME_MS, SystemClock.elapsedRealtime() - inferenceStartedAt)
-                // SDK coldLoadTimeMs is the engine's lifetime initial load time, not per-request.
-                result.copy(coldLoadTimeMs = if (acquisition.cacheHit) 0L else result.coldLoadTimeMs)
+            } catch (timeout: OcrInferenceTimeout) {
+                // The synchronous engine call has returned (including its RunOptions cleanup).
+                // Keep engineLock and the hard watchdog until the unhealthy engine is retired.
+                logStage(requestId, "ENGINE_ISOLATION_START", "reason=INFERENCE_TIMEOUT;creationCount=${acquisition.creationCount}")
+                val released = runCatching { engineHolder.isolateAfterTimeout(acquisition) }.getOrDefault(false)
+                logStage(requestId, "ENGINE_ISOLATION_END", "released=$released;nextAction=${if (released) "REBUILD_ON_FRESH_REQUEST" else "PROCESS_RESTART"}")
+                if (!released) recovery.escalateReleaseFailure()
+                throw timeout
+            } finally {
+                val safeExit = recovery.finish()
+                hardWatchdog.cancel(false)
+                if (!safeExit) throw OcrInferenceTimeout()
             }
         }
     }
@@ -384,6 +416,10 @@ class OcrPluginService : Service() {
         .toString()
 
     companion object {
+        private val PROCESS_QUARANTINED = AtomicBoolean(false)
+        private val RECOVERY_WATCHDOG = ScheduledThreadPoolExecutor(1) { runnable ->
+            Thread(runnable, "Freedom-OCR-Recovery").apply { isDaemon = true }
+        }.apply { removeOnCancelPolicy = true }
         private const val LOG_TAG = "FreedomOcrPlugin"
         private const val PLUGIN_ID = "freedom-paddle-ocr-pp-ocrv6-small"
         private const val LEGACY_PROTOCOL_VERSION = 1

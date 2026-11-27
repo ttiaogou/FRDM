@@ -35,21 +35,22 @@ class ORTSessionManager(
 
     private var activeRequest: RequestScope? = null
 
-    internal fun <T> withInferenceDeadline(requestId: String, run: () -> T): T {
+    internal fun <T> withInferenceDeadline(requestId: String, inferenceStartedAtMs: Long? = null, run: () -> T): T {
         check(activeRequest == null) { "OCR engine already has an inference owner" }
         val options = OrtSession.RunOptions()
-        val startedAt = SystemClock.elapsedRealtime()
+        val startedAt = inferenceStartedAtMs ?: SystemClock.elapsedRealtime()
         val deadline = OcrInferenceDeadline(SystemClock::elapsedRealtime, {
             Log.w("FreedomOcrEngine", "OCR_INFERENCE_DEADLINE requestId=$requestId;phase=TERMINATION_REQUESTED;budgetMs=${OcrInferenceDeadline.HOT_INFERENCE_BUDGET_MS}")
             val termination = runCatching { options.setTerminate(true) }
             Log.w("FreedomOcrEngine", "OCR_INFERENCE_DEADLINE requestId=$requestId;phase=TERMINATION_SIGNAL;accepted=${termination.isSuccess};type=${termination.exceptionOrNull()?.javaClass?.simpleName ?: "NONE"}")
-        })
+        }, startedAtMs = startedAt)
         val scope = RequestScope(requestId, options, deadline)
         activeRequest = scope
         try {
             val watchdog = DEADLINE_WATCHDOG.schedule(
                 { deadline.requestTerminationIfDue() },
-                OcrInferenceDeadline.HOT_INFERENCE_BUDGET_MS,
+                (OcrInferenceDeadline.HOT_INFERENCE_BUDGET_MS -
+                    (SystemClock.elapsedRealtime() - startedAt)).coerceAtLeast(0L),
                 TimeUnit.MILLISECONDS,
             )
             try {

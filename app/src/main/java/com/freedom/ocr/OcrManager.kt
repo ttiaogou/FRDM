@@ -331,6 +331,11 @@ class OcrManager(context: android.content.Context) : Closeable {
                 }
                 releaseBinding()
 
+                if (phase == RequestPhase.RECOGNIZE && typed.failureKind.requiresFreshOcrObservation()) {
+                    emitDiagnostic("OCR_CLIENT_ENGINE_CHANNEL_RETIRED requestId=$requestId;attempt=$attempt;" +
+                        "failure=${typed.failureKind};nextAction=FRESH_OBSERVATION;replay=false")
+                    throw typed
+                }
                 if (!alreadyTimedOut && isRequestCurrent() && phase == RequestPhase.RECOGNIZE &&
                     attempt < MAX_REQUEST_ATTEMPTS && typed.failureKind.isRetryable()) {
                     emitDiagnostic(

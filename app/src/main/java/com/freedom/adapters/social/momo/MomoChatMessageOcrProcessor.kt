@@ -25,6 +25,8 @@ import com.freedom.features.aireply.domain.message.OcrTextProjection
 import com.freedom.features.aireply.domain.message.OcrTextProjectionStatus
 import com.freedom.features.aireply.domain.message.MessageContentQuality
 import com.freedom.ocr.OcrManager
+import com.freedom.ocr.OcrPluginException
+import com.freedom.ocr.requiresFreshOcrObservation
 import kotlin.math.ceil
 import kotlin.math.floor
 import java.io.Closeable
@@ -479,6 +481,15 @@ internal class MomoChatMessageOcrProcessor(
             recognizeCrop(crop, incoming) { !isCompleted() && isRequestCurrent() }
         }
             .getOrElse { failure ->
+                if (failure is OcrPluginException && failure.failureKind.requiresFreshOcrObservation()) {
+                    // A channel fault invalidates this frame for further OCR, not the owning task.
+                    // Keep the existing lease until the worker exits, and do not replay old crops.
+                    runCatching { crop.recycle() }
+                    onLog("OCR_BATCH_ENGINE_RECOVERY_REQUIRED row=${target.rowIndex};reason=${failure.failureKind};nextRequest=false")
+                    onComplete(MomoChatOcrResult(emptyMap(), index + 1, failed + 1,
+                        failureReason = "OCR 引擎恢复需要新鲜截图：${failure.failureKind}", invalidated = true))
+                    return
+                }
                 val detail = failure.message?.takeIf { it.isNotBlank() } ?: "无异常消息"
                 lastEngineFailureReason = "${failure.javaClass.simpleName}: $detail"
                 CropRecognition("", "", "", null, 0)
@@ -663,7 +674,8 @@ internal class MomoChatMessageOcrProcessor(
                 }.isNotEmpty() || !isRequestCurrent()
             ) return tokens
             val result = runCatching { ocrManager.recognize(isolated, isRequestCurrent = isRequestCurrent) }
-                .getOrElse {
+                .getOrElse { failure ->
+                    if (failure is OcrPluginException && failure.failureKind.requiresFreshOcrObservation()) throw failure
                     onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=FAILED;reason=LOCAL_OCR_FAILED")
                     return tokens
                 }

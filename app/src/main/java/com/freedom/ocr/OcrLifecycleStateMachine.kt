@@ -188,3 +188,11 @@ internal fun OcrPluginFailureKind.isRetryable(): Boolean = when (this) {
     OcrPluginFailureKind.IMAGE_TRANSFER_FAILED,
     OcrPluginFailureKind.OCR_TIMEOUT -> false
 }
+
+/** These failures retire the captured OCR frame, not the business task or send journal. */
+internal fun OcrPluginFailureKind.requiresFreshOcrObservation(): Boolean = when (this) {
+    OcrPluginFailureKind.OCR_TIMEOUT,
+    OcrPluginFailureKind.BINDER_DIED,
+    OcrPluginFailureKind.SERVICE_DISCONNECTED -> true
+    else -> false
+}

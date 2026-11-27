@@ -110,9 +110,19 @@ internal class OcrEngineHolder(context: Context) {
         }
     }
 
-    fun release(reason: String) = synchronized(lock) { releaseLocked(reason) }
+    fun release(reason: String) {
+        synchronized(lock) { releaseLocked(reason) }
+    }
 
-    private fun releaseLocked(reason: String) {
+    /** Called under the service engine lock only after the failed inference has returned. */
+    fun isolateAfterTimeout(acquisition: Acquisition): Boolean = synchronized(lock) {
+        check(cachedEngine === acquisition.engine && engineCreateCount == acquisition.creationCount) {
+            "Timed-out OCR acquisition is not the current engine"
+        }
+        releaseLocked("INFERENCE_TIMEOUT")
+    }
+
+    private fun releaseLocked(reason: String): Boolean {
         val old = cachedEngine
         cachedEngine = null
         cachedKey = null
@@ -122,7 +132,9 @@ internal class OcrEngineHolder(context: Context) {
             Log.i(LOG_TAG, "OCR_ENGINE_STAGE stage=ENGINE_RELEASE_START;reason=$reason;creationCount=$engineCreateCount;thread=${Thread.currentThread().name}")
             val released = runCatching { runBlocking(Dispatchers.IO) { old.release() } }
             Log.i(LOG_TAG, "OCR_ENGINE_STAGE stage=ENGINE_RELEASE_END;reason=$reason;success=${released.isSuccess};durationMs=${SystemClock.elapsedRealtime() - startedAt}")
+            return released.isSuccess
         }
+        return true
     }
 
     internal data class EngineKey(

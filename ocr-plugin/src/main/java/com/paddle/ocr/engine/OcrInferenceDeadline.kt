@@ -12,9 +12,9 @@ internal class OcrInferenceDeadline(
     private val nowMs: () -> Long,
     private val terminate: () -> Unit,
     private val budgetMs: Long = HOT_INFERENCE_BUDGET_MS,
+    private val startedAtMs: Long = nowMs(),
 ) {
     init { require(budgetMs > 0L) }
-    private val startedAtMs = nowMs()
     private var expired = false
     private var retired = false
 
