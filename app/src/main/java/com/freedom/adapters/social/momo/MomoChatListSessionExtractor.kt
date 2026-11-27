@@ -83,6 +83,115 @@ internal class MomoChatListSessionExtractor(
         val boundsValid: Boolean
     )
 
+    data class AiFinderOverlayInspection(
+        val bounds: ScreenRect?,
+        val foundVisible: Boolean,
+        val complete: Boolean
+    )
+
+    /**
+     * Nested active_rv widgets are horizontal recommendation carousels inside the inbox. Exclude
+     * their vertical bands from main-list swipes; otherwise a swipe may be consumed by a nested
+     * RecyclerView while the main inbox fingerprint remains unchanged.
+     */
+    fun findVisibleAuxiliaryRecyclerBounds(
+        root: AccessibilityNodeInfo,
+        viewport: ScreenRect,
+        targetPackage: String
+    ): List<ScreenRect>? {
+        val matches = runCatching {
+            root.findAccessibilityNodeInfosByViewId("$targetPackage:id/active_rv")
+        }.getOrNull() ?: return null
+        val bounds = ArrayList<ScreenRect>()
+        var invalidVisibleAuxiliaryBounds = false
+        try {
+            matches.forEach { node ->
+                val rect = Rect()
+                try {
+                    if (safeBoolean { node.isVisibleToUser } && safeBoolean { node.isScrollable }) {
+                        node.getBoundsInScreen(rect)
+                        val candidate = ScreenRect(rect.left, rect.top, rect.right, rect.bottom)
+                        if (MomoChatListSessionPolicy.intersectsViewport(candidate, viewport) &&
+                            candidate.width >= viewport.width * 0.60f
+                        ) {
+                            if (!MomoChatListSessionPolicy.hasValidBounds(candidate)) {
+                                invalidVisibleAuxiliaryBounds = true
+                            } else {
+                                bounds += candidate
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // If the auxiliary node cannot be inspected, we cannot prove the swipe
+                    // path avoids it. Fail closed instead of risking a nested-list gesture.
+                    invalidVisibleAuxiliaryBounds = true
+                }
+            }
+        } finally {
+            matches.forEach { runCatching { it.recycle() } }
+        }
+        if (invalidVisibleAuxiliaryBounds) return null
+        return bounds.distinct()
+    }
+
+    /**
+     * Reads the exact mf_view overlay from the freshly acquired active root. The view-ID lookup
+     * is available because the AccessibilityService enables FLAG_REPORT_VIEW_IDS. Its children
+     * are deliberately not traversed: the FrameLayout bounds cover the complete control.
+     */
+    fun inspectAiFinderFloatingOverlay(root: AccessibilityNodeInfo, targetPackage: String): AiFinderOverlayInspection {
+        val matches = runCatching {
+            root.findAccessibilityNodeInfosByViewId("$targetPackage:id/mf_view")
+        }.getOrNull() ?: return AiFinderOverlayInspection(null, foundVisible = false, complete = false)
+        var foundVisible = false
+        var invalidVisibleBounds = false
+        var unionBounds: ScreenRect? = null
+        matches.forEach { node ->
+            try {
+                val viewId = safeString { node.viewIdResourceName?.toString().orEmpty() }
+                if (!MomoChatListSessionPolicy.isAiFinderFloatingView(viewId) ||
+                    !safeBoolean { node.isVisibleToUser }
+                ) return@forEach
+                foundVisible = true
+                val rect = Rect()
+                val readSucceeded = runCatching { node.getBoundsInScreen(rect) }.isSuccess
+                if (!readSucceeded || rect.right <= rect.left || rect.bottom <= rect.top) {
+                    invalidVisibleBounds = true
+                } else {
+                    val next = ScreenRect(rect.left, rect.top, rect.right, rect.bottom)
+                    val previous = unionBounds
+                    unionBounds = if (previous == null) next else ScreenRect(
+                        left = minOf(previous.left, next.left),
+                        top = minOf(previous.top, next.top),
+                        right = maxOf(previous.right, next.right),
+                        bottom = maxOf(previous.bottom, next.bottom)
+                    )
+                }
+            } finally {
+                runCatching { node.recycle() }
+            }
+        }
+        return AiFinderOverlayInspection(
+            bounds = unionBounds,
+            foundVisible = foundVisible,
+            complete = !invalidVisibleBounds && (!foundVisible || unionBounds != null)
+        )
+    }
+
+    fun resolveLocalPath(
+        root: AccessibilityNodeInfo,
+        relativePath: List<Int>
+    ): AccessibilityNodeInfo? {
+        var current: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(root)
+        for (index in relativePath) {
+            val parent = current ?: return null
+            val child = safeNode { parent.getChild(index) }
+            runCatching { parent.recycle() }
+            current = child ?: return null
+        }
+        return current
+    }
+
     fun extractRoot(
         root: AccessibilityNodeInfo,
         targetPackage: String,

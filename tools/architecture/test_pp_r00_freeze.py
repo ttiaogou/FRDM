@@ -125,6 +125,17 @@ class PpR00FreezeTest(unittest.TestCase):
         }.items():
             self.assertEqual(historical, reviewed_s1[path])
             reviewed_s1[path] = replacement
+        # R04 batch 2: exact relocation of read-only node acquisition and counting.
+        for path, (previous, replacement) in {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": (
+                "0d35707b612ac3926a75c1933650d3083a898571", "2d6f690d5b3504fa13bb177a14737180c3bd8a73"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoChatListSessionExtractor.kt": (
+                "200836fd2c0353efa39e4ecca29a05f880046922", "581a0a323522ed6e12b71fe2e1d85fb197adb18e"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoPageInspector.kt": (
+                "9fbda0573ae4e8a10e36498aad605ea60c266bb4", "dfc2877d7bc269871759a5a62e04dfeb3d21b7dc"),
+        }.items():
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = replacement
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

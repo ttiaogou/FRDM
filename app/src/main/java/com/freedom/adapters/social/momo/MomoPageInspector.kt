@@ -706,6 +706,20 @@ internal class MomoPageInspector(
         return bestNode
     }
 
+    fun countVisibleDirectChildren(container: AccessibilityNodeInfo): Int {
+        var visible = 0
+        val count = runCatching { container.childCount }.getOrDefault(0)
+        for (index in 0 until count) {
+            val child = runCatching { container.getChild(index) }.getOrNull() ?: continue
+            try {
+                if (runCatching { child.isVisibleToUser }.getOrDefault(false)) visible += 1
+            } finally {
+                runCatching { child.recycle() }
+            }
+        }
+        return visible
+    }
+
     fun pageFingerprint(root: AccessibilityNodeInfo): PageFingerprint {
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(AccessibilityNodeInfo.obtain(root) to 0)

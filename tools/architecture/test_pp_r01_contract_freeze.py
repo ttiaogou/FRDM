@@ -105,12 +105,15 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "tools/architecture/test_pp_r00_freeze.py"
                 self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
                 # R04 also pins the reviewed relocation; R03 remains in the R00 gate.
-                expected[path] = "0ca8691e7bb94a4595db2ee9bfe97a0371406517"
+                expected[path] = "528c3b0de3dff27adb3d542c08ed8d967dc78ed6"
             issues.extend(evidence_violations(ROOT, expected))
         # New R04 regression evidence is pinned independently of the historical inventory.
         issues.extend(evidence_violations(ROOT, {
             "app/src/test/java/com/freedom/adapters/social/momo/R04MomoReadOnlyMigrationTest.kt":
                 "08cbddbca8ff6c96e484a6e823e69af95dd4f6cd",
+        }))
+        issues.extend(evidence_violations(ROOT, {
+            "tools/architecture/test_pp_r04_node_read_migration.py": "1917bd9733e5b0f568479dd037ae78421b13d5bb",
         }))
         self.assertEqual([], issues)
 
