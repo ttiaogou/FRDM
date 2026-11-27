@@ -1,6 +1,7 @@
 package com.freedom.data
 
 import android.content.Context
+import android.util.Log
 import com.freedom.features.aireply.domain.contact.ContactImageSendStatus
 import com.freedom.features.aireply.domain.contact.ContactInterceptionStatus
 import com.freedom.features.aireply.domain.contact.ContactMessageLedgerEntry
@@ -12,6 +13,14 @@ import com.freedom.features.aireply.domain.contact.ContactFollowUpStep
 /** SharedPreferences implementation containing hashes and state names only, never chat content. */
 class ContactMessageLedgerDataStore(context: Context) : ContactMessageLedgerRepository {
     private val preferences = context.applicationContext.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+
+    init {
+        // Discard only the retired mixed counter. Never import it into either task.
+        // This is idempotent on a fresh installation and leaves the private ledger intact.
+        if (!context.applicationContext.deleteSharedPreferences("freedom_contact_message_ledger")) {
+            Log.w("ContactMessageLedger", "Failed to remove retired mixed contact ledger")
+        }
+    }
 
     override fun loadAll(): List<ContactMessageLedgerEntry> = preferences.all.mapNotNull { (key, value) ->
         (value as? String)?.let { decode(key, it) }
@@ -66,7 +75,5 @@ class ContactMessageLedgerDataStore(context: Context) : ContactMessageLedgerRepo
         )
     }.getOrNull()
 
-    // The old store mixed greetings and private replies (including weak title keys).
-    // Keep it untouched; its ambiguous history cannot be safely imported as private counts.
     private companion object { const val NAME = "freedom_private_contact_message_ledger" }
 }
