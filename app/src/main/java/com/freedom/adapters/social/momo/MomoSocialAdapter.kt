@@ -381,6 +381,7 @@ internal class MomoSocialAdapter(
     @Volatile private var lastReceivedGreetingsEntryDiagnosticAtMs: Long = 0L
     @Volatile private var lastReceivedGreetingsNavigationWaitActivityClass: String = ""
     private val receivedGreetingsEntrySearchController = MomoReceivedGreetingsEntrySearchController()
+    private val receivedGreetingsEntryPositionMemory = MomoReceivedGreetingsEntryPositionMemory()
     private val receivedGreetingsEntrySearchGestureInFlight: Boolean
         get() = receivedGreetingsEntrySearchController.isGestureInFlight()
     @Volatile private var receivedGreetingsEntrySearchWindowIdentity: String = ""
@@ -7112,6 +7113,12 @@ internal class MomoSocialAdapter(
             },
             windowGeneration = window.generation
         )
+        val previousEntryPosition = receivedGreetingsEntryPositionMemory.position
+        val observedEntryPosition = receivedGreetingsEntryPositionMemory.observe(result)
+        if (previousEntryPosition != observedEntryPosition) {
+            onLog("收到的招呼入口位置记忆[OBSERVED]：" +
+                "previous=" + previousEntryPosition.name + ";position=" + observedEntryPosition.name)
+        }
         if (result.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             pendingInboxIdentityCapture == null
         ) {
@@ -7859,6 +7866,7 @@ internal class MomoSocialAdapter(
      * sayHiTraversalState checkpoints or the durable send/return journal.
      */
     private fun resetReceivedGreetingsRunState(reason: String) {
+        receivedGreetingsEntryPositionMemory.endRun()
         val newGeneration = sayHiRunGenerationGuard.invalidatePreviousRun()
         completionBackStage = CompletionBackStage.NONE
         completionBackRetryGate.reset()
@@ -7923,7 +7931,7 @@ internal class MomoSocialAdapter(
             verifiedInboxIdentityByAnchor.clear()
             completedInboxIdentityOutcomes.clear()
         }
-        sessionComponents.sampleStore.beginRun()
+        sessionComponents.sampleStore.beginRun().also { receivedGreetingsEntryPositionMemory.beginRun() }
     }.onFailure { error ->
         diagnostics.recordException(
             component = "MomoSocialAdapter",
