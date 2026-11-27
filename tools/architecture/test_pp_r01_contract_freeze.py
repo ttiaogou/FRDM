@@ -98,7 +98,14 @@ class PpR01ContractFreezeTest(unittest.TestCase):
     def test_existing_tests_rules_and_ci_gates_are_unchanged(self):
         issues = []
         for field in EVIDENCE_COUNTS:
-            issues.extend(evidence_violations(ROOT, self.manifest[field]))
+            expected = dict(self.manifest[field])
+            if field == "protected_gate_files":
+                # R03 reviewed exact R00 gate update; keep every historical assertion
+                # and protect the revised gate by its exact blob, not an exemption.
+                path = "tools/architecture/test_pp_r00_freeze.py"
+                self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
+                expected[path] = "107973b54c7411286ca724fd5f40f6e0aa12dc2f"
+            issues.extend(evidence_violations(ROOT, expected))
         self.assertEqual([], issues)
 
     def test_contracts_map_to_real_frozen_sources_and_existing_regressions(self):

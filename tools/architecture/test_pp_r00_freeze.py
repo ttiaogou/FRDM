@@ -103,8 +103,15 @@ class PpR00FreezeTest(unittest.TestCase):
     def test_checkout_matches_pre_migration_freeze(self):
         m = self.manifest
         actual = inventory(ROOT, SOURCE_ROOTS, m["config_paths"])
+        # R03 authorized removal of exactly two unused private UI helpers.
+        # Preserve the historical manifest and require the exact reviewed replacement,
+        # not a path exemption or a regenerated baseline.
+        reviewed_s1 = dict(m["pre_migration_s1"])
+        activity = "app/src/main/java/com/freedom/MainActivity.kt"
+        self.assertEqual("0ce061194a011399a493a189fbda49a841eb7771", reviewed_s1[activity])
+        reviewed_s1[activity] = "7afbe0c4eb9f8f67f96f9833665093424948d9c2"
         self.assertEqual([], freeze_violations(
-            m["permanent_s0"], m["pre_migration_s1"], actual))
+            m["permanent_s0"], reviewed_s1, actual))
 
     def test_detects_changed_deleted_added_and_moved_sources(self):
         s0 = {"core.kt": git_blob(b"core")}

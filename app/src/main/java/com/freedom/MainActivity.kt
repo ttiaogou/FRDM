@@ -2351,24 +2351,6 @@ class MainActivity : Activity() {
 
     }
 
-    // Retained utility views from the existing Activity implementation.
-    private fun card(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(14), dp(13), dp(14), dp(13))
-        background = roundedBackground(Color.WHITE, dp(12).toFloat())
-        elevation = dp(1).toFloat()
-        layoutParams = LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(12)
-        }
-    }
-
-    private fun sectionTitle(text: String) = TextView(this).apply {
-        this.text = text
-        textSize = 15f
-        typeface = Typeface.DEFAULT_BOLD
-        setTextColor(FreedomUi.TEXT)
-    }
-
     private fun roundedBackground(color: Int, radius: Float) = GradientDrawable().apply {
         setColor(color)
         cornerRadius = radius
