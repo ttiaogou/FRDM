@@ -902,8 +902,20 @@ class PrivateMessagesTraversalTaskExecutorTest {
         executor.checkpointLastSuccessfulTaskId = "confirmed-a-or-b-receipt"
         executor.checkpointNextCursorKey = key(b)
 
-        // A verified return from greetings is still the SAME round.
+        // A verified return from greetings is still the SAME round; old gesture
+        // and boundary samples, unlike business progress, are never reusable.
+        executor.pendingScrollBaseline = staleViewport
+        executor.pendingScrollToTop = true
+        executor.pendingBoundaryConfirmationKeys = staleViewport
+        executor.pendingBoundaryConfirmationToTop = true
+        executor.noProgressScrollCount = 2
         executor.resumeAfterReturnedInbox()
+        assertEquals(null, executor.pendingScrollBaseline)
+        assertFalse(executor.pendingScrollToTop)
+        assertEquals(null, executor.pendingBoundaryConfirmationKeys)
+        assertFalse(executor.pendingBoundaryConfirmationToTop)
+        assertEquals(0, executor.noProgressScrollCount)
+        assertEquals(staleViewport, executor.lastStableSessionListVisibleKeys)
         assertEquals(setOf(key(a), key(b)), executor.attemptedSessionKeys)
         assertEquals(setOf(key(a), key(b)), executor.lockedUnreadSessionKeys)
         assertEquals(setOf("old-snapshot-capture"), executor.capturedSessionListFingerprints)

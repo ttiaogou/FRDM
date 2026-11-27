@@ -26,7 +26,9 @@ internal class MomoSayHiTraversalCheckpointStore(
                 },
                 deferredReturnToTopActive = record.deferredReturnToTopActive,
                 deferredReplayStarted = record.deferredReplayStarted,
-                savedAtEpochMs = record.savedAtEpochMs
+                savedAtEpochMs = record.savedAtEpochMs,
+                lastVisibleRowKeys = record.lastVisibleRowKeys,
+                reanchorToTopPending = record.reanchorToTopPending
             )
         }
 
@@ -46,7 +48,9 @@ internal class MomoSayHiTraversalCheckpointStore(
                     )
                 },
                 deferredReturnToTopActive = checkpoint.deferredReturnToTopActive,
-                deferredReplayStarted = checkpoint.deferredReplayStarted
+                deferredReplayStarted = checkpoint.deferredReplayStarted,
+                lastVisibleRowKeys = checkpoint.lastVisibleRowKeys,
+                reanchorToTopPending = checkpoint.reanchorToTopPending
             )
         )
     }
@@ -61,7 +65,9 @@ internal data class MomoSayHiTraversalCheckpoint(
     val deferredRows: Map<String, MomoSayHiDeferredRowCheckpoint>,
     val deferredReturnToTopActive: Boolean,
     val deferredReplayStarted: Boolean,
-    val savedAtEpochMs: Long
+    val savedAtEpochMs: Long,
+    val lastVisibleRowKeys: List<String> = emptyList(),
+    val reanchorToTopPending: Boolean = false
 )
 
 internal data class MomoSayHiDeferredRowCheckpoint(

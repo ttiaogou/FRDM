@@ -1279,13 +1279,14 @@ internal class MomoSocialAdapter(
         completionBackRetryGate.reset()
         resetReceivedGreetingsEntrySearch()
         sayHiAutonomousBrowseController.reset()
+        sayHiTraversalState.prepareForListReentry()
         sayHiTraversalState.resetFilterSkips()
         clearSayHiSelectedGreeting()
         resetSayHiRowTapTransaction()
         receivedGreetingsEntryTapPending = false
         sayHiCardListTapPending = false
-        sayHiTraversalState.setDeferredReturnToTopActive(false)
-        sayHiTraversalState.setDeferredReplayStarted(false)
+        // The same logical scan may be resumed through a manually confirmed list.
+        // Its direction and outstanding rows are not reset by admission.
         sayHiStableCandidateKey = ""
         sayHiStableCandidateTarget = null
         sayHiStableCandidateWindow = null
@@ -1321,6 +1322,7 @@ internal class MomoSocialAdapter(
         completionBackStage = CompletionBackStage.NONE
         completionBackRetryGate.reset()
         resetReceivedGreetingsEntrySearch()
+        sayHiTraversalState.prepareForListReentry()
     }
 
     override fun performReceivedGreetingsIdleStep(): Boolean {
@@ -4371,7 +4373,9 @@ internal class MomoSocialAdapter(
         return when {
             isReceivedGreetingsListStructureVisible() -> if (!sayHiNavigationFlowController.isReceivedListConfirmed()) {
                 ReceivedGreetingsTraversalStatus.UNKNOWN
-            } else if (sayHiAutonomousBrowseController.isFinished() && !sayHiTraversalState.hasDeferredRows) {
+            } else if (sayHiAutonomousBrowseController.isFinished() &&
+                !sayHiTraversalState.reanchorToTopPending && !sayHiTraversalState.hasDeferredRows
+            ) {
                 ReceivedGreetingsTraversalStatus.COMPLETE
             } else {
                 ReceivedGreetingsTraversalStatus.SCANNING
@@ -4506,9 +4510,10 @@ internal class MomoSocialAdapter(
         if (!inboxConfirmed || sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight) {
             return false
         }
-        // A safe partial handoff must never use the legacy exhausted-scan cleanup.
-        // L03 will extend cursor restoration; preserve the existing durable ledger now.
-        if (preserveTraversal && !runCatching { persistSayHiTraversalCheckpoint() }.isSuccess) return false
+        // Returning to the other task retires only window-bound state. Even a
+        // completed scan retains its business ledger for the next visit.
+        if (!runCatching { sayHiTraversalState.suspendTraversal(preserveTraversal) }.isSuccess) return false
+        sayHiRunGenerationGuard.invalidatePreviousRun()
         receivedGreetingsEntryTapPending = false
         sayHiCardListTapPending = false
         sayHiNavigationFlowController.reset()
@@ -4516,7 +4521,7 @@ internal class MomoSocialAdapter(
         resetReceivedGreetingsEntrySearch()
         resetSayHiListSnapshotState()
         clearSayHiSelectedGreeting()
-        if (!preserveTraversal) sayHiTraversalState.clear()
+        sayHiDeferredSafeEvidenceOnlyWait = false
         sayHiStableCandidateKey = ""
         sayHiStableCandidateTarget = null
         sayHiStableCandidateWindow = null
@@ -4911,6 +4916,22 @@ internal class MomoSocialAdapter(
                     return false
                 }
             }
+            if (sayHiReadOnlyStage == SayHiReadOnlyStage.IDLE &&
+                !tree.truncated && !result.truncated && !result.queryBudgetExceeded &&
+                result.containerFound && result.containerMatchCountExact && !result.containerAmbiguous &&
+                !sayHiGestureInFlight && accessibilityGateway.isWindowCurrent(tree.window)
+            ) {
+                val resumed = runCatching {
+                    sayHiTraversalState.observeVerifiedViewport(result.listRows.map(MomoSayHiIdentityFingerprintPolicy::rowKey))
+                }.getOrElse {
+                    onLog("收到招呼检查点恢复[CHECKPOINT_WRITE_FAILED]：等待新鲜快照，不推进遍历")
+                    scheduleSayHiListSnapshotInspection(500L, "CHECKPOINT_WRITE_FAILED", retry = false)
+                    return false
+                }
+                if (resumed == MomoSayHiTraversalState.ViewportResume.REANCHOR_TO_TOP) {
+                    onLog("收到招呼检查点恢复[REANCHOR]：原视口未证明或仍在重新定位；保留业务记录，使用新鲜列表继续")
+                }
+            }
             greetingRowActionHandled = processReceivedGreetingRows(tree, result)
             if (!greetingRowActionHandled) {
                 // Empty visible rows are not by themselves proof of completion. Route them
@@ -5008,6 +5029,14 @@ internal class MomoSocialAdapter(
      * Autonomously browses only the outer vertically scrolling listview proven by the device trace.
      * The nested card_list recommendation carousel is never used as the scroll target.
      */
+    private fun completeSayHiTopReanchor(): Boolean = runCatching {
+        sayHiTraversalState.completeTopReanchor()
+    }.getOrElse {
+        onLog("收到招呼检查点恢复[REANCHOR_CHECKPOINT_WRITE_FAILED]：保留重新定位状态，等待保存")
+        scheduleSayHiListSnapshotInspection(500L, "REANCHOR_CHECKPOINT_WRITE_FAILED", retry = false)
+        false
+    }
+
     private fun dispatchAutonomousSayHiListScroll(
         tree: com.freedom.core.accessibility.api.AccessibilityTreeSnapshot,
         inspection: MomoSayHiPageInspection
@@ -5046,6 +5075,13 @@ internal class MomoSocialAdapter(
                 scheduleSayHiListSnapshotInspection(350L, "NON_SCROLLABLE_BOUNDARY_CONFIRMATION", retry = false)
                 return
             }
+            if (sayHiTraversalState.reanchorToTopPending) {
+                if (!completeSayHiTopReanchor()) return
+                // A verified non-scrollable list is already at both boundaries.
+                sayHiAutonomousBrowseController.reset()
+                scheduleSayHiListSnapshotInspection(350L, "REANCHOR_TOP_CONFIRMED", retry = false)
+                return
+            }
             if (sayHiTraversalState.hasDeferredRows) {
                 if (hasRetryableSayHiDeferredRows()) {
                     onLog("收到招呼自主浏览暂未完成：已确认当前 listview 不可滚动，但仍有 ${sayHiTraversalState.deferredRowCount} 个用户待恢复；保留断点并等待回访，不报告完成")
@@ -5063,6 +5099,11 @@ internal class MomoSocialAdapter(
             }
             onLog("收到招呼自主浏览完成：外层 listview 连续两份完整、间隔快照均确认不可滚动，且不存在待恢复用户")
             return
+        }
+        if (sayHiAutonomousBrowseController.isFinished() && sayHiTraversalState.reanchorToTopPending) {
+            if (!completeSayHiTopReanchor()) return
+            sayHiAutonomousBrowseController.reset()
+            onLog("收到招呼检查点恢复[TOP_REANCHORED]：新鲜边界已确认，继续原业务未处理记录")
         }
         if (sayHiAutonomousBrowseController.isFinished() && sayHiTraversalState.hasDeferredRows) {
             if (!hasRetryableSayHiDeferredRows()) {
@@ -5164,7 +5205,7 @@ internal class MomoSocialAdapter(
             id = "momo-sayhi-list-scroll-${System.nanoTime()}",
             intent = GestureIntent.VerticalSwipe(
                 viewport = visibleListBounds,
-                direction = if (sayHiTraversalState.deferredReturnToTopActive) VerticalSwipeDirection.DOWN else VerticalSwipeDirection.UP,
+                direction = if (sayHiTraversalState.isReverseTraversal) VerticalSwipeDirection.DOWN else VerticalSwipeDirection.UP,
                 durationMs = 520L
             ),
             description = "陌陌收到招呼列表安全上滑",

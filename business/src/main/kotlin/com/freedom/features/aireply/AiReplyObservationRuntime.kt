@@ -2881,7 +2881,7 @@ class AiReplyObservationRuntime(
                         }
                         val traversalExhausted = privateToGreetingsHandoff == PrivateToGreetingsHandoff.TRAVERSAL_EXHAUSTED
                         finishGreetingsToPrivateHandoff()
-                        privateMessagesTraversalTaskExecutor.sessionActionCount = 0
+                        if (traversalExhausted) privateMessagesTraversalTaskExecutor.sessionActionCount = 0
                         // The greeting branch returned to the already-established inbox context.
                         // Preserve the existing traversal memory; only the open conversation and
                         // stale viewport baseline are invalid after returning from another page.
@@ -7424,7 +7424,6 @@ class AiReplyObservationRuntime(
         invalidateMessageReadTransaction()
 
         receivedGreetingsRecoveryRetryAttempt = 0
-        privateMessagesTraversalTaskExecutor.sessionActionCount = 0
 
         startupReadinessCoordinator.markReceivedGreetingsWorkAreaConfirmed()
 

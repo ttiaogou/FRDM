@@ -39,6 +39,15 @@ internal class MomoSayHiTraversalState(
     var deferredReplayStarted: Boolean = false
         private set
 
+    // Durable logical cursor; window identity, geometry and boundary samples are never persisted.
+    private var lastVisibleRowKeys: List<String> = emptyList()
+    private var resumeViewportPending = false
+    var reanchorToTopPending: Boolean = false
+        private set
+    val isReverseTraversal: Boolean get() = reanchorToTopPending || deferredReturnToTopActive
+
+    enum class ViewportResume { CONTINUE, REANCHOR_TO_TOP, FRESH_SCAN }
+
     val processedRowCount: Int get() = processedRowKeys.size
     val processedContactCount: Int get() = processedContactIdHashes.size
     val deferredRowCount: Int get() = deferredRowKeys.size
@@ -59,7 +68,7 @@ internal class MomoSayHiTraversalState(
         val safeTargetRetryExhausted: Boolean
     )
 
-    /** Restores only hashed/content-derived identities and retry metadata, never list position. */
+    /** Restore logical progress only; every resumed viewport must be independently reacquired. */
     fun restore(): RestoreSummary? {
         val checkpoint = checkpointStore.load() ?: run {
             hasRestorableCheckpoint = false
@@ -83,10 +92,101 @@ internal class MomoSayHiTraversalState(
             }
         }
         recoveryEvidenceCandidates.clear()
-        // A platform scroll position is never restored; every run starts a fresh forward pass.
+        lastVisibleRowKeys = validViewportKeys(checkpoint.lastVisibleRowKeys)
+        reanchorToTopPending = checkpoint.reanchorToTopPending
+        // A legacy record without an anchor cannot prove continuity or reverse direction.
+        deferredReturnToTopActive = lastVisibleRowKeys.isNotEmpty() && checkpoint.deferredReturnToTopActive
+        deferredReplayStarted = lastVisibleRowKeys.isNotEmpty() && checkpoint.deferredReplayStarted
+        resumeViewportPending = true
+        return RestoreSummary(processedRowKeys.size, deferredRowKeys.size, processedContactIdHashes.size)
+    }
+
+    private fun validViewportKeys(keys: List<String>): List<String> =
+        keys.takeIf { it.size <= 64 && it.distinct().size == it.size &&
+            it.all { key -> key.matches(Regex("[0-9a-f]{64}")) } }.orEmpty()
+
+    /** Reentry invalidates old evidence even when navigation was initiated manually. */
+    fun prepareForListReentry() {
+        recoveryEvidenceCandidates.clear()
+        resumeViewportPending = lastVisibleRowKeys.isNotEmpty() || reanchorToTopPending ||
+            processedRowKeys.isNotEmpty() || deferredRowKeys.isNotEmpty()
+    }
+
+    /**
+     * Suspend business progress without retaining any window-scoped observation.
+     * Exhaustion starts a new scan later, but does not erase processed or deferred work.
+     */
+    fun suspendTraversal(preserveTraversal: Boolean) {
+        recoveryEvidenceCandidates.clear()
+        if (!preserveTraversal) {
+            lastVisibleRowKeys = emptyList()
+            reanchorToTopPending = false
+            deferredReturnToTopActive = false
+            deferredReplayStarted = false
+            resetFilterSkips()
+        }
+        resumeViewportPending = true
+        persist()
+    }
+
+    /** Reentry must compare fresh ordered row identities, not an old position or coordinate. */
+    fun observeVerifiedViewport(rowKeys: List<String>): ViewportResume {
+        val fresh = validViewportKeys(rowKeys)
+        val previousKeys = lastVisibleRowKeys
+        val previousResumePending = resumeViewportPending
+        val previousReanchor = reanchorToTopPending
+        val previousReverse = deferredReturnToTopActive
+        val previousReplay = deferredReplayStarted
+        val result = if (!resumeViewportPending) ViewportResume.CONTINUE else {
+            resumeViewportPending = false
+            when {
+                reanchorToTopPending -> ViewportResume.REANCHOR_TO_TOP
+                lastVisibleRowKeys.isNotEmpty() && lastVisibleRowKeys == fresh -> ViewportResume.CONTINUE
+                lastVisibleRowKeys.isEmpty() && processedRowKeys.isEmpty() && deferredRowKeys.isEmpty() ->
+                    ViewportResume.FRESH_SCAN
+                else -> {
+                    // Missing, reordered or ambiguous anchor: reuse the safe reverse sweep.
+                    // Keep all row obligations; no old boundary samples are carried over.
+                    reanchorToTopPending = true
+                    deferredReturnToTopActive = false
+                    deferredReplayStarted = false
+                    ViewportResume.REANCHOR_TO_TOP
+                }
+            }
+        }
+        if (fresh != lastVisibleRowKeys || result != ViewportResume.CONTINUE) {
+            lastVisibleRowKeys = fresh
+            try {
+                persist()
+            } catch (failure: Throwable) {
+                lastVisibleRowKeys = previousKeys
+                resumeViewportPending = previousResumePending
+                reanchorToTopPending = previousReanchor
+                deferredReturnToTopActive = previousReverse
+                deferredReplayStarted = previousReplay
+                throw failure
+            }
+        }
+        return result
+    }
+
+    /** Called only by the existing confirmed boundary controller, never by a timer. */
+    fun completeTopReanchor(): Boolean {
+        if (!reanchorToTopPending) return false
+        val previousReverse = deferredReturnToTopActive
+        val previousReplay = deferredReplayStarted
+        reanchorToTopPending = false
         deferredReturnToTopActive = false
         deferredReplayStarted = false
-        return RestoreSummary(processedRowKeys.size, deferredRowKeys.size, processedContactIdHashes.size)
+        try {
+            persist()
+        } catch (failure: Throwable) {
+            reanchorToTopPending = true
+            deferredReturnToTopActive = previousReverse
+            deferredReplayStarted = previousReplay
+            throw failure
+        }
+        return true
     }
 
     fun updateFilterSettings(settings: ConversationFilterSettings) {
@@ -273,9 +373,12 @@ internal class MomoSayHiTraversalState(
                 deferredRows = deferred,
                 deferredReturnToTopActive = deferredReturnToTopActive,
                 deferredReplayStarted = deferredReplayStarted,
-                savedAtEpochMs = nowEpochMs
+                savedAtEpochMs = nowEpochMs,
+                lastVisibleRowKeys = lastVisibleRowKeys,
+                reanchorToTopPending = reanchorToTopPending
             )
         )
+        hasRestorableCheckpoint = true
     }
 
     /** Clears both in-memory traversal state and its persisted checkpoint after explicit exit. */
@@ -292,6 +395,9 @@ internal class MomoSayHiTraversalState(
         recoveryEvidenceCandidates.clear()
         deferredReturnToTopActive = false
         deferredReplayStarted = false
+        lastVisibleRowKeys = emptyList()
+        reanchorToTopPending = false
+        resumeViewportPending = false
         hasRestorableCheckpoint = false
         checkpointStore.clear()
     }

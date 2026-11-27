@@ -17,7 +17,10 @@ data class MomoSayHiTraversalCheckpointRecord(
     val deferredRows: Map<String, MomoSayHiDeferredRowCheckpointRecord>,
     val deferredReturnToTopActive: Boolean,
     val deferredReplayStarted: Boolean,
-    val savedAtEpochMs: Long = System.currentTimeMillis()
+    val savedAtEpochMs: Long = System.currentTimeMillis(),
+    /** Ordered, unique SHA-256 row keys; comparison only, never node targets. */
+    val lastVisibleRowKeys: List<String> = emptyList(),
+    val reanchorToTopPending: Boolean = false
 )
 
 /** Port for bounded, expiring traversal checkpoints; Data owns their serialization. */

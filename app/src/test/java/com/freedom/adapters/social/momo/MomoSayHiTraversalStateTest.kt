@@ -97,6 +97,64 @@ class MomoSayHiTraversalStateTest {
     }
 
     @Test
+    fun partialHandoffRetainsLogicalCursorAndDeferredBudgetAcrossReentry() {
+        val repository = InMemoryRepository()
+        val store = MomoSayHiTraversalCheckpointStore(repository)
+        val state = MomoSayHiTraversalState(store)
+        val keys = listOf("a".repeat(64), "b".repeat(64))
+        state.markProcessedRow("done")
+        state.deferRow("pending", "TEMPORARY", 1_000L)
+        state.observeVerifiedViewport(keys)
+        state.setDeferredReturnToTopActive(true)
+        state.suspendTraversal(preserveTraversal = true)
+        val restored = MomoSayHiTraversalState(store)
+        assertTrue(restored.restore() != null)
+        assertEquals(MomoSayHiTraversalState.ViewportResume.CONTINUE, restored.observeVerifiedViewport(keys))
+        assertTrue(restored.isReverseTraversal)
+        assertTrue(restored.isProcessedRow("done"))
+        assertFalse(restored.isDeferredRetryDue("pending", 2_499L))
+        assertTrue(restored.isDeferredRetryDue("pending", 2_500L))
+    }
+
+    @Test
+    fun missingOrAmbiguousAnchorReanchorsWithoutErasingWorkAndSurvivesAnotherHandoff() {
+        val repository = InMemoryRepository()
+        val store = MomoSayHiTraversalCheckpointStore(repository)
+        val state = MomoSayHiTraversalState(store)
+        val keys = listOf("a".repeat(64), "b".repeat(64))
+        state.markProcessedRow("done")
+        state.observeVerifiedViewport(keys)
+        state.suspendTraversal(preserveTraversal = true)
+        assertEquals(MomoSayHiTraversalState.ViewportResume.REANCHOR_TO_TOP,
+            state.observeVerifiedViewport(listOf("c".repeat(64), "c".repeat(64))))
+        assertTrue(state.isReverseTraversal)
+        state.suspendTraversal(preserveTraversal = true)
+        val restored = MomoSayHiTraversalState(store)
+        restored.restore()
+        assertTrue(restored.reanchorToTopPending)
+        assertEquals(MomoSayHiTraversalState.ViewportResume.REANCHOR_TO_TOP,
+            restored.observeVerifiedViewport(keys))
+        assertTrue(restored.completeTopReanchor())
+        assertFalse(restored.isReverseTraversal)
+        assertFalse(restored.completeTopReanchor())
+        assertTrue(restored.isProcessedRow("done"))
+    }
+
+    @Test
+    fun exhaustedHandoffStartsNewScanWithoutDeletingLedger() {
+        val repository = InMemoryRepository()
+        val state = MomoSayHiTraversalState(MomoSayHiTraversalCheckpointStore(repository))
+        state.markProcessedRow("done")
+        state.deferRow("pending", "TEMPORARY", 1_000L)
+        state.observeVerifiedViewport(listOf("a".repeat(64)))
+        state.suspendTraversal(preserveTraversal = false)
+        assertTrue(state.isProcessedRow("done"))
+        assertTrue(state.isDeferredRow("pending"))
+        assertTrue(state.hasRestorableCheckpoint)
+        assertTrue(repository.value?.lastVisibleRowKeys?.isEmpty() == true)
+    }
+
+    @Test
     fun completedIdentityCanBeRemovedFromDeferredStateAndExplicitExitClearsCheckpoint() {
         val repository = InMemoryRepository()
         val state = MomoSayHiTraversalState(MomoSayHiTraversalCheckpointStore(repository))

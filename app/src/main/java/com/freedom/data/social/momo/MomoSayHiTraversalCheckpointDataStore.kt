@@ -52,7 +52,10 @@ internal class MomoSayHiTraversalCheckpointDataStore(context: Context) : MomoSay
                 deferredRows = deferred,
                 deferredReturnToTopActive = json.optBoolean("deferredReturnToTopActive", false),
                 deferredReplayStarted = json.optBoolean("deferredReplayStarted", false),
-                savedAtEpochMs = savedAt
+                savedAtEpochMs = savedAt,
+                lastVisibleRowKeys = json.optJSONArray("lastVisibleRowKeys").toStringSet()
+                    .filter { it.matches(Regex("[0-9a-f]{64}")) }.take(MAX_VIEWPORT_ROWS),
+                reanchorToTopPending = json.optBoolean("reanchorToTopPending", false)
             )
         }.getOrElse {
             clear()
@@ -76,6 +79,9 @@ internal class MomoSayHiTraversalCheckpointDataStore(context: Context) : MomoSay
                 .put("failedSafeTargetEvidenceHash", value.failedSafeTargetEvidenceHash
                     .takeIf { it.matches(Regex("[0-9a-f]{64}")) }.orEmpty()))
         }
+        val visible = JSONArray()
+        checkpoint.lastVisibleRowKeys.filter { it.matches(Regex("[0-9a-f]{64}")) }
+            .distinct().take(MAX_VIEWPORT_ROWS).forEach { visible.put(it) }
         val payload = JSONObject()
             .put("version", CHECKPOINT_VERSION)
             .put("savedAtEpochMs", System.currentTimeMillis())
@@ -84,6 +90,8 @@ internal class MomoSayHiTraversalCheckpointDataStore(context: Context) : MomoSay
             .put("deferredRows", deferred)
             .put("deferredReturnToTopActive", checkpoint.deferredReturnToTopActive)
             .put("deferredReplayStarted", checkpoint.deferredReplayStarted)
+            .put("lastVisibleRowKeys", visible)
+            .put("reanchorToTopPending", checkpoint.reanchorToTopPending)
         preferences.edit().putString(KEY_CHECKPOINT, payload.toString()).apply()
     }
 
@@ -106,6 +114,7 @@ internal class MomoSayHiTraversalCheckpointDataStore(context: Context) : MomoSay
         const val KEY_CHECKPOINT = "checkpoint_v1"
         const val CHECKPOINT_VERSION = 1
         const val MAX_ROWS = 600
+        const val MAX_VIEWPORT_ROWS = 64
         const val MAX_AGE_MS = 24L * 60L * 60L * 1_000L
     }
 }

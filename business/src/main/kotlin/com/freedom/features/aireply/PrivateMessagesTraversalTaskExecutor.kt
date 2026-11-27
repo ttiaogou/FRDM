@@ -1768,8 +1768,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
     fun resumeAfterReturnedInbox() {
         clearCurrentSession()
         executionState = SessionManagerState.WAITING_FOR_SESSION_LIST
-        pendingScrollBaseline = null
-        pendingScrollToTop = false
+        clearRecoveryViewportEvidence()
         // Retain the original same-round position until the fresh inbox proves continuity.
     }
 
