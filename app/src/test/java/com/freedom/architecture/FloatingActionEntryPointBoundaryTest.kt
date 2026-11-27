@@ -5,7 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Guards the three-entry floating menu, global collector entry, and in-place target-app overlays. */
+/** Guards the two-entry floating menu, global collector entry, and in-place target-app overlays. */
 class FloatingActionEntryPointBoundaryTest {
     private val projectRoot: File
         get() = File(System.getProperty("user.dir")).let { start ->
@@ -41,21 +41,21 @@ class FloatingActionEntryPointBoundaryTest {
     }
 
     @Test
-    fun threeFloatingActionsUseDistinctIconsAndSemiCircularGeometry() {
+    fun twoFloatingActionsUseDistinctIconsAndSemiCircularGeometry() {
         val overlay = source("app/src/main/java/com/freedom/adapters/accessibility/android/MonitorOverlay.kt")
         val menuFactory = source("app/src/main/java/com/freedom/adapters/accessibility/android/MonitorOverlayMenuViewFactory.kt")
         val createMenu = menuFactory.substringAfter("fun create(context: Context): FrameLayout")
-            .substringBefore("/** Places the three icon-only actions")
+            .substringBefore("/** Places the two icon-only actions")
 
         assertTrue(createMenu.contains("icon = R.drawable.ic_floating_visualizer"))
         assertTrue(createMenu.contains("requestNodeBounds(context)"))
         assertTrue(createMenu.contains("icon = R.drawable.ic_floating_export"))
         assertTrue(createMenu.contains("openCollectionExport(context)"))
-        assertTrue(createMenu.contains("icon = R.drawable.ic_floating_logs"))
-        assertTrue("The logs action must invoke its injected callback", createMenu.contains("showRunLog(context)"))
-        assertTrue("Window owner must connect logs to the existing repository-backed view", overlay.contains("showRunLog = { context -> FloatingRunLogWindow.show(context, repository(context)) }"))
-        assertTrue("Exactly three real entries should be attached", createMenu.split("menu.addView(").size - 1 == 3)
-        assertTrue(overlay.contains("MENU_ACTION_ANGLES = listOf(-90f, 0f, 90f)"))
+        assertFalse(createMenu.contains("ic_floating_logs"))
+        assertFalse(createMenu.contains("showRunLog"))
+        assertFalse("The former window must not be reachable from the overlay", overlay.contains("FloatingRunLogWindow"))
+        assertTrue("Exactly two real entries should be attached", createMenu.split("menu.addView(").size - 1 == 2)
+        assertTrue(overlay.contains("MENU_ACTION_ANGLES = listOf(-45f, 45f)"))
         assertTrue(overlay.contains("actionAngles = MENU_ACTION_ANGLES"))
         assertTrue(menuFactory.contains("RadialMenuGeometry.fanPositions("))
         assertTrue(overlay.contains("MENU_ACTION_SIZE_DP = 60"))
@@ -111,12 +111,12 @@ class FloatingActionEntryPointBoundaryTest {
         val main = source("app/src/main/java/com/freedom/MainActivity.kt")
         val actions = source("app/src/main/java/com/freedom/adapters/android/MonitorActions.kt")
         val menu = menuFactory.substringAfter("fun create(context: Context): FrameLayout")
-            .substringBefore("/** Places the three icon-only actions")
+            .substringBefore("/** Places the two icon-only actions")
 
         assertTrue(menu.contains("R.drawable.ic_floating_visualizer"))
         assertTrue(menu.contains("R.drawable.ic_floating_export"))
         assertTrue(menu.contains("openCollectionExport(context)"))
-        assertTrue(menu.contains("R.drawable.ic_floating_logs"))
+        assertFalse(menu.contains("R.drawable.ic_floating_logs"))
         assertFalse(menu.substringAfter("ic_floating_export").substringBefore("menu.addView(")
             .contains("requestGlobalNodeLayoutBounds(context)"))
         assertTrue(overlay.contains("Intent(MonitorActions.ACTION_OPEN_CAPTURE_EXPORT)"))
@@ -163,13 +163,20 @@ class FloatingActionEntryPointBoundaryTest {
     }
 
     @Test
-    fun floatingRunLogUsesTheExistingRuntimeLogRepository() {
+    fun collectionExportUsesTheExistingRuntimeLogRepositoryWithoutLiveLogWindows() {
         val overlay = source("app/src/main/java/com/freedom/adapters/accessibility/android/MonitorOverlay.kt")
-        val floatingLog = source("app/src/main/java/com/freedom/adapters/accessibility/android/FloatingRunLogWindow.kt")
-        assertTrue(overlay.contains("FloatingRunLogWindow.show(context, repository(context))"))
-        assertTrue(floatingLog.contains("source.logs()"))
-        assertTrue(floatingLog.contains("TYPE_APPLICATION_OVERLAY"))
-        assertTrue(floatingLog.contains("POLL_INTERVAL_MS"))
+        val main = source("app/src/main/java/com/freedom/MainActivity.kt")
+        val dialog = source("app/src/main/java/com/freedom/ui/logs/LogRecordsDialog.kt")
+        val home = source("app/src/main/java/com/freedom/ui/config/ConfigurationHome.kt")
+        assertFalse(overlay.contains("FloatingRunLogWindow"))
+        assertFalse(main.contains("LogRecordsDialog.show("))
+        assertFalse(main.contains("diagnostics.latestReportText()"))
+        assertFalse(dialog.contains("onShowDiagnosticReport"))
+        assertFalse(dialog.contains("onCleared"))
+        assertTrue(main.contains("launchLogExport(monitorRepository.logs())"))
+        assertTrue(main.contains("onCollectionExport = ::showCollectionExportActions"))
+        assertTrue(home.contains("callbacks.onCollectionExport()"))
+        assertTrue(dialog.contains("stylePrimaryExportButton"))
     }
 
     @Test

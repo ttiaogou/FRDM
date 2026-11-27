@@ -33,7 +33,7 @@ internal class ConfigurationHome(
         val onTaskParametersChanged: (TaskLaunchParameters) -> Unit,
         val onTargetClick: () -> Unit,
         val onPersonalization: () -> Unit,
-        val onRecordsTab: () -> Unit,
+        val onCollectionExport: () -> Unit,
         val onOpenDrawer: () -> Unit,
         val onRunClick: () -> Unit
     )
@@ -156,17 +156,17 @@ internal class ConfigurationHome(
             gravity = Gravity.CENTER_VERTICAL
         })
 
-        val recordsEntry = ImageButton(activity).apply {
-            setImageResource(R.drawable.ic_run_history)
+        val exportEntry = ImageButton(activity).apply {
+            setImageResource(R.drawable.ic_floating_export)
             imageTintList = ColorStateList.valueOf(TEXT)
             background = clickableBackground(24)
             scaleType = ImageView.ScaleType.CENTER
-            contentDescription = "运行记录"
+            contentDescription = "采集与导出"
             isFocusable = true
-            setOnClickListener { callbacks.onRecordsTab() }
+            setOnClickListener { callbacks.onCollectionExport() }
         }
         header.addView(configEntry, LinearLayout.LayoutParams(0, dp(48), 1f))
-        header.addView(recordsEntry, LinearLayout.LayoutParams(dp(48), dp(48)))
+        header.addView(exportEntry, LinearLayout.LayoutParams(dp(48), dp(48)))
         return header
     }
 

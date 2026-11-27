@@ -22,8 +22,7 @@ internal class MonitorOverlayMenuViewFactory(
     private val actionAngles: List<Float>,
     private val collapseMenu: () -> Unit,
     private val requestNodeBounds: (Context) -> Unit,
-    private val openCollectionExport: (Context) -> Unit,
-    private val showRunLog: (Context) -> Unit
+    private val openCollectionExport: (Context) -> Unit
 ) {
     fun create(context: Context): FrameLayout {
         val menu = FrameLayout(context).apply {
@@ -61,22 +60,10 @@ internal class MonitorOverlayMenuViewFactory(
             },
             FrameLayout.LayoutParams(dp(context, actionSizeDp), dp(context, actionSizeDp))
         )
-        menu.addView(
-            menuIconAction(
-                context = context,
-                icon = R.drawable.ic_floating_logs,
-                gradient = intArrayOf(0xFF314D3A.toInt(), 0xFF17281F.toInt()),
-                contentDescription = "悬浮日志：查看实时运行事件"
-            ) {
-                collapseMenu()
-                showRunLog(context)
-            },
-            FrameLayout.LayoutParams(dp(context, actionSizeDp), dp(context, actionSizeDp))
-        )
         return menu
     }
 
-    /** Places the three icon-only actions along the open semicircle. */
+    /** Places the two icon-only actions along the open semicircle. */
     fun position(menu: FrameLayout, onRightEdge: Boolean, anchorCenterY: Float) {
         val menuSize = dp(menu.context, menuSizeDp)
         val itemSize = dp(menu.context, actionSizeDp)

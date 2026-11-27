@@ -53,7 +53,7 @@ object MonitorOverlay {
     private const val MENU_SIZE_DP = 260
     private const val MENU_ACTION_SIZE_DP = 60
     private const val MENU_ACTION_RADIUS_DP = 92
-    private val MENU_ACTION_ANGLES = listOf(-90f, 0f, 90f)
+    private val MENU_ACTION_ANGLES = listOf(-45f, 45f)
     private const val MENU_SAFE_TOP_DP = 40
     private const val MENU_SAFE_BOTTOM_DP = 56
     private const val HOST_SERVICE_RESTART_RETRY_MS = 800L
@@ -105,8 +105,7 @@ object MonitorOverlay {
             actionAngles = MENU_ACTION_ANGLES,
             collapseMenu = ::collapseMenu,
             requestNodeBounds = ::requestGlobalNodeLayoutBounds,
-            openCollectionExport = ::openCollectionExport,
-            showRunLog = { context -> FloatingRunLogWindow.show(context, repository(context)) }
+            openCollectionExport = ::openCollectionExport
         )
     }
 
@@ -206,7 +205,6 @@ object MonitorOverlay {
             appContext = app
             hostActivityForeground = visible
             systemSettingsSuppressed = suppressFloatingButton
-            if (visible) FloatingRunLogWindow.hide()
             if (!repository(app).isFloatingLogEnabled() || !hasOverlayPermission(app)) {
                 hideOnMainThread()
                 FloatingWindowHostService.stop(app)
@@ -353,7 +351,6 @@ object MonitorOverlay {
                 MonitorKeepAliveService.stop(app)
                 app.sendBroadcast(Intent(MonitorActions.ACTION_REFRESH).setPackage(app.packageName))
                 state.addLog("双击悬浮按钮：已提交停止请求")
-                FloatingRunLogWindow.refresh(app, state)
                 Toast.makeText(app, "正在停止运行，返回 Freedom…", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(app, "当前没有运行中的任务，返回 Freedom", Toast.LENGTH_SHORT).show()
@@ -555,7 +552,7 @@ object MonitorOverlay {
             log(context, "浮动功能菜单展开失败：${error.javaClass.simpleName}: ${error.message.orEmpty()}")
             Log.e(TAG, "Failed to show radial action menu", error)
             recoverDetachedWindow(context, "展开功能菜单时 WindowManager 更新失败")
-            Toast.makeText(context, "功能菜单暂时无法展开，请查看运行记录", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "功能菜单暂时无法展开，请通过采集与导出获取运行日志", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -670,7 +667,7 @@ object MonitorOverlay {
             Toast.makeText(app, "正在目标页面绘制节点边界", Toast.LENGTH_SHORT).show()
         }.onFailure { error ->
             log(app, "全局节点可视化请求发送失败：${error.javaClass.simpleName}")
-            Toast.makeText(app, "节点可视化请求失败，请查看运行记录", Toast.LENGTH_LONG).show()
+            Toast.makeText(app, "节点可视化请求失败，请通过采集与导出获取运行日志", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -821,7 +818,6 @@ object MonitorOverlay {
         val app = context.applicationContext
         mainHandler.post {
             appContext = app
-            FloatingRunLogWindow.refresh(app, repository(app))
             if (!repository(app).isFloatingLogEnabled() || !hasOverlayPermission(app)) {
                 hideOnMainThread()
                 FloatingWindowHostService.stop(app)
@@ -935,7 +931,6 @@ object MonitorOverlay {
         cancelHealthCheck()
         pendingSingleTap?.let(mainHandler::removeCallbacks)
         pendingSingleTap = null
-        FloatingRunLogWindow.hide()
         snapAnimator?.cancel()
         snapAnimator = null
         collapseMenu()

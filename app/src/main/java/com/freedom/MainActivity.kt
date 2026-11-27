@@ -43,7 +43,7 @@ import com.freedom.ui.config.ConfigurationHome
 import com.freedom.ui.config.AiModelConfigurationScreen
 import com.freedom.ui.config.PersonalizationScreen
 import com.freedom.ui.config.TargetAppEditor
-import com.freedom.ui.logs.LogRecordsDialog
+import com.freedom.ui.logs.CollectionExportDialog
 import com.freedom.ui.logs.LogTextFormatter
 import com.freedom.ui.logs.SessionSampleArchive
 import com.freedom.ui.logs.SessionSampleArchiveManager
@@ -377,7 +377,7 @@ class MainActivity : Activity() {
                 onTaskParametersChanged = taskLaunchParametersStore::write,
                 onTargetClick = ::showTargetPicker,
                 onPersonalization = ::showPersonalizationPage,
-                onRecordsTab = ::showRecords,
+                onCollectionExport = ::showCollectionExportActions,
                 onOpenDrawer = { configPanel.show() },
                 onRunClick = ::toggleMonitoring
             )
@@ -1153,7 +1153,7 @@ class MainActivity : Activity() {
                     .setTitle(if (outcome.isSuccess) "OCR 测试完成" else "OCR 测试失败")
                     .setMessage(message)
                     .setPositiveButton("确定", null)
-                    .setNeutralButton("查看运行日志") { _, _ -> showRecords() }
+                    .setNeutralButton("采集与导出") { _, _ -> showCollectionExportActions() }
                     .show()
             }
         }, "Freedom-OCR-Image-Test").apply { isDaemon = true }.start()
@@ -1758,151 +1758,63 @@ class MainActivity : Activity() {
         return SessionSampleArchiveManager.listSealedArchives(runsDirectory)
     }
 
-    private fun showRecords() {
-        LogRecordsDialog.show(
+    /** The Activity owns the single export entry, shared by the main and floating menus. */
+    private fun showCollectionExportActions() {
+        CollectionExportDialog.show(
             activity = this,
-            records = monitorRepository.logs(),
-            sampleRuns = listSessionSampleArchives(),
-            dp = { value -> dp(value) },
-            onExportLogs = ::launchLogExport,
-            onShowDiagnosticReport = { diagnostics.latestReportText() },
-            onCleared = {
-                monitorRepository.clearLogs()
-                refreshScreen()
-            }
+            dp = ::dp,
+            title = "采集与导出",
+            actions = listOf(
+                CollectionExportDialog.Action(
+                    label = "采集 ZIP 运行日志",
+                    description = "运行日志、诊断报告及已封存的异常证据",
+                    primary = true
+                ) { launchLogExport(monitorRepository.logs()) },
+                CollectionExportDialog.Action(
+                    label = "已封存采集归档 ZIP",
+                    description = "查看归档、选择导出或等待当前采集封存"
+                ) { showArchiveExportActions() },
+                CollectionExportDialog.Action(
+                    label = "导出最近节点预览 ZIP",
+                    description = "独立的节点结构快照"
+                ) { launchNodeDumpExport() }
+            )
         )
     }
 
-    /** This is the single entry sheet opened from the green floating-button action. */
-    private fun showCollectionExportActions() {
-        // Keep recovery and sealed/active classification in one pass so a partially written
-        // ZIP is never presented as an exportable archive.
+    private fun showArchiveExportActions() {
         val sealedArchives = listSessionSampleArchives()
         val runsDirectory = sessionSampleRunsDirectory()
         val activeRunIds = SessionSampleArchiveManager.listActiveRunIds(runsDirectory)
         val runRequested = monitorRepository.isRunRequested()
-
-        val actions = ArrayList<Pair<String, () -> Unit>>()
-        actions += "导出运行诊断与异常历史 ZIP" to { launchLogExport(monitorRepository.logs()) }
-        actions += "导出最近节点预览 ZIP" to { launchNodeDumpExport() }
+        val actions = ArrayList<CollectionExportDialog.Action>()
+        if (sealedArchives.isNotEmpty()) {
+            actions += CollectionExportDialog.Action(
+                label = "选择已封存采集归档 ZIP（${sealedArchives.size}）",
+                description = "可选择一条或多条采集归档",
+                primary = true
+            ) { showSessionSampleArchiveExportPicker() }
+        }
         when {
-            activeRunIds.isNotEmpty() && monitorRepository.isRunRequested() -> {
-                actions += "停止当前采集、封存后导出 ZIP" to {
-                    confirmStopCurrentRunAndExport(activeRunIds)
-                }
+            runRequested -> {
+                actions += CollectionExportDialog.Action(
+                    label = if (activeRunIds.isNotEmpty()) "停止当前采集、封存后导出 ZIP" else "停止当前运行并检查采集归档",
+                    description = "确认停止后等待完整封存，不会导出活动目录"
+                ) { confirmStopCurrentRunAndExport(activeRunIds) }
             }
             activeRunIds.isNotEmpty() -> {
-                actions += "等待当前采集封存完成并导出 ZIP" to {
-                    beginWaitingForSessionArchiveSeal(activeRunIds)
-                }
-            }
-            runRequested -> {
-                actions += "停止当前运行并检查采集归档" to {
-                    confirmStopCurrentRunAndExport(emptySet())
-                }
+                actions += CollectionExportDialog.Action(
+                    label = "等待当前采集封存完成并导出 ZIP"
+                ) { beginWaitingForSessionArchiveSeal(activeRunIds) }
             }
         }
-        if (sealedArchives.isNotEmpty()) {
-            actions += "导出已封存采集归档 ZIP（${sealedArchives.size}）" to {
-                showSessionSampleArchiveExportPicker()
-            }
-        } else if (activeRunIds.isEmpty() && !runRequested) {
-            actions += "暂无已封存的采集归档" to {
-                Toast.makeText(this, "暂无已封存的采集归档", Toast.LENGTH_LONG).show()
-            }
-        }
-
-        lateinit var dialog: AlertDialog
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(12), dp(18), dp(14))
-            background = FreedomUi.roundedSurface(dp(18), FreedomUi.BACKGROUND, FreedomUi.DIVIDER)
-            minimumHeight = dp(250)
-        }
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        header.addView(TextView(this).apply {
-            text = "采集与导出"
-            textSize = 19f
-            typeface = Typeface.create("sans-serif", Typeface.BOLD)
-            setTextColor(FreedomUi.TEXT)
-        }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        header.addView(TextView(this).apply {
-            text = "×"
-            textSize = 28f
-            gravity = Gravity.CENTER
-            setTextColor(FreedomUi.TEXT)
-            contentDescription = "关闭采集与导出"
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { dialog.dismiss() }
-        }, LinearLayout.LayoutParams(dp(44), dp(44)))
-        root.addView(header)
-        root.addView(View(this).apply {
-            setBackgroundColor(FreedomUi.DIVIDER)
-        }, LinearLayout.LayoutParams(-1, dp(1)))
-
-        val list = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(6), 0, dp(6))
-        }
-        actions.forEachIndexed { index, action ->
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                minimumHeight = dp(58)
-                setPadding(dp(4), dp(8), dp(4), dp(8))
-                isClickable = true
-                isFocusable = true
-                background = android.graphics.drawable.RippleDrawable(
-                    android.content.res.ColorStateList.valueOf(0x26718E22),
-                    GradientDrawable().apply {
-                        setColor(Color.TRANSPARENT)
-                        cornerRadius = dp(10).toFloat()
-                    },
-                    GradientDrawable().apply {
-                        setColor(Color.WHITE)
-                        cornerRadius = dp(10).toFloat()
-                    }
-                )
-                setOnClickListener {
-                    dialog.dismiss()
-                    action.second.invoke()
-                }
-            }
-            row.addView(TextView(this@MainActivity).apply {
-                text = action.first
-                textSize = 14f
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                setTextColor(FreedomUi.TEXT)
-                maxLines = 2
-                gravity = Gravity.CENTER_VERTICAL
-            }, LinearLayout.LayoutParams(0, -2, 1f))
-            row.addView(TextView(this@MainActivity).apply {
-                text = "›"
-                textSize = 24f
-                gravity = Gravity.CENTER
-                setTextColor(FreedomUi.MUTED)
-            }, LinearLayout.LayoutParams(dp(28), dp(42)))
-            list.addView(row)
-            if (index < actions.lastIndex) {
-                list.addView(View(this@MainActivity).apply {
-                    setBackgroundColor(FreedomUi.DIVIDER)
-                }, LinearLayout.LayoutParams(-1, dp(1)))
-            }
-        }
-        root.addView(ScrollView(this).apply {
-            isVerticalScrollBarEnabled = false
-            isHorizontalScrollBarEnabled = false
-            clipToPadding = false
-            addView(list)
-        }, LinearLayout.LayoutParams(-1, 0, 1f))
-
-        dialog = AlertDialog.Builder(this).setView(root).create()
-        dialog.show()
-        FreedomUi.styleAlertDialog(dialog, this, ::dp, widthFraction = 0.92f)
+        CollectionExportDialog.show(
+            activity = this,
+            dp = ::dp,
+            title = "已封存采集归档 ZIP",
+            actions = actions,
+            message = if (sealedArchives.isEmpty()) "暂无已封存的采集任务；运行结束后会自动归档。" else null
+        )
     }
 
     private fun showSessionSampleArchiveExportPicker(preselectedRunIds: Set<String> = emptySet()) {
@@ -1912,7 +1824,12 @@ class MainActivity : Activity() {
             return
         }
         val labels = archives.map { archive ->
-            "${archive.runId} · ${archive.durationLabel()} · ${archive.sampleCountLabel()}"
+            val integrity = archive.archiveIntegrityStatus ?: "未检测"
+            val warnings = archive.captureWarnings.joinToString("、").ifBlank { "无" }
+            "${archive.runId} · ${archive.durationLabel()} · ${archive.sampleCountLabel()}\n" +
+                "归档完整性：$integrity · 采集告警：$warnings\n" +
+                (if (archive.nodeTreeCaptureCount > 0) "节点树已采集 ${archive.nodeTreeCaptureCount} 份" else "节点树未采集") + "\n" +
+                archive.contentLabels.joinToString("、").ifBlank { "归档内容未识别" }
         }.toTypedArray()
         val checked = BooleanArray(archives.size) { index -> archives[index].runId in preselectedRunIds }
         AlertDialog.Builder(this)
@@ -2183,7 +2100,7 @@ class MainActivity : Activity() {
                 setPadding(0, dp(12), 0, 0)
             })
         }
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle(if (archives.size == 1) "导出采集任务" else "批量导出采集任务")
             .setView(ScrollView(this).apply {
                 isVerticalScrollBarEnabled = false
@@ -2194,6 +2111,8 @@ class MainActivity : Activity() {
             .setNegativeButton("取消", null)
             .setPositiveButton("导出 ZIP") { _, _ -> beginSessionSampleExport(archives) }
             .show()
+        FreedomUi.styleAlertDialog(dialog, this, ::dp)
+        CollectionExportDialog.stylePrimaryExportButton(dialog.getButton(AlertDialog.BUTTON_POSITIVE), ::dp)
     }
 
     private fun beginSessionSampleExport(
