@@ -241,6 +241,14 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt"
         self.assertEqual("d68d98d536a7b54e955c2b150f2fbe79fdbd50e0", reviewed_s1[path])
         reviewed_s1[path] = "e92cb4a3348146fa055fd3aa2b6abda2dac80824"
+        # R06-B: exact reviewed page evidence extraction; original inventory remains unchanged.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("1c0c3bc1669f0cdc56e3abbb36c2f8c0be064f8a", reviewed_s1[path])
+        reviewed_s1[path] = "a20bf91b008cecd8146a0a7135f4ad46e5090757"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyPageEvidence.kt"
+        self.assertNotIn(path, reviewed_s1)
+        self.assertNotIn(path, m["permanent_s0"])
+        reviewed_s1[path] = "687c609b7df393c86eab41a6916ef60764b4a74e"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

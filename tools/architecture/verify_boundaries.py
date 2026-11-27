@@ -1377,7 +1377,8 @@ def legacy_architecture_bypass_violations(code_by_path: dict[str, str]) -> list[
 
     send_block = re.search(
         r"\bprivate\s+fun\s+requestSendConfirmationRecovery\s*\([^)]*\)[\s\S]*?"
-        r"(?=\bprivate\s+fun\s+pageIdentityChanged\s*\()", ai)
+        # R06-B moved pageIdentityChanged; ownsTask is now the next method.
+        r"(?=\bprivate\s+fun\s+ownsTask\s*\()", ai)
     if send_block is None or re.search(
         r"\bRecoveryEventIdentity\s*\(|\brecoveryContext\.request\s*\(", send_block.group(0)
     ):

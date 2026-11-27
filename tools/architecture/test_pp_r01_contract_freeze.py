@@ -105,7 +105,7 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "tools/architecture/test_pp_r00_freeze.py"
                 self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
                 # R04 also pins the reviewed relocation; R03 remains in the R00 gate.
-                expected[path] = "f81e79bf686ed79206537b962b57cec5b98410dd"
+                expected[path] = "44d5b3dd3cf8dd647e0488b4cb5ea88f458320da"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -115,7 +115,7 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # and adds owner/recovery/delegation mutation checks.
                 path = "tools/architecture/verify_boundaries.py"
                 self.assertEqual("713a0cfc1ed4617a37a31c66e1a0b056f42db1a3", expected[path])
-                expected[path] = "dfc47aef48e05d56e1540c27d08cc8490a2547bd"
+                expected[path] = "f625a28a50f90ee07d6d32587a776c4a39fdc66a"
                 path = "tools/architecture/test_verify_boundaries.py"
                 self.assertEqual("bec2d575a43477763c2309a04a9e6014ad39967a", expected[path])
                 expected[path] = "06485947b2fda4007b4ef09d1371c06b2f745fb2"
@@ -155,6 +155,7 @@ class PpR01ContractFreezeTest(unittest.TestCase):
             "tools/architecture/test_pp_r05_follow_up_boundary_migration.py": "6d1103b2b8a7c7e4bdafd0e56d56436f4da5a573",
             "tools/architecture/test_pp_r05_facade_convergence.py": "5422e057795e4b30d6dde17123f7301d8a98fe46",
             "tools/architecture/test_pp_r05_integration_acceptance.py": "cb2537f571b13e7114f0ba4ecc8aba79785c43d8",
+            "tools/architecture/test_pp_r06_page_evidence_migration.py": "51ae99e6de3d383b7055360510f02023456f55e3",
         }))
         self.assertEqual([], issues)
 
