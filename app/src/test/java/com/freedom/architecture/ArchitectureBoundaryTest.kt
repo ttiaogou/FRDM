@@ -389,6 +389,29 @@ class ArchitectureBoundaryTest {
         assertTrue(composition.contains("root.taskLaunchParametersRepository.read().conversationFilterSettings()"))
     }
 
+    @Test
+    fun greetingFilterDoesNotEnterPrivateMessagesOrSharedDraftRuntime() {
+        val adapter = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt").readText()
+        val processing = adapter.substringAfter("private fun processReceivedGreetingRows(")
+            .substringBefore("private fun readSayHiFilterSettings(")
+        val listFilter = adapter.substringAfter("private fun passesSayHiListFilter(")
+            .substringBefore("private fun logSayHiFilterDecision(")
+        assertEquals(2, Regex("ConversationFilterPolicy\\.evaluate\\(").findAll(adapter).count())
+        assertTrue(processing.contains("ConversationFilterPolicy.evaluate(settings, evidence)"))
+        assertTrue(listFilter.contains("ConversationFilterPolicy.evaluate(settings, evidence)"))
+        assertTrue(listFilter.contains("isFilterSkipped(rowKey, evidence)"))
+        val runtimePaths = listOf(
+            "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt",
+            "business/src/main/kotlin/com/freedom/features/aireply/PrivateMessagesTraversalTaskExecutor.kt",
+            "business/src/main/kotlin/com/freedom/features/aireply/ai/AiReplyDraftCoordinator.kt"
+        )
+        for (path in runtimePaths) {
+            val source = projectFile(path).readText()
+            assertFalse("Greeting filter must not enter $path", source.contains("ConversationFilterPolicy"))
+            assertFalse("Greeting filter state must not enter $path", source.contains("MomoSayHiTraversalState"))
+        }
+    }
+
     private val forbiddenTouchAction = Regex(
         "(?:AccessibilityNodeInfo\\.)?ACTION_(?:CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD)"
     )

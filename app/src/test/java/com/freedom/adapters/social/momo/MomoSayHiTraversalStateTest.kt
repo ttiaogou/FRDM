@@ -1,5 +1,9 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.features.aireply.policy.ConversationFilterDecision
+import com.freedom.features.aireply.policy.ConversationFilterEvidence
+import com.freedom.features.aireply.policy.ConversationFilterReason
+import com.freedom.features.aireply.policy.ConversationFilterResult
 import com.freedom.features.aireply.policy.ConversationFilterSettings
 import com.freedom.features.aireply.ports.MomoSayHiDeferredRowCheckpointRecord
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRecord
@@ -440,20 +444,20 @@ class MomoSayHiTraversalStateTest {
         state.deferRow("recover", "DRAFT_MODEL_FAILURE", 1_000L)
         val before = repository.value
         state.updateFilterSettings(ConversationFilterSettings())
-        assertTrue(state.markFilterSkipped("excluded"))
-        assertFalse(state.markFilterSkipped("excluded"))
-        assertTrue(state.isFilterSkipped("excluded"))
+        assertTrue(state.markFilterSkipped("excluded", ConversationFilterEvidence(lastActiveMinutes = 240), ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)))
+        assertFalse(state.markFilterSkipped("excluded", ConversationFilterEvidence(lastActiveMinutes = 240), ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)))
+        assertTrue(state.isFilterSkipped("excluded", ConversationFilterEvidence(lastActiveMinutes = 240)))
         assertFalse(state.isProcessedRow("excluded"))
         assertFalse(state.isDeferredRow("excluded"))
-        assertFalse(state.markFilterSkipped("recover"))
-        assertFalse(state.isFilterSkipped("recover"))
+        assertFalse(state.markFilterSkipped("recover", ConversationFilterEvidence(lastActiveMinutes = 240), ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)))
+        assertFalse(state.isFilterSkipped("recover", ConversationFilterEvidence(lastActiveMinutes = 240)))
         assertTrue(state.isDeferredRetryDue("recover", 2_500L))
         assertEquals(before, repository.value)
 
         val restored = MomoSayHiTraversalState(store)
         restored.restore()
         restored.updateFilterSettings(ConversationFilterSettings())
-        assertFalse(restored.isFilterSkipped("excluded"))
+        assertFalse(restored.isFilterSkipped("excluded", ConversationFilterEvidence(lastActiveMinutes = 240)))
         assertTrue(restored.isProcessedRow("sent"))
         assertTrue(restored.isDeferredRow("recover"))
     }
@@ -463,23 +467,77 @@ class MomoSayHiTraversalStateTest {
         val state = MomoSayHiTraversalState(MomoSayHiTraversalCheckpointStore(InMemoryRepository()))
         val settings = ConversationFilterSettings()
         state.updateFilterSettings(settings)
-        assertTrue(state.markFilterSkipped("a"))
+        assertTrue(state.markFilterSkipped("a", ConversationFilterEvidence(lastActiveMinutes = 240), ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)))
         state.updateFilterSettings(settings.copy())
-        assertTrue(state.isFilterSkipped("a"))
+        assertTrue(state.isFilterSkipped("a", ConversationFilterEvidence(lastActiveMinutes = 240)))
         state.updateFilterSettings(settings.copy(maxLastActiveMinutes = 120))
-        assertFalse(state.isFilterSkipped("a"))
-        assertTrue(state.markFilterSkipped("a"))
+        assertFalse(state.isFilterSkipped("a", ConversationFilterEvidence(lastActiveMinutes = 240)))
+        assertTrue(state.markFilterSkipped("a", ConversationFilterEvidence(lastActiveMinutes = 240), ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)))
         state.deferRow("a", "MANUAL_RETURN_BEFORE_SEND_CONFIRMATION", 1_000L)
-        assertFalse(state.isFilterSkipped("a"))
+        assertFalse(state.isFilterSkipped("a", ConversationFilterEvidence(lastActiveMinutes = 240)))
         assertTrue(state.isDeferredRow("a"))
         state.updateFilterSettings(ConversationFilterSettings(maxLastActiveMinutes = 0))
-        assertFalse(state.markFilterSkipped("b"))
+        assertFalse(state.markFilterSkipped("b", ConversationFilterEvidence(lastActiveMinutes = 240), ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)))
         state.updateFilterSettings(settings)
-        assertTrue(state.markFilterSkipped("b"))
+        assertTrue(state.markFilterSkipped("b", ConversationFilterEvidence(lastActiveMinutes = 240), ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)))
         state.resetFilterSkips()
-        assertFalse(state.isFilterSkipped("b"))
+        assertFalse(state.isFilterSkipped("b", ConversationFilterEvidence(lastActiveMinutes = 240)))
         assertTrue(state.isDeferredRow("a"))
         assertTrue(state.isDeferredRetryDue("a", 2_500L))
     }
 
+
+    @Test
+    fun filterEvidenceChangeReleasesExclusionAndUnknownListDoesNotSkip() {
+        val state = MomoSayHiTraversalState(MomoSayHiTraversalCheckpointStore(InMemoryRepository()))
+        val settings = ConversationFilterSettings(maxLastActiveMinutes = 180)
+        val old = ConversationFilterEvidence(lastActiveMinutes = 240)
+        val fresh = ConversationFilterEvidence(lastActiveMinutes = 52)
+        val unknown = ConversationFilterEvidence()
+        val excluded = ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)
+        val allowed = ConversationFilterDecision(ConversationFilterResult.ALLOW)
+        val missing = ConversationFilterDecision(ConversationFilterResult.UNKNOWN, ConversationFilterReason.ACTIVE_TIME_UNAVAILABLE)
+        state.updateFilterSettings(settings)
+        assertTrue(state.recordListFilterDecision("row", old, excluded))
+        assertTrue(state.isFilterSkipped("row", old))
+        assertFalse(state.isFilterSkipped("row", fresh))
+        assertTrue(state.recordListFilterDecision("row", fresh, allowed))
+        assertFalse(state.recordListFilterDecision("row", fresh, allowed))
+        assertFalse(state.isFilterSkipped("row", fresh))
+        assertTrue(state.recordListFilterDecision("row", unknown, missing))
+        assertFalse(state.isFilterSkipped("row", unknown))
+        assertTrue(state.markFilterSkipped("row", unknown, missing))
+        assertTrue(state.isFilterSkipped("row", unknown))
+        assertFalse(state.isFilterSkipped("row", fresh))
+        assertFalse(state.isProcessedRow("row"))
+        assertFalse(state.isDeferredRow("row"))
+    }
+
+    @Test
+    fun preservedTaskHandoffAndReentryReleaseVisitLocalFilterEvidenceOnly() {
+        val repository = InMemoryRepository()
+        val state = MomoSayHiTraversalState(MomoSayHiTraversalCheckpointStore(repository))
+        val settings = ConversationFilterSettings(maxLastActiveMinutes = 180)
+        val evidence = ConversationFilterEvidence(lastActiveMinutes = 240)
+        val decision = ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)
+        val keys = listOf("a".repeat(64), "b".repeat(64))
+        state.markProcessedRow("sent")
+        state.deferRow("recover", "DRAFT_MODEL_FAILURE", 1_000L)
+        state.observeVerifiedViewport(keys)
+        state.updateFilterSettings(settings)
+        assertTrue(state.recordListFilterDecision("excluded", evidence, decision))
+        state.suspendTraversal(preserveTraversal = true)
+        state.updateFilterSettings(settings)
+        assertFalse(state.isFilterSkipped("excluded", evidence))
+        assertEquals(MomoSayHiTraversalState.ViewportResume.CONTINUE, state.observeVerifiedViewport(keys))
+        assertTrue(state.isProcessedRow("sent"))
+        assertTrue(state.isDeferredRow("recover"))
+        assertTrue(state.recordListFilterDecision("excluded", evidence, decision))
+        state.prepareForListReentry()
+        state.updateFilterSettings(settings)
+        assertFalse(state.isFilterSkipped("excluded", evidence))
+        assertEquals(MomoSayHiTraversalState.ViewportResume.CONTINUE, state.observeVerifiedViewport(keys))
+        assertTrue(state.isProcessedRow("sent"))
+        assertTrue(state.isDeferredRow("recover"))
+    }
 }

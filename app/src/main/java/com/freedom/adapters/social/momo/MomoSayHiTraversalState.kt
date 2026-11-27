@@ -1,5 +1,8 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.features.aireply.policy.ConversationFilterDecision
+import com.freedom.features.aireply.policy.ConversationFilterEvidence
+import com.freedom.features.aireply.policy.ConversationFilterResult
 import com.freedom.features.aireply.policy.ConversationFilterSettings
 
 /**
@@ -18,8 +21,18 @@ internal class MomoSayHiTraversalState(
     private val processedRowKeys = LinkedHashSet<String>()
     private val processedContactIdHashes = LinkedHashSet<String>()
     private val deferredRowKeys = LinkedHashSet<String>()
-    // Filter skips belong only to this scan, never to the durable processed/deferred ledger.
-    private val filterSkippedRowKeys = LinkedHashSet<String>()
+    // Visit-local filter observations, never part of the durable processed/deferred ledger.
+    // The current normalized list evidence must still match before a prior decision can skip.
+    private data class FilterObservation(
+        val listEvidence: ConversationFilterEvidence,
+        val decision: ConversationFilterDecision,
+        val profileReturn: Boolean
+    ) {
+        val skipsCurrentEvidence: Boolean
+            get() = decision.result == ConversationFilterResult.EXCLUDE ||
+                (profileReturn && decision.result == ConversationFilterResult.UNKNOWN)
+    }
+    private val filterObservations = LinkedHashMap<String, FilterObservation>()
     private var filterSettings: ConversationFilterSettings? = null
     private val retryCounts = LinkedHashMap<String, Int>()
     private val retryAfterEpochMs = LinkedHashMap<String, Long>()
@@ -70,6 +83,7 @@ internal class MomoSayHiTraversalState(
 
     /** Restore logical progress only; every resumed viewport must be independently reacquired. */
     fun restore(): RestoreSummary? {
+        resetFilterSkips()
         val checkpoint = checkpointStore.load() ?: run {
             hasRestorableCheckpoint = false
             return null
@@ -107,6 +121,7 @@ internal class MomoSayHiTraversalState(
 
     /** Reentry invalidates old evidence even when navigation was initiated manually. */
     fun prepareForListReentry() {
+        resetFilterSkips()
         recoveryEvidenceCandidates.clear()
         resumeViewportPending = lastVisibleRowKeys.isNotEmpty() || reanchorToTopPending ||
             processedRowKeys.isNotEmpty() || deferredRowKeys.isNotEmpty()
@@ -117,13 +132,13 @@ internal class MomoSayHiTraversalState(
      * Exhaustion starts a new scan later, but does not erase processed or deferred work.
      */
     fun suspendTraversal(preserveTraversal: Boolean) {
+        resetFilterSkips()
         recoveryEvidenceCandidates.clear()
         if (!preserveTraversal) {
             lastVisibleRowKeys = emptyList()
             reanchorToTopPending = false
             deferredReturnToTopActive = false
             deferredReplayStarted = false
-            resetFilterSkips()
         }
         resumeViewportPending = true
         persist()
@@ -191,21 +206,42 @@ internal class MomoSayHiTraversalState(
 
     fun updateFilterSettings(settings: ConversationFilterSettings) {
         if (settings != filterSettings) {
-            filterSkippedRowKeys.clear()
+            filterObservations.clear()
             filterSettings = settings
         }
     }
 
-    fun isFilterSkipped(rowKey: String): Boolean =
-        rowKey in filterSkippedRowKeys && !isDeferredRow(rowKey)
+    /** Recheck changed evidence; an UNKNOWN list observation alone never suppresses admission. */
+    fun isFilterSkipped(rowKey: String, listEvidence: ConversationFilterEvidence): Boolean {
+        if (isDeferredRow(rowKey)) return false
+        val previous = filterObservations[rowKey] ?: return false
+        if (previous.listEvidence != listEvidence) {
+            filterObservations.remove(rowKey)
+            return false
+        }
+        return previous.skipsCurrentEvidence
+    }
 
-    /** Never suppress a recovery row. This is intentionally not a checkpoint write. */
-    fun markFilterSkipped(rowKey: String): Boolean =
-        filterSettings?.hasEnabledConditions == true && !isDeferredRow(rowKey) &&
-            filterSkippedRowKeys.add(rowKey)
+    /** Record list decisions for diagnostics and skip only an explicit exclusion. */
+    fun recordListFilterDecision(
+        rowKey: String, listEvidence: ConversationFilterEvidence, decision: ConversationFilterDecision
+    ): Boolean = recordFilterObservation(rowKey, FilterObservation(listEvidence, decision, false))
+
+    /** Final non-admission (including missing profile evidence) is only a visit-local skip. */
+    fun markFilterSkipped(
+        rowKey: String, listEvidence: ConversationFilterEvidence, decision: ConversationFilterDecision
+    ): Boolean = decision.result != ConversationFilterResult.ALLOW &&
+        recordFilterObservation(rowKey, FilterObservation(listEvidence, decision, true))
+
+    private fun recordFilterObservation(rowKey: String, observation: FilterObservation): Boolean {
+        if (filterSettings?.hasEnabledConditions != true || isDeferredRow(rowKey) ||
+            isProcessedRow(rowKey)
+        ) return false
+        return filterObservations.put(rowKey, observation) != observation
+    }
 
     fun resetFilterSkips() {
-        filterSkippedRowKeys.clear()
+        filterObservations.clear()
         filterSettings = null
     }
 
@@ -283,6 +319,7 @@ internal class MomoSayHiTraversalState(
     }
 
     fun markProcessedRow(rowKey: String) {
+        filterObservations.remove(rowKey)
         rememberBounded(processedRowKeys, rowKey)
         persist()
     }
@@ -297,6 +334,7 @@ internal class MomoSayHiTraversalState(
         rowKey: String, reason: String, nowEpochMs: Long,
         failureEvidenceHash: String? = null
     ): DeferralResult {
+        filterObservations.remove(rowKey)
         rememberBounded(deferredRowKeys, rowKey)
         val attempts = ((retryCounts[rowKey] ?: 0) + 1).coerceAtMost(maxRetryBackoffStage)
         retryCounts[rowKey] = attempts

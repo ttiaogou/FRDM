@@ -17,6 +17,20 @@ class ConversationFilterPolicyTest {
             ConversationFilterPolicy.evaluate(settings, ConversationFilterEvidence()).result)
     }
 
+    @Test fun threeHourThresholdIsInclusiveAndIndependentOfOtherConditions() {
+        val settings = ConversationFilterSettings(maxLastActiveMinutes = 180)
+        for (minutes in listOf(0L, 10L, 52L, 120L, 179L, 180L)) {
+            assertEquals(ConversationFilterResult.ALLOW,
+                ConversationFilterPolicy.evaluate(settings, ConversationFilterEvidence(lastActiveMinutes = minutes)).result)
+        }
+        for (minutes in listOf(181L, 240L, 960L)) {
+            assertEquals(ConversationFilterResult.EXCLUDE,
+                ConversationFilterPolicy.evaluate(settings, ConversationFilterEvidence(lastActiveMinutes = minutes)).result)
+        }
+        assertEquals(ConversationFilterResult.UNKNOWN,
+            ConversationFilterPolicy.evaluate(settings, ConversationFilterEvidence()).result)
+    }
+
     @Test fun oneMinuteAndDisabledFilters() {
         val settings = ConversationFilterSettings(maxLastActiveMinutes = 1)
         for (minutes in listOf(0L, 1L)) {

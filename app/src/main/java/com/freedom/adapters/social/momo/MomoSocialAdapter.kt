@@ -1306,7 +1306,6 @@ internal class MomoSocialAdapter(
         resetReceivedGreetingsEntrySearch()
         sayHiAutonomousBrowseController.reset()
         sayHiTraversalState.prepareForListReentry()
-        sayHiTraversalState.resetFilterSkips()
         clearSayHiSelectedGreeting()
         resetSayHiRowTapTransaction()
         receivedGreetingsEntryTapPending = false
@@ -2540,8 +2539,8 @@ internal class MomoSocialAdapter(
                     .supplementedBy(row.filterEvidence)
                 val decision = ConversationFilterPolicy.evaluate(settings, evidence)
                 if (decision.result != ConversationFilterResult.ALLOW) {
-                    if (sayHiTraversalState.markFilterSkipped(selected.rowKey)) {
-                        logSayHiFilterDecision(decision, settings, evidence, "PROFILE_RETURN")
+                    if (sayHiTraversalState.markFilterSkipped(selected.rowKey, row.filterEvidence, decision)) {
+                        logSayHiFilterDecision(selected.rowKey, decision, settings, evidence, "PROFILE_RETURN")
                     }
                     clearSayHiSelectedGreeting()
                     // Let the normal next idle step select another visible candidate before
@@ -2549,7 +2548,7 @@ internal class MomoSocialAdapter(
                     return true
                 }
                 if (settings.hasEnabledConditions) {
-                    logSayHiFilterDecision(decision, settings, evidence, "PROFILE_RETURN")
+                    logSayHiFilterDecision(selected.rowKey, decision, settings, evidence, "PROFILE_RETURN")
                 }
             }
             val namePath = row.namePath ?: run {
@@ -2629,11 +2628,10 @@ internal class MomoSocialAdapter(
             val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
             key !in confirmedRows && !sayHiTraversalState.isProcessedRow(key) && !sayHiTraversalState.isDeferredRow(key) &&
                 settings != null && (!settings.hasEnabledConditions ||
-                    (!sayHiTraversalState.isFilterSkipped(key) &&
-                        // Keep the existing duplicate-row safety path authoritative. An ambiguous row
-                        // key must not be used to cache a filter exclusion for another visible row.
-                        (inspection.listRows.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1 ||
-                            passesSayHiListFilter(key, settings, row.filterEvidence))))
+                    // Keep the existing duplicate-row safety path authoritative. An ambiguous row
+                    // key must not be used to cache a filter exclusion for another visible row.
+                    (inspection.listRows.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1 ||
+                        passesSayHiListFilter(key, settings, row.filterEvidence)))
         }
         // Read-only recovery probe: the old finite click budget is never reset just
         // because a timer fired. Inspect a NEW unique and independently safe row target.
@@ -2714,34 +2712,40 @@ internal class MomoSocialAdapter(
         rowKey: String, settings: ConversationFilterSettings, evidence: ConversationFilterEvidence
     ): Boolean {
         if (sayHiTraversalState.isDeferredRow(rowKey) || !settings.hasEnabledConditions) return true
-        if (sayHiTraversalState.isFilterSkipped(rowKey)) return false
+        if (sayHiTraversalState.isFilterSkipped(rowKey, evidence)) return false
         val decision = ConversationFilterPolicy.evaluate(settings, evidence)
         // Missing list evidence is not a rejection: the original profile visit can fill it.
-        if (decision.result != ConversationFilterResult.EXCLUDE) return true
-        if (sayHiTraversalState.markFilterSkipped(rowKey)) {
-            logSayHiFilterDecision(decision, settings, evidence, "LIST")
+        // Log changed decisions for all candidates, including those not selected before a yield.
+        if (sayHiTraversalState.recordListFilterDecision(rowKey, evidence, decision)) {
+            logSayHiFilterDecision(rowKey, decision, settings, evidence, "LIST")
         }
-        return false
+        return decision.result != ConversationFilterResult.EXCLUDE
     }
 
     private fun logSayHiFilterDecision(
+        rowKey: String,
         decision: ConversationFilterDecision,
         settings: ConversationFilterSettings,
         evidence: ConversationFilterEvidence,
         stage: String
     ) {
-        val nextAction = if (decision.result == ConversationFilterResult.ALLOW)
-            "CONTINUE_ORIGINAL_WORKFLOW" else "CONTINUE_TRAVERSAL"
+        val nextAction = when {
+            stage == "LIST" && decision.result != ConversationFilterResult.EXCLUDE -> "CANDIDATE_PENDING_PROFILE"
+            decision.result == ConversationFilterResult.ALLOW -> "CONTINUE_ORIGINAL_WORKFLOW"
+            decision.result == ConversationFilterResult.UNKNOWN -> "RECHECK_ON_NEXT_VISIT_OR_EVIDENCE_CHANGE"
+            else -> "CONTINUE_TRAVERSAL"
+        }
         val event = when (decision.result) {
             ConversationFilterResult.ALLOW -> "CONVERSATION_FILTER_ALLOWED"
             ConversationFilterResult.EXCLUDE -> "CONVERSATION_FILTER_EXCLUDED"
             ConversationFilterResult.UNKNOWN -> "CONVERSATION_FILTER_UNKNOWN"
         }
         // Only normalized threshold/decision information; no raw identifiers or profile text.
-        onLog("$event stage=$stage reason=${decision.reason ?: "NONE"};" +
+        onLog("$event task=RECEIVED_GREETINGS;rowHash=${rowKey.take(12)};stage=$stage reason=${decision.reason ?: "NONE"};" +
             "thresholdMinutes=${settings.maxLastActiveMinutes};" +
             "observedMinutes=${evidence.lastActiveMinutes ?: "UNKNOWN"};" +
-            "maxDistanceKm=${settings.maxDistanceKm};minAge=${settings.minAge};maxAge=${settings.maxAge};" +
+            "maxDistanceKm=${settings.maxDistanceKm};observedDistanceKm=${evidence.distanceKm ?: "UNKNOWN"};" +
+            "minAge=${settings.minAge};maxAge=${settings.maxAge};observedAge=${evidence.age ?: "UNKNOWN"};" +
             "nextAction=$nextAction")
     }
 
