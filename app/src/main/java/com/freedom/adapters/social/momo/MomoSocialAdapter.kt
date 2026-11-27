@@ -366,7 +366,9 @@ internal class MomoSocialAdapter(
     /** Scoped to one read-only probe; it enables manual-list stability, never navigation. */
     @Volatile private var manualReceivedGreetingsArrivalProbeActive: Boolean = false
     @Volatile private var sayHiCardListTapPending: Boolean = false
-    @Volatile private var sayHiGestureInFlight: Boolean = false
+    @Volatile private var sayHiNonSearchGestureInFlight: Boolean = false
+    private val sayHiGestureInFlight: Boolean
+        get() = sayHiNonSearchGestureInFlight || receivedGreetingsEntrySearchGestureInFlight
     private enum class CompletionBackStage { NONE, LIST_SUBMITTED, CARD_SUBMITTED }
     @Volatile private var completionBackStage = CompletionBackStage.NONE
     private val completionBackRetryGate = MomoCompletionBackRetryGate(SAYHI_DETAIL_BACK_TIMEOUT_MS)
@@ -378,9 +380,8 @@ internal class MomoSocialAdapter(
     @Volatile private var lastReceivedGreetingsEntryDiagnosticAtMs: Long = 0L
     @Volatile private var lastReceivedGreetingsNavigationWaitActivityClass: String = ""
     private val receivedGreetingsEntrySearchController = MomoReceivedGreetingsEntrySearchController()
-    @Volatile private var receivedGreetingsEntrySearchActive: Boolean = false
-    @Volatile private var receivedGreetingsEntrySearchComplete: Boolean = false
-    @Volatile private var receivedGreetingsEntrySearchGestureInFlight: Boolean = false
+    private val receivedGreetingsEntrySearchGestureInFlight: Boolean
+        get() = receivedGreetingsEntrySearchController.isGestureInFlight()
     @Volatile private var receivedGreetingsEntrySearchWindowIdentity: String = ""
     @Volatile private var sayHiReadOnlyStage: SayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
     /** Business-visible read-only wait; never a permission to click or mark a row complete. */
@@ -1371,7 +1372,7 @@ internal class MomoSocialAdapter(
                 if (System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs > SAYHI_PROFILE_SCROLL_TIMEOUT_MS) {
                     sayHiProfileScrollRequestId = null
                     sayHiProfileScrollInFlight = false
-                    sayHiGestureInFlight = false
+                    sayHiNonSearchGestureInFlight = false
                     sayHiProfileScrollFailed = true
                     sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
                     sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
@@ -1842,7 +1843,7 @@ internal class MomoSocialAdapter(
         sayHiNavigationFlowController.beginEntryNavigation()
         receivedGreetingsEntryTapPending = true
         lastReceivedGreetingsNavigationWaitActivityClass = ""
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         receivedGreetingsEntryTapAtMs = tapSubmittedAt
         lastReceivedGreetingsEntryTapAtMs = tapSubmittedAt
         lastReceivedGreetingsEntryDiagnostic = ""
@@ -1861,7 +1862,7 @@ internal class MomoSocialAdapter(
         val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = gesturePolicy.execute(tapRequest, GestureExecutionListener { result ->
             if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             val completed = result.status == GestureExecutionStatus.COMPLETED
             onLog(
                 if (completed) {
@@ -1883,12 +1884,12 @@ internal class MomoSocialAdapter(
         } else if (submission == GestureSubmission.DEFERRED_NOT_READY) {
             // No tap was dispatched. Restore the entry phase so the next idle inspection can
             // reacquire the same list entry after the overlay/startup guard clears.
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             receivedGreetingsEntryTapPending = false
             sayHiNavigationFlowController.reset()
             onLog("收到的招呼入口[DEFERRED_NOT_READY]：页面暂不可操作，未派发点击、未消耗入口重试；保留导航意图并等待新快照")
         } else {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             receivedGreetingsEntryTapPending = false
             sayHiNavigationFlowController.reset()
             logReceivedGreetingsEntrySkip("GESTURE_SUBMISSION_REJECTED")
@@ -1958,7 +1959,7 @@ internal class MomoSocialAdapter(
         }
         resetSayHiListSnapshotState()
         val submittedAt = System.currentTimeMillis()
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         sayHiCardListTapPending = true
         sayHiCardListTapAtMs = submittedAt
         val request = GestureIntentRequest(
@@ -1975,7 +1976,7 @@ internal class MomoSocialAdapter(
         val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
             if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             if (result.status == GestureExecutionStatus.COMPLETED) {
                 sayHiCardListTapPending = true
                 sayHiCardListTapAtMs = submittedAt
@@ -1988,12 +1989,12 @@ internal class MomoSocialAdapter(
             }
         })
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiCardListTapPending = false
             sayHiNavigationFlowController.markCardListTapFailed()
             onLog("收到的招呼资料卡列表入口[DEFERRED_NOT_READY]：没有派发点击；清除旧稳定样本，重新采集资料卡快照后再尝试")
         } else if (submission != GestureSubmission.ACCEPTED) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiCardListTapPending = false
             sayHiNavigationFlowController.markCardListTapFailed()
             logSayHiCardListTapSkip("GESTURE_SUBMISSION_REJECTED:$submission")
@@ -2055,8 +2056,8 @@ internal class MomoSocialAdapter(
      * viewport that excludes the mf_view overlay.
      */
     private fun performReceivedGreetingsEntrySearchStep(): Boolean {
-        if (receivedGreetingsEntrySearchComplete) return false
-        if (receivedGreetingsEntrySearchGestureInFlight) return true
+        if (receivedGreetingsEntrySearchController.isComplete()) return false
+        if (sayHiGestureInFlight) return true
 
         val fresh = runCatching { inspectChatPage() }.getOrNull() ?: run {
             onLog("收到的招呼入口搜索暂停：无法重新读取普通消息列表；不使用旧视口坐标")
@@ -2098,11 +2099,8 @@ internal class MomoSocialAdapter(
             return true
         }
         val windowIdentity = "${expectedWindow.packageName}|${expectedWindow.windowId}|${expectedWindow.generation}"
-        if (!receivedGreetingsEntrySearchActive || receivedGreetingsEntrySearchWindowIdentity != windowIdentity) {
-            receivedGreetingsEntrySearchController.reset()
+        if (!receivedGreetingsEntrySearchController.isActive() || receivedGreetingsEntrySearchWindowIdentity != windowIdentity) {
             receivedGreetingsEntrySearchController.start()
-            receivedGreetingsEntrySearchActive = true
-            receivedGreetingsEntrySearchComplete = false
             receivedGreetingsEntrySearchWindowIdentity = windowIdentity
             onLog(
                 "收到的招呼入口搜索开始：已确认普通消息列表窗口=$windowIdentity；" +
@@ -2110,6 +2108,7 @@ internal class MomoSocialAdapter(
             )
         }
 
+        val searchGeneration = receivedGreetingsEntrySearchController.captureSearchGeneration()
         val viewportFingerprint = receivedGreetingsEntrySearchViewportFingerprint(fresh)
         if (viewportFingerprint.isBlank()) {
             onLog("收到的招呼入口搜索暂缓：当前视口暂缺可比较的会话行身份/几何证据；等待新快照，不终止导航")
@@ -2121,8 +2120,6 @@ internal class MomoSocialAdapter(
                 onLog("收到的招呼入口搜索：已通过连续两次无位移确认当前方向边界；反转方向，复核剩余列表区域")
             }
             MomoReceivedGreetingsEntrySearchController.Observation.COMPLETE -> {
-                receivedGreetingsEntrySearchComplete = true
-                receivedGreetingsEntrySearchActive = false
                 onLog(
                     "收到的招呼入口搜索完成：已从当前起点双向扫描普通消息列表并复核两端边界；" +
                         "仍未发现唯一‘收到的招呼’标签；不盲点其它行，也不把未命中伪装成进入成功"
@@ -2165,22 +2162,24 @@ internal class MomoSocialAdapter(
             },
             executionContext = executionContext
         )
-        receivedGreetingsEntrySearchGestureInFlight = true
-        sayHiGestureInFlight = true
         val callbackGeneration = sayHiRunGenerationGuard.capture()
+        if (sayHiGestureInFlight ||
+            !receivedGreetingsEntrySearchController.tryBeginGesture(searchGeneration, request.id)
+        ) return true
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
                 if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
-                receivedGreetingsEntrySearchGestureInFlight = false
-                sayHiGestureInFlight = false
-                if (result.status == GestureExecutionStatus.COMPLETED) {
-                    receivedGreetingsEntrySearchController.onGestureCompleted(viewportFingerprint)
+                val completed = result.status == GestureExecutionStatus.COMPLETED
+                if (!receivedGreetingsEntrySearchController.finishGesture(
+                        request.id, if (completed) viewportFingerprint else null
+                    )
+                ) return@GestureExecutionListener
+                if (completed) {
                     onLog(
                         "收到的招呼入口搜索滑动完成：方向=${direction.name}；" +
                             "等待新的会话行身份/位置快照后继续搜索"
                     )
                 } else {
-                    receivedGreetingsEntrySearchController.onGestureFailed()
                     onLog(
                         "收到的招呼入口搜索滑动未完成：status=${result.status}；reason=${result.reason}；" +
                             "保留方向状态，等待新快照后安全重试"
@@ -2188,25 +2187,19 @@ internal class MomoSocialAdapter(
                 }
             })
         }.getOrElse {
-            receivedGreetingsEntrySearchGestureInFlight = false
-            sayHiGestureInFlight = false
-            receivedGreetingsEntrySearchController.onGestureFailed()
+            receivedGreetingsEntrySearchController.finishGesture(request.id, null)
             onLog("收到的招呼入口搜索暂停：手势协调器异常=${it.javaClass.simpleName}；未使用坐标兜底")
             return false
         }
         return when (submission) {
             GestureSubmission.ACCEPTED -> true
             GestureSubmission.DEFERRED_NOT_READY -> {
-                receivedGreetingsEntrySearchGestureInFlight = false
-                sayHiGestureInFlight = false
-                receivedGreetingsEntrySearchController.onGestureFailed()
+                receivedGreetingsEntrySearchController.finishGesture(request.id, null)
                 onLog("收到的招呼入口搜索暂缓：手势协调器尚未就绪；保留搜索方向并等待后续快照")
                 true
             }
             else -> {
-                receivedGreetingsEntrySearchGestureInFlight = false
-                sayHiGestureInFlight = false
-                receivedGreetingsEntrySearchController.onGestureFailed()
+                receivedGreetingsEntrySearchController.finishGesture(request.id, null)
                 onLog("收到的招呼入口搜索暂停：手势协调器拒绝安全滑动；submission=$submission")
                 false
             }
@@ -2225,11 +2218,9 @@ internal class MomoSocialAdapter(
                 "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
         }.trim('|')
 
-    private fun resetReceivedGreetingsEntrySearch() {
-        receivedGreetingsEntrySearchController.reset()
-        receivedGreetingsEntrySearchActive = false
-        receivedGreetingsEntrySearchComplete = false
-        receivedGreetingsEntrySearchGestureInFlight = false
+    private fun resetReceivedGreetingsEntrySearch(resetRun: Boolean = false) {
+        if (resetRun) receivedGreetingsEntrySearchController.resetForRun()
+        else receivedGreetingsEntrySearchController.reset()
         receivedGreetingsEntrySearchWindowIdentity = ""
     }
 
@@ -2799,7 +2790,7 @@ internal class MomoSocialAdapter(
         sayHiProfileBackWindowId = -1
         sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
         sayHiReadOnlyStage = SayHiReadOnlyStage.AVATAR_TAP_PENDING
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         val request = GestureIntentRequest(
             id = "momo-sayhi-avatar-${System.nanoTime()}",
             intent = GestureIntent.Tap(
@@ -2815,7 +2806,7 @@ internal class MomoSocialAdapter(
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
                 if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
-                sayHiGestureInFlight = false
+                sayHiNonSearchGestureInFlight = false
                 if (result.status == GestureExecutionStatus.COMPLETED) {
                     sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
                     sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
@@ -2836,14 +2827,14 @@ internal class MomoSocialAdapter(
                 }
             })
         }.getOrElse {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
             clearSayHiSelectedGreeting()
             onLog("收到招呼头像导航失败：手势执行器异常；不执行坐标兜底")
             return true
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             clearSayHiSelectedGreeting()
             sayHiStableCandidateKey = selected.rowKey
             onLog("收到招呼头像导航[DEFERRED_NOT_READY]：弹窗/页面准入暂未放行；未点击、未标记跳过；下一轮使用新列表快照重新识别原用户行")
@@ -2853,7 +2844,7 @@ internal class MomoSocialAdapter(
                 retry = false
             )
         } else if (submission != GestureSubmission.ACCEPTED) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
             clearSayHiSelectedGreeting()
             onLog("收到招呼头像导航未提交：统一手势协调器拒绝；submission=$submission")
@@ -2891,7 +2882,7 @@ internal class MomoSocialAdapter(
         val revalidationFailure = revalidateSayHiRowTarget(tree, row, target, selected)
         if (revalidationFailure != null) {
             val diagnostic = describeSayHiRowTargetRevalidation(tree, row, target, revalidationFailure)
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             deferSayHiRow(
                 selected.rowKey,
                 "$SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX:$revalidationFailure",
@@ -2925,7 +2916,7 @@ internal class MomoSocialAdapter(
             }
         sayHiReadOnlyStage = SayHiReadOnlyStage.ROW_TAP_PENDING
         sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         pendingSayHiRowTapTarget = target
         sayHiUnverifiedBackAttempted = false
         sayHiUnverifiedBackAttemptActivity = ""
@@ -2959,7 +2950,7 @@ internal class MomoSocialAdapter(
 
                 override fun onResult(result: com.freedom.core.accessibility.gesture.GestureExecutionResult) {
                     if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return
-                    sayHiGestureInFlight = false
+                    sayHiNonSearchGestureInFlight = false
                     if (result.status == GestureExecutionStatus.COMPLETED) {
                         sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_DETAIL
                         sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
@@ -3000,7 +2991,7 @@ internal class MomoSocialAdapter(
                 }
             })
         }.getOrElse { error ->
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             val activityAfterFailure = activityClass()
             if (activityAfterFailure.isNotBlank() &&
                 !isReceivedGreetingsListStructureVisible() && inspectCurrentChatDetailFingerprint() == null
@@ -3019,7 +3010,7 @@ internal class MomoSocialAdapter(
             return true
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             resetSayHiRowTapTransaction()
             sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_BACK_PENDING
             onLog("收到招呼消息行点击[DEFERRED_NOT_READY]：平台手势未派发；保留已验证身份和原始行，不进入详情；重新扫描后再确认")
@@ -3029,7 +3020,7 @@ internal class MomoSocialAdapter(
                 retry = false
             )
         } else if (submission != GestureSubmission.ACCEPTED) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             val activityAfterRejection = activityClass()
             if (activityAfterRejection.isNotBlank() &&
                 !isReceivedGreetingsListStructureVisible() && inspectCurrentChatDetailFingerprint() == null
@@ -3576,7 +3567,7 @@ internal class MomoSocialAdapter(
         sayHiProfileScrollFailed = false
         sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_SCROLL_PENDING
         sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         onLog(
             "收到招呼身份采集[PROFILE_SCROLL]：已唯一确认可滚动资料内容视口；" +
                 "candidates=${decision.candidateCount}；fingerprint=${decision.reason}；" +
@@ -3589,7 +3580,7 @@ internal class MomoSocialAdapter(
             gesturePolicy.execute(request, GestureExecutionListener { result ->
                 if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
                 if (sayHiProfileScrollRequestId != request.id) return@GestureExecutionListener
-                sayHiGestureInFlight = false
+                sayHiNonSearchGestureInFlight = false
                 sayHiProfileScrollInFlight = false
                 sayHiProfileScrollRequestId = null
                 if (result.status == GestureExecutionStatus.COMPLETED) {
@@ -3618,7 +3609,7 @@ internal class MomoSocialAdapter(
                 }
             })
         }.getOrElse {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiProfileScrollInFlight = false
             sayHiProfileScrollRequestId = null
             sayHiProfileScrollFailed = true
@@ -3629,7 +3620,7 @@ internal class MomoSocialAdapter(
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
             sayHiProfileDeferredRetryGate.onDeferred(request.id, tree.window, SystemClock.uptimeMillis())
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiProfileScrollInFlight = false
             sayHiProfileScrollRequestId = null
             sayHiProfileScrollAttempted = false
@@ -3638,7 +3629,7 @@ internal class MomoSocialAdapter(
             sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
             onLog("收到招呼身份资料页上滑[DEFERRED_NOT_READY]：页面暂不可操作，未派发滑动且不消耗唯一滑动机会；等待新鲜资料页快照")
         } else if (submission != GestureSubmission.ACCEPTED) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiProfileScrollInFlight = false
             sayHiProfileScrollRequestId = null
             sayHiProfileScrollFailed = true
@@ -4350,10 +4341,10 @@ internal class MomoSocialAdapter(
 
     override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus {
         val currentActivity = activityClass()
-        if (receivedGreetingsEntrySearchActive || receivedGreetingsEntrySearchGestureInFlight) {
+        if (receivedGreetingsEntrySearchController.isActive() || receivedGreetingsEntrySearchGestureInFlight) {
             return ReceivedGreetingsTraversalStatus.NAVIGATING
         }
-        if (receivedGreetingsEntrySearchComplete) return ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND
+        if (receivedGreetingsEntrySearchController.isComplete()) return ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND
         if (sayHiReadOnlyStage == SayHiReadOnlyStage.WAITING_DETAIL &&
             sayHiRowTapFeedbackState != SayHiRowTapFeedbackState.REJECTED
         ) {
@@ -5173,12 +5164,12 @@ internal class MomoSocialAdapter(
             )
             return
         }
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = try {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
                 if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
-                sayHiGestureInFlight = false
+                sayHiNonSearchGestureInFlight = false
                 if (result.status == GestureExecutionStatus.DEFERRED) {
                     sayHiAutonomousBrowseController.onGestureDeferred()
                     sayHiListSnapshotRecoveryPolicy.onGestureDeferred()
@@ -5206,7 +5197,7 @@ internal class MomoSocialAdapter(
                 }
             })
         } catch (failure: Throwable) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiAutonomousBrowseController.onGestureCompleted(false)
             val settleDelayMs = sayHiListSnapshotRecoveryPolicy.onGestureFinished(
                 SystemClock.elapsedRealtime()
@@ -5223,7 +5214,7 @@ internal class MomoSocialAdapter(
             return
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiAutonomousBrowseController.onGestureDeferred()
             sayHiListSnapshotRecoveryPolicy.onGestureDeferred()
             scheduleSayHiListSnapshotInspection(
@@ -5233,7 +5224,7 @@ internal class MomoSocialAdapter(
             )
             onLog("收到招呼自主浏览[DEFERRED_NOT_READY]：弹窗/窗口准入暂未放行；未派发滑动、不计失败、不消耗滚动机会；等待新快照")
         } else if (submission != GestureSubmission.ACCEPTED) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiAutonomousBrowseController.onGestureCompleted(false)
             val settleDelayMs = sayHiListSnapshotRecoveryPolicy.onGestureFinished(
                 SystemClock.elapsedRealtime()
@@ -7712,14 +7703,14 @@ internal class MomoSocialAdapter(
         resetSayHiListSnapshotState()
         sayHiNavigationFlowController.reset()
         sayHiAutonomousBrowseController.reset()
-        resetReceivedGreetingsEntrySearch()
+        resetReceivedGreetingsEntrySearch(resetRun = true)
         clearSayHiSelectedGreeting()
         resetSayHiRowTapTransaction()
         sayHiRestoredReturnConfirmation.reset()
         sayHiTraversalState.resetFilterSkips()
         sayHiFilterSettingsUnavailableLogged = false
 
-        sayHiGestureInFlight = false
+        sayHiNonSearchGestureInFlight = false
         sayHiDeferredSafeEvidenceOnlyWait = false
         sayHiStableCandidateKey = ""
         sayHiStableCandidateTarget = null
