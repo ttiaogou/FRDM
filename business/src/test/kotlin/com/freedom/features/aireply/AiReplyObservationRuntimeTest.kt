@@ -1234,6 +1234,60 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun l09SearchObservationHoldKeepsGreetingLeaseAndOriginalPrivateCursorUntilVerifiedReturn() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val port = fixture.port
+        port.receivedGreetingsWorkflowEnabled = true
+        port.provideMessageTabPositionEvidence = true
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.NAVIGATING
+        port.receivedGreetingsIdleStepAccepted = false
+        port.pageAfterReceivedGreetingsReturn = fixture.listPage
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.lockedUnreadSessionKeys += "offscreen-pending"
+        executor.attemptedSessionKeys += "done"
+        executor.checkpointNextCursorKey = "offscreen-pending"
+        invokeSafeSessionBoundaryHandoff(fixture)
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        assertEquals(1, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(1, port.receivedGreetingsIdleSteps)
+        assertEquals("offscreen-pending", requireNotNull(fixture.checkpoint()).nextCursorKey)
+        assertEquals(0, fixture.dispatchedGestures())
+        assertEquals(0, port.receivedGreetingsPriorityReturns)
+        assertTrue(fixture.logs.any { it.contains("收到的招呼自动恢复[RETRY]") })
+        assertTrue(fixture.scheduler.hasPendingDelay(
+            com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(1)))
+
+        // Adapter reports a fresh observation recovered the original navigation.
+        port.receivedGreetingsIdleStepAccepted = true
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        port.page = fixture.listPage.copy(
+            activityClass = "com.immomo.momo.newsayhi.NewSayHiListActivity",
+            pageKind = ChatPageKind.NON_CHAT, hasChatTab = false, chatListCandidates = emptyList()
+        )
+        val flow = fixture.runtime.javaClass.getDeclaredField("receivedGreetingsTaskFlow")
+            .apply { isAccessible = true }.get(fixture.runtime) as ReceivedGreetingsTaskFlowController
+        assertTrue(flow.requestSafeHandoffReturn())
+        port.greetingReturnConfirmationAccepted = false
+        runUntil(fixture.scheduler, 40) { port.greetingReturnConfirmationAttempts > 0 }
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        assertEquals(0, port.receivedGreetingsConfirmedReturns)
+        assertEquals(0, fixture.dispatchedGestures())
+        port.greetingReturnConfirmationAccepted = true
+        runUntilLog(fixture.scheduler, fixture.logs, "跨任务交接[PRIVATE_LEASE_TRANSFERRED]")
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(1, port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals(1, port.receivedGreetingsConfirmedReturns)
+        assertTrue(port.lastGreetingsReturnPreservedTraversal)
+        assertEquals(setOf("offscreen-pending"), executor.lockedUnreadSessionKeys)
+        assertEquals(setOf("done"), executor.attemptedSessionKeys)
+        assertEquals("offscreen-pending", executor.checkpointNextCursorKey)
+        assertFalse(fixture.logs.any { it.contains("自主轮询[ROUND_STATE_REBUILT]") })
+    }
+
+    @Test
     fun p1RelocationTimerIsIntentOnlyAndReusesExistingScrollAfterFreshProof() {
         val fixture = preScrollPageRecoveryFixture()
         // The startup observation and the relocation timer both use 500ms. Isolate
@@ -10694,6 +10748,7 @@ class AiReplyObservationRuntimeTest {
         var backNoOpAttempts = 0
         var receivedGreetingsWorkflowEnabled: Boolean = false
         var receivedGreetingsIdleSteps: Int = 0
+        var receivedGreetingsIdleStepAccepted = true
         var receivedGreetingsNavigationTaskStarts: Int = 0
         var receivedGreetingsCurrentListStartAttempts: Int = 0
         var beginCurrentListResult: Boolean = true
@@ -10824,7 +10879,7 @@ class AiReplyObservationRuntimeTest {
         }
         override fun performReceivedGreetingsIdleStep(): Boolean {
             receivedGreetingsIdleSteps++
-            return true
+            return receivedGreetingsIdleStepAccepted
         }
         override fun observeManuallyOpenedReceivedGreetingsPage(): ReceivedGreetingsPageArrivalStatus {
             manualGreetingsArrivalObservations++

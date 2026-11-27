@@ -1976,6 +1976,82 @@ def paired_ai_task_boundary_violations(code_by_path: dict[str, str]) -> list[str
                   "if (privateQuotaReturnReady)", "ensureAndroidRecoveryReady(",
                   "privateSliceQuota.record(receipt)", "startReceivedGreetingsTask(")
 
+    # L09: one run-local position owner; task handoffs retire search progress only.
+    momo = "app/src/main/java/com/freedom/adapters/social/momo/"
+    memory = momo + "MomoReceivedGreetingsEntryPositionMemory.kt"
+    search = momo + "MomoReceivedGreetingsEntrySearchController.kt"
+    policy = prefix + "ports/ChatSessionManagementPolicy.kt"
+    executor = prefix + "ReceivedGreetingsTaskExecutor.kt"
+    memory_owners = [
+        path for path, code in code_by_path.items() if "/src/main/" in path
+        for _ in re.finditer(r"\bMomoReceivedGreetingsEntryPositionMemory\s*\(\s*\)", code)
+    ]
+    if memory_owners != [adapter]:
+        issues.append("L09 position memory must have exactly one adapter owner")
+    require_order(adapter, "inspectChatPage", "receivedGreetingsEntryPositionMemory.observe(result)", "return result")
+    require_order(adapter, "beginSessionManagement", "resetReceivedGreetingsRunState(",
+                  "sessionComponents.sampleStore.beginRun()", "receivedGreetingsEntryPositionMemory.beginRun()")
+    require_order(adapter, "finishSessionManagement", "resetReceivedGreetingsRunState(",
+                  "sessionComponents.sampleStore.finishRun()")
+    require_order(adapter, "resetReceivedGreetingsRunState", "receivedGreetingsEntryPositionMemory.endRun()")
+    for name in ("beginReceivedGreetingsNavigationTask", "confirmReceivedGreetingsCompletionReturn",
+                 "resetReceivedGreetingsEntrySearch"):
+        handoff_body = body(adapter, name)
+        if re.search(r"\breceivedGreetingsEntryPositionMemory\.(?:beginRun|endRun)\s*\(", handoff_body):
+            issues.append(f"L09 task handoff must not reset run position memory: {name}")
+    # The initial direction is a hint, not action authorization; retain all fresh-window,
+    # readiness, physical-boundary, retry, and request-generation gates before dispatch.
+    require_order(executor, "performIdleStep", "if (!ownsTask()) return false",
+                  "pagePort.performReceivedGreetingsIdleStep()")
+    step = require_order(adapter, "performReceivedGreetingsEntrySearchStep", "inspectChatPage()",
+                  "accessibilityGateway.isWindowCurrent(expectedWindow)",
+                  "receivedGreetingsEntryPositionMemory.position",
+                  "receivedGreetingsEntrySearchController.start(entryPosition)",
+                  "readiness?.isReadyForWindow(expectedWindow, RunMode.AI_REPLY)",
+                  "ChatSessionManagementPolicy.greetingSearchBoundaryEvidence(",
+                  "receivedGreetingsEntrySearchController.observeAfterGesture(",
+                  "resolveSessionListSwipeViewport(fresh)", "gesturePolicy.captureContext(",
+                  "receivedGreetingsEntrySearchController.mayDispatch(",
+                  "receivedGreetingsEntrySearchController.tryBeginGesture(",
+                  "gesturePolicy.execute(")
+    if not re.search(r"Observation\.WAIT_FOR_OBSERVATION\s*->\s*\{[^{}]*\breturn false\b", step):
+        issues.append("L09 observation hold must return before search dispatch")
+    require_order(search, "start", "initialPosition == MomoReceivedGreetingsEntryPosition.VISIBLE",
+                  "return false", "initialPosition == MomoReceivedGreetingsEntryPosition.ABOVE",
+                  "VerticalSwipeDirection.DOWN", "VerticalSwipeDirection.UP")
+    require_order(search, "tryBeginGesture", "expectedGeneration != searchGeneration",
+                  "inFlightGesture != null", "retryAttempt > 0 && !retryAdmitted", "retryAdmitted = false",
+                  "inFlightGesture = InFlightGesture(")
+    require_order(search, "finishGesture", "pending.requestId != requestId",
+                  "pending.generation != searchGeneration", "if (pendingBaseline == null)",
+                  "holdForObservation(nowMs)")
+    require_order(search, "mayDispatch", "readyViewportKey.isNullOrBlank()",
+                  "nowMs < retryNotBeforeMs", "retryConfirmation.observe(readyViewportKey, nowMs)")
+    require_order(search, "holdForObservation", "RecoveryScheduler.readOnlyRetryDelayMs(retryAttempt)")
+    observe = require_order(search, "observeAfterGesture", "if (boundaryEvidence != true)",
+                  "return Observation.CONTINUE", "edgeConfirmation.observe(currentFingerprint, nowMs)",
+                  "if (!reversed)", "return Observation.REVERSED", "complete = true",
+                  "return Observation.COMPLETE")
+    if not re.search(r"if\s*\(!edgeConfirmation\.observe\(currentFingerprint,\s*nowMs\)\)\s*return Observation\.WAIT_FOR_OBSERVATION", observe):
+        issues.append("L09 physical edge must require independent stable observations")
+    boundary = require_order(policy, "greetingSearchBoundaryEvidence",
+                  "snapshot.chatListExtractionTruncated", "if (canScroll == true) return false",
+                  "physicalCollectionBoundaryEvidence(snapshot, toTop)")
+    if re.search(r"\b(?:privateBoundaryReadStatus|ChatUnreadStatus|replyQuota|lockedUnreadSetFinalized)\b", boundary):
+        issues.append("L09 greeting discovery must not use private unread or quota boundaries")
+    for path in (memory, search):
+        code = code_by_path.get(path, "")
+        if not code or re.search(r"\b(?:AccessibilityNodeInfo|dispatchGesture|GestureApi|TaskScheduler|Handler|TaskCoordinator)\b", code):
+            issues.append(f"L09 pure search evidence owner must not acquire platform/scheduler authority: {path}")
+    # Existing paired return must acknowledge the adapter before transferring ownership,
+    # and resume the same private traversal rather than starting a new round.
+    require_order(runtime, "handleInspectionSnapshot", "verifiedGreetingsInboxReturn ->",
+                  "receivedGreetingsTaskFlow.confirmCompletionReturn()",
+                  "claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID",
+                  "finishGreetingsToPrivateHandoff()",
+                  "privateMessagesTraversalTaskExecutor.resumeAfterReturnedInbox()",
+                  "schedulePairedContinuation(privateYield, greetingYield, visibleWork)")
+
     for path in (runtime, flow, controller):
         code = code_by_path.get(path, "")
         for token in ("privateRoundCompletedForGreetings", "pollingRoundPending",

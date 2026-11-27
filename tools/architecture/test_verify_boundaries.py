@@ -69,6 +69,44 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
                 code[path] = code[path].replace(old, new)
                 self.assertTrue(guard.paired_ai_task_boundary_violations(code))
 
+    def test_l09_guard_rejects_position_lifecycle_and_search_gate_bypasses(self):
+        momo = "app/src/main/java/com/freedom/adapters/social/momo/"
+        adapter = momo + "MomoSocialAdapter.kt"
+        search = momo + "MomoReceivedGreetingsEntrySearchController.kt"
+        memory = momo + "MomoReceivedGreetingsEntryPositionMemory.kt"
+        runtime = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        policy = "business/src/main/kotlin/com/freedom/features/aireply/ports/ChatSessionManagementPolicy.kt"
+        for path, old, new in (
+            (adapter, "receivedGreetingsEntryPositionMemory.observe(result)", "receivedGreetingsEntryPositionMemory.position"),
+            (adapter, "override fun beginReceivedGreetingsNavigationTask() {",
+             "override fun beginReceivedGreetingsNavigationTask() {\n        receivedGreetingsEntryPositionMemory.endRun()"),
+            (adapter, "receivedGreetingsEntrySearchController.start(entryPosition)", "receivedGreetingsEntrySearchController.start()"),
+            (adapter, "readiness?.isReadyForWindow(expectedWindow, RunMode.AI_REPLY)", "true"),
+            (adapter, "ChatSessionManagementPolicy.greetingSearchBoundaryEvidence(", "unverifiedBoundary("),
+            (adapter, "receivedGreetingsEntrySearchController.mayDispatch(", "uncheckedDispatch("),
+            (adapter, "receivedGreetingsEntrySearchController.tryBeginGesture(", "uncheckedBegin("),
+            (search, "retryAttempt > 0 && !retryAdmitted", "false"),
+            (search, "holdForObservation(nowMs)", "Unit"),
+            (search, "nowMs < retryNotBeforeMs", "false"),
+            (search, "edgeConfirmation.observe(currentFingerprint, nowMs)", "true"),
+            (policy, "if (canScroll == true) return false", "if (canScroll == true) return true"),
+            (runtime, "privateMessagesTraversalTaskExecutor.resumeAfterReturnedInbox()", "privateMessagesTraversalTaskExecutor.reset()"),
+        ):
+            with self.subTest(path=path, old=old):
+                code = dict(self.recovery_code)
+                self.assertIn(old, code[path])
+                code[path] = code[path].replace(old, new)
+                self.assertTrue(guard.paired_ai_task_boundary_violations(code))
+
+        for path, addition in (
+            (adapter, "\nval duplicate = MomoReceivedGreetingsEntryPositionMemory()\n"),
+            (memory, "\nval forbiddenScheduler: TaskScheduler? = null\n"),
+        ):
+            with self.subTest(path=path, addition=addition):
+                code = dict(self.recovery_code)
+                code[path] += addition
+                self.assertTrue(guard.paired_ai_task_boundary_violations(code))
+
     def test_automatic_recovery_hard_guards_reject_old_handoff_interfaces_and_files(self):
         runtime = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
         for token in (
