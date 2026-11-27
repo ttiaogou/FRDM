@@ -105,7 +105,12 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "tools/architecture/test_pp_r00_freeze.py"
                 self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
                 # R04 also pins the reviewed relocation; R03 remains in the R00 gate.
-                expected[path] = "53ed4e6a6ab6aaeb5e4d31be80e4070877b26ad5"
+                expected[path] = "4638f13f85e718831149def2f3f9ec34e467b092"
+                # R05-E relocates the image order check to the actual image owner;
+                # the original M04 manifest and every frozen action assertion remain pinned.
+                path = "tools/architecture/test_m04_media_click_freeze.py"
+                self.assertEqual("8e0e9acbc33eb5b0c41d57f99e2ac4e02e82088a", expected[path])
+                expected[path] = "0cd46a421e63e60644497e21534c77a6e2154430"
             issues.extend(evidence_violations(ROOT, expected))
         # New R04 regression evidence is pinned independently of the historical inventory.
         issues.extend(evidence_violations(ROOT, {
@@ -136,7 +141,8 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         }))
         # R05-D adds an exact inverse reconstruction of the prior R05-C source.
         issues.extend(evidence_violations(ROOT, {
-            "tools/architecture/test_pp_r05_draft_transaction_migration.py": "dab438603a2d9b84517eabd2268e266ddc9f37fe",
+            "tools/architecture/test_pp_r05_draft_transaction_migration.py": "624e2df6d11189e26cbde371e413a12287cdb096",
+            "tools/architecture/test_pp_r05_image_transaction_migration.py": "7aa56dd2fd23ce03172d702a058503ed6fa61936",
         }))
         self.assertEqual([], issues)
 

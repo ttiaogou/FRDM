@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = Path(__file__).with_name("m04_media_click_freeze.json")
+IMAGE_OWNER = "app/src/main/java/com/freedom/adapters/social/momo/MomoImageSendTransactionController.kt"
 
 
 def fingerprint(text):
@@ -38,9 +39,14 @@ def freeze_violations(manifest, sources):
     start = adapter.find("    override fun observe() {")
     end = adapter.find("\n    override fun sendDraft(", start)
     observe = adapter[start:end] if 0 <= start < end else ""
+    # R05-E moved only the image observation call sites. The frozen action
+    # implementations and interception call sites remain in the adapter.
+    image_owner = sources.get(IMAGE_OWNER, "")
+    image_start = image_owner.find("    fun observe(child: PrivateFollowUpTransaction) {")
+    image_observe = image_owner[image_start:] if image_start >= 0 else ""
     positions = []
     for name in manifest["image_order"]:
-        matches = list(re.finditer(r"\b" + re.escape(name) + r"\s*\(", observe))
+        matches = list(re.finditer(r"\b" + re.escape(name) + r"\s*\(", image_observe))
         if len(matches) != 1:
             issues.append(f"Frozen image action call missing or duplicated: {name}")
         else:
@@ -63,7 +69,7 @@ class M04MediaClickFreezeTest(unittest.TestCase):
     def setUpClass(cls):
         cls.manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         # Missing files are violations, not silently skipped.
-        paths = set(cls.manifest["files"]) | {r["path"] for r in cls.manifest["regions"]} | {cls.manifest["adapter"]}
+        paths = set(cls.manifest["files"]) | {r["path"] for r in cls.manifest["regions"]} | {cls.manifest["adapter"], IMAGE_OWNER}
         cls.sources = {
             path: (ROOT / path).read_text(encoding="utf-8")
             for path in paths if (ROOT / path).is_file()
@@ -99,6 +105,20 @@ class M04MediaClickFreezeTest(unittest.TestCase):
         src = sources[adapter]
         sources[adapter] = src.replace(a, "__M04_SWAP__", 1).replace(b, a, 1).replace("__M04_SWAP__", b, 1)
         self.assertIn("Frozen interception action order changed", freeze_violations(self.manifest, sources))
+
+    def test_migrated_image_order_still_rejects_missing_duplicate_or_reordered_calls(self):
+        sources = dict(self.sources)
+        original = sources[IMAGE_OWNER]
+        a, b = self.manifest["image_order"][:2]
+        for changed in (
+            original.replace(a + "(", "removedAction(", 1),
+            original + "\n" + a + "(fixture)",
+            original.replace(a + "(", "__M04_SWAP__(", 1).replace(
+                b + "(", a + "(", 1).replace("__M04_SWAP__(", b + "(", 1),
+        ):
+            with self.subTest(changed=changed[-80:]):
+                sources[IMAGE_OWNER] = changed
+                self.assertTrue(freeze_violations(self.manifest, sources))
 
     def test_unrelated_adapter_code_is_not_frozen(self):
         sources = dict(self.sources)

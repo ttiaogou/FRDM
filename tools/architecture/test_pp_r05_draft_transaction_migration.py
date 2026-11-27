@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r05_image_transaction_migration import restore_r05d_adapter
 
 ROOT = Path(__file__).resolve().parents[2]
 MOMO = ROOT / "app/src/main/java/com/freedom/adapters/social/momo/"
@@ -22,6 +23,7 @@ def region(source, start, end):
     return source[left:source.index(end, left + len(start))]
 
 def restore_r05c_adapter(adapter, controller=None):
+    adapter = restore_r05d_adapter(adapter)
     if controller is None:
         controller = (MOMO / "MomoDraftTransactionController.kt").read_text(encoding="utf-8")
     if git_blob(controller.encode("utf-8")) != OWNER:

@@ -203,6 +203,14 @@ class PpR00FreezeTest(unittest.TestCase):
         self.assertNotIn(path, reviewed_s1)
         self.assertNotIn(path, m["permanent_s0"])
         reviewed_s1[path] = "e56c3fc9787320aaade7b5b9ce7f731aef2794bb"
+        # R05-E: pin image-only relocation without re-recording the historical baseline.
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt"
+        self.assertEqual("3d7e95615422c89d98683fe0f53718a4d40c1848", reviewed_s1[path])
+        reviewed_s1[path] = "d31b652c8d12b9507d7df6a5fc941a9faf919062"
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoImageSendTransactionController.kt"
+        self.assertNotIn(path, reviewed_s1)
+        self.assertNotIn(path, m["permanent_s0"])
+        reviewed_s1[path] = "2517ee16b10ebbb08f31ab3e2b47ab07365c976f"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 
