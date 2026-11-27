@@ -584,6 +584,7 @@ def inspect_project(root: Path) -> list[str]:
     # routes must keep the common verifier and a bounded, non-terminal scheduler.
     issues.extend(automatic_recovery_hard_boundary_violations(code_by_path))
     issues.extend(paired_ai_task_boundary_violations(code_by_path))
+    issues.extend(ocr_recovery_boundary_violations(code_by_path))
 
     return issues
 
@@ -2058,6 +2059,156 @@ def paired_ai_task_boundary_violations(code_by_path: dict[str, str]) -> list[str
                       "pollingRoundDue", "markTraversalCompleted", "markTraversalReturnedToInbox"):
             if re.search(r"\b" + token + r"\b", code):
                 issues.append(f"Legacy paired task lifecycle symbol {token}: {path}")
+    return issues
+
+
+def ocr_recovery_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
+    """L10: keep native termination, worker ownership and read-only send proof connected.
+
+    Masked source contracts are deliberately narrow; behavioral tests cover outcomes.
+    They do not claim to prove native cancellation latency or Android process recovery.
+    """
+    issues: list[str] = []
+    plugin = "ocr-plugin/src/main/java/"
+    host = "app/src/main/java/com/freedom/"
+    business = "business/src/main/kotlin/com/freedom/features/aireply/"
+    ort = plugin + "com/paddle/ocr/engine/ORTSessionManager.kt"
+    deadline = plugin + "com/paddle/ocr/engine/OcrInferenceDeadline.kt"
+    service = plugin + "com/freedom/ocr/plugin/OcrPluginService.kt"
+    holder = plugin + "com/freedom/ocr/plugin/runtime/OcrEngineHolder.kt"
+    hard = plugin + "com/freedom/ocr/plugin/runtime/OcrEngineRecoveryGuard.kt"
+    manager = host + "ocr/OcrManager.kt"
+    processor = host + "adapters/social/momo/MomoChatMessageOcrProcessor.kt"
+    gate = host + "adapters/social/momo/OcrBatchAdmissionGate.kt"
+    adapter = host + "adapters/social/momo/MomoSocialAdapter.kt"
+    runtime = business + "AiReplyObservationRuntime.kt"
+    coordinator = business + "ChatMessageReadCoordinator.kt"
+
+    def section(path: str, start: str, end: str | None = None) -> str:
+        source = code_by_path.get(path, "")
+        a = source.find(start)
+        b = source.find(end, a + len(start)) if end and a >= 0 else len(source)
+        if a < 0 or b < 0:
+            issues.append(f"L10 missing boundary {start}: {path}")
+            return ""
+        return source[a:b]
+
+    def order(path: str, start: str, end: str | None, *tokens: str) -> str:
+        source = section(path, start, end)
+        source = re.sub(r"\s+", " ", source)
+        cursor = 0
+        for token in tokens:
+            index = source.find(token, cursor)
+            if index < 0:
+                issues.append(f"L10 {start} lost ordered gate {token}: {path}")
+                break
+            cursor = index + len(token)
+        return source
+
+    order(ort, "fun <T> withInferenceDeadline(", "fun checkInferenceDeadline(",
+          "check(activeRequest == null)", "val options = OrtSession.RunOptions()",
+          "options.setTerminate(true)", "activeRequest = scope", "DEADLINE_WATCHDOG.schedule(",
+          "val result = run()", "deadline.complete()", "return result",
+          "deadline.retire()", "watchdog.cancel(false)", "deadline.retire()",
+          "activeRequest = null", "options.close()")
+    order(ort, "fun runSession(", "companion object",
+          "scope.deadline.checkActive()", "OnnxTensor.createTensor(",
+          "scope.deadline.checkActive()", "session.run(mapOf(inputName to tensor), scope.options)",
+          "tensor.close()", "scope.deadline.checkActive()", "result.close()")
+    order(deadline, "fun requestTerminationIfDue(", "fun checkActive(",
+          "if (retired || expired || nowMs() - startedAtMs < budgetMs) return false",
+          "expired = true", "terminate()", "return true")
+    order(deadline, "fun complete(", "fun retire(", "checkActive()", "retired = true")
+    order(hard, "fun escalateOnce(", "fun finish(",
+          "if (finished || escalated) return false", "escalated = true", "escalate(reason)")
+    order(hard, "companion object", None,
+          "HARD_EXIT_BUDGET_MS = OcrInferenceDeadline.HOT_INFERENCE_BUDGET_MS + EXIT_GRACE_MS")
+    order(service, "fun recognizeBitmap(", "fun <T> traceStage(",
+          "synchronized(engineLock)", "check(!PROCESS_QUARANTINED.get())", "engineHolder.get(files, options)",
+          "val inferenceStartedAt = SystemClock.elapsedRealtime()", "OcrEngineRecoveryGuard(inferenceStartedAt",
+          "PROCESS_QUARANTINED.set(true)", "android.os.Process.killProcess(android.os.Process.myPid())",
+          "RECOVERY_WATCHDOG.schedule(", "recovery.escalateIfDue()",
+          "acquisition.engine.recognize(bitmap, acquisition.detMaxSideLimit, requestId, inferenceStartedAt)",
+          "catch (timeout: OcrInferenceTimeout)", "engineHolder.isolateAfterTimeout(acquisition)",
+          "if (!released) recovery.escalateReleaseFailure()", "throw timeout",
+          "recovery.finish()", "hardWatchdog.cancel(false)", "if (!safeExit) throw OcrInferenceTimeout()")
+    order(service, "companion object", None, "RECOVERY_WATCHDOG = ScheduledThreadPoolExecutor(1)")
+    order(ort, "companion object", None, "DEADLINE_WATCHDOG = ScheduledThreadPoolExecutor(1)")
+    order(holder, "fun isolateAfterTimeout(", "fun releaseLocked(",
+          "check(cachedEngine === acquisition.engine && engineCreateCount == acquisition.creationCount)", "releaseLocked(")
+    order(holder, "fun releaseLocked(", "internal data class EngineKey",
+          "val old = cachedEngine", "cachedEngine = null", "cachedKey = null",
+          "isLoaded = false", "old.release()", "return released.isSuccess")
+    for path, source in code_by_path.items():
+        if "killProcess(" in source and path == service:
+            if source.count("killProcess(") != 1:
+                issues.append("L10 plugin recovery must have exactly one self-process exit")
+    order(manager, "fun recognize(", "fun markTimedOut(",
+          "operationLock.withLock", "plugin.service.detect(", "releaseBinding()",
+          "typed.failureKind.requiresFreshOcrObservation()", "throw typed",
+          "typed.failureKind.isRetryable()", "continue")
+    order(processor, "fun recognize(", "fun recognizeNext(",
+          "batchAdmission.tryAcquire()", "if (batchLease == null)",
+          "admissionDeferred = true", "recognitionReuse.begin()",
+          "if (!validResult.invalidated", "recognitionReuse.publish(",
+          "timeoutRunnable = Runnable", "ocrManager.markTimedOut(", "deliver(MomoChatOcrResult(",
+          "executor.execute", "recognizeNext(", "finally", "batchLease.close()")
+    timeout = section(processor, "timeoutRunnable = Runnable", "if (!timeoutHandler.postDelayed")
+    if "batchLease.close()" in timeout or "bitmap.recycle()" in timeout:
+        issues.append("L10 caller timeout may not release a live worker or bitmap")
+    order(processor, "fun recognizeNext(", "fun recognizeCrop(",
+          "failure.failureKind.requiresFreshOcrObservation()", "crop.recycle()",
+          "onComplete(MomoChatOcrResult(", "invalidated = true", "return",
+          "recognizeNext(")
+    order(gate, "fun tryAcquire(", "internal class Lease",
+          "occupied.compareAndSet(false, true)", "return Lease", "occupied.set(false)")
+    order(gate, "override fun close(", None, "released.compareAndSet(false, true)", "releaseAction()")
+    order(adapter, "fun readRecentMessagesWithOcr(", None,
+          "if (ocrResult.invalidated || !isCurrent())", "deliver(staleBatch())", "return@recognize",
+          "if (ocrResult.admissionDeferred)", "ocrAdmissionDeferred = true", "applyOcrResults(")
+    order(coordinator, "fun requestOcr(", "fun closeRead(",
+          "if (!isReadRequestAllowed() || requestInFlight) return false",
+          "ocrInFlight = true", "if (generation == requestGeneration && requestInFlight)",
+          "closeRead()", "onResult(batch, revalidate || batch.status == MessageReadStatus.WINDOW_STALE)")
+    order(coordinator, "val scheduledTimeout = scheduler.schedule(timeoutMs)", "timeoutTask = scheduledTimeout",
+          "requestGeneration += 1L", "closeRead()", "pendingSnapshot = null",
+          "messagePort.invalidateOcrRecognitionReuse()", "timedOut(timeoutMs)")
+    order(coordinator, "fun completeRequest(", None,
+          "expectedGeneration != requestGeneration || !requestInFlight", "closeRead()",
+          "isResultCurrent(requestedSnapshot, batch, activeSnapshot)", "onValidatedResult(",
+          "else if (onRejectedResult())", "pendingSnapshot = null", "return")
+    order(runtime, "fun isMessageReadResultCurrent(", "fun sendConfirmationReadDeferredReason(",
+          "if (batch.status == MessageReadStatus.WINDOW_STALE) return false")
+    order(runtime, "fun scheduleDeferredSendProofRecheck(", "fun requestPendingSendConfirmationOcr(",
+          "isSendConfirmationPending()", "recoveryContext.pending", "if (hasProtectedSendInspection()) return",
+          "++deferredSendProofRetryAttempt", "RecoveryScheduler.readOnlyRetryDelayMs(attempt)",
+          "scheduleFullInspectionAfter(delayMs, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)")
+    order(runtime, "fun requestPendingSendConfirmationOcr(", "fun followUpEnabled(",
+          "sendConfirmation = true", "visit != draftVisitToken", "runGeneration != currentRunGeneration()",
+          "readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY)", "ownsTask(RECEIVED_GREETINGS_TASK_ID)",
+          "!isMessageReadResultCurrent(snapshot, ocrBatch, fresh)", "scheduleDeferredSendProofRecheck(reason)",
+          "return@sendOcr", "if (deferBusyOcrResult(ocrBatch)) return@sendOcr",
+          "onSendTransaction(ocrBatch, snapshot)", "handleSendConfirmationResult(transaction, ocrBatch, snapshot)")
+    order(runtime, "fun handleMessageReadBatch(", None,
+          "if (batch.status == MessageReadStatus.WINDOW_STALE)", "scheduleDeferredSendProofRecheck(",
+          "return", "onSendTransaction(batch, snapshot)")
+    order(runtime, "fun completeConfirmedGreetingSend(", "private data class GreetingChatEvidence",
+          "greetingBindingRejectReason(snapshot, confirmed.binding)", "if (!confirmed.sendJournalSaved)",
+          "persistReceivedGreetingConfirmedSend(confirmed.confirmationId)", "if (!recorded)",
+          "return", "confirmed.sendJournalSaved = true", "if (!confirmed.finalSampleSaved)",
+          "confirmed.finalSampleSaved = true", "receivedGreetingsTaskFlow.completeDetailInspection(true)")
+    order(runtime, "fun handleSendConfirmationResult(", "fun handleMessageReadBatch(",
+          "val sendConfirmationId = transaction.finalSendConfirmationId", "sendConfirmationId.isNullOrBlank()",
+          "recordSuccessfulSend(sendConfirmationId)", "countUpdate.status == ContactSendRecordStatus.PERSISTENCE_FAILED",
+          "return true", "confirmedPrivateCompletionReceipt = sendConfirmationId",
+          "finishConfirmedPrivateSend(sendConfirmationId, snapshot)")
+    order(runtime, "fun finishConfirmedPrivateSend(", "fun handleSendConfirmationResult(",
+          "checkpointNextCursorKey = currentSessionKey", "completeCurrentUnfinishedSession()",
+          "rememberRecoveryAnchor(candidate)", "privateMessagesCheckpointRepository?.save(",
+          "if (!checkpointWritten)", "return true", "scheduleReturnToSessionList(snapshot)")
+    order(runtime, "fun verifyConfirmedPrivateReturn(", None,
+          "canPerformPrivateMessagesUiAction()", "inspectFreshPageSnapshot()",
+          "observed?.pageKind == ChatPageKind.CHAT_LIST", "handleSessionListPage(observed)")
     return issues
 
 

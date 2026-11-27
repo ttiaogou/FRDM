@@ -5770,7 +5770,14 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
-    fun privateUnconfirmedSendRetriesRejectedBindingUntilFreshOcrWithoutReplayingGesture() {
+    fun privateUnconfirmedSendRetriesRejectedBindingUntilFreshOcrWithoutReplayingGesture() =
+        assertPrivateSendOcrRecovery(false)
+
+    @Test
+    fun l10dRecoveredPrivateSendWritesCheckpointBeforeVerifiedInboxReturn() =
+        assertPrivateSendOcrRecovery(true)
+
+    private fun assertPrivateSendOcrRecovery(completeAfterRecovery: Boolean) {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)
         val port = FakeChatPort().apply {
@@ -5796,6 +5803,14 @@ class AiReplyObservationRuntimeTest {
             )
         }
         val logs = ArrayList<String>()
+        val savedCheckpoints = mutableListOf<PrivateMessagesTraversalCheckpoint>()
+        val repository = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long): PrivateMessagesTraversalCheckpoint? = null
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { savedCheckpoints += checkpoint }
+            override fun clear() = Unit
+        }
+        if (completeAfterRecovery) port.pageAfterBack = port.page
+        var confirmNext = false
         var pendingSend = false
         var confirmationCalls = 0
         var gestureCalls = 0
@@ -5822,14 +5837,20 @@ class AiReplyObservationRuntimeTest {
             inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
             fullInspectionDebounceMs = 300L,
             regionRefreshDebounceMs = 500L,
+            privateMessagesCheckpointRepository = if (completeAfterRecovery) repository else null,
             isSendConfirmationPending = { pendingSend },
             onSendTransaction = { _, _ ->
                 // A real coordinator has no pending transaction before the send is submitted.
                 val result = if (pendingSend) {
                     confirmationCalls++
-                    com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
+                    if (confirmNext) {
+                        pendingSend = false
+                        com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED
+                    } else com.freedom.features.aireply.ai.SendConfirmationResult.WAITING
                 } else com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
-                com.freedom.features.aireply.ai.ReplySendTransactionOutcome(result)
+                com.freedom.features.aireply.ai.ReplySendTransactionOutcome(result,
+                    if (result == com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED)
+                        "l10d-original-private-send" else null)
             }
         )
         runtime.scheduleInitialObservation()
@@ -5896,9 +5917,33 @@ class AiReplyObservationRuntimeTest {
             gesturesBefore, gestureCalls)
         assertEquals(0, port.navigateBackCalls)
 
-        runtime.reset("user stopped")
-        assertFalse("A stopped run must cancel a pending send-proof recheck",
-            scheduler.hasPendingDelay(500L))
+        if (completeAfterRecovery) {
+            val traversal = runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+                .apply { isAccessible = true }.get(runtime) as PrivateMessagesTraversalTaskExecutor
+            val originalCursor = requireNotNull(traversal.currentSessionKey)
+            val originalUnfinished = traversal.checkpoint().unfinishedSessions
+            assertTrue(pendingSend)
+            assertFalse(originalUnfinished.isEmpty())
+            assertFalse(savedCheckpoints.any { it.lastSuccessfulTaskId == "l10d-original-private-send" })
+            confirmNext = true
+            scheduler.runNextWithDelay(500L)
+            runUntilShortestDelay(scheduler, 60) {
+                savedCheckpoints.any { it.lastSuccessfulTaskId == "l10d-original-private-send" }
+            }
+            val completion = savedCheckpoints.last { it.lastSuccessfulTaskId == "l10d-original-private-send" }
+            assertEquals(originalCursor, completion.nextCursorKey)
+            assertTrue(completion.unfinishedSessions.isEmpty())
+            assertFalse(pendingSend)
+            assertEquals(0, port.navigateBackCalls)
+            assertEquals(gesturesBefore, gestureCalls)
+            runUntilShortestDelay(scheduler, 80) { logs.any { it.contains("INBOX_VERIFIED") } }
+            assertEquals(1, port.navigateBackCalls)
+            assertEquals(2, confirmationCalls)
+        } else {
+            runtime.reset("user stopped")
+            assertFalse("A stopped run must cancel a pending send-proof recheck",
+                scheduler.hasPendingDelay(500L))
+        }
     }
 
     @Test

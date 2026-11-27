@@ -107,6 +107,45 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
                 code[path] += addition
                 self.assertTrue(guard.paired_ai_task_boundary_violations(code))
 
+    def test_l10_ocr_recovery_guard_accepts_current_graph(self):
+        self.assertEqual(guard.ocr_recovery_boundary_violations(self.recovery_code), [])
+
+    def test_l10_ocr_recovery_guard_rejects_unsafe_bypasses(self):
+        plugin = "ocr-plugin/src/main/java/"
+        host = "app/src/main/java/com/freedom/"
+        business = "business/src/main/kotlin/com/freedom/features/aireply/"
+        ort = plugin + "com/paddle/ocr/engine/ORTSessionManager.kt"
+        service = plugin + "com/freedom/ocr/plugin/OcrPluginService.kt"
+        holder = plugin + "com/freedom/ocr/plugin/runtime/OcrEngineHolder.kt"
+        processor = host + "adapters/social/momo/MomoChatMessageOcrProcessor.kt"
+        manager = host + "ocr/OcrManager.kt"
+        runtime = business + "AiReplyObservationRuntime.kt"
+        coordinator = business + "ChatMessageReadCoordinator.kt"
+        for path, old, new in (
+            (ort, "options.setTerminate(true)", "Unit"),
+            (ort, "session.run(mapOf(inputName to tensor), scope.options)", "session.run(mapOf(inputName to tensor))"),
+            (ort, "deadline.complete()", "Unit"),
+            (service, "android.os.Process.killProcess(android.os.Process.myPid())", "android.os.Process.killProcess(1)"),
+            (service, "engineHolder.isolateAfterTimeout(acquisition)", "true"),
+            (service, "if (!released) recovery.escalateReleaseFailure()", "Unit"),
+            (service, "if (!safeExit) throw OcrInferenceTimeout()", "Unit"),
+            (holder, "cachedEngine === acquisition.engine && engineCreateCount == acquisition.creationCount", "true"),
+            (manager, "typed.failureKind.requiresFreshOcrObservation()", "false"),
+            (processor, "timeoutRunnable = Runnable {", "timeoutRunnable = Runnable {\\n                    batchLease.close()"),
+            (processor, "failure.failureKind.requiresFreshOcrObservation()", "false"),
+            (coordinator, "else if (onRejectedResult())", "else if (false)"),
+            (runtime, "if (batch.status == MessageReadStatus.WINDOW_STALE) return false", "Unit"),
+            (runtime, "if (hasProtectedSendInspection()) return", "Unit"),
+            (runtime, "persistReceivedGreetingConfirmedSend(confirmed.confirmationId)", "true"),
+            (runtime, "countUpdate.status == ContactSendRecordStatus.PERSISTENCE_FAILED", "false"),
+            (runtime, "checkpointNextCursorKey = currentSessionKey", "checkpointNextCursorKey = null"),
+        ):
+            with self.subTest(path=path, old=old):
+                code = dict(self.recovery_code)
+                self.assertIn(old, code[path])
+                code[path] = code[path].replace(old, new)
+                self.assertTrue(guard.ocr_recovery_boundary_violations(code))
+
     def test_automatic_recovery_hard_guards_reject_old_handoff_interfaces_and_files(self):
         runtime = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
         for token in (
