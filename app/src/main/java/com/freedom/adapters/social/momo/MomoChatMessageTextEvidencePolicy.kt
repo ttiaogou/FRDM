@@ -2,6 +2,10 @@ package com.freedom.adapters.social.momo
 
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.features.aireply.domain.message.ChatMessageType
+import com.freedom.features.aireply.domain.message.OcrContentKind
+import com.freedom.features.aireply.domain.message.OcrContentToken
+import com.freedom.features.aireply.domain.message.OcrTokenSource
+import com.freedom.features.aireply.domain.message.OcrTokenStatus
 
 /** Detached text/geometry evidence for one visible Momo message row. */
 internal data class MomoChatTextEvidence(
@@ -23,7 +27,7 @@ internal object MomoChatMessageTextEvidencePolicy {
     const val MAX_MESSAGE_TEXT_LENGTH = 4_000
 
     private val MESSAGE_TEXT_ID_HINTS = setOf("message_text", "msg_text", "chat_content", "bubble_text")
-    private val IMAGE_HINTS = setOf("msg_image", "message_image", "chat_image", "photo_content")
+    private val IMAGE_HINTS = setOf("msg_image", "message_image", "chat_image", "photo_content", "image_content", "message_gifview")
     private val VOICE_HINTS = setOf("msg_voice", "message_voice", "voice_wave", "audio_message")
     private val VIDEO_HINTS = setOf("msg_video", "message_video", "video_content")
     private val CARD_HINTS = setOf("msg_card", "message_card", "share_card", "link_card", "profile_card")
@@ -86,6 +90,51 @@ internal object MomoChatMessageTextEvidencePolicy {
             else -> ChatMessageType.UNKNOWN
         }
     }
+
+    /** Exact body resource names only; do not scan cards or avatar/status decorations as media. */
+    fun classifiedMediaBodyIds(): Set<String> = IMAGE_HINTS + VOICE_HINTS + VIDEO_HINTS
+
+    fun classifiedMediaBodyType(viewId: String, trail: List<String>): ChatMessageType? {
+        val id = entryName(viewId)
+        if (id !in classifiedMediaBodyIds()) return null
+        val ids = trail.map(::entryName)
+        val root = ids.indexOfLast { it == "message_root" }
+        if (root < 0 || ids.lastOrNull() != id) return null
+        val scoped = ids.drop(root + 1)
+        val content = scoped.indexOf("message_content_layout")
+        val container = scoped.indexOf("message_layout_messagecontainer")
+        if (content < 0 || container <= content || container >= scoped.lastIndex) return null
+        val ancestors = scoped.dropLast(1)
+        if (containsAnyHint(ancestors, CARD_HINTS + DYNAMIC_CARD_HINTS + INTERACTIVE_CARD_HINTS)) return null
+        return inferMessageType(listOf(id)).takeIf { it != ChatMessageType.UNKNOWN }
+    }
+
+    /** Preserve text with independent projection; an unproved graphic is not OCR text.
+     * The original OCR string/tokens stay in the local batch for diagnostics and projection.
+     * No type inference from a marker literal or an ambiguous glyph alone. */
+    fun classifyOcrBody(text: String, tokens: List<OcrContentToken>): ChatMessageType {
+        if (tokens.isEmpty()) return ChatMessageType.TEXT // legacy callers without row evidence
+        val byLine = tokens.groupBy { it.lineIndex }
+        val reconstructed = byLine.toSortedMap().values.joinToString("\n") { line ->
+            line.joinToString("") { it.text }
+        }
+        if (reconstructed.trim() != text.trim()) return ChatMessageType.TEXT
+        if (MomoOcrTextProjector.extract(text, tokens) != null) return ChatMessageType.TEXT
+        val significant = tokens.filterNot { it.text.isBlank() }
+        if (significant.isNotEmpty() && significant.all {
+                it.kind == OcrContentKind.EMOJI && it.source == OcrTokenSource.UNICODE_EMOJI &&
+                    it.status == OcrTokenStatus.UNVERIFIED
+            }) return ChatMessageType.EMOJI
+        val visual = significant.any {
+            it.kind == OcrContentKind.PLACEHOLDER && it.source == OcrTokenSource.VISUAL_GUARD &&
+                it.status == OcrTokenStatus.UNVERIFIED
+        }
+        // No independently verified text in this row. Keep its ordered UNKNOWN slot rather
+        // than fabricate a sticker meaning or let an OCR hallucination masquerade as TEXT.
+        return if (visual) ChatMessageType.UNKNOWN else ChatMessageType.TEXT
+    }
+
+    private fun entryName(id: String): String = id.substringAfterLast('/').substringAfterLast(':').lowercase()
 
     private fun containsAnyHint(signatures: List<String>, hints: Set<String>): Boolean =
         signatures.any { signature ->

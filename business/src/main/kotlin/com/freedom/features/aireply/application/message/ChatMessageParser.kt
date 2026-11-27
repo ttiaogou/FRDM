@@ -29,7 +29,9 @@ data class ChatMessageCandidate(
     val structureSignature: String? = null,
     val identityDirectionHint: ChatMessageDirection? = null,
     val identityBubbleBounds: ScreenRect? = null,
-    val identityAvatarBounds: ScreenRect? = null
+    val identityAvatarBounds: ScreenRect? = null,
+    /** A positively observed message row with unresolved non-text content; not an unrecognized UI row. */
+    val retainUnknownRow: Boolean = false
 ) {
     override fun toString(): String =
         "ChatMessageCandidate(rowIndex=$rowIndex,typeHint=$typeHint," +
@@ -73,10 +75,11 @@ class ChatMessageParser(
             val type = when {
                 system -> ChatMessageType.SYSTEM
                 candidate.typeHint != ChatMessageType.UNKNOWN -> candidate.typeHint
+                candidate.retainUnknownRow -> ChatMessageType.UNKNOWN
                 !filteredText.isNullOrBlank() -> ChatMessageType.TEXT
                 else -> ChatMessageType.UNKNOWN
             }
-            if (type == ChatMessageType.UNKNOWN) return@forEachIndexed
+            if (type == ChatMessageType.UNKNOWN && !candidate.retainUnknownRow) return@forEachIndexed
             if (type == ChatMessageType.TEXT && filteredText.isNullOrBlank()) return@forEachIndexed
 
             val (direction, evidence) = if (system) {

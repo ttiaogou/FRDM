@@ -9,13 +9,15 @@ import com.freedom.features.aireply.domain.message.ChatMessageIdentity
 import com.freedom.features.aireply.domain.message.ChatMessageOcrTarget
 import com.freedom.features.aireply.domain.message.ChatMessageType
 import com.freedom.features.aireply.domain.message.MessageContentQuality
+import com.freedom.features.aireply.domain.message.OcrContentToken
 
 /** Pure bridge from OCR text + previously verified Momo row geometry into the shared parser. */
 internal object MomoChatOcrCandidateMapper {
     fun candidates(
         targets: List<ChatMessageOcrTarget>,
         textByRowIndex: Map<Int, String>,
-        listBounds: ScreenRect
+        listBounds: ScreenRect,
+        tokensByRowIndex: Map<Int, List<OcrContentToken>> = emptyMap()
     ): List<ChatMessageCandidate> = targets.mapNotNull { target ->
         // 分类探针不是消息正文，绝不把资料字段当作对方消息提交模型。
         if (!target.isMessageTextTarget) return@mapNotNull null
@@ -25,24 +27,23 @@ internal object MomoChatOcrCandidateMapper {
             ?.takeIf(String::isNotBlank)
             ?: return@mapNotNull null
         if (MomoChatUiTextFilter.isNonMessageUiText(text)) return@mapNotNull null
+        val type = MomoChatMessageTextEvidencePolicy.classifyOcrBody(text, tokensByRowIndex[target.rowIndex].orEmpty())
         ChatMessageCandidate(
             rowIndex = target.rowIndex,
             rowBounds = target.rowBounds,
             bubbleBounds = target.bubbleBounds,
             listBounds = listBounds,
-            text = text,
-            // Reader 只为正式文本容器建立正文 OCR 目标。
-            // 周围的卡片/图片节点不能再覆盖该容器的文字类型。
-            typeHint = ChatMessageType.TEXT,
+            text = text.takeIf { type == ChatMessageType.TEXT },
+            typeHint = type,
+            retainUnknownRow = type == ChatMessageType.UNKNOWN,
             explicitDirectionHint = target.explicitDirectionHint,
             explicitDirectionEvidence = target.explicitDirectionEvidence,
             timeHint = target.timeHint,
             isSystemMessage = false,
             avatarBounds = target.avatarBounds,
-            // Textual correctness is not locally provable. Structural admission (window, row,
-            // order and direction) is handled by the surrounding read/draft pipeline; a non-empty
-            // OCR result is therefore allowed to become model input here.
-            contentQuality = conservativeQuality(text),
+            // A non-text row is never verified conversational text.
+            contentQuality = if (type == ChatMessageType.TEXT) conservativeQuality(text)
+                else MessageContentQuality.AMBIGUOUS,
             neighborSignature = target.neighborSignature,
             structureSignature = target.structureSignature,
             identityDirectionHint = target.identityDirectionHint
@@ -57,9 +58,10 @@ internal object MomoChatOcrCandidateMapper {
         textByRowIndex: Map<Int, String>,
         listBounds: ScreenRect,
         parser: ChatMessageParser,
-        limit: Int
+        limit: Int,
+        tokensByRowIndex: Map<Int, List<OcrContentToken>> = emptyMap()
     ): List<ChatMessage> = parser.parse(
-        candidates(targets, textByRowIndex, listBounds),
+        candidates(targets, textByRowIndex, listBounds, tokensByRowIndex),
         limit
     )
 }

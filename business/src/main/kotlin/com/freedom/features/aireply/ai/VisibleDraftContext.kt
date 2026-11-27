@@ -34,6 +34,15 @@ internal object VisibleDraftContext {
         // 会话发生变化。写入器会在 SET_TEXT 前后重新检查
         // 当前会话及可编辑输入框。
         if (batch.truncated) return retry("MESSAGE_LIST_TRUNCATED")
+        // Classification is not proof that earlier incoming text was answered.
+        // Until pending-message selection is extended, do not falsely complete this visit.
+        if (latest.type == ChatMessageType.UNKNOWN ||
+            (latest.type in setOf(ChatMessageType.EMOJI, ChatMessageType.IMAGE, ChatMessageType.VOICE,
+                ChatMessageType.VIDEO) && latest.direction != ChatMessageDirection.OUTGOING &&
+                batch.messagesBottomToTop.drop(1)
+                    .takeWhile { it.direction == ChatMessageDirection.INCOMING }
+                    .any { it.type == ChatMessageType.TEXT })
+        ) return retry("CLASSIFIED_VISUAL_PENDING_CONTEXT")
         if (latest.type != ChatMessageType.TEXT) return Admission(false, false, "LATEST_MESSAGE_UNSUPPORTED")
         if (latest.direction == ChatMessageDirection.OUTGOING) return Admission(false, false, "LATEST_MESSAGE_OUTGOING")
         if (!eligible(batch, latest)) return retry("LATEST_TEXT_OR_DIRECTION_UNVERIFIED")

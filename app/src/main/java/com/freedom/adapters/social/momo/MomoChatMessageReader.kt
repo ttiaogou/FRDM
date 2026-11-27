@@ -17,6 +17,7 @@ import com.freedom.features.aireply.domain.message.DirectionEvidence
 import com.freedom.features.aireply.domain.message.ChatMessageType
 import com.freedom.features.aireply.domain.message.MessageDirectionDiagnosticReason
 import com.freedom.features.aireply.domain.message.MessageReadStatus
+import com.freedom.features.aireply.domain.message.MessageContentQuality
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import java.util.ArrayDeque
@@ -264,7 +265,8 @@ internal class MomoChatMessageReader(
         val candidates = MomoChatOcrCandidateMapper.candidates(
             targets = batch.ocrTargets,
             textByRowIndex = result.textByRowIndex,
-            listBounds = listBounds
+            listBounds = listBounds,
+            tokensByRowIndex = result.tokensByRowIndex
         )
         val ocrMessages = parser.parse(candidates, limit)
         val messages = (batch.messages + ocrMessages)
@@ -423,15 +425,18 @@ internal class MomoChatMessageReader(
             return RowRead(null, false, 0, 0)
         }
 
-        // 没有正式文本容器的行直接跳过，不扫描其卡片内容、不建立 OCR 目标。
-        // 查询限定在当前行和既有正文资源名内，随后仍按原层级规则复核归属与方向。
-        val hasFormalContainer = try {
-            hasVisibleFormalTextContainer(row, rowBounds, listBounds)
+        // 仅对正式文本容器或已有明确媒体正文资源名执行同一有界行读取。
+        // 媒体不建立 OCR 目标；无关卡片、头像和状态图标仍不准入。
+        val (hasFormalContainer, hasMediaContainer) = try {
+            val formal = hasVisibleBodyContainer(row, rowBounds, listBounds,
+                MomoChatRowCandidatePolicy.formalTextContainerIds())
+            formal to (!formal && hasVisibleBodyContainer(row, rowBounds, listBounds,
+                MomoChatMessageTextEvidencePolicy.classifiedMediaBodyIds()))
         } catch (failure: Exception) {
             recycle(row)
             throw failure
         }
-        if (!hasFormalContainer) {
+        if (!hasFormalContainer && !hasMediaContainer) {
             recycle(row)
             return RowRead(null, false, 0, 0)
         }
@@ -441,6 +446,7 @@ internal class MomoChatMessageReader(
         val textEvidence = ArrayList<MomoChatTextEvidence>()
         val avatarEvidence = ArrayList<AvatarEvidence>()
         val unexposedMessageTextViews = ArrayList<MomoChatTextEvidence>()
+        val mediaBodies = ArrayList<Pair<MomoChatTextEvidence, ChatMessageType>>()
         val layoutNodeEvidence = ArrayList<MomoChatMessageLayoutNodeEvidence>()
         val signatures = ArrayList<String>()
         var truncated = false
@@ -482,7 +488,16 @@ internal class MomoChatMessageReader(
                         )
                     }
 
-                    if (isMomoMessageBodyView(viewId) &&
+                    if (hasMediaContainer && !bounds.isEmpty && intersects(bounds, listBounds) &&
+                        intersects(bounds, rowBounds)
+                    ) {
+                        MomoChatMessageTextEvidencePolicy.classifiedMediaBodyType(viewId, idTrail)?.let { type ->
+                            mediaBodies += MomoChatTextEvidence("", bounds, pending.depth, childCount,
+                                normalizedClass, viewId, pending.ancestorBounds, idTrail, pending.path) to type
+                        }
+                    }
+
+                    if (hasFormalContainer && isMomoMessageBodyView(viewId) &&
                         text.isBlank() && contentDescription.isBlank() &&
                         !bounds.isEmpty && intersects(bounds, listBounds)
                     ) {
@@ -499,7 +514,7 @@ internal class MomoChatMessageReader(
                         )
                     }
 
-                    if (!safeBoolean { node.isEditable } && !bounds.isEmpty && intersects(bounds, listBounds)) {
+                    if (hasFormalContainer && !safeBoolean { node.isEditable } && !bounds.isEmpty && intersects(bounds, listBounds)) {
                         val textValue = when {
                             text.isNotBlank() -> {
                                 textEvidenceCount++
@@ -668,7 +683,23 @@ internal class MomoChatMessageReader(
         } else null
         val directionListBounds = if (coordinateSpaceReliable) listBounds else ScreenRect(0, 0, 0, 0)
 
+        val media = mediaBodies.singleOrNull()?.takeIf { hasMessageRowAnchor && !truncated && coordinateSpaceReliable }
+        val exposedBodyType = MomoChatMessageTextEvidencePolicy.inferMessageType(emptyList(), bodyText)
+            .takeIf { it == ChatMessageType.EMOJI } ?: ChatMessageType.TEXT
         val candidate = when {
+            media != null -> {
+                val (evidence, type) = media
+                val mediaDirection = directionFor(evidence)
+                val mediaBubble = MomoChatMessageTextEvidencePolicy.resolveBubbleBounds(evidence, listBounds)
+                val mediaAvatar = mediaBubble?.let {
+                    resolveAvatarBounds(avatarEvidence, evidence, it, rowBounds, listBounds)
+                }
+                ChatMessageCandidate(rowIndex, rowBounds, mediaBubble, directionListBounds, null,
+                    typeHint = type, explicitDirectionHint = mediaDirection.direction,
+                    explicitDirectionEvidence = mediaDirection.evidence, timeHint = timeHint,
+                    avatarBounds = mediaAvatar, contentQuality = MessageContentQuality.UNVERIFIED,
+                    structureSignature = structureSignature, identityDirectionHint = mediaDirection.direction)
+            }
             systemMessage -> ChatMessageCandidate(
                 rowIndex = rowIndex,
                 rowBounds = rowBounds,
@@ -692,7 +723,9 @@ internal class MomoChatMessageReader(
                 bubbleBounds = bubbleBounds,
                 listBounds = directionListBounds,
                 text = bodyText,
-                typeHint = ChatMessageType.TEXT,
+                typeHint = exposedBodyType,
+                contentQuality = if (exposedBodyType == ChatMessageType.TEXT) MessageContentQuality.VERIFIED
+                    else MessageContentQuality.UNVERIFIED,
                 explicitDirectionHint = bodyDirection.direction,
                 explicitDirectionEvidence = bodyDirection.evidence,
                 timeHint = timeHint,
@@ -754,11 +787,12 @@ internal class MomoChatMessageReader(
     }
 
     /** 在当前可见行查询精确的正文容器，不把卡片的任意文本标签当作正文。 */
-    private fun hasVisibleFormalTextContainer(
+    private fun hasVisibleBodyContainer(
         row: AccessibilityNodeInfo,
         rowBounds: ScreenRect,
-        listBounds: ScreenRect
-    ): Boolean = MomoChatRowCandidatePolicy.formalTextContainerIds().any { entry ->
+        listBounds: ScreenRect,
+        resourceNames: Set<String>
+    ): Boolean = resourceNames.any { entry ->
         val viewId = "$targetPackage:id/$entry"
         val nodes = row.findAccessibilityNodeInfosByViewId(viewId).orEmpty()
         try {

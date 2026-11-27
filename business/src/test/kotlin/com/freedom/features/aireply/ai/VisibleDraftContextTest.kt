@@ -52,6 +52,19 @@ class VisibleDraftContextTest {
         variants.forEach { assertNull(VisibleDraftContext.build(batch(message()).copy(messages = listOf(message(), it), completeTailRowBounds = it.bounds))) }
     }
 
+    @Test fun l08aClassifiedGraphicCannotFinalizeAnUnansweredTextVisit() {
+        val earlier = message()
+        val visual = message(100).copy(type = ChatMessageType.UNKNOWN, content = null,
+            contentQuality = MessageContentQuality.AMBIGUOUS)
+        for (type in listOf(ChatMessageType.UNKNOWN, ChatMessageType.EMOJI, ChatMessageType.IMAGE)) {
+            val classified = batch(earlier, visual.copy(type = type))
+            val result = VisibleDraftContext.assess(classified)
+            assertFalse(result.accepted)
+            assertTrue(result.retryable)
+            assertNull(VisibleDraftContext.build(classified))
+        }
+    }
+
     @Test fun partialAndStaleBatchesAreRejected() {
         val batch = batch(message()).copy(completeTailRowBounds = message().bounds)
         val partial = batch.copy(status = MessageReadStatus.OCR_PARTIAL, ocrFailedTargetCount = 1, unrecognizedRowCount = 1)

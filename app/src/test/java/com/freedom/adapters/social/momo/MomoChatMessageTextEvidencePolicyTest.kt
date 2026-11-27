@@ -46,4 +46,14 @@ class MomoChatMessageTextEvidencePolicyTest {
             )
         )
     }
+    @Test
+    fun l08aMediaTypeRequiresExactScopedBodyRatherThanAvatarOrStatus() {
+        val policy = MomoChatMessageTextEvidencePolicy
+        val trail = listOf("message_root", "message_content_layout", "message_layout_messagecontainer")
+        assertEquals(ChatMessageType.IMAGE, policy.classifiedMediaBodyType("image_content", trail + "image_content"))
+        assertEquals(ChatMessageType.IMAGE, policy.classifiedMediaBodyType("message_gifview", trail + "message_gifview"))
+        assertEquals(null, policy.classifiedMediaBodyType("message_iv_userphoto", trail + "message_iv_userphoto"))
+        assertEquals(null, policy.classifiedMediaBodyType("image_content", listOf("message_root", "message_content_layout", "image_content")))
+        assertEquals(null, policy.classifiedMediaBodyType("iv_message_status", trail + "iv_message_status"))
+    }
 }

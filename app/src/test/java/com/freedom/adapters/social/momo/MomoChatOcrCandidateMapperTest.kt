@@ -192,6 +192,48 @@ class MomoChatOcrCandidateMapperTest {
     }
 
     @Test
+    fun l08aVisualRowKeepsItsSlotWithoutContaminatingNormalText() {
+        val visual = MomoOcrVisualSymbolGuard.reconcileWithTokens(
+            listOf(OcrVisualLine("安", OcrVisualRect(15, 20, 55, 68), emptyList())),
+            listOf(OcrVisualRect(8, 14, 64, 72))
+        )
+        val messages = MomoChatOcrCandidateMapper.parse(
+            listOf(incomingTarget, outgoingTarget),
+            mapOf(1 to "今天有空吗", 2 to visual.text), listBounds, ChatMessageParser(), 10,
+            tokensByRowIndex = mapOf(2 to visual.tokens)
+        )
+        assertEquals(2, messages.size)
+        assertEquals("今天有空吗", messages.single { it.observationRowIndex == 1 }.content)
+        val isolated = messages.single { it.observationRowIndex == 2 }
+        assertEquals(com.freedom.features.aireply.domain.message.ChatMessageType.UNKNOWN, isolated.type)
+        assertEquals(null, isolated.content)
+        assertFalse(isolated.isAiInputEligible)
+        assertEquals(1, messages.count { it.isAiInputEligible })
+    }
+
+    @Test
+    fun l08aEmojiAndMixedTextUseExistingTokenEvidence() {
+        val emoji = MomoOcrVisualSymbolGuard.reconcileWithTokens(
+            listOf(OcrVisualLine("😊", OcrVisualRect(0, 0, 32, 32), emptyList())), emptyList()
+        )
+        val mixed = MomoOcrVisualSymbolGuard.reconcileWithTokens(
+            listOf(OcrVisualLine("你好😊", OcrVisualRect(0, 0, 128, 40), emptyList())), emptyList()
+        )
+        val messages = MomoChatOcrCandidateMapper.parse(
+            listOf(incomingTarget, outgoingTarget), mapOf(1 to emoji.text, 2 to mixed.text),
+            listBounds, ChatMessageParser(), 10, mapOf(1 to emoji.tokens, 2 to mixed.tokens)
+        )
+        val isolated = messages.single { it.observationRowIndex == 1 }
+        assertEquals(com.freedom.features.aireply.domain.message.ChatMessageType.EMOJI, isolated.type)
+        assertEquals(null, isolated.content)
+        assertFalse(isolated.isAiInputEligible)
+        val text = messages.single { it.observationRowIndex == 2 }
+        assertEquals(com.freedom.features.aireply.domain.message.ChatMessageType.TEXT, text.type)
+        assertEquals(mixed.text, text.content)
+        assertEquals("你好", MomoOcrTextProjector.extract(mixed.text, mixed.tokens)?.text)
+    }
+
+    @Test
     fun emptyOcrAndUiLabelsDoNotCreateMessages() {
         val messages = MomoChatOcrCandidateMapper.parse(
             listOf(incomingTarget, outgoingTarget),
