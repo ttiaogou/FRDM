@@ -188,78 +188,6 @@ internal class MomoSocialAdapter(
         val profileFilterEvidence: ConversationFilterEvidence? = null
     )
 
-    private enum class InboxIdentityCaptureStage {
-        AVATAR_TAP_PENDING,
-        WAITING_PROFILE,
-        WAITING_LIST_RETURN
-    }
-
-    /**
-     * Exact, short-lived row evidence used only to bind a profile ID back to the row that opened
-     * it. A nickname by itself is deliberately insufficient to restore the association.
-     */
-    private sealed interface InboxIdentityAnchor {
-        val displayName: String
-        fun opaqueKey(): String
-        fun matches(candidate: ChatListCandidateSnapshot): Boolean = false
-    }
-
-    private data class ObservedDetailIdentityAnchor(
-        override val displayName: String,
-        val sourceWindow: WindowRef,
-        val runGeneration: Long,
-        val visitToken: String
-    ) : InboxIdentityAnchor {
-        override fun opaqueKey(): String = listOf(
-            "OBSERVED_DETAIL", sourceWindow.packageName, sourceWindow.windowId,
-            sourceWindow.generation, runGeneration, visitToken
-        ).joinToString("|").let(::sha256IdentityAnchor)
-
-        override fun toString(): String = "ObservedDetailIdentityAnchor(anchor=[REDACTED])"
-    }
-
-    private data class InboxIdentityRowAnchor(
-        val rowIndex: Int,
-        val rowPath: List<Int>,
-        override val displayName: String,
-        val rowBounds: ScreenRect
-    ) : InboxIdentityAnchor {
-        override fun matches(candidate: ChatListCandidateSnapshot): Boolean =
-            candidate.selectionClass == "PRIVATE_CHAT" &&
-                candidate.rowIndex == rowIndex &&
-                candidate.rowTarget.path.childIndices == rowPath &&
-                normalizeIdentityDisplayName(candidate.nameText) == normalizeIdentityDisplayName(displayName) &&
-                candidate.rowBounds == rowBounds
-
-        override fun opaqueKey(): String = listOf(
-            rowIndex,
-            rowPath.joinToString("."),
-            normalizeIdentityDisplayName(displayName),
-            rowBounds.left, rowBounds.top, rowBounds.right, rowBounds.bottom
-        ).joinToString("|").let(::sha256IdentityAnchor)
-    }
-
-    private class PendingInboxIdentityCapture(
-        val anchor: InboxIdentityAnchor,
-        stage: InboxIdentityCaptureStage,
-        lastTransitionAtMs: Long
-    ) {
-        @Volatile var stage: InboxIdentityCaptureStage = stage
-        @Volatile var lastTransitionAtMs: Long = lastTransitionAtMs
-        @Volatile var platformUserId: String? = null
-        @Volatile var profileReadCompleted: Boolean = false
-        /** Set only after the unique platform ID has been read in the current transaction. */
-        @Volatile var profileEntryVerified: Boolean = false
-        @Volatile var profileScrollAttempted: Boolean = false
-        @Volatile var profileScrollInFlight: Boolean = false
-        @Volatile var profileScrollWindowId: Int = -1
-        @Volatile var profileScrollSettledAtMs: Long = 0L
-        val profileDeferredRetryGate = MomoSayHiProfileDeferredRetryGate()
-        @Volatile var backAttempts: Int = 0
-        @Volatile var avatarClickState: MomoAvatarClickTransactionState =
-            MomoAvatarClickTransactionState.AVATAR_CLICK_PREPARING
-    }
-
     private sealed interface SayHiCardListTapInspection {
         data class Ready(
             val tree: AccessibilityTreeSnapshot,
@@ -323,13 +251,13 @@ internal class MomoSocialAdapter(
             (sayHiReadOnlyStage == SayHiReadOnlyStage.PROFILE_SCROLL_PENDING &&
                 sayHiSelectedGreeting != null &&
                 sayHiProfileScrollInFlight && sayHiProfileScrollWindowId == windowId) ||
-                pendingInboxIdentityCapture?.let {
+                sessionComponents.inboxIdentity.pendingInboxIdentityCapture?.let {
                     it.stage == InboxIdentityCaptureStage.WAITING_PROFILE &&
                         it.profileScrollInFlight && it.profileScrollWindowId == windowId
                 } == true
         },
         sayHiProfileScrollWindowId = {
-            pendingInboxIdentityCapture?.takeIf { it.profileScrollInFlight }?.profileScrollWindowId
+            sessionComponents.inboxIdentity.pendingInboxIdentityCapture?.takeIf { it.profileScrollInFlight }?.profileScrollWindowId
                 ?: sayHiProfileScrollWindowId
         }
     )
@@ -454,17 +382,6 @@ internal class MomoSocialAdapter(
     @Volatile private var sayHiUnverifiedBackAttemptActivity: String = ""
     /** True only when we safely backed out of a fingerprint-confirmed detail whose tap event never arrived. */
     @Volatile private var sayHiUnverifiedDetailReturnPending: Boolean = false
-    private val inboxIdentityCaptureLock = Any()
-    @Volatile private var pendingInboxIdentityCapture: PendingInboxIdentityCapture? = null
-    @Volatile private var identityReturnReinspectionPending: Boolean = false
-    private var observedDetailIdentityReturnKey: String? = null
-    @Volatile private var lastConfirmedChatDetailSnapshot: ChatPageSnapshot? = null
-    private val failedInboxIdentityCaptureKeys = LinkedHashSet<String>()
-    private val loggedInboxIdentityFailureKeys = LinkedHashSet<String>()
-    /** Run-scoped row-anchor cache; never persists a display-name-to-ID mapping across runs. */
-    private val verifiedInboxIdentityByAnchor = LinkedHashMap<String, String>()
-    private val completedInboxIdentityOutcomes = LinkedHashMap<String, ContactIdentityCaptureOutcome>()
-
     private fun transitionAvatarClickState(
         pending: PendingInboxIdentityCapture?,
         next: MomoAvatarClickTransactionState,
@@ -496,8 +413,8 @@ internal class MomoSocialAdapter(
             MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
             reason
         )
-        synchronized(inboxIdentityCaptureLock) {
-            if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
+        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+            if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture === pending) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
         }
     }
 
@@ -510,8 +427,8 @@ internal class MomoSocialAdapter(
             MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
             reason.name
         )
-        synchronized(inboxIdentityCaptureLock) {
-            if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
+        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+            if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture === pending) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
         }
         onLog(
             "AI 头像点击事务：资料页进入失败；释放旧头像事务，下一次观察重新读取聊天详情并重新定位头像；" +
@@ -622,7 +539,7 @@ internal class MomoSocialAdapter(
                             inspectGesturePageReadiness(root, window.activityClass, RunMode.ACCOUNT_BROWSE).ready
                     "AI_REPLY_PRIVATE_MESSAGES", "AI_REPLY_RECEIVED_GREETINGS" -> {
                         val profileTransaction = if (currentTaskId == "AI_REPLY_PRIVATE_MESSAGES") {
-                            pendingInboxIdentityCapture != null
+                            sessionComponents.inboxIdentity.pendingInboxIdentityCapture != null
                         } else {
                             sayHiSelectedGreeting != null && sayHiReadOnlyStage in setOf(
                                 SayHiReadOnlyStage.AVATAR_TAP_PENDING, SayHiReadOnlyStage.WAITING_PROFILE,
@@ -4424,7 +4341,7 @@ internal class MomoSocialAdapter(
                 sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE ||
                 sayHiSelectedGreeting != null || sayHiPendingVerifiedReturnRow != null ||
                 receivedGreetingsEntryTapPending || sayHiCardListTapPending ||
-                pendingInboxIdentityCapture != null
+                sessionComponents.inboxIdentity.pendingInboxIdentityCapture != null
             ) return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
             val noPendingSendReturn = runCatching {
                 receivedGreetingsSendReturnRepository.loadAll().none {
@@ -4490,7 +4407,7 @@ internal class MomoSocialAdapter(
         // Do not invoke the general chat inspection path here: it can advance a separate
         // identity transaction. Use the same existing root-based page classifier read-only.
         if (sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight ||
-            pendingInboxIdentityCapture != null
+            sessionComponents.inboxIdentity.pendingInboxIdentityCapture != null
         ) return false
         val inboxConfirmed = rootAccess.withActiveTargetRoot { root, window ->
             if (window.packageName != targetPackage || window.windowId < 0 ||
@@ -6863,7 +6780,7 @@ internal class MomoSocialAdapter(
 
         val (pageEvidence, chatListExtraction) = captured
         val (inspection, treeEvidence, window) = pageEvidence
-        val awaitingIdentityListReturn = pendingInboxIdentityCapture?.takeIf {
+        val awaitingIdentityListReturn = sessionComponents.inboxIdentity.pendingInboxIdentityCapture?.takeIf {
             it.stage == InboxIdentityCaptureStage.WAITING_LIST_RETURN
         }
         if (awaitingIdentityListReturn != null && inspection.pageType != MomoChatPageType.CHAT_LIST) {
@@ -6900,7 +6817,7 @@ internal class MomoSocialAdapter(
                     pendingIdentityCapture?.platformUserId
                 } else null
                 justCapturedId ?: createInboxIdentityAnchor(candidate)?.opaqueKey()?.let { key ->
-                    synchronized(inboxIdentityCaptureLock) { verifiedInboxIdentityByAnchor[key] }
+                    synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) { sessionComponents.inboxIdentity.verifiedInboxIdentityByAnchor[key] }
                 }
             }
             val identities = sessionComponents.contactIdentityManager.resolveSnapshot(
@@ -6924,14 +6841,14 @@ internal class MomoSocialAdapter(
                     verificationResult != MomoIdentityVerificationResult.IDENTITY_VERIFIED
                 ) {
                     createInboxIdentityAnchor(candidate)?.opaqueKey()?.let { key ->
-                        synchronized(inboxIdentityCaptureLock) {
-                            verifiedInboxIdentityByAnchor.remove(key)
+                        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+                            sessionComponents.inboxIdentity.verifiedInboxIdentityByAnchor.remove(key)
                             if (verificationResult.isTerminalFailure()) {
-                                failedInboxIdentityCaptureKeys += key
-                                onIdentityVerificationLog(verificationResult, "EXPLICIT_IDENTITY_CONFLICT", true, "SKIP_CURRENT_TARGET", key)
+                                sessionComponents.inboxIdentity.failedInboxIdentityCaptureKeys += key
+                                sessionComponents.inboxIdentity.onIdentityVerificationLog(onLog, verificationResult, "EXPLICIT_IDENTITY_CONFLICT", true, "SKIP_CURRENT_TARGET", key)
                             } else {
-                                failedInboxIdentityCaptureKeys.remove(key)
-                                onIdentityVerificationLog(verificationResult, "PROFILE_ID_NOT_CONFIRMED", false, "RETRY_ON_NEXT_OBSERVATION", key)
+                                sessionComponents.inboxIdentity.failedInboxIdentityCaptureKeys.remove(key)
+                                sessionComponents.inboxIdentity.onIdentityVerificationLog(onLog, verificationResult, "PROFILE_ID_NOT_CONFIRMED", false, "RETRY_ON_NEXT_OBSERVATION", key)
                             }
                         }
                     }
@@ -7082,24 +6999,18 @@ internal class MomoSocialAdapter(
                 ";reason=" + observedEntryPositionReason.name)
         }
         if (result.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
-            pendingInboxIdentityCapture == null
+            sessionComponents.inboxIdentity.pendingInboxIdentityCapture == null
         ) {
-            lastConfirmedChatDetailSnapshot = result
+            sessionComponents.inboxIdentity.lastConfirmedChatDetailSnapshot = result
         }
         return result
     }
 
     override fun hasPendingIdentityReturnReinspectionRequest(): Boolean =
-        synchronized(inboxIdentityCaptureLock) { identityReturnReinspectionPending }
+        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) { sessionComponents.inboxIdentity.identityReturnReinspectionPending }
 
     override fun consumeIdentityReturnReinspectionRequest(): Boolean {
-        val consumed = synchronized(inboxIdentityCaptureLock) {
-            if (!identityReturnReinspectionPending) false
-            else {
-                identityReturnReinspectionPending = false
-                true
-            }
-        }
+        val consumed = sessionComponents.inboxIdentity.consumeIdentityReturnReinspectionRequest()
         onLog(
             if (consumed) {
                 "AI 身份回接[REQUEST_CONSUMED]：result=CONSUMED；reason=REQUEST_AVAILABLE；" +
@@ -7139,13 +7050,13 @@ internal class MomoSocialAdapter(
     private fun requestContactIdentityCapture(anchor: InboxIdentityAnchor): ContactIdentityCaptureRequestResult {
         onLog("AI 头像点击事务：进入 AVATAR_CLICK_PREPARING；准备基于当前聊天详情重新定位头像")
         val anchorKey = anchor.opaqueKey()
-        synchronized(inboxIdentityCaptureLock) {
-            if (anchorKey in failedInboxIdentityCaptureKeys) {
+        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+            if (anchorKey in sessionComponents.inboxIdentity.failedInboxIdentityCaptureKeys) {
                 onLog("IDENTITY_CAPTURE_BLOCKED result=IDENTITY_CAPTURE_BLOCKED；reason=EXPLICIT_IDENTITY_CONFLICT；failedCacheHit=true；action=SKIP_CURRENT_TARGET；anchorHash=${anchorKey.take(12)}")
                 return ContactIdentityCaptureRequestResult.REJECTED
             }
             onLog("IDENTITY_RETRY_ALLOWED result=IDENTITY_RETRY_ALLOWED；previousFailure=NONE_OR_RETRYABLE；failedCacheHit=false；action=REACQUIRE_AVATAR；anchorHash=${anchorKey.take(12)}")
-            val pending = pendingInboxIdentityCapture
+            val pending = sessionComponents.inboxIdentity.pendingInboxIdentityCapture
             if (pending != null) return ContactIdentityCaptureRequestResult.IN_PROGRESS
         }
 
@@ -7173,15 +7084,15 @@ internal class MomoSocialAdapter(
             stage = InboxIdentityCaptureStage.AVATAR_TAP_PENDING,
             lastTransitionAtMs = System.currentTimeMillis()
         )
-        synchronized(inboxIdentityCaptureLock) {
-            if (anchorKey in failedInboxIdentityCaptureKeys) {
+        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+            if (anchorKey in sessionComponents.inboxIdentity.failedInboxIdentityCaptureKeys) {
                 onLog("IDENTITY_CAPTURE_BLOCKED result=IDENTITY_CAPTURE_BLOCKED；reason=EXPLICIT_IDENTITY_CONFLICT；failedCacheHit=true；action=SKIP_CURRENT_TARGET；anchorHash=${anchorKey.take(12)}")
                 return ContactIdentityCaptureRequestResult.REJECTED
             }
-            if (pendingInboxIdentityCapture != null) {
+            if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture != null) {
                 return ContactIdentityCaptureRequestResult.IN_PROGRESS
             }
-            pendingInboxIdentityCapture = pending
+            sessionComponents.inboxIdentity.pendingInboxIdentityCapture = pending
         }
 
         transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_PAGE_READING, "开始读取当前聊天详情页")
@@ -7260,8 +7171,8 @@ internal class MomoSocialAdapter(
         )
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
-                synchronized(inboxIdentityCaptureLock) {
-                    if (pendingInboxIdentityCapture !== pending) return@synchronized
+                synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+                    if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture !== pending) return@synchronized
                     if (result.status == GestureExecutionStatus.COMPLETED) {
                         pending.stage = InboxIdentityCaptureStage.WAITING_PROFILE
                         pending.lastTransitionAtMs = System.currentTimeMillis()
@@ -7276,7 +7187,7 @@ internal class MomoSocialAdapter(
                             MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
                             "头像手势未完成；不将本次点击直接视为事务终止"
                         )
-                        pendingInboxIdentityCapture = null
+                        sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
                     }
                 }
                 if (result.status == GestureExecutionStatus.COMPLETED) {
@@ -7286,8 +7197,8 @@ internal class MomoSocialAdapter(
                 }
             })
         }.getOrElse {
-            synchronized(inboxIdentityCaptureLock) {
-                if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
+            synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+                if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture === pending) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
             }
             onLog("AI 联系人身份采集：头像手势执行器异常；" +
                 "reason=${MomoAvatarClickFailureReason.AVATAR_GESTURE_REJECTED.name}；重新定位，不执行坐标或整行兜底")
@@ -7300,8 +7211,8 @@ internal class MomoSocialAdapter(
                 MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
                 "头像手势未被接受；等待下一次当前页面重新定位"
             )
-            synchronized(inboxIdentityCaptureLock) {
-                if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
+            synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+                if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture === pending) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
             }
             val reason = if (submission == GestureSubmission.DEFERRED_NOT_READY) {
                 MomoAvatarClickFailureReason.AVATAR_GESTURE_DEFERRED
@@ -7346,21 +7257,21 @@ internal class MomoSocialAdapter(
 
     override fun hasPendingObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget): Boolean {
         val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
-        return synchronized(inboxIdentityCaptureLock) {
-            pendingInboxIdentityCapture?.anchor?.opaqueKey() == key
+        return synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+            sessionComponents.inboxIdentity.pendingInboxIdentityCapture?.anchor?.opaqueKey() == key
         }
     }
 
     override fun hasObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean {
         val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
-        return synchronized(inboxIdentityCaptureLock) { observedDetailIdentityReturnKey == key }
+        return synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) { sessionComponents.inboxIdentity.observedDetailIdentityReturnKey == key }
     }
 
     override fun consumeObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean {
         val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
-        return synchronized(inboxIdentityCaptureLock) {
-            if (observedDetailIdentityReturnKey != key) false else {
-                observedDetailIdentityReturnKey = null
+        return synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+            if (sessionComponents.inboxIdentity.observedDetailIdentityReturnKey != key) false else {
+                sessionComponents.inboxIdentity.observedDetailIdentityReturnKey = null
                 true
             }
         }
@@ -7368,11 +7279,11 @@ internal class MomoSocialAdapter(
 
     override fun cancelObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget) {
         val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return
-        synchronized(inboxIdentityCaptureLock) {
-            if (pendingInboxIdentityCapture?.anchor?.opaqueKey() == key) pendingInboxIdentityCapture = null
-            completedInboxIdentityOutcomes.remove(key)
-            if (observedDetailIdentityReturnKey == key) observedDetailIdentityReturnKey = null
-            failedInboxIdentityCaptureKeys.remove(key)
+        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+            if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture?.anchor?.opaqueKey() == key) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
+            sessionComponents.inboxIdentity.completedInboxIdentityOutcomes.remove(key)
+            if (sessionComponents.inboxIdentity.observedDetailIdentityReturnKey == key) sessionComponents.inboxIdentity.observedDetailIdentityReturnKey = null
+            sessionComponents.inboxIdentity.failedInboxIdentityCaptureKeys.remove(key)
         }
     }
 
@@ -7381,9 +7292,9 @@ internal class MomoSocialAdapter(
         requestCapture: () -> ContactIdentityCaptureRequestResult = { requestContactIdentityCapture(anchor) }
     ): ContactIdentityCaptureOutcome {
         val key = anchor.opaqueKey()
-        synchronized(inboxIdentityCaptureLock) {
-            completedInboxIdentityOutcomes[key]?.let { return it }
-            pendingInboxIdentityCapture?.let { pending ->
+        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+            sessionComponents.inboxIdentity.completedInboxIdentityOutcomes[key]?.let { return it }
+            sessionComponents.inboxIdentity.pendingInboxIdentityCapture?.let { pending ->
                 if (pending.anchor.opaqueKey() == key) {
                     // IN_PROGRESS is a non-terminal state. Keep the reason in the
                     // explicit OBSERVE log, never in failureReason.
@@ -7433,85 +7344,14 @@ internal class MomoSocialAdapter(
         )
     }
 
-    /** Retryable failures must not leave a terminal outcome for the next observation. */
-    private fun clearRetryableInboxIdentityState(anchorKey: String) {
-        completedInboxIdentityOutcomes.remove(anchorKey)
-        failedInboxIdentityCaptureKeys.remove(anchorKey)
-        verifiedInboxIdentityByAnchor.remove(anchorKey)
-    }
-
-    private fun onIdentityVerificationLog(result: MomoIdentityVerificationResult, reason: String, cacheWrite: Boolean, nextAction: String, anchorKey: String) {
-        onLog("IDENTITY_VERIFICATION result=${result.name}；reason=$reason；cacheWrite=$cacheWrite；nextAction=$nextAction；anchorHash=${anchorKey.take(12)}")
-    }
-
     private fun completePendingInboxIdentityBinding(
         pending: PendingInboxIdentityCapture,
         identityVerified: Boolean
-    ) {
-        synchronized(inboxIdentityCaptureLock) {
-            if (pendingInboxIdentityCapture !== pending) return
-            val anchorKey = pending.anchor.opaqueKey()
-            if (identityVerified && !pending.platformUserId.isNullOrBlank()) {
-                failedInboxIdentityCaptureKeys.remove(anchorKey)
-                // An observed detail has no list row to populate in the row cache.
-                if (pending.anchor is InboxIdentityRowAnchor) {
-                    verifiedInboxIdentityByAnchor[anchorKey] = pending.platformUserId!!
-                }
-                val identity = sessionComponents.contactIdentityManager.resolveSnapshot(
-                    snapshotId = "inbox-identity-${System.nanoTime()}",
-                    observations = listOf(
-                        ContactIdentityObservation(
-                            displayName = pending.anchor.displayName,
-                            isPrivateChat = true,
-                            platformUserId = pending.platformUserId
-                        )
-                    ),
-                    observedAtMillis = System.currentTimeMillis()
-                ).singleOrNull()
-                val verificationResult = classifyMomoIdentityVerification(
-                    confidence = identity?.confidence,
-                    contactId = identity?.contactId
-                )
-                completedInboxIdentityOutcomes[anchorKey] = if (
-                    verificationResult == MomoIdentityVerificationResult.IDENTITY_VERIFIED
-                ) {
-                    ContactIdentityCaptureOutcome.completed(requireNotNull(identity))
-                } else if (verificationResult.isTerminalFailure()) {
-                    failedInboxIdentityCaptureKeys += anchorKey
-                    onIdentityVerificationLog(verificationResult, "EXPLICIT_IDENTITY_CONFLICT", true, "SKIP_CURRENT_TARGET", anchorKey)
-                    ContactIdentityCaptureOutcome.failed(
-                        ContactIdentityCaptureRequestResult.REJECTED,
-                        verificationResult.name
-                    )
-                } else {
-                    clearRetryableInboxIdentityState(anchorKey)
-                    onIdentityVerificationLog(verificationResult, "PROFILE_ID_NOT_CONFIRMED", false, "RETRY_ON_NEXT_OBSERVATION", anchorKey)
-                    ContactIdentityCaptureOutcome.waiting(ContactIdentityCaptureRequestResult.RETRY_LATER)
-                }
-                while (verifiedInboxIdentityByAnchor.size > MAX_INBOX_VERIFIED_IDENTITY_CACHE_ENTRIES) {
-                    val oldest = verifiedInboxIdentityByAnchor.entries.firstOrNull()?.key ?: break
-                    verifiedInboxIdentityByAnchor.remove(oldest)
-                }
-            } else {
-                // Missing profile ID is retryable observation failure, not an identity
-                // conflict. Do not populate either terminal cache: the next observation must
-                // be allowed to reacquire the chat page, relocate the avatar and retry.
-                clearRetryableInboxIdentityState(anchorKey)
-            }
-            pendingInboxIdentityCapture = null
-        }
-        onLog(
-            if (identityVerified) {
-                "AI 联系人身份采集完成：资料页 ID 已完成终态回传；等待 AI Reply 绑定当前私人会话"
-            } else {
-                "AI 联系人身份采集未完成：返回列表后无法将资料页 ID 唯一绑定到原消息行；不关联任何历史记录"
-            }
-        )
-    }
+    ) = sessionComponents.inboxIdentity.completePendingInboxIdentityBinding(pending, identityVerified, onLog)
 
     /** Returns true while the profile-navigation transaction owns the current foreground page. */
     private fun inspectPendingInboxIdentityCapture(): Boolean {
-        val pending = pendingInboxIdentityCapture ?: return false
+        val pending = sessionComponents.inboxIdentity.pendingInboxIdentityCapture ?: return false
         val currentActivity = activityClass()
         val ageMs = System.currentTimeMillis() - pending.lastTransitionAtMs
 
@@ -7668,14 +7508,14 @@ internal class MomoSocialAdapter(
                         MomoAvatarClickTransactionState.AVATAR_COMPLETED,
                         "资料页身份读取完成并返回原聊天详情"
                     )
-                    synchronized(inboxIdentityCaptureLock) {
+                    synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
                         if (pending.anchor is ObservedDetailIdentityAnchor) {
                             val key = pending.anchor.opaqueKey()
-                            if (completedInboxIdentityOutcomes[key]?.verifiedIdentity != null) {
-                                observedDetailIdentityReturnKey = key
+                            if (sessionComponents.inboxIdentity.completedInboxIdentityOutcomes[key]?.verifiedIdentity != null) {
+                                sessionComponents.inboxIdentity.observedDetailIdentityReturnKey = key
                             }
                         } else {
-                            identityReturnReinspectionPending = true
+                            sessionComponents.inboxIdentity.identityReturnReinspectionPending = true
                         }
                     }
                     onLog(
@@ -7720,9 +7560,9 @@ internal class MomoSocialAdapter(
         // deduplicate by the redacted display identity and reason, not the volatile anchor.
         val logKey = "${normalizeIdentityDisplayName(pending.anchor.displayName)}|$reason"
         val shouldLog: Boolean
-        synchronized(inboxIdentityCaptureLock) {
-            if (pendingInboxIdentityCapture === pending) pendingInboxIdentityCapture = null
-            shouldLog = loggedInboxIdentityFailureKeys.add(logKey)
+        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
+            if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture === pending) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
+            shouldLog = sessionComponents.inboxIdentity.loggedInboxIdentityFailureKeys.add(logKey)
         }
         transitionAvatarClickState(
             pending,
@@ -7777,7 +7617,7 @@ internal class MomoSocialAdapter(
         pending.profileScrollInFlight = true
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
-                if (pendingInboxIdentityCapture !== pending) return@GestureExecutionListener
+                if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture !== pending) return@GestureExecutionListener
                 pending.lastTransitionAtMs = System.currentTimeMillis()
                 when (result.status) {
                     GestureExecutionStatus.COMPLETED -> {
@@ -7881,16 +7721,7 @@ internal class MomoSocialAdapter(
 
     override fun beginSessionManagement(): String? = runCatching {
         resetReceivedGreetingsRunState("BEGIN_RUN")
-        synchronized(inboxIdentityCaptureLock) {
-            pendingInboxIdentityCapture = null
-            identityReturnReinspectionPending = false
-            observedDetailIdentityReturnKey = null
-            lastConfirmedChatDetailSnapshot = null
-            failedInboxIdentityCaptureKeys.clear()
-            loggedInboxIdentityFailureKeys.clear()
-            verifiedInboxIdentityByAnchor.clear()
-            completedInboxIdentityOutcomes.clear()
-        }
+        sessionComponents.inboxIdentity.resetForRun()
         sessionComponents.sampleStore.beginRun().also { receivedGreetingsEntryPositionMemory.beginRun() }
     }.onFailure { error ->
         diagnostics.recordException(
@@ -7913,16 +7744,7 @@ internal class MomoSocialAdapter(
 
     override fun finishSessionManagement(): String? {
         resetReceivedGreetingsRunState("FINISH_RUN")
-        synchronized(inboxIdentityCaptureLock) {
-            pendingInboxIdentityCapture = null
-            identityReturnReinspectionPending = false
-            observedDetailIdentityReturnKey = null
-            lastConfirmedChatDetailSnapshot = null
-            failedInboxIdentityCaptureKeys.clear()
-            loggedInboxIdentityFailureKeys.clear()
-            verifiedInboxIdentityByAnchor.clear()
-            completedInboxIdentityOutcomes.clear()
-        }
+        sessionComponents.inboxIdentity.resetForRun()
         return runCatching { sessionComponents.sampleStore.finishRun() }.getOrNull()
     }
 
@@ -8510,7 +8332,6 @@ internal class MomoSocialAdapter(
         private const val SAYHI_CLICK_EVENT_SETTLE_MS = 700L
         private const val SAYHI_PROFILE_PAGE_TIMEOUT_MS = 6_000L
         private const val INBOX_IDENTITY_TAP_TIMEOUT_MS = 6_000L
-        private const val MAX_INBOX_VERIFIED_IDENTITY_CACHE_ENTRIES = 256
         private const val SAYHI_PROFILE_SCROLL_TIMEOUT_MS = 8_000L
         private const val SAYHI_PROFILE_SCROLL_SETTLE_MS = 500L
         private const val SAYHI_PROFILE_IDENTITY_SCROLL_DURATION_MS = 520L

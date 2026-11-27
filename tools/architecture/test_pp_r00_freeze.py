@@ -164,6 +164,15 @@ class PpR00FreezeTest(unittest.TestCase):
         }.items():
             self.assertEqual(previous, reviewed_s1[path])
             reviewed_s1[path] = replacement
+        # R05-A: exact reviewed relocation of the existing inbox identity state.
+        for path, (previous, replacement) in {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": (
+                "8bab51d20b1d24626041635fda0a767d33eb7ff8", "0c9bf36aad8f4cba2d996be835ae14d731ecd17d"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapterComponents.kt": (
+                "7c934cd16f354b46060ca6eb6fe77c7b4b211814", "2df5450adbc3d941d6df48a5b8a4bddba8700129"),
+        }.items():
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = replacement
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 
