@@ -120,142 +120,6 @@ private fun testAndroidRecoveryReadiness(page: ChatPageSnapshot): TargetAppReadi
 class AiReplyObservationRuntimeTest {
 
     @Test
-    fun explicitImageTestUsesManualChatLeaseAndOneShotWithoutNormalReplyWorkflow() {
-        assertExplicitChatChildTest("manual-test")
-    }
-
-    @Test
-    fun explicitInterceptionTestUsesSameParentAdmissionWithoutImageOrDraftWorkflow() {
-        assertExplicitChatChildTest("interception:manual-test")
-    }
-
-    @Test
-    fun explicitImageTestImmediatelyAdvancesThenContinuesOnFreshObservation() {
-        assertExplicitChatChildTest("manual-multi-step-test", completeOnObservation = 2)
-    }
-
-    private fun assertExplicitChatChildTest(request: String, completeOnObservation: Int = 1) {
-        val scheduler = FakeScheduler()
-        val original = chatDetailSnapshot()
-        val window = requireNotNull(original.inputFieldTarget).window
-        val chat = FakeChatPort().apply {
-            page = original.copy(inputFieldTarget = null, messageListTarget = null,
-                messageListCount = 0, editableInputCount = 0, chatTitleText = null,
-                pageKind = ChatPageKind.UNKNOWN)
-        }
-        var entryAvailable = false
-        var quietRemaining = 5_000L
-        var recoveryChecks = 0
-        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
-        var available = true
-        var begins = 0
-        var observations = 0
-        var modelChecks = 0
-        var draftCalls = 0
-        val testPort = object : com.freedom.features.aireply.ports.ChatImageSendTestPort {
-            private var state = com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE
-            override fun progress() = state
-            override fun inspectEntryTarget(requestId: String): com.freedom.features.aireply.ports.ChatDraftInputTarget? {
-                assertEquals(request, requestId)
-                if (!entryAvailable) return null
-                return com.freedom.features.aireply.ports.ChatDraftInputTarget(
-                    window.packageName, window.activityClass, "test-window", "test-window", "test-window",
-                    com.freedom.core.accessibility.api.NodeTarget(window, com.freedom.core.accessibility.api.NodePath(emptyList()))
-                )
-            }
-            override fun begin(
-                target: com.freedom.features.aireply.ports.ChatDraftInputTarget,
-                requestId: String,
-                claim: () -> Boolean,
-                ownsTransaction: () -> Boolean
-            ) {
-                assertEquals(request, requestId)
-                assertEquals(window, target.nodeTarget.window)
-                assertEquals(tasks.currentLease(), target.taskLease)
-                assertTrue(ownsTransaction())
-                assertTrue(claim())
-                begins++
-                state = com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE
-            }
-            override fun observe() {
-                observations++
-                assertEquals(1, begins)
-                assertFalse(available)
-                assertTrue(tasks.currentLease() != null)
-                if (observations == completeOnObservation)
-                    state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
-            }
-            override fun abort(reason: String) {
-                state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
-            }
-            override fun reset(reason: String) {
-                state = com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE
-            }
-        }
-        val runtime = AiReplyObservationRuntime(
-            scheduler = scheduler, sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
-            chatPagePort = chat, chatMessagePort = chat, chatSessionManagementPort = chat,
-            gesturePolicy = NoOpGestureApi, targetPackage = { "com.immomo.momo" }, isAiReplyActive = { true },
-            inspectAndroidRecoveryReadiness = { snapshot ->
-                recoveryChecks++
-                testAndroidRecoveryReadiness(snapshot)
-            },
-            onLog = {}, fullInspectionDebounceMs = 300L, regionRefreshDebounceMs = 500L,
-            taskCoordinator = tasks, currentRunGeneration = { 1L }, pageSelectedStartup = true,
-            draftStartupFailure = { modelChecks++; "MODEL_NOT_CONFIGURED" },
-            onDraftConversationObserved = { _, _, _, _ -> draftCalls++; false },
-            imageSendTestRequestId = { request },
-            isImageSendTestRequestAvailable = { available },
-            claimImageSendTestRequest = { if (!available) false else { available = false; true } },
-            imageSendTestPort = testPort,
-            foregroundQuietRemainingMs = { quietRemaining }
-        )
-        runtime.reset("test startup")
-        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
-        assertTrue(runtime.isImageSendTestRun())
-        assertNull(tasks.currentLease())
-        runtime.requestPageRouteObservation()
-        scheduler.runNextWithDelay(300L)
-        assertEquals(0, begins)
-        assertNull(tasks.currentLease())
-        entryAvailable = true
-        repeat(3) {
-            scheduler.runNextShortestDelay()
-            assertEquals(0, begins)
-            assertEquals(0, observations)
-            assertTrue(available)
-            assertNull(tasks.currentLease())
-        }
-        quietRemaining = 0L
-        scheduler.runNextShortestDelay()
-        assertEquals(1, begins)
-        assertFalse(available)
-        // First click attempt runs in the same callback as BEGIN.
-        assertEquals(1, observations)
-        if (completeOnObservation > 1) {
-            assertTrue(tasks.currentLease() != null)
-            runtime.requestPageRouteObservation()
-            scheduler.runNextWithDelay(500L)
-        }
-        assertEquals(completeOnObservation, observations)
-        assertNull(tasks.currentLease())
-        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
-        assertEquals(1, begins)
-        assertEquals(completeOnObservation, observations)
-        assertEquals(0, recoveryChecks)
-        assertEquals(0, modelChecks)
-        assertEquals(0, draftCalls)
-        assertEquals(0, chat.messageReads)
-        assertEquals(0, chat.messageWorkAreaEntryAttempts)
-        runtime.reset("service reconnect")
-        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
-        runtime.requestPageRouteObservation()
-        repeat(5) { if (scheduler.pendingCount() > 0) scheduler.runNextShortestDelay() }
-        assertEquals(1, begins)
-        assertNull(tasks.currentLease())
-    }
-
-    @Test
     fun samePersistedCheckpointGetsOneIdAcrossUnknownReconnectAndRestart() {
         val task = "AI_REPLY_PRIVATE_MESSAGES"
         val otherTask = "AI_REPLY_RECEIVED_GREETINGS"
@@ -3700,15 +3564,9 @@ class AiReplyObservationRuntimeTest {
         val ledgerRepo = com.freedom.features.aireply.domain.contact.InMemoryContactMessageLedgerRepository()
         val actions = mutableListOf<Boolean>()
         var result: Boolean? = null
-        val media = object : com.freedom.features.aireply.ports.ChatImageSendTestPort {
-            private var state = com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE
+        val media = object : com.freedom.features.aireply.ports.PrivateChatFollowUpPort {
+            private var state = com.freedom.features.aireply.ports.PrivateChatFollowUpProgress.IDLE
             private var verified = false
-            override fun inspectEntryTarget(requestId: String): com.freedom.features.aireply.ports.ChatDraftInputTarget? =
-                error("Production must not use manual test admission")
-            override fun begin(
-                target: com.freedom.features.aireply.ports.ChatDraftInputTarget, requestId: String,
-                claim: () -> Boolean, ownsTransaction: () -> Boolean
-            ) = error("Production must not consume test authorization")
             override fun beginPrivateFollowUp(
                 target: com.freedom.features.aireply.ports.ChatDraftInputTarget,
                 transactionId: String, interception: Boolean,
@@ -3722,7 +3580,7 @@ class AiReplyObservationRuntimeTest {
                     com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_SWITCH
                     else com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SEND))
                 assertTrue(ledgerRepo.loadAll().single().followUpCheckpoint?.reconciliationRequired == true)
-                state = com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE
+                state = com.freedom.features.aireply.ports.PrivateChatFollowUpProgress.ACTIVE
                 return true
             }
             override fun progress() = state
@@ -3731,16 +3589,16 @@ class AiReplyObservationRuntimeTest {
                 result?.let {
                     verified = it
                     result = null
-                    state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
+                    state = com.freedom.features.aireply.ports.PrivateChatFollowUpProgress.TERMINAL
                 }
             }
             override fun abort(reason: String) {
                 verified = false
-                state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
+                state = com.freedom.features.aireply.ports.PrivateChatFollowUpProgress.TERMINAL
             }
             override fun reset(reason: String) {
                 verified = false
-                state = com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE
+                state = com.freedom.features.aireply.ports.PrivateChatFollowUpProgress.IDLE
             }
         }
         val runtime = AiReplyObservationRuntime(
@@ -3762,7 +3620,7 @@ class AiReplyObservationRuntimeTest {
             imageSendThreshold = { 1 },
             messageInterceptionThreshold = { 1 },
             privateImageResourceCount = { 1 },
-            imageSendTestPort = media,
+            privateChatFollowUpPort = media,
             observedPrivateJournalAdmitted = { _, _, _, _ -> true },
             privateReplyRequestKey = { _, _ -> requestKey },
             isConversationDraftPending = { pendingSend },

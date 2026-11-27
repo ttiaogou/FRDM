@@ -1,7 +1,6 @@
 package com.freedom.application
 
 import com.freedom.features.aireply.policy.ConversationFilterSettings
-import com.freedom.features.aireply.ports.INTERCEPTION_TEST_REQUEST_PREFIX
 
 /**
  * Editable filter and launch-form values shared by the launcher and its persistence adapter.
@@ -18,25 +17,9 @@ data class TaskLaunchParameters(
     val messageInterceptionThreshold: Int = 0,
     /** Per-contact confirmed text-reply count after which a configured image is eligible; 0 disables it. */
     val imageSendThreshold: Int = 0,
-    /** Persistable document URIs selected by the user for the future image-send transaction. */
-    val imageResourceUris: List<String> = emptyList(),
-    /** Single-use child-test authorization; interception: prefix selects interception, otherwise image. */
-    val imageSendTestRequestId: String? = null
+    /** Persistable document URIs selected by the user for the image-send transaction. */
+    val imageResourceUris: List<String> = emptyList()
 ) {
-    val isInterceptionTestRequested: Boolean
-        get() = imageSendTestRequestId?.startsWith(INTERCEPTION_TEST_REQUEST_PREFIX) == true
-
-    val isImageTestRequested: Boolean
-        get() = imageSendTestRequestId != null && !isInterceptionTestRequested
-
-    fun childTestValidationError(): String? =
-        if (isInterceptionTestRequested) null else imageSendTestValidationError()
-
-    fun imageSendTestValidationError(): String? = when {
-        imageResourceUris.count { it.isNotBlank() } != 1 -> "图片测试请先导入且仅保留一张图片"
-        else -> null
-    }
-
     /** Validate the image setting without requiring a pool when the feature is disabled. */
     fun imageSendThresholdValidationError(threshold: Int): String? = when {
         threshold < 0 -> "请输入大于或等于 0 的数字"

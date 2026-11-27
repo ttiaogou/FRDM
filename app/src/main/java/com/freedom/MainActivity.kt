@@ -380,8 +380,7 @@ class MainActivity : Activity() {
                 onPersonalization = ::showPersonalizationPage,
                 onRecordsTab = ::showRecords,
                 onOpenDrawer = { configPanel.show() },
-                onRunClick = ::toggleMonitoring,
-                isRunRequested = monitorRepository::isRunRequested
+                onRunClick = ::toggleMonitoring
             )
         )
         configurationHome = screen

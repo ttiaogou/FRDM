@@ -19,7 +19,6 @@ import android.widget.Switch
 import android.widget.TextView
 import com.freedom.R
 import com.freedom.application.TaskLaunchParameters
-import com.freedom.features.aireply.ports.INTERCEPTION_TEST_REQUEST_PREFIX
 import com.freedom.ui.theme.FreedomUi
 
 /** Task launcher UI. Business state and actions are supplied through callbacks. */
@@ -36,8 +35,7 @@ internal class ConfigurationHome(
         val onPersonalization: () -> Unit,
         val onRecordsTab: () -> Unit,
         val onOpenDrawer: () -> Unit,
-        val onRunClick: () -> Unit,
-        val isRunRequested: () -> Boolean = { false }
+        val onRunClick: () -> Unit
     )
 
     private var runButton: ImageButton? = null
@@ -46,9 +44,6 @@ internal class ConfigurationHome(
     private var minAgeValue: TextView? = null
     private var maxAgeValue: TextView? = null
     private var activeTimeValue: TextView? = null
-    private var imageSendTestSwitch: Switch? = null
-    private var interceptionTestSwitch: Switch? = null
-    private var syncingChildTestSwitches = false
     private var parameters = callbacks.taskParameters()
 
     fun refresh(running: Boolean) {
@@ -57,8 +52,6 @@ internal class ConfigurationHome(
             contentDescription = if (running) "停止运行" else "开始运行"
         }
         targetValue?.text = callbacks.targetLabel()
-        imageSendTestSwitch?.isEnabled = !running
-        interceptionTestSwitch?.isEnabled = !running
     }
 
     fun create(): View {
@@ -103,8 +96,6 @@ internal class ConfigurationHome(
         }
         content.addView(buildTargetSection())
         content.addView(buildPersonalizationRow(), spaced(18))
-        content.addView(buildImageSendTestRow(), spaced(18))
-        content.addView(buildImageSendTestRow(interception = true), spaced(18))
         content.addView(buildFilterPanel(), spaced(20))
         scroll.addView(content)
         installLeftEdgeGesture(scroll)
@@ -441,68 +432,6 @@ internal class ConfigurationHome(
             setTextColor(PANEL_MUTED)
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(5) })
         return panel
-    }
-
-    /** Both independent tests use the same one-shot parent-task admission slot. */
-    private fun buildImageSendTestRow(interception: Boolean = false): View {
-        val wrapper = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-        val row = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val label = if (interception) "消息拦截测试" else "图片发送测试"
-        fun selected(settings: TaskLaunchParameters): Boolean =
-            if (interception) settings.isInterceptionTestRequested else settings.isImageTestRequested
-        row.addView(TextView(activity).apply {
-            text = label
-            textSize = 15f
-            setTextColor(TEXT)
-            typeface = Typeface.DEFAULT_BOLD
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        val toggle = styledSwitch().apply {
-            isChecked = selected(parameters)
-            isEnabled = !callbacks.isRunRequested()
-            contentDescription = label
-        }
-        if (interception) interceptionTestSwitch = toggle else imageSendTestSwitch = toggle
-        toggle.setOnCheckedChangeListener { _, checked ->
-            if (syncingChildTestSwitches) return@setOnCheckedChangeListener
-            val latest = callbacks.taskParameters()
-            val error = if (callbacks.isRunRequested()) "请先停止运行再修改测试开关"
-                else if (checked && !interception) latest.imageSendTestValidationError() else null
-            if (error != null) {
-                syncChildTestSwitches(latest)
-                android.widget.Toast.makeText(activity, error, android.widget.Toast.LENGTH_LONG).show()
-            } else {
-                val request = if (checked) {
-                    val prefix = if (interception) INTERCEPTION_TEST_REQUEST_PREFIX else ""
-                    prefix + java.util.UUID.randomUUID().toString()
-                } else if (selected(latest)) null else latest.imageSendTestRequestId
-                val updated = latest.copy(imageSendTestRequestId = request)
-                saveParameters(updated)
-                syncChildTestSwitches(updated)
-            }
-        }
-        row.addView(toggle)
-        wrapper.addView(row)
-        wrapper.addView(TextView(activity).apply {
-            text = if (interception)
-                "开启后开始运行，手动进入尚未拦截的陌陌私聊；真实点击拦截开关一次并返回聊天，不调用 AI、不发图、不遍历。与图片测试互斥。"
-            else "仅限一张导入图片。开启后开始运行，手动进入陌陌私聊；真实发送一次，不调用 AI、不遍历列表。测试后停止运行，关再开可重新授权。"
-            textSize = 12f
-            setTextColor(MUTED)
-        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
-        return wrapper
-    }
-
-    private fun syncChildTestSwitches(settings: TaskLaunchParameters) {
-        syncingChildTestSwitches = true
-        try {
-            imageSendTestSwitch?.isChecked = settings.isImageTestRequested
-            interceptionTestSwitch?.isChecked = settings.isInterceptionTestRequested
-        } finally {
-            syncingChildTestSwitches = false
-        }
     }
 
     private fun buildMessageBlockingRow(): View {

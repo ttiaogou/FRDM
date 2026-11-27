@@ -104,3 +104,24 @@ class M04MediaClickFreezeTest(unittest.TestCase):
         sources = dict(self.sources)
         sources[self.manifest["adapter"]] += "\n// unrelated orchestration documentation\n"
         self.assertEqual([], freeze_violations(self.manifest, sources))
+
+    def test_retired_manual_media_entry_is_absent(self):
+        paths = [
+            "app/src/main/java/com/freedom/ui/config/ConfigurationHome.kt",
+            "app/src/main/java/com/freedom/application/TaskLaunchParameters.kt",
+            "app/src/main/java/com/freedom/application/ports/TaskLaunchParametersRepository.kt",
+            "app/src/main/java/com/freedom/data/TaskLaunchParametersStore.kt",
+            "app/src/main/java/com/freedom/app/AppCompositionRoot.kt",
+            "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt",
+            self.manifest["adapter"],
+        ]
+        for path in paths:
+            source = (ROOT / path).read_text(encoding="utf-8")
+            for marker in ("imageSendTestRequestId", "isImageSendTestRequestAvailable",
+                           "claimImageSendTestRequest", "isImageSendTestRun",
+                           "buildImageSendTestRow", "ChatImageSendTestPort",
+                           "SEND_TAP_COMPLETED_DELIVERY_NOT_VERIFIED",
+                           "SWITCH_TAPPED_ONCE_AND_CHAT_RETURNED_STATE_NOT_READ"):
+                with self.subTest(path=path, marker=marker):
+                    self.assertNotIn(marker, source)
+        self.assertFalse((ROOT / "business/src/main/kotlin/com/freedom/features/aireply/ports/ChatImageSendTestPort.kt").exists())

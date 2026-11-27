@@ -55,9 +55,8 @@ import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.MessageWorkAreaNavigationOutcome
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
-import com.freedom.features.aireply.ports.ChatImageSendTestPort
-import com.freedom.features.aireply.ports.INTERCEPTION_TEST_REQUEST_PREFIX
-import com.freedom.features.aireply.ports.ImageSendTestProgress
+import com.freedom.features.aireply.ports.PrivateChatFollowUpPort
+import com.freedom.features.aireply.ports.PrivateChatFollowUpProgress
 import com.freedom.features.aireply.ports.ChatDraftInputPort
 import com.freedom.features.aireply.ports.ChatDraftInputTarget
 import com.freedom.features.aireply.ports.ChatDraftInputResult
@@ -124,7 +123,7 @@ internal class MomoSocialAdapter(
     /** Exact lease captured at model admission; task handoff revokes old async callbacks. */
     private val isBoundAiReplyUiOperationOwned: (com.freedom.core.runtime.TaskLease?) -> Boolean = { true }
 ) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort,
-    ChatDraftSendPort, ChatImageSendTestPort {
+    ChatDraftSendPort, PrivateChatFollowUpPort {
 
     override fun isReceivedGreetingsListActivity(activityClass: String): Boolean =
         activityClass == MomoSayHiPageContract.LIST_ACTIVITY
@@ -609,15 +608,15 @@ internal class MomoSocialAdapter(
                             pageInspectionComponents.gestureReadinessInspector.hasVisibleViewId(
                                 root, setOf(MomoSayHiPageContract.CARD_CONTENT_VIEW_ID, MomoSayHiPageContract.CARD_CLOSE_VIEW_ID)
                             )
-                        val privateFollowUp = imageSendTest?.takeIf {
-                            currentTaskId == "AI_REPLY_PRIVATE_MESSAGES" && it.production
+                        val privateFollowUp = privateFollowUp?.takeIf {
+                            currentTaskId == "AI_REPLY_PRIVATE_MESSAGES"
                         }
                         if (privateFollowUp != null) {
                             // During the child, another chat is not a continuation of this transaction.
                             if (chat.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE) {
-                                originalImageTestChat(privateFollowUp) &&
+                                originalPrivateFollowUpChat(privateFollowUp) &&
                                     chat.chatTitleText == privateFollowUp.target.expectedChatTitle
-                            } else inspectImageTestOwnedPage()
+                            } else inspectPrivateFollowUpOwnedPage()
                         } else chatConfirmed || cardConfirmed || (profileTransaction && isSayHiProfileSurfacePresent())
                     }
                     else -> false
@@ -5740,28 +5739,25 @@ internal class MomoSocialAdapter(
 
     // The existing Momo adapter owns this short-lived platform navigation transaction.
     // The AI runtime owns scheduling/admission; TaskCoordinator remains the only lease owner.
-    private enum class ImageTestStage {
+    private enum class PrivateFollowUpStage {
         OPEN_ALBUM, WAIT_ALBUM, WAIT_DIRECTORY, WAIT_FREEDOM, WAIT_SELECTION, WAIT_SEND_RESULT,
         INTERCEPTION_OPEN_SETTINGS, INTERCEPTION_OPEN_CONTROL, INTERCEPTION_TAP_SWITCH,
         INTERCEPTION_DISMISS, INTERCEPTION_BACK, INTERCEPTION_RETURN, TERMINAL
     }
 
-    private class ImageTestTransaction(
+    private class PrivateFollowUpTransaction(
         val target: ChatDraftInputTarget,
         val id: String,
         val owner: () -> Boolean,
-        val beforeStep: ((com.freedom.features.aireply.domain.contact.ContactFollowUpStep) -> Boolean)? = null
+        val interception: Boolean,
+        val beforeStep: (com.freedom.features.aireply.domain.contact.ContactFollowUpStep) -> Boolean
     ) {
-        val production = beforeStep != null
-        val interception = id.startsWith(INTERCEPTION_TEST_REQUEST_PREFIX)
-        val logPrefix = if (production) {
-            if (interception) "PRIVATE_INTERCEPTION" else "PRIVATE_IMAGE_SEND"
-        } else if (interception) "MESSAGE_INTERCEPTION_TEST" else "MEDIA_IMAGE_TEST"
+        val logPrefix = if (interception) "PRIVATE_INTERCEPTION" else "PRIVATE_IMAGE_SEND"
         var baseline: MomoImageSendBaseline? = null
         @Volatile var sendAttempt: MomoImageSendAttempt? = null
         @Volatile var switchVerifiedOn = false
-        @Volatile var productionSucceeded = false
-        @Volatile var stage = if (interception) ImageTestStage.INTERCEPTION_OPEN_SETTINGS else ImageTestStage.OPEN_ALBUM
+        @Volatile var succeeded = false
+        @Volatile var stage = if (interception) PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS else PrivateFollowUpStage.OPEN_ALBUM
         @Volatile var inFlight = false
         @Volatile var stageStartedAt = SystemClock.uptimeMillis()
         var albumWindow: WindowRef? = null
@@ -5772,90 +5768,36 @@ internal class MomoSocialAdapter(
         var lastWaitReason: String? = null
     }
 
-    @Volatile private var imageSendTest: ImageTestTransaction? = null
+    @Volatile private var privateFollowUp: PrivateFollowUpTransaction? = null
 
-    override fun progress(): ImageSendTestProgress = when (imageSendTest?.stage) {
-        null -> ImageSendTestProgress.IDLE
-        ImageTestStage.TERMINAL -> ImageSendTestProgress.TERMINAL
-        else -> ImageSendTestProgress.ACTIVE
+    override fun progress(): PrivateChatFollowUpProgress = when (privateFollowUp?.stage) {
+        null -> PrivateChatFollowUpProgress.IDLE
+        PrivateFollowUpStage.TERMINAL -> PrivateChatFollowUpProgress.TERMINAL
+        else -> PrivateChatFollowUpProgress.ACTIVE
     }
 
-    /** Manual one-shot test entry: a live chat window and the selected first control only. */
-    override fun inspectEntryTarget(requestId: String): ChatDraftInputTarget? =
-        rootAccess.withActiveTargetRoot { root, window ->
-            if (requestId.isBlank() || window.packageName != targetPackage || window.windowId < 0 ||
-                (window.activityClass.isNotBlank() &&
-                    window.activityClass != MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS)
-            ) return@withActiveTargetRoot null
-            val interception = requestId.startsWith(INTERCEPTION_TEST_REQUEST_PREFIX)
-            val firstTargetPresent = if (interception) {
-                interceptionNodeBounds(root, "chat_toolbar_avatar", "android.widget.ImageView", clickable = true) != null
-            } else {
-                chatComponents.pageInspector.inspectImageEntry(AccessibilityNodeInfo.obtain(root), targetPackage) != null
-            }
-            if (!firstTargetPresent || accessibilityGateway.currentGestureWindow() != window)
-                return@withActiveTargetRoot null
-            // Only interception checks the original chat on return; image testing is click-only.
-            val title = if (!interception) null else {
-                val titleNodes = root.findAccessibilityNodeInfosByViewId(MomoChatPageContract.CHAT_TITLE_VIEW_ID).orEmpty()
-                try {
-                    titleNodes.singleOrNull { it.isVisibleToUser }
-                        ?.let { it.text?.toString().orEmpty().ifBlank { it.contentDescription?.toString().orEmpty() } }
-                        ?.trim()?.takeIf { it.isNotBlank() }
-                } finally {
-                    titleNodes.forEach { runCatching { it.recycle() } }
-                }
-            }
-            if (accessibilityGateway.currentGestureWindow() != window) return@withActiveTargetRoot null
-            val windowKey = "${window.packageName}|windowId=${window.windowId}|generation=${window.generation}"
-            // The root path anchors only this window; this test never invokes draft input.
-            ChatDraftInputTarget(window.packageName, window.activityClass, windowKey,
-                title?.hashCode()?.toString() ?: windowKey, windowKey,
-                NodeTarget(window, NodePath(emptyList())), title)
-        }
+    private fun followUpCurrent(child: PrivateFollowUpTransaction): Boolean =
+        privateFollowUp === child && child.stage != PrivateFollowUpStage.TERMINAL &&
+            runCatching(child.owner).getOrDefault(false)
 
-    private fun testCurrent(test: ImageTestTransaction): Boolean =
-        imageSendTest === test && test.stage != ImageTestStage.TERMINAL &&
-            runCatching(test.owner).getOrDefault(false)
-
-    private fun originalImageTestChat(test: ImageTestTransaction): Boolean {
+    private fun originalPrivateFollowUpChat(child: PrivateFollowUpTransaction): Boolean {
         val live = accessibilityGateway.currentGestureWindow() ?: return false
-        val original = test.target.nodeTarget.window
+        val original = child.target.nodeTarget.window
         return live.packageName == original.packageName && live.windowId == original.windowId &&
             live.generation >= original.generation &&
-            (!test.production || (live.activityClass == original.activityClass &&
-                interceptionReturnedToChat(test)))
+            live.activityClass == original.activityClass && interceptionReturnedToChat(child)
     }
 
     /** Parent ownership persists during its own media transaction, including transient child windows.
      * This is routing evidence only: each write still requires a fresh step-specific target. */
-    internal fun inspectImageTestOwnedPage(): Boolean {
-        val test = imageSendTest ?: return false
-        if (!testCurrent(test)) return false
+    internal fun inspectPrivateFollowUpOwnedPage(): Boolean {
+        val child = privateFollowUp ?: return false
+        if (!followUpCurrent(child)) return false
         val live = accessibilityGateway.currentGestureWindow() ?: return false
         return live.packageName == targetPackage && live.windowId >= 0 &&
-            live.generation >= test.target.nodeTarget.window.generation &&
-            (test.stage !in setOf(ImageTestStage.OPEN_ALBUM, ImageTestStage.INTERCEPTION_OPEN_SETTINGS) ||
-                originalImageTestChat(test))
-    }
-
-    override fun begin(
-        target: ChatDraftInputTarget,
-        requestId: String,
-        claim: () -> Boolean,
-        ownsTransaction: () -> Boolean
-    ) {
-        if (imageSendTest != null || requestId.isBlank() || target.packageName != targetPackage ||
-            !runCatching(ownsTransaction).getOrDefault(false) ||
-            !isBoundAiReplyUiOperationOwned(target.taskLease)) return
-        // A crash/reconnect after claim is never permission to send another image.
-        if (!runCatching(claim).getOrDefault(false)) {
-            onLog("CHAT_CHILD_TEST WAIT reason=ONE_SHOT_CLAIM_REJECTED")
-            return
-        }
-        imageSendTest = ImageTestTransaction(target, requestId, ownsTransaction)
-        val test = requireNotNull(imageSendTest)
-        onLog("${test.logPrefix} BEGIN parentLeaseInherited=true;clickOnly=true;oneShotClaimed=true")
+            live.generation >= child.target.nodeTarget.window.generation &&
+            (child.stage !in setOf(PrivateFollowUpStage.OPEN_ALBUM, PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS) ||
+                originalPrivateFollowUpChat(child))
     }
 
     override fun beginPrivateFollowUp(
@@ -5865,162 +5807,160 @@ internal class MomoSocialAdapter(
         beforeStep: (com.freedom.features.aireply.domain.contact.ContactFollowUpStep) -> Boolean,
         ownsTransaction: () -> Boolean
     ): Boolean {
-        if (imageSendTest != null || transactionId.isBlank() || target.packageName != targetPackage ||
+        if (privateFollowUp != null || transactionId.isBlank() || target.packageName != targetPackage ||
             target.expectedChatTitle.isNullOrBlank() || target.conversationIdentityKey.isBlank() ||
             !runCatching(ownsTransaction).getOrDefault(false) ||
             !isBoundAiReplyUiOperationOwned(target.taskLease) ||
             accessibilityGateway.currentGestureWindow() != target.nodeTarget.window) return false
-        val id = if (interception) INTERCEPTION_TEST_REQUEST_PREFIX + transactionId else transactionId
-        val test = ImageTestTransaction(target, id, ownsTransaction, beforeStep)
+        val id = transactionId
+        val child = PrivateFollowUpTransaction(target, id, ownsTransaction, interception, beforeStep)
         if (!interception) {
             // The normal send must have a baseline before leaving the original chat.
-            test.baseline = captureImageSendBaseline(target, id, ownsTransaction) ?: return false
+            child.baseline = captureImageSendBaseline(target, id, ownsTransaction) ?: return false
         }
-        imageSendTest = test
-        onLog("${test.logPrefix} BEGIN parentLeaseInherited=true;clickOnly=false")
+        privateFollowUp = child
+        onLog("${child.logPrefix} BEGIN parentLeaseInherited=true")
         return true
     }
 
     override fun privateFollowUpSucceeded(): Boolean =
-        imageSendTest?.let { it.production && it.stage == ImageTestStage.TERMINAL && it.productionSucceeded } == true
+        privateFollowUp?.let { it.stage == PrivateFollowUpStage.TERMINAL && it.succeeded } == true
 
-    private fun testWait(test: ImageTestTransaction, reason: String) {
-        if (test.lastWaitReason != reason) {
-            test.lastWaitReason = reason
-            onLog("${test.logPrefix} WAIT stage=${test.stage};reason=$reason")
+    private fun followUpWait(child: PrivateFollowUpTransaction, reason: String) {
+        if (child.lastWaitReason != reason) {
+            child.lastWaitReason = reason
+            onLog("${child.logPrefix} WAIT stage=${child.stage};reason=$reason")
         }
     }
 
-    private fun testTerminal(test: ImageTestTransaction, result: String, reason: String) {
-        if (imageSendTest !== test || test.stage == ImageTestStage.TERMINAL) return
-        val previous = test.stage
-        test.productionSucceeded = test.production && result == "COMPLETED"
-        test.stage = ImageTestStage.TERMINAL
-        test.inFlight = false
-        onLog("${test.logPrefix} TERMINAL result=$result;stage=$previous;reason=$reason;retrySend=false")
+    private fun followUpTerminal(child: PrivateFollowUpTransaction, result: String, reason: String) {
+        if (privateFollowUp !== child || child.stage == PrivateFollowUpStage.TERMINAL) return
+        val previous = child.stage
+        child.succeeded = result == "COMPLETED"
+        child.stage = PrivateFollowUpStage.TERMINAL
+        child.inFlight = false
+        onLog("${child.logPrefix} TERMINAL result=$result;stage=$previous;reason=$reason;retrySend=false")
     }
 
     override fun abort(reason: String) {
-        imageSendTest?.let { testTerminal(it, "UNKNOWN", reason) }
+        privateFollowUp?.let { followUpTerminal(it, "UNKNOWN", reason) }
     }
 
     override fun reset(reason: String) {
         abort("RUNTIME_RESET")
-        imageSendTest = null
+        privateFollowUp = null
     }
 
     /** Move to a wait stage BEFORE submission; an accepted or ambiguous tap is never replayed. */
-    private fun submitImageTestStep(
-        test: ImageTestTransaction,
-        next: ImageTestStage,
+    private fun submitPrivateFollowUpStep(
+        child: PrivateFollowUpTransaction,
+        next: PrivateFollowUpStage,
         action: ((GestureExecutionStatus) -> Unit) -> GestureSubmission
     ) {
-        if (!testCurrent(test) || test.inFlight || !isBoundAiReplyUiOperationOwned(test.target.taskLease)) {
-            testWait(test, "PAGE_WRITE_LEASE_WAIT")
+        if (!followUpCurrent(child) || child.inFlight || !isBoundAiReplyUiOperationOwned(child.target.taskLease)) {
+            followUpWait(child, "PAGE_WRITE_LEASE_WAIT")
             return
         }
-        val previous = test.stage
-        val previousStartedAt = test.stageStartedAt
-        if (test.production && !persistPrivateFollowUpStep(test, previous)) {
-            testTerminal(test, "UNKNOWN", "CHECKPOINT_WRITE_NOT_CONFIRMED")
+        val previous = child.stage
+        val previousStartedAt = child.stageStartedAt
+        if (!persistPrivateFollowUpStep(child, previous)) {
+            followUpTerminal(child, "UNKNOWN", "CHECKPOINT_WRITE_NOT_CONFIRMED")
             return
         }
-        test.stage = next
-        test.stageStartedAt = SystemClock.uptimeMillis()
-        test.inFlight = true
-        test.lastWaitReason = null
+        child.stage = next
+        child.stageStartedAt = SystemClock.uptimeMillis()
+        child.inFlight = true
+        child.lastWaitReason = null
         val submission = runCatching {
             action { status ->
-                if (testCurrent(test)) {
-                    test.inFlight = false
-                    onLog("${test.logPrefix} GESTURE_RESULT stage=$next;status=$status")
+                if (followUpCurrent(child)) {
+                    child.inFlight = false
+                    onLog("${child.logPrefix} GESTURE_RESULT stage=$next;status=$status")
                     if (status == GestureExecutionStatus.DEFERRED) {
                         // No platform dispatch: keep the original stage and reacquire the target.
-                        test.stage = previous
-                        test.stageStartedAt = previousStartedAt
+                        child.stage = previous
+                        child.stageStartedAt = previousStartedAt
                     } else if (status == GestureExecutionStatus.REJECTED &&
-                        previous == ImageTestStage.WAIT_DIRECTORY && test.directoryRejectedRetries == 0
+                        previous == PrivateFollowUpStage.WAIT_DIRECTORY && child.directoryRejectedRetries == 0
                     ) {
                         // Directory navigation is not a send/toggle. Reacquire once on rejection.
-                        test.directoryRejectedRetries++
-                        test.stage = previous
-                        test.stageStartedAt = previousStartedAt
-                        testWait(test, "DIRECTORY_TAP_REJECTED_REACQUIRE")
-                    } else if (previous == ImageTestStage.INTERCEPTION_BACK &&
+                        child.directoryRejectedRetries++
+                        child.stage = previous
+                        child.stageStartedAt = previousStartedAt
+                        followUpWait(child, "DIRECTORY_TAP_REJECTED_REACQUIRE")
+                    } else if (previous == PrivateFollowUpStage.INTERCEPTION_BACK &&
                         status == GestureExecutionStatus.CANCELLED &&
-                        !test.interceptionBackDispatched && test.interceptionBackCancelledRetries == 0
+                        !child.interceptionBackDispatched && child.interceptionBackCancelledRetries == 0
                     ) {
                         // Only the final return tap may be retried after cancellation before
                         // platform dispatch. Never replay the switch or an actual back tap.
-                        test.interceptionBackCancelledRetries++
-                        test.stage = previous
-                        test.stageStartedAt = previousStartedAt
-                        testWait(test, "INTERCEPTION_BACK_CANCELLED_BEFORE_DISPATCH_REACQUIRE")
+                        child.interceptionBackCancelledRetries++
+                        child.stage = previous
+                        child.stageStartedAt = previousStartedAt
+                        followUpWait(child, "INTERCEPTION_BACK_CANCELLED_BEFORE_DISPATCH_REACQUIRE")
                     } else if (status != GestureExecutionStatus.COMPLETED) {
                         // An ambiguous send/toggle is never replayed.
-                        testTerminal(test, "UNKNOWN", "GESTURE_NOT_CONFIRMED")
-                    } else if (next == ImageTestStage.WAIT_SEND_RESULT && !test.production) {
-                        testTerminal(test, "COMPLETED", "SEND_TAP_COMPLETED_DELIVERY_NOT_VERIFIED")
+                        followUpTerminal(child, "UNKNOWN", "GESTURE_NOT_CONFIRMED")
                     }
                 }
             }
         }.getOrDefault(GestureSubmission.REJECTED)
-        onLog("${test.logPrefix} SUBMISSION from=$previous;to=$next;submission=$submission")
+        onLog("${child.logPrefix} SUBMISSION from=$previous;to=$next;submission=$submission")
         // A synchronous result may have completed or rolled back the stage already.
-        if (!testCurrent(test) || test.stage != next) return
+        if (!followUpCurrent(child) || child.stage != next) return
         when (submission) {
             GestureSubmission.ACCEPTED -> Unit
             GestureSubmission.DEFERRED_NOT_READY -> {
-                test.inFlight = false
-                test.stage = previous
-                test.stageStartedAt = previousStartedAt
-                testWait(test, "FRESH_ADMISSION_REQUIRED")
+                child.inFlight = false
+                child.stage = previous
+                child.stageStartedAt = previousStartedAt
+                followUpWait(child, "FRESH_ADMISSION_REQUIRED")
             }
             GestureSubmission.REJECTED -> {
                 // Directory navigation is not a send/toggle. A rejected submission may be
                 // retried once, only after the observer reacquires the current directory.
-                if (previous == ImageTestStage.WAIT_DIRECTORY &&
-                    test.directoryRejectedRetries == 0 && testCurrent(test)
+                if (previous == PrivateFollowUpStage.WAIT_DIRECTORY &&
+                    child.directoryRejectedRetries == 0 && followUpCurrent(child)
                 ) {
-                    test.directoryRejectedRetries++
-                    test.inFlight = false
-                    test.stage = previous
-                    test.stageStartedAt = previousStartedAt
-                    testWait(test, "DIRECTORY_TAP_REJECTED_REACQUIRE")
-                } else if (previous == ImageTestStage.INTERCEPTION_OPEN_CONTROL &&
-                    test.interceptionLayoutRejectedRetries == 0 && testCurrent(test)
+                    child.directoryRejectedRetries++
+                    child.inFlight = false
+                    child.stage = previous
+                    child.stageStartedAt = previousStartedAt
+                    followUpWait(child, "DIRECTORY_TAP_REJECTED_REACQUIRE")
+                } else if (previous == PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL &&
+                    child.interceptionLayoutRejectedRetries == 0 && followUpCurrent(child)
                 ) {
                     // The settings entry was rejected before admission. Re-resolve its
                     // live bounds on the next observation; never replay an accepted tap.
-                    test.interceptionLayoutRejectedRetries++
-                    test.inFlight = false
-                    test.stage = previous
-                    test.stageStartedAt = previousStartedAt
-                    testWait(test, "INTERCEPTION_LAYOUT_TAP_REJECTED_REACQUIRE")
-                } else testTerminal(test, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
+                    child.interceptionLayoutRejectedRetries++
+                    child.inFlight = false
+                    child.stage = previous
+                    child.stageStartedAt = previousStartedAt
+                    followUpWait(child, "INTERCEPTION_LAYOUT_TAP_REJECTED_REACQUIRE")
+                } else followUpTerminal(child, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
             }
-            else -> testTerminal(test, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
+            else -> followUpTerminal(child, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
         }
     }
 
-    private fun persistPrivateFollowUpStep(test: ImageTestTransaction, stage: ImageTestStage): Boolean {
-        val callback = test.beforeStep ?: return true
+    private fun persistPrivateFollowUpStep(child: PrivateFollowUpTransaction, stage: PrivateFollowUpStage): Boolean {
+        val callback = child.beforeStep
         val step = when (stage) {
-            ImageTestStage.OPEN_ALBUM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_OPEN_ALBUM
-            ImageTestStage.WAIT_ALBUM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_OPEN_DIRECTORY
-            ImageTestStage.WAIT_DIRECTORY -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_OPEN_FREEDOM
-            ImageTestStage.WAIT_FREEDOM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SELECT
-            ImageTestStage.WAIT_SELECTION -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SEND
-            ImageTestStage.WAIT_SEND_RESULT -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_VERIFY
-            ImageTestStage.INTERCEPTION_OPEN_SETTINGS -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_OPEN_SETTINGS
-            ImageTestStage.INTERCEPTION_OPEN_CONTROL -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_OPEN_CONTROL
-            ImageTestStage.INTERCEPTION_TAP_SWITCH -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_SWITCH
-            ImageTestStage.INTERCEPTION_DISMISS -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_DISMISS
-            ImageTestStage.INTERCEPTION_BACK -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_BACK
-            ImageTestStage.INTERCEPTION_RETURN -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_RETURN
-            ImageTestStage.TERMINAL -> return false
+            PrivateFollowUpStage.OPEN_ALBUM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_OPEN_ALBUM
+            PrivateFollowUpStage.WAIT_ALBUM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_OPEN_DIRECTORY
+            PrivateFollowUpStage.WAIT_DIRECTORY -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_OPEN_FREEDOM
+            PrivateFollowUpStage.WAIT_FREEDOM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SELECT
+            PrivateFollowUpStage.WAIT_SELECTION -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SEND
+            PrivateFollowUpStage.WAIT_SEND_RESULT -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_VERIFY
+            PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_OPEN_SETTINGS
+            PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_OPEN_CONTROL
+            PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_SWITCH
+            PrivateFollowUpStage.INTERCEPTION_DISMISS -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_DISMISS
+            PrivateFollowUpStage.INTERCEPTION_BACK -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_BACK
+            PrivateFollowUpStage.INTERCEPTION_RETURN -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_RETURN
+            PrivateFollowUpStage.TERMINAL -> return false
         }
-        return testCurrent(test) && runCatching { callback(step) }.getOrDefault(false)
+        return followUpCurrent(child) && runCatching { callback(step) }.getOrDefault(false)
     }
 
     /** Read-only confirmation of the very same switch in the confirmed interception popup. */
@@ -6045,19 +5985,19 @@ internal class MomoSocialAdapter(
             else interceptionChecked(root).takeIf { accessibilityGateway.currentGestureWindow() == window }
         }
 
-    private fun verifyPrivateImageSend(test: ImageTestTransaction) {
-        val attempt = test.sendAttempt ?: run {
-            testTerminal(test, "UNKNOWN", "SEND_DISPATCH_EVIDENCE_MISSING")
+    private fun verifyPrivateImageSend(child: PrivateFollowUpTransaction) {
+        val attempt = child.sendAttempt ?: run {
+            followUpTerminal(child, "UNKNOWN", "SEND_DISPATCH_EVIDENCE_MISSING")
             return
         }
-        test.inFlight = true
-        inspectImageSendResult(attempt, test.target, test.id, { testCurrent(test) }) { result ->
-            if (testCurrent(test)) {
-                test.inFlight = false
+        child.inFlight = true
+        inspectImageSendResult(attempt, child.target, child.id, { followUpCurrent(child) }) { result ->
+            if (followUpCurrent(child)) {
+                child.inFlight = false
                 when (result) {
-                    MomoImageSendResult.SUCCESS -> testTerminal(test, "COMPLETED", "OUTGOING_IMAGE_CONFIRMED")
-                    MomoImageSendResult.FAILED -> testTerminal(test, "UNKNOWN", "IMAGE_SEND_FAILED_NO_REPLAY")
-                    MomoImageSendResult.UNKNOWN -> testWait(test, "IMAGE_RESULT_NOT_CONFIRMED")
+                    MomoImageSendResult.SUCCESS -> followUpTerminal(child, "COMPLETED", "OUTGOING_IMAGE_CONFIRMED")
+                    MomoImageSendResult.FAILED -> followUpTerminal(child, "UNKNOWN", "IMAGE_SEND_FAILED_NO_REPLAY")
+                    MomoImageSendResult.UNKNOWN -> followUpWait(child, "IMAGE_RESULT_NOT_CONFIRMED")
                 }
             }
         }
@@ -6065,7 +6005,7 @@ internal class MomoSocialAdapter(
 
     /**
      * Interception uses the same parent-bound serial tap pipeline as image sending.
-     * Resolve only the current action's target; no page fingerprint or checked-state query.
+     * Resolve only the current action's target; switch verification is kept outside the frozen locator.
      */
     private fun interceptionNodeBounds(
         root: AccessibilityNodeInfo,
@@ -6091,22 +6031,21 @@ internal class MomoSocialAdapter(
     }.getOrNull()
 
     private fun submitInterceptionStep(
-        test: ImageTestTransaction,
-        next: ImageTestStage,
+        child: PrivateFollowUpTransaction,
+        next: PrivateFollowUpStage,
         action: String,
         resolve: (AccessibilityNodeInfo, WindowRef) -> ScreenRect?
     ) {
         val window = accessibilityGateway.currentGestureWindow() ?: return
         if (window.packageName != targetPackage || window.windowId < 0) return
-        submitImageTestStep(test, next) { callback ->
+        submitPrivateFollowUpStep(child, next) { callback ->
             var layoutBoundsLogged = false
-            if (action == "interception-back") test.interceptionBackDispatched = false
+            if (action == "interception-back") child.interceptionBackDispatched = false
             submitVerifiedAlbumTap(
-                test.target, window, test.id, { testCurrent(test) }, action,
+                child.target, window, child.id, { followUpCurrent(child) }, action,
                 resolve = { root, liveWindow ->
-                    // A normal toggle must still be OFF at dispatch revalidation.
-                    // Test mode retains the exact click-only behavior.
-                    val safe = !test.production || when (action) {
+                    // The toggle must still be OFF at dispatch revalidation.
+                    val safe = when (action) {
                         "interception-switch" -> interceptionChecked(root) == false
                         "interception-dismiss" -> interceptionChecked(root) == true
                         "interception-back" -> interceptionNodeBounds(root, "setting_layout_harass",
@@ -6116,13 +6055,13 @@ internal class MomoSocialAdapter(
                     (if (safe) resolve(root, liveWindow) else null)?.also { bounds ->
                         if (action == "interception-layout" && !layoutBoundsLogged) {
                             layoutBoundsLogged = true
-                            onLog("MESSAGE_INTERCEPTION_TEST LAYOUT_TARGET windowId=${liveWindow.windowId};" +
+                            onLog("PRIVATE_INTERCEPTION LAYOUT_TARGET windowId=${liveWindow.windowId};" +
                                 "generation=${liveWindow.generation};bounds=$bounds")
                         }
                     }
                 }, boundsOf = { it },
                 onPlatformDispatched = { _, _ ->
-                    if (action == "interception-back") test.interceptionBackDispatched = true
+                    if (action == "interception-back") child.interceptionBackDispatched = true
                 },
                 onGestureResult = callback
             )
@@ -6140,17 +6079,17 @@ internal class MomoSocialAdapter(
             .takeUnless { it.isEmpty || title.top > rootBounds.bottom }
     }
 
-    /** Return evidence is only used after the toggle; it never gates initial execution. */
-    private fun interceptionReturnedToChat(test: ImageTestTransaction): Boolean =
+    /** Verify the bound original chat before entry and after the toggle. */
+    private fun interceptionReturnedToChat(child: PrivateFollowUpTransaction): Boolean =
         rootAccess.withActiveTargetRoot { root, window ->
-            window.packageName == test.target.packageName &&
-                window.generation >= test.target.nodeTarget.window.generation &&
-                (!test.production || (window.windowId == test.target.nodeTarget.window.windowId &&
-                    window.activityClass == test.target.nodeTarget.window.activityClass)) &&
+            window.packageName == child.target.packageName &&
+                window.generation >= child.target.nodeTarget.window.generation &&
+                window.windowId == child.target.nodeTarget.window.windowId &&
+                window.activityClass == child.target.nodeTarget.window.activityClass &&
                 interceptionNodeBounds(root, "chat_toolbar_avatar", "android.widget.ImageView", clickable = true) != null &&
-                (test.target.expectedChatTitle == null ||
+                (child.target.expectedChatTitle == null ||
                     interceptionNodeBounds(root, "chat_user_name", "android.widget.TextView",
-                        text = test.target.expectedChatTitle) != null) &&
+                        text = child.target.expectedChatTitle) != null) &&
                 accessibilityGateway.currentGestureWindow() == window
         } == true
 
@@ -6171,154 +6110,145 @@ internal class MomoSocialAdapter(
     }
 
     override fun observe() {
-        val test = imageSendTest ?: return
-        if (test.stage == ImageTestStage.TERMINAL) return
-        if (!testCurrent(test)) {
-            testTerminal(test, "UNKNOWN", "EXACT_TRANSACTION_OWNERSHIP_LOST")
+        val child = privateFollowUp ?: return
+        if (child.stage == PrivateFollowUpStage.TERMINAL) return
+        if (!followUpCurrent(child)) {
+            followUpTerminal(child, "UNKNOWN", "EXACT_TRANSACTION_OWNERSHIP_LOST")
             return
         }
-        if (SystemClock.uptimeMillis() - test.stageStartedAt > 45_000L) {
-            testTerminal(test, "UNKNOWN", "STAGE_OBSERVATION_TIMEOUT")
+        if (SystemClock.uptimeMillis() - child.stageStartedAt > 45_000L) {
+            followUpTerminal(child, "UNKNOWN", "STAGE_OBSERVATION_TIMEOUT")
             return
         }
-        if (test.inFlight) {
-            testWait(test, "GESTURE_RESULT_PENDING")
+        if (child.inFlight) {
+            followUpWait(child, "GESTURE_RESULT_PENDING")
             return
         }
-        val owns = { testCurrent(test) }
-        when (test.stage) {
-            ImageTestStage.OPEN_ALBUM -> {
-                if (!originalImageTestChat(test)) {
-                    testWait(test, "ORIGINAL_CHAT_NOT_CURRENT")
+        val owns = { followUpCurrent(child) }
+        when (child.stage) {
+            PrivateFollowUpStage.OPEN_ALBUM -> {
+                if (!originalPrivateFollowUpChat(child)) {
+                    followUpWait(child, "ORIGINAL_CHAT_NOT_CURRENT")
                     return
                 }
-                submitImageTestStep(test, ImageTestStage.WAIT_ALBUM) { callback ->
-                    openImageAlbum(test.target, test.id, owns, callback)
+                submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_ALBUM) { callback ->
+                    openImageAlbum(child.target, child.id, owns, callback)
                 }
             }
-            ImageTestStage.WAIT_ALBUM -> {
+            PrivateFollowUpStage.WAIT_ALBUM -> {
                 val window = accessibilityGateway.currentGestureWindow()
                 if (window == null || window.packageName != targetPackage ||
-                    window.generation < test.target.nodeTarget.window.generation) {
-                    testWait(test, "ALBUM_SELECTOR_WINDOW_UNAVAILABLE")
+                    window.generation < child.target.nodeTarget.window.generation) {
+                    followUpWait(child, "ALBUM_SELECTOR_WINDOW_UNAVAILABLE")
                     return
                 }
-                test.albumWindow = window
-                submitImageTestStep(test, ImageTestStage.WAIT_DIRECTORY) { callback ->
-                    openImageAlbumDirectory(test.target, window, test.id, owns, callback)
+                child.albumWindow = window
+                submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_DIRECTORY) { callback ->
+                    openImageAlbumDirectory(child.target, window, child.id, owns, callback)
                 }
             }
-            ImageTestStage.WAIT_DIRECTORY -> {
-                val window = test.albumWindow ?: return
+            PrivateFollowUpStage.WAIT_DIRECTORY -> {
+                val window = child.albumWindow ?: return
                 val directory = inspectFreedomDirectory(window)
                 if (directory == null) {
-                    testWait(test, "FREEDOM_NAME_NOT_FOUND_IN_CURRENT_CHILD_WINDOW")
+                    followUpWait(child, "FREEDOM_NAME_NOT_FOUND_IN_CURRENT_CHILD_WINDOW")
                     return
                 }
-                onLog("MEDIA_IMAGE_TEST DIRECTORY_NAME_FOUND windowId=${directory.window.windowId};" +
+                onLog("PRIVATE_IMAGE_SEND DIRECTORY_NAME_FOUND windowId=${directory.window.windowId};" +
                     "generation=${directory.window.generation};bounds=${directory.nameBounds};activityRequired=false;name=Freedom")
-                submitImageTestStep(test, ImageTestStage.WAIT_FREEDOM) { callback ->
-                    openFreedomAlbum(test.target, window, test.id, owns, callback)
+                submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_FREEDOM) { callback ->
+                    openFreedomAlbum(child.target, window, child.id, owns, callback)
                 }
             }
-            ImageTestStage.WAIT_FREEDOM -> {
+            PrivateFollowUpStage.WAIT_FREEDOM -> {
                 val window = accessibilityGateway.currentGestureWindow() ?: return
                 if (window.packageName != targetPackage) return
-                test.albumWindow = window
-                submitImageTestStep(test, ImageTestStage.WAIT_SELECTION) { callback ->
-                    selectFreedomImage(test.target, window, test.id, owns, callback)
+                child.albumWindow = window
+                submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SELECTION) { callback ->
+                    selectFreedomImage(child.target, window, child.id, owns, callback)
                 }
             }
-            ImageTestStage.WAIT_SELECTION -> {
-                val selectedWindow = test.albumWindow ?: return
+            PrivateFollowUpStage.WAIT_SELECTION -> {
+                val selectedWindow = child.albumWindow ?: return
                 val window = accessibilityGateway.currentGestureWindow() ?: return
                 if (window.packageName != selectedWindow.packageName || window.windowId != selectedWindow.windowId ||
                     window.generation < selectedWindow.generation) {
-                    testWait(test, "SELECTED_ALBUM_WINDOW_NOT_CURRENT")
+                    followUpWait(child, "SELECTED_ALBUM_WINDOW_NOT_CURRENT")
                     return
                 }
-                submitImageTestStep(test, ImageTestStage.WAIT_SEND_RESULT) { callback ->
-                    sendFreedomImage(test.target, window, test.id, owns, baseline = test.baseline,
+                submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT) { callback ->
+                    sendFreedomImage(child.target, window, child.id, owns, baseline = child.baseline,
                         onDispatched = { attempt ->
-                            if (testCurrent(test)) {
-                                if (test.production) test.sendAttempt = attempt
-                                onLog("${test.logPrefix} SEND_TAP_DISPATCHED")
+                            if (followUpCurrent(child)) {
+                                child.sendAttempt = attempt
+                                onLog("${child.logPrefix} SEND_TAP_DISPATCHED")
                             }
                         },
                         onGestureResult = callback)
                 }
             }
-            ImageTestStage.WAIT_SEND_RESULT -> {
-                if (test.production) verifyPrivateImageSend(test)
-                else testWait(test, "SEND_GESTURE_RESULT_PENDING")
-            }
-            ImageTestStage.INTERCEPTION_OPEN_SETTINGS -> {
-                if (!originalImageTestChat(test)) {
-                    testWait(test, "ORIGINAL_CHAT_NOT_CURRENT")
+            PrivateFollowUpStage.WAIT_SEND_RESULT -> verifyPrivateImageSend(child)
+            PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS -> {
+                if (!originalPrivateFollowUpChat(child)) {
+                    followUpWait(child, "ORIGINAL_CHAT_NOT_CURRENT")
                     return
                 }
-                submitInterceptionStep(test, ImageTestStage.INTERCEPTION_OPEN_CONTROL, "interception-avatar") { root, _ ->
+                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL, "interception-avatar") { root, _ ->
                     interceptionNodeBounds(root, "chat_toolbar_avatar", "android.widget.ImageView", clickable = true)
                 }
             }
-            ImageTestStage.INTERCEPTION_OPEN_CONTROL -> {
-                submitInterceptionStep(test, ImageTestStage.INTERCEPTION_TAP_SWITCH, "interception-layout") { root, _ ->
+            PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL -> {
+                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH, "interception-layout") { root, _ ->
                     interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true)
                 }
             }
-            ImageTestStage.INTERCEPTION_TAP_SWITCH -> {
-                if (test.production) {
-                    when (currentInterceptionChecked()) {
-                        true -> {
-                            test.switchVerifiedOn = true
-                            test.stage = ImageTestStage.INTERCEPTION_DISMISS
-                            test.stageStartedAt = SystemClock.uptimeMillis()
-                            return
-                        }
-                        null -> {
-                            testWait(test, "SWITCH_STATE_NOT_READABLE")
-                            return
-                        }
-                        false -> Unit
+            PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH -> {
+                when (currentInterceptionChecked()) {
+                    true -> {
+                        child.switchVerifiedOn = true
+                        child.stage = PrivateFollowUpStage.INTERCEPTION_DISMISS
+                        child.stageStartedAt = SystemClock.uptimeMillis()
+                        return
                     }
+                    null -> {
+                        followUpWait(child, "SWITCH_STATE_NOT_READABLE")
+                        return
+                    }
+                    false -> Unit
                 }
-                submitInterceptionStep(test, ImageTestStage.INTERCEPTION_DISMISS, "interception-switch") { root, _ ->
+                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_DISMISS, "interception-switch") { root, _ ->
                     interceptionNodeBounds(root, "btn_switch", "android.widget.CompoundButton", checkable = true)
                 }
             }
-            ImageTestStage.INTERCEPTION_DISMISS -> {
-                if (test.production) {
-                    if (currentInterceptionChecked() != true) {
-                        testWait(test, "SWITCH_ON_NOT_CONFIRMED")
-                        return
-                    }
-                    test.switchVerifiedOn = true
+            PrivateFollowUpStage.INTERCEPTION_DISMISS -> {
+                if (currentInterceptionChecked() != true) {
+                    followUpWait(child, "SWITCH_ON_NOT_CONFIRMED")
+                    return
                 }
-                submitInterceptionStep(test, ImageTestStage.INTERCEPTION_BACK, "interception-dismiss") { root, _ ->
+                child.switchVerifiedOn = true
+                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_BACK, "interception-dismiss") { root, _ ->
                     interceptionDismissBounds(root)
                 }
             }
-            ImageTestStage.INTERCEPTION_BACK -> {
-                if (interceptionReturnedToChat(test)) {
-                    if (!test.production || test.switchVerifiedOn) {
-                        testTerminal(test, "COMPLETED", if (test.production) "SWITCH_ON_AND_CHAT_RETURN_CONFIRMED"
-                            else "SWITCH_TAPPED_ONCE_AND_CHAT_RETURNED_STATE_NOT_READ")
-                    } else testTerminal(test, "UNKNOWN", "SWITCH_ON_NOT_CONFIRMED")
+            PrivateFollowUpStage.INTERCEPTION_BACK -> {
+                if (interceptionReturnedToChat(child)) {
+                    if (child.switchVerifiedOn) {
+                        followUpTerminal(child, "COMPLETED", "SWITCH_ON_AND_CHAT_RETURN_CONFIRMED")
+                    } else followUpTerminal(child, "UNKNOWN", "SWITCH_ON_NOT_CONFIRMED")
                     return
                 }
-                submitInterceptionStep(test, ImageTestStage.INTERCEPTION_RETURN, "interception-back") { _, window ->
+                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_RETURN, "interception-back") { _, window ->
                     interceptionBackBounds(window)
                 }
             }
-            ImageTestStage.INTERCEPTION_RETURN -> {
-                if (interceptionReturnedToChat(test)) {
-                    if (!test.production || test.switchVerifiedOn) {
-                        testTerminal(test, "COMPLETED", if (test.production) "SWITCH_ON_AND_CHAT_RETURN_CONFIRMED"
-                            else "SWITCH_TAPPED_ONCE_AND_CHAT_RETURNED_STATE_NOT_READ")
-                    } else testTerminal(test, "UNKNOWN", "SWITCH_ON_NOT_CONFIRMED")
-                } else testWait(test, "ORIGINAL_CHAT_RETURN_PENDING")
+            PrivateFollowUpStage.INTERCEPTION_RETURN -> {
+                if (interceptionReturnedToChat(child)) {
+                    if (child.switchVerifiedOn) {
+                        followUpTerminal(child, "COMPLETED", "SWITCH_ON_AND_CHAT_RETURN_CONFIRMED")
+                    } else followUpTerminal(child, "UNKNOWN", "SWITCH_ON_NOT_CONFIRMED")
+                } else followUpWait(child, "ORIGINAL_CHAT_RETURN_PENDING")
             }
-            ImageTestStage.TERMINAL -> Unit
+            PrivateFollowUpStage.TERMINAL -> Unit
         }
     }
 

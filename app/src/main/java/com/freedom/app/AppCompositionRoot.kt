@@ -367,52 +367,30 @@ internal class AccessibilityServiceDependencies internal constructor(
                     }
                     val generation = runSessionCoordinator.currentRunGeneration()
                     val currentTaskId = runSessionCoordinator.currentPageRuntimeSession()?.taskId
-                    // Explicit development mode still routes through the single existing page
-                    // admission and ownership reconciliation below.
-                    val imageTestRequest = root.taskLaunchParametersRepository.read().imageSendTestRequestId
-                    val activeTest = currentTaskId == "AI_REPLY_PRIVATE_MESSAGES" &&
-                        aiReplyObservationRuntime.isImageSendTestRun()
-                    val imageTestMode = imageTestRequest != null || activeTest
                     var ownedNestedPage = false
                     var greetingNavigationAwaitingHandoff = false
                     val recognized = runCatching {
-                        val targetTask = if (imageTestMode) {
-                            fun initialChat() = imageTestRequest != null &&
-                                root.taskLaunchParametersRepository.isImageSendTestRequestAvailable(imageTestRequest) &&
-                                momoSocialAdapter.inspectEntryTarget(imageTestRequest) != null
-                            if (activeTest) {
-                                // A running child uses its existing transaction, not a new admission.
-                                ownedNestedPage = when (momoSocialAdapter.progress()) {
-                                    com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE ->
-                                        momoSocialAdapter.inspectImageTestOwnedPage()
-                                    com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE -> initialChat()
-                                    com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL -> false
-                                }
-                                null
-                            } else if (initialChat()) "AI_REPLY_PRIVATE_MESSAGES" else null
-                        } else {
-                            val observed = momoSocialAdapter.inspectUnifiedEntryPage(currentTaskId)
-                            if (observed == null) null else {
-                                val (fingerprint, nestedProof) = observed
-                                ownedNestedPage = nestedProof
-                                when (pageObservationCoordinator.matchFingerprint(fingerprint)) {
-                                    "ENTRY:AI_REPLY_PRIVATE_MESSAGES" -> "AI_REPLY_PRIVATE_MESSAGES"
-                                    "ENTRY:AI_REPLY_RECEIVED_GREETINGS" -> "AI_REPLY_RECEIVED_GREETINGS"
-                                    "ENTRY:ACCOUNT_BROWSE" -> "ACCOUNT_BROWSE"
-                                    else -> null
-                                }
+                        val observed = momoSocialAdapter.inspectUnifiedEntryPage(currentTaskId)
+                        val targetTask = if (observed == null) null else {
+                            val (fingerprint, nestedProof) = observed
+                            ownedNestedPage = nestedProof
+                            when (pageObservationCoordinator.matchFingerprint(fingerprint)) {
+                                "ENTRY:AI_REPLY_PRIVATE_MESSAGES" -> "AI_REPLY_PRIVATE_MESSAGES"
+                                "ENTRY:AI_REPLY_RECEIVED_GREETINGS" -> "AI_REPLY_RECEIVED_GREETINGS"
+                                "ENTRY:ACCOUNT_BROWSE" -> "ACCOUNT_BROWSE"
+                                else -> null
                             }
                         }
                         if (targetTask == null || generation != runSessionCoordinator.currentRunGeneration() ||
                             !runSessionCoordinator.isPageObservationAllowed()
                         ) false else {
-                            if (!imageTestMode && aiReplyObservationRuntime.isPrivateFollowUpActive()) {
+                            if (aiReplyObservationRuntime.isPrivateFollowUpActive()) {
                                 aiReplyObservationRuntime.onPrivateFollowUpTopLevelObserved()
                             }
                             val mode = if (targetTask == "ACCOUNT_BROWSE") RunMode.ACCOUNT_BROWSE
                                 else RunMode.AI_REPLY
                             val verifiedGreetingNavigation =
-                                !imageTestMode && targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
+                                targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
                                 currentTaskId == "AI_REPLY_RECEIVED_GREETINGS" &&
                                 aiReplyObservationRuntime.isVerifiedGreetingsNavigationPending()
                             if (verifiedGreetingNavigation) {
@@ -436,7 +414,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                     }
                     // Explicitly wake the existing business observer after route reconciliation.
                     // This also covers a quiet chat with no further accessibility events.
-                    if ((imageTestMode || aiReplyObservationRuntime.isPrivateFollowUpActive()) &&
+                    if (aiReplyObservationRuntime.isPrivateFollowUpActive() &&
                         (recognized || ownedNestedPage)) {
                         aiReplyObservationRuntime.requestPageRouteObservation()
                     }
@@ -864,11 +842,8 @@ internal class AccessibilityServiceDependencies internal constructor(
             imageSendThreshold = {
                 root.taskLaunchParametersRepository.read().imageSendThreshold
             },
-            imageSendTestRequestId = { root.taskLaunchParametersRepository.read().imageSendTestRequestId },
-            isImageSendTestRequestAvailable = root.taskLaunchParametersRepository::isImageSendTestRequestAvailable,
-            claimImageSendTestRequest = root.taskLaunchParametersRepository::claimImageSendTestRequest,
-            imageSendTestPort = momoSocialAdapter,
-            isImageSendTestTouchActive = { touchInteractionMonitor.snapshot().interactionActive },
+            privateChatFollowUpPort = momoSocialAdapter,
+            isPrivateFollowUpTouchActive = { touchInteractionMonitor.snapshot().interactionActive },
             privateImageResourceCount = {
                 root.taskLaunchParametersRepository.read().imageResourceUris.count { it.isNotBlank() }
             },
@@ -943,12 +918,10 @@ internal class AccessibilityServiceDependencies internal constructor(
                 if (entryPageRetryDelegate.isInitialized()) entryPageRetry.cancel()
             },
             onUserRunEnded = {
-                if (root.taskLaunchParametersRepository.read().imageSendTestRequestId == null) {
-                    root.recoveryScheduleRepository.clear()
-                    root.privateMessagesRecoveryScheduleRepository.clear()
-                    root.receivedGreetingsRecoveryScheduleRepository.clear()
-                    root.accountBrowseCheckpointRepository.clear()
-                }
+                root.recoveryScheduleRepository.clear()
+                root.privateMessagesRecoveryScheduleRepository.clear()
+                root.receivedGreetingsRecoveryScheduleRepository.clear()
+                root.accountBrowseCheckpointRepository.clear()
             },
             initiallyServiceConnected = false
         )

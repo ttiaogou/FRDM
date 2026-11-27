@@ -35,7 +35,7 @@ import com.freedom.features.aireply.domain.contact.ContactFollowUpCheckpoint
 import com.freedom.features.aireply.domain.contact.ContactFollowUpStep
 import com.freedom.features.aireply.domain.contact.ContactPendingRecoveryAction
 import com.freedom.features.aireply.ports.ChatDraftInputTarget
-import com.freedom.features.aireply.ports.ImageSendTestProgress
+import com.freedom.features.aireply.ports.PrivateChatFollowUpProgress
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPagePort
@@ -177,19 +177,10 @@ class AiReplyObservationRuntime(
     private val privateReplyRequestKey: (ChatMessageBatch, ChatPageSnapshot) -> String? = { _, _ -> null },
     private val restoreObservedPrivatePendingDraft: (ChatMessageBatch, ChatPageSnapshot, String, String) -> Boolean =
         { _, _, _, _ -> false },
-    private val imageSendTestRequestId: () -> String? = { null },
-    private val isImageSendTestRequestAvailable: (String) -> Boolean = { false },
-    private val claimImageSendTestRequest: (String) -> Boolean = { false },
-    private val imageSendTestPort: com.freedom.features.aireply.ports.ChatImageSendTestPort? = null,
-    private val isImageSendTestTouchActive: () -> Boolean = { false },
+    private val privateChatFollowUpPort: com.freedom.features.aireply.ports.PrivateChatFollowUpPort? = null,
+    private val isPrivateFollowUpTouchActive: () -> Boolean = { false },
     private val privateImageResourceCount: () -> Int = { 0 }
 ) {
-    // Test mode is latched for this page runtime; it never falls through to the normal reply
-    // workflow when the one-shot request is consumed or the switch changes.
-    @Volatile private var activeImageSendTestRequest: String? = null
-    private var lastImageTestAdmissionWait: String? = null
-    fun isImageSendTestRun(): Boolean = activeImageSendTestRequest != null
-
     // Ephemeral binding for the existing adapter execution; the ledger remains the durable owner.
     private class PrivateFollowUp(
         val contactKey: String,
@@ -203,7 +194,7 @@ class AiReplyObservationRuntime(
     /** The unified entry has independently recognized a top-level destination. */
     fun onPrivateFollowUpTopLevelObserved() {
         if (activePrivateFollowUp == null) return
-        imageSendTestPort?.reset("PRIVATE_FOLLOW_UP_LEFT_CHILD")
+        privateChatFollowUpPort?.reset("PRIVATE_FOLLOW_UP_LEFT_CHILD")
         activePrivateFollowUp = null
         currentSessionSendConfirmed = false
         onLog("PRIVATE_FOLLOW_UP LEFT_CHILD;checkpointRetained=true")
@@ -583,10 +574,6 @@ class AiReplyObservationRuntime(
 
     /** Receives business-neutral navigation provenance from the unified accessibility layer. */
     fun onSelfNavigationAttached(transition: SelfNavigationTransition) {
-        if (isImageSendTestRun()) {
-            requestPageRouteObservation()
-            return
-        }
         pendingNavigationSourceResult = transition
         onLog(
             "统一页面导航[SELF_NAVIGATION_ATTACHED]：" +
@@ -601,10 +588,6 @@ class AiReplyObservationRuntime(
      * still the authority that creates the recovery transaction.
      */
     fun onUnmatchedNavigationObserved(targetActivityClass: String) {
-        if (isImageSendTestRun()) {
-            requestPageRouteObservation()
-            return
-        }
         if (!isAiReplyActive() || !sessionRunStarted) return
         unmatchedNavigationObservationPending = true
         onLog(
@@ -1313,10 +1296,6 @@ class AiReplyObservationRuntime(
             runPrivateFollowUpObservation()
             return
         }
-        if (isImageSendTestRun()) {
-            runImageSendTestObservation()
-            return
-        }
         if (!chatPagePort.supportsTargetPackage(targetPackage())) {
             pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
             if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
@@ -1662,21 +1641,10 @@ class AiReplyObservationRuntime(
     fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
         if (!sessionRunStarted) return
         if (isPrivateFollowUpActive() && event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER) {
-            imageSendTestPort?.abort("PRIVATE_FOLLOW_UP_USER_INTERACTION")
+            privateChatFollowUpPort?.abort("PRIVATE_FOLLOW_UP_USER_INTERACTION")
             onPrivateFollowUpTopLevelObserved()
             onLog("PRIVATE_FOLLOW_UP USER_INTERACTION;checkpointRetained=true;noReplay=true")
             // Fall through to existing physical-interaction handling, not a new recovery route.
-        }
-        if (isImageSendTestRun()) {
-            lastImageTestAdmissionWait = null
-            if (event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER &&
-                imageSendTestPort?.progress() == com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE
-            ) {
-                imageSendTestPort?.abort("PHYSICAL_USER_INTERACTION")
-                releaseTaskOwnership("图片测试用户操作；禁止重发")
-            }
-            requestPageRouteObservation()
-            return
         }
         pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
         val observedPhysicalInterruption = event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER &&
@@ -3575,7 +3543,6 @@ class AiReplyObservationRuntime(
 
     /** Passive progress persistence at the existing lifecycle boundary, not a recovery request. */
     fun persistTaskProgressBeforeExit(reason: String, serviceBoundary: Boolean) {
-        if (isImageSendTestRun()) return
         if (!sessionRunStarted || (serviceBoundary && serviceInterruptionCheckpointPersisted)) return
         val boundary = if (serviceBoundary) "SERVICE_BOUNDARY" else "PAGE_PAUSE"
         if (recoveryContext.pending) {
@@ -3615,28 +3582,14 @@ class AiReplyObservationRuntime(
      * but must preserve the saved schedule for a later intent-checked reconnect.
      */
     fun clearRecoverySchedulesAfterRunStop() {
-        if (imageSendTestRequestId() != null || isImageSendTestRun()) return
         privateMessagesRecoveryScheduleRepository?.clear()
         receivedGreetingsRecoveryScheduleRepository?.clear()
     }
 
     fun reset(reason: String = "未指定", preservePendingRecovery: Boolean = true) {
         if (isPrivateFollowUpActive()) {
-            imageSendTestPort?.reset("PRIVATE_FOLLOW_UP_RUNTIME_RESET")
+            privateChatFollowUpPort?.reset("PRIVATE_FOLLOW_UP_RUNTIME_RESET")
             activePrivateFollowUp = null
-        }
-        if (isImageSendTestRun() || (!sessionRunStarted && imageSendTestRequestId() != null)) {
-            imageSendTestPort?.reset(reason)
-            pageInspectionTask?.cancel()
-            pageInspectionTask = null
-            pageObservationCoordinator.reset()
-            lastImageTestAdmissionWait = null
-            taskOwnership.reset("图片测试结束：$reason")
-            activeImageSendTestRequest = null
-            sessionRunStarted = false
-            sessionManagerState = SessionManagerState.STOPPED
-            // Do not touch the production reply ledger, draft, traversal or checkpoints.
-            return
         }
         runCatching { onDraftRuntimeReset() }
         sessionActionGeneration += 1L
@@ -4640,129 +4593,11 @@ class AiReplyObservationRuntime(
                 scheduleFullInspectionAfter(fullInspectionDebounceMs)
             return
         }
-        if (isImageSendTestRun()) {
-            val request = activeImageSendTestRequest ?: return
-            val progress = imageSendTestPort?.progress() ?: return
-            if (isAiReplyActive() && sessionRunStarted && pageInspectionTask == null &&
-                (progress == com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE ||
-                    (progress == com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE &&
-                        isImageSendTestRequestAvailable(request)))) {
-                scheduleImageTestObservation(fullInspectionDebounceMs)
-            }
-            return
-        }
         if (!isAiReplyActive() || !sessionRunStarted ||
             hasProtectedPrivateInspection() || hasProtectedSendInspection()
         ) return
         if (pageInspectionTask != null) return
         scheduleFullInspection()
-    }
-
-    /** Test-only timer on the shared observer; no production read cancellation. */
-    private fun scheduleImageTestObservation(delayMs: Long) {
-        if (pageInspectionTask != null) return
-        val request = activeImageSendTestRequest ?: return
-        val generation = currentRunGeneration()
-        pageInspectionTask = sharedPageObservationCoordinator.scheduleReadOnlyObservation(delayMs) {
-            pageInspectionTask = null
-            if (activeImageSendTestRequest == request && currentRunGeneration() == generation &&
-                sessionRunStarted && isAiReplyActive()
-            ) runImageSendTestObservation()
-        }
-    }
-
-    /** Existing observer and ownership controller drive the platform transaction one sample at a time. */
-    private fun runImageSendTestObservation() {
-        val request = activeImageSendTestRequest ?: return
-        val port = imageSendTestPort ?: return
-        fun retry() = scheduleImageTestObservation(500L)
-        fun waitForEntry(reason: String) {
-            if (lastImageTestAdmissionWait != reason) {
-                lastImageTestAdmissionWait = reason
-                onLog("CHAT_CHILD_TEST ENTRY_WAIT reason=$reason")
-            }
-            retry()
-        }
-        fun advanceActive(first: Boolean = false) {
-            if (!ownsTask(PRIVATE_MESSAGES_TASK_ID)) {
-                port.abort("EXACT_LEASE_LOST")
-                return
-            }
-            if (isImageSendTestTouchActive()) {
-                waitForEntry("USER_TOUCH_ACTIVE")
-                return
-            }
-            lastImageTestAdmissionWait = null
-            if (first) onLog("CHAT_CHILD_TEST FIRST_OBSERVE immediate=true")
-            port.observe()
-            if (port.progress() == com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE) retry()
-            else releaseTaskOwnership("图片测试已结束")
-        }
-        if (imageSendTestRequestId() != request || !sessionRunStarted) {
-            port.abort("REQUEST_REVOKED")
-            releaseTaskOwnership("图片测试授权撤销")
-            return
-        }
-        when (port.progress()) {
-            com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL -> {
-                releaseTaskOwnership("图片测试已结束")
-                return
-            }
-            com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE -> {
-                advanceActive()
-                return
-            }
-            com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE -> Unit
-        }
-        if (!isImageSendTestRequestAvailable(request)) {
-            releaseTaskOwnership("图片测试授权已使用或图片池不满足条件")
-            return
-        }
-        if (isImageSendTestTouchActive()) {
-            waitForEntry("USER_TOUCH_ACTIVE")
-            return
-        }
-        val entry = runCatching { port.inspectEntryTarget(request) }.getOrNull()
-        if (entry == null || entry.packageName != targetPackage()) {
-            waitForEntry("FIRST_CONTROL_OR_CHAT_WINDOW_UNAVAILABLE")
-            return
-        }
-        // Reuse the existing startup protection; do not enqueue a first tap that the
-        // gesture coordinator must defer while the foreground quiet period is still running.
-        if (runCatching(foregroundQuietRemainingMs).getOrDefault(Long.MAX_VALUE) > 0L) {
-            waitForEntry("FOREGROUND_STARTUP_PROTECTION")
-            return
-        }
-        val generation = currentRunGeneration()
-        if (!ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
-            !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "独立子任务测试：当前聊天首个目标控件已确认")
-        ) {
-            waitForEntry("PARENT_LEASE_NOT_ADMITTED")
-            return
-        }
-        val coordinator = taskCoordinator
-        val lease = coordinator?.currentLease()?.takeIf {
-            it.taskId == PRIVATE_MESSAGES_TASK_ID && it.runGeneration == generation
-        }
-        if (coordinator == null || lease == null) {
-            waitForEntry("PARENT_LEASE_UNAVAILABLE")
-            return
-        }
-        val target = entry.copy(taskLease = lease)
-        lastImageTestAdmissionWait = null
-        onLog("CHAT_CHILD_TEST ENTRY_READY windowId=${target.nodeTarget.window.windowId};parentLeaseInherited=true")
-        val owns = {
-            activeImageSendTestRequest == request && imageSendTestRequestId() == request &&
-                generation == currentRunGeneration() && isAiReplyActive() && coordinator.isCurrent(lease)
-        }
-        port.begin(target, request, claim = { claimImageSendTestRequest(request) }, ownsTransaction = owns)
-        when (port.progress()) {
-            com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE -> advanceActive(first = true)
-            com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL ->
-                releaseTaskOwnership("图片测试已结束")
-            com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE ->
-                waitForEntry("BEGIN_NOT_ADMITTED")
-        }
     }
 
     /** Return true only after the selected AI business runtime has really initialized. */
@@ -4775,21 +4610,6 @@ class AiReplyObservationRuntime(
     fun scheduleInitialObservation() = scheduleInitialObservation(null)
 
     private fun scheduleInitialObservation(selectedTaskId: String?) {
-        val testRequest = imageSendTestRequestId()
-        if (testRequest != null) {
-            activeImageSendTestRequest = testRequest
-            if (selectedTaskId != PRIVATE_MESSAGES_TASK_ID || imageSendTestPort == null) {
-                sessionRunStarted = false
-                return
-            }
-            privateMessagesTaskController.beginRun(currentRunGeneration())
-            sessionRunStarted = true
-            lastImageTestAdmissionWait = null
-            val testLog = if (testRequest.startsWith(com.freedom.features.aireply.ports.INTERCEPTION_TEST_REQUEST_PREFIX))
-                "MESSAGE_INTERCEPTION_TEST" else "MEDIA_IMAGE_TEST"
-            onLog("$testLog ARMED：等待当前聊天首个点击控件；不调用模型、不读取生产断点、不遍历列表")
-            return
-        }
         pageSelectedPrivateStartupVerificationPending = false
         pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
         resetCrossTaskGreetingsHandoffRetry()
@@ -4979,7 +4799,6 @@ class AiReplyObservationRuntime(
 
     /** Re-reads the durable greetings checkpoint; current-page confirmation is still pending. */
     fun reloadReceivedGreetingsCheckpointAfterServiceReconnect(): Boolean = runCatching {
-        if (isImageSendTestRun() || imageSendTestRequestId() != null) return@runCatching false
         val pageVerified = chatPagePort.reloadReceivedGreetingsCheckpointAfterServiceReconnect()
         val checkpoint = receivedGreetingsCheckpointRepository?.load()
         if (checkpoint != null && (!recoveryContext.pending ||
@@ -5017,7 +4836,6 @@ class AiReplyObservationRuntime(
 
     /** Reloads the message-list checkpoint and accepts it only with a fresh list-page check. */
     fun reloadPrivateMessagesCheckpointAfterServiceReconnect(): Boolean {
-        if (isImageSendTestRun() || imageSendTestRequestId() != null) return false
         val checkpoint = privateMessagesCheckpointRepository?.load() ?: return false
         val retained = messageListCheckpointForUnified
         if (recoveryContext.pending && recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
@@ -5060,7 +4878,7 @@ class AiReplyObservationRuntime(
 
     /** Schedules bounded page or known-region inspection from a normalized, redacted event. */
     fun schedule(event: AccessibilityEventEnvelope) {
-        if (isPrivateFollowUpActive() || isImageSendTestRun()) {
+        if (isPrivateFollowUpActive()) {
             requestPageRouteObservation()
             return
         }
@@ -5484,7 +5302,7 @@ class AiReplyObservationRuntime(
         val title = fresh.chatTitleText?.takeIf(String::isNotBlank) ?: return null
         val conversation = fresh.conversationIdentityKey() ?: return null
         val windowKey = windowSessionKey(fresh) ?: return null
-        if (!canPerformPrivateMessagesUiAction() || userInteractionActive || isImageSendTestTouchActive() ||
+        if (!canPerformPrivateMessagesUiAction() || userInteractionActive || isPrivateFollowUpTouchActive() ||
             fresh.packageName != targetPackage() || fresh.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
             isSemanticallyUnconfirmed(fresh) || !hasSameWindowSession(snapshot, fresh) ||
             title != snapshot.chatTitleText || currentSessionWindowKey != windowKey ||
@@ -5496,7 +5314,7 @@ class AiReplyObservationRuntime(
     /** Only newly admitted actions are executed in M04-D. Interrupted checkpoints are not replayed. */
     private fun startPrivateFollowUp(contactKey: String, sendId: String, snapshot: ChatPageSnapshot) {
         val checkpoint = contactMessageLedger.followUpCheckpoint(contactKey) ?: return
-        val port = imageSendTestPort
+        val port = privateChatFollowUpPort
         val target = privateFollowUpTarget(snapshot)
         if (checkpoint.reconciliationRequired || checkpoint.revision != 0L ||
             port == null || target == null || !followUpEnabled(checkpoint.step.action) ||
@@ -5544,7 +5362,7 @@ class AiReplyObservationRuntime(
         val windowKey = windowSessionKey(fresh) ?: return null
         val surfaceKey = chatSurfaceKey(fresh) ?: return null
         val binding = currentSessionBinding ?: return null
-        if (!ownsPrivateFollowUp(child) || userInteractionActive || isImageSendTestTouchActive() ||
+        if (!ownsPrivateFollowUp(child) || userInteractionActive || isPrivateFollowUpTouchActive() ||
             fresh.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE || isSemanticallyUnconfirmed(fresh) ||
             live.packageName != original.packageName || live.activityClass != original.activityClass ||
             live.windowId != original.windowId || live.generation < original.generation ||
@@ -5563,17 +5381,17 @@ class AiReplyObservationRuntime(
 
     private fun runPrivateFollowUpObservation() {
         val child = activePrivateFollowUp ?: return
-        val port = imageSendTestPort ?: return
+        val port = privateChatFollowUpPort ?: return
         if (!ownsPrivateFollowUp(child)) {
             onPrivateFollowUpTopLevelObserved()
             return
         }
-        if (userInteractionActive || isImageSendTestTouchActive()) {
+        if (userInteractionActive || isPrivateFollowUpTouchActive()) {
             port.abort("PRIVATE_FOLLOW_UP_USER_INTERACTION")
             return
         }
-        if (port.progress() == ImageSendTestProgress.ACTIVE) port.observe()
-        if (port.progress() == ImageSendTestProgress.ACTIVE) {
+        if (port.progress() == PrivateChatFollowUpProgress.ACTIVE) port.observe()
+        if (port.progress() == PrivateChatFollowUpProgress.ACTIVE) {
             scheduleFullInspectionAfter(500L)
             return
         }
