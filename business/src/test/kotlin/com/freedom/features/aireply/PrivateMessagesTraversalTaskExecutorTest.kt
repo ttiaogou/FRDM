@@ -1123,9 +1123,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(damaged)))
         val saved = executor.unresolvedIncompleteUnreadKeys.toSet()
         val repaired = candidate(1, "Pending row", ChatUnreadStatus.UNREAD)
-        val stale = repaired.copy(rowTarget = repaired.rowTarget.copy(
-            window = WindowRef("com.immomo.momo", "MaintabActivity", 2L, 1)
-        ))
+        val stale = candidate(1, "Pending row", ChatUnreadStatus.UNREAD, windowGeneration = 2L)
         val healthy = candidate(0, "Other row", ChatUnreadStatus.READ)
         assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(healthy, stale)))
         assertEquals(saved, executor.unresolvedIncompleteUnreadKeys)
@@ -2331,14 +2329,15 @@ class PrivateMessagesTraversalTaskExecutorTest {
         previewBoundsIntersectViewport: Boolean = true,
         previewBoundsFullyInsideViewport: Boolean = true,
         rowVisible: Boolean = true,
-        inViewport: Boolean = true
+        inViewport: Boolean = true,
+        windowGeneration: Long = 1L
     ): ChatListCandidateSnapshot {
         val row = ScreenRect(0, top, 720, top + rowHeight)
         val nameBounds = ScreenRect(150, top + 10, 380, top + 40)
         return ChatListCandidateSnapshot(
             rowIndex = rowIndex,
             rowTarget = NodeTarget(
-                WindowRef("com.immomo.momo", "MaintabActivity", 1L, 1),
+                WindowRef("com.immomo.momo", "MaintabActivity", windowGeneration, 1),
                 NodePath(listOf(0, rowIndex)),
                 expectedClassName = "android.widget.RelativeLayout"
             ),
