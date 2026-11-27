@@ -166,6 +166,38 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Build and compare shrink-only Freedom debug APK
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/freedom-baseline.apk"
+          gradle --no-daemon --build-cache -PfreedomShrinkDebug=true :app:assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/freedom-slim-debug.apk"
+          python3 - <<'PY'
+          import os
+          import zipfile
+          from pathlib import Path
+
+          def report(path):
+              with zipfile.ZipFile(path) as apk:
+                  dex = [entry for entry in apk.infolist() if entry.filename.endswith(".dex")]
+                  return path.stat().st_size, sum(entry.compress_size for entry in dex), len(dex)
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          baseline = report(root / "freedom-baseline.apk")
+          slim = report(root / "freedom-slim-debug.apk")
+          print("Variant | APK bytes | Compressed DEX bytes | DEX count")
+          print(f"Baseline | {baseline[0]} | {baseline[1]} | {baseline[2]}")
+          print(f"Slim | {slim[0]} | {slim[1]} | {slim[2]}")
+          print(f"Saved bytes: {baseline[0] - slim[0]}")
+          PY
+
+      - name: Upload shrink-only Freedom debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Freedom-slim-debug-apk
+          path: ${{ runner.temp }}/freedom-slim-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
   build-ocr-plugin-apk:
     name: Build OCR plugin debug APK
     needs: arch-guard

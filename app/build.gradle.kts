@@ -3,6 +3,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Opt-in shrink-only debug build; keep the normal diagnostic APK unchanged.
+val shrinkDebug = providers.gradleProperty("freedomShrinkDebug").map { it.toBooleanStrict() }.orElse(false)
+
 val releaseStoreFile = providers.gradleProperty("releaseStoreFile").orNull
 val releaseStorePassword = providers.gradleProperty("releaseStorePassword").orNull
 val releaseKeyAlias = providers.gradleProperty("releaseKeyAlias").orNull
@@ -28,6 +31,10 @@ android {
 
     buildTypes {
         debug {
+            isMinifyEnabled = shrinkDebug.get()
+            if (isMinifyEnabled) {
+                proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "debug-shrink-rules.pro")
+            }
             // Temporary local-only OCR validation. Release artifacts must never log chat bodies.
             buildConfigField("boolean", "OCR_RESULT_DEBUG_LOGGING", "true")
         }
