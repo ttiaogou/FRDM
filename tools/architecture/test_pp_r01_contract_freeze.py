@@ -154,6 +154,7 @@ class PpR01ContractFreezeTest(unittest.TestCase):
             "tools/architecture/test_pp_r05_interception_transaction_migration.py": "983a9908e70616b0298e48a532c0b8cadb1414d8",
             "tools/architecture/test_pp_r05_follow_up_boundary_migration.py": "6d1103b2b8a7c7e4bdafd0e56d56436f4da5a573",
             "tools/architecture/test_pp_r05_facade_convergence.py": "5422e057795e4b30d6dde17123f7301d8a98fe46",
+            "tools/architecture/test_pp_r05_integration_acceptance.py": "cb2537f571b13e7114f0ba4ecc8aba79785c43d8",
         }))
         self.assertEqual([], issues)
 
