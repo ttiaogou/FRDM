@@ -65,6 +65,34 @@ class VisibleDraftContextTest {
         }
     }
 
+    @Test fun l08bConsecutiveIncomingVisualTailAllowsOnlyCurrentVerifiedText() {
+        val earlier = message(10).copy(observationRowIndex = 0, content = "今晚有空吗")
+        val later = message(30).copy(observationRowIndex = 1, content = "一起吃饭")
+        val visual = message(50).copy(observationRowIndex = 2, type = ChatMessageType.UNKNOWN,
+            content = null, contentQuality = MessageContentQuality.AMBIGUOUS)
+        val sticker = message(70).copy(observationRowIndex = 3, type = ChatMessageType.EMOJI,
+            content = null, contentQuality = MessageContentQuality.UNVERIFIED)
+        val complete = batch(earlier, later, visual, sticker).copy(completeTailRowBounds = sticker.bounds)
+        assertEquals(later, VisibleDraftContext.replyTarget(complete))
+        assertEquals("INCOMING_TEXT_BEFORE_ISOLATED_VISUAL", VisibleDraftContext.assess(complete).reason)
+        assertEquals(listOf("今晚有空吗", "一起吃饭"),
+            VisibleDraftContext.build(complete)!!.messages.map { it.content })
+        // Every barrier keeps older text from being promoted into a new request.
+        for (barrier in listOf(later.copy(direction = ChatMessageDirection.OUTGOING),
+            later.copy(direction = ChatMessageDirection.UNKNOWN),
+            later.copy(directionEvidence = DirectionEvidence.AMBIGUOUS),
+            later.copy(contentQuality = MessageContentQuality.AMBIGUOUS))) {
+            assertNull(VisibleDraftContext.build(complete.copy(messages = listOf(earlier, barrier, visual, sticker))))
+        }
+        assertNull(VisibleDraftContext.build(complete.copy(messages = listOf(earlier, visual, sticker))))
+        assertNull(VisibleDraftContext.build(complete.copy(completeTailRowBounds = null)))
+        assertNull(VisibleDraftContext.build(complete.copy(truncated = true)))
+        assertNull(VisibleDraftContext.build(complete.copy(ocrAdmissionDeferred = true)))
+        assertNull(VisibleDraftContext.build(complete.copy(messages = listOf(visual, sticker))))
+        assertNull(VisibleDraftContext.build(complete.copy(messages = listOf(earlier, later, visual,
+            sticker.copy(direction = ChatMessageDirection.OUTGOING)))))
+    }
+
     @Test fun partialAndStaleBatchesAreRejected() {
         val batch = batch(message()).copy(completeTailRowBounds = message().bounds)
         val partial = batch.copy(status = MessageReadStatus.OCR_PARTIAL, ocrFailedTargetCount = 1, unrecognizedRowCount = 1)

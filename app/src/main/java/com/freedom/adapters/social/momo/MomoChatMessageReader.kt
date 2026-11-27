@@ -206,8 +206,13 @@ internal class MomoChatMessageReader(
             status = readResult.status,
             windowSessionKey = readResult.windowSessionKey,
             // Accessibility text is used only as structural evidence and OCR targeting input.
-            // The target app's message body is produced by OCR, not by node text extraction.
-            messages = emptyList(),
+            // Retain only positively classified, payload-free media slots; never promote node
+            // text or duplicate a row for which the OCR mapper will produce the observation.
+            messages = readResult.messages.filter { message ->
+                message.content == null && message.type in setOf(ChatMessageType.IMAGE, ChatMessageType.EMOJI,
+                    ChatMessageType.VOICE, ChatMessageType.VIDEO) &&
+                    readResult.ocrTargets.none { it.rowIndex == message.observationRowIndex }
+            },
             scannedRowCount = readResult.scannedRows,
             candidateRowCount = readResult.candidateRows,
             truncated = readResult.truncated,

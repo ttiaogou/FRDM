@@ -4,7 +4,20 @@ import com.freedom.features.aireply.domain.message.*
 
 /** 草稿仅使用已验证文字；写入安全性由当前会话和输入框的实时校验确认。 */
 internal object VisibleDraftContext {
-    data class Admission(val accepted: Boolean, val retryable: Boolean, val reason: String)
+    data class Admission(val accepted: Boolean, val retryable: Boolean, val reason: String,
+        val replyTarget: ChatMessage? = null)
+
+    /** Only isolated, ordered non-text rows with known incoming direction may be crossed.
+     * An unclassified text failure, unknown sender, or any own outgoing row is a barrier. */
+    private fun isolatedIncomingVisual(message: ChatMessage): Boolean =
+        message.direction == ChatMessageDirection.INCOMING &&
+            message.directionEvidence != DirectionEvidence.AMBIGUOUS &&
+            message.content == null &&
+            message.contentQuality != MessageContentQuality.VERIFIED &&
+            message.type in setOf(ChatMessageType.EMOJI, ChatMessageType.IMAGE,
+                ChatMessageType.VOICE, ChatMessageType.VIDEO, ChatMessageType.UNKNOWN)
+
+    fun replyTarget(batch: ChatMessageBatch): ChatMessage? = assess(batch).replyTarget
 
     // Legacy callers without a batch cannot upgrade AMBIGUOUS OCR evidence.
     fun eligible(message: ChatMessage): Boolean = message.isAiInputEligible &&
@@ -34,20 +47,48 @@ internal object VisibleDraftContext {
         // 会话发生变化。写入器会在 SET_TEXT 前后重新检查
         // 当前会话及可编辑输入框。
         if (batch.truncated) return retry("MESSAGE_LIST_TRUNCATED")
-        // Classification is not proof that earlier incoming text was answered.
-        // Until pending-message selection is extended, do not falsely complete this visit.
-        if (latest.type == ChatMessageType.UNKNOWN ||
-            (latest.type in setOf(ChatMessageType.EMOJI, ChatMessageType.IMAGE, ChatMessageType.VOICE,
-                ChatMessageType.VIDEO) && latest.direction != ChatMessageDirection.OUTGOING &&
-                batch.messagesBottomToTop.drop(1)
-                    .takeWhile { it.direction == ChatMessageDirection.INCOMING }
-                    .any { it.type == ChatMessageType.TEXT })
-        ) return retry("CLASSIFIED_VISUAL_PENDING_CONTEXT")
-        if (latest.type != ChatMessageType.TEXT) return Admission(false, false, "LATEST_MESSAGE_UNSUPPORTED")
-        if (latest.direction == ChatMessageDirection.OUTGOING) return Admission(false, false, "LATEST_MESSAGE_OUTGOING")
-        if (!eligible(batch, latest)) return retry("LATEST_TEXT_OR_DIRECTION_UNVERIFIED")
-        if (latest.content!!.length > 2_000) return Admission(false, false, "LATEST_MESSAGE_EXCEEDS_CONTEXT_LIMIT")
-        return Admission(true, false, "LATEST_INCOMING_VERIFIED")
+        if (latest.type == ChatMessageType.UNKNOWN && !isolatedIncomingVisual(latest))
+            return retry("CLASSIFIED_VISUAL_PENDING_CONTEXT")
+        if (latest.direction == ChatMessageDirection.OUTGOING)
+            return Admission(false, false, "LATEST_MESSAGE_OUTGOING")
+        var target = latest
+        if (isolatedIncomingVisual(latest)) {
+            // Crossing a visual tail is a NEW admission path: require complete current
+            // tail geometry and consecutive row indices, not arbitrary historical text.
+            if (batch.completeTailRowBounds != latest.bounds || latest.bounds.isEmpty ||
+                batch.ocrAdmissionDeferred || latest.observationRowIndex == null
+            ) return retry("CLASSIFIED_VISUAL_PENDING_CONTEXT")
+            var newer = latest
+            var selected: ChatMessage? = null
+            for (row in batch.messagesBottomToTop.drop(1)) {
+                val newerIndex = newer.observationRowIndex ?: break
+                if (row.observationRowIndex != newerIndex - 1 || row.bounds.isEmpty ||
+                    row.bounds.bottom > newer.bounds.top ||
+                    row.direction != ChatMessageDirection.INCOMING ||
+                    row.directionEvidence == DirectionEvidence.AMBIGUOUS
+                ) break
+                if (isolatedIncomingVisual(row)) {
+                    newer = row
+                    continue
+                }
+                if (row.type == ChatMessageType.TEXT && eligible(batch, row)) selected = row
+                break
+            }
+            target = selected ?: return retry("CLASSIFIED_VISUAL_PENDING_CONTEXT")
+        }
+        if (target.type != ChatMessageType.TEXT) {
+            // Retain the previous fail-closed gate for legacy/non-classified payloads.
+            if (target.type in setOf(ChatMessageType.EMOJI, ChatMessageType.IMAGE,
+                    ChatMessageType.VOICE, ChatMessageType.VIDEO) &&
+                batch.messagesBottomToTop.drop(1).takeWhile { it.direction == ChatMessageDirection.INCOMING }
+                    .any { it.type == ChatMessageType.TEXT }
+            ) return retry("CLASSIFIED_VISUAL_PENDING_CONTEXT")
+            return Admission(false, false, "LATEST_MESSAGE_UNSUPPORTED")
+        }
+        if (!eligible(batch, target)) return retry("LATEST_TEXT_OR_DIRECTION_UNVERIFIED")
+        if (target.content!!.length > 2_000) return Admission(false, false, "LATEST_MESSAGE_EXCEEDS_CONTEXT_LIMIT")
+        return Admission(true, false,
+            if (target == latest) "LATEST_INCOMING_VERIFIED" else "INCOMING_TEXT_BEFORE_ISOLATED_VISUAL", target)
     }
 
     fun build(batch: ChatMessageBatch, visitToken: String = batch.windowSessionKey.orEmpty()): ConversationContext? {

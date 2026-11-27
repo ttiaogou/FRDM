@@ -287,6 +287,29 @@ class AiSafeConversationTextTest {
         }
     }
 
+    @Test fun l08bGraphicTailDoesNotPoisonIndependentRowProjections() {
+        val first = msg("今晚有空吗", MessageContentQuality.VERIFIED, 3)
+        val graphic = msg("", MessageContentQuality.AMBIGUOUS, 4).copy(id = "graphic",
+            logicalMessageId = "graphic", type = ChatMessageType.UNKNOWN, content = null,
+            bounds = ScreenRect(0, 40, 100, 70))
+        val textTokens = listOf(OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED,
+            "今晚有空吗", OcrTokenSource.OCR_LINE, 0, line))
+        val graphicTokens = listOf(
+            OcrContentToken(OcrContentKind.PLACEHOLDER, OcrTokenStatus.UNVERIFIED,
+                OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY, OcrTokenSource.VISUAL_GUARD, 0, line),
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.AMBIGUOUS, " 安",
+                OcrTokenSource.OCR_LINE, 0, line))
+        val batch = ChatMessageBatch(MessageReadStatus.SUCCESS, "window", listOf(first, graphic),
+            2, 2, false, 1L, completeTailRowBounds = graphic.bounds,
+            ocrTokensByRowIndex = mapOf(3 to textTokens, 4 to graphicTokens),
+            ocrTextProjectionsByRowIndex = mapOf(3 to OcrTextProjection("今晚有空吗",
+                OcrTextProjectionStatus.COMPLETE, listOf(0), emptyList())))
+        assertEquals(first, VisibleDraftContext.replyTarget(batch))
+        assertEquals(listOf("今晚有空吗"), VisibleDraftContext.build(batch)!!.messages.map { it.content })
+        assertNull(VisibleDraftContext.build(batch.copy(ocrTextProjectionsByRowIndex = emptyMap())))
+        assertNull(VisibleDraftContext.build(batch.copy(ocrTokensByRowIndex = mapOf(4 to graphicTokens))))
+    }
+
     @Test fun missingProjectionNeverUpgradesAmbiguousContent() {
         val marker = OcrUncertaintyMarkers.UNKNOWN_VISUAL_SYMBOL
         val raw = "你好${marker}"

@@ -217,6 +217,29 @@ class VisibleDraftFlowTest {
             privateMessage.decisionRequests.single().outputContract)
     }
 
+    @Test fun l08bVisualTailUsesSameReplyKeyAndDoesNotDuplicateDraftForEitherTask() {
+        for (taskId in listOf(AiDecisionTaskIds.PRIVATE_MESSAGES, AiDecisionTaskIds.RECEIVED_GREETINGS)) {
+            val f = Fixture()
+            val incoming = f.batch.messages.single().copy(observationRowIndex = 0)
+            val graphic = incoming.copy(id = "graphic", type = ChatMessageType.UNKNOWN,
+                content = null, contentQuality = MessageContentQuality.AMBIGUOUS,
+                observationRowIndex = 1, bounds = ScreenRect(0, 40, 100, 70))
+            val original = f.batch.copy(messages = listOf(incoming), completeTailRowBounds = incoming.bounds)
+            val batch = original.copy(messages = listOf(incoming, graphic), scannedRowCount = 2,
+                candidateRowCount = 2, completeTailRowBounds = graphic.bounds)
+            assertEquals(f.coordinator.privateVisibleReplyRequestKey(original, f.snapshot),
+                f.coordinator.privateVisibleReplyRequestKey(batch, f.snapshot))
+            assertTrue(f.coordinator.generateVisibleDraft(batch, f.snapshot, taskId = taskId))
+            assertEquals(listOf("你好"), f.requests.single().conversation.map { it.content })
+            assertFalse(f.coordinator.generateVisibleDraft(original, f.snapshot, taskId = taskId))
+            f.drain()
+            assertEquals(1, f.calls)
+            assertFalse(f.coordinator.generateVisibleDraft(batch, f.snapshot, taskId = taskId))
+            assertTrue(f.logs.any { it.startsWith("AI_CONTEXT_ADMISSION ") &&
+                it.contains("type=UNKNOWN;") && it.contains("accepted=false;reason=UNSUPPORTED_MESSAGE_TYPE") })
+        }
+    }
+
     @Test fun contextDiagnosticsExplainRejectedRowsWithoutChangingModelInput() {
         val f = Fixture()
         val latest = f.batch.messages.single().copy(observationRowIndex = 2,

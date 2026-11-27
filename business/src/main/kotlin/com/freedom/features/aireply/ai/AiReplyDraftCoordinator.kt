@@ -571,10 +571,7 @@ class AiReplyDraftCoordinator(
     fun privateVisibleReplyRequestKey(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): String? {
         val conversation = snapshot.conversationIdentityKey() ?: return null
         val contact = batch.windowSessionKey ?: return null
-        if (!VisibleDraftContext.assess(batch).accepted) return null
-        val incoming = batch.messagesBottomToTop.firstOrNull {
-            it.direction == ChatMessageDirection.INCOMING && VisibleDraftContext.eligible(batch, it)
-        } ?: return null
+        val incoming = VisibleDraftContext.replyTarget(batch) ?: return null
         return replyRequestKey(contact, conversation, incoming)
     }
 
@@ -651,11 +648,11 @@ class AiReplyDraftCoordinator(
         val visible = if (localDraft) VisibleDraftContext.build(batch, visitToken) else null
         if (localDraft && (visible == null || context.conversationId != visible.conversationId ||
                 context.messages.takeLast(visible.messages.size) != visible.messages)) return reject("VISIBLE_CONTEXT_MISMATCH")
-        val latestIncoming = batch.messagesBottomToTop.firstOrNull {
-            (if (localDraft) VisibleDraftContext.eligible(batch, it)
-                else it.isAiInputEligible && AiSafeConversationText.legacy(it.content) != null) &&
-                it.direction == ChatMessageDirection.INCOMING
-        } ?: return reject("NO_VERIFIED_INCOMING_MESSAGE")
+        val latestIncoming = (if (localDraft) VisibleDraftContext.replyTarget(batch)
+            else batch.messagesBottomToTop.firstOrNull {
+                it.isAiInputEligible && AiSafeConversationText.legacy(it.content) != null &&
+                    it.direction == ChatMessageDirection.INCOMING
+            }) ?: return reject("NO_VERIFIED_INCOMING_MESSAGE")
         val latestSafeText = if (localDraft) {
             AiSafeConversationText.visible(batch, latestIncoming)
         } else {
@@ -1716,9 +1713,7 @@ class AiReplyDraftCoordinator(
         val repository = replySegmentTaskRepository ?: return false
         val groups = runCatching { repository.findByConversation(conversation).groupBy { it.requestId }.values }
             .getOrNull() ?: return false
-        val latest = batch.messagesBottomToTop.firstOrNull {
-            it.direction == ChatMessageDirection.INCOMING && VisibleDraftContext.eligible(batch, it)
-        }
+        val latest = VisibleDraftContext.replyTarget(batch)
         val linkedOwner = visitRequestKey?.let { replyTaskRepository?.find(it) }
         for (group in groups) {
             val started = group.any { it.status in setOf(
