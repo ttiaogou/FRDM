@@ -19,6 +19,37 @@ internal object VisibleDraftContext {
 
     fun replyTarget(batch: ChatMessageBatch): ChatMessage? = assess(batch).replyTarget
 
+    /**
+     * Identity of a fully observed, non-actionable visual tail, not a send permit.
+     * Never use OCR hallucinated graphic text as a stability key. Failed OCR,
+     * incomplete rows and unknown sender remain ordinary read-recovery cases.
+     */
+    fun stableVisualDeferralKey(batch: ChatMessageBatch, admission: Admission): List<String>? {
+        if (admission.accepted || !admission.retryable ||
+            admission.reason != "CLASSIFIED_VISUAL_PENDING_CONTEXT" ||
+            batch.windowSessionKey.isNullOrBlank() || !batch.coordinateSpaceReliable ||
+            batch.truncated || batch.status != MessageReadStatus.SUCCESS ||
+            batch.ocrAdmissionDeferred || batch.ocrFailedTargetCount != 0 ||
+            (batch.ocrTargets.isNotEmpty() && !batch.ocrAttempted)
+        ) return null
+        val rows = batch.messagesBottomToTop
+        val latest = rows.firstOrNull() ?: return null
+        if (!isolatedIncomingVisual(latest) || latest.bounds != batch.completeTailRowBounds) return null
+        if (rows.any { it.observationRowIndex == null || it.bounds.isEmpty } ||
+            rows.zipWithNext().any { (newer, older) ->
+                older.observationRowIndex != newer.observationRowIndex!! - 1 ||
+                    older.bounds.bottom > newer.bounds.top
+            } ||
+            batch.ocrTargets.any { target -> target.isMessageTextTarget &&
+                rows.none { it.observationRowIndex == target.rowIndex && it.bounds == target.rowBounds } }
+        ) return null
+        return listOf(batch.windowSessionKey.orEmpty()) + rows.map { row ->
+            listOf(row.observationRowIndex, row.bounds, row.type, row.direction,
+                row.directionEvidence, row.contentQuality, row.stableLogicalMessageId,
+                if (row.type == ChatMessageType.TEXT) row.effectiveContentRevision else "").joinToString("|")
+        }
+    }
+
     // Legacy callers without a batch cannot upgrade AMBIGUOUS OCR evidence.
     fun eligible(message: ChatMessage): Boolean = message.isAiInputEligible &&
         message.directionEvidence != DirectionEvidence.AMBIGUOUS &&

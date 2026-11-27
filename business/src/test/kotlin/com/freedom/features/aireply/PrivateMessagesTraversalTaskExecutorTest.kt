@@ -1735,6 +1735,36 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun l08cUnreadableVisitUsesExistingRoundParkingButCannotParkLinkedReply() {
+        val row = candidate(0, "Visual", ChatUnreadStatus.UNREAD)
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        executor.beginSession(row, key(row), "window")
+        val detail = snapshot(row).copy(
+            pageKind = com.freedom.features.aireply.ports.ChatPageKind.CHAT_DETAIL_CANDIDATE,
+            chatTitleText = "与Visual对话",
+            inputFieldTarget = row.rowTarget, messageListTarget = row.rowTarget, windowGeneration = 1L)
+        assertTrue(executor.recordVerifiedDetailEntry(detail, 100L))
+        val verified = candidate(0, "Visual", ChatUnreadStatus.UNREAD).apply {
+            contactIdentity = ContactRowIdentity("snapshot", "temp", "visual-id", ContactIdentityConfidence.PLATFORM_ID_VERIFIED)
+        }
+        assertTrue(executor.verifyUnfinishedIdentity(verified))
+        assertTrue(executor.deferCurrentUnfinishedRead())
+        val parked = executor.checkpoint()
+        assertEquals(UnfinishedPrivateSessionDisposition.SEND_DEFERRED_THIS_ROUND,
+            parked.unfinishedSessions.single().disposition)
+        assertNull(parked.unfinishedSessions.single().replyRequestKey)
+        assertNull(parked.lastSuccessfulTaskId)
+        val restored = PrivateMessagesTraversalTaskExecutor().apply {
+            restore(parked)
+            resumeAfterReturnedInbox()
+        }
+        assertTrue(restored.isDeferredForCurrentRound(key(row)))
+        assertFalse(restored.canRecoverInterruptedRow(snapshot(row), row))
+        assertTrue(executor.recordVerifiedVisitReplyRequestKey("a".repeat(64)))
+        assertFalse(executor.deferCurrentUnfinishedRead())
+    }
+
+    @Test
     fun r03bDeferralNeverClearsIndependentUnreadUnknownOrIncompleteEvidence() {
         val executor = PrivateMessagesTraversalTaskExecutor().apply {
             initialInboxPositionCheckCompleted = true

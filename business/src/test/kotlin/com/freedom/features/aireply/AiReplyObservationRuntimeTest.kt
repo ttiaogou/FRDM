@@ -7783,6 +7783,23 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun l08cGreetingStableVisualTailDefersWithoutDraftOrSendReceipt() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort().apply { visualOnlyMessages = true }
+        var drafts = 0
+        val runtime = greetingRuntimeFixture(scheduler, port, logs, greetingDraft = { drafts++; true })
+        activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        runUntil(scheduler, 60) { logs.any { it.contains("GREETING_READ_DEFERRED") } }
+        assertEquals(1, port.greetingVisualDeferralCalls)
+        assertEquals(0, drafts)
+        assertEquals(0, port.greetingSendJournalWrites)
+        assertEquals(0, port.greetingDetailSuccessfulCompletions)
+        assertTrue(logs.none { it.contains("GREETING_SEND_COMPLETED") })
+    }
+
+    @Test
     fun greetingOcrSavedWithoutDraftNeverCompletesOrReturns() {
         val scheduler = FakeScheduler()
         val logs = ArrayList<String>()
@@ -9882,6 +9899,73 @@ class AiReplyObservationRuntimeTest {
 
 
     @Test
+    fun l08cPrivateVisualVisitSavesUnfinishedCheckpointBeforeBackAndDoesNotCount() {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply {
+            verifiedMessageWorkAreaNavigationSupported = true
+            receivedGreetingsWorkflowEnabled = true
+            sessionRunEnabled = true
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+            observedDetailIdentityEnabled = true
+            visualOnlyMessages = true
+            page = chatDetailSnapshot()
+        }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val logs = mutableListOf<String>()
+        var saved: PrivateMessagesTraversalCheckpoint? = null
+        var failedSave = false
+        var drafts = 0
+        val repository = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long) = saved
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) {
+                if (!failedSave && checkpoint.unfinishedSessions.any {
+                    it.disposition.name == "SEND_DEFERRED_THIS_ROUND"
+                }) {
+                    failedSave = true
+                    error("simulated checkpoint failure")
+                }
+                saved = checkpoint
+            }
+            override fun clear() { saved = null }
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port, chatMessagePort = port, chatSessionManagementPort = port,
+            gesturePolicy = NoOpGestureApi,
+            targetPackage = { "com.immomo.momo" }, isAiReplyActive = { true },
+            onLog = logs::add, inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            privateMessagesCheckpointRepository = repository,
+            observedPrivateJournalAdmitted = { _, _, _, _ -> true },
+            onDraftConversationObserved = { _, _, _, _ -> drafts++; true },
+            fullInspectionDebounceMs = 300L, regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L }, pageSelectedStartup = true
+        )
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
+        runtime.requestPageRouteObservation()
+        runUntilShortestDelay(scheduler, 30) { port.observedDetailTarget != null }
+        port.observedDetailOutcome = ContactIdentityCaptureOutcome.completed(ContactRowIdentity(
+            snapshotId = "observed-detail-test", temporaryUserId = "observed-visit",
+            contactId = "verified-platform-id", confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        ))
+        port.observedDetailReturnPending = true
+        port.page = chatDetailSnapshot(2L)
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilShortestDelay(scheduler, 70) { logs.any { it.contains("PRIVATE_READ_DEFER_CHECKPOINT_WAIT") } }
+        assertEquals(0, port.navigateBackCalls)
+        assertEquals("INTERRUPTED", saved?.unfinishedSessions?.singleOrNull()?.disposition?.name)
+        runUntilShortestDelay(scheduler, 70) { logs.any { it.contains("PRIVATE_READ_DEFERRED：") } }
+        assertEquals("SEND_DEFERRED_THIS_ROUND", saved?.unfinishedSessions?.singleOrNull()?.disposition?.name)
+        assertNull(saved?.unfinishedSessions?.singleOrNull()?.replyRequestKey)
+        assertNull(saved?.lastSuccessfulTaskId)
+        assertEquals(0, drafts)
+        val reads = port.messageReads
+        runUntilShortestDelay(scheduler, 30) { port.navigateBackCalls == 1 }
+        assertEquals(reads, port.messageReads)
+        assertTrue(logs.none { it.contains("PAIRED_QUOTA[COUNT]") || it.contains("TERMINAL_CONFIRMED") })
+    }
+
+    @Test
     fun privateOcrFailureAfterFastRetriesSchedulesFreshReadOnlyObservation() {
         val scheduler = FakeScheduler()
         val candidate = sessionCandidate(completeBoundaryEvidence = true)
@@ -10561,6 +10645,8 @@ class AiReplyObservationRuntimeTest {
         }
         var lastMessageLimit = 0
         var lastMessagePage: ChatPageSnapshot? = null
+        var visualOnlyMessages = false
+        var greetingVisualDeferralCalls = 0
         var messageContentQuality = MessageContentQuality.VERIFIED
         var messageDirection = ChatMessageDirection.INCOMING
         var persistedChatSamples = 0
@@ -10759,6 +10845,10 @@ class AiReplyObservationRuntimeTest {
             greetingSendJournalWrites++
             return greetingSendJournalAccepted && confirmationId.isNotBlank()
         }
+        override fun deferReceivedGreetingAfterUnreadableContent(): Boolean {
+            greetingVisualDeferralCalls++
+            return greetingDetailReturnAccepted
+        }
         override fun deferReceivedGreetingAfterModelFailure(): Boolean {
             greetingModelFailureDeferralCalls++
             return greetingModelFailureDeferralAccepted && greetingDetailReturnAccepted
@@ -10903,11 +10993,12 @@ class AiReplyObservationRuntimeTest {
             val message = ChatMessage(
                 id = "fake-message-id",
                 direction = messageDirection,
-                type = ChatMessageType.TEXT,
-                content = "PRIVATE_CHAT_BODY_SENTINEL",
+                type = if (visualOnlyMessages) ChatMessageType.UNKNOWN else ChatMessageType.TEXT,
+                content = if (visualOnlyMessages) null else "PRIVATE_CHAT_BODY_SENTINEL",
                 bounds = ScreenRect(10, 20, 300, 80),
                 directionEvidence = DirectionEvidence.BUBBLE_GEOMETRY,
-                contentQuality = messageContentQuality
+                contentQuality = if (visualOnlyMessages) MessageContentQuality.AMBIGUOUS else messageContentQuality,
+                observationRowIndex = if (visualOnlyMessages) 1 else null
             )
             return ChatMessageBatch(
                 status = messageReadStatuses.getOrNull(messageReads - 1) ?: MessageReadStatus.SUCCESS,
@@ -10922,7 +11013,8 @@ class AiReplyObservationRuntimeTest {
                 scannedRowCount = 3,
                 candidateRowCount = 1,
                 truncated = false,
-                capturedAtMillis = 1L,
+                capturedAtMillis = if (visualOnlyMessages) messageReads.toLong() else 1L,
+                completeTailRowBounds = if (visualOnlyMessages) message.bounds else null,
                 ocrTargets = if (ocrDebugTextByRowIndex == null && !simulateOcrWithoutDebugPayload) emptyList() else listOf(
                     ChatMessageOcrTarget(
                         rowIndex = 1,

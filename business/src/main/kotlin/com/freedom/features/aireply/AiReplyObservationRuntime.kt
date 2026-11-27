@@ -22,6 +22,7 @@ import com.freedom.core.accessibility.gesture.VerticalSwipeDirection
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.accessibility.gesture.GestureExecutionResult
 import com.freedom.core.accessibility.gesture.GestureExecutionStatus
+import com.freedom.features.aireply.ai.VisibleDraftContext
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.MessageReadStatus
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
@@ -5021,6 +5022,7 @@ class AiReplyObservationRuntime(
             return
         }
         if (sessionRunStarted) {
+            if (!receivedGreetingsTaskActive && continueDeferredPrivateReadReturn(snapshot)) return
             if (!receivedGreetingsTaskActive && currentSessionSendConfirmed &&
                 sessionManagerState == SessionManagerState.READING_SESSION
             ) {
@@ -6076,7 +6078,8 @@ class AiReplyObservationRuntime(
             if (started) onLog("AI OCR 启动：身份采集已终态且聊天页已恢复；开始处理结构批次中的 OCR 区域")
             return
         }
-        val draftAdmission = com.freedom.features.aireply.ai.VisibleDraftContext.assess(batch)
+        val draftAdmission = VisibleDraftContext.assess(batch)
+        if (privateDetail && continueDeferredPrivateReadReturn(snapshot)) return
         if (observedDetail) {
             val executor = privateMessagesTraversalTaskExecutor
             val entry = executor.currentUnfinishedSession()
@@ -6107,6 +6110,10 @@ class AiReplyObservationRuntime(
             if (!observedPrivateDetailVerified(snapshot) || isSendConfirmationPending()) return
         }
         if (draftTargetConfirmed && draftAdmission.retryable) {
+            // Count only independent, matching visual-tail observations in this visit.
+            // Actual OCR failures and missing structural evidence keep the old recovery path.
+            val stableVisual = observeStableVisualReadFailure(batch, draftAdmission)
+            if (stableVisual && tryDeferUnreadableVisualVisit(snapshot, batch, greetingDetail)) return
             // 使用新快照重新 OCR；不把重试成功等同于内容已验证。
             if (draftRetryTask != null) return
             if (draftReadRetries < 2) {
@@ -6130,10 +6137,13 @@ class AiReplyObservationRuntime(
             onLog("AI 会话返回门禁[OCR_READ_NOT_CONFIRMED]：消息证据仍不完整；保留当前聊天页")
             if (privateDetail && !receivedGreetingsTaskActive) {
                 schedulePrivatePreSendReadRetry("OCR_READ_NOT_CONFIRMED")
+            } else if (greetingDetail && stableVisual) {
+                scheduleReceivedGreetingsRecoveryRetry("非文本延期返回暂未准入；保留原招呼")
             }
             return
         }
 
+        stableVisualReadFailure = null
         if (privateDetail && draftAdmission.accepted) {
             privateOcrRecoveryAttempt = 0
             draftReadRetries = 0
@@ -8723,7 +8733,12 @@ class AiReplyObservationRuntime(
                 recoverRetryablePrivateList("PRIVATE_RETURN_DETAIL_UNVERIFIED")
                 return@schedule
             }
-            if (currentSessionWindowKey?.let { privateNoReplyCompleted(draftVisitToken, it) } == true) {
+            if (deferredPrivateReadReturnVisit == draftVisitToken) {
+                if (!privateReadDeferralPageReady(current)) {
+                    scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                    return@schedule
+                }
+            } else if (currentSessionWindowKey?.let { privateNoReplyCompleted(draftVisitToken, it) } == true) {
                 completePrivateBusinessObservation("MODEL_NO_REPLY")
             }
             sessionManagerState = SessionManagerState.RETURNING_TO_SESSION_LIST
@@ -9393,10 +9408,107 @@ class AiReplyObservationRuntime(
         }
     }
 
+    private data class StableVisualReadFailure(
+        val visit: String, val key: List<String>, val observationId: String,
+        val capturedAtMillis: Long, val count: Int
+    )
+    private var stableVisualReadFailure: StableVisualReadFailure? = null
+    private var deferredPrivateReadReturnVisit: String? = null
+
+    private fun observeStableVisualReadFailure(
+        batch: ChatMessageBatch, admission: VisibleDraftContext.Admission
+    ): Boolean {
+        val key = VisibleDraftContext.stableVisualDeferralKey(batch, admission)
+        if (key == null) {
+            stableVisualReadFailure = null
+            return false
+        }
+        val old = stableVisualReadFailure
+        val same = old != null && old.visit == draftVisitToken && old.key == key
+        if (same && old != null && (old.observationId == batch.effectiveObservationBatchId ||
+                batch.capturedAtMillis <= old.capturedAtMillis)) return false
+        val count = if (same && old != null) (old.count + 1).coerceAtMost(2) else 1
+        stableVisualReadFailure = StableVisualReadFailure(draftVisitToken, key,
+            batch.effectiveObservationBatchId, batch.capturedAtMillis, count)
+        return count >= 2
+    }
+
+    private fun unreadableVisualReturnIdle(): Boolean =
+        sessionRunStarted && isAiReplyActive() && !recoveryContext.pending && !userInteractionActive &&
+            activeSessionGestureRequestId == null && !isPrivateFollowUpActive() &&
+            !isSendConfirmationPending() && !isSendControlRecoveryPending() &&
+            !isConversationDraftPending() && !currentSessionSendConfirmed &&
+            confirmedGreetingSend == null && privateModelFailureRecovery == null &&
+            !privateModelRetryAwaitingDraft && greetingModelFailureRecovery == null
+
+    private fun privateReadDeferralPageReady(snapshot: ChatPageSnapshot): Boolean =
+        unreadableVisualReturnIdle() && !receivedGreetingsTaskActive &&
+            sessionManagerState == SessionManagerState.READING_SESSION &&
+            canPerformPrivateMessagesUiAction() && hasBoundPrivateDetailRecoverySession() &&
+            snapshot.packageName == targetPackage() && snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            currentSessionWindowKey == windowSessionKey(snapshot) &&
+            isExpectedPrivateSessionDetail(snapshot) &&
+            ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null &&
+            !isSemanticallyUnconfirmed(snapshot) &&
+            !pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey()) &&
+            pendingPrivateQuotaReceipt == null && !privateQuotaReturnReady &&
+            AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(),
+                runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()).allowed
+
+    private fun continueDeferredPrivateReadReturn(snapshot: ChatPageSnapshot): Boolean {
+        if (deferredPrivateReadReturnVisit != draftVisitToken ||
+            sessionManagerState != SessionManagerState.READING_SESSION ||
+            currentSessionSendConfirmed || isSendConfirmationPending() || isSendControlRecoveryPending()
+        ) return false
+        if (sessionTransitionTask == null) {
+            if (privateReadDeferralPageReady(snapshot)) scheduleReturnToSessionList(snapshot)
+            else scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+        }
+        return true
+    }
+
+    private fun tryDeferUnreadableVisualVisit(
+        snapshot: ChatPageSnapshot, batch: ChatMessageBatch, greeting: Boolean
+    ): Boolean {
+        if (!unreadableVisualReturnIdle()) return false
+        val fresh = runCatching { readPageSnapshot(AiReplyPageReadPurpose.RETURN_NAVIGATION_VERIFY) }
+            .getOrNull() ?: return false
+        if (!hasSameWindowSession(snapshot, fresh) || batch.windowSessionKey != windowSessionKey(fresh) ||
+            !AndroidRecoveryExecutionGate.assess(fresh, targetPackage(),
+                runCatching { inspectAndroidRecoveryReadiness(fresh) }.getOrNull()).allowed ||
+            !unreadableVisualReturnIdle()
+        ) return false
+        if (greeting) {
+            if (greetingBindingRejectReason(fresh) != null ||
+                !receivedGreetingsTaskFlow.deferAfterUnreadableContent()) return false
+            onLog("GREETING_READ_DEFERRED：稳定非文本内容无可信待回复文字；原行延期；不计成功")
+            invalidatePendingMessageRead()
+            scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
+            return true
+        }
+        if (!privateReadDeferralPageReady(fresh)) return false
+        val repository = privateMessagesCheckpointRepository ?: return false
+        val traversal = privateMessagesTraversalTaskExecutor
+        val entry = traversal.currentUnfinishedSession() ?: return false
+        if (entry.conversationKey != fresh.conversationIdentityKey() ||
+            !traversal.deferCurrentUnfinishedRead()) return false
+        if (runCatching { repository.save(traversal.checkpoint()) }.isFailure) {
+            onLog("PRIVATE_READ_DEFER_CHECKPOINT_WAIT：延期检查点未写入；禁止 BACK")
+            return false
+        }
+        // Persist first. No send receipt, processed flag or quota is created here.
+        deferredPrivateReadReturnVisit = draftVisitToken
+        draftRetryTask?.cancel()
+        draftRetryTask = null
+        onLog("PRIVATE_READ_DEFERRED：稳定非文本内容无可信待回复文字；保留原会话；本轮延期；不计成功")
+        scheduleReturnToSessionList(fresh)
+        return true
+    }
+
     /**
-     * Fast OCR retries stay bounded. After they are exhausted, continue with
-     * low-frequency, read-only observations of the same verified private chat.
-     * An OCR failure never authorizes drafting, sending, or returning.
+     * Fast OCR retries stay bounded. Genuine read failures retain low-frequency
+     * observations of the same verified chat; only positively isolated visual
+     * content may enter the separate durable, pre-send deferral path above.
      */
     private fun schedulePrivatePreSendReadRetry(reason: String) {
         if (!sessionRunStarted || receivedGreetingsTaskActive ||
@@ -9479,6 +9591,8 @@ class AiReplyObservationRuntime(
         greetingModelFailureRecoveryTask = null
         greetingModelFailureRecovery = null
         draftVisitToken = java.util.UUID.randomUUID().toString()
+        stableVisualReadFailure = null
+        deferredPrivateReadReturnVisit = null
         greetingChatBinding = null
         confirmedGreetingSend = null
         draftReadRetries = 0

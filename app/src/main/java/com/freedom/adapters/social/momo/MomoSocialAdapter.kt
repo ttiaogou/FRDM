@@ -4217,6 +4217,15 @@ internal class MomoSocialAdapter(
         return completeReceivedGreetingDetailInspectionInternal(false, "DRAFT_MODEL_FAILURE")
     }
 
+    override fun deferReceivedGreetingAfterUnreadableContent(): Boolean {
+        val selected = sayHiSelectedGreeting ?: return false
+        // Storage failure or any existing confirmed send fact blocks this pre-send path.
+        val priorSend = runCatching { sayHiSendReturnJournal.findByRow(selected.rowKey) }
+            .getOrElse { return false }
+        if (priorSend != null) return false
+        return completeReceivedGreetingDetailInspectionInternal(false, "UNREADABLE_VISUAL_CONTENT")
+    }
+
     override fun deferReceivedGreetingAfterManualReturn(): Boolean {
         val selected = sayHiSelectedGreeting ?: return false
         val priorSend = runCatching { sayHiSendReturnJournal.findByRow(selected.rowKey) }.getOrNull()

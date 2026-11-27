@@ -706,6 +706,9 @@ interface ChatPagePort {
      */
     fun deferReceivedGreetingAfterModelFailure(): Boolean = false
 
+    /** Stable unreadable visual content; retains the original row without a send receipt. */
+    fun deferReceivedGreetingAfterUnreadableContent(): Boolean = false
+
     /** Records a manually returned, still-unconfirmed greeting row and releases detail state. */
     fun deferReceivedGreetingAfterManualReturn(): Boolean = false
 

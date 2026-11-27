@@ -93,6 +93,26 @@ class VisibleDraftContextTest {
             sticker.copy(direction = ChatMessageDirection.OUTGOING)))))
     }
 
+    @Test fun l08cStableVisualDeferralRequiresCompleteClassifiedTailNotAnOcrFailure() {
+        val visual = message(30).copy(observationRowIndex = 1, type = ChatMessageType.UNKNOWN,
+            content = null, contentQuality = MessageContentQuality.AMBIGUOUS)
+        val earlier = message(10).copy(observationRowIndex = 0, direction = ChatMessageDirection.OUTGOING)
+        val complete = batch(earlier, visual).copy(completeTailRowBounds = visual.bounds)
+        fun key(value: ChatMessageBatch) = VisibleDraftContext.stableVisualDeferralKey(value,
+            VisibleDraftContext.assess(value))
+        val original = requireNotNull(key(complete))
+        assertEquals(original, key(complete.copy(ocrSampleTextByRowIndex = mapOf(1 to "安"))))
+        assertEquals(original, key(complete.copy(ocrSampleTextByRowIndex = mapOf(1 to "方"))))
+        assertNull(key(complete.copy(status = MessageReadStatus.OCR_FAILED)))
+        assertNull(key(complete.copy(ocrFailedTargetCount = 1)))
+        assertNull(key(complete.copy(truncated = true)))
+        assertNull(key(complete.copy(completeTailRowBounds = null)))
+        assertNull(key(complete.copy(ocrAdmissionDeferred = true)))
+        assertNull(key(complete.copy(messages = listOf(earlier.copy(observationRowIndex = -1), visual))))
+        assertNull(key(complete.copy(messages = listOf(earlier, visual.copy(direction = ChatMessageDirection.UNKNOWN)))))
+        assertNull(key(complete.copy(messages = listOf(earlier.copy(direction = ChatMessageDirection.INCOMING), visual))))
+    }
+
     @Test fun partialAndStaleBatchesAreRejected() {
         val batch = batch(message()).copy(completeTailRowBounds = message().bounds)
         val partial = batch.copy(status = MessageReadStatus.OCR_PARTIAL, ocrFailedTargetCount = 1, unrecognizedRowCount = 1)

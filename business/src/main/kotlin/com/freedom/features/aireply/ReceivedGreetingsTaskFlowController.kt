@@ -148,6 +148,9 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun deferAfterModelFailure(): Boolean = executor.deferAfterModelFailure()
 
+    fun deferAfterUnreadableContent(): Boolean =
+        lifecycle.isActive && lifecycle.ownsTask() && executor.deferAfterUnreadableContent()
+
     fun deferReceivedGreetingAfterManualReturn(): Boolean =
         executor.deferReceivedGreetingAfterManualReturn()
 

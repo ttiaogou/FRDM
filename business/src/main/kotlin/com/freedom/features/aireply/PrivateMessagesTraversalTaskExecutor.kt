@@ -525,7 +525,16 @@ internal class PrivateMessagesTraversalTaskExecutor {
                 (key == entry.sourceKey || key == entry.verifiedKey || key == entry.titleKey)
         }
 
-    fun deferCurrentUnfinishedSend(): Boolean {
+    fun deferCurrentUnfinishedSend(): Boolean = parkCurrentUnfinishedSession()
+
+    /** Reuse the serialized round-local parking state, only before any linked reply request. */
+    fun deferCurrentUnfinishedRead(): Boolean {
+        val entry = currentUnfinishedSession() ?: return false
+        if (entry.replyRequestKey != null) return false
+        return parkCurrentUnfinishedSession()
+    }
+
+    private fun parkCurrentUnfinishedSession(): Boolean {
         val entry = currentUnfinishedSession() ?: return false
         unfinishedSessions[entry.sourceKey] = entry.copy(
             disposition = UnfinishedPrivateSessionDisposition.SEND_DEFERRED_THIS_ROUND

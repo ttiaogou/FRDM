@@ -159,6 +159,11 @@ internal class ReceivedGreetingsTaskExecutor(
         return runCatching { pagePort.deferReceivedGreetingAfterModelFailure() }.getOrDefault(false)
     }
 
+    fun deferAfterUnreadableContent(): Boolean {
+        if (!ownsTask()) return false
+        return runCatching { pagePort.deferReceivedGreetingAfterUnreadableContent() }.getOrDefault(false)
+    }
+
     /** Defers an unconfirmed greeting after manual return while retaining its durable record. */
     fun deferReceivedGreetingAfterManualReturn(): Boolean {
         if (!ownsTask()) return false
