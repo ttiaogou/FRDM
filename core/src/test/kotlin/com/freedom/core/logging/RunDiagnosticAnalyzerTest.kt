@@ -371,6 +371,23 @@ class RunDiagnosticAnalyzerTest {
     }
 
     @Test
+    fun t05LegacyRecoveryTransitionDoesNotCountAsErrorButTypedFailureDoes() {
+        val legacy = event(1, 1, "private_recovery",
+            "AI 私聊异常会话[RELOCATION_ORIGIN_VERIFIED]：已重新找到目标或确认已读边界；保留未解决身份"
+        ).copy(level = RunLogLevel.ERROR, result = "FAILED_OR_EXCEPTION")
+        val quality = event(2, 2, "private_recovery",
+            "AI 私聊异常会话[INCOMPLETE_UNREAD_RETRYABLE]：unresolved=1；cacheWrite=false；保持检查点"
+        ).copy(level = RunLogLevel.ERROR, result = "FAILED_OR_EXCEPTION")
+        val actual = quality.copy(sequence = 3, errorType = "IllegalStateException")
+        val detail = legacy.copy(sequence = 4, errorDetail = "actual failure")
+        val report = RunDiagnosticAnalyzer.analyze("RUN_T05", "STOPPED", 0, 5,
+            listOf(legacy, quality, actual, detail), RunDiagnosticCounters(errorEvents = 4))
+        assertEquals(2L, report.counters.errorEvents)
+        assertEquals(1L, report.counters.warningEvents)
+        assertEquals(listOf(3L, 4L), report.issues.first { it.code == "RUNTIME_ERRORS_PRESENT" }.evidenceSequences)
+    }
+
+    @Test
     fun zeroDirectionUnknownSummaryDoesNotCreateFalseDirectionIssue() {
         val warningSummary = event(
             1, 1, "chat_batch_summary", "AI 模式消息批次摘要：状态=WARN；方向不明=0；OCR失败区域=0"

@@ -943,6 +943,10 @@ class AiReplyObservationRuntimeTest {
         handle.invoke(fixture.runtime, altered)
 
         assertTrue(fixture.logs.any { it.contains("INCOMPLETE_UNREAD_RETRYABLE") })
+        val rowDecision = fixture.logs.filter { it.contains("INCOMPLETE_UNREAD_RETRYABLE") ||
+            it.contains("LIST_EVIDENCE_INSUFFICIENT") }
+        assertEquals(1, rowDecision.size)
+        assertTrue(rowDecision.single().contains("scope=LIST_EVIDENCE_INSUFFICIENT"))
         assertTrue(fixture.logs.any { it.contains("PRIVATE_INCOMPLETE_UNREAD_ROW") &&
             it.contains("PAUSED_CHECKPOINT_SAVED") })
         assertEquals(0, fixture.dispatchedGestures())
@@ -967,6 +971,11 @@ class AiReplyObservationRuntimeTest {
         handle.invoke(fixture.runtime, mixed)
 
         assertTrue(fixture.logs.any { it.contains("ROW_SCOPED_BLOCK") })
+        val rowDecision = fixture.logs.filter { it.contains("INCOMPLETE_UNREAD_RETRYABLE") ||
+            it.contains("ROW_SCOPED_BLOCK") }
+        assertEquals(1, rowDecision.size)
+        assertTrue(rowDecision.single().contains("scope=ROW_SCOPED_BLOCK"))
+        assertTrue(rowDecision.single().contains("unresolved=1"))
         assertFalse(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") &&
             it.contains("PRIVATE_INCOMPLETE_UNREAD_ROW") })
         assertEquals(1, fixture.dispatchedGestures())

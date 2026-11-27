@@ -6719,15 +6719,19 @@ class AiReplyObservationRuntime(
         if (listEvaluation.incompleteUnreadEvidenceBlocked) {
             // Preserve the original round and opaque pending hints. A local row fault
             // cannot authorize a click on that row or count it as READ/attempted/completed.
+            // One decision record per observation, rather than two overlapping
+            // warnings. Keep count, reason and scope together so the existing
+            // consecutive-event deduplication can preserve the repeat count.
+            val scope = if (listEvaluation.incompleteUnreadAllowsIndependentTraversal)
+                "ROW_SCOPED_BLOCK；仅隔离待复核会话；其余列表动作仍须通过原有窗口、租约与手势门禁；禁止提前完成本轮"
+            else "LIST_EVIDENCE_INSUFFICIENT；缺少独立完整行证据或存在无法安全跨视口匹配的匿名行；保持原恢复门禁"
             onLog("AI 私聊异常会话[INCOMPLETE_UNREAD_RETRYABLE]：" +
                 "unresolved=${privateMessagesTraversalTaskExecutor.unresolvedIncompleteUnreadKeys.size}；" +
-                "cacheWrite=false；保持检查点，待原行新鲜可操作证据确认")
+                "cacheWrite=false；保持检查点，待原行新鲜可操作证据确认；scope=$scope")
             if (!listEvaluation.incompleteUnreadAllowsIndependentTraversal) {
-                onLog("AI 私聊异常会话[LIST_EVIDENCE_INSUFFICIENT]：缺少独立完整行证据或存在无法安全跨视口匹配的匿名行；保持原恢复门禁")
                 recoverRetryablePrivateList("PRIVATE_INCOMPLETE_UNREAD_ROW")
                 return
             }
-            onLog("AI 私聊异常会话[ROW_SCOPED_BLOCK]：仅隔离待复核会话；其余列表动作仍须通过原有窗口、租约与手势门禁；禁止提前完成本轮")
         }
 
         // The traversal executor owns the snapshot-to-decision sequence. This runtime performs

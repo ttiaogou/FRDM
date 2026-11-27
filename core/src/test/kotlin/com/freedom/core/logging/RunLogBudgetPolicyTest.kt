@@ -216,6 +216,36 @@ class RunLogBudgetPolicyTest {
     }
 
     @Test
+    fun t05PrivateRowRecoveryTransitionsAreInfoButActualFailuresStayVisible() {
+        val messages = listOf(
+            "AI 私聊异常会话[RELOCATION_ORIGIN_VERIFIED]：已重新找到目标或确认已读边界；保留未解决身份",
+            "AI 私聊异常会话[RELOCATION_STARTED]：保留原轮次、已处理记录与未决身份；重新寻找待处理目标，找到后立即反向处理",
+            "AI 私聊异常会话[DEFERRED_WORK_HANDOFF]：局部待复核身份不计为完成；保留检查点并安全交接"
+        )
+        for (message in messages) {
+            assertEquals(RunLogLevel.INFO, RunLogBudgetPolicy.inferLevel(message))
+            assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("$message；写入失败"))
+            assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("$message；IllegalStateException"))
+            assertEquals(RunLogLevel.FATAL, RunLogBudgetPolicy.inferLevel("$message；FATAL"))
+            assertTrue(RunLogBudgetPolicy.inferLevel("$message；TIMEOUT") != RunLogLevel.INFO)
+        }
+    }
+
+    @Test
+    fun t05CombinedPrivateRowDecisionRetainsWarningAndScope() {
+        val prefix = "AI 私聊异常会话[INCOMPLETE_UNREAD_RETRYABLE]：unresolved=1；cacheWrite=false；保持检查点，待原行新鲜可操作证据确认；scope="
+        for (scope in listOf(
+            "ROW_SCOPED_BLOCK；仅隔离待复核会话；其余列表动作仍须通过原有窗口、租约与手势门禁；禁止提前完成本轮",
+            "LIST_EVIDENCE_INSUFFICIENT；缺少独立完整行证据或存在无法安全跨视口匹配的匿名行；保持原恢复门禁"
+        )) {
+            val message = prefix + scope
+            assertEquals(RunLogLevel.WARN, RunLogBudgetPolicy.inferLevel(message))
+            assertEquals(RunLogCategory.DATA_QUALITY, RunLogBudgetPolicy.inferCategory(message))
+            assertEquals(RunLogLevel.ERROR, RunLogBudgetPolicy.inferLevel("$message；读取失败"))
+        }
+    }
+
+    @Test
     fun receivedGreetingsNavigationPauseAfterTimeoutIsWarning() {
         val message = "收到的招呼导航暂停：异步页面切换等待失败或超时；不把中间页面当作消息列表"
 

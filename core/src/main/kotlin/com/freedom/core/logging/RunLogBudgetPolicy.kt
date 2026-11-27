@@ -224,7 +224,19 @@ object RunLogBudgetPolicy {
             message.contains("不返回失败原因") &&
             inferLevel(message) == RunLogLevel.INFO
 
+    /** Successful/started recovery transitions, not new observation failures.
+     * Exact matching prevents an appended timeout, exception or write failure
+     * from inheriting the informational level of the transition.
+     */
+    fun isBenignPrivateRowRecoveryTransition(message: String): Boolean =
+        message.trim() in setOf(
+            "AI 私聊异常会话[RELOCATION_ORIGIN_VERIFIED]：已重新找到目标或确认已读边界；保留未解决身份",
+            "AI 私聊异常会话[RELOCATION_STARTED]：保留原轮次、已处理记录与未决身份；重新寻找待处理目标，找到后立即反向处理",
+            "AI 私聊异常会话[DEFERRED_WORK_HANDOFF]：局部待复核身份不计为完成；保留检查点并安全交接"
+        )
+
     fun inferLevel(message: String): RunLogLevel {
+        if (isBenignPrivateRowRecoveryTransition(message)) return RunLogLevel.INFO
         val value = message.uppercase(Locale.ROOT)
         val observationValue = if (value.contains("AI 联系人身份采集[OBSERVE_WAITING]")) {
             value.replace("不返回失败原因", "")

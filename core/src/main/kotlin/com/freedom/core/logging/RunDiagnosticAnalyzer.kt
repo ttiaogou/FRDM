@@ -26,7 +26,7 @@ object RunDiagnosticAnalyzer {
         // old run is not permanently reported as a runtime failure.
         val errorEvents = persistedErrorLevelEvents.filter(::isRuntimeFailureEvent)
         val downgradedQualityEvents = persistedErrorLevelEvents.filterNot(::isRuntimeFailureEvent)
-            .filterNot(::isLegacyBenignIdentityWait)
+            .filterNot(::isLegacyBenignObservation)
         val persistedWarningEvents = sorted.filter {
             it.level == RunLogLevel.WARN && !isPreviousRunRecoveryEvent(it)
         }
@@ -262,13 +262,20 @@ object RunDiagnosticAnalyzer {
             event.errorType.isNullOrBlank() && event.errorDetail.isNullOrBlank() &&
             RunLogBudgetPolicy.isBenignIdentityObservationWait(event.message)
 
+    private fun isLegacyBenignObservation(event: RunDiagnosticEvent): Boolean =
+        isLegacyBenignIdentityWait(event) ||
+            (event.level == RunLogLevel.ERROR && event.result == "FAILED_OR_EXCEPTION" &&
+                event.errorType.isNullOrBlank() && event.errorDetail.isNullOrBlank() &&
+                RunLogBudgetPolicy.isBenignPrivateRowRecoveryTransition(event.message))
+
     /** True only for a confirmed error/fatal event belonging to the run being diagnosed. */
     fun isRuntimeFailureEvent(event: RunDiagnosticEvent): Boolean =
         !isPreviousRunRecoveryEvent(event) && (
             event.level == RunLogLevel.FATAL ||
                 (event.level == RunLogLevel.ERROR &&
-                    !isLegacyBenignIdentityWait(event) &&
-                    !RunLogBudgetPolicy.isNonFatalQualityWarningMessage(event.message))
+                    !isLegacyBenignObservation(event) &&
+                    (!event.errorType.isNullOrBlank() || !event.errorDetail.isNullOrBlank() ||
+                        !RunLogBudgetPolicy.isNonFatalQualityWarningMessage(event.message)))
             )
 
     private fun isMessageDirectionUnresolvedEvent(event: RunDiagnosticEvent): Boolean =
