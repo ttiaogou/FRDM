@@ -3,6 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r05_avatar_transaction_migration import restore_r05b_adapter
 
 ROOT = Path(__file__).resolve().parents[2]
 MOMO = ROOT / "app/src/main/java/com/freedom/adapters/social/momo/"
@@ -30,6 +31,7 @@ def replace_once(s, old, new):
 
 
 def restore_r05a_adapter(adapter):
+    adapter = restore_r05b_adapter(adapter)
     nav = source("MomoSayHiNavigationFlowController.kt")
     search = source("MomoReceivedGreetingsEntrySearchController.kt")
     traversal = source("MomoSayHiTraversalState.kt")

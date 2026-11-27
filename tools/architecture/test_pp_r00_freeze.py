@@ -186,6 +186,15 @@ class PpR00FreezeTest(unittest.TestCase):
         }.items():
             self.assertEqual(previous, reviewed_s1[path])
             reviewed_s1[path] = replacement
+        # R05-C: exact relocation of existing avatar and identity transaction state operations.
+        for path, (previous, replacement) in {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": (
+                "a1cb58a1eaecb734a48a58656e4bdd454b52466d", "a7e2b9cb16f4764839f55d24f69e8bb7fb462f4d"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapterComponents.kt": (
+                "2df5450adbc3d941d6df48a5b8a4bddba8700129", "808407dd637949c040408ba5101e0849d7075cf2"),
+        }.items():
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = replacement
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

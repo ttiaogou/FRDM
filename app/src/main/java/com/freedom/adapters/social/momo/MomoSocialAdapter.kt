@@ -366,55 +366,17 @@ internal class MomoSocialAdapter(
         pending: PendingInboxIdentityCapture?,
         next: MomoAvatarClickTransactionState,
         reason: String
-    ) {
-        if (pending == null) return
-        val previous = pending.avatarClickState
-        if (previous == next) return
-        if (!previous.canTransitionTo(next)) {
-            onLog(
-                "AI 头像点击事务：非法状态转换被拒绝；" +
-                    "from=${previous.name}；to=${next.name}；reason=$reason"
-            )
-            return
-        }
-        pending.avatarClickState = next
-        onLog(
-            "AI 头像点击事务状态：from=${previous.name}；to=${next.name}；" +
-                "reason=$reason"
-        )
-    }
+    ) = sessionComponents.inboxIdentity.transitionAvatarClickState(pending, next, reason, onLog)
 
     private fun releaseAvatarCaptureForRetry(
         pending: PendingInboxIdentityCapture,
         reason: String
-    ) {
-        transitionAvatarClickState(
-            pending,
-            MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
-            reason
-        )
-        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-            if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture === pending) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
-        }
-    }
+    ) = sessionComponents.inboxIdentity.releaseAvatarCaptureForRetry(pending, reason, onLog)
 
     private fun releaseAvatarCaptureAfterProfileMiss(
         pending: PendingInboxIdentityCapture,
         reason: MomoAvatarClickFailureReason
-    ) {
-        transitionAvatarClickState(
-            pending,
-            MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
-            reason.name
-        )
-        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-            if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture === pending) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
-        }
-        onLog(
-            "AI 头像点击事务：资料页进入失败；释放旧头像事务，下一次观察重新读取聊天详情并重新定位头像；" +
-                "reason=${reason.name}；不暂停任务、不标记身份失败、不使用旧坐标、不点击整行"
-        )
-    }
+    ) = sessionComponents.inboxIdentity.releaseAvatarCaptureAfterProfileMiss(pending, reason, onLog)
 
     init {
         sayHiTraversalState.restore()?.let { restored ->
@@ -6797,7 +6759,7 @@ internal class MomoSocialAdapter(
                     pendingIdentityCapture?.platformUserId
                 } else null
                 justCapturedId ?: createInboxIdentityAnchor(candidate)?.opaqueKey()?.let { key ->
-                    synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) { sessionComponents.inboxIdentity.verifiedInboxIdentityByAnchor[key] }
+                    sessionComponents.inboxIdentity.cachedPlatformId(key)
                 }
             }
             val identities = sessionComponents.contactIdentityManager.resolveSnapshot(
@@ -6821,16 +6783,7 @@ internal class MomoSocialAdapter(
                     verificationResult != MomoIdentityVerificationResult.IDENTITY_VERIFIED
                 ) {
                     createInboxIdentityAnchor(candidate)?.opaqueKey()?.let { key ->
-                        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-                            sessionComponents.inboxIdentity.verifiedInboxIdentityByAnchor.remove(key)
-                            if (verificationResult.isTerminalFailure()) {
-                                sessionComponents.inboxIdentity.failedInboxIdentityCaptureKeys += key
-                                sessionComponents.inboxIdentity.onIdentityVerificationLog(onLog, verificationResult, "EXPLICIT_IDENTITY_CONFLICT", true, "SKIP_CURRENT_TARGET", key)
-                            } else {
-                                sessionComponents.inboxIdentity.failedInboxIdentityCaptureKeys.remove(key)
-                                sessionComponents.inboxIdentity.onIdentityVerificationLog(onLog, verificationResult, "PROFILE_ID_NOT_CONFIRMED", false, "RETRY_ON_NEXT_OBSERVATION", key)
-                            }
-                        }
+                        sessionComponents.inboxIdentity.invalidateCachedIdentity(key, verificationResult, onLog)
                     }
                     onLog(
                         "AI 联系人身份验证分类：result=${verificationResult.name}；" +
@@ -6987,7 +6940,7 @@ internal class MomoSocialAdapter(
     }
 
     override fun hasPendingIdentityReturnReinspectionRequest(): Boolean =
-        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) { sessionComponents.inboxIdentity.identityReturnReinspectionPending }
+        sessionComponents.inboxIdentity.hasReturnReinspection()
 
     override fun consumeIdentityReturnReinspectionRequest(): Boolean {
         val consumed = sessionComponents.inboxIdentity.consumeIdentityReturnReinspectionRequest()
@@ -7030,15 +6983,7 @@ internal class MomoSocialAdapter(
     private fun requestContactIdentityCapture(anchor: InboxIdentityAnchor): ContactIdentityCaptureRequestResult {
         onLog("AI 头像点击事务：进入 AVATAR_CLICK_PREPARING；准备基于当前聊天详情重新定位头像")
         val anchorKey = anchor.opaqueKey()
-        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-            if (anchorKey in sessionComponents.inboxIdentity.failedInboxIdentityCaptureKeys) {
-                onLog("IDENTITY_CAPTURE_BLOCKED result=IDENTITY_CAPTURE_BLOCKED；reason=EXPLICIT_IDENTITY_CONFLICT；failedCacheHit=true；action=SKIP_CURRENT_TARGET；anchorHash=${anchorKey.take(12)}")
-                return ContactIdentityCaptureRequestResult.REJECTED
-            }
-            onLog("IDENTITY_RETRY_ALLOWED result=IDENTITY_RETRY_ALLOWED；previousFailure=NONE_OR_RETRYABLE；failedCacheHit=false；action=REACQUIRE_AVATAR；anchorHash=${anchorKey.take(12)}")
-            val pending = sessionComponents.inboxIdentity.pendingInboxIdentityCapture
-            if (pending != null) return ContactIdentityCaptureRequestResult.IN_PROGRESS
-        }
+        sessionComponents.inboxIdentity.checkCaptureAdmission(anchorKey, onLog)?.let { return it }
 
         // The session candidate is created from the main list, but identity capture is
         // intentionally executed after navigation on the confirmed chat detail page.
@@ -7064,16 +7009,7 @@ internal class MomoSocialAdapter(
             stage = InboxIdentityCaptureStage.AVATAR_TAP_PENDING,
             lastTransitionAtMs = System.currentTimeMillis()
         )
-        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-            if (anchorKey in sessionComponents.inboxIdentity.failedInboxIdentityCaptureKeys) {
-                onLog("IDENTITY_CAPTURE_BLOCKED result=IDENTITY_CAPTURE_BLOCKED；reason=EXPLICIT_IDENTITY_CONFLICT；failedCacheHit=true；action=SKIP_CURRENT_TARGET；anchorHash=${anchorKey.take(12)}")
-                return ContactIdentityCaptureRequestResult.REJECTED
-            }
-            if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture != null) {
-                return ContactIdentityCaptureRequestResult.IN_PROGRESS
-            }
-            sessionComponents.inboxIdentity.pendingInboxIdentityCapture = pending
-        }
+        sessionComponents.inboxIdentity.registerCapture(anchorKey, pending, onLog)?.let { return it }
 
         transitionAvatarClickState(pending, MomoAvatarClickTransactionState.AVATAR_PAGE_READING, "开始读取当前聊天详情页")
         onLog("AI 头像点击事务：进入 AVATAR_PAGE_READING；读取当前聊天详情页")
@@ -7151,25 +7087,7 @@ internal class MomoSocialAdapter(
         )
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
-                synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-                    if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture !== pending) return@synchronized
-                    if (result.status == GestureExecutionStatus.COMPLETED) {
-                        pending.stage = InboxIdentityCaptureStage.WAITING_PROFILE
-                        pending.lastTransitionAtMs = System.currentTimeMillis()
-                        transitionAvatarClickState(
-                            pending,
-                            MomoAvatarClickTransactionState.AVATAR_ENTRY_VERIFYING,
-                            "头像手势完成，等待资料页页面确认"
-                        )
-                    } else {
-                        transitionAvatarClickState(
-                            pending,
-                            MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
-                            "头像手势未完成；不将本次点击直接视为事务终止"
-                        )
-                        sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
-                    }
-                }
+                sessionComponents.inboxIdentity.applyAvatarGestureResult(pending, result.status, onLog)
                 if (result.status == GestureExecutionStatus.COMPLETED) {
                     onLog("AI 联系人身份采集：头像手势回调完成；仅进入资料页复核状态，尚未确认资料页，不读取 ID、不点击整行")
                 } else {
@@ -7177,9 +7095,7 @@ internal class MomoSocialAdapter(
                 }
             })
         }.getOrElse {
-            synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-                if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture === pending) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
-            }
+            sessionComponents.inboxIdentity.releaseIfCurrent(pending)
             onLog("AI 联系人身份采集：头像手势执行器异常；" +
                 "reason=${MomoAvatarClickFailureReason.AVATAR_GESTURE_REJECTED.name}；重新定位，不执行坐标或整行兜底")
             return ContactIdentityCaptureRequestResult.RETRY_LATER
@@ -7191,9 +7107,7 @@ internal class MomoSocialAdapter(
                 MomoAvatarClickTransactionState.AVATAR_RETRY_WAITING,
                 "头像手势未被接受；等待下一次当前页面重新定位"
             )
-            synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-                if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture === pending) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
-            }
+            sessionComponents.inboxIdentity.releaseIfCurrent(pending)
             val reason = if (submission == GestureSubmission.DEFERRED_NOT_READY) {
                 MomoAvatarClickFailureReason.AVATAR_GESTURE_DEFERRED
             } else {
@@ -7237,74 +7151,28 @@ internal class MomoSocialAdapter(
 
     override fun hasPendingObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget): Boolean {
         val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
-        return synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-            sessionComponents.inboxIdentity.pendingInboxIdentityCapture?.anchor?.opaqueKey() == key
-        }
+        return sessionComponents.inboxIdentity.hasObservedCapture(key)
     }
 
     override fun hasObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean {
         val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
-        return synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) { sessionComponents.inboxIdentity.observedDetailIdentityReturnKey == key }
+        return sessionComponents.inboxIdentity.hasObservedReturn(key)
     }
 
     override fun consumeObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean {
         val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
-        return synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-            if (sessionComponents.inboxIdentity.observedDetailIdentityReturnKey != key) false else {
-                sessionComponents.inboxIdentity.observedDetailIdentityReturnKey = null
-                true
-            }
-        }
+        return sessionComponents.inboxIdentity.consumeObservedReturn(key)
     }
 
     override fun cancelObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget) {
         val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return
-        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-            if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture?.anchor?.opaqueKey() == key) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
-            sessionComponents.inboxIdentity.completedInboxIdentityOutcomes.remove(key)
-            if (sessionComponents.inboxIdentity.observedDetailIdentityReturnKey == key) sessionComponents.inboxIdentity.observedDetailIdentityReturnKey = null
-            sessionComponents.inboxIdentity.failedInboxIdentityCaptureKeys.remove(key)
-        }
+        sessionComponents.inboxIdentity.cancelObservedCapture(key)
     }
 
     private fun observeContactIdentityCapture(
         anchor: InboxIdentityAnchor,
         requestCapture: () -> ContactIdentityCaptureRequestResult = { requestContactIdentityCapture(anchor) }
-    ): ContactIdentityCaptureOutcome {
-        val key = anchor.opaqueKey()
-        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-            sessionComponents.inboxIdentity.completedInboxIdentityOutcomes[key]?.let { return it }
-            sessionComponents.inboxIdentity.pendingInboxIdentityCapture?.let { pending ->
-                if (pending.anchor.opaqueKey() == key) {
-                    // IN_PROGRESS is a non-terminal state. Keep the reason in the
-                    // explicit OBSERVE log, never in failureReason.
-                    onLog("AI 联系人身份采集[OBSERVE_WAITING]：事务仍在进行；不返回失败原因")
-                    return ContactIdentityCaptureOutcome.waiting(
-                        ContactIdentityCaptureRequestResult.IN_PROGRESS
-                    )
-                }
-            }
-        }
-        return when (val request = requestCapture()) {
-            ContactIdentityCaptureRequestResult.STARTED,
-            ContactIdentityCaptureRequestResult.IN_PROGRESS,
-            ContactIdentityCaptureRequestResult.RETRY_LATER ->
-                // Waiting is not a terminal failure. The outcome contract rejects a
-                // failureReason while awaiting=true; stage details are emitted by the
-                // explicit [OBSERVE] and [REQUEST] logs above.
-                ContactIdentityCaptureOutcome.waiting(request)
-            ContactIdentityCaptureRequestResult.NOT_SUPPORTED ->
-                ContactIdentityCaptureOutcome.failed(request, "IDENTITY_CAPTURE_NOT_SUPPORTED")
-            ContactIdentityCaptureRequestResult.REJECTED ->
-                ContactIdentityCaptureOutcome.failed(request, "IDENTITY_CAPTURE_REQUEST_REJECTED")
-        }.also { outcome ->
-            onLog(
-                "AI 联系人身份采集[OBSERVE_RESULT]：" +
-                    "request=${outcome.request.name}；awaiting=${outcome.awaiting}；" +
-                    "verified=${outcome.verifiedIdentity != null}；failure=${outcome.failureReason ?: "NONE"}"
-            )
-        }
-    }
+    ): ContactIdentityCaptureOutcome = sessionComponents.inboxIdentity.observeContactIdentityCapture(anchor, requestCapture, onLog)
 
     private fun createInboxIdentityAnchor(
         candidate: ChatListCandidateSnapshot
@@ -7488,16 +7356,7 @@ internal class MomoSocialAdapter(
                         MomoAvatarClickTransactionState.AVATAR_COMPLETED,
                         "资料页身份读取完成并返回原聊天详情"
                     )
-                    synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-                        if (pending.anchor is ObservedDetailIdentityAnchor) {
-                            val key = pending.anchor.opaqueKey()
-                            if (sessionComponents.inboxIdentity.completedInboxIdentityOutcomes[key]?.verifiedIdentity != null) {
-                                sessionComponents.inboxIdentity.observedDetailIdentityReturnKey = key
-                            }
-                        } else {
-                            sessionComponents.inboxIdentity.identityReturnReinspectionPending = true
-                        }
-                    }
+                    sessionComponents.inboxIdentity.publishVerifiedReturn(pending)
                     onLog(
                         "AI 身份回接[REQUEST_PRODUCED]：result=PRODUCED；" +
                             "reason=ORIGINAL_CHAT_FINGERPRINT_AND_TITLE_VERIFIED；" +
@@ -7535,25 +7394,7 @@ internal class MomoSocialAdapter(
     private fun failPendingInboxIdentityCapture(
         pending: PendingInboxIdentityCapture,
         reason: String
-    ) {
-        // Row geometry/path may change while the same profile transaction is unwinding;
-        // deduplicate by the redacted display identity and reason, not the volatile anchor.
-        val logKey = "${normalizeIdentityDisplayName(pending.anchor.displayName)}|$reason"
-        val shouldLog: Boolean
-        synchronized(sessionComponents.inboxIdentity.inboxIdentityCaptureLock) {
-            if (sessionComponents.inboxIdentity.pendingInboxIdentityCapture === pending) sessionComponents.inboxIdentity.pendingInboxIdentityCapture = null
-            shouldLog = sessionComponents.inboxIdentity.loggedInboxIdentityFailureKeys.add(logKey)
-        }
-        transitionAvatarClickState(
-            pending,
-            MomoAvatarClickTransactionState.AVATAR_UNKNOWN_RECOVERY,
-            reason
-        )
-        if (shouldLog) {
-            onLog("AI 身份回接[REQUEST_NOT_PRODUCED]：result=NOT_PRODUCED；reason=$reason")
-            onLog("AI 联系人身份采集失败：$reason；保留未验证身份，不以昵称关联历史")
-        }
-    }
+    ) = sessionComponents.inboxIdentity.failPendingInboxIdentityCapture(pending, reason, onLog)
 
     private fun dispatchInboxProfileIdentityScroll(
         pending: PendingInboxIdentityCapture,
