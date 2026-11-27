@@ -5684,8 +5684,9 @@ internal class MomoSocialAdapter(
     }
 
     /**
-     * M03.2: the app returns to chat automatically. Re-read the same original conversation and
-     * only classify a newly appended outgoing image. No BACK, repeat send, or ledger write here.
+     * Re-read the exact original conversation and appended outgoing image.
+     * Recognized node states are sufficient; legacy non-clickable status color remains
+     * a supplemental positive-success proof. No mutation is performed here.
      */
     internal fun inspectImageSendResult(
         attempt: MomoImageSendAttempt,
@@ -5705,8 +5706,20 @@ internal class MomoSocialAdapter(
         if (!current()) return
         val snapshot = freshMediaSnapshot()
         val proof = snapshot?.let { MomoImageSendEvidenceInspector.newImage(it, baseline, target) }
+        if (proof == null) {
+            if (current()) onResult(MomoImageSendResult.UNKNOWN)
+            return
+        }
+        if (proof.nodeResult != MomoImageSendResult.UNKNOWN) {
+            if (current() && accessibilityGateway.currentGestureWindow() == proof.window) {
+                onLog("MEDIA_IMAGE_SEND_EVIDENCE result=${proof.nodeResult};source=NODE;windowId=${proof.window.windowId}")
+                onResult(proof.nodeResult)
+            } else if (current()) onResult(MomoImageSendResult.UNKNOWN)
+            return
+        }
         val capture = screenshotCapture
-        if (proof == null || capture == null) {
+        if (capture == null || proof.statusClickable) {
+            // Legacy visual evidence may confirm a non-clickable success, but can never authorize resend.
             if (current()) onResult(MomoImageSendResult.UNKNOWN)
             return
         }
@@ -5722,7 +5735,7 @@ internal class MomoSocialAdapter(
                     else MomoImageSendEvidenceInspector.classifyStatus(
                         frame.bitmap, proof,
                         frame.scope == com.freedom.adapters.accessibility.android.AndroidScreenshotScope.TARGET_WINDOW
-                    )
+                    ).takeIf { it == MomoImageSendResult.SUCCESS } ?: MomoImageSendResult.UNKNOWN
                 }
             } catch (_: Exception) {
                 MomoImageSendResult.UNKNOWN
@@ -5741,6 +5754,7 @@ internal class MomoSocialAdapter(
     // The AI runtime owns scheduling/admission; TaskCoordinator remains the only lease owner.
     private enum class PrivateFollowUpStage {
         OPEN_ALBUM, WAIT_ALBUM, WAIT_DIRECTORY, WAIT_FREEDOM, WAIT_SELECTION, WAIT_SEND_RESULT,
+        IMAGE_RETRY_OPEN, IMAGE_RETRY_CONFIRM,
         INTERCEPTION_OPEN_SETTINGS, INTERCEPTION_OPEN_CONTROL, INTERCEPTION_TAP_SWITCH,
         INTERCEPTION_DISMISS, INTERCEPTION_BACK, INTERCEPTION_RETURN, TERMINAL
     }
@@ -5755,6 +5769,11 @@ internal class MomoSocialAdapter(
         val logPrefix = if (interception) "PRIVATE_INTERCEPTION" else "PRIVATE_IMAGE_SEND"
         var baseline: MomoImageSendBaseline? = null
         @Volatile var sendAttempt: MomoImageSendAttempt? = null
+        // The original failed-row tap must really have been dispatched by this transaction.
+        @Volatile var imageRetryDialogRequested = false
+        var imageRetryDialogWindowId: Int? = null
+        var imageRetryAttempt = 0
+        @Volatile var imageRetryNotBefore = 0L
         @Volatile var switchVerifiedOn = false
         @Volatile var succeeded = false
         @Volatile var stage = if (interception) PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS else PrivateFollowUpStage.OPEN_ALBUM
@@ -5852,7 +5871,7 @@ internal class MomoSocialAdapter(
         privateFollowUp = null
     }
 
-    /** Persist before submission. Image sends never replay; interception reconciles live state. */
+    /** Persist before submission. Never replay an ambiguous album send; reconcile live results. */
     private fun submitPrivateFollowUpStep(
         child: PrivateFollowUpTransaction,
         next: PrivateFollowUpStage,
@@ -5864,6 +5883,15 @@ internal class MomoSocialAdapter(
         }
         val previous = child.stage
         val previousStartedAt = child.stageStartedAt
+        val imageRetry = previous == PrivateFollowUpStage.IMAGE_RETRY_OPEN ||
+            previous == PrivateFollowUpStage.IMAGE_RETRY_CONFIRM
+        if (imageRetry) {
+            child.imageRetryAttempt = (child.imageRetryAttempt + 1).coerceAtMost(6)
+            child.imageRetryNotBefore = SystemClock.uptimeMillis() + maxOf(
+                2_000L,
+                com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(child.imageRetryAttempt)
+            )
+        }
         if (child.interception) {
             child.interceptionRetryAttempt = (child.interceptionRetryAttempt + 1).coerceAtMost(6)
             child.interceptionRetryNotBefore = SystemClock.uptimeMillis() + maxOf(
@@ -5872,7 +5900,7 @@ internal class MomoSocialAdapter(
             )
         }
         if (!persistPrivateFollowUpStep(child, previous)) {
-            if (child.interception) followUpWait(child, "UNKNOWN_CHECKPOINT_WRITE_RETRY")
+            if (child.interception || imageRetry) followUpWait(child, "UNKNOWN_CHECKPOINT_WRITE_RETRY")
             else followUpTerminal(child, "UNKNOWN", "CHECKPOINT_WRITE_NOT_CONFIRMED")
             return
         }
@@ -5888,6 +5916,14 @@ internal class MomoSocialAdapter(
                         // including CANCELLED/REJECTED; never roll back blindly to the tap.
                         child.interceptionRetryNotBefore = maxOf(
                             child.interceptionRetryNotBefore, SystemClock.uptimeMillis() + 2_000L
+                        )
+                        child.inFlight = false
+                        onLog("${child.logPrefix} GESTURE_RESULT stage=$next;status=$status;reconcile=true")
+                        return@action
+                    }
+                    if (imageRetry || (next == PrivateFollowUpStage.WAIT_SEND_RESULT && child.sendAttempt != null)) {
+                        child.imageRetryNotBefore = maxOf(
+                            child.imageRetryNotBefore, SystemClock.uptimeMillis() + 2_000L
                         )
                         child.inFlight = false
                         onLog("${child.logPrefix} GESTURE_RESULT stage=$next;status=$status;reconcile=true")
@@ -5921,6 +5957,13 @@ internal class MomoSocialAdapter(
             if (submission != GestureSubmission.ACCEPTED) {
                 child.inFlight = false
                 followUpWait(child, "UNKNOWN_GESTURE_ADMISSION_RECHECK")
+            }
+            return
+        }
+        if (imageRetry || (next == PrivateFollowUpStage.WAIT_SEND_RESULT && child.sendAttempt != null)) {
+            if (submission != GestureSubmission.ACCEPTED) {
+                child.inFlight = false
+                followUpWait(child, "UNKNOWN_IMAGE_GESTURE_ADMISSION_RECHECK")
             }
             return
         }
@@ -5958,6 +6001,8 @@ internal class MomoSocialAdapter(
             PrivateFollowUpStage.WAIT_FREEDOM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SELECT
             PrivateFollowUpStage.WAIT_SELECTION -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SEND
             PrivateFollowUpStage.WAIT_SEND_RESULT -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_VERIFY
+            PrivateFollowUpStage.IMAGE_RETRY_OPEN -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_RETRY_OPEN
+            PrivateFollowUpStage.IMAGE_RETRY_CONFIRM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_RETRY_CONFIRM
             PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_OPEN_SETTINGS
             PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_OPEN_CONTROL
             PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_SWITCH
@@ -6086,9 +6131,100 @@ internal class MomoSocialAdapter(
         return true
     }
 
+    /** Same append proof as initial send; never search globally for historical failure icons. */
+    private fun imageRetryProof(child: PrivateFollowUpTransaction, snapshot: AccessibilityTreeSnapshot): MomoImageSendProof? {
+        val attempt = child.sendAttempt ?: return null
+        val baseline = attempt.baseline ?: return null
+        if (!attempt.commandId.startsWith("momo-album-send-image-") ||
+            !baseline.belongsTo(child.target, child.id) || !followUpCurrent(child)) return null
+        return MomoImageSendEvidenceInspector.newImage(snapshot, baseline, child.target)
+    }
+
+    private fun submitImageRetryOpen(child: PrivateFollowUpTransaction, window: WindowRef) {
+        child.stage = PrivateFollowUpStage.IMAGE_RETRY_OPEN
+        submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT) { callback ->
+            submitVerifiedAlbumTap(
+                child.target, window, child.id, { followUpCurrent(child) }, "image-retry-open",
+                resolve = { _, live ->
+                    freshMediaSnapshot(live)?.let { snapshot ->
+                        if (MomoImageSendEvidenceInspector.networkDisconnected(snapshot)) null
+                        else imageRetryProof(child, snapshot)
+                            ?.takeIf { it.nodeResult == MomoImageSendResult.FAILED }
+                    }
+                }, boundsOf = { it.statusBounds },
+                onPlatformDispatched = { _, _ ->
+                    if (followUpCurrent(child)) {
+                        child.imageRetryDialogRequested = true
+                        child.imageRetryDialogWindowId = null
+                        onLog("PRIVATE_IMAGE_SEND RETRY_OPEN_DISPATCHED")
+                    }
+                },
+                onGestureResult = callback
+            )
+        }
+    }
+
+    private fun submitImageRetryConfirm(child: PrivateFollowUpTransaction, window: WindowRef) {
+        child.stage = PrivateFollowUpStage.IMAGE_RETRY_CONFIRM
+        submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT) { callback ->
+            submitVerifiedAlbumTap(
+                child.target, window, child.id, { followUpCurrent(child) }, "image-retry-confirm",
+                resolve = { _, live ->
+                    if (!child.imageRetryDialogRequested || child.imageRetryDialogWindowId != live.windowId) null
+                    else freshMediaSnapshot(live)?.let(MomoImageSendEvidenceInspector::retryConfirmation)
+                }, boundsOf = { it },
+                onGestureResult = callback
+            )
+        }
+    }
+
     private fun verifyPrivateImageSend(child: PrivateFollowUpTransaction) {
         val attempt = child.sendAttempt ?: run {
-            followUpTerminal(child, "UNKNOWN", "SEND_DISPATCH_EVIDENCE_MISSING")
+            followUpWait(child, "UNKNOWN_SEND_DISPATCH_EVIDENCE_MISSING")
+            return
+        }
+        val snapshot = freshMediaSnapshot() ?: run {
+            followUpWait(child, "UNKNOWN_IMAGE_PAGE_NOT_CONFIRMED")
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        if (MomoImageSendEvidenceInspector.retryConfirmation(snapshot) != null) {
+            if (!child.imageRetryDialogRequested ||
+                (child.imageRetryDialogWindowId != null && child.imageRetryDialogWindowId != snapshot.window.windowId)) {
+                followUpWait(child, "UNKNOWN_UNOWNED_RETRY_DIALOG")
+                return
+            }
+            child.imageRetryDialogWindowId = snapshot.window.windowId
+            if (now < child.imageRetryNotBefore) {
+                followUpWait(child, "IMAGE_RETRY_BACKOFF")
+                return
+            }
+            submitImageRetryConfirm(child, snapshot.window)
+            return
+        }
+        val proof = imageRetryProof(child, snapshot)
+        if (proof == null) {
+            followUpWait(child, "UNKNOWN_IMAGE_RESULT_NOT_CONFIRMED")
+            return
+        }
+        // The exact original append is visible again: any prior modal authorization is retired.
+        // A new modal requires a new actual failure-control dispatch.
+        child.imageRetryDialogRequested = false
+        child.imageRetryDialogWindowId = null
+        if (proof.nodeResult == MomoImageSendResult.FAILED) {
+            if (MomoImageSendEvidenceInspector.networkDisconnected(snapshot)) {
+                followUpWait(child, "IMAGE_NETWORK_DISCONNECTED")
+                return
+            }
+            if (now < child.imageRetryNotBefore) {
+                followUpWait(child, "IMAGE_RETRY_BACKOFF")
+                return
+            }
+            submitImageRetryOpen(child, snapshot.window)
+            return
+        }
+        if (proof.nodeResult == MomoImageSendResult.SENDING) {
+            followUpWait(child, "IMAGE_SENDING")
             return
         }
         child.inFlight = true
@@ -6097,8 +6233,9 @@ internal class MomoSocialAdapter(
                 child.inFlight = false
                 when (result) {
                     MomoImageSendResult.SUCCESS -> followUpTerminal(child, "COMPLETED", "OUTGOING_IMAGE_CONFIRMED")
-                    MomoImageSendResult.FAILED -> followUpTerminal(child, "UNKNOWN", "IMAGE_SEND_FAILED_NO_REPLAY")
-                    MomoImageSendResult.UNKNOWN -> followUpWait(child, "IMAGE_RESULT_NOT_CONFIRMED")
+                    MomoImageSendResult.SENDING -> followUpWait(child, "IMAGE_SENDING")
+                    MomoImageSendResult.FAILED,
+                    MomoImageSendResult.UNKNOWN -> followUpWait(child, "UNKNOWN_IMAGE_RESULT_NOT_CONFIRMED")
                 }
             }
         }
@@ -6218,13 +6355,16 @@ internal class MomoSocialAdapter(
             return
         }
         if (SystemClock.uptimeMillis() - child.stageStartedAt > 45_000L) {
-            if (!child.interception) {
+            if (!child.interception && child.stage !in setOf(
+                    PrivateFollowUpStage.WAIT_SEND_RESULT, PrivateFollowUpStage.IMAGE_RETRY_OPEN,
+                    PrivateFollowUpStage.IMAGE_RETRY_CONFIRM
+                )) {
                 followUpTerminal(child, "UNKNOWN", "STAGE_OBSERVATION_TIMEOUT")
                 return
             }
             // Keep the exact transaction/lease; observation can continue indefinitely.
             // A pending command still blocks all writes until its result is delivered.
-            onLog("PRIVATE_INTERCEPTION UNKNOWN stage=${child.stage};reason=STAGE_OBSERVATION_TIMEOUT;retainCheckpoint=true")
+            onLog("${child.logPrefix} UNKNOWN stage=${child.stage};reason=STAGE_OBSERVATION_TIMEOUT;retainCheckpoint=true")
             child.stageStartedAt = SystemClock.uptimeMillis()
         }
         if (child.inFlight) {
@@ -6295,7 +6435,9 @@ internal class MomoSocialAdapter(
                         onGestureResult = callback)
                 }
             }
-            PrivateFollowUpStage.WAIT_SEND_RESULT -> verifyPrivateImageSend(child)
+            PrivateFollowUpStage.WAIT_SEND_RESULT,
+            PrivateFollowUpStage.IMAGE_RETRY_OPEN,
+            PrivateFollowUpStage.IMAGE_RETRY_CONFIRM -> verifyPrivateImageSend(child)
             PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS -> {
                 if (!originalPrivateFollowUpChat(child)) {
                     followUpWait(child, "ORIGINAL_CHAT_NOT_CURRENT")

@@ -12,7 +12,7 @@ import com.freedom.core.accessibility.api.WindowRef
 import com.freedom.core.runtime.TaskLease
 import com.freedom.features.aireply.ports.ChatDraftInputTarget
 
-internal enum class MomoImageSendResult { SUCCESS, FAILED, UNKNOWN }
+internal enum class MomoImageSendResult { SUCCESS, FAILED, SENDING, UNKNOWN }
 internal data class MomoImageSendBaseline(
     val transactionId: String,
     val originalWindow: WindowRef,
@@ -37,7 +37,8 @@ internal data class MomoImageSendProof(
     val rootBounds: ScreenRect,
     val imageBounds: ScreenRect,
     val statusBounds: ScreenRect,
-    val statusClickable: Boolean
+    val statusClickable: Boolean,
+    val nodeResult: MomoImageSendResult = MomoImageSendResult.UNKNOWN
 )
 
 /** Positive append evidence; a returned chat or completed tap alone cannot confirm a send. */
@@ -96,14 +97,79 @@ internal object MomoImageSendEvidenceInspector {
             it.viewId == "${target.packageName}:id/message_status_view" &&
                 it.path.parent() == content.path && it.usable()
         } ?: return null
-        val status = rowNodes.singleOrNull {
-            it.viewId == "${target.packageName}:id/iv_message_status" &&
-                it.className == "android.widget.ImageView" && it.path.parent() == statusContainer.path &&
+        if (!list.bounds.contains(body.bounds) || !root.bounds.contains(statusContainer.bounds)) return null
+        val progressNodes = rowNodes.filter { it.viewId == "${target.packageName}:id/progress_text" }
+        val statusNodes = rowNodes.filter { it.viewId == "${target.packageName}:id/iv_message_status" }
+        val animationNodes = rowNodes.filter { it.viewId == "${target.packageName}:id/iv_message_status_svga" }
+        // A progress indicator is positive evidence of an unfinished upload, never a retry target.
+        if (progressNodes.isNotEmpty()) {
+            val progress = progressNodes.singleOrNull()?.takeIf {
+                it.className == "android.widget.TextView" && it.usable() &&
+                    it.path.parent() == body.path.parent() && body.bounds.contains(it.bounds) &&
+                    it.text?.trim()?.matches(Regex("(100|[0-9]{1,2})%")) == true
+            } ?: return null
+            if (statusNodes.isNotEmpty() || animationNodes.isNotEmpty() || statusContainer.childCount != 0 ||
+                !content.bounds.contains(progress.bounds)) return null
+            return MomoImageSendProof(snapshot.window, count, root.bounds, body.bounds,
+                statusContainer.bounds, false, MomoImageSendResult.SENDING)
+        }
+        val status = statusNodes.singleOrNull()?.takeIf {
+            it.className == "android.widget.ImageView" && it.path.parent() == statusContainer.path &&
                 it.usable() && statusContainer.bounds.contains(it.bounds)
         } ?: return null
-        if (!root.bounds.contains(status.bounds) || !list.bounds.contains(status.bounds) ||
-            !list.bounds.contains(body.bounds)) return null
-        return MomoImageSendProof(snapshot.window, count, root.bounds, body.bounds, status.bounds, status.clickable)
+        if (!root.bounds.contains(status.bounds) || !list.bounds.contains(status.bounds)) return null
+        val animation = animationNodes.singleOrNull()?.takeIf {
+            it.className == "android.widget.ImageView" && it.path.parent() == statusContainer.path &&
+                it.usable() && statusContainer.bounds.contains(it.bounds) && !it.clickable
+        }
+        val actionsRead = status.captureState(AccessibilityNodeField.ACTIONS, snapshot.textCapture) in
+            setOf(AccessibilityFieldCaptureState.VALUE_PRESENT, AccessibilityFieldCaptureState.EMPTY)
+        if (!actionsRead) return null
+        val clickAction = status.actions.any { it.id == 16 }
+        // Conflicting interaction flags must not be turned into a success or resend.
+        if (status.clickable != clickAction || status.focusable != status.clickable) return null
+        val result = if (animation != null && statusContainer.childCount == 2)
+            if (status.clickable) MomoImageSendResult.FAILED else MomoImageSendResult.SUCCESS
+        else MomoImageSendResult.UNKNOWN
+        return MomoImageSendProof(snapshot.window, count, root.bounds, body.bounds, status.bounds, status.clickable, result)
+    }
+
+    /** Exact app-provided offline banner; not a substitute for the target row's result. */
+    fun networkDisconnected(snapshot: AccessibilityTreeSnapshot): Boolean =
+        scopedNodes(snapshot).any {
+            it.viewId == "${snapshot.window.packageName}:id/toptip_text" &&
+                it.usable() && it.text?.trim() == "当前没有网络，通讯已断开"
+        }
+
+    /** The resend confirmation is a separate active window. Generic button1 alone is never proof. */
+    fun retryConfirmation(snapshot: AccessibilityTreeSnapshot): ScreenRect? {
+        if (snapshot.truncated || snapshot.timeBudgetExceeded || snapshot.textCapture != NodeTextCapture.EPHEMERAL ||
+            snapshot.window.packageName != "com.immomo.momo" || snapshot.window.windowId < 0) return null
+        val nodes = scopedNodes(snapshot)
+        val root = nodes.singleOrNull { it.path.childIndices.isEmpty() && it.usable() } ?: return null
+        val panel = nodes.singleOrNull {
+            it.viewId == "com.immomo.momo:id/parentPanel" &&
+                it.className == "androidx.appcompat.widget.LinearLayoutCompat" && it.usable() &&
+                root.bounds.contains(it.bounds)
+        } ?: return null
+        fun exact(id: String, cls: String, text: String, button: Boolean = false): AccessibilityNodeSnapshot? =
+            nodes.singleOrNull {
+                it.viewId == id && it.className == cls && it.text?.trim() == text &&
+                    it.usable() && it.path.isDescendantOf(panel.path) && panel.bounds.contains(it.bounds) &&
+                    (!button || (it.clickable && it.actions.any { action -> action.id == 16 }))
+            }
+        exact("com.immomo.momo:id/alertTitle", "android.widget.TextView", "提示") ?: return null
+        exact("android:id/message", "android.widget.TextView", "重发该消息？") ?: return null
+        val cancel = exact("android:id/button2", "android.widget.Button", "取消", true) ?: return null
+        val confirm = exact("android:id/button1", "android.widget.Button", "确认", true) ?: return null
+        if (cancel.path.parent() != confirm.path.parent()) return null
+        // The captured modal contains only these four visible labels and two clickable buttons.
+        // Reject extra controls or text rather than accepting another overlay.
+        if (nodes.any { it.visible && it.text.orEmpty().trim().let { value ->
+                value.isNotEmpty() && value !in setOf("提示", "重发该消息？", "取消", "确认")
+            } } || nodes.filter { it.usable() && it.clickable }.map { it.path }.toSet() != setOf(cancel.path, confirm.path))
+            return null
+        return confirm.bounds
     }
 
     private fun confirmedTailList(snapshot: AccessibilityTreeSnapshot, target: ChatDraftInputTarget): AccessibilityNodeSnapshot? {
@@ -146,6 +212,7 @@ internal object MomoImageSendEvidenceInspector {
      * A pink/red error icon plus its clickable retry control is failure; all else is unknown.
      */
     fun classifyStatus(bitmap: Bitmap, proof: MomoImageSendProof, windowCapture: Boolean): MomoImageSendResult {
+        if (proof.nodeResult == MomoImageSendResult.SENDING) return MomoImageSendResult.SENDING
         val root = proof.rootBounds
         val bounds = proof.statusBounds
         val offsetX = if (windowCapture) root.left else 0

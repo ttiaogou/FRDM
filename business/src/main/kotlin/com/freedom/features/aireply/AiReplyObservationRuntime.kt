@@ -5407,7 +5407,7 @@ class AiReplyObservationRuntime(
         val interception = child.checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION
         val fresh = privateFollowUpReturnedSnapshot(child) ?: run {
             onLog("PRIVATE_FOLLOW_UP RETURN_NOT_CONFIRMED;checkpointRetained=true")
-            if (interception) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return
         }
         val checkpoint = child.checkpoint
@@ -5418,7 +5418,7 @@ class AiReplyObservationRuntime(
         }
         if (!confirmed) {
             onLog("PRIVATE_FOLLOW_UP RESULT_NOT_PERSISTED;noReturn=true")
-            if (interception) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return
         }
         onLog("PRIVATE_FOLLOW_UP CONFIRMED;action=${checkpoint.step.action}")

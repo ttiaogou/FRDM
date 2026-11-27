@@ -31,6 +31,8 @@ enum class ContactFollowUpStep(val action: ContactPendingRecoveryAction) {
     IMAGE_SELECT(ContactPendingRecoveryAction.SEND_IMAGE),
     IMAGE_SEND(ContactPendingRecoveryAction.SEND_IMAGE),
     IMAGE_VERIFY(ContactPendingRecoveryAction.SEND_IMAGE),
+    IMAGE_RETRY_OPEN(ContactPendingRecoveryAction.SEND_IMAGE),
+    IMAGE_RETRY_CONFIRM(ContactPendingRecoveryAction.SEND_IMAGE),
     INTERCEPTION_OPEN_SETTINGS(ContactPendingRecoveryAction.ENABLE_INTERCEPTION),
     INTERCEPTION_OPEN_CONTROL(ContactPendingRecoveryAction.ENABLE_INTERCEPTION),
     INTERCEPTION_SWITCH(ContactPendingRecoveryAction.ENABLE_INTERCEPTION),

@@ -60,6 +60,82 @@ class MomoImageSendEvidenceInspectorTest {
         assertEquals(MomoImageSendResult.UNKNOWN, MomoImageSendEvidenceInspector.classifyPixels(grey, false))
     }
 
+    @Test
+    fun capturedNodeStatesDistinguishSuccessFailureAndSending() {
+        val baseline = MomoImageSendEvidenceInspector.baseline(snapshot(original, 30), target, "media-1")!!
+        val sent = statusSnapshot(false)
+        val failed = statusSnapshot(true)
+        val sending = statusSnapshot(null)
+        assertEquals(MomoImageSendResult.SUCCESS, MomoImageSendEvidenceInspector.newImage(sent, baseline, target)?.nodeResult)
+        assertEquals(MomoImageSendResult.FAILED, MomoImageSendEvidenceInspector.newImage(failed, baseline, target)?.nodeResult)
+        assertEquals(MomoImageSendResult.SENDING, MomoImageSendEvidenceInspector.newImage(sending, baseline, target)?.nodeResult)
+        assertNull(MomoImageSendEvidenceInspector.newImage(failed.copy(nodes = failed.nodes.map {
+            if (it.viewId.endsWith(":id/iv_message_status")) it.copy(actions = emptyList()) else it
+        }), baseline, target))
+        assertNull(MomoImageSendEvidenceInspector.newImage(failed.copy(nodes = failed.nodes +
+            sending.nodes.single { it.viewId.endsWith(":id/progress_text") }), baseline, target))
+        assertNull(MomoImageSendEvidenceInspector.newImage(failed.copy(nodes = failed.nodes.map {
+            if (it.viewId.endsWith(":id/message_chat_recycler_view"))
+                it.copy(collection = AccessibilityCollectionSnapshot(32, 1, false)) else it
+        }), baseline, target))
+    }
+
+    @Test
+    fun retryConfirmationNeedsExactDialogAndUniqueControls() {
+        val window = original.copy(windowId = 9, generation = 5L)
+        fun dialogNode(id: String, cls: String, path: List<Int>, text: String? = null,
+                       button: Boolean = false) = AccessibilityNodeSnapshot(
+            NodePath(path), cls, id, text, null, screen, true, true,
+            false, false, button, false, false, false, false, false, 0,
+            pkg, window.windowId, actions = if (button) listOf(AccessibilityActionSnapshot(16)) else emptyList()
+        )
+        val nodes = listOf(
+            dialogNode("", "android.widget.FrameLayout", emptyList()),
+            dialogNode("$pkg:id/parentPanel", "androidx.appcompat.widget.LinearLayoutCompat", listOf(0)),
+            dialogNode("$pkg:id/alertTitle", "android.widget.TextView", listOf(0, 0), "提示"),
+            dialogNode("android:id/message", "android.widget.TextView", listOf(0, 1), "重发该消息？"),
+            dialogNode("android:id/button2", "android.widget.Button", listOf(0, 2, 0), "取消", true),
+            dialogNode("android:id/button1", "android.widget.Button", listOf(0, 2, 1), "确认", true)
+        )
+        val dialog = AccessibilityTreeSnapshot(window, nodes, nodes.size, false, textCapture = NodeTextCapture.EPHEMERAL)
+        assertNotNull(MomoImageSendEvidenceInspector.retryConfirmation(dialog))
+        assertNull(MomoImageSendEvidenceInspector.retryConfirmation(dialog.copy(nodes = nodes.map {
+            if (it.viewId == "android:id/message") it.copy(text = "删除该消息？") else it
+        })))
+        assertNull(MomoImageSendEvidenceInspector.retryConfirmation(dialog.copy(nodes = nodes + nodes.last().copy(path = NodePath(listOf(0, 3))))))
+        assertNull(MomoImageSendEvidenceInspector.retryConfirmation(dialog.copy(truncated = true)))
+    }
+
+    @Test
+    fun offlineBannerIsSeparateFromSendResult() {
+        val failed = statusSnapshot(true)
+        val banner = failed.nodes.first().copy(path = NodePath(listOf(8)),
+            viewId = "$pkg:id/toptip_text", className = "android.widget.TextView", text = "当前没有网络，通讯已断开")
+        assertEquals(false, MomoImageSendEvidenceInspector.networkDisconnected(failed))
+        assertEquals(true, MomoImageSendEvidenceInspector.networkDisconnected(failed.copy(nodes = failed.nodes + banner)))
+    }
+
+    private fun statusSnapshot(clickable: Boolean?): AccessibilityTreeSnapshot {
+        val base = snapshot(original.copy(generation = 4L), 31)
+        val status = base.nodes.single { it.viewId.endsWith(":id/iv_message_status") }
+        val body = base.nodes.single { it.viewId.endsWith(":id/image_content") }
+        val container = base.nodes.single { it.viewId.endsWith(":id/message_status_view") }
+        val rows = base.nodes.filter { it != status }.map {
+            if (it == container) it.copy(childCount = if (clickable == null) 0 else 2) else it
+        }
+        val extra = if (clickable == null) listOf(body.copy(
+            path = NodePath(body.path.childIndices.dropLast(1) + 2),
+            viewId = "$pkg:id/progress_text", className = "android.widget.TextView", text = "0%",
+            clickable = false, bounds = ScreenRect(423, 1171, 486, 1217)
+        )) else listOf(
+            status.copy(path = NodePath(container.path.childIndices + 1),
+                clickable = clickable, focusable = clickable,
+                actions = if (clickable) listOf(AccessibilityActionSnapshot(16)) else emptyList()),
+            status.copy(viewId = "$pkg:id/iv_message_status_svga", bounds = container.bounds)
+        )
+        return base.copy(nodes = rows + extra)
+    }
+
     private fun snapshot(window: WindowRef, count: Int): AccessibilityTreeSnapshot {
         fun node(id: String, cls: String, path: List<Int>, bounds: ScreenRect,
                  text: String? = null, clickable: Boolean = false) = AccessibilityNodeSnapshot(
