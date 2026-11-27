@@ -1791,7 +1791,14 @@ class AiReplyObservationRuntimeTest {
             fixture.logs.any { it.contains("GESTURE_RECOVERY_REQUESTED") }
         }
         val original = requireNotNull(fixture.savedCheckpoint())
-        assertFalse(original.initialUnreadGateSwipeCompleted)
+        // F03 admits the current viewport read-only before the first search swipe.
+        // Admission does not certify movement, a READ boundary, or completed work.
+        assertTrue(original.initialUnreadGateSwipeCompleted)
+        assertFalse(original.lockedUnreadSetFinalized)
+        assertFalse(original.atTop)
+        assertEquals(SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY.name, original.phase)
+        assertTrue(original.attemptedSessionKeys.isEmpty())
+        assertEquals(VerticalSwipeDirection.UP, (fixture.request.intent as GestureIntent.VerticalSwipe).direction)
         assertEquals(1, fixture.dispatchedGestures())
         fixture.scheduler.runNextWithDelay(180L)
         assertFalse(fixture.logs.any { it.contains("RECOVERY_EXECUTION_READY") })
@@ -1805,6 +1812,8 @@ class AiReplyObservationRuntimeTest {
         val replacement = requireNotNull(fixture.latestRequest())
         assertTrue(replacement.id != fixture.request.id)
         assertTrue(replacement.intent is GestureIntent.VerticalSwipe)
+        assertEquals(VerticalSwipeDirection.UP, (replacement.intent as GestureIntent.VerticalSwipe).direction)
+        assertFalse(requireNotNull(fixture.savedCheckpoint()).lockedUnreadSetFinalized)
         assertFalse(fixture.logs.any { it.contains("INITIALIZATION_COMPLETE") })
 
         // A stale completion cannot certify the first cancelled swipe.
