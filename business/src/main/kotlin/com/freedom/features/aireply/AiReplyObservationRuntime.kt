@@ -30,6 +30,8 @@ import com.freedom.features.aireply.domain.contact.ContactMessageLedger
 import com.freedom.features.aireply.domain.contact.ContactMessageLedgerRepository
 import com.freedom.features.aireply.domain.contact.InMemoryContactMessageLedgerRepository
 import com.freedom.features.aireply.domain.contact.ContactSendCountUpdate
+import com.freedom.features.aireply.domain.contact.ContactSendRecordStatus
+import com.freedom.features.aireply.domain.contact.ContactFollowUpCheckpoint
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPagePort
@@ -355,8 +357,6 @@ class AiReplyObservationRuntime(
     private var lastMessageFingerprint = ""
     private val loggedOcrDebugFingerprints = LinkedHashSet<String>()
     private val contactMessageLedger = ContactMessageLedger(contactMessageLedgerRepository)
-    /** Session keys awaiting an externally verified intercept-toggle result, in threshold order. */
-    private val pendingInterceptionContactKeys = LinkedHashSet<String>()
     private var ocrDebugBatchLimitLogged = false
     private var currentSessionSendConfirmed = false
 
@@ -956,7 +956,6 @@ class AiReplyObservationRuntime(
                 return
             }
             confirmed.sendJournalSaved = true
-            recordSuccessfulSend(confirmed.confirmationId)
             onLog("GREETING_SEND_FACT_PERSISTED：已确认发送事实落盘；尚未确认安全返回")
         }
         if (!confirmed.finalSampleSaved) {
@@ -3699,8 +3698,8 @@ class AiReplyObservationRuntime(
         userInteractionActive = false
         privateMessagesTraversalTaskExecutor.reset()
         lastMessageFingerprint = ""
-        contactMessageLedger.clearAll()
-        pendingInterceptionContactKeys.clear()
+        // The private contact ledger is durable business state, not run-local traversal state.
+        // Resetting the runtime must preserve counts and unresolved follow-up checkpoints.
         receivedGreetingsTaskFlow.reset()
         receivedGreetingsRecoveryRetryAttempt = 0
         receivedGreetingsPageProbePending = false
@@ -4537,17 +4536,20 @@ class AiReplyObservationRuntime(
         }
     }
 
-    /**
-     * Records only a confirmed successful send, never a message merely observed in history.
-     * The send executor must call this after the target app confirms the message was accepted.
-     */
+    /** A title-only traversal key is never a durable contact identity. */
+    private fun verifiedPrivateLedgerContactKey(): String? {
+        if (receivedGreetingsTaskActive || sessionManagerState != SessionManagerState.READING_SESSION) return null
+        val binding = currentSessionBinding ?: return null
+        val identity = if (binding.observedBusinessAdmitted) binding.observedVerifiedIdentity
+            else currentSessionCandidate?.contactIdentity
+        if (identity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) return null
+        val key = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId)
+        return key.takeIf { it.isNotBlank() && it == currentSessionKey }
+    }
+
+    /** Confirmed private text sends only. No greeting count, no title-only durable identity. */
     fun recordSuccessfulSend(sendConfirmationId: String): ContactSendCountUpdate {
-        val contactKey = if (receivedGreetingsTaskActive) {
-            // The avatar profile supplied the platform ID; never use a display-name key.
-            greetingChatBinding?.contactId?.let(ChatSessionManagementPolicy::stableSessionKeyForVerifiedContact)
-        } else {
-            currentSessionKey.takeIf { sessionManagerState == SessionManagerState.READING_SESSION }
-        }
+        val contactKey = verifiedPrivateLedgerContactKey()
         val interceptionThreshold = messageInterceptionThreshold().coerceAtLeast(0)
         val imageThreshold = imageSendThreshold().coerceAtLeast(0)
         val update = contactMessageLedger.recordSuccessfulSend(
@@ -4556,35 +4558,25 @@ class AiReplyObservationRuntime(
             interceptionThreshold = interceptionThreshold,
             imageThreshold = imageThreshold
         )
-        if (update.imageThresholdReachedNow) {
-            onLog(
-                "AI 联系人临时账本：当前会话达到图片发送阈值=$imageThreshold；" +
-                    "图片发送事务尚未接入，本次仅保留已达阈值状态"
-            )
-        }
-        if (update.thresholdReachedNow) {
-            contactKey?.let(pendingInterceptionContactKeys::add)
-            onLog(
-                "AI 联系人临时账本：当前会话达到发送上限=${update.threshold}；" +
-                    "已暂停该联系人后续发送并等待消息拦截开关确认"
-            )
+        if (update.imageThresholdReachedNow || update.thresholdReachedNow) {
+            onLog("PRIVATE_CONTACT_LEDGER FOLLOW_UP_PENDING;imageDue=${update.imageThresholdReachedNow};" +
+                "interceptionDue=${update.thresholdReachedNow};productionActionsNotConnected=true")
+        } else if (update.status == ContactSendRecordStatus.INVALID_INPUT) {
+            onLog("PRIVATE_CONTACT_LEDGER RECORD_SKIPPED;reason=UNVERIFIED_PRIVATE_CONTACT_OR_INVALID_RECEIPT")
         }
         return update
     }
 
-    /**
-     * Clears the oldest threshold-reached contact only after an external controller has
-     * independently verified that the intended intercept switch is ON. This survives the
-     * normal return-to-inbox transition, which clears currentSessionKey.
-     */
-    fun confirmMessageInterceptionEnabled(): Boolean {
-        val contactKey = pendingInterceptionContactKeys.firstOrNull() ?: return false
-        val cleared = contactMessageLedger.confirmInterceptionEnabled(contactKey)
-        if (cleared) {
-            pendingInterceptionContactKeys.remove(contactKey)
-            onLog("AI 联系人临时账本：消息拦截状态已确认开启；该联系人临时数据已清除")
+    /** The later private child transaction must supply its exact verified contact and checkpoint.
+     * No FIFO contact selection and no implicit use of whatever chat is currently visible. */
+    fun confirmMessageInterceptionEnabled(
+        contactKey: String,
+        expected: ContactFollowUpCheckpoint
+    ): Boolean {
+        if (receivedGreetingsTaskActive || verifiedPrivateLedgerContactKey() != contactKey) return false
+        return contactMessageLedger.confirmInterceptionEnabled(contactKey, expected).also { confirmed ->
+            if (confirmed) onLog("PRIVATE_CONTACT_LEDGER INTERCEPTION_CONFIRMED;contactRecordRetained=true")
         }
-        return cleared
     }
 
     /** Request a fresh observation for page-driven startup/handoff without replacing
@@ -5456,7 +5448,14 @@ class AiReplyObservationRuntime(
                         onLog("AI 发送成功记录被阻止：缺少稳定 sendConfirmationId；不返回列表")
                         return true
                     }
-                    recordSuccessfulSend(sendConfirmationId)
+                    val countUpdate = recordSuccessfulSend(sendConfirmationId)
+                    if (countUpdate.status == ContactSendRecordStatus.PERSISTENCE_FAILED) {
+                        currentSessionSendConfirmed = false
+                        onLog("PRIVATE_CONTACT_LEDGER WRITE_FAILED;retainConfirmedSendJournal=true;noReturn=true")
+                        requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "PRIVATE_DETAIL_CONTACT_LEDGER_WRITE_FAILED")
+                        scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                        return true
+                    }
                     privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
                     privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
                     val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
