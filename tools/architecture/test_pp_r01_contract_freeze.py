@@ -104,8 +104,14 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # and protect the revised gate by its exact blob, not an exemption.
                 path = "tools/architecture/test_pp_r00_freeze.py"
                 self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
-                expected[path] = "107973b54c7411286ca724fd5f40f6e0aa12dc2f"
+                # R04 also pins the reviewed relocation; R03 remains in the R00 gate.
+                expected[path] = "0ca8691e7bb94a4595db2ee9bfe97a0371406517"
             issues.extend(evidence_violations(ROOT, expected))
+        # New R04 regression evidence is pinned independently of the historical inventory.
+        issues.extend(evidence_violations(ROOT, {
+            "app/src/test/java/com/freedom/adapters/social/momo/R04MomoReadOnlyMigrationTest.kt":
+                "08cbddbca8ff6c96e484a6e823e69af95dd4f6cd",
+        }))
         self.assertEqual([], issues)
 
     def test_contracts_map_to_real_frozen_sources_and_existing_regressions(self):

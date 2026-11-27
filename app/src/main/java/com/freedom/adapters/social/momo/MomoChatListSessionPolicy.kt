@@ -1,5 +1,8 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.features.aireply.ports.ChatPageSnapshot
+import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.features.aireply.ports.ChatUnreadEvidenceSource
 import com.freedom.features.aireply.ports.ChatUnreadStatus
@@ -62,6 +65,27 @@ internal data class MomoChatListRowClassification(
 
 /** Pure selection and geometry rules shared by the Android extractor and local unit tests. */
 internal object MomoChatListSessionPolicy {
+    fun receivedGreetingsEntrySearchViewportFingerprint(snapshot: ChatPageSnapshot): String {
+        if (snapshot.chatListExtractionTruncated || snapshot.chatListInvalidRowBoundsCount != 0 ||
+            snapshot.chatListViewport?.isEmpty != false || snapshot.windowIdentityKey() == null
+        ) return ""
+        val rowKeys = snapshot.chatListCandidates.filter { candidate ->
+            candidate.rowVisibleToUser && candidate.intersectsViewport &&
+                MomoChatListSessionPolicy.hasValidBounds(candidate.rowBounds)
+        }.joinToString("|") { candidate ->
+            // Preserve the existing redacted identity/geometry signal for movement.
+            val identity = ChatSessionManagementPolicy.stableSessionKey(candidate)
+                .ifBlank { candidate.structuralKey() }
+            "$identity@${candidate.rowBounds.left},${candidate.rowBounds.top}," +
+                "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
+        }
+        if (rowKeys.isBlank()) return ""
+        val rows = ChatSessionManagementPolicy.validatedCollectionRows(snapshot)
+        return "${snapshot.windowIdentityKey()}|${snapshot.chatListViewport}|" +
+            "${snapshot.chatListCollectionRowCount}:${rows?.firstOrNull()}:${rows?.lastOrNull()}:" +
+            "${snapshot.chatListCanScrollForward}:${snapshot.chatListCanScrollBackward}|$rowKeys"
+    }
+
     private const val AUXILIARY_RECYCLER_VIEW_ID = "active_rv"
     private const val NOTICE_HOLDER_VIEW_ID = "notice_layout_content_root"
     private const val AI_FINDER_FLOATING_VIEW_ID = "mf_view"

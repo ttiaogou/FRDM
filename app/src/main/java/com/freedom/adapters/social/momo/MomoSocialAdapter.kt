@@ -1,6 +1,14 @@
 package com.freedom.adapters.social.momo
 
 import com.freedom.gesture.api.GestureApi
+import com.freedom.adapters.social.momo.MomoChatPageContract.unknownChatPageSnapshot
+import com.freedom.adapters.social.momo.MomoChatPageContract.receivedGreetingsListChatPagePlaceholder
+import com.freedom.adapters.social.momo.MomoSayHiIdentityFingerprintPolicy.sha256IdentityAnchor
+import com.freedom.adapters.social.momo.MomoSayHiIdentityFingerprintPolicy.extractChatPeerName
+import com.freedom.adapters.social.momo.MomoSayHiIdentityFingerprintPolicy.normalizeIdentityDisplayName
+import com.freedom.adapters.social.momo.MomoWindowPageFingerprint.sayHiWindowStabilityKey
+import com.freedom.adapters.social.momo.MomoWindowPageFingerprint.sameMomoWindowGeneration
+import com.freedom.adapters.social.momo.MomoChatListSessionPolicy.receivedGreetingsEntrySearchViewportFingerprint
 import com.freedom.features.conversation.domain.contact.ContactIdentityManager
 import com.freedom.features.conversation.domain.contact.ContactIdentityObservation
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
@@ -2283,27 +2291,6 @@ internal class MomoSocialAdapter(
         }
     }
 
-    private fun receivedGreetingsEntrySearchViewportFingerprint(snapshot: ChatPageSnapshot): String {
-        if (snapshot.chatListExtractionTruncated || snapshot.chatListInvalidRowBoundsCount != 0 ||
-            snapshot.chatListViewport?.isEmpty != false || snapshot.windowIdentityKey() == null
-        ) return ""
-        val rowKeys = snapshot.chatListCandidates.filter { candidate ->
-            candidate.rowVisibleToUser && candidate.intersectsViewport &&
-                MomoChatListSessionPolicy.hasValidBounds(candidate.rowBounds)
-        }.joinToString("|") { candidate ->
-            // Preserve the existing redacted identity/geometry signal for movement.
-            val identity = ChatSessionManagementPolicy.stableSessionKey(candidate)
-                .ifBlank { candidate.structuralKey() }
-            "$identity@${candidate.rowBounds.left},${candidate.rowBounds.top}," +
-                "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
-        }
-        if (rowKeys.isBlank()) return ""
-        val rows = ChatSessionManagementPolicy.validatedCollectionRows(snapshot)
-        return "${snapshot.windowIdentityKey()}|${snapshot.chatListViewport}|" +
-            "${snapshot.chatListCollectionRowCount}:${rows?.firstOrNull()}:${rows?.lastOrNull()}:" +
-            "${snapshot.chatListCanScrollForward}:${snapshot.chatListCanScrollBackward}|$rowKeys"
-    }
-
     private fun resetReceivedGreetingsEntrySearch(resetRun: Boolean = false) {
         if (resetRun) receivedGreetingsEntrySearchController.resetForRun()
         else receivedGreetingsEntrySearchController.reset()
@@ -2366,20 +2353,6 @@ internal class MomoSocialAdapter(
             target = decision as MomoReceivedGreetingsEntryTapDecision.Ready
         )
     }
-
-    private fun sameMomoWindowGeneration(left: WindowRef, right: WindowRef): Boolean =
-        left.packageName == right.packageName &&
-            left.windowId == right.windowId &&
-            left.generation == right.generation
-
-    private fun sayHiWindowStabilityKey(tree: AccessibilityTreeSnapshot): String =
-        sayHiWindowStabilityKey(tree.window.copy(windowId = tree.windowId))
-
-    private fun sayHiWindowStabilityKey(window: WindowRef): String = listOf(
-        window.packageName,
-        window.windowId,
-        window.generation
-    ).joinToString("|")
 
     private fun resetSayHiListSnapshotState() {
         sayHiSnapshotCoordinator.reset()
@@ -6915,7 +6888,7 @@ internal class MomoSocialAdapter(
             // page (or while BACK has not yet restored the chat detail page). The pending flow
             // must finish, confirm the chat page, and only then allow the main pipeline to read
             // the current-window fallback or load history.
-            return unknownChatPageSnapshot()
+            return unknownChatPageSnapshot(activityClass())
         }
         val currentActivity = activityClass()
         if (sayHiNavigationFlowController.shouldUseDedicatedReceivedListInspector(
@@ -6929,7 +6902,7 @@ internal class MomoSocialAdapter(
                         "节点采集统一交由受手势/快照闸门保护的外层 listview 与内层 card_list 精确检查"
                 )
             }
-            return receivedGreetingsListChatPagePlaceholder()
+            return receivedGreetingsListChatPagePlaceholder(targetPackage)
         }
         sayHiGenericChatInspectionBypassActive = false
         inspectMomoNavigationEvidenceIfNeeded()
@@ -6961,7 +6934,7 @@ internal class MomoSocialAdapter(
                 MomoChatListSessionExtraction(null, emptyList(), 0, false)
             }
             Triple(inspection, treeEvidence, window) to chatListExtraction
-        } ?: return unknownChatPageSnapshot()
+        } ?: return unknownChatPageSnapshot(activityClass())
 
         val (pageEvidence, chatListExtraction) = captured
         val (inspection, treeEvidence, window) = pageEvidence
@@ -6969,7 +6942,7 @@ internal class MomoSocialAdapter(
             it.stage == InboxIdentityCaptureStage.WAITING_LIST_RETURN
         }
         if (awaitingIdentityListReturn != null && inspection.pageType != MomoChatPageType.CHAT_LIST) {
-            return unknownChatPageSnapshot()
+            return unknownChatPageSnapshot(activityClass())
         }
         treeEvidence.snapshot?.let { snapshot ->
             sessionComponents.sampleStore.recordNodeTree(
@@ -8733,34 +8706,6 @@ internal class MomoSocialAdapter(
         }
     }
 
-    private fun receivedGreetingsListChatPagePlaceholder() = ChatPageSnapshot(
-        packageName = targetPackage,
-        activityClass = MomoSayHiPageContract.LIST_ACTIVITY,
-        pageKind = ChatPageKind.NON_CHAT,
-        scannedNodeCount = 0,
-        editableInputCount = 0,
-        messageListCount = 0,
-        sendActionCount = 0,
-        messageRelatedViewIdCount = 0,
-        hasChatTab = false,
-        messageListTarget = null,
-        inputFieldTarget = null
-    )
-
-    private fun unknownChatPageSnapshot() = ChatPageSnapshot(
-        packageName = "",
-        activityClass = activityClass(),
-        pageKind = ChatPageKind.UNKNOWN,
-        scannedNodeCount = 0,
-        editableInputCount = 0,
-        messageListCount = 0,
-        sendActionCount = 0,
-        messageRelatedViewIdCount = 0,
-        hasChatTab = false,
-        messageListTarget = null,
-        inputFieldTarget = null
-    )
-
     private fun configPageDynamicTabLabel(): String = config.page.dynamicTabLabel
     private fun configPageHomeTabLabel(): String = config.page.homeTabLabel
     private fun configPageDynamicTabUpperBandRatio(): Float = config.page.dynamicTabUpperBandRatio
@@ -8890,19 +8835,3 @@ internal class MomoSocialAdapter(
         )
     }
 }
-
-private fun normalizeIdentityDisplayName(value: String?): String =
-    java.text.Normalizer.normalize(value.orEmpty().trim(), java.text.Normalizer.Form.NFC)
-        .replace(Regex("\\s+"), " ")
-
-/** ChatActivity exposes the peer title as 与+昵称+对话; compare the extracted nickname. */
-private fun extractChatPeerName(value: String?): String {
-    val title = normalizeIdentityDisplayName(value)
-    if (!title.startsWith("与") || !title.endsWith("对话")) return ""
-    return normalizeIdentityDisplayName(title.removePrefix("与").removeSuffix("对话"))
-}
-
-private fun sha256IdentityAnchor(value: String): String =
-    java.security.MessageDigest.getInstance("SHA-256")
-        .digest(value.toByteArray(Charsets.UTF_8))
-        .joinToString("") { byte -> "%02x".format(byte) }

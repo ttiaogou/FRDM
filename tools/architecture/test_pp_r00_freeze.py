@@ -110,6 +110,21 @@ class PpR00FreezeTest(unittest.TestCase):
         activity = "app/src/main/java/com/freedom/MainActivity.kt"
         self.assertEqual("0ce061194a011399a493a189fbda49a841eb7771", reviewed_s1[activity])
         reviewed_s1[activity] = "7afbe0c4eb9f8f67f96f9833665093424948d9c2"
+        # R04: exact reviewed relocation of stateless Momo functions, no blanket exemption.
+        for path, (historical, replacement) in {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoChatListSessionPolicy.kt": (
+                "52f6de77fb025c65c1f93666cf4bfa940e85f93d", "491b4e888cc045b2c170b48b16b11924682a1663"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoWindowPageFingerprint.kt": (
+                "842648b653524414c0559a3919c8c97e91d45e6c", "b812edf273cf0c45af16e80ae1a3e41bdb8085e8"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSayHiIdentityFingerprintPolicy.kt": (
+                "7d5fc671a44945b0b3e3dce6ff2d300e18d1046a", "4f709f87c43bfe9ec1e2d586e2413d44f90754c1"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoChatPageModels.kt": (
+                "2fa1871c901fbe8cf30b1d47589b8ea9189d62e1", "3fb5dd10b74ba2d161759ebd33a20d5e24220a82"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": (
+                "69811799d3ed1048c3fc2105c4a2e09af7f50f17", "0d35707b612ac3926a75c1933650d3083a898571"),
+        }.items():
+            self.assertEqual(historical, reviewed_s1[path])
+            reviewed_s1[path] = replacement
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

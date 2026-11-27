@@ -1,5 +1,7 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.core.accessibility.api.AccessibilityTreeSnapshot
+
 import com.freedom.core.accessibility.api.WindowRef
 
 /**
@@ -8,6 +10,20 @@ import com.freedom.core.accessibility.api.WindowRef
  * Structural signatures are supplied by the page-specific inspectors and exclude volatile content.
  */
 internal object MomoWindowPageFingerprint {
+    fun sameMomoWindowGeneration(left: WindowRef, right: WindowRef): Boolean =
+        left.packageName == right.packageName &&
+            left.windowId == right.windowId &&
+            left.generation == right.generation
+
+    fun sayHiWindowStabilityKey(tree: AccessibilityTreeSnapshot): String =
+        sayHiWindowStabilityKey(tree.window.copy(windowId = tree.windowId))
+
+    fun sayHiWindowStabilityKey(window: WindowRef): String = listOf(
+        window.packageName,
+        window.windowId,
+        window.generation
+    ).joinToString("|")
+
     fun create(
         window: WindowRef,
         targetPackage: String,

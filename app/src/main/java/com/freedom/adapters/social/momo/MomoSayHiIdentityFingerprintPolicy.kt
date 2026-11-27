@@ -9,6 +9,22 @@ import java.security.MessageDigest
  * 使用与原逻辑一致的输入字段生成指纹；原始文本和平台 ID 不写入常规日志。
  */
 internal object MomoSayHiIdentityFingerprintPolicy {
+    fun normalizeIdentityDisplayName(value: String?): String =
+        java.text.Normalizer.normalize(value.orEmpty().trim(), java.text.Normalizer.Form.NFC)
+            .replace(Regex("\\s+"), " ")
+
+    /** ChatActivity exposes the peer title as 与+昵称+对话; compare the extracted nickname. */
+    fun extractChatPeerName(value: String?): String {
+        val title = normalizeIdentityDisplayName(value)
+        if (!title.startsWith("与") || !title.endsWith("对话")) return ""
+        return normalizeIdentityDisplayName(title.removePrefix("与").removeSuffix("对话"))
+    }
+
+    fun sha256IdentityAnchor(value: String): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+
     fun contactIdHash(contactId: String): String =
         sha256(contactId.trim())
 

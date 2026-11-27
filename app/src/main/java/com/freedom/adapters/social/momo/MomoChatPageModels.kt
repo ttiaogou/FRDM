@@ -1,11 +1,42 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.features.aireply.ports.ChatPageKind
+import com.freedom.features.aireply.ports.ChatPageSnapshot
+
 /**
  * Versioned Momo chat-page contract derived from the supplied device accessibility trees.
  * Activity names are retained as diagnostic hints; page identity is established by the
  * same-window structural anchors and exact component relationships below.
  */
 internal object MomoChatPageContract {
+    fun receivedGreetingsListChatPagePlaceholder(targetPackage: String) = ChatPageSnapshot(
+        packageName = targetPackage,
+        activityClass = MomoSayHiPageContract.LIST_ACTIVITY,
+        pageKind = ChatPageKind.NON_CHAT,
+        scannedNodeCount = 0,
+        editableInputCount = 0,
+        messageListCount = 0,
+        sendActionCount = 0,
+        messageRelatedViewIdCount = 0,
+        hasChatTab = false,
+        messageListTarget = null,
+        inputFieldTarget = null
+    )
+
+    fun unknownChatPageSnapshot(activityClass: String) = ChatPageSnapshot(
+        packageName = "",
+        activityClass = activityClass,
+        pageKind = ChatPageKind.UNKNOWN,
+        scannedNodeCount = 0,
+        editableInputCount = 0,
+        messageListCount = 0,
+        sendActionCount = 0,
+        messageRelatedViewIdCount = 0,
+        hasChatTab = false,
+        messageListTarget = null,
+        inputFieldTarget = null
+    )
+
     const val CHAT_DETAIL_ACTIVITY = MomoAppDescriptor.CHAT_DETAIL_ACTIVITY_CLASS
     const val MAIN_ACTIVITY = MomoAppDescriptor.MAIN_ACTIVITY_CLASS
     const val MESSAGE_LIST_VIEW_ID = MomoAppDescriptor.CHAT_MESSAGE_LIST_VIEW_ID
