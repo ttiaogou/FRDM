@@ -1787,6 +1787,71 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun l07cSystemBadgesAreReadForBoundaryWithoutChangingRawStateOrEligibility() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+        }
+        val read = candidate(0, "Read private", ChatUnreadStatus.READ)
+        val systemUnread = candidate(1, "System", ChatUnreadStatus.UNREAD, selectionClass = "SYSTEM_ENTRY")
+        val systemUnknown = candidate(1, "System", ChatUnreadStatus.UNKNOWN, selectionClass = "SYSTEM_ENTRY")
+        val policy = com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+        assertEquals(ChatUnreadStatus.READ, policy.privateBoundaryReadStatus(systemUnread))
+        assertEquals(ChatUnreadStatus.READ, policy.privateBoundaryReadStatus(systemUnknown))
+        assertFalse(policy.isEligible(systemUnread))
+        assertFalse(policy.isEligible(systemUnknown))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+            executor.evaluateUnreadAdmission(snapshot(read, systemUnread)))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED,
+            executor.evaluateUnreadAdmission(snapshot(read, systemUnknown)))
+        assertEquals(ChatUnreadStatus.UNREAD, systemUnread.unreadStatus)
+        assertEquals(ChatUnreadStatus.UNKNOWN, systemUnknown.unreadStatus)
+        assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+    }
+
+    @Test
+    fun l07cSystemEntryDoesNotHidePrivateUnreadOrProveAnUnseenSuffix() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+        }
+        val system = candidate(0, "System", ChatUnreadStatus.UNREAD, selectionClass = "SYSTEM_ENTRY")
+        val unread = candidate(1, "Private unread", ChatUnreadStatus.UNREAD)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            executor.evaluateUnreadAdmission(snapshot(system)))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            executor.evaluateUnreadAdmission(snapshot(system, unread)))
+        assertEquals(setOf(key(unread)), executor.lockedUnreadSessionKeys)
+        val bottom = snapshot(system).copy(windowGeneration = 1L,
+            chatListCollectionRowCount = 2, chatListVisibleCollectionRows = listOf(1),
+            chatListCanScrollForward = false, chatListCanScrollBackward = true)
+        assertEquals(true, executor.collectionBoundaryEvidence(bottom, toTop = false))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+            executor.evaluateUnreadAdmission(bottom))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED,
+            executor.evaluateUnreadAdmission(bottom))
+        assertEquals(setOf(key(unread)), executor.lockedUnreadSessionKeys)
+    }
+
+    @Test
+    fun l07cInvisibleRowsDoNotSupplyReadProofOrBlockAnOtherwiseCompleteReadViewport() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxTopPositioningCompleted = true
+        }
+        val hidden = candidate(1, "Hidden stale", ChatUnreadStatus.UNKNOWN,
+            top = 1700, rowVisible = false, inViewport = false)
+        val read = candidate(0, "Read", ChatUnreadStatus.READ)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            executor.evaluateUnreadAdmission(snapshot(hidden)))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            executor.evaluateUnreadAdmission(snapshot(read).copy(chatListInvalidRowBoundsCount = 1)))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+            executor.evaluateUnreadAdmission(snapshot(read, hidden)))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED,
+            executor.evaluateUnreadAdmission(snapshot(read, hidden)))
+        assertEquals(ChatUnreadStatus.UNKNOWN, hidden.unreadStatus)
+    }
+
+    @Test
     fun readViewportRequiresCompletePrivateEvidenceAndNeverIgnoresEdgeBadge() {
         val executor = PrivateMessagesTraversalTaskExecutor().apply {
             initialInboxTopPositioningCompleted = true
@@ -2044,7 +2109,9 @@ class PrivateMessagesTraversalTaskExecutorTest {
         selectionClass: String = "PRIVATE_CHAT",
         previewBounds: ScreenRect = ScreenRect(150, top + 50, 620, top + 90),
         previewBoundsIntersectViewport: Boolean = true,
-        previewBoundsFullyInsideViewport: Boolean = true
+        previewBoundsFullyInsideViewport: Boolean = true,
+        rowVisible: Boolean = true,
+        inViewport: Boolean = true
     ): ChatListCandidateSnapshot {
         val row = ScreenRect(0, top, 720, top + rowHeight)
         val nameBounds = ScreenRect(150, top + 10, 380, top + 40)
@@ -2056,9 +2123,9 @@ class PrivateMessagesTraversalTaskExecutorTest {
                 expectedClassName = "android.widget.RelativeLayout"
             ),
             rowBounds = row,
-            rowVisibleToUser = true,
-            intersectsViewport = true,
-            fullyInsideViewport = true,
+            rowVisibleToUser = rowVisible,
+            intersectsViewport = inViewport,
+            fullyInsideViewport = inViewport,
             rowBoundsValid = true,
             avatarBounds = ScreenRect(20, top + 10, 110, top + 100),
             avatarPath = NodePath(listOf(0, rowIndex, 0)),

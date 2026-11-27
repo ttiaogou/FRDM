@@ -44,6 +44,15 @@ enum class ChatHeaderMatchMode {
 
 /** Pure rules for selecting stable, geometrically safe session-row candidates. */
 object ChatSessionManagementPolicy {
+    /** Private-inbox boundary semantics only. Keep the provider's original badge for
+     * greeting-entry discovery and diagnostics; a system row never becomes a click target. */
+    fun privateBoundaryReadStatus(candidate: ChatListCandidateSnapshot): ChatUnreadStatus? =
+        when (candidate.selectionClass) {
+            "PRIVATE_CHAT" -> candidate.unreadStatus
+            "SYSTEM_ENTRY" -> ChatUnreadStatus.READ
+            else -> null
+        }
+
     fun isEligible(candidate: ChatListCandidateSnapshot): Boolean =
         candidate.selectionClass == "PRIVATE_CHAT" &&
             candidate.rowBoundsValid && candidate.intersectsViewport &&

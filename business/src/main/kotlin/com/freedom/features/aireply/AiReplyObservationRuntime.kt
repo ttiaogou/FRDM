@@ -7870,7 +7870,12 @@ class AiReplyObservationRuntime(
             "；私人聊天UNKNOWN=${unknownPrivate.size}" +
             "；可操作私人聊天UNKNOWN=${eligibleUnknownPrivate}" +
             "；系统入口未读=${unreadSystem}（不计入私人聊天未读）" +
-            "；系统入口UNKNOWN=${unknownSystem}（不阻断私人聊天准入）" +
+            "；系统入口UNKNOWN=${unknownSystem}（保留原始徽标，不阻断私人聊天准入）" +
+            "；系统入口边界READ=${systemRows.count {
+                !it.rowClippedAtViewportEdge &&
+                    ChatSessionManagementPolicy.privateBoundaryReadStatus(it) == ChatUnreadStatus.READ &&
+                    ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
+            }}" +
             "；几何准入未读=${eligibleUnread.size}" +
             "；身份冲突阻止=${blockedUnread}" +
             "；本轮已处理=${attemptedUnread}" +

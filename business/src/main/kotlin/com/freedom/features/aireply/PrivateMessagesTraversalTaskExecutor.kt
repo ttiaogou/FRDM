@@ -1098,13 +1098,18 @@ internal class PrivateMessagesTraversalTaskExecutor {
         unreadBoundaryStabilityCount = 0
     }
 
+    /** Same complete, visible row evidence for admission and stability. System badges
+     * are READ for this task only; clipped holders never supply positive boundary proof. */
+    private fun completeUnreadBoundaryRows(snapshot: ChatPageSnapshot): List<ChatListCandidateSnapshot> =
+        snapshot.chatListCandidates.filter {
+            ChatSessionManagementPolicy.privateBoundaryReadStatus(it) != null &&
+                (it.selectionClass == "SYSTEM_ENTRY" || ChatSessionManagementPolicy.isEligible(it)) &&
+                !isClippedAtViewportEdge(snapshot, it) && !it.rowClippedAtViewportEdge &&
+                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
+        }
+
     private fun buildUnreadBoundarySignature(snapshot: ChatPageSnapshot): String {
-        val rows = snapshot.chatListCandidates
-            .filter { ChatSessionManagementPolicy.isEligible(it) }
-            .filter {
-                !it.rowClippedAtViewportEdge &&
-                    ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
-            }
+        val rows = completeUnreadBoundaryRows(snapshot)
             .sortedWith(
                 compareBy<ChatListCandidateSnapshot> { it.rowBounds.top }
                     .thenBy { it.rowBounds.bottom }
@@ -1115,7 +1120,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
                 .takeIf(String::isNotBlank)
                 ?.let { key ->
                     "$key@${row.rowBounds.left},${row.rowBounds.top}," +
-                        "${row.rowBounds.right},${row.rowBounds.bottom}:${row.unreadStatus.name}"
+                        "${row.rowBounds.right},${row.rowBounds.bottom}:" +
+                        "${row.selectionClass}:${ChatSessionManagementPolicy.privateBoundaryReadStatus(row)?.name}"
                 }
         }
         return if (rows.isNotEmpty() && keys.size == rows.size) "$window|${keys.joinToString("|")}" else ""
@@ -1347,7 +1353,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val unknownBlocked = observeUnreadBlockers(snapshot)
         reconcileAdmittedUnread(snapshot)
         val viewportUnread = snapshot.chatListCandidates.filter {
-            it.unreadStatus == ChatUnreadStatus.UNREAD && ChatSessionManagementPolicy.isEligible(it)
+            it.rowVisibleToUser && it.intersectsViewport &&
+                ChatSessionManagementPolicy.privateBoundaryReadStatus(it) == ChatUnreadStatus.UNREAD &&
+                ChatSessionManagementPolicy.isEligible(it)
         }
         if (unknownBlocked && !canContinueWithUnknownUnread(snapshot)) {
             resetUnreadBoundaryObservation()
@@ -1379,23 +1387,30 @@ internal class PrivateMessagesTraversalTaskExecutor {
             resetUnreadBoundaryObservation()
             return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
         }
-        val privateRows = snapshot.chatListCandidates.filter { it.selectionClass == "PRIVATE_CHAT" }
-        val completePrivateRows = privateRows.filter {
-            !it.rowClippedAtViewportEdge &&
-                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
-        }
-        // Clipped holders may lose the timestamp/name and be UNCLASSIFIED. An observed
+        val visibleRows = snapshot.chatListCandidates.filter { it.rowVisibleToUser && it.intersectsViewport }
+        val privateRows = visibleRows.filter { it.selectionClass == "PRIVATE_CHAT" }
+        val completeRows = completeUnreadBoundaryRows(snapshot)
+        // System-only rows count as READ but cannot prove that an unobserved private
+        // unread region does not exist below a system-only viewport. Require either
+        // complete private READ evidence or independent physical-bottom evidence.
+        val hasReadAnchor = completeRows.any {
+            it.selectionClass == "PRIVATE_CHAT" &&
+                ChatSessionManagementPolicy.privateBoundaryReadStatus(it) == ChatUnreadStatus.READ
+        } || (completeRows.isNotEmpty() && collectionBoundaryEvidence(snapshot, toTop = false) == true)
+        // Clipped holders may lose the timestamp/name and be UNCLASSIFIED. A visible
         // unread marker on such a row is not evidence of a clean read viewport.
-        val unresolvedUnclassifiedBadge = snapshot.chatListCandidates.any {
+        val unresolvedUnclassifiedBadge = visibleRows.any {
             it.selectionClass == "UNCLASSIFIED" && it.unreadStatus != ChatUnreadStatus.READ &&
                 (it.unreadStatus == ChatUnreadStatus.UNREAD || it.statusNewNodePresent ||
                     it.unreadNodeEvidence.isNotEmpty())
         }
-        val cleanReadViewport = completePrivateRows.isNotEmpty() && !snapshot.chatListExtractionTruncated &&
+        val cleanReadViewport = hasReadAnchor && !snapshot.chatListExtractionTruncated &&
             snapshot.chatListInvalidRowBoundsCount == 0 && !unresolvedUnclassifiedBadge &&
-            privateRows.all {
-                (it.unreadStatus == ChatUnreadStatus.READ && it in completePrivateRows) ||
-                    isNonContributingClippedEdge(snapshot, it)
+            completeRows.all {
+                ChatSessionManagementPolicy.privateBoundaryReadStatus(it) == ChatUnreadStatus.READ
+            } && privateRows.all {
+                (ChatSessionManagementPolicy.privateBoundaryReadStatus(it) == ChatUnreadStatus.READ &&
+                    it in completeRows) || isNonContributingClippedEdge(snapshot, it)
             }
         if (canContinueWithIncompleteUnread(snapshot) && !cleanReadViewport) {
             // Pending named evidence is not an empty inbox or a proven read suffix.

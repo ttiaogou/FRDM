@@ -197,10 +197,13 @@ internal class MomoChatListSessionExtractor(
                 }
                 val itemLayout = userContainer.node
                 val rowBounds = boundsOf(itemLayout)
-                val rowVisibleToUser = safeBoolean { itemLayout.isVisibleToUser }
+                val visibility = runCatching { itemLayout.isVisibleToUser }.getOrNull()
+                val rowVisibleToUser = visibility == true
                 val rowBoundsValid = MomoChatListSessionPolicy.hasValidBounds(rowBounds)
                 val inViewport = MomoChatListSessionPolicy.intersectsViewport(rowBounds, viewport)
-                if (!rowBoundsValid) invalidRowBoundsCount++
+                // A confirmed invisible recycled holder supplies no boundary evidence.
+                // Unknown visibility remains fail-closed, just like a visible invalid row.
+                if (!rowBoundsValid && visibility != false) invalidRowBoundsCount++
                 if (!rowBoundsValid || !inViewport) {
                     recycle(itemLayout)
                     continue
