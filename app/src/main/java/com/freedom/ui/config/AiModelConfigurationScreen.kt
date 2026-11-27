@@ -1,7 +1,6 @@
 package com.freedom.ui.config
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.graphics.Color
 import android.graphics.Typeface
 import android.text.InputType
@@ -375,20 +374,9 @@ internal class AiModelConfigurationScreen(
     }
 
     private fun showModelEditor() {
-        val input = EditText(activity).apply {
-            setText(selectedModelName)
-            setSelection(text.length)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-            isSingleLine = true
-            textSize = 16f
-            setTextColor(FreedomUi.TEXT)
-            hint = "输入模型 ID"
-            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-        }
-        val content = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(8), dp(22), dp(4))
+        val input = FreedomUi.editorInput(activity, dp, selectedModelName,
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD, "输入模型 ID")
+        val content = FreedomUi.editorContent(activity, dp).apply {
             if (currentModelOptions.isNotEmpty()) {
                 addView(TextView(activity).apply {
                     text = "已加载模型"
@@ -413,7 +401,7 @@ internal class AiModelConfigurationScreen(
                 }
                 addView(picker, LinearLayout.LayoutParams(-1, dp(48)))
             }
-            addView(input, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(10) })
+            FreedomUi.addEditorInput(this, input, dp)
             addView(TextView(activity).apply {
                 text = "可选择已加载模型，也可手动填写模型 ID"
                 textSize = 11f
@@ -421,30 +409,21 @@ internal class AiModelConfigurationScreen(
                 setPadding(dp(2), dp(8), 0, 0)
             })
         }
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("模型名称")
-            .setView(content)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("保存", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val value = input.text.toString().trim()
-                if (value.isBlank()) {
-                    input.error = "模型名称不能为空"
-                    return@setOnClickListener
-                }
-                val next = configuration.copy(modelName = value).normalized()
-                configuration = next
-                selectedModelName = value
-                modelNameValue?.text = value
-                customModelInput?.setText(value)
-                onSave(next).getOrThrow()
-                dialog.dismiss()
+        val dialog = FreedomUi.createEditorDialog(activity, "模型名称", content)
+        FreedomUi.showEditorDialog(dialog, activity, dp, input) {
+            val value = input.text.toString().trim()
+            if (value.isBlank()) {
+                input.error = "模型名称不能为空"
+                return@showEditorDialog
             }
+            val next = configuration.copy(modelName = value).normalized()
+            configuration = next
+            selectedModelName = value
+            modelNameValue?.text = value
+            customModelInput?.setText(value)
+            onSave(next).getOrThrow()
+            dialog.dismiss()
         }
-        dialog.show()
-        FreedomUi.styleAlertDialog(dialog, activity, dp)
     }
 
     private fun showTextEditor(
@@ -454,37 +433,15 @@ internal class AiModelConfigurationScreen(
         inputType: Int,
         onSaveValue: (String) -> Unit
     ) {
-        val input = EditText(activity).apply {
-            setText(current)
-            setSelection(text.length)
-            this.inputType = inputType
-            isSingleLine = true
-            textSize = 16f
-            setTextColor(FreedomUi.TEXT)
-            this.hint = hint
-            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+        val input = FreedomUi.editorInput(activity, dp, current, inputType, hint)
+        val content = FreedomUi.editorContent(activity, dp)
+        FreedomUi.addEditorInput(content, input, dp)
+        val dialog = FreedomUi.createEditorDialog(activity, title, content)
+        FreedomUi.showEditorDialog(dialog, activity, dp, input) {
+            runCatching { onSaveValue(input.text.toString().trim()) }
+                .onSuccess { dialog.dismiss() }
+                .onFailure { input.error = it.message ?: "输入内容无效" }
         }
-        val content = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(8), dp(22), dp(4))
-            addView(input, LinearLayout.LayoutParams(-1, dp(52)))
-        }
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle(title)
-            .setView(content)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("保存", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                runCatching { onSaveValue(input.text.toString().trim()) }
-                    .onSuccess { dialog.dismiss() }
-                    .onFailure { input.error = it.message ?: "输入内容无效" }
-            }
-        }
-        dialog.show()
-        FreedomUi.styleAlertDialog(dialog, activity, dp)
     }
 
     private fun loadRemoteModels(baseUrl: String, apiKey: String) {
@@ -527,93 +484,70 @@ internal class AiModelConfigurationScreen(
     }
 
     private fun showApiKeyEditor() {
-        val input = EditText(activity).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            isSingleLine = true
-            textSize = 16f
-            setTextColor(FreedomUi.TEXT)
-            hint = "输入 API Key"
-            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+        val input = FreedomUi.editorInput(activity, dp, "",
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD, "输入 API Key").apply {
             isSaveEnabled = false
             importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
         }
-        val content = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(8), dp(22), dp(4))
-            addView(input, LinearLayout.LayoutParams(-1, dp(52)))
-            addView(TextView(activity).apply {
-                text = "留空并保存清空已保存的 Key"
-                textSize = 11f
-                setTextColor(FreedomUi.MUTED)
-                setPadding(dp(2), dp(8), 0, 0)
-            })
-        }
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("API Key")
-            .setView(content)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("保存", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val endpoint = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
-                    customEndpointInput?.text?.toString()?.trim().orEmpty()
-                } else {
-                    configuration.apiBaseUrl.ifBlank { selectedProvider.defaultBaseUrl }
-                }
-                val model = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
-                    customModelInput?.text?.toString()?.trim().orEmpty()
-                } else {
-                    selectedModelName.ifBlank { configuration.modelName }
-                }
-                val next = runCatching {
-                    configuration.copy(
-                        provider = selectedProvider,
-                        apiBaseUrl = endpoint,
-                        modelName = model,
-                        apiKey = input.text.toString().trim()
-                    ).normalized()
-                }.getOrElse { failure ->
-                    input.error = failure.message ?: "API Key 无效"
-                    return@setOnClickListener
-                }
-                if (selectedProvider != AiModelServiceProvider.CUSTOM_OPENAI_COMPAT &&
-                    currentModelOptions.none { it.id == next.modelName }
-                ) {
-                    input.error = "请选择列表中的模型"
-                    return@setOnClickListener
-                }
-                next.validationError()?.let { message ->
-                    input.error = message
-                    return@setOnClickListener
-                }
-                if (next.modelName.isBlank() || next.apiBaseUrl.isBlank()) {
-                    input.error = "模型配置不完整，请检查服务商和模型选择"
-                    return@setOnClickListener
-                }
-                onSave(next).fold(
-                    onSuccess = {
-                        configuration = next
-                        savedConfiguration = next
-                        runCatching { onCloudConsentChanged(next.apiKey.isNotBlank()) }
-                            .onFailure { failure ->
-                                showStatus(failure.message ?: "保存云端授权状态失败。", error = true)
-                            }
-                        apiKeyValue?.text = if (next.apiKey.isBlank()) "未设置" else "已保存 · 点击编辑"
-                        apiKeyStatus?.text = apiKeyStatusText()
-                        if (next.apiKey.isNotBlank()) loadRemoteModels(next.apiBaseUrl, next.apiKey)
-                        showStatus("模型配置已保存。", error = false)
-                        dialog.dismiss()
-                    },
-                    onFailure = { failure ->
-                        input.error = failure.message ?: "保存失败，请检查安全存储状态"
-                    }
-                )
+        val content = FreedomUi.editorContent(activity, dp)
+        FreedomUi.addEditorInput(content, input, dp)
+        FreedomUi.addEditorHint(content, "留空并保存清空已保存的 Key", dp)
+        val dialog = FreedomUi.createEditorDialog(activity, "API Key", content)
+        FreedomUi.showEditorDialog(dialog, activity, dp, input) {
+            val endpoint = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
+                customEndpointInput?.text?.toString()?.trim().orEmpty()
+            } else {
+                configuration.apiBaseUrl.ifBlank { selectedProvider.defaultBaseUrl }
             }
+            val model = if (selectedProvider == AiModelServiceProvider.CUSTOM_OPENAI_COMPAT) {
+                customModelInput?.text?.toString()?.trim().orEmpty()
+            } else {
+                selectedModelName.ifBlank { configuration.modelName }
+            }
+            val next = runCatching {
+                configuration.copy(
+                    provider = selectedProvider,
+                    apiBaseUrl = endpoint,
+                    modelName = model,
+                    apiKey = input.text.toString().trim()
+                ).normalized()
+            }.getOrElse { failure ->
+                input.error = failure.message ?: "API Key 无效"
+                return@showEditorDialog
+            }
+            if (selectedProvider != AiModelServiceProvider.CUSTOM_OPENAI_COMPAT &&
+                currentModelOptions.none { it.id == next.modelName }
+            ) {
+                input.error = "请选择列表中的模型"
+                return@showEditorDialog
+            }
+            next.validationError()?.let { message ->
+                input.error = message
+                return@showEditorDialog
+            }
+            if (next.modelName.isBlank() || next.apiBaseUrl.isBlank()) {
+                input.error = "模型配置不完整，请检查服务商和模型选择"
+                return@showEditorDialog
+            }
+            onSave(next).fold(
+                onSuccess = {
+                    configuration = next
+                    savedConfiguration = next
+                    runCatching { onCloudConsentChanged(next.apiKey.isNotBlank()) }
+                        .onFailure { failure ->
+                            showStatus(failure.message ?: "保存云端授权状态失败。", error = true)
+                        }
+                    apiKeyValue?.text = if (next.apiKey.isBlank()) "未设置" else "已保存 · 点击编辑"
+                    apiKeyStatus?.text = apiKeyStatusText()
+                    if (next.apiKey.isNotBlank()) loadRemoteModels(next.apiBaseUrl, next.apiKey)
+                    showStatus("模型配置已保存。", error = false)
+                    dialog.dismiss()
+                },
+                onFailure = { failure ->
+                    input.error = failure.message ?: "保存失败，请检查安全存储状态"
+                }
+            )
         }
-        dialog.show()
-        FreedomUi.styleAlertDialog(dialog, activity, dp)
     }
 
     private fun apiKeyStatusText(): String =

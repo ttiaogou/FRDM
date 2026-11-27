@@ -333,55 +333,29 @@ internal class PersonalizationScreen(
     }
 
     private fun showReplyLimitEditor() {
-        val input = EditText(activity).apply {
-            setText(parameters.messageInterceptionThreshold.toString())
-            setSelection(text.length)
-            inputType = InputType.TYPE_CLASS_NUMBER
-            isSingleLine = true
-            textSize = 18f
-            setTextColor(FreedomUi.TEXT)
-            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-        }
-        val content = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(8), dp(22), dp(4))
-            addView(input, LinearLayout.LayoutParams(-1, dp(52)))
-            addView(TextView(activity).apply {
-                text = "回复消息满足后执行/0不开启"
-                textSize = 11f
-                setTextColor(FreedomUi.MUTED)
-                setPadding(dp(2), dp(8), 0, 0)
-            })
-        }
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("消息拦截")
-            .setView(content)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("保存", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val parsed = input.text.toString().trim().toIntOrNull()
-                if (parsed == null || parsed < 0) {
-                    input.error = "请输入大于或等于 0 的数字"
-                    return@setOnClickListener
-                }
-                if (parsed > 0 && parameters.imageSendThreshold > parsed) {
-                    input.error = "图片发送阈值大于消息拦截阈值；拦截会先阻断后续回复"
-                    return@setOnClickListener
-                }
-                parameters = parameters.copy(messageInterceptionThreshold = parsed)
-                onTaskParametersChanged(parameters)
-                messageInterceptionThresholdValue?.apply {
-                    text = parsed.toString()
-                    contentDescription = "消息拦截 $parsed，点击编辑"
-                }
-                dialog.dismiss()
+        val input = FreedomUi.editorInput(activity, dp, parameters.messageInterceptionThreshold.toString(), InputType.TYPE_CLASS_NUMBER)
+        val content = FreedomUi.editorContent(activity, dp)
+        FreedomUi.addEditorInput(content, input, dp)
+        FreedomUi.addEditorHint(content, "回复消息满足后执行/0不开启；留空按 0 保存", dp)
+        val dialog = FreedomUi.createEditorDialog(activity, "消息拦截", content)
+        FreedomUi.showEditorDialog(dialog, activity, dp, input) {
+            val parsed = FreedomUi.parseEditorInteger(input.text.toString())
+            if (parsed == null || parsed < 0) {
+                input.error = "请输入大于或等于 0 的数字"
+                return@showEditorDialog
             }
+            if (parsed > 0 && parameters.imageSendThreshold > parsed) {
+                input.error = "图片发送阈值大于消息拦截阈值；拦截会先阻断后续回复"
+                return@showEditorDialog
+            }
+            parameters = parameters.copy(messageInterceptionThreshold = parsed)
+            onTaskParametersChanged(parameters)
+            messageInterceptionThresholdValue?.apply {
+                text = parsed.toString()
+                contentDescription = "消息拦截 $parsed，点击编辑"
+            }
+            dialog.dismiss()
         }
-        dialog.show()
-        FreedomUi.styleAlertDialog(dialog, activity, dp)
     }
 
     private fun imagePreReplyPreferenceRow(): View {
@@ -423,54 +397,30 @@ internal class PersonalizationScreen(
     }
 
     private fun showImagePreReplyEditor() {
-        val input = EditText(activity).apply {
-            setText(parameters.imageSendThreshold.toString())
-            setSelection(text.length)
-            inputType = InputType.TYPE_CLASS_NUMBER
-            isSingleLine = true
-            textSize = 18f
-            setTextColor(FreedomUi.TEXT)
-            background = FreedomUi.roundedSurface(dp(10), Color.WHITE, FreedomUi.DIVIDER)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-        }
-        val content = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(8), dp(22), dp(4))
-            addView(input, LinearLayout.LayoutParams(-1, dp(52)))
-            addView(TextView(activity).apply {
-                text = "回复消息满足后发送图片 / 0 不开启"
-                textSize = 11f
-                setTextColor(FreedomUi.MUTED)
-                setPadding(dp(2), dp(8), 0, 0)
-            })
-        }
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("图片预回复")
-            .setView(content)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("保存", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val parsed = input.text.toString().trim().toIntOrNull()
-                if (parsed == null || parsed < 0) {
-                    input.error = "请输入大于或等于 0 的数字"
-                    return@setOnClickListener
-                }
-                val latest = taskParameters()
-                val validationError = latest.imageSendThresholdValidationError(parsed)
-                if (validationError != null) {
-                    input.error = validationError
-                    return@setOnClickListener
-                }
-                parameters = latest.copy(imageSendThreshold = parsed)
-                onTaskParametersChanged(parameters)
-                imageSendThresholdValue?.apply {
-                    text = parsed.toString()
-                    contentDescription = "图片预回复 $parsed，点击编辑"
-                }
-                dialog.dismiss()
+        val input = FreedomUi.editorInput(activity, dp, parameters.imageSendThreshold.toString(), InputType.TYPE_CLASS_NUMBER)
+        val content = FreedomUi.editorContent(activity, dp)
+        FreedomUi.addEditorInput(content, input, dp)
+        FreedomUi.addEditorHint(content, "回复消息满足后发送图片 / 0 不开启；留空按 0 保存", dp)
+        val dialog = FreedomUi.createEditorDialog(activity, "图片预回复", content)
+        val save: () -> Unit = save@{
+            val parsed = FreedomUi.parseEditorInteger(input.text.toString())
+            if (parsed == null || parsed < 0) {
+                input.error = "请输入大于或等于 0 的数字"
+                return@save
             }
+            val latest = taskParameters()
+            val validationError = latest.imageSendThresholdValidationError(parsed)
+            if (validationError != null) {
+                input.error = validationError
+                return@save
+            }
+            parameters = latest.copy(imageSendThreshold = parsed)
+            onTaskParametersChanged(parameters)
+            imageSendThresholdValue?.apply {
+                text = parsed.toString()
+                contentDescription = "图片预回复 $parsed，点击编辑"
+            }
+            dialog.dismiss()
         }
         content.addView(TextView(activity).apply {
             text = "发送图片"
@@ -502,8 +452,7 @@ internal class PersonalizationScreen(
                 }
             })
         }
-        dialog.show()
-        FreedomUi.styleAlertDialog(dialog, activity, dp)
+        FreedomUi.showEditorDialog(dialog, activity, dp, input, save)
     }
 
     private fun historyRetentionPolicyRow(): View {

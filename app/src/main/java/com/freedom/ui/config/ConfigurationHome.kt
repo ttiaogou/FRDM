@@ -1,7 +1,6 @@
 package com.freedom.ui.config
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
@@ -10,7 +9,6 @@ import android.graphics.drawable.RippleDrawable
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
-import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -495,54 +493,25 @@ internal class ConfigurationHome(
         validate: (Int) -> String?,
         onSave: (Int) -> Unit
     ) {
-        val input = EditText(activity).apply {
-            setText(value.toString())
-            setSelection(text.length)
-            inputType = InputType.TYPE_CLASS_NUMBER
-            textSize = 18f
-            isSingleLine = true
-            setTextColor(TEXT)
-            hint = "输入$suffix"
-            background = rounded(Color.WHITE, BORDER, 10)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-        }
-        val container = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(8), dp(22), dp(4))
-            addView(input, LinearLayout.LayoutParams(-1, dp(52)))
-            addView(TextView(activity).apply {
-                text = "输入 0 表示不限（如该项目适用）"
-                textSize = 11f
-                setTextColor(MUTED)
-                setPadding(dp(2), dp(8), 0, 0)
-            })
-        }
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle(title)
-            .setView(container)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("保存", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val parsed = input.text.toString().trim().toIntOrNull()
-                if (parsed == null) {
-                    input.error = "请输入有效数字"
-                    return@setOnClickListener
-                }
-                val validationError = validate(parsed)
-                if (validationError != null) {
-                    input.error = validationError
-                    return@setOnClickListener
-                }
-                onSave(parsed)
-                dialog.dismiss()
+        val input = FreedomUi.editorInput(activity, ::dp, value.toString(), InputType.TYPE_CLASS_NUMBER, "输入$suffix")
+        val content = FreedomUi.editorContent(activity, ::dp)
+        FreedomUi.addEditorInput(content, input, ::dp)
+        FreedomUi.addEditorHint(content, "输入 0 表示不限（如该项目适用）；留空按 0 保存", ::dp)
+        val dialog = FreedomUi.createEditorDialog(activity, title, content)
+        FreedomUi.showEditorDialog(dialog, activity, ::dp, input) {
+            val parsed = FreedomUi.parseEditorInteger(input.text.toString())
+            if (parsed == null) {
+                input.error = "请输入有效数字"
+                return@showEditorDialog
             }
-            input.requestFocus()
-            dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+            val validationError = validate(parsed)
+            if (validationError != null) {
+                input.error = validationError
+                return@showEditorDialog
+            }
+            onSave(parsed)
+            dialog.dismiss()
         }
-        dialog.show()
-        FreedomUi.styleAlertDialog(dialog, activity, ::dp, widthFraction = 0.86f)
     }
 
     private fun sectionLabel(value: String): View = TextView(activity).apply {

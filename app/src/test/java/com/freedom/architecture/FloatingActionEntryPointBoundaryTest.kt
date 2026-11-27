@@ -1,6 +1,7 @@
 package com.freedom.architecture
 
 import java.io.File
+import com.freedom.ui.theme.FreedomUi
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -285,6 +286,45 @@ class FloatingActionEntryPointBoundaryTest {
     }
 
     @Test
+    fun modalIntegerEditorParsesBlankAsZeroWithoutCoercingInvalidInput() {
+        listOf("", " ", "\t\n", "　").forEach { assertTrue(FreedomUi.parseEditorInteger(it) == 0) }
+        assertTrue(FreedomUi.parseEditorInteger(" 12 ") == 12)
+        assertTrue(FreedomUi.parseEditorInteger("-1") == -1)
+        assertTrue(FreedomUi.parseEditorInteger("2147483647") == Int.MAX_VALUE)
+        listOf("abc", "1.2", "2147483648", "1 2").forEach {
+            assertTrue(FreedomUi.parseEditorInteger(it) == null)
+        }
+    }
+
+    @Test
+    fun modalEditorsSharePresentationButKeepFieldSpecificValidation() {
+        val ui = source("app/src/main/java/com/freedom/ui/theme/FreedomUi.kt")
+        val home = source("app/src/main/java/com/freedom/ui/config/ConfigurationHome.kt")
+        val personalization = source("app/src/main/java/com/freedom/ui/config/PersonalizationScreen.kt")
+        val model = source("app/src/main/java/com/freedom/ui/config/AiModelConfigurationScreen.kt")
+        val target = source("app/src/main/java/com/freedom/ui/config/TargetAppEditor.kt")
+        val main = source("app/src/main/java/com/freedom/MainActivity.kt")
+        listOf(home, personalization, model, target, main).forEach {
+            assertTrue(it.contains("FreedomUi.editorInput("))
+            assertTrue(it.contains("FreedomUi.createEditorDialog("))
+            assertTrue(it.contains("FreedomUi.showEditorDialog("))
+        }
+        assertTrue(ui.contains("SOFT_INPUT_ADJUST_RESIZE"))
+        assertTrue(ui.contains(".setPositiveButton(positiveLabel, null)"))
+        assertTrue(personalization.split("FreedomUi.parseEditorInteger(").size - 1 == 2)
+        assertTrue(personalization.contains("imageSendThresholdValidationError(parsed)"))
+        assertTrue(personalization.contains("parameters.imageSendThreshold > parsed"))
+        assertTrue(model.contains("apiKey = input.text.toString().trim()"))
+        assertTrue(model.contains("isSaveEnabled = false"))
+        assertTrue(model.contains("View.IMPORTANT_FOR_AUTOFILL_NO"))
+        assertTrue(model.contains("模型名称不能为空"))
+        assertTrue(target.contains("packagePattern.matches(value)"))
+        assertTrue(main.contains("multiline = true"))
+        assertFalse(model.contains("parseEditorInteger("))
+        assertFalse(target.contains("parseEditorInteger("))
+    }
+
+    @Test
     fun filterPanelPersistsActivityTimeAlongsideDistanceAndAgePreferences() {
         val home = source("app/src/main/java/com/freedom/ui/config/ConfigurationHome.kt")
         val model = source("app/src/main/java/com/freedom/application/TaskLaunchParameters.kt")
@@ -306,7 +346,9 @@ class FloatingActionEntryPointBoundaryTest {
         assertTrue(home.contains("text = updated.maxLastActiveMinutes.toString()"))
         assertTrue(home.contains("callbacks.onTaskParametersChanged(updated)"))
         assertTrue(home.contains("private fun showNumberEditor("))
-        assertTrue(home.contains("AlertDialog.Builder(activity)"))
+        assertTrue(home.contains("FreedomUi.createEditorDialog(activity, title, content)"))
+        assertTrue(home.contains("FreedomUi.showEditorDialog(dialog, activity, ::dp, input)"))
+        assertTrue(home.contains("FreedomUi.parseEditorInteger(input.text.toString())"))
         assertTrue(home.contains("onSave(parsed)"))
 
         assertTrue(model.contains("val maxLastActiveMinutes: Int = ConversationFilterSettings.DEFAULT_MAX_LAST_ACTIVE_MINUTES"))

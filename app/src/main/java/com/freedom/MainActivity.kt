@@ -23,7 +23,6 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.CheckBox
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ImageView
 import android.widget.ScrollView
@@ -929,29 +928,33 @@ class MainActivity : Activity() {
     }
 
     private fun showOcrCorrectionDialog(entry: OcrReviewEntry) {
-        val input = EditText(this).apply {
-            hint = "可填写图片中实际显示的正确文字（非必填）"
-            minLines = 2
-            maxLines = 5
-            setText(entry.correctedText)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-        }
-        AlertDialog.Builder(this)
-            .setTitle("标记为识别错误")
-            .setMessage("确认当前 OCR 文本有误。录入正确文本可用于后续人工对照，但不是必填项。")
-            .setView(input)
-            .setNegativeButton("取消") { _, _ -> showOcrReviewDetail(entry) }
-            .setPositiveButton("保存核验结果") { _, _ ->
-                val saved = ocrReviewRepository.markReviewed(
-                    entry.batchId,
-                    entry.entryId,
-                    OcrReviewRepository.REVIEW_INCORRECT,
-                    input.text?.toString().orEmpty()
-                )
-                if (saved) showOcrReviewDetail(entry)
-                else Toast.makeText(this, "保存人工核验结果失败", Toast.LENGTH_LONG).show()
+        val input = FreedomUi.editorInput(
+            this, ::dp, entry.correctedText.orEmpty(),
+            android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE,
+            "可填写图片中实际显示的正确文字（非必填）", multiline = true
+        )
+        val content = FreedomUi.editorContent(this, ::dp)
+        FreedomUi.addEditorInput(content, input, ::dp)
+        val dialog = FreedomUi.createEditorDialog(
+            this, "标记为识别错误", content,
+            positiveLabel = "保存核验结果",
+            message = "确认当前 OCR 文本有误。录入正确文本可用于后续人工对照，但不是必填项。",
+            onCancel = { showOcrReviewDetail(entry) }
+        )
+        FreedomUi.showEditorDialog(dialog, this, ::dp, input) {
+            val saved = ocrReviewRepository.markReviewed(
+                entry.batchId,
+                entry.entryId,
+                OcrReviewRepository.REVIEW_INCORRECT,
+                input.text?.toString().orEmpty()
+            )
+            if (saved) {
+                dialog.dismiss()
+                showOcrReviewDetail(entry)
+            } else {
+                input.error = "保存人工核验结果失败"
             }
-            .show()
+        }
     }
 
     private fun addOcrReviewImage(parent: LinearLayout, title: String, path: String?) {
