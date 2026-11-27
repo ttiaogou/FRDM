@@ -1,0 +1,105 @@
+{
+  "baseline": "2c624b372532a379036192cb939e65c514f03b85",
+  "files": {
+    "app/src/main/java/com/freedom/adapters/social/momo/MomoImageEntryPolicy.kt": "d2e935cc04862fa846f66e0c566763a9593f51c9",
+    "app/src/main/java/com/freedom/adapters/social/momo/MomoAlbumSelectorInspector.kt": "4001ea30994d1c0bbd0f238072801f70b5db6f43",
+    "app/src/main/java/com/freedom/adapters/social/momo/MomoAlbumDirectoryInspector.kt": "5e47d3a3c42b04dceaeabcb2100bfc0be69de3ad",
+    "app/src/main/java/com/freedom/adapters/social/momo/MomoFreedomAlbumInspector.kt": "29cd9288c4f828cbfc92f37c9c57a2e602250201",
+    "app/src/main/java/com/freedom/adapters/social/momo/MomoAlbumGesturePermit.kt": "919a266982d6944a56a8696ef78e556410ea4940"
+  },
+  "regions": [
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    internal fun openImageAlbum(",
+      "lines": 19,
+      "sha1": "bfb61d404be92f8bb02bd75a979e4a61088248bb"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    internal fun openImageAlbumDirectory(",
+      "lines": 12,
+      "sha1": "e41127fea45a0949af63bf2036d76da2f27df951"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    private fun freshMediaSnapshot(expectedWindow: WindowRef? = null): AccessibilityTreeSnapshot? {",
+      "lines": 15,
+      "sha1": "b81e35778f9a2f84f14bbff4bacbb78efd7e83de"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    private fun isAlbumDirectoryArrival(albumWindow: WindowRef, snapshot: AccessibilityTreeSnapshot): Boolean =",
+      "lines": 2,
+      "sha1": "78151a4a0b6853c90e615dae9af12ff1fa8fb7be"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    internal fun inspectFreedomDirectory(albumWindow: WindowRef): MomoFreedomDirectoryTarget? {",
+      "lines": 5,
+      "sha1": "837f466d370e40dcc11f581f087195c9eb29e94c"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    internal fun openFreedomAlbum(",
+      "lines": 18,
+      "sha1": "9b9839f3408bb01e5f761ee86c7505e63b59efc6"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    internal fun selectFreedomImage(",
+      "lines": 14,
+      "sha1": "c7b79d4527b5577c4e70cc816618ad9e37e20cbe"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    internal fun sendFreedomImage(",
+      "lines": 22,
+      "sha1": "5e01d21a5487d5d3fad780deba488ee0224bd351"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    private fun <T : Any> submitVerifiedAlbumTap(",
+      "lines": 98,
+      "sha1": "f013c9b10899fc67104e31b2f2292601174be066"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    private fun interceptionNodeBounds(",
+      "lines": 22,
+      "sha1": "5be156ce1e2ee75f312552dfd20cb3062501e674"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    private fun interceptionDismissBounds(root: AccessibilityNodeInfo): ScreenRect? {",
+      "lines": 10,
+      "sha1": "5424ef279aa2c7875f4d6860080d2fbca87336c9"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+      "anchor": "    private fun interceptionBackBounds(window: WindowRef): ScreenRect? {",
+      "lines": 15,
+      "sha1": "7f9e3f0d926f60b71e51715222e08c5b176f4ea4"
+    },
+    {
+      "path": "app/src/main/java/com/freedom/adapters/social/momo/MomoChatPageInspector.kt",
+      "anchor": "    fun inspectImageEntry(root: AccessibilityNodeInfo, targetPackage: String): MomoImageEntryEvidence? {",
+      "lines": 24,
+      "sha1": "10d9c71d5a101b0be91db8bd0950cd6a69dfc7d1"
+    }
+  ],
+  "adapter": "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt",
+  "image_order": [
+    "openImageAlbum",
+    "openImageAlbumDirectory",
+    "openFreedomAlbum",
+    "selectFreedomImage",
+    "sendFreedomImage"
+  ],
+  "interception_resolvers": [
+    "\"interception-avatar\") { root, _ ->\n                    interceptionNodeBounds(root, \"chat_toolbar_avatar\", \"android.widget.ImageView\", clickable = true)\n                }",
+    "\"interception-layout\") { root, _ ->\n                    interceptionNodeBounds(root, \"setting_layout_harass\", \"android.widget.LinearLayout\", clickable = true)\n                }",
+    "\"interception-switch\") { root, _ ->\n                    interceptionNodeBounds(root, \"btn_switch\", \"android.widget.CompoundButton\", checkable = true)\n                }",
+    "\"interception-dismiss\") { root, _ ->\n                    interceptionDismissBounds(root)\n                }",
+    "\"interception-back\") { _, window ->\n                    interceptionBackBounds(window)\n                }"
+  ]
+}
