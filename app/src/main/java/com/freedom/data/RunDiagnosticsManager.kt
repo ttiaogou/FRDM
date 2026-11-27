@@ -7,6 +7,7 @@ import android.os.SystemClock
 import com.freedom.core.logging.RunDiagnosticAnalyzer
 import com.freedom.core.logging.RunDiagnosticCounters
 import com.freedom.core.logging.RunDiagnosticEvent
+import com.freedom.core.logging.RunIncidentEvidencePolicy
 import com.freedom.core.logging.RunDiagnosticReport
 import com.freedom.core.logging.RunDiagnosticHistoryAnalyzer
 import com.freedom.core.logging.RunLogBudgetPolicy
@@ -57,6 +58,9 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         val directory: File,
         var nextSequence: Long = 1L,
         val rollingStore: RunEventRollingStore = RunEventRollingStore(directory),
+        val incidentStore: RunIncidentEvidenceStore = RunIncidentEvidenceStore(directory, RunDiagnosticEventJsonCodec::encode),
+        var incidentQueueRejected: Long = 0,
+        var incidentUnexpectedFailures: Long = 0,
         var writtenEventBytes: Long = 0L,
         var normalEvictedEvents: Long = 0L,
         var normalEvictedBytes: Long = 0L,
@@ -415,7 +419,6 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                 reason = reason
             )
             state.acceptedEvents++
-            addRecent(state, finishEvent)
             activeRun = null
             finalizingRun = state
             finalizationPending = true
@@ -423,6 +426,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         val finalize = Runnable {
             try {
                 appendEventLine(state, finishEvent)
+                finishIncidentEvidence(state)
                 sealEvents(state.directory)
                 val finishedAt = System.currentTimeMillis()
                 val storedEvents = readEvents(state.directory)
@@ -477,6 +481,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                 runCatching { pruneHistory(state.runId) }
             } catch (error: Exception) {
                 synchronized(this) { state.writeFailures++ }
+                finishIncidentEvidence(state)
                 runCatching {
                     val fallback = RunDiagnosticAnalyzer.analyze(
                         runId = state.runId,
@@ -536,8 +541,13 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             }
         }.isSuccess
         val recoveredEvents = readEvents(safeDirectory)
+        val incidentRecoveryFailures = RunIncidentEvidenceStore.recoverInterrupted(safeDirectory) +
+            if (runCatching { writeIncidentIndex(safeDirectory) }.isSuccess) 0L else 1L
         val reconstructed = countersFromEvents(safeDirectory, recoveredEvents).let {
-            if (recoveryMarkerWritten) it else it.copy(writeFailures = it.writeFailures + 1)
+            it.copy(
+                writeFailures = it.writeFailures + if (recoveryMarkerWritten) 0L else 1L,
+                incidentWriteFailures = it.incidentWriteFailures + incidentRecoveryFailures
+            )
         }
         val baseReport = RunDiagnosticAnalyzer.analyze(
             runId = runId,
@@ -555,6 +565,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             loadHistoricalIssueCodes(excludingRunId = runId)
         )
         writeReport(safeDirectory, report)
+        writeCounterSnapshot(safeDirectory, RunDiagnosticEventJsonCodec.counters(report.counters).toString())
         writeDiagnosticManifest(safeDirectory, runId)
         writeMarker(
             JSONObject()
@@ -667,7 +678,6 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                 state.truncatedRecords++
                 state.truncatedBytes += (originalBytes - safeBytes).toLong()
             }
-            addRecent(state, boundedEvent)
             enqueueEvent(state, boundedEvent)
             if (state.acceptedEvents % 50L == 0L) persistCountersSnapshot(state, force = true)
         }
@@ -695,7 +705,6 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         state.pendingDuplicateCount = 0L
         state.pendingDuplicateType = ""
         state.acceptedEvents++
-        addRecent(state, summary)
         enqueueEvent(state, summary)
     }
 
@@ -726,6 +735,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         } catch (_: RejectedExecutionException) {
             synchronized(this) {
                 state.queueDroppedEvents++
+                if (RunIncidentEvidencePolicy.triggerLevel(event) != null) state.incidentQueueRejected++
                 recordDroppedEvent(state, event)
             }
         }
@@ -795,7 +805,14 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
     }
 
     private fun appendEventLine(state: ActiveRun, event: RunDiagnosticEvent): Boolean {
-        val line = RunDiagnosticEventJsonCodec.encode(boundEventFields(event))
+        val bounded = boundEventFields(event)
+        val incidentStatsBefore = state.incidentStore.stats
+        // Freeze before rolling storage can evict anything. Even a main-lane budget
+        // rejection does not prevent independent incident evidence capture.
+        runCatching { state.incidentStore.observe(bounded, state.recentEvents) }
+            .onFailure { synchronized(this) { state.incidentUnexpectedFailures++ } }
+        addRecent(state, bounded)
+        val line = RunDiagnosticEventJsonCodec.encode(bounded)
         val bytes = line.toByteArray(Charsets.UTF_8).size.toLong() + 1L
         val outcome = state.rollingStore.append(lane(event), line)
         synchronized(this) {
@@ -816,13 +833,51 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                     recordDroppedEvent(state, event)
                 }
             }
-            if (outcome.evictedRecords > 0L || outcome.status != RunEventRollingStore.Status.WRITTEN) {
+            if (outcome.evictedRecords > 0L || outcome.status != RunEventRollingStore.Status.WRITTEN ||
+                incidentStatsBefore != state.incidentStore.stats
+            ) {
                 // Called by the writer. The optional snapshot remains asynchronous and
                 // is suppressed after detachment so it cannot follow the seal barrier.
                 if (activeRun === state) persistCountersSnapshot(state)
             }
         }
         return outcome.status == RunEventRollingStore.Status.WRITTEN
+    }
+
+    private fun finishIncidentEvidence(state: ActiveRun) {
+        runCatching {
+            state.incidentStore.finish()
+            writeIncidentIndex(state.directory)
+        }.onFailure { synchronized(this) { state.incidentUnexpectedFailures++ } }
+    }
+
+    private fun writeIncidentIndex(directory: File) {
+        val incidents = RunIncidentEvidenceStore.directories(directory)
+        if (incidents.isEmpty()) return
+        val entries = JSONArray()
+        for (incident in incidents) {
+            val capture = runCatching { JSONObject(File(incident, "capture.json").readText()) }.getOrNull()
+            val end = runCatching { JSONObject(File(incident, "capture_end.json").readText()) }.getOrNull()
+            entries.put(JSONObject()
+                .put("id", incident.name)
+                .put("path", "incidents/${incident.name}")
+                .put("capture", capture ?: JSONObject.NULL)
+                .put("end", end ?: JSONObject.NULL)
+                .put("captureStatus", if (capture == null || !File(incident, "timeline.jsonl").isFile)
+                    "INCOMPLETE_START" else end?.optString("captureStatus") ?: "INCOMPLETE")
+            )
+        }
+        val file = File(directory, "incidents/index.json")
+        val temporary = File(directory, "incidents/index.json.tmp")
+        try {
+            temporary.writeText(JSONObject().put("schemaVersion", 1)
+                .put("businessRecoveryOutcome", "NOT_EVALUATED")
+                .put("entries", entries).toString(), Charsets.UTF_8)
+            java.nio.file.Files.move(temporary.toPath(), file.toPath(),
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            temporary.delete()
+        }
     }
 
     private fun sealEvents(directory: File) {
@@ -895,10 +950,12 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             "diagnostic_counters.json",
             "diagnostic_report.json",
             "diagnostic_report.txt",
-            "diagnostic_summary.txt"
+            "diagnostic_summary.txt",
+            "incidents/index.json"
         )
         val files = JSONArray()
-        (names.map { File(directory, it) } + RunEventRollingStore.sources(directory))
+        (names.map { File(directory, it) } + RunEventRollingStore.sources(directory) +
+            RunIncidentEvidenceStore.files(directory))
             .filter(File::isFile).distinctBy { it.absolutePath }.forEach { file ->
             files.put(JSONObject()
                 .put("path", file.relativeTo(directory).invariantSeparatorsPath)
@@ -918,6 +975,10 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                     .put("warningMaxBytes", RunLogBudgetPolicy.MAX_WARNING_EVENT_BYTES)
                     .put("criticalMaxBytes", RunLogBudgetPolicy.MAX_CRITICAL_EVENT_EXTRA_BYTES)
                     .put("lifecycleMaxBytes", RunLogBudgetPolicy.MAX_LIFECYCLE_EVENT_BYTES)
+                    .put("incidentMaxCaptures", RunLogBudgetPolicy.MAX_INCIDENT_CAPTURES)
+                    .put("incidentTriggerMaxBytes", RunLogBudgetPolicy.MAX_INCIDENT_TRIGGER_BYTES)
+                    .put("incidentBeforeMaxBytes", RunLogBudgetPolicy.MAX_INCIDENT_BEFORE_BYTES)
+                    .put("incidentAfterMaxBytes", RunLogBudgetPolicy.MAX_INCIDENT_AFTER_BYTES)
                     .put("eventRecordMaxBytes", RunLogBudgetPolicy.MAX_RUN_EVENT_RECORD_BYTES)
                     .put("errorDetailMaxBytesPerEntry", RunLogBudgetPolicy.MAX_ERROR_DETAIL_BYTES)
                     .put("errorDetailMaxBytesTotal", RunLogBudgetPolicy.MAX_ERROR_DETAILS_TOTAL_BYTES)
@@ -961,7 +1022,11 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         normalEvictedBytes = state.normalEvictedBytes,
         retainedEvents = (state.writtenEvents - state.normalEvictedEvents).coerceAtLeast(0L),
         queueDroppedEvents = state.queueDroppedEvents,
-        budgetDroppedEvents = state.budgetDroppedEvents
+        budgetDroppedEvents = state.budgetDroppedEvents,
+        incidentCaptured = state.incidentStore.stats.captured,
+        incidentRejected = state.incidentStore.stats.rejected + state.incidentQueueRejected,
+        incidentWriteFailures = state.incidentStore.stats.writeFailures + state.incidentUnexpectedFailures,
+        incidentPostLimited = state.incidentStore.stats.postLimited
     )
 
     private fun countersFromEvents(directory: File, events: List<RunDiagnosticEvent>): RunDiagnosticCounters {
@@ -990,7 +1055,20 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             normalEvictedBytes = markerCounts?.optLong("normalEvictedBytes") ?: 0L,
             retainedEvents = events.size.toLong(),
             queueDroppedEvents = markerCounts?.optLong("queueDroppedEvents") ?: 0L,
-            budgetDroppedEvents = markerCounts?.optLong("budgetDroppedEvents") ?: 0L
+            budgetDroppedEvents = markerCounts?.optLong("budgetDroppedEvents") ?: 0L,
+            incidentCaptured = RunIncidentEvidenceStore.directories(directory).count {
+                File(it, "capture.json").isFile && File(it, "timeline.jsonl").isFile
+            }.toLong(),
+            incidentRejected = markerCounts?.optLong("incidentRejected") ?: 0L,
+            incidentWriteFailures = maxOf(markerCounts?.optLong("incidentWriteFailures") ?: 0L,
+                RunIncidentEvidenceStore.directories(directory).count {
+                    !File(it, "capture.json").isFile || !File(it, "timeline.jsonl").isFile
+                }.toLong()),
+            incidentPostLimited = maxOf(markerCounts?.optLong("incidentPostLimited") ?: 0L,
+                RunIncidentEvidenceStore.directories(directory).count {
+                    val status = runCatching { JSONObject(File(it, "capture_end.json").readText()).optString("captureStatus") }.getOrNull()
+                    status == "POST_WINDOW_LIMIT" || status == "POST_BYTE_LIMIT"
+                }.toLong())
         )
     }
 

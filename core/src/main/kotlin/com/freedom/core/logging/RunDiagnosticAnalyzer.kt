@@ -106,6 +106,15 @@ object RunDiagnosticAnalyzer {
             )
         }
 
+        if (counters.incidentRejected > 0 || counters.incidentWriteFailures > 0 || counters.incidentPostLimited > 0) {
+            issues += RunDiagnosticIssue(
+                code = "INCIDENT_EVIDENCE_INCOMPLETE",
+                level = RunLogLevel.WARN,
+                title = "异常专项取证受限",
+                description = "拒绝 ${counters.incidentRejected} 次，写入失败 ${counters.incidentWriteFailures} 次，后置窗口受限 ${counters.incidentPostLimited} 次；不能据此判定异常已恢复。",
+                suggestedAction = "查看 incidents 中实际保留的触发及关联证据，并核对容量和队列统计。"
+            )
+        }
         if (counters.droppedEvents > 0 || counters.truncatedRecords > 0 || counters.writeFailures > 0 ||
             counters.errorDetailDroppedCount > 0
         ) {

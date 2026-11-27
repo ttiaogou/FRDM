@@ -132,7 +132,11 @@ data class RunDiagnosticCounters(
     val normalEvictedBytes: Long = 0,
     val retainedEvents: Long = 0,
     val queueDroppedEvents: Long = 0,
-    val budgetDroppedEvents: Long = 0
+    val budgetDroppedEvents: Long = 0,
+    val incidentCaptured: Long = 0,
+    val incidentRejected: Long = 0,
+    val incidentWriteFailures: Long = 0,
+    val incidentPostLimited: Long = 0
 )
 
 data class RunDiagnosticIssue(

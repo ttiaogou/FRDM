@@ -496,6 +496,15 @@ class RunDiagnosticAnalyzerTest {
         assertTrue(lost.issues.any { it.code == "DIAGNOSTIC_DATA_INCOMPLETE" })
     }
 
+    @Test
+    fun l11dIncidentEvidenceLimitIsReportedSeparatelyFromNormalRotation() {
+        val report = RunDiagnosticAnalyzer.analyze("RUN", "STOPPED", 0, 10,
+            emptyList(), RunDiagnosticCounters(normalEvictedEvents = 100,
+                incidentCaptured = 16, incidentRejected = 1, incidentPostLimited = 2))
+        assertTrue(report.issues.any { it.code == "INCIDENT_EVIDENCE_INCOMPLETE" })
+        assertTrue(report.issues.none { it.code == "DIAGNOSTIC_DATA_INCOMPLETE" })
+    }
+
     private fun event(
         sequence: Long,
         timestamp: Long,

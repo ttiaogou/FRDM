@@ -92,4 +92,8 @@ internal object RunDiagnosticEventJsonCodec {
         .put("retainedEvents", counters.retainedEvents)
         .put("queueDroppedEvents", counters.queueDroppedEvents)
         .put("budgetDroppedEvents", counters.budgetDroppedEvents)
+        .put("incidentCaptured", counters.incidentCaptured)
+        .put("incidentRejected", counters.incidentRejected)
+        .put("incidentWriteFailures", counters.incidentWriteFailures)
+        .put("incidentPostLimited", counters.incidentPostLimited)
 }
