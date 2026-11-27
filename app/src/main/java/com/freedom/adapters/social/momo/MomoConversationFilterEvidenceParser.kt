@@ -23,8 +23,20 @@ internal object MomoConversationFilterEvidenceParser {
         val distance = listOf("hi_message_timestamp", "hilist_tv_distance").flatMap { id ->
             visible.filter { it.viewId == PREFIX + id }.flatMap { tokens(it.text) }
         }.mapNotNull(MomoSayHiProfileParser::parseDistanceToken).distinct().singleOrNull()
+        // Device cross-check: profile_container/hi_message_timestamp has the same
+        // distance + activity pair as the verified profile. The greeting clock instead
+        // belongs to hi_message_msg_container/hilist_tv_distance. Do not infer presence
+        // from arbitrary row text, a bare relative timestamp or an unverified format.
+        val profile = visible.singleId("profile_container")
+        val timestamp = visible.singleId("hi_message_timestamp")?.takeIf { node ->
+            profile != null && node.isWithin(profile) && node.className == "android.widget.TextView"
+        }
+        val pair = timestamp?.text?.split('·')?.map(String::trim)
+        val activeMinutes = pair?.takeIf { it.size == 2 && distance != null &&
+            MomoSayHiProfileParser.parseDistanceToken(it[0]) == distance
+        }?.get(1)?.let(::parseActivityMinutes)
         return ConversationFilterEvidence(
-            // List recency could refer to the greeting, not presence. Do not infer activity.
+            lastActiveMinutes = activeMinutes,
             distanceKm = distance,
             age = readAge(visible, badge)
         )
