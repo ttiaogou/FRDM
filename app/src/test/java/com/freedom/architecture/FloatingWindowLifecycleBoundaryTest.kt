@@ -72,12 +72,36 @@ class FloatingWindowLifecycleBoundaryTest {
     }
 
     @Test
-    fun runRecordsTxtExportRemainsIndependentOfTheFloatingWindow() {
+    fun runRecordsZipExportRemainsIndependentOfTheFloatingWindow() {
         val records = source("app/src/main/java/com/freedom/ui/logs/LogRecordsDialog.kt")
         val activity = source("app/src/main/java/com/freedom/MainActivity.kt")
-        assertTrue(records.contains("导出 TXT"))
+        val recordsEntry = activity.substringAfter("private fun showRecords()")
+            .substringBefore("private fun showCollectionExportActions()")
+        val logExport = activity.substringAfter("private fun launchLogExport(")
+            .substringBefore("private fun launchNodeDumpExport(")
+        val bundleExport = activity.substringAfter("private fun beginSessionSampleExport(")
+            .substringBefore("private fun launchSessionSampleSavePicker(")
+        val picker = activity.substringAfter("private fun launchSessionSampleSavePicker(")
+            .substringBefore("private fun exportSessionSampleArchive(")
+
+        assertTrue(records.contains("actionButton(activity, \"导出 ZIP\", dp, primary = true)"))
         assertTrue(records.contains("onExportLogs(records)"))
+        assertTrue(recordsEntry.contains("onExportLogs = ::launchLogExport"))
+        assertTrue(logExport.contains("beginSessionSampleExport(emptyList(), includeAllDiagnostics = true, recentLogText = buildLogExportContent(records))"))
+        assertTrue(bundleExport.contains("SessionSampleArchiveManager.createExportBundle("))
+        assertTrue(bundleExport.contains("withSealedHistory = diagnostics::withSealedHistoryForExport"))
+        assertTrue(bundleExport.contains("launchSessionSampleSavePicker(combinedArchive, temporary = true)"))
+        assertTrue(picker.contains("Intent.ACTION_CREATE_DOCUMENT"))
+        assertTrue(picker.contains("type = \"application/zip\""))
+        assertTrue(picker.contains("startActivityForResult(intent, REQUEST_EXPORT_SESSION_SAMPLES)"))
+        assertTrue(activity.contains("actions += \"导出运行诊断与异常历史 ZIP\" to { launchLogExport(monitorRepository.logs()) }"))
+        assertFalse(logExport.contains("MonitorOverlay"))
+        assertFalse(bundleExport.contains("MonitorOverlay"))
+        assertFalse(picker.contains("MonitorOverlay"))
+        assertFalse(records.contains("导出 TXT"))
         assertFalse(activity.contains("导出运行日志 TXT"))
+        assertFalse(activity.contains("REQUEST_EXPORT_LOGS"))
+        assertFalse(activity.contains("pendingLogExportContent"))
     }
     @Test
     fun floatingActionWindowIsAttachedBeforeLauncherAndReusedAcrossExpandCollapse() {
