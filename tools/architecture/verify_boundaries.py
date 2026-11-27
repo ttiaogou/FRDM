@@ -2123,15 +2123,31 @@ def ocr_recovery_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
           "if (finished || escalated) return false", "escalated = true", "escalate(reason)")
     order(hard, "companion object", None,
           "HARD_EXIT_BUDGET_MS = OcrInferenceDeadline.HOT_INFERENCE_BUDGET_MS + EXIT_GRACE_MS")
-    order(service, "fun recognizeBitmap(", "fun <T> traceStage(",
-          "synchronized(engineLock)", "check(!PROCESS_QUARANTINED.get())", "engineHolder.get(files, options)",
+    order(hard, "fun escalateIfDue(", "fun escalateReleaseFailure(",
+          "if (phase == Phase.COLD_LOAD) COLD_LOAD_BUDGET_MS else HARD_EXIT_BUDGET_MS",
+          "if (nowMs() - startedAtMs < budgetMs) return false", "return escalateOnce(")
+    order(hard, "fun finish(", "companion object",
+          "if (!finished && !escalated) escalateIfDue()", "finished = true", "return !escalated")
+    order(hard, "companion object", None, "COLD_LOAD_BUDGET_MS = 30_000L")
+    order(service, "fun recognizeBitmap(", "fun <T> withColdLoadRecovery(",
+          "synchronized(engineLock)", "check(!PROCESS_QUARANTINED.get())",
+          "val acquisition = withColdLoadRecovery(requestId)",
+          "modelManager.ensureInstalled(modelId)", "engineHolder.get(files, options)", "acquired",
           "val inferenceStartedAt = SystemClock.elapsedRealtime()", "OcrEngineRecoveryGuard(inferenceStartedAt",
-          "PROCESS_QUARANTINED.set(true)", "android.os.Process.killProcess(android.os.Process.myPid())",
+          "restartOcrPluginProcess(requestId, reason)",
           "RECOVERY_WATCHDOG.schedule(", "recovery.escalateIfDue()",
           "acquisition.engine.recognize(bitmap, acquisition.detMaxSideLimit, requestId, inferenceStartedAt)",
           "catch (timeout: OcrInferenceTimeout)", "engineHolder.isolateAfterTimeout(acquisition)",
           "if (!released) recovery.escalateReleaseFailure()", "throw timeout",
           "recovery.finish()", "hardWatchdog.cancel(false)", "if (!safeExit) throw OcrInferenceTimeout()")
+    order(service, "fun <T> withColdLoadRecovery(", "fun restartOcrPluginProcess(",
+          "val startedAt = SystemClock.elapsedRealtime()", "OcrEngineRecoveryGuard(",
+          "restartOcrPluginProcess(requestId, reason)", "OcrEngineRecoveryGuard.Phase.COLD_LOAD",
+          "RECOVERY_WATCHDOG.schedule(", "recovery.escalateIfDue()",
+          "OcrEngineRecoveryGuard.COLD_LOAD_BUDGET_MS", "return acquire()",
+          "recovery.finish()", "coldWatchdog.cancel(false)", "if (!safeExit) throw OcrColdLoadTimeout()")
+    order(service, "fun restartOcrPluginProcess(", "fun <T> traceStage(",
+          "PROCESS_QUARANTINED.set(true)", "android.os.Process.killProcess(android.os.Process.myPid())")
     order(service, "companion object", None, "RECOVERY_WATCHDOG = ScheduledThreadPoolExecutor(1)")
     order(ort, "companion object", None, "DEADLINE_WATCHDOG = ScheduledThreadPoolExecutor(1)")
     order(holder, "fun isolateAfterTimeout(", "fun releaseLocked(",
@@ -2147,6 +2163,8 @@ def ocr_recovery_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
           "operationLock.withLock", "plugin.service.detect(", "releaseBinding()",
           "typed.failureKind.requiresFreshOcrObservation()", "throw typed",
           "typed.failureKind.isRetryable()", "continue")
+    order(manager, "fun Exception.asOcrPluginException(", "fun toLineResult(",
+          "isColdLoadTimeoutSignal(this)", "OcrPluginFailureKind.OCR_TIMEOUT")
     order(processor, "fun recognize(", "fun recognizeNext(",
           "batchAdmission.tryAcquire()", "if (batchLease == null)",
           "admissionDeferred = true", "recognitionReuse.begin()",

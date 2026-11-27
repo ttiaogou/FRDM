@@ -35,6 +35,9 @@ data class OcrLineResult(
 internal fun isNativeInferenceTimeoutSignal(failure: Exception): Boolean =
     failure is IllegalStateException && failure.message == OcrPluginContract.INFERENCE_TIMEOUT_SIGNAL
 
+internal fun isColdLoadTimeoutSignal(failure: Exception): Boolean =
+    failure is IllegalStateException && failure.message == OcrPluginContract.COLD_LOAD_TIMEOUT_SIGNAL
+
 /**
  * Freedom's OCR entry point and owner of the process-wide plugin Binder connection.
  * Startup preflight and real OCR calls share this instance so preflight does not immediately unbind
@@ -528,6 +531,8 @@ class OcrManager(context: android.content.Context) : Closeable {
         )
         else -> if (isNativeInferenceTimeoutSignal(this)) {
             OcrPluginException("OCR 单张推理已超过期限；插件已退出本次调用", this, OcrPluginFailureKind.OCR_TIMEOUT)
+        } else if (isColdLoadTimeoutSignal(this)) {
+            OcrPluginException("OCR 模型准备或引擎获取超过期限；必须重新采集", this, OcrPluginFailureKind.OCR_TIMEOUT)
         } else OcrPluginException(
             "OCR 插件调用失败：${message ?: javaClass.simpleName}",
             this,

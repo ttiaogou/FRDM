@@ -33,5 +33,6 @@ object OcrPluginContract {
     const val EXTRA_PER_LINE_REC_MS = "freedomPerLineRecMs"
     // Stable exception marker for the existing synchronous AIDL contract; no synthetic OCR result.
     const val INFERENCE_TIMEOUT_SIGNAL = "FREEDOM_OCR_INFERENCE_TIMEOUT"
+    const val COLD_LOAD_TIMEOUT_SIGNAL = "FREEDOM_OCR_COLD_LOAD_TIMEOUT"
     const val EXTRA_DIAGNOSTIC_REQUEST_ID = "com.freedom.ocr.extra.DIAGNOSTIC_REQUEST_ID"
 }

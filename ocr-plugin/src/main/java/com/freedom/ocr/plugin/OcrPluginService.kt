@@ -96,6 +96,9 @@ class OcrPluginService : Service() {
                     // Parcel supports IllegalStateException across the existing AIDL interface.
                     throw IllegalStateException(OcrPluginContract.INFERENCE_TIMEOUT_SIGNAL)
                 }
+                if (failure is OcrColdLoadTimeout) {
+                    throw IllegalStateException(OcrPluginContract.COLD_LOAD_TIMEOUT_SIGNAL)
+                }
                 throw failure
             } finally {
                 if (!bitmap.isRecycled) bitmap.recycle()
@@ -237,30 +240,28 @@ class OcrPluginService : Service() {
             val lockWaitMs = SystemClock.elapsedRealtime() - lockWaitStartedAt
             timings?.put(OcrPluginContract.EXTRA_ENGINE_LOCK_WAIT_MS, lockWaitMs)
             logStage(requestId, "ENGINE_LOCK_ACQUIRED", "waitMs=$lockWaitMs")
-            val modelId = selectedModelId() ?: DEFAULT_MODEL_ID
-            val modelStartedAt = SystemClock.elapsedRealtime()
-            val files = traceStage(requestId, "MODEL_PREPARE", "modelId=$modelId") {
-                modelManager.ensureInstalled(modelId)
+            val acquisition = withColdLoadRecovery(requestId) {
+                val modelId = selectedModelId() ?: DEFAULT_MODEL_ID
+                val modelStartedAt = SystemClock.elapsedRealtime()
+                val files = traceStage(requestId, "MODEL_PREPARE", "modelId=$modelId") {
+                    modelManager.ensureInstalled(modelId)
+                }
+                timings?.put(OcrPluginContract.EXTRA_MODEL_PREPARE_TIME_MS, SystemClock.elapsedRealtime() - modelStartedAt)
+                val engineStartedAt = SystemClock.elapsedRealtime()
+                val acquired = traceStage(requestId, "ENGINE_ACQUIRE", "modelId=${files.modelId};version=${files.version}") {
+                    engineHolder.get(files, options)
+                }
+                timings?.put(OcrPluginContract.EXTRA_ENGINE_ACQUIRE_TIME_MS, SystemClock.elapsedRealtime() - engineStartedAt)
+                acquired
             }
-            timings?.put(OcrPluginContract.EXTRA_MODEL_PREPARE_TIME_MS, SystemClock.elapsedRealtime() - modelStartedAt)
-            val engineStartedAt = SystemClock.elapsedRealtime()
-            val acquisition = traceStage(requestId, "ENGINE_ACQUIRE", "modelId=${files.modelId};version=${files.version}") {
-                engineHolder.get(files, options)
-            }
-            timings?.put(OcrPluginContract.EXTRA_ENGINE_ACQUIRE_TIME_MS, SystemClock.elapsedRealtime() - engineStartedAt)
             timings?.put(OcrPluginContract.EXTRA_ENGINE_CACHE_HIT, if (acquisition.cacheHit) 1L else 0L)
             timings?.put(OcrPluginContract.EXTRA_ENGINE_CREATE_COUNT, acquisition.creationCount)
             timings?.put(OcrPluginContract.EXTRA_DET_MAX_SIDE_LIMIT, acquisition.detMaxSideLimit.toLong())
             logStage(requestId, "ENGINE_REUSE", "cacheHit=${acquisition.cacheHit};creationCount=${acquisition.creationCount};detMaxSideLimit=${acquisition.detMaxSideLimit}")
             val inferenceStartedAt = SystemClock.elapsedRealtime()
             // A separate watchdog must still run if RunOptions.setTerminate or native cleanup hangs.
-            val recovery = OcrEngineRecoveryGuard(inferenceStartedAt, SystemClock::elapsedRealtime) { reason ->
-                PROCESS_QUARANTINED.set(true)
-                Log.e(LOG_TAG, "OCR_ENGINE_RECOVERY requestId=$requestId;phase=PROCESS_RESTART;reason=$reason;pid=${android.os.Process.myPid()}")
-                // This service belongs to the independently installed OCR APK, never the host.
-                // Do not close any live native objects and do not kill another process.
-                android.os.Process.killProcess(android.os.Process.myPid())
-            }
+            val recovery = OcrEngineRecoveryGuard(inferenceStartedAt, SystemClock::elapsedRealtime,
+                { reason -> restartOcrPluginProcess(requestId, reason) })
             val hardWatchdog = RECOVERY_WATCHDOG.schedule(
                 { recovery.escalateIfDue() },
                 OcrEngineRecoveryGuard.HARD_EXIT_BUDGET_MS,
@@ -290,6 +291,41 @@ class OcrPluginService : Service() {
                 if (!safeExit) throw OcrInferenceTimeout()
             }
         }
+    }
+
+    /** Called under engineLock, before model file preparation or native engine acquisition.
+     * Retire the cold token before starting a fresh, independently timed hot inference.
+     */
+    private fun <T> withColdLoadRecovery(requestId: String, acquire: () -> T): T {
+        val startedAt = SystemClock.elapsedRealtime()
+        val recovery = OcrEngineRecoveryGuard(
+            startedAt, SystemClock::elapsedRealtime,
+            { reason -> restartOcrPluginProcess(requestId, reason) },
+            OcrEngineRecoveryGuard.Phase.COLD_LOAD,
+        )
+        val coldWatchdog = RECOVERY_WATCHDOG.schedule(
+            { recovery.escalateIfDue() },
+            OcrEngineRecoveryGuard.COLD_LOAD_BUDGET_MS,
+            TimeUnit.MILLISECONDS,
+        )
+        try {
+            logStage(requestId, "COLD_LOAD_GUARD_ARMED", "budgetMs=${OcrEngineRecoveryGuard.COLD_LOAD_BUDGET_MS}")
+            return acquire()
+        } finally {
+            val safeExit = recovery.finish()
+            coldWatchdog.cancel(false)
+            if (!safeExit) throw OcrColdLoadTimeout()
+        }
+    }
+
+    private class OcrColdLoadTimeout : IllegalStateException(OcrPluginContract.COLD_LOAD_TIMEOUT_SIGNAL)
+
+    private fun restartOcrPluginProcess(requestId: String, reason: String) {
+        PROCESS_QUARANTINED.set(true)
+        Log.e(LOG_TAG, "OCR_ENGINE_RECOVERY requestId=$requestId;phase=PROCESS_RESTART;reason=$reason;pid=${android.os.Process.myPid()}")
+        // This service belongs to the independently installed OCR APK, never the host.
+        // Do not close any live native objects and do not kill another process.
+        android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     private inline fun <T> traceStage(
