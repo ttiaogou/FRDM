@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r05_draft_transaction_migration import restore_r05c_adapter
 
 ROOT = Path(__file__).resolve().parents[2]
 MOMO = ROOT / "app/src/main/java/com/freedom/adapters/social/momo/"
@@ -81,6 +82,7 @@ def verify_relocated_owner():
 
 
 def restore_r05b_adapter(adapter):
+    adapter = restore_r05c_adapter(adapter)
     verify_relocated_owner()
     for current, previous in REVERSE_PATCH:
         if adapter.count(current) != 1:

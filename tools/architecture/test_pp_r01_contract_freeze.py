@@ -105,7 +105,7 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "tools/architecture/test_pp_r00_freeze.py"
                 self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
                 # R04 also pins the reviewed relocation; R03 remains in the R00 gate.
-                expected[path] = "8aebedd1ee6fa3c3b5cd9886edd0af411fb43f91"
+                expected[path] = "53ed4e6a6ab6aaeb5e4d31be80e4070877b26ad5"
             issues.extend(evidence_violations(ROOT, expected))
         # New R04 regression evidence is pinned independently of the historical inventory.
         issues.extend(evidence_violations(ROOT, {
@@ -131,8 +131,12 @@ class PpR01ContractFreezeTest(unittest.TestCase):
             "app/src/test/java/com/freedom/adapters/social/momo/R05GreetingsStateTest.kt": "0668e9b39fa6add20b716eb4493c9f0e05726b2d",
         }))
         issues.extend(evidence_violations(ROOT, {
-            "tools/architecture/test_pp_r05_avatar_transaction_migration.py": "44ca1a08d4f1acb2c2b263acc50561282d7802e8",
+            "tools/architecture/test_pp_r05_avatar_transaction_migration.py": "bc2f436b5719fdf40b0c78b13d04c8f87823266b",
             "app/src/test/java/com/freedom/adapters/social/momo/R05AvatarTransactionMigrationTest.kt": "79598dad5eb51d53187a91dbf97d48dc89b0d8fa",
+        }))
+        # R05-D adds an exact inverse reconstruction of the prior R05-C source.
+        issues.extend(evidence_violations(ROOT, {
+            "tools/architecture/test_pp_r05_draft_transaction_migration.py": "dab438603a2d9b84517eabd2268e266ddc9f37fe",
         }))
         self.assertEqual([], issues)
 

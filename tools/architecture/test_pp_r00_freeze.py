@@ -195,6 +195,14 @@ class PpR00FreezeTest(unittest.TestCase):
         }.items():
             self.assertEqual(previous, reviewed_s1[path])
             reviewed_s1[path] = replacement
+        # R05-D: exact reviewed relocation; keep the historical manifest and every S0/S1 check.
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt"
+        self.assertEqual("a7e2b9cb16f4764839f55d24f69e8bb7fb462f4d", reviewed_s1[path])
+        reviewed_s1[path] = "3d7e95615422c89d98683fe0f53718a4d40c1848"
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoDraftTransactionController.kt"
+        self.assertNotIn(path, reviewed_s1)
+        self.assertNotIn(path, m["permanent_s0"])
+        reviewed_s1[path] = "e56c3fc9787320aaade7b5b9ce7f731aef2794bb"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 
