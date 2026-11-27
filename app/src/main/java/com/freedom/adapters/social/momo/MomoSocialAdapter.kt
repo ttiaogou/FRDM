@@ -399,6 +399,31 @@ internal class MomoSocialAdapter(
     private val sayHiRestoredReturnConfirmation = MomoSayHiListReturnConfirmationPolicy()
     private val sayHiSendReturnJournal = ReceivedGreetingsSendReturnJournal(receivedGreetingsSendReturnRepository)
     private var sayHiPendingVerifiedReturnRow: String? = null
+    // Only sends admitted in this run earn scheduling credit; restored historical sends
+    // still repair their durable journal but never increment a new run's quota.
+    private val sayHiRunSendReceipts = LinkedHashSet<String>()
+    private val sayHiVerifiedReturnReceipts = LinkedHashSet<String>()
+
+    @Synchronized
+    override fun consumeReceivedGreetingsVerifiedReturnReceipts(): List<String> {
+        if (!isReceivedGreetingsListConfirmed() || sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE ||
+            sayHiGestureInFlight || !isAiReplyUiOperationOwned()
+        ) return emptyList()
+        return sayHiVerifiedReturnReceipts.toList().also { sayHiVerifiedReturnReceipts.clear() }
+    }
+
+    @Synchronized
+    private fun recordSayHiRunSendReceipt(receipt: String) {
+        sayHiRunSendReceipts.add(receipt)
+    }
+
+    @Synchronized
+    private fun recordSayHiVerifiedReturnReceipt(receipt: String) {
+        if (sayHiRunSendReceipts.remove(receipt)) sayHiVerifiedReturnReceipts.add(receipt)
+    }
+
+    @Synchronized
+    private fun hasSayHiVerifiedReturnReceipts(): Boolean = sayHiVerifiedReturnReceipts.isNotEmpty()
     @Volatile private var sayHiProfileReadAttempts: Int = 0
     @Volatile private var sayHiProfileScrollAttempted: Boolean = false
     private val sayHiProfileDeferredRetryGate = MomoSayHiProfileDeferredRetryGate()
@@ -1329,7 +1354,7 @@ internal class MomoSocialAdapter(
         // Do not inspect/tap a candidate while the bounded discovery swipe is still running.
         // The next fresh page snapshot owns the next decision; this also prevents a recycled
         // row or transiently visible label from racing the gesture callback.
-        if (receivedGreetingsEntrySearchGestureInFlight) return true
+        if (receivedGreetingsEntrySearchGestureInFlight || hasSayHiVerifiedReturnReceipts()) return true
 
         val currentActivity = activityClass()
         when (sayHiReadOnlyStage) {
@@ -1550,6 +1575,7 @@ internal class MomoSocialAdapter(
                         sayHiTraversalState.markProcessedRow(proof.rowKeyHash)
                         sayHiTraversalState.markProcessedContactHash(proof.contactIdHash)
                         clearSayHiRowDeferral(proof.rowKeyHash)
+                        recordSayHiVerifiedReturnReceipt(proof.sendConfirmationHash)
                         sayHiPendingVerifiedReturnRow = null
                         onLog("GREETING_RETURN_VERIFIED：已通过原列表双快照，独立持久化返回事实并推进游标")
                     }
@@ -2358,6 +2384,7 @@ internal class MomoSocialAdapter(
         tree: AccessibilityTreeSnapshot,
         inspection: MomoSayHiPageInspection
     ): Boolean {
+        if (hasSayHiVerifiedReturnReceipts()) return true
         if (inspection.truncated || inspection.queryBudgetExceeded || tree.truncated ||
             !inspection.containerFound || !inspection.containerMatchCountExact || inspection.containerAmbiguous
         ) return true
@@ -2529,6 +2556,7 @@ internal class MomoSocialAdapter(
                 sayHiTraversalState.markProcessedRow(record.rowKeyHash)
                 sayHiTraversalState.markProcessedContactHash(record.contactIdHash)
                 clearSayHiRowDeferral(record.rowKeyHash)
+                recordSayHiVerifiedReturnReceipt(record.sendConfirmationHash)
             }
             sayHiRestoredReturnConfirmation.reset()
             onLog("GREETING_RESTORED_RETURN_VERIFIED：已发送联系人经列表双快照完成返回；未重复发送、已补写游标")
@@ -4170,6 +4198,7 @@ internal class MomoSocialAdapter(
                 MomoSayHiIdentityFingerprintPolicy.contactIdHash(confirmationId)
             )
         }.getOrDefault(false)
+        if (saved) recordSayHiRunSendReceipt(MomoSayHiIdentityFingerprintPolicy.contactIdHash(confirmationId))
         onLog(
             if (saved) "GREETING_SEND_FACT_PERSISTED：发送证明已与原始招呼行及平台身份哈希绑定"
             else "GREETING_SEND_FACT_REJECTED：发送确认未可靠落盘；禁止推进返回"
@@ -4543,6 +4572,9 @@ internal class MomoSocialAdapter(
         minimumIntervalMs: Long = 500L,
         forceFresh: Boolean = false
     ): Boolean {
+        // A completed session must be acknowledged by the business scheduler before
+        // a callback or autonomous list pass can select another greeting.
+        if (hasSayHiVerifiedReturnReceipts()) return true
         val activityHint = activityClass() // diagnostic/card-host hint only; list identity is structural
         val listSurfaceVisible = isReceivedGreetingsListStructureVisible()
         val listFlowExpected = sayHiNavigationFlowController.isReceivedListConfirmed() ||
@@ -7778,6 +7810,10 @@ internal class MomoSocialAdapter(
         sayHiStableCandidateTarget = null
         sayHiStableCandidateWindow = null
         sayHiPendingVerifiedReturnRow = null
+        synchronized(this) {
+            sayHiRunSendReceipts.clear()
+            sayHiVerifiedReturnReceipts.clear()
+        }
 
         receivedGreetingsEntryTapPending = false
         manualReceivedGreetingsArrivalProbeActive = false

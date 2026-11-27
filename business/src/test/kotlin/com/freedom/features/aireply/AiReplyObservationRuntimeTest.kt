@@ -1041,6 +1041,61 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun pairedQuotaPrivateTwoVerifiedReceiptsYieldWithoutTraversalExhaustion() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        fixture.port.receivedGreetingsWorkflowEnabled = true
+        val pending = fixture.runtime.javaClass.getDeclaredField("pendingPrivateQuotaReceipt").apply { isAccessible = true }
+        val ready = fixture.runtime.javaClass.getDeclaredField("privateQuotaReturnReady").apply { isAccessible = true }
+        val boundary = fixture.runtime.javaClass.getDeclaredMethod("handlePrivateQuotaBoundary", ChatPageSnapshot::class.java)
+            .apply { isAccessible = true }
+        pending.set(fixture.runtime, "first")
+        ready.setBoolean(fixture.runtime, true)
+        assertEquals(false, boundary.invoke(fixture.runtime, fixture.listPage))
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        pending.set(fixture.runtime, "first")
+        ready.setBoolean(fixture.runtime, true)
+        assertEquals(false, boundary.invoke(fixture.runtime, fixture.listPage))
+        pending.set(fixture.runtime, "second")
+        ready.setBoolean(fixture.runtime, true)
+        assertEquals(true, boundary.invoke(fixture.runtime, fixture.listPage))
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        assertEquals(1, fixture.port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(2, fixture.logs.count { it.contains("PAIRED_QUOTA[COUNT] task=PRIVATE") })
+    }
+
+    @Test
+    fun pairedQuotaGreetingsTwoVerifiedReceiptsReturnWithoutTraversalExhaustion() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val port = fixture.port
+        port.receivedGreetingsWorkflowEnabled = true
+        port.provideMessageTabPositionEvidence = true
+        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.SCANNING
+        port.pageAfterReceivedGreetingsReturn = fixture.listPage
+        invokeSafeSessionBoundaryHandoff(fixture)
+        port.page = fixture.listPage.copy(
+            activityClass = "com.immomo.momo.newsayhi.NewSayHiListActivity",
+            pageKind = ChatPageKind.NON_CHAT, hasChatTab = false, chatListCandidates = emptyList()
+        )
+        port.greetingVerifiedReturnReceipts = listOf("greeting-first")
+        runUntilLog(fixture.scheduler, fixture.logs, "PAIRED_QUOTA[COUNT] task=GREETINGS;completed=1/2")
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        assertEquals(0, port.receivedGreetingsPriorityReturns)
+        port.greetingVerifiedReturnReceipts = listOf("greeting-first", "greeting-second")
+        runUntilLog(fixture.scheduler, fixture.logs, "PAIRED_QUOTA[YIELD] task=GREETINGS")
+        assertEquals(ReceivedGreetingsTraversalStatus.SCANNING, port.receivedGreetingsTraversalStatusValue)
+        assertEquals(2, fixture.logs.count { it.contains("PAIRED_QUOTA[COUNT] task=GREETINGS") })
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        runUntilLog(fixture.scheduler, fixture.logs, "跨任务交接[PRIVATE_LEASE_TRANSFERRED]")
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertEquals(1, port.receivedGreetingsConfirmedReturns)
+        assertTrue(port.lastGreetingsReturnPreservedTraversal)
+        assertFalse(fixture.logs.any { it.contains("AI Reply 低频待机") })
+    }
+
+    @Test
     fun l06FailedPrivateCheckpointSaveDoesNotTransferLeaseAndCanRetry() {
         var allowSave = true
         val fixture = preScrollPageRecoveryFixture(checkpointSaveAllowed = { allowSave })
@@ -10571,6 +10626,9 @@ class AiReplyObservationRuntimeTest {
             pageAfterReceivedGreetingsReturn?.let { page = it }
             return ReceivedGreetingsBackResult.BACK_SUBMITTED
         }
+        var greetingVerifiedReturnReceipts: List<String> = emptyList()
+        override fun consumeReceivedGreetingsVerifiedReturnReceipts(): List<String> =
+            greetingVerifiedReturnReceipts.also { greetingVerifiedReturnReceipts = emptyList() }
         var lastGreetingsReturnPreservedTraversal = false
         var greetingReturnConfirmationAccepted = true
         var greetingReturnConfirmationAttempts = 0

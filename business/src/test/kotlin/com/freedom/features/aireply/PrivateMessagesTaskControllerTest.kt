@@ -9,6 +9,28 @@ import org.junit.Test
 
 class PrivateMessagesTaskControllerTest {
     @Test
+    fun pairedQuotaCountsUniqueVerifiedReceiptsAndResetsOnlySliceOnHandoff() {
+        val privateQuota = AiReplyTaskSliceQuota()
+        val greetingQuota = AiReplyTaskSliceQuota()
+        assertFalse(privateQuota.record(""))
+        assertTrue(privateQuota.record("send-one"))
+        assertFalse(privateQuota.record("send-one"))
+        assertFalse(privateQuota.reached)
+        assertTrue(privateQuota.record("send-two"))
+        assertTrue(privateQuota.reached)
+        assertEquals(0, greetingQuota.completed)
+        privateQuota.finishSlice()
+        assertEquals(0, privateQuota.completed)
+        assertFalse(privateQuota.record("send-two"))
+        assertTrue(greetingQuota.record("greeting-one"))
+        assertTrue(greetingQuota.record("greeting-two"))
+        assertTrue(greetingQuota.reached)
+        greetingQuota.resetRun()
+        assertFalse(greetingQuota.reached)
+        assertTrue(greetingQuota.record("greeting-one"))
+    }
+
+    @Test
     fun privateMessageTaskRequiresAnExplicitLeaseAndCanReleaseIt() {
         val coordinator = TaskCoordinator(UiOperationOwnershipCoordinator())
         val controller = PrivateMessagesTaskController(

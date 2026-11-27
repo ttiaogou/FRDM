@@ -691,6 +691,11 @@ interface ChatPagePort {
     /** Durably records the final confirmed greeting send before a safe BACK is permitted. */
     fun persistReceivedGreetingConfirmedSend(confirmationId: String): Boolean = false
 
+    /** Current-run confirmed sends whose list return was independently verified and persisted.
+     * The adapter holds subsequent row actions until this acknowledgement is consumed.
+     */
+    fun consumeReceivedGreetingsVerifiedReturnReceipts(): List<String> = emptyList()
+
     /** Requests a safe BACK after confirmed sending; list return must be independently verified. */
     fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean = false
 

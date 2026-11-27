@@ -13,6 +13,30 @@ internal enum class AiReplyTaskYieldReason {
         get() = this == TRAVERSAL_EXHAUSTED || this == DEFERRED_WORK
 }
 
+/** Run-local scheduling credit, independent of the durable contact/media ledger.
+ * Only a unique confirmed send AND verified return receipt is admitted by the runtime.
+ * Retrying a handoff must not consume credit; reset a slice only after actual transfer.
+ */
+internal class AiReplyTaskSliceQuota {
+    companion object { const val LIMIT = 2 }
+    private val countedReceipts = HashSet<String>()
+    var completed: Int = 0
+        private set
+    val reached: Boolean get() = completed >= LIMIT
+
+    fun record(receipt: String): Boolean {
+        if (receipt.isBlank() || !countedReceipts.add(receipt)) return false
+        completed = (completed + 1).coerceAtMost(LIMIT)
+        return true
+    }
+
+    fun finishSlice() { completed = 0 }
+    fun resetRun() {
+        completed = 0
+        countedReceipts.clear()
+    }
+}
+
 /**
  * AI Reply 对通用任务执行控制器的领域适配门面。
  * 私聊与收到招呼共享同一个控制器实例，以支持原子租约转交。

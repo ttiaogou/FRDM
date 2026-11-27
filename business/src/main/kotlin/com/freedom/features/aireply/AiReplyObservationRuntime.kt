@@ -531,6 +531,10 @@ class AiReplyObservationRuntime(
     private var sessionRunStarted = false
     // Task-local yield and pair wake are independent facts.
     private var privateToGreetingsHandoff: AiReplyTaskYieldReason? = null
+    private val privateSliceQuota = AiReplyTaskSliceQuota()
+    private val greetingSliceQuota = AiReplyTaskSliceQuota()
+    private var pendingPrivateQuotaReceipt: String? = null
+    private var privateQuotaReturnReady = false
     private enum class PairWakeMode { REFRESH_PRIVATE, RESUME_PRIVATE }
     private data class PairWake(val mode: PairWakeMode, var due: Boolean, var retryAttempt: Int = 0)
     private var pairWake: PairWake? = null
@@ -2753,7 +2757,9 @@ class AiReplyObservationRuntime(
         }
 
         if (sessionRunStarted && receivedGreetingsTaskActive && !verifiedGreetingsInboxReturn) {
+            if (handleGreetingQuotaBoundary(observation, inspection)) return
             val decision = receivedGreetingsTaskFlow.evaluatePageSnapshot(inspection.pageKind)
+            if (handleGreetingQuotaBoundary(observation, inspection)) return
             when (decision.kind) {
                 ReceivedGreetingsTaskFlowController.DecisionKind.ENTRY_NOT_FOUND -> {
                     onLog("收到的招呼入口未发现：普通消息列表已完成双向搜索并复核两端边界；这是已确认的入口缺失结果，不是单次页面核验失败")
@@ -3348,6 +3354,7 @@ class AiReplyObservationRuntime(
     /** Retire only old task callbacks and transient page evidence; never discard private cursor. */
     private fun finishGreetingsToPrivateHandoff() {
         receivedGreetingsTaskFlow.finishVerifiedHandoff()
+        greetingSliceQuota.finishSlice()
         privateToGreetingsHandoff = null
         pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
         sessionActionGeneration += 1L
@@ -3653,6 +3660,7 @@ class AiReplyObservationRuntime(
         resetPairWake()
         privateToGreetingsHandoff = null
         privateRelocationRetryOwed = false
+        resetPairedQuotaRun()
         startupReadinessCoordinator.resetState(sessionStarted = false)
         sessionManagerState = SessionManagerState.STOPPED
         taskOwnership.reset("运行时重置：$reason")
@@ -4682,6 +4690,7 @@ class AiReplyObservationRuntime(
         resetPairWake()
         privateToGreetingsHandoff = null
         privateRelocationRetryOwed = false
+        resetPairedQuotaRun()
         receivedGreetingsTaskFlow.reset()
         // Keep the existing lease lifecycle for compatibility, but do not perform any UI action
         // until the first fresh page event has classified the visible business route.
@@ -5454,6 +5463,9 @@ class AiReplyObservationRuntime(
             if (observedVisit) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return true
         }
+        if (sendConfirmationId != null && pendingPrivateQuotaReceipt == sendConfirmationId) {
+            privateQuotaReturnReady = true
+        }
         onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
         if (!currentSessionReadCaptured) {
             onLog("AI 会话返回门禁[CHAT_SAMPLE_NOT_PERSISTED]：发送已确认；样本归档失败不阻止安全返回")
@@ -5503,6 +5515,14 @@ class AiReplyObservationRuntime(
                         requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "PRIVATE_DETAIL_CONTACT_LEDGER_WRITE_FAILED")
                         scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
                         return true
+                    }
+                    // Only an actual verified send from an admitted unread list row earns
+                    // credit. A restored follow-up alone, manual visit or OCR does not.
+                    if (currentSessionCandidate?.unreadStatus == ChatUnreadStatus.UNREAD &&
+                        currentSessionBinding?.observedBusinessAdmitted != true
+                    ) {
+                        pendingPrivateQuotaReceipt = sendConfirmationId
+                        privateQuotaReturnReady = false
                     }
                     val contactKey = verifiedPrivateLedgerContactKey()
                     if (pendingPrivateFollowUpEnabled(contactKey)) {
@@ -6532,6 +6552,10 @@ class AiReplyObservationRuntime(
             }
         }
 
+        // Verified inbox return, after retiring the completed detail transaction and
+        // before evaluating or dispatching any next row/scroll.
+        if (handlePrivateQuotaBoundary(snapshot)) return
+
         val wasWaitingForUnread = sessionManagerState == SessionManagerState.WAITING_FOR_UNREAD
         val listEvaluation = privateMessagesTraversalTaskExecutor.evaluateListSnapshot(
             snapshot = snapshot,
@@ -7092,6 +7116,76 @@ class AiReplyObservationRuntime(
         return true
     }
 
+    private fun resetPairedQuotaRun() {
+        privateSliceQuota.resetRun()
+        greetingSliceQuota.resetRun()
+        pendingPrivateQuotaReceipt = null
+        privateQuotaReturnReady = false
+    }
+
+    private fun handlePrivateQuotaBoundary(snapshot: ChatPageSnapshot): Boolean {
+        if (receivedGreetingsTaskActive) return false
+        if (!privateQuotaReturnReady && !privateSliceQuota.reached) return false
+        if (!canPerformPrivateMessagesUiAction() ||
+            currentSessionKey != null || currentSessionSendConfirmed || isPrivateFollowUpActive() ||
+            isSendConfirmationPending() || isConversationDraftPending() || userInteractionActive ||
+            snapshot.packageName != targetPackage() || snapshot.pageKind != ChatPageKind.CHAT_LIST ||
+            snapshot.chatListExtractionTruncated || snapshot.windowIdentityKey() == null ||
+            isSemanticallyUnconfirmed(snapshot)
+        ) {
+            scheduleSessionListStabilityRetry("私聊配额返回边界尚未安全确认")
+            return true
+        }
+        if (privateQuotaReturnReady) {
+            if (!ensureAndroidRecoveryReady(snapshot, "PRIVATE_QUOTA_RETURN")) {
+                recoverRetryablePrivateList("PRIVATE_QUOTA_RETURN_NOT_READY")
+                return true
+            }
+            val receipt = pendingPrivateQuotaReceipt
+            if (receipt != null && privateSliceQuota.record(receipt)) {
+                onLog("PAIRED_QUOTA[COUNT] task=PRIVATE;completed=${privateSliceQuota.completed}/${AiReplyTaskSliceQuota.LIMIT}")
+            }
+            pendingPrivateQuotaReceipt = null
+            privateQuotaReturnReady = false
+        }
+        if (!privateSliceQuota.reached || !receivedGreetingsTaskFlow.supportsWorkflow()) return false
+        onLog("PAIRED_QUOTA[YIELD] task=PRIVATE;reason=SAFE_SESSION_BOUNDARY")
+        startReceivedGreetingsTask("私人消息已处理两次未读会话", snapshot, AiReplyTaskYieldReason.SAFE_SESSION_BOUNDARY)
+        return true
+    }
+
+    private fun handleGreetingQuotaBoundary(observation: ObservationResult, inspection: ChatPageSnapshot): Boolean {
+        if (receivedGreetingsTaskFlow.awaitingNormalInboxAfterReturn || !ownsTask(RECEIVED_GREETINGS_TASK_ID) ||
+            observation.status != ObservationStatus.CONFIRMED_PAGE || inspection.pageKind != ChatPageKind.NON_CHAT ||
+            inspection.packageName != targetPackage() || recoveryContext.pending || userInteractionActive ||
+            isSendConfirmationPending() || isConversationDraftPending()
+        ) return false
+        if (receivedGreetingsTaskFlow.traversalStatus() !in setOf(
+                ReceivedGreetingsTraversalStatus.SCANNING, ReceivedGreetingsTraversalStatus.COMPLETE
+            )
+        ) return false
+        val receipts = runCatching { chatPagePort.consumeReceivedGreetingsVerifiedReturnReceipts() }
+            .getOrElse {
+                scheduleReceivedGreetingsRecoveryRetry("返回凭证暂不可读；保留任务")
+                return true
+            }
+        for (receipt in receipts) {
+            if (greetingSliceQuota.record(receipt)) {
+                onLog("PAIRED_QUOTA[COUNT] task=GREETINGS;completed=${greetingSliceQuota.completed}/${AiReplyTaskSliceQuota.LIMIT}")
+            }
+        }
+        if (!greetingSliceQuota.reached) return false
+        if (!ensureAndroidRecoveryReady(inspection, "GREETING_QUOTA_RETURN") ||
+            !receivedGreetingsTaskFlow.requestSafeHandoffReturn()
+        ) {
+            scheduleReceivedGreetingsRecoveryRetry("招呼配额已达到；等待安全返回准入")
+            return true
+        }
+        onLog("PAIRED_QUOTA[YIELD] task=GREETINGS;reason=SAFE_SESSION_BOUNDARY")
+        requestGreetingsReturn(observation, inspection)
+        return true
+    }
+
     /** The paired scheduler uses both task-local yield reasons, never a pair completion gate. */
     private fun schedulePairedContinuation(
         privateYield: AiReplyTaskYieldReason?,
@@ -7359,6 +7453,7 @@ class AiReplyObservationRuntime(
             return
         }
         privateToGreetingsHandoff = handoff
+        privateSliceQuota.finishSlice()
         if (handoff == AiReplyTaskYieldReason.DEFERRED_WORK) privateRelocationRetryOwed = true
         incompleteUnreadRelocationWait = null
         sessionActionGeneration += 1L
