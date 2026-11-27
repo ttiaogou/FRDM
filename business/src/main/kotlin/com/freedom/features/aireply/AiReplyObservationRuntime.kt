@@ -184,7 +184,7 @@ class AiReplyObservationRuntime(
     // Ephemeral binding for the existing adapter execution; the ledger remains the durable owner.
     private class PrivateFollowUp(
         val contactKey: String,
-        val sendConfirmationId: String,
+        val sendConfirmationId: String?,
         val target: ChatDraftInputTarget,
         @Volatile var checkpoint: ContactFollowUpCheckpoint
     )
@@ -5311,16 +5311,20 @@ class AiReplyObservationRuntime(
             windowKey, input, title, lease)
     }
 
-    /** Only newly admitted actions are executed in M04-D. Interrupted checkpoints are not replayed. */
-    private fun startPrivateFollowUp(contactKey: String, sendId: String, snapshot: ChatPageSnapshot) {
+    /** Only interception can reconcile a persisted prior action from a freshly verified chat.
+     * Image admission retains the M04-D no-replay contract. */
+    private fun startPrivateFollowUp(contactKey: String, sendId: String?, snapshot: ChatPageSnapshot) {
         val checkpoint = contactMessageLedger.followUpCheckpoint(contactKey) ?: return
+        val interception = checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION
         val port = privateChatFollowUpPort
         val target = privateFollowUpTarget(snapshot)
-        if (checkpoint.reconciliationRequired || checkpoint.revision != 0L ||
+        if ((!interception && (checkpoint.reconciliationRequired || checkpoint.revision != 0L || sendId == null)) ||
             port == null || target == null || !followUpEnabled(checkpoint.step.action) ||
+            verifiedPrivateLedgerContactKey() != contactKey ||
             (checkpoint.step.action == ContactPendingRecoveryAction.SEND_IMAGE && privateImageResourceCount() != 1)
         ) {
             onLog("PRIVATE_FOLLOW_UP ADMISSION_HELD;checkpointRetained=true;noReplay=true")
+            if (interception) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return
         }
         val child = PrivateFollowUp(contactKey, sendId, target, checkpoint)
@@ -5347,6 +5351,7 @@ class AiReplyObservationRuntime(
         if (!started) {
             activePrivateFollowUp = null
             onLog("PRIVATE_FOLLOW_UP BEGIN_NOT_ADMITTED;checkpointRetained=true")
+            if (interception) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return
         }
         onLog("PRIVATE_FOLLOW_UP BEGIN;action=${checkpoint.step.action};parentLeaseInherited=true")
@@ -5399,8 +5404,10 @@ class AiReplyObservationRuntime(
             onLog("PRIVATE_FOLLOW_UP RESULT_UNCONFIRMED;checkpointRetained=true;noReturn=true")
             return
         }
+        val interception = child.checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION
         val fresh = privateFollowUpReturnedSnapshot(child) ?: run {
             onLog("PRIVATE_FOLLOW_UP RETURN_NOT_CONFIRMED;checkpointRetained=true")
+            if (interception) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return
         }
         val checkpoint = child.checkpoint
@@ -5411,6 +5418,7 @@ class AiReplyObservationRuntime(
         }
         if (!confirmed) {
             onLog("PRIVATE_FOLLOW_UP RESULT_NOT_PERSISTED;noReturn=true")
+            if (interception) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return
         }
         onLog("PRIVATE_FOLLOW_UP CONFIRMED;action=${checkpoint.step.action}")
@@ -5419,14 +5427,17 @@ class AiReplyObservationRuntime(
         if (pendingPrivateFollowUpEnabled(child.contactKey)) {
             startPrivateFollowUp(child.contactKey, child.sendConfirmationId, fresh)
         } else {
+            // A resumed interception is a durable follow-up result, not a new text send.
+            // Keep the old send receipt instead of inventing one when re-entered later.
+            if (interception) currentSessionSendConfirmed = true
             finishConfirmedPrivateSend(child.sendConfirmationId, fresh)
         }
     }
 
     /** Existing traversal completion, called after text-only or fully confirmed child actions. */
-    private fun finishConfirmedPrivateSend(sendConfirmationId: String, snapshot: ChatPageSnapshot): Boolean {
+    private fun finishConfirmedPrivateSend(sendConfirmationId: String?, snapshot: ChatPageSnapshot): Boolean {
         privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
-        privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
+        if (sendConfirmationId != null) privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
         val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
         if (!observedVisit) {
             privateMessagesTraversalTaskExecutor.checkpointNextCursorKey = currentSessionKey
@@ -6046,12 +6057,20 @@ class AiReplyObservationRuntime(
                 rowIdentity
             }
         }
-        if (privateDetail && identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+        if (privateDetail && !receivedGreetingsTaskActive &&
+            identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
             pendingPrivateFollowUpEnabled(ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId))
         ) {
-            // Recovery of a prior unfinished media transaction is explicitly deferred to M04-C.
-            // Do not initiate another text/image/toggle on a pending contact.
-            onLog("PRIVATE_FOLLOW_UP PRIOR_PENDING;noNewDraft=true;recoveryNotConnected=true")
+            val contactKey = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId)
+            if (contactMessageLedger.pendingRecoveryAction(contactKey) == ContactPendingRecoveryAction.ENABLE_INTERCEPTION &&
+                verifiedPrivateLedgerContactKey() == contactKey &&
+                !isSendConfirmationPending() && !isConversationDraftPending()
+            ) {
+                onLog("PRIVATE_FOLLOW_UP PRIOR_INTERCEPTION_RECONCILE;noNewDraft=true")
+                startPrivateFollowUp(contactKey, null, snapshot)
+            } else {
+                onLog("PRIVATE_FOLLOW_UP PRIOR_PENDING;noNewDraft=true;checkpointRetained=true")
+            }
             return
         }
         // Link a verified private visit to the actual dedupe key BEFORE the shared

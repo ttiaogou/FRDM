@@ -5762,9 +5762,10 @@ internal class MomoSocialAdapter(
         @Volatile var stageStartedAt = SystemClock.uptimeMillis()
         var albumWindow: WindowRef? = null
         var directoryRejectedRetries = 0
-        var interceptionLayoutRejectedRetries = 0
-        var interceptionBackCancelledRetries = 0
-        @Volatile var interceptionBackDispatched = false
+        var interceptionSettingsObserved = false
+        var interceptionLastAction: MomoInterceptionRecoveryPolicy.Action? = null
+        var interceptionRetryAttempt = 0
+        @Volatile var interceptionRetryNotBefore = 0L
         var lastWaitReason: String? = null
     }
 
@@ -5851,7 +5852,7 @@ internal class MomoSocialAdapter(
         privateFollowUp = null
     }
 
-    /** Move to a wait stage BEFORE submission; an accepted or ambiguous tap is never replayed. */
+    /** Persist before submission. Image sends never replay; interception reconciles live state. */
     private fun submitPrivateFollowUpStep(
         child: PrivateFollowUpTransaction,
         next: PrivateFollowUpStage,
@@ -5863,8 +5864,16 @@ internal class MomoSocialAdapter(
         }
         val previous = child.stage
         val previousStartedAt = child.stageStartedAt
+        if (child.interception) {
+            child.interceptionRetryAttempt = (child.interceptionRetryAttempt + 1).coerceAtMost(6)
+            child.interceptionRetryNotBefore = SystemClock.uptimeMillis() + maxOf(
+                2_000L,
+                com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(child.interceptionRetryAttempt)
+            )
+        }
         if (!persistPrivateFollowUpStep(child, previous)) {
-            followUpTerminal(child, "UNKNOWN", "CHECKPOINT_WRITE_NOT_CONFIRMED")
+            if (child.interception) followUpWait(child, "UNKNOWN_CHECKPOINT_WRITE_RETRY")
+            else followUpTerminal(child, "UNKNOWN", "CHECKPOINT_WRITE_NOT_CONFIRMED")
             return
         }
         child.stage = next
@@ -5874,6 +5883,16 @@ internal class MomoSocialAdapter(
         val submission = runCatching {
             action { status ->
                 if (followUpCurrent(child)) {
+                    if (child.interception) {
+                        // A result is not page evidence. Wait for the settled live state,
+                        // including CANCELLED/REJECTED; never roll back blindly to the tap.
+                        child.interceptionRetryNotBefore = maxOf(
+                            child.interceptionRetryNotBefore, SystemClock.uptimeMillis() + 2_000L
+                        )
+                        child.inFlight = false
+                        onLog("${child.logPrefix} GESTURE_RESULT stage=$next;status=$status;reconcile=true")
+                        return@action
+                    }
                     child.inFlight = false
                     onLog("${child.logPrefix} GESTURE_RESULT stage=$next;status=$status")
                     if (status == GestureExecutionStatus.DEFERRED) {
@@ -5888,16 +5907,6 @@ internal class MomoSocialAdapter(
                         child.stage = previous
                         child.stageStartedAt = previousStartedAt
                         followUpWait(child, "DIRECTORY_TAP_REJECTED_REACQUIRE")
-                    } else if (previous == PrivateFollowUpStage.INTERCEPTION_BACK &&
-                        status == GestureExecutionStatus.CANCELLED &&
-                        !child.interceptionBackDispatched && child.interceptionBackCancelledRetries == 0
-                    ) {
-                        // Only the final return tap may be retried after cancellation before
-                        // platform dispatch. Never replay the switch or an actual back tap.
-                        child.interceptionBackCancelledRetries++
-                        child.stage = previous
-                        child.stageStartedAt = previousStartedAt
-                        followUpWait(child, "INTERCEPTION_BACK_CANCELLED_BEFORE_DISPATCH_REACQUIRE")
                     } else if (status != GestureExecutionStatus.COMPLETED) {
                         // An ambiguous send/toggle is never replayed.
                         followUpTerminal(child, "UNKNOWN", "GESTURE_NOT_CONFIRMED")
@@ -5908,6 +5917,13 @@ internal class MomoSocialAdapter(
         onLog("${child.logPrefix} SUBMISSION from=$previous;to=$next;submission=$submission")
         // A synchronous result may have completed or rolled back the stage already.
         if (!followUpCurrent(child) || child.stage != next) return
+        if (child.interception) {
+            if (submission != GestureSubmission.ACCEPTED) {
+                child.inFlight = false
+                followUpWait(child, "UNKNOWN_GESTURE_ADMISSION_RECHECK")
+            }
+            return
+        }
         when (submission) {
             GestureSubmission.ACCEPTED -> Unit
             GestureSubmission.DEFERRED_NOT_READY -> {
@@ -5927,16 +5943,6 @@ internal class MomoSocialAdapter(
                     child.stage = previous
                     child.stageStartedAt = previousStartedAt
                     followUpWait(child, "DIRECTORY_TAP_REJECTED_REACQUIRE")
-                } else if (previous == PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL &&
-                    child.interceptionLayoutRejectedRetries == 0 && followUpCurrent(child)
-                ) {
-                    // The settings entry was rejected before admission. Re-resolve its
-                    // live bounds on the next observation; never replay an accepted tap.
-                    child.interceptionLayoutRejectedRetries++
-                    child.inFlight = false
-                    child.stage = previous
-                    child.stageStartedAt = previousStartedAt
-                    followUpWait(child, "INTERCEPTION_LAYOUT_TAP_REJECTED_REACQUIRE")
                 } else followUpTerminal(child, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
             }
             else -> followUpTerminal(child, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
@@ -5984,6 +5990,101 @@ internal class MomoSocialAdapter(
             if (window.packageName != targetPackage || accessibilityGateway.currentGestureWindow() != window) null
             else interceptionChecked(root).takeIf { accessibilityGateway.currentGestureWindow() == window }
         }
+
+
+    /** Status is scoped to the unique interception row, not any "已开启" on the page. */
+    private fun interceptionSettingsChecked(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean? = runCatching {
+        val title = child.target.expectedChatTitle ?: return null
+        if (interceptionNodeBounds(root, "tv_user_name", "android.widget.TextView", text = title) == null) return null
+        val rows = root.findAccessibilityNodeInfosByViewId("$targetPackage:id/setting_layout_harass").orEmpty()
+        try {
+            val row = rows.singleOrNull {
+                it.packageName?.toString() == targetPackage &&
+                    it.className?.toString() == "android.widget.LinearLayout" &&
+                    it.isVisibleToUser && it.isEnabled && it.isClickable
+            } ?: return null
+            val statuses = row.findAccessibilityNodeInfosByViewId("$targetPackage:id/tv_harass_status").orEmpty()
+            try {
+                val status = statuses.singleOrNull {
+                    it.packageName?.toString() == targetPackage &&
+                        it.className?.toString() == "android.widget.TextView" &&
+                        it.isVisibleToUser && it.isEnabled
+                } ?: return null
+                MomoInterceptionRecoveryPolicy.settingsChecked(status.text?.toString().orEmpty())
+            } finally {
+                statuses.forEach { runCatching { it.recycle() } }
+            }
+        } finally {
+            rows.forEach { runCatching { it.recycle() } }
+        }
+    }.getOrNull()
+
+    private fun observeInterceptionPage(child: PrivateFollowUpTransaction): MomoInterceptionRecoveryPolicy.Page {
+        val observed = rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                window.generation < child.target.nodeTarget.window.generation ||
+                accessibilityGateway.currentGestureWindow() != window
+            ) return@withActiveTargetRoot MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+            val page = if (interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息") != null) {
+                if (!child.interceptionSettingsObserved) MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+                else when (interceptionChecked(root)) {
+                    true -> MomoInterceptionRecoveryPolicy.Page.POPUP_ON
+                    false -> MomoInterceptionRecoveryPolicy.Page.POPUP_OFF
+                    null -> MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+                }
+            } else if (interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true) != null) {
+                when (interceptionSettingsChecked(root, child)) {
+                    true -> MomoInterceptionRecoveryPolicy.Page.SETTINGS_ON
+                    false -> MomoInterceptionRecoveryPolicy.Page.SETTINGS_OFF
+                    null -> MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+                }
+            } else null
+            if (accessibilityGateway.currentGestureWindow() == window) page
+            else MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+        }
+        return observed ?: if (originalPrivateFollowUpChat(child)) MomoInterceptionRecoveryPolicy.Page.ORIGINAL_CHAT
+            else MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+    }
+
+    /** Reconcile under the existing parent lease and observer; no independent recovery loop. */
+    private fun reconcileInterception(child: PrivateFollowUpTransaction): Boolean {
+        val page = observeInterceptionPage(child)
+        val decision = MomoInterceptionRecoveryPolicy.reconcile(page, child.switchVerifiedOn)
+        child.switchVerifiedOn = decision.verifiedOn
+        when (page) {
+            MomoInterceptionRecoveryPolicy.Page.SETTINGS_ON,
+            MomoInterceptionRecoveryPolicy.Page.SETTINGS_OFF -> child.interceptionSettingsObserved = true
+            MomoInterceptionRecoveryPolicy.Page.ORIGINAL_CHAT -> child.interceptionSettingsObserved = false
+            else -> Unit
+        }
+        val action = decision.action
+        if (action == MomoInterceptionRecoveryPolicy.Action.WAIT) {
+            followUpWait(child, "UNKNOWN_INTERCEPTION_PAGE_OR_STATE")
+            return false
+        }
+        if (action != child.interceptionLastAction) {
+            child.interceptionLastAction = action
+            child.interceptionRetryAttempt = 0
+            child.interceptionRetryNotBefore = 0L
+            child.stageStartedAt = SystemClock.uptimeMillis()
+            child.lastWaitReason = null
+            onLog("PRIVATE_INTERCEPTION RECONCILED page=$page;action=$action;verifiedOn=${decision.verifiedOn}")
+        }
+        if (SystemClock.uptimeMillis() < child.interceptionRetryNotBefore) {
+            followUpWait(child, "INTERCEPTION_RETRY_BACKOFF")
+            return false
+        }
+        child.stage = when (action) {
+            MomoInterceptionRecoveryPolicy.Action.OPEN_SETTINGS -> PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS
+            MomoInterceptionRecoveryPolicy.Action.OPEN_CONTROL -> PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL
+            MomoInterceptionRecoveryPolicy.Action.ENABLE -> PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH
+            MomoInterceptionRecoveryPolicy.Action.DISMISS -> PrivateFollowUpStage.INTERCEPTION_DISMISS
+            MomoInterceptionRecoveryPolicy.Action.BACK -> PrivateFollowUpStage.INTERCEPTION_BACK
+            MomoInterceptionRecoveryPolicy.Action.COMPLETE -> PrivateFollowUpStage.INTERCEPTION_RETURN
+            MomoInterceptionRecoveryPolicy.Action.WAIT -> return false
+        }
+        return true
+    }
 
     private fun verifyPrivateImageSend(child: PrivateFollowUpTransaction) {
         val attempt = child.sendAttempt ?: run {
@@ -6040,16 +6141,19 @@ internal class MomoSocialAdapter(
         if (window.packageName != targetPackage || window.windowId < 0) return
         submitPrivateFollowUpStep(child, next) { callback ->
             var layoutBoundsLogged = false
-            if (action == "interception-back") child.interceptionBackDispatched = false
             submitVerifiedAlbumTap(
                 child.target, window, child.id, { followUpCurrent(child) }, action,
                 resolve = { root, liveWindow ->
                     // The toggle must still be OFF at dispatch revalidation.
                     val safe = when (action) {
+                        "interception-avatar" -> liveWindow.windowId == child.target.nodeTarget.window.windowId &&
+                            liveWindow.activityClass == child.target.nodeTarget.window.activityClass &&
+                            interceptionNodeBounds(root, "chat_user_name", "android.widget.TextView",
+                                text = child.target.expectedChatTitle) != null
+                        "interception-layout" -> interceptionSettingsChecked(root, child) == false
                         "interception-switch" -> interceptionChecked(root) == false
                         "interception-dismiss" -> interceptionChecked(root) == true
-                        "interception-back" -> interceptionNodeBounds(root, "setting_layout_harass",
-                            "android.widget.LinearLayout", clickable = true) != null
+                        "interception-back" -> interceptionSettingsChecked(root, child) == true
                         else -> true
                     }
                     (if (safe) resolve(root, liveWindow) else null)?.also { bounds ->
@@ -6060,9 +6164,6 @@ internal class MomoSocialAdapter(
                         }
                     }
                 }, boundsOf = { it },
-                onPlatformDispatched = { _, _ ->
-                    if (action == "interception-back") child.interceptionBackDispatched = true
-                },
                 onGestureResult = callback
             )
         }
@@ -6117,13 +6218,20 @@ internal class MomoSocialAdapter(
             return
         }
         if (SystemClock.uptimeMillis() - child.stageStartedAt > 45_000L) {
-            followUpTerminal(child, "UNKNOWN", "STAGE_OBSERVATION_TIMEOUT")
-            return
+            if (!child.interception) {
+                followUpTerminal(child, "UNKNOWN", "STAGE_OBSERVATION_TIMEOUT")
+                return
+            }
+            // Keep the exact transaction/lease; observation can continue indefinitely.
+            // A pending command still blocks all writes until its result is delivered.
+            onLog("PRIVATE_INTERCEPTION UNKNOWN stage=${child.stage};reason=STAGE_OBSERVATION_TIMEOUT;retainCheckpoint=true")
+            child.stageStartedAt = SystemClock.uptimeMillis()
         }
         if (child.inFlight) {
             followUpWait(child, "GESTURE_RESULT_PENDING")
             return
         }
+        if (child.interception && !reconcileInterception(child)) return
         val owns = { followUpCurrent(child) }
         when (child.stage) {
             PrivateFollowUpStage.OPEN_ALBUM -> {
