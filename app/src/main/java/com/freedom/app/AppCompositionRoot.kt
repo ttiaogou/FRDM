@@ -406,6 +406,9 @@ internal class AccessibilityServiceDependencies internal constructor(
                         if (targetTask == null || generation != runSessionCoordinator.currentRunGeneration() ||
                             !runSessionCoordinator.isPageObservationAllowed()
                         ) false else {
+                            if (!imageTestMode && aiReplyObservationRuntime.isPrivateFollowUpActive()) {
+                                aiReplyObservationRuntime.onPrivateFollowUpTopLevelObserved()
+                            }
                             val mode = if (targetTask == "ACCOUNT_BROWSE") RunMode.ACCOUNT_BROWSE
                                 else RunMode.AI_REPLY
                             val verifiedGreetingNavigation =
@@ -433,7 +436,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                     }
                     // Explicitly wake the existing business observer after route reconciliation.
                     // This also covers a quiet chat with no further accessibility events.
-                    if (imageTestMode && (recognized || ownedNestedPage)) {
+                    if ((imageTestMode || aiReplyObservationRuntime.isPrivateFollowUpActive()) &&
+                        (recognized || ownedNestedPage)) {
                         aiReplyObservationRuntime.requestPageRouteObservation()
                     }
                     // Keep the independent observation alive even in READY. Unknown,
@@ -865,6 +869,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             claimImageSendTestRequest = root.taskLaunchParametersRepository::claimImageSendTestRequest,
             imageSendTestPort = momoSocialAdapter,
             isImageSendTestTouchActive = { touchInteractionMonitor.snapshot().interactionActive },
+            privateImageResourceCount = {
+                root.taskLaunchParametersRepository.read().imageResourceUris.count { it.isNotBlank() }
+            },
             contactMessageLedgerRepository = root.contactMessageLedgerRepository,
             privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository,
             receivedGreetingsCheckpointRepository = root.sayHiTraversalCheckpointRepository,

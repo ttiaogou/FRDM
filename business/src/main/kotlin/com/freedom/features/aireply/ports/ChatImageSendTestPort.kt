@@ -1,5 +1,7 @@
 package com.freedom.features.aireply.ports
 
+import com.freedom.features.aireply.domain.contact.ContactFollowUpStep
+
 /** Existing AI observer drives one explicitly authorized chat-detail child transaction. */
 const val INTERCEPTION_TEST_REQUEST_PREFIX = "interception:"
 enum class ImageSendTestProgress { IDLE, ACTIVE, TERMINAL }
@@ -10,6 +12,19 @@ interface ChatImageSendTestPort {
     fun progress(): ImageSendTestProgress
     /** Durably consume the one-shot request before any tap; no production delivery verification. */
     fun begin(target: ChatDraftInputTarget, requestId: String, claim: () -> Boolean, ownsTransaction: () -> Boolean)
+    /** Normal private-chat admission reuses the same platform execution, without test authorization.
+     * The caller owns durable checkpoint writes; false forbids the next UI mutation. */
+    fun beginPrivateFollowUp(
+        target: ChatDraftInputTarget,
+        transactionId: String,
+        interception: Boolean,
+        beforeStep: (ContactFollowUpStep) -> Boolean,
+        ownsTransaction: () -> Boolean
+    ): Boolean = false
+
+    /** Only independent external result evidence can confirm a normal business action. */
+    fun privateFollowUpSucceeded(): Boolean = false
+
     /** One fresh observation/at most one action. No timers, retries or business counters are owned here. */
     fun observe()
     fun abort(reason: String)

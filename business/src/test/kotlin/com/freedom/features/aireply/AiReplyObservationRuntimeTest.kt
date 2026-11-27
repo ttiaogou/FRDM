@@ -3666,6 +3666,183 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun m04dObservedPrivateFollowUpsFinishInOrderBeforeTraversalCompletion() {
+        assertM04dPrivateFollowUp(imageConfirmed = true)
+    }
+
+    @Test
+    fun m04dUnknownImageDoesNotToggleOrCompleteVisit() {
+        assertM04dPrivateFollowUp(imageConfirmed = false)
+    }
+
+    private fun assertM04dPrivateFollowUp(imageConfirmed: Boolean) {
+        val scheduler = FakeScheduler()
+        val port = FakeChatPort().apply {
+            verifiedMessageWorkAreaNavigationSupported = true
+            receivedGreetingsWorkflowEnabled = true
+            sessionRunEnabled = true
+            manualGreetingsArrivalStatus = ReceivedGreetingsPageArrivalStatus.NOT_TARGET
+            observedDetailIdentityEnabled = true
+            page = chatDetailSnapshot()
+        }
+        val tasks = TaskCoordinator(UiOperationOwnershipCoordinator())
+        val logs = mutableListOf<String>()
+        val requestKey = "a".repeat(64)
+        var saved: PrivateMessagesTraversalCheckpoint? = null
+        val repository = object : PrivateMessagesTraversalCheckpointRepository {
+            override fun load(nowEpochMs: Long) = saved
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { saved = checkpoint }
+            override fun clear() { saved = null }
+        }
+        var draftCalls = 0
+        var pendingSend = false
+        var receiptReturned = false
+        val ledgerRepo = com.freedom.features.aireply.domain.contact.InMemoryContactMessageLedgerRepository()
+        val actions = mutableListOf<Boolean>()
+        var result: Boolean? = null
+        val media = object : com.freedom.features.aireply.ports.ChatImageSendTestPort {
+            private var state = com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE
+            private var verified = false
+            override fun inspectEntryTarget(requestId: String): com.freedom.features.aireply.ports.ChatDraftInputTarget? =
+                error("Production must not use manual test admission")
+            override fun begin(
+                target: com.freedom.features.aireply.ports.ChatDraftInputTarget, requestId: String,
+                claim: () -> Boolean, ownsTransaction: () -> Boolean
+            ) = error("Production must not consume test authorization")
+            override fun beginPrivateFollowUp(
+                target: com.freedom.features.aireply.ports.ChatDraftInputTarget,
+                transactionId: String, interception: Boolean,
+                beforeStep: (com.freedom.features.aireply.domain.contact.ContactFollowUpStep) -> Boolean,
+                ownsTransaction: () -> Boolean
+            ): Boolean {
+                assertEquals(tasks.currentLease(), target.taskLease)
+                assertTrue(ownsTransaction())
+                actions += interception
+                assertTrue(beforeStep(if (interception)
+                    com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_SWITCH
+                    else com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SEND))
+                assertTrue(ledgerRepo.loadAll().single().followUpCheckpoint?.reconciliationRequired == true)
+                state = com.freedom.features.aireply.ports.ImageSendTestProgress.ACTIVE
+                return true
+            }
+            override fun progress() = state
+            override fun privateFollowUpSucceeded() = verified
+            override fun observe() {
+                result?.let {
+                    verified = it
+                    result = null
+                    state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
+                }
+            }
+            override fun abort(reason: String) {
+                verified = false
+                state = com.freedom.features.aireply.ports.ImageSendTestProgress.TERMINAL
+            }
+            override fun reset(reason: String) {
+                verified = false
+                state = com.freedom.features.aireply.ports.ImageSendTestProgress.IDLE
+            }
+        }
+        val runtime = AiReplyObservationRuntime(
+            scheduler = scheduler,
+            sharedPageObservationCoordinator = PageObservationCoordinator(scheduler),
+            chatPagePort = port,
+            chatMessagePort = port,
+            chatSessionManagementPort = port,
+            gesturePolicy = object : TestGestureApi {
+                override fun execute(command: GestureIntentRequest, listener: GestureExecutionListener): GestureSubmission =
+                    error("No traversal/send gesture may originate from the observation runtime")
+            },
+            targetPackage = { "com.immomo.momo" },
+            isAiReplyActive = { true },
+            onLog = logs::add,
+            inspectAndroidRecoveryReadiness = ::testAndroidRecoveryReadiness,
+            privateMessagesCheckpointRepository = repository,
+            contactMessageLedgerRepository = ledgerRepo,
+            imageSendThreshold = { 1 },
+            messageInterceptionThreshold = { 1 },
+            privateImageResourceCount = { 1 },
+            imageSendTestPort = media,
+            observedPrivateJournalAdmitted = { _, _, _, _ -> true },
+            privateReplyRequestKey = { _, _ -> requestKey },
+            isConversationDraftPending = { pendingSend },
+            isSendConfirmationPending = { pendingSend },
+            onDraftConversationObserved = { _, _, identity, _ ->
+                assertEquals("verified-platform-id", identity?.contactId)
+                assertEquals(requestKey, saved?.unfinishedSessions?.singleOrNull()?.replyRequestKey)
+                draftCalls++
+                pendingSend = true
+                true
+            },
+            onRecoveredPrivateSendTransaction = { _, _, openedAt ->
+                if (pendingSend) {
+                    assertEquals(openedAt, saved?.unfinishedSessions?.singleOrNull()?.openedAtMillis)
+                    pendingSend = false
+                    receiptReturned = true
+                    com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                        com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED, "verified-send-receipt"
+                    )
+                } else com.freedom.features.aireply.ai.ReplySendTransactionOutcome(
+                    com.freedom.features.aireply.ai.SendConfirmationResult.NOT_PENDING
+                )
+            },
+            fullInspectionDebounceMs = 300L,
+            regionRefreshDebounceMs = 500L,
+            taskCoordinator = tasks, currentRunGeneration = { 1L },
+            pageSelectedStartup = true
+        )
+        assertTrue(runtime.preparePageSelectedStartup("AI_REPLY_PRIVATE_MESSAGES"))
+        runtime.requestPageRouteObservation()
+        runUntilShortestDelay(scheduler, 30) { port.observedDetailTarget != null }
+        port.observedDetailOutcome = ContactIdentityCaptureOutcome.completed(ContactRowIdentity(
+            snapshotId = "observed-detail-test", temporaryUserId = "observed-visit",
+            contactId = "verified-platform-id", confidence = ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        ))
+        port.observedDetailReturnPending = true
+        port.page = chatDetailSnapshot(2L)
+        runtime.schedule(event(AccessibilityEventType.WINDOW_STATE_CHANGED))
+        runUntilShortestDelay(scheduler, 40) { draftCalls == 1 }
+        val before = requireNotNull(saved)
+        assertEquals(1, before.unfinishedSessions.size)
+        assertEquals(0, port.navigateBackCalls)
+        assertEquals(0, port.messageWorkAreaEntryAttempts)
+        runtime.onSendConfirmationObservationRequested()
+        runUntilShortestDelay(scheduler, 40) { receiptReturned }
+        assertEquals(listOf(false), actions)
+        assertEquals(1, draftCalls)
+        assertEquals(1, requireNotNull(saved).unfinishedSessions.size)
+        assertEquals(0, port.navigateBackCalls)
+        result = imageConfirmed
+        runUntilShortestDelay(scheduler, 30) {
+            actions.size == 2 || logs.any { it.contains("PRIVATE_FOLLOW_UP RESULT_UNCONFIRMED") }
+        }
+        if (!imageConfirmed) {
+            assertEquals(listOf(false), actions)
+            assertEquals(1, requireNotNull(saved).unfinishedSessions.size)
+            assertEquals(0, port.navigateBackCalls)
+            assertEquals(com.freedom.features.aireply.domain.contact.ContactPendingRecoveryAction.SEND_IMAGE,
+                ledgerRepo.loadAll().single().pendingRecoveryAction)
+        } else {
+            assertEquals(listOf(false, true), actions)
+            assertEquals(1, requireNotNull(saved).unfinishedSessions.size)
+            assertEquals(0, port.navigateBackCalls)
+            assertEquals(com.freedom.features.aireply.domain.contact.ContactImageSendStatus.SENT_CONFIRMED,
+                ledgerRepo.loadAll().single().imageStatus)
+            result = true
+            runUntilShortestDelay(scheduler, 30) { requireNotNull(saved).unfinishedSessions.isEmpty() }
+            assertEquals(com.freedom.features.aireply.domain.contact.ContactInterceptionStatus.ENABLED,
+                ledgerRepo.loadAll().single().interceptionStatus)
+            assertEquals(com.freedom.features.aireply.domain.contact.ContactPendingRecoveryAction.NONE,
+                ledgerRepo.loadAll().single().pendingRecoveryAction)
+            assertEquals(before.nextCursorKey, saved?.nextCursorKey)
+            assertEquals("verified-send-receipt", saved?.lastSuccessfulTaskId)
+        }
+        assertEquals(1, draftCalls)
+        runtime.reset("test stop")
+        assertNull(tasks.currentLease())
+    }
+
+    @Test
     fun r03e3ObservedUnknownKeepsReadOnlyBackoffAndCompletesWithoutPageRecovery() {
         assertR03e3ObservedUnknown()
     }

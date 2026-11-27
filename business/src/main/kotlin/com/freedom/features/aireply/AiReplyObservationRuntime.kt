@@ -32,6 +32,10 @@ import com.freedom.features.aireply.domain.contact.InMemoryContactMessageLedgerR
 import com.freedom.features.aireply.domain.contact.ContactSendCountUpdate
 import com.freedom.features.aireply.domain.contact.ContactSendRecordStatus
 import com.freedom.features.aireply.domain.contact.ContactFollowUpCheckpoint
+import com.freedom.features.aireply.domain.contact.ContactFollowUpStep
+import com.freedom.features.aireply.domain.contact.ContactPendingRecoveryAction
+import com.freedom.features.aireply.ports.ChatDraftInputTarget
+import com.freedom.features.aireply.ports.ImageSendTestProgress
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPagePort
@@ -177,13 +181,33 @@ class AiReplyObservationRuntime(
     private val isImageSendTestRequestAvailable: (String) -> Boolean = { false },
     private val claimImageSendTestRequest: (String) -> Boolean = { false },
     private val imageSendTestPort: com.freedom.features.aireply.ports.ChatImageSendTestPort? = null,
-    private val isImageSendTestTouchActive: () -> Boolean = { false }
+    private val isImageSendTestTouchActive: () -> Boolean = { false },
+    private val privateImageResourceCount: () -> Int = { 0 }
 ) {
     // Test mode is latched for this page runtime; it never falls through to the normal reply
     // workflow when the one-shot request is consumed or the switch changes.
     @Volatile private var activeImageSendTestRequest: String? = null
     private var lastImageTestAdmissionWait: String? = null
     fun isImageSendTestRun(): Boolean = activeImageSendTestRequest != null
+
+    // Ephemeral binding for the existing adapter execution; the ledger remains the durable owner.
+    private class PrivateFollowUp(
+        val contactKey: String,
+        val sendConfirmationId: String,
+        val target: ChatDraftInputTarget,
+        @Volatile var checkpoint: ContactFollowUpCheckpoint
+    )
+    @Volatile private var activePrivateFollowUp: PrivateFollowUp? = null
+    fun isPrivateFollowUpActive(): Boolean = activePrivateFollowUp != null
+
+    /** The unified entry has independently recognized a top-level destination. */
+    fun onPrivateFollowUpTopLevelObserved() {
+        if (activePrivateFollowUp == null) return
+        imageSendTestPort?.reset("PRIVATE_FOLLOW_UP_LEFT_CHILD")
+        activePrivateFollowUp = null
+        currentSessionSendConfirmed = false
+        onLog("PRIVATE_FOLLOW_UP LEFT_CHILD;checkpointRetained=true")
+    }
 
     companion object {
         /**
@@ -1285,6 +1309,10 @@ class AiReplyObservationRuntime(
     private fun runFullInspection(purpose: AiReplyPageReadPurpose) {
         pageInspectionTask = null
         if (!isAiReplyActive()) return
+        if (isPrivateFollowUpActive()) {
+            runPrivateFollowUpObservation()
+            return
+        }
         if (isImageSendTestRun()) {
             runImageSendTestObservation()
             return
@@ -1633,6 +1661,12 @@ class AiReplyObservationRuntime(
     /** System touch boundaries pause received-greetings recovery without becoming page evidence. */
     fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
         if (!sessionRunStarted) return
+        if (isPrivateFollowUpActive() && event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER) {
+            imageSendTestPort?.abort("PRIVATE_FOLLOW_UP_USER_INTERACTION")
+            onPrivateFollowUpTopLevelObserved()
+            onLog("PRIVATE_FOLLOW_UP USER_INTERACTION;checkpointRetained=true;noReplay=true")
+            // Fall through to existing physical-interaction handling, not a new recovery route.
+        }
         if (isImageSendTestRun()) {
             lastImageTestAdmissionWait = null
             if (event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER &&
@@ -1745,6 +1779,7 @@ class AiReplyObservationRuntime(
     /** Applies a newly acquired page snapshot after ordinary debounce or verified user stability. */
     /** Consumes the semantic observation result; the snapshot remains evidence only. */
     private fun handleInspectionSnapshot(observation: ObservationResult) {
+        if (isPrivateFollowUpActive()) return
         val incomingInspection = observation.snapshot ?: return
         if (observation.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) return
         val previous = lastPageInspection
@@ -3586,6 +3621,10 @@ class AiReplyObservationRuntime(
     }
 
     fun reset(reason: String = "未指定", preservePendingRecovery: Boolean = true) {
+        if (isPrivateFollowUpActive()) {
+            imageSendTestPort?.reset("PRIVATE_FOLLOW_UP_RUNTIME_RESET")
+            activePrivateFollowUp = null
+        }
         if (isImageSendTestRun() || (!sessionRunStarted && imageSendTestRequestId() != null)) {
             imageSendTestPort?.reset(reason)
             pageInspectionTask?.cancel()
@@ -4560,7 +4599,7 @@ class AiReplyObservationRuntime(
         )
         if (update.imageThresholdReachedNow || update.thresholdReachedNow) {
             onLog("PRIVATE_CONTACT_LEDGER FOLLOW_UP_PENDING;imageDue=${update.imageThresholdReachedNow};" +
-                "interceptionDue=${update.thresholdReachedNow};productionActionsNotConnected=true")
+                "interceptionDue=${update.thresholdReachedNow}")
         } else if (update.status == ContactSendRecordStatus.INVALID_INPUT) {
             onLog("PRIVATE_CONTACT_LEDGER RECORD_SKIPPED;reason=UNVERIFIED_PRIVATE_CONTACT_OR_INVALID_RECEIPT")
         }
@@ -4596,6 +4635,11 @@ class AiReplyObservationRuntime(
                     receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING))
 
     fun requestPageRouteObservation() {
+        if (isPrivateFollowUpActive()) {
+            if (isAiReplyActive() && sessionRunStarted && pageInspectionTask == null)
+                scheduleFullInspectionAfter(fullInspectionDebounceMs)
+            return
+        }
         if (isImageSendTestRun()) {
             val request = activeImageSendTestRequest ?: return
             val progress = imageSendTestPort?.progress() ?: return
@@ -5016,7 +5060,7 @@ class AiReplyObservationRuntime(
 
     /** Schedules bounded page or known-region inspection from a normalized, redacted event. */
     fun schedule(event: AccessibilityEventEnvelope) {
-        if (isImageSendTestRun()) {
+        if (isPrivateFollowUpActive() || isImageSendTestRun()) {
             requestPageRouteObservation()
             return
         }
@@ -5139,6 +5183,7 @@ class AiReplyObservationRuntime(
      * complete asynchronously; message bodies remain ephemeral and are never logged here.
      */
     private fun readVisibleMessages(snapshot: ChatPageSnapshot) {
+        if (isPrivateFollowUpActive()) return
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
         if (sessionRunStarted && recoveryContext.pending) {
             onLog("AI 身份业务续接[READ_DEFERRED]：恢复事务未完成；禁止旧消息批次启动 OCR 或草稿")
@@ -5414,6 +5459,187 @@ class AiReplyObservationRuntime(
         }
     }
 
+    private fun followUpEnabled(action: ContactPendingRecoveryAction): Boolean = when (action) {
+        ContactPendingRecoveryAction.SEND_IMAGE -> imageSendThreshold() > 0
+        ContactPendingRecoveryAction.ENABLE_INTERCEPTION -> messageInterceptionThreshold() > 0
+        ContactPendingRecoveryAction.NONE -> false
+    }
+
+    private fun pendingPrivateFollowUpEnabled(contactKey: String?): Boolean =
+        followUpEnabled(contactMessageLedger.pendingRecoveryAction(contactKey))
+
+    private fun ownsPrivateFollowUp(child: PrivateFollowUp): Boolean =
+        activePrivateFollowUp === child && sessionRunStarted && isAiReplyActive() &&
+            !receivedGreetingsTaskActive && canPerformPrivateMessagesUiAction() &&
+            verifiedPrivateLedgerContactKey() == child.contactKey &&
+            child.target.taskLease?.let { taskCoordinator?.isCurrent(it) } == true &&
+            followUpEnabled(child.checkpoint.step.action)
+
+    private fun privateFollowUpTarget(snapshot: ChatPageSnapshot): ChatDraftInputTarget? {
+        val fresh = inspectFreshPageSnapshot() ?: return null
+        val lease = taskCoordinator?.currentLease()?.takeIf {
+            it.taskId == PRIVATE_MESSAGES_TASK_ID && it.runGeneration == currentRunGeneration()
+        } ?: return null
+        val input = fresh.inputFieldTarget ?: return null
+        val title = fresh.chatTitleText?.takeIf(String::isNotBlank) ?: return null
+        val conversation = fresh.conversationIdentityKey() ?: return null
+        val windowKey = windowSessionKey(fresh) ?: return null
+        if (!canPerformPrivateMessagesUiAction() || userInteractionActive || isImageSendTestTouchActive() ||
+            fresh.packageName != targetPackage() || fresh.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            isSemanticallyUnconfirmed(fresh) || !hasSameWindowSession(snapshot, fresh) ||
+            title != snapshot.chatTitleText || currentSessionWindowKey != windowKey ||
+            currentSessionHeaderMatchMode(fresh) == null || !isExpectedPrivateSessionDetail(fresh)) return null
+        return ChatDraftInputTarget(fresh.packageName, fresh.activityClass, windowKey, conversation,
+            windowKey, input, title, lease)
+    }
+
+    /** Only newly admitted actions are executed in M04-D. Interrupted checkpoints are not replayed. */
+    private fun startPrivateFollowUp(contactKey: String, sendId: String, snapshot: ChatPageSnapshot) {
+        val checkpoint = contactMessageLedger.followUpCheckpoint(contactKey) ?: return
+        val port = imageSendTestPort
+        val target = privateFollowUpTarget(snapshot)
+        if (checkpoint.reconciliationRequired || checkpoint.revision != 0L ||
+            port == null || target == null || !followUpEnabled(checkpoint.step.action) ||
+            (checkpoint.step.action == ContactPendingRecoveryAction.SEND_IMAGE && privateImageResourceCount() != 1)
+        ) {
+            onLog("PRIVATE_FOLLOW_UP ADMISSION_HELD;checkpointRetained=true;noReplay=true")
+            return
+        }
+        val child = PrivateFollowUp(contactKey, sendId, target, checkpoint)
+        activePrivateFollowUp = child
+        sessionTransitionTask?.cancel()
+        sessionTransitionTask = null
+        regionRefreshTask?.cancel()
+        regionRefreshTask = null
+        invalidatePendingMessageRead()
+        port.reset("PRIVATE_FOLLOW_UP_BEGIN")
+        val started = port.beginPrivateFollowUp(
+            target, checkpoint.transactionId, checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION,
+            beforeStep = { step ->
+                val expected = child.checkpoint
+                if (!ownsPrivateFollowUp(child) ||
+                    !contactMessageLedger.updateFollowUpCheckpoint(contactKey, expected, step, true)) false
+                else {
+                    child.checkpoint = requireNotNull(contactMessageLedger.followUpCheckpoint(contactKey))
+                    true
+                }
+            },
+            ownsTransaction = { ownsPrivateFollowUp(child) }
+        )
+        if (!started) {
+            activePrivateFollowUp = null
+            onLog("PRIVATE_FOLLOW_UP BEGIN_NOT_ADMITTED;checkpointRetained=true")
+            return
+        }
+        onLog("PRIVATE_FOLLOW_UP BEGIN;action=${checkpoint.step.action};parentLeaseInherited=true")
+        // The same shared observer that drives the validated test advances the normal child.
+        runPrivateFollowUpObservation()
+    }
+
+    /** Rebind only the exact original chat after adapter result evidence; never restore old nodes. */
+    private fun privateFollowUpReturnedSnapshot(child: PrivateFollowUp): ChatPageSnapshot? {
+        val fresh = inspectFreshPageSnapshot() ?: return null
+        val live = fresh.inputFieldTarget?.window ?: return null
+        val original = child.target.nodeTarget.window
+        val windowKey = windowSessionKey(fresh) ?: return null
+        val surfaceKey = chatSurfaceKey(fresh) ?: return null
+        val binding = currentSessionBinding ?: return null
+        if (!ownsPrivateFollowUp(child) || userInteractionActive || isImageSendTestTouchActive() ||
+            fresh.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE || isSemanticallyUnconfirmed(fresh) ||
+            live.packageName != original.packageName || live.activityClass != original.activityClass ||
+            live.windowId != original.windowId || live.generation < original.generation ||
+            fresh.chatTitleText != child.target.expectedChatTitle ||
+            fresh.conversationIdentityKey() != child.target.conversationIdentityKey ||
+            currentSessionHeaderMatchMode(fresh) == null) return null
+        currentSessionWindowKey = windowKey
+        currentSessionBinding = binding.copy(chatWindowKey = windowKey, chatSurfaceKey = surfaceKey)
+        if (!isExpectedPrivateSessionDetail(fresh)) {
+            currentSessionWindowKey = binding.chatWindowKey
+            currentSessionBinding = binding
+            return null
+        }
+        return fresh
+    }
+
+    private fun runPrivateFollowUpObservation() {
+        val child = activePrivateFollowUp ?: return
+        val port = imageSendTestPort ?: return
+        if (!ownsPrivateFollowUp(child)) {
+            onPrivateFollowUpTopLevelObserved()
+            return
+        }
+        if (userInteractionActive || isImageSendTestTouchActive()) {
+            port.abort("PRIVATE_FOLLOW_UP_USER_INTERACTION")
+            return
+        }
+        if (port.progress() == ImageSendTestProgress.ACTIVE) port.observe()
+        if (port.progress() == ImageSendTestProgress.ACTIVE) {
+            scheduleFullInspectionAfter(500L)
+            return
+        }
+        if (!port.privateFollowUpSucceeded()) {
+            onLog("PRIVATE_FOLLOW_UP RESULT_UNCONFIRMED;checkpointRetained=true;noReturn=true")
+            return
+        }
+        val fresh = privateFollowUpReturnedSnapshot(child) ?: run {
+            onLog("PRIVATE_FOLLOW_UP RETURN_NOT_CONFIRMED;checkpointRetained=true")
+            return
+        }
+        val checkpoint = child.checkpoint
+        val confirmed = when (checkpoint.step.action) {
+            ContactPendingRecoveryAction.SEND_IMAGE -> contactMessageLedger.confirmImageSent(child.contactKey, checkpoint)
+            ContactPendingRecoveryAction.ENABLE_INTERCEPTION -> confirmMessageInterceptionEnabled(child.contactKey, checkpoint)
+            ContactPendingRecoveryAction.NONE -> false
+        }
+        if (!confirmed) {
+            onLog("PRIVATE_FOLLOW_UP RESULT_NOT_PERSISTED;noReturn=true")
+            return
+        }
+        onLog("PRIVATE_FOLLOW_UP CONFIRMED;action=${checkpoint.step.action}")
+        port.reset("PRIVATE_FOLLOW_UP_CONFIRMED")
+        activePrivateFollowUp = null
+        if (pendingPrivateFollowUpEnabled(child.contactKey)) {
+            startPrivateFollowUp(child.contactKey, child.sendConfirmationId, fresh)
+        } else {
+            finishConfirmedPrivateSend(child.sendConfirmationId, fresh)
+        }
+    }
+
+    /** Existing traversal completion, called after text-only or fully confirmed child actions. */
+    private fun finishConfirmedPrivateSend(sendConfirmationId: String, snapshot: ChatPageSnapshot): Boolean {
+        privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
+        privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
+        val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
+        if (!observedVisit) {
+            privateMessagesTraversalTaskExecutor.checkpointNextCursorKey = currentSessionKey
+            privateMessagesTraversalTaskExecutor.checkpointTraversalDirection = "BOTTOM_TO_TOP"
+        }
+        privateMessagesTraversalTaskExecutor.completeCurrentUnfinishedSession()
+        val checkpointWritten = if (observedVisit) {
+            runCatching {
+                privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            }.isSuccess
+        } else currentSessionCandidate?.let {
+            privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(it)
+            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            true
+        } ?: run {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 会话返回被阻止：缺少当前会话稳定键，未写入返回检查点")
+            false
+        }
+        if (!checkpointWritten) {
+            if (observedVisit) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
+        if (!currentSessionReadCaptured) {
+            onLog("AI 会话返回门禁[CHAT_SAMPLE_NOT_PERSISTED]：发送已确认；样本归档失败不阻止安全返回")
+        }
+        scheduleReturnToSessionList(snapshot)
+        return true
+    }
+
     /** Only a fully verified outgoing message may release the send hold or advance its queue. */
     private fun handleSendConfirmationResult(
         transaction: com.freedom.features.aireply.ai.ReplySendTransactionOutcome,
@@ -5456,32 +5682,12 @@ class AiReplyObservationRuntime(
                         scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
                         return true
                     }
-                    privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
-                    privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
-                    val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
-                    if (!observedVisit) {
-                        privateMessagesTraversalTaskExecutor.checkpointNextCursorKey = currentSessionKey
-                        privateMessagesTraversalTaskExecutor.checkpointTraversalDirection = "BOTTOM_TO_TOP"
-                    }
-                    privateMessagesTraversalTaskExecutor.completeCurrentUnfinishedSession()
-                    val checkpointWritten = if (observedVisit) {
-                        runCatching {
-                            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
-                        }.isSuccess
-                    } else currentSessionCandidate?.let {
-                        privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(it)
-                        privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
-                        true
-                    } ?: run {
-                        sessionManagerState = SessionManagerState.PAUSED
-                        onLog("AI 会话返回被阻止：缺少当前会话稳定键，未写入返回检查点")
-                        false
-                    }
-                    if (!checkpointWritten) {
-                        if (observedVisit) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                    val contactKey = verifiedPrivateLedgerContactKey()
+                    if (pendingPrivateFollowUpEnabled(contactKey)) {
+                        startPrivateFollowUp(requireNotNull(contactKey), sendConfirmationId, snapshot)
                         return true
                     }
-                    onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
+                    return finishConfirmedPrivateSend(sendConfirmationId, snapshot)
                 }
                 if (!currentSessionSendConfirmed) {
                     sessionManagerState = SessionManagerState.PAUSED
@@ -5557,6 +5763,7 @@ class AiReplyObservationRuntime(
     }
 
     private fun handleMessageReadBatch(batch: ChatMessageBatch, snapshot: ChatPageSnapshot) {
+        if (isPrivateFollowUpActive()) return
         // A busy adapter did not perform recognition. It is never a draft/send/sample batch.
         if (batch.ocrAdmissionDeferred) {
             deferBusyOcrResult(batch)
@@ -6020,6 +6227,14 @@ class AiReplyObservationRuntime(
                 onLog("AI 历史联系人解析失败：CONTACT_HISTORY_LOOKUP_FAILED；exception=${it.javaClass.simpleName}")
                 rowIdentity
             }
+        }
+        if (privateDetail && identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+            pendingPrivateFollowUpEnabled(ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId))
+        ) {
+            // Recovery of a prior unfinished media transaction is explicitly deferred to M04-C.
+            // Do not initiate another text/image/toggle on a pending contact.
+            onLog("PRIVATE_FOLLOW_UP PRIOR_PENDING;noNewDraft=true;recoveryNotConnected=true")
+            return
         }
         // Link a verified private visit to the actual dedupe key BEFORE the shared
         // draft entry can create a model request or segment journal. Legacy row-based
@@ -8267,6 +8482,7 @@ class AiReplyObservationRuntime(
         draftPendingWaitedMs: Long = 0L
     ) {
         if (sessionManagerState != SessionManagerState.READING_SESSION) return
+        if (isPrivateFollowUpActive() || pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())) return
         if (!canPerformPrivateMessagesUiAction()) {
             onLog("AI 会话返回被阻止：私人消息任务未持有 UI 操作权")
             recoverRetryablePrivateList("PRIVATE_RETURN_LEASE_LOST")
