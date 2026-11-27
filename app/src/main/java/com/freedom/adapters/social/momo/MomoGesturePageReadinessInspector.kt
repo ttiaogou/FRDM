@@ -30,7 +30,8 @@ internal class MomoGesturePageReadinessInspector(
         root: AccessibilityNodeInfo,
         currentActivity: String,
         mode: RunMode,
-        albumPermit: MomoAlbumGesturePermit? = null
+        albumPermit: MomoAlbumGesturePermit? = null,
+        observedOwnedChildPage: Boolean = false
     ): TargetAppPageReadiness {
         val packageName = safeString { root.packageName?.toString().orEmpty() }
         if (packageName != targetPackage) {
@@ -116,6 +117,12 @@ internal class MomoGesturePageReadinessInspector(
                 retryable = !permitted,
                 transactionChildWindowConfirmed = permitted && albumPermit.transactionChildAction
             )
+        }
+
+        // This proof is supplied only by the gateway's read-only evaluation. It does not
+        // set transactionChildWindowConfirmed or replace the exact dispatch permit above.
+        if (mode == RunMode.AI_REPLY && observedOwnedChildPage) {
+            return TargetAppPageReadiness(true, "AI Reply: verified private follow-up page (observation only)")
         }
 
         if (mode == RunMode.AI_REPLY && MomoAlbumArrivalInspector.isConfirmed(root, targetPackage)) {

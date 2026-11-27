@@ -416,6 +416,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                     // This also covers a quiet chat with no further accessibility events.
                     if (aiReplyObservationRuntime.isPrivateFollowUpActive() &&
                         (recognized || ownedNestedPage)) {
+                        if (ownedNestedPage) accessibilityGateway.inspectRecoveryReadiness()
                         aiReplyObservationRuntime.requestPageRouteObservation()
                     }
                     // Keep the independent observation alive even in READY. Unknown,
@@ -480,7 +481,8 @@ internal class AccessibilityServiceDependencies internal constructor(
                     (route.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
                         aiReplyObservationRuntime.isReceivedGreetingsRecoveryPending()) ||
                         (route.taskId == "AI_REPLY_PRIVATE_MESSAGES" &&
-                            aiReplyObservationRuntime.isObservedPrivateRecoveryPending())
+                            (aiReplyObservationRuntime.isObservedPrivateRecoveryPending() ||
+                                aiReplyObservationRuntime.isPrivateFollowUpWriteBlocked()))
                 }
             }
         )
@@ -498,6 +500,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             inspectBoundPageReadiness = { root, activity, mode, commandId ->
                 momoSocialAdapter.inspectGesturePageReadiness(root, activity, mode, commandId)
+            },
+            inspectObservedChildPageReadiness = { root, activity, mode ->
+                momoSocialAdapter.inspectObservedPrivateFollowUpReadiness(root, activity, mode)
             },
             targetAppReadinessController = targetAppReadinessController,
             inputOriginClassifier = inputOriginClassifier,

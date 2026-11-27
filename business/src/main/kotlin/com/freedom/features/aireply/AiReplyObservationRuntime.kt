@@ -5290,10 +5290,15 @@ class AiReplyObservationRuntime(
 
     private fun ownsPrivateFollowUp(child: PrivateFollowUp): Boolean =
         activePrivateFollowUp === child && sessionRunStarted && isAiReplyActive() &&
-            !receivedGreetingsTaskActive && canPerformPrivateMessagesUiAction() &&
+            !receivedGreetingsTaskActive && ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
             verifiedPrivateLedgerContactKey() == child.contactKey &&
             child.target.taskLease?.let { taskCoordinator?.isCurrent(it) } == true &&
             followUpEnabled(child.checkpoint.step.action)
+
+    /** A temporary recovery veto is not a lost transaction. The composition root also
+     * applies this veto to the final platform write authority, including delayed commands. */
+    fun isPrivateFollowUpWriteBlocked(): Boolean =
+        activePrivateFollowUp != null && (recoveryContext.pending || receivedGreetingsOwnershipRecheckPending)
 
     private fun privateFollowUpTarget(snapshot: ChatPageSnapshot): ChatDraftInputTarget? {
         val fresh = inspectFreshPageSnapshot() ?: return null
@@ -5341,7 +5346,7 @@ class AiReplyObservationRuntime(
             target, checkpoint.transactionId, checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION,
             beforeStep = { step ->
                 val expected = child.checkpoint
-                if (!ownsPrivateFollowUp(child) ||
+                if (!ownsPrivateFollowUp(child) || !canPerformPrivateMessagesUiAction() ||
                     !contactMessageLedger.updateFollowUpCheckpoint(contactKey, expected, step, true)) false
                 else {
                     child.checkpoint = requireNotNull(contactMessageLedger.followUpCheckpoint(contactKey))
@@ -5369,7 +5374,8 @@ class AiReplyObservationRuntime(
         val windowKey = windowSessionKey(fresh) ?: return null
         val surfaceKey = chatSurfaceKey(fresh) ?: return null
         val binding = currentSessionBinding ?: return null
-        if (!ownsPrivateFollowUp(child) || userInteractionActive || isPrivateFollowUpTouchActive() ||
+        if (!ownsPrivateFollowUp(child) || !canPerformPrivateMessagesUiAction() ||
+            userInteractionActive || isPrivateFollowUpTouchActive() ||
             fresh.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE || isSemanticallyUnconfirmed(fresh) ||
             live.packageName != original.packageName || live.activityClass != original.activityClass ||
             live.windowId != original.windowId || live.generation < original.generation ||

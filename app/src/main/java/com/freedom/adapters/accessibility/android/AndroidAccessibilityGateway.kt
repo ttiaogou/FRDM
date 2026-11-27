@@ -83,7 +83,8 @@ internal class AndroidAccessibilityGateway(
     private val uiWriteAuthorization: UiWriteAuthorization,
     private val onReadinessDiagnostic: (String) -> Unit = {},
     private val onActivityBindingMissing: () -> Unit = {},
-    private val inspectBoundPageReadiness: ((AccessibilityNodeInfo, String, RunMode, String) -> TargetAppPageReadiness)? = null
+    private val inspectBoundPageReadiness: ((AccessibilityNodeInfo, String, RunMode, String) -> TargetAppPageReadiness)? = null,
+    private val inspectObservedChildPageReadiness: ((AccessibilityNodeInfo, String, RunMode) -> TargetAppPageReadiness?)? = null
 ) : AccessibilityGateway, GestureExecutionPort, AndroidActiveWindowRootAccess, AndroidScreenshotCapture {
 
     @Volatile
@@ -654,7 +655,9 @@ internal class AndroidAccessibilityGateway(
      * This does not dispatch a gesture or grant UI ownership. The cached current()
      * diagnostic alone is insufficient after a service restart.
      */
-    fun inspectRecoveryReadiness(): TargetAppReadinessSnapshot = evaluateCurrentReadiness()
+    fun inspectRecoveryReadiness(): TargetAppReadinessSnapshot =
+        if (inspectObservedChildPageReadiness == null) evaluateCurrentReadiness()
+        else evaluateCurrentReadiness(null, observeChildPage = true)
 
     private fun inspectAutonomousDispatchReadiness(): String? = inspectAutonomousDispatchReadiness(null)
 
@@ -668,7 +671,9 @@ internal class AndroidAccessibilityGateway(
     /** Shared live safety evaluation. Observing readiness is not a rejected dispatch. */
     private fun evaluateCurrentReadiness(): TargetAppReadinessSnapshot = evaluateCurrentReadiness(null)
 
-    private fun evaluateCurrentReadiness(commandId: String?): TargetAppReadinessSnapshot {
+    private fun evaluateCurrentReadiness(
+        commandId: String?, observeChildPage: Boolean = false
+    ): TargetAppReadinessSnapshot {
         val expectedPackage = targetPackage()
         val mode = runCatching { activeRunMode() }.getOrNull()
         val root = runCatching { service.rootInActiveWindow }.getOrNull()
@@ -700,6 +705,9 @@ internal class AndroidAccessibilityGateway(
                     val boundInspector = inspectBoundPageReadiness
                     if (commandId != null && boundInspector != null) {
                         boundInspector(root, currentActivity, mode, commandId)
+                    } else if (observeChildPage && commandId == null) {
+                        inspectObservedChildPageReadiness?.invoke(root, currentActivity, mode)
+                            ?: inspectPageReadiness(root, currentActivity, mode)
                     } else inspectPageReadiness(root, currentActivity, mode)
                 }.getOrElse {
                         TargetAppPageReadiness(

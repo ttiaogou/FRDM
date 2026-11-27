@@ -40,6 +40,35 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
+    fun privateFollowUpRouteProofDoesNotAuthorizeUnboundDispatch() {
+        val gateway = projectFile("app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccessibilityGateway.kt").readText()
+        val recovery = gateway.substringAfter("fun inspectRecoveryReadiness()").substringBefore("private fun inspectAutonomousDispatchReadiness()")
+        val dispatch = gateway.substringAfter("private fun inspectAutonomousDispatchReadiness()").substringBefore("private fun evaluateCurrentReadiness()")
+        assertTrue(recovery.contains("observeChildPage = true"))
+        assertFalse(dispatch.contains("observeChildPage = true"))
+        val adapter = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt").readText()
+        val proof = adapter.substringAfter("private fun inspectPrivateFollowUpOwnedPage(").substringBefore("override fun beginPrivateFollowUp(")
+        assertTrue(proof.contains("interceptionSettingsPage(root, child)"))
+        assertTrue(proof.contains("MomoAlbumArrivalInspector.isConfirmed"))
+        assertTrue(proof.contains("accessibilityGateway.currentGestureWindow() == live"))
+        assertTrue(proof.contains("observedOwnedChildPage = true"))
+        val dispatchReadiness = adapter.substringAfter("fun inspectGesturePageReadiness(").substringBefore("private val activeAlbumSelectorPermit")
+        assertFalse(dispatchReadiness.contains("observedOwnedChildPage"))
+    }
+
+    @Test
+    fun privateFollowUpSurvivesTemporaryWriteVetoWithoutRemovingTheVeto() {
+        val runtime = projectFile("business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt").readText()
+        val ownership = runtime.substringAfter("private fun ownsPrivateFollowUp(").substringBefore("fun isPrivateFollowUpWriteBlocked()")
+        assertTrue(ownership.contains("taskCoordinator?.isCurrent(it)"))
+        assertFalse(ownership.contains("canPerformPrivateMessagesUiAction()"))
+        val begin = runtime.substringAfter("private fun startPrivateFollowUp(").substringBefore("private fun privateFollowUpReturnedSnapshot(")
+        assertTrue(begin.contains("!ownsPrivateFollowUp(child) || !canPerformPrivateMessagesUiAction()"))
+        val root = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        assertTrue(root.contains("aiReplyObservationRuntime.isPrivateFollowUpWriteBlocked()"))
+    }
+
+    @Test
     fun avatarScreenshotDiagnosticsCannotWriteIdentityBlockCache() {
         val imageStore = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoChatSampleImageStore.kt").readText()
         assertTrue("Avatar difference evidence must remain observable", imageStore.contains("visualConflictCandidate"))

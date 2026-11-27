@@ -643,7 +643,7 @@ internal class MomoSocialAdapter(
                             if (chat.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE) {
                                 originalPrivateFollowUpChat(privateFollowUp) &&
                                     chat.chatTitleText == privateFollowUp.target.expectedChatTitle
-                            } else inspectPrivateFollowUpOwnedPage()
+                            } else inspectPrivateFollowUpOwnedPage(root, window)
                         } else chatConfirmed || cardConfirmed || (profileTransaction && isSayHiProfileSurfacePresent())
                     }
                     else -> false
@@ -5893,16 +5893,60 @@ internal class MomoSocialAdapter(
             live.activityClass == original.activityClass && interceptionReturnedToChat(child)
     }
 
-    /** Parent ownership persists during its own media transaction, including transient child windows.
-     * This is routing evidence only: each write still requires a fresh step-specific target. */
-    internal fun inspectPrivateFollowUpOwnedPage(): Boolean {
+    /** Positive evidence for this parent's child page, not permission for a generic gesture.
+     * Reuse the action-specific inspectors; a target-package window alone is not a route. */
+    private fun inspectPrivateFollowUpOwnedPage(root: AccessibilityNodeInfo, live: WindowRef): Boolean {
         val child = privateFollowUp ?: return false
-        if (!followUpCurrent(child)) return false
-        val live = accessibilityGateway.currentGestureWindow() ?: return false
-        return live.packageName == targetPackage && live.windowId >= 0 &&
-            live.generation >= child.target.nodeTarget.window.generation &&
-            (child.stage !in setOf(PrivateFollowUpStage.OPEN_ALBUM, PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS) ||
-                originalPrivateFollowUpChat(child))
+        if (!followUpCurrent(child) || live.packageName != targetPackage || live.windowId < 0 ||
+            live.generation < child.target.nodeTarget.window.generation ||
+            root.windowId != live.windowId || root.packageName?.toString() != targetPackage ||
+            accessibilityGateway.currentGestureWindow() != live) return false
+        val verified = if (child.interception) {
+            child.stage != PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS &&
+                (interceptionSettingsPage(root, child) ||
+                    (child.interceptionSettingsObserved &&
+                        interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息") != null &&
+                        interceptionNodeBounds(root, "btn_switch", "android.widget.CompoundButton", checkable = true) != null))
+        } else when (child.stage) {
+            PrivateFollowUpStage.WAIT_ALBUM, PrivateFollowUpStage.WAIT_DIRECTORY,
+            PrivateFollowUpStage.WAIT_FREEDOM, PrivateFollowUpStage.WAIT_SELECTION,
+            PrivateFollowUpStage.WAIT_SEND_RESULT -> {
+                val album = child.albumWindow
+                val albumPage = MomoAlbumArrivalInspector.isConfirmed(root, targetPackage) ||
+                    MomoAlbumSelectorInspector.inspect(root, targetPackage) != null
+                albumPage ||
+                    (child.stage == PrivateFollowUpStage.WAIT_DIRECTORY && album != null &&
+                        freshMediaSnapshot(live)?.let {
+                            isAlbumDirectoryArrival(album, it) &&
+                                MomoAlbumDirectoryInspector.resolveFreedomName(it, targetPackage) != null
+                        } == true) ||
+                    (child.stage == PrivateFollowUpStage.WAIT_SEND_RESULT &&
+                        child.imageRetryDialogRequested && freshMediaSnapshot(live)?.let {
+                            MomoImageSendEvidenceInspector.retryConfirmation(it) != null
+                        } == true)
+            }
+            PrivateFollowUpStage.IMAGE_RETRY_OPEN, PrivateFollowUpStage.IMAGE_RETRY_CONFIRM ->
+                child.imageRetryDialogRequested && freshMediaSnapshot(live)?.let {
+                    MomoImageSendEvidenceInspector.retryConfirmation(it) != null
+                } == true
+            else -> false
+        }
+        return verified && followUpCurrent(child) && accessibilityGateway.currentGestureWindow() == live
+    }
+
+    /** Only the read-only readiness caller may use child-page evidence. Dispatch still requires
+     * the existing exact command permit and independent target/overlay/lease checks. */
+    internal fun inspectObservedPrivateFollowUpReadiness(
+        root: AccessibilityNodeInfo, activity: String, mode: RunMode
+    ): TargetAppPageReadiness? {
+        if (mode != RunMode.AI_REPLY) return null
+        val live = accessibilityGateway.currentGestureWindow() ?: return null
+        if (live.activityClass != activity || !inspectPrivateFollowUpOwnedPage(root, live)) return null
+        val readiness = pageInspectionComponents.gestureReadinessInspector.inspect(
+            root, activity, mode, observedOwnedChildPage = true
+        )
+        return if (accessibilityGateway.currentGestureWindow() == live) readiness
+            else TargetAppPageReadiness(false, "Private follow-up observation window changed", retryable = true)
     }
 
     override fun beginPrivateFollowUp(
@@ -6121,6 +6165,13 @@ internal class MomoSocialAdapter(
             else interceptionChecked(root).takeIf { accessibilityGateway.currentGestureWindow() == window }
         }
 
+
+    /** Settings-page identity does not depend on the switch/status text being readable yet. */
+    private fun interceptionSettingsPage(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean {
+        val title = child.target.expectedChatTitle ?: return false
+        return interceptionNodeBounds(root, "tv_user_name", "android.widget.TextView", text = title) != null &&
+            interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true) != null
+    }
 
     /** Status is scoped to the unique interception row, not any "已开启" on the page. */
     private fun interceptionSettingsChecked(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean? = runCatching {
