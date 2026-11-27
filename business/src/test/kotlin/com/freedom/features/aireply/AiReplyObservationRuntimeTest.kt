@@ -3782,7 +3782,12 @@ class AiReplyObservationRuntimeTest {
         assertM04dPrivateFollowUp(imageConfirmed = false)
     }
 
-    private fun assertM04dPrivateFollowUp(imageConfirmed: Boolean) {
+    @Test
+    fun l07bInterceptionContinuesAfterQuietWaitAndUnconfirmedTerminal() {
+        assertM04dPrivateFollowUp(imageConfirmed = true, retryInterception = true)
+    }
+
+    private fun assertM04dPrivateFollowUp(imageConfirmed: Boolean, retryInterception: Boolean = false) {
         val scheduler = FakeScheduler()
         val port = FakeChatPort().apply {
             verifiedMessageWorkAreaNavigationSupported = true
@@ -3807,6 +3812,9 @@ class AiReplyObservationRuntimeTest {
         val ledgerRepo = com.freedom.features.aireply.domain.contact.InMemoryContactMessageLedgerRepository()
         val actions = mutableListOf<Boolean>()
         var result: Boolean? = null
+        var observations = 0
+        var transientObservationFailure = false
+        val transactionIds = mutableListOf<String>()
         val media = object : com.freedom.features.aireply.ports.PrivateChatFollowUpPort {
             private var state = com.freedom.features.aireply.ports.PrivateChatFollowUpProgress.IDLE
             private var verified = false
@@ -3819,6 +3827,7 @@ class AiReplyObservationRuntimeTest {
                 assertEquals(tasks.currentLease(), target.taskLease)
                 assertTrue(ownsTransaction())
                 actions += interception
+                transactionIds += transactionId
                 assertTrue(beforeStep(if (interception)
                     com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_SWITCH
                     else com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SEND))
@@ -3829,6 +3838,11 @@ class AiReplyObservationRuntimeTest {
             override fun progress() = state
             override fun privateFollowUpSucceeded() = verified
             override fun observe() {
+                observations++
+                if (transientObservationFailure) {
+                    transientObservationFailure = false
+                    error("temporary observation failure")
+                }
                 result?.let {
                     verified = it
                     result = null
@@ -3929,6 +3943,24 @@ class AiReplyObservationRuntimeTest {
             assertEquals(0, port.navigateBackCalls)
             assertEquals(com.freedom.features.aireply.domain.contact.ContactImageSendStatus.SENT_CONFIRMED,
                 ledgerRepo.loadAll().single().imageStatus)
+            if (retryInterception) {
+                val beforeWait = observations
+                transientObservationFailure = true
+                // No accessibility event is necessary for the retry after a transient read failure.
+                runUntilShortestDelay(scheduler, 30) { observations >= beforeWait + 2 }
+                assertTrue(logs.any { it.contains("PRIVATE_FOLLOW_UP OBSERVATION_RETRY") })
+                assertEquals(listOf(false, true), actions)
+                val lease = tasks.currentLease()
+                val transactionId = transactionIds.last()
+                result = false
+                runUntilShortestDelay(scheduler, 40) { actions.size == 3 }
+                assertEquals(listOf(false, true, true), actions)
+                assertEquals(transactionId, transactionIds.last())
+                assertEquals(lease, tasks.currentLease())
+                assertEquals(1, draftCalls)
+                assertEquals(0, port.navigateBackCalls)
+                assertTrue(logs.any { it.contains("INTERCEPTION_RECONCILE_RESTART") })
+            }
             result = true
             runUntilShortestDelay(scheduler, 30) { requireNotNull(saved).unfinishedSessions.isEmpty() }
             assertEquals(com.freedom.features.aireply.domain.contact.ContactInterceptionStatus.ENABLED,

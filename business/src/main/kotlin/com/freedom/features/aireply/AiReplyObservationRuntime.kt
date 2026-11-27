@@ -187,7 +187,10 @@ class AiReplyObservationRuntime(
         val sendConfirmationId: String?,
         val target: ChatDraftInputTarget,
         @Volatile var checkpoint: ContactFollowUpCheckpoint
-    )
+    ) {
+        var observationCount = 0L
+        var unconfirmedReported = false
+    }
     @Volatile private var activePrivateFollowUp: PrivateFollowUp? = null
     fun isPrivateFollowUpActive(): Boolean = activePrivateFollowUp != null
 
@@ -312,6 +315,7 @@ class AiReplyObservationRuntime(
         get() = receivedGreetingsTaskFlow.awaitingNormalInboxAfterReturn
 
     private var pageInspectionTask: ScheduledTask? = null
+    private var fullInspectionCallbackToken = 0L
     /** Purpose carried with the next scheduled full observation. */
     private var pendingPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
     private var regionRefreshTask: ScheduledTask? = null
@@ -585,6 +589,7 @@ class AiReplyObservationRuntime(
                 "actionId=${transition.actionId}；targetActivity=${transition.targetActivityClass}；" +
                 "targetPageGeneration=${transition.targetPageGeneration}"
         )
+        if (isPrivateFollowUpActive()) requestPageRouteObservation()
     }
 
     /**
@@ -600,7 +605,8 @@ class AiReplyObservationRuntime(
                 "targetActivity=${targetActivityClass.ifBlank { "UNKNOWN" }}；" +
                 "等待目标页面指纹，不直接判定UNKNOWN或恢复"
         )
-        scheduleFullInspectionAfter(0L)
+        if (isPrivateFollowUpActive()) requestPageRouteObservation()
+        else scheduleFullInspectionAfter(0L)
     }
     /** Prevents duplicate mismatch handling; the per-attempt guard belongs to the traversal executor. */
     private val headerMismatchGuard: Any
@@ -1286,6 +1292,7 @@ class AiReplyObservationRuntime(
         // An event/watcher can satisfy an ordinary pending full observation before
         // its explicit timer fires. Retire that timer rather than losing its handle.
         // Protected send/scroll reads are still shielded at their existing entry gates.
+        ++fullInspectionCallbackToken
         pageInspectionTask?.cancel()
         pageInspectionTask = null
         pageObservationCoordinator.cancelFullInspection()
@@ -5298,7 +5305,8 @@ class AiReplyObservationRuntime(
     /** A temporary recovery veto is not a lost transaction. The composition root also
      * applies this veto to the final platform write authority, including delayed commands. */
     fun isPrivateFollowUpWriteBlocked(): Boolean =
-        activePrivateFollowUp != null && (recoveryContext.pending || receivedGreetingsOwnershipRecheckPending)
+        activePrivateFollowUp != null && (recoveryContext.pending || receivedGreetingsOwnershipRecheckPending ||
+            userInteractionActive || isPrivateFollowUpTouchActive())
 
     private fun privateFollowUpTarget(snapshot: ChatPageSnapshot): ChatDraftInputTarget? {
         val fresh = inspectFreshPageSnapshot() ?: return null
@@ -5320,7 +5328,9 @@ class AiReplyObservationRuntime(
 
     /** Only interception can reconcile a persisted prior action from a freshly verified chat.
      * Image admission retains the M04-D no-replay contract. */
-    private fun startPrivateFollowUp(contactKey: String, sendId: String?, snapshot: ChatPageSnapshot) {
+    private fun startPrivateFollowUp(
+        contactKey: String, sendId: String?, snapshot: ChatPageSnapshot, deferFirstObservation: Boolean = false
+    ) {
         val checkpoint = contactMessageLedger.followUpCheckpoint(contactKey) ?: return
         val interception = checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION
         val port = privateChatFollowUpPort
@@ -5347,6 +5357,7 @@ class AiReplyObservationRuntime(
             beforeStep = { step ->
                 val expected = child.checkpoint
                 if (!ownsPrivateFollowUp(child) || !canPerformPrivateMessagesUiAction() ||
+                    userInteractionActive || isPrivateFollowUpTouchActive() ||
                     !contactMessageLedger.updateFollowUpCheckpoint(contactKey, expected, step, true)) false
                 else {
                     child.checkpoint = requireNotNull(contactMessageLedger.followUpCheckpoint(contactKey))
@@ -5362,8 +5373,10 @@ class AiReplyObservationRuntime(
             return
         }
         onLog("PRIVATE_FOLLOW_UP BEGIN;action=${checkpoint.step.action};parentLeaseInherited=true")
-        // The same shared observer that drives the validated test advances the normal child.
-        runPrivateFollowUpObservation()
+        // The same shared observer advances the normal child. A recovered terminal must
+        // yield to the scheduler, not recursively restart on the current call stack.
+        if (deferFirstObservation) scheduleFullInspectionAfter(500L)
+        else runPrivateFollowUpObservation()
     }
 
     /** Rebind only the exact original chat after adapter result evidence; never restore old nodes. */
@@ -5400,19 +5413,48 @@ class AiReplyObservationRuntime(
             return
         }
         if (userInteractionActive || isPrivateFollowUpTouchActive()) {
-            port.abort("PRIVATE_FOLLOW_UP_USER_INTERACTION")
+            // Only the physical-user/route-exit path retires this transaction. A transient
+            // touch gate cannot strand it in a terminal state or grant any write.
+            scheduleFullInspectionAfter(500L)
             return
         }
-        if (port.progress() == PrivateChatFollowUpProgress.ACTIVE) port.observe()
+        val count = ++child.observationCount
+        if (count == 1L || count % 10L == 0L) {
+            onLog("PRIVATE_FOLLOW_UP OBSERVATION;action=${child.checkpoint.step.action};" +
+                "count=$count;progress=${port.progress()}")
+        }
+        if (port.progress() == PrivateChatFollowUpProgress.ACTIVE) {
+            val observed = runCatching { port.observe() }
+            if (observed.isFailure) {
+                onLog("PRIVATE_FOLLOW_UP OBSERVATION_RETRY;type=${observed.exceptionOrNull()?.javaClass?.simpleName};checkpointRetained=true")
+                if (activePrivateFollowUp === child) scheduleFullInspectionAfter(500L)
+                return
+            }
+        }
+        if (activePrivateFollowUp !== child) return
         if (port.progress() == PrivateChatFollowUpProgress.ACTIVE) {
             scheduleFullInspectionAfter(500L)
             return
         }
+        val interception = child.checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION
         if (!port.privateFollowUpSucceeded()) {
-            onLog("PRIVATE_FOLLOW_UP RESULT_UNCONFIRMED;checkpointRetained=true;noReturn=true")
+            if (!child.unconfirmedReported) {
+                child.unconfirmedReported = true
+                onLog("PRIVATE_FOLLOW_UP RESULT_UNCONFIRMED;checkpointRetained=true;noReturn=true")
+            }
+            // A terminal image is never replayed. Interception alone is idempotently
+            // reconciled from a newly verified original chat and the unchanged ledger.
+            val fresh = if (interception) privateFollowUpReturnedSnapshot(child) else null
+            if (fresh != null && contactMessageLedger.followUpCheckpoint(child.contactKey) == child.checkpoint) {
+                onLog("PRIVATE_FOLLOW_UP INTERCEPTION_RECONCILE_RESTART;noNewDraft=true")
+                port.reset("PRIVATE_FOLLOW_UP_INTERCEPTION_RECONCILE")
+                activePrivateFollowUp = null
+                startPrivateFollowUp(child.contactKey, child.sendConfirmationId, fresh, deferFirstObservation = true)
+            } else {
+                scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(4))
+            }
             return
         }
-        val interception = child.checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION
         val fresh = privateFollowUpReturnedSnapshot(child) ?: run {
             onLog("PRIVATE_FOLLOW_UP RETURN_NOT_CONFIRMED;checkpointRetained=true")
             scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
@@ -9229,9 +9271,14 @@ class AiReplyObservationRuntime(
         cancelMessageReadRetry()
         pageObservationCoordinator.cancelFullInspection()
         pageObservationCoordinator.cancelRegionRefresh()
+        val token = ++fullInspectionCallbackToken
         pageInspectionTask?.cancel()
+        pageInspectionTask = null
         pendingPageReadPurpose = purpose
-        pageInspectionTask = sharedPageObservationCoordinator.scheduleReadOnlyObservation(delayMs) {
+        pageInspectionTask = sharedPageObservationCoordinator.scheduleReadOnlyObservation(delayMs) observation@{
+            // A cancelled callback must not retire a replacement observation or advance a
+            // new child. Reset/route recovery can also clear the pending slot without reposting.
+            if (token != fullInspectionCallbackToken || pageInspectionTask == null) return@observation
             runFullInspection()
         }
     }

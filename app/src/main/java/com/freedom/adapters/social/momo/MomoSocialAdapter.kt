@@ -5871,6 +5871,7 @@ internal class MomoSocialAdapter(
         var interceptionRetryAttempt = 0
         @Volatile var interceptionRetryNotBefore = 0L
         var lastWaitReason: String? = null
+        var waitObservationCount = 0L
     }
 
     @Volatile private var privateFollowUp: PrivateFollowUpTransaction? = null
@@ -5978,7 +5979,11 @@ internal class MomoSocialAdapter(
     private fun followUpWait(child: PrivateFollowUpTransaction, reason: String) {
         if (child.lastWaitReason != reason) {
             child.lastWaitReason = reason
-            onLog("${child.logPrefix} WAIT stage=${child.stage};reason=$reason")
+            child.waitObservationCount = 0L
+        }
+        val count = ++child.waitObservationCount
+        if (count == 1L || count % 10L == 0L) {
+            onLog("${child.logPrefix} WAIT stage=${child.stage};reason=$reason;observations=$count")
         }
     }
 
@@ -6207,17 +6212,18 @@ internal class MomoSocialAdapter(
                 accessibilityGateway.currentGestureWindow() != window
             ) return@withActiveTargetRoot MomoInterceptionRecoveryPolicy.Page.UNKNOWN
             val page = if (interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息") != null) {
-                if (!child.interceptionSettingsObserved) MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+                if (!child.interceptionSettingsObserved) MomoInterceptionRecoveryPolicy.Page.POPUP_SOURCE_UNCONFIRMED
                 else when (interceptionChecked(root)) {
                     true -> MomoInterceptionRecoveryPolicy.Page.POPUP_ON
                     false -> MomoInterceptionRecoveryPolicy.Page.POPUP_OFF
-                    null -> MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+                    null -> MomoInterceptionRecoveryPolicy.Page.POPUP_STATE_UNKNOWN
                 }
             } else if (interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true) != null) {
-                when (interceptionSettingsChecked(root, child)) {
+                if (!interceptionSettingsPage(root, child)) MomoInterceptionRecoveryPolicy.Page.SETTINGS_IDENTITY_UNCONFIRMED
+                else when (interceptionSettingsChecked(root, child)) {
                     true -> MomoInterceptionRecoveryPolicy.Page.SETTINGS_ON
                     false -> MomoInterceptionRecoveryPolicy.Page.SETTINGS_OFF
-                    null -> MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+                    null -> MomoInterceptionRecoveryPolicy.Page.SETTINGS_STATE_UNKNOWN
                 }
             } else null
             if (accessibilityGateway.currentGestureWindow() == window) page
@@ -6240,7 +6246,13 @@ internal class MomoSocialAdapter(
         }
         val action = decision.action
         if (action == MomoInterceptionRecoveryPolicy.Action.WAIT) {
-            followUpWait(child, "UNKNOWN_INTERCEPTION_PAGE_OR_STATE")
+            followUpWait(child, when (page) {
+                MomoInterceptionRecoveryPolicy.Page.SETTINGS_IDENTITY_UNCONFIRMED -> "INTERCEPTION_SETTINGS_IDENTITY_UNCONFIRMED"
+                MomoInterceptionRecoveryPolicy.Page.SETTINGS_STATE_UNKNOWN -> "INTERCEPTION_SETTINGS_STATE_UNKNOWN"
+                MomoInterceptionRecoveryPolicy.Page.POPUP_SOURCE_UNCONFIRMED -> "INTERCEPTION_POPUP_SOURCE_UNCONFIRMED"
+                MomoInterceptionRecoveryPolicy.Page.POPUP_STATE_UNKNOWN -> "INTERCEPTION_POPUP_STATE_UNKNOWN"
+                else -> "UNKNOWN_INTERCEPTION_PAGE_OR_STATE"
+            })
             return false
         }
         if (action != child.interceptionLastAction) {
@@ -6620,7 +6632,7 @@ internal class MomoSocialAdapter(
                 if (interceptionReturnedToChat(child)) {
                     if (child.switchVerifiedOn) {
                         followUpTerminal(child, "COMPLETED", "SWITCH_ON_AND_CHAT_RETURN_CONFIRMED")
-                    } else followUpTerminal(child, "UNKNOWN", "SWITCH_ON_NOT_CONFIRMED")
+                    } else followUpWait(child, "SWITCH_ON_NOT_CONFIRMED")
                     return
                 }
                 submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_RETURN, "interception-back") { _, window ->
@@ -6631,7 +6643,7 @@ internal class MomoSocialAdapter(
                 if (interceptionReturnedToChat(child)) {
                     if (child.switchVerifiedOn) {
                         followUpTerminal(child, "COMPLETED", "SWITCH_ON_AND_CHAT_RETURN_CONFIRMED")
-                    } else followUpTerminal(child, "UNKNOWN", "SWITCH_ON_NOT_CONFIRMED")
+                    } else followUpWait(child, "SWITCH_ON_NOT_CONFIRMED")
                 } else followUpWait(child, "ORIGINAL_CHAT_RETURN_PENDING")
             }
             PrivateFollowUpStage.TERMINAL -> Unit

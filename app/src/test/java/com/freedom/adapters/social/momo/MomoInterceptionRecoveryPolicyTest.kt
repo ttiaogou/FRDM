@@ -40,6 +40,16 @@ class MomoInterceptionRecoveryPolicyTest {
         assertEquals(Action.COMPLETE, policy.reconcile(Page.ORIGINAL_CHAT, settings.verifiedOn).action)
     }
 
+    @Test fun partialSettingsAndPopupEvidenceNeverAuthorizeMutation() {
+        for (page in listOf(Page.SETTINGS_IDENTITY_UNCONFIRMED, Page.SETTINGS_STATE_UNKNOWN,
+            Page.POPUP_SOURCE_UNCONFIRMED, Page.POPUP_STATE_UNKNOWN)) {
+            assertEquals(Action.WAIT, policy.reconcile(page, false).action)
+            assertFalse(policy.reconcile(page, false).verifiedOn)
+            assertEquals(Action.WAIT, policy.reconcile(page, true).action)
+            assertTrue(policy.reconcile(page, true).verifiedOn)
+        }
+    }
+
     @Test fun unknownHoldsProofWithoutAuthorizingAnyGesture() {
         val waiting = policy.reconcile(Page.UNKNOWN, true)
         assertEquals(Action.WAIT, waiting.action)

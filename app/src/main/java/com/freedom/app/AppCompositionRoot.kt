@@ -415,7 +415,10 @@ internal class AccessibilityServiceDependencies internal constructor(
                     // Explicitly wake the existing business observer after route reconciliation.
                     // This also covers a quiet chat with no further accessibility events.
                     if (aiReplyObservationRuntime.isPrivateFollowUpActive() &&
-                        (recognized || ownedNestedPage)) {
+                        generation == runSessionCoordinator.currentRunGeneration() &&
+                        session?.taskId == "AI_REPLY_PRIVATE_MESSAGES" &&
+                        runSessionCoordinator.isPageObservationAllowed()) {
+                        // Unknown is also an observation signal, never a write grant.
                         if (ownedNestedPage) accessibilityGateway.inspectRecoveryReadiness()
                         aiReplyObservationRuntime.requestPageRouteObservation()
                     }
