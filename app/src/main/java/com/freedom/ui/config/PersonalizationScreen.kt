@@ -1,8 +1,6 @@
 package com.freedom.ui.config
 
 import android.app.Activity
-import android.app.AlertDialog
-import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.text.InputFilter
@@ -15,9 +13,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
-import android.widget.Switch
 import android.widget.TextView
-import com.freedom.application.TaskLaunchParameters
 import com.freedom.features.aireply.ai.AiReplyPersonalization
 import com.freedom.features.aireply.ai.EmotionExpression
 import com.freedom.features.aireply.ai.HumorLevel
@@ -27,27 +23,19 @@ import com.freedom.features.aireply.ai.PersonalityStyle
 import com.freedom.features.aireply.ai.ReplyLength
 import com.freedom.ui.theme.FreedomUi
 
-/** Provider-neutral chat style settings; task-level reply controls remain unchanged. */
+/** Provider-neutral chat style settings. Task reply controls are owned by the launcher. */
 internal class PersonalizationScreen(
     private val activity: Activity,
     private val dp: (Int) -> Int,
     private val onBack: () -> Unit,
-    private val taskParameters: () -> TaskLaunchParameters,
-    private val onTaskParametersChanged: (TaskLaunchParameters) -> Unit,
-    private val onImageResourceImportRequested: () -> Unit,
-    private val onImageResourceClearRequested: () -> Unit,
     private val loadAiReplyPersonalization: () -> AiReplyPersonalization,
     private val onAiReplyPersonalizationChanged: (AiReplyPersonalization) -> Unit
 ) {
-    private var parameters = taskParameters()
     private var personalization = loadAiReplyPersonalization()
-    private var messageInterceptionThresholdValue: TextView? = null
-    private var imageSendThresholdValue: TextView? = null
     private var customInstructionsInput: EditText? = null
     private var personalizationStatus: TextView? = null
 
     fun create(): View {
-        parameters = taskParameters()
         personalization = loadAiReplyPersonalization()
         val root = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -172,12 +160,6 @@ internal class PersonalizationScreen(
             topMargin = dp(6)
         })
 
-        content.addView(sectionHeader("回复行为设置"), LinearLayout.LayoutParams(-1, -2).apply {
-            topMargin = dp(18)
-        })
-        content.addView(messageInterceptionPreferenceRow(), LinearLayout.LayoutParams(-1, -2))
-        content.addView(imagePreReplyPreferenceRow(), LinearLayout.LayoutParams(-1, -2))
-
         content.addView(sectionHeader("本地记录说明"), LinearLayout.LayoutParams(-1, -2).apply {
             topMargin = dp(18)
         })
@@ -294,167 +276,6 @@ internal class PersonalizationScreen(
             }
     }
 
-    private fun messageInterceptionPreferenceRow(): View {
-        val wrapper = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-        val row = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(68)
-            setPadding(dp(2), dp(8), dp(4), dp(8))
-            background = clickableBackground(8)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { showReplyLimitEditor() }
-        }
-        row.addView(LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(TextView(activity).apply {
-                text = "消息拦截"
-                textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(FreedomUi.TEXT)
-            })
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        messageInterceptionThresholdValue = TextView(activity).apply {
-            text = parameters.messageInterceptionThreshold.toString()
-            textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setTextColor(FreedomUi.TEXT)
-            background = FreedomUi.roundedSurface(dp(9), Color.WHITE, FreedomUi.DIVIDER)
-            contentDescription = "消息拦截 ${parameters.messageInterceptionThreshold}，点击编辑"
-        }
-        row.addView(messageInterceptionThresholdValue, LinearLayout.LayoutParams(dp(64), dp(40)))
-        wrapper.addView(row)
-        wrapper.addView(View(activity).apply {
-            setBackgroundColor(FreedomUi.DIVIDER)
-        }, LinearLayout.LayoutParams(-1, dp(1)))
-        return wrapper
-    }
-
-    private fun showReplyLimitEditor() {
-        val input = FreedomUi.editorInput(activity, dp, parameters.messageInterceptionThreshold.toString(), InputType.TYPE_CLASS_NUMBER)
-        val content = FreedomUi.editorContent(activity, dp)
-        FreedomUi.addEditorInput(content, input, dp)
-        FreedomUi.addEditorHint(content, "回复消息满足后执行/0不开启；留空按 0 保存", dp)
-        val dialog = FreedomUi.createEditorDialog(activity, "消息拦截", content)
-        FreedomUi.showEditorDialog(dialog, activity, dp, input) {
-            val parsed = FreedomUi.parseEditorInteger(input.text.toString())
-            if (parsed == null || parsed < 0) {
-                input.error = "请输入大于或等于 0 的数字"
-                return@showEditorDialog
-            }
-            if (parsed > 0 && parameters.imageSendThreshold > parsed) {
-                input.error = "图片发送阈值大于消息拦截阈值；拦截会先阻断后续回复"
-                return@showEditorDialog
-            }
-            parameters = parameters.copy(messageInterceptionThreshold = parsed)
-            onTaskParametersChanged(parameters)
-            messageInterceptionThresholdValue?.apply {
-                text = parsed.toString()
-                contentDescription = "消息拦截 $parsed，点击编辑"
-            }
-            dialog.dismiss()
-        }
-    }
-
-    private fun imagePreReplyPreferenceRow(): View {
-        val wrapper = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-        val row = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(68)
-            setPadding(dp(2), dp(8), dp(4), dp(8))
-            background = clickableBackground(8)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { showImagePreReplyEditor() }
-        }
-        row.addView(LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(TextView(activity).apply {
-                text = "图片预回复"
-                textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(FreedomUi.TEXT)
-            })
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        imageSendThresholdValue = TextView(activity).apply {
-            text = parameters.imageSendThreshold.toString()
-            textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setTextColor(FreedomUi.TEXT)
-            background = FreedomUi.roundedSurface(dp(9), Color.WHITE, FreedomUi.DIVIDER)
-            contentDescription = "图片预回复 ${parameters.imageSendThreshold}，点击编辑"
-        }
-        row.addView(imageSendThresholdValue, LinearLayout.LayoutParams(dp(64), dp(40)))
-        wrapper.addView(row)
-        wrapper.addView(View(activity).apply {
-            setBackgroundColor(FreedomUi.DIVIDER)
-        }, LinearLayout.LayoutParams(-1, dp(1)))
-        return wrapper
-    }
-
-    private fun showImagePreReplyEditor() {
-        val input = FreedomUi.editorInput(activity, dp, parameters.imageSendThreshold.toString(), InputType.TYPE_CLASS_NUMBER)
-        val content = FreedomUi.editorContent(activity, dp)
-        FreedomUi.addEditorInput(content, input, dp)
-        FreedomUi.addEditorHint(content, "回复消息满足后发送图片 / 0 不开启；留空按 0 保存", dp)
-        val dialog = FreedomUi.createEditorDialog(activity, "图片预回复", content)
-        val save: () -> Unit = save@{
-            val parsed = FreedomUi.parseEditorInteger(input.text.toString())
-            if (parsed == null || parsed < 0) {
-                input.error = "请输入大于或等于 0 的数字"
-                return@save
-            }
-            val latest = taskParameters()
-            val validationError = latest.imageSendThresholdValidationError(parsed)
-            if (validationError != null) {
-                input.error = validationError
-                return@save
-            }
-            parameters = latest.copy(imageSendThreshold = parsed)
-            onTaskParametersChanged(parameters)
-            imageSendThresholdValue?.apply {
-                text = parsed.toString()
-                contentDescription = "图片预回复 $parsed，点击编辑"
-            }
-            dialog.dismiss()
-        }
-        content.addView(TextView(activity).apply {
-            text = "发送图片"
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(FreedomUi.TEXT)
-            setPadding(dp(2), dp(18), 0, dp(6))
-        })
-        content.addView(Button(activity).apply {
-            text = "导入图片（已导入 ${parameters.imageResourceUris.size} 张）"
-            setOnClickListener {
-                dialog.dismiss()
-                onImageResourceImportRequested()
-            }
-        })
-        if (parameters.imageResourceUris.isNotEmpty()) {
-            content.addView(Button(activity).apply {
-                text = "清空图片池"
-                setOnClickListener {
-                    AlertDialog.Builder(activity)
-                        .setTitle("清空图片池")
-                        .setMessage("将移除 Freedom 专用相册中的已导入副本，不删除原始图片。确定继续？")
-                        .setNegativeButton("取消", null)
-                        .setPositiveButton("清空") { _, _ ->
-                            dialog.dismiss()
-                            onImageResourceClearRequested()
-                        }
-                        .show()
-                }
-            })
-        }
-        FreedomUi.showEditorDialog(dialog, activity, dp, input, save)
-    }
-
     private fun historyRetentionPolicyRow(): View {
         val wrapper = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         wrapper.addView(LinearLayout(activity).apply {
@@ -480,15 +301,4 @@ internal class PersonalizationScreen(
         return wrapper
     }
 
-    private fun clickableBackground(radius: Int) = android.graphics.drawable.RippleDrawable(
-        ColorStateList.valueOf(0x26718E22),
-        android.graphics.drawable.GradientDrawable().apply {
-            setColor(Color.TRANSPARENT)
-            cornerRadius = dp(radius).toFloat()
-        },
-        android.graphics.drawable.GradientDrawable().apply {
-            setColor(Color.WHITE)
-            cornerRadius = dp(radius).toFloat()
-        }
-    )
 }

@@ -382,6 +382,8 @@ class MainActivity : Activity() {
                 onTaskParametersChanged = taskLaunchParametersStore::write,
                 onTargetClick = ::showTargetPicker,
                 onPersonalization = ::showPersonalizationPage,
+                onImageResourceImportRequested = ::launchImageResourceImport,
+                onImageResourceClearRequested = ::clearImportedImageResources,
                 onCollectionExport = ::showCollectionExportActions,
                 onOpenDrawer = { configPanel.show() },
                 onRunClick = ::toggleMonitoring
@@ -1321,10 +1323,6 @@ class MainActivity : Activity() {
                 activity = this,
                 dp = ::dp,
                 onBack = ::showConfigurationPage,
-                taskParameters = { taskLaunchParametersStore.read() },
-                onTaskParametersChanged = taskLaunchParametersStore::write,
-                onImageResourceImportRequested = ::launchImageResourceImport,
-                onImageResourceClearRequested = ::clearImportedImageResources,
                 loadAiReplyPersonalization = aiReplyPersonalizationRepository::load,
                 onAiReplyPersonalizationChanged = aiReplyPersonalizationRepository::save
             ).create()
@@ -1373,7 +1371,7 @@ class MainActivity : Activity() {
                 )
                 taskLaunchParametersStore.write(updated)
                 imagePoolOperationRunning = false
-                if (currentScreen == Screen.PERSONALIZATION) showPersonalizationPage()
+                configurationHome?.refreshTaskParameters()
                 Toast.makeText(this,
                     if (failed.isEmpty()) "图片池已清空" else "部分图片无法移除，保留 ${failed.size} 张",
                     Toast.LENGTH_LONG).show()
@@ -2302,7 +2300,7 @@ class MainActivity : Activity() {
                                 val updated = current.withImportedImageResourceUris(result.publishedUris)
                                 taskLaunchParametersStore.write(updated)
                                 imagePoolOperationRunning = false
-                                if (currentScreen == Screen.PERSONALIZATION) showPersonalizationPage()
+                                configurationHome?.refreshTaskParameters()
                                 val added = updated.imageResourceUris.size - current.imageResourceUris.size
                                 val message = if (result.unsupportedSystem) {
                                     "Android 9 及以下未授权公共媒体写入；未导入图片"

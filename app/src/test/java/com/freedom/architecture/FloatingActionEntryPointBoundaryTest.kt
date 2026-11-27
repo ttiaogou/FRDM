@@ -182,7 +182,7 @@ class FloatingActionEntryPointBoundaryTest {
     }
 
     @Test
-    fun imageAndInterceptionThresholdsLiveInPersonalizationAndPersistAsPreferences() {
+    fun imageAndInterceptionThresholdsLiveInLauncherAndPersistAsPreferences() {
         val home = source("app/src/main/java/com/freedom/ui/config/ConfigurationHome.kt")
         val homeOnly = home
         val personalization = source("app/src/main/java/com/freedom/ui/config/PersonalizationScreen.kt")
@@ -190,16 +190,36 @@ class FloatingActionEntryPointBoundaryTest {
         val store = source("app/src/main/java/com/freedom/data/TaskLaunchParametersStore.kt")
 
         assertFalse(homeOnly.contains("回复数量限制"))
-        assertTrue(personalization.contains("messageInterceptionPreferenceRow()"))
-        assertTrue(personalization.contains("图片预回复"))
+        assertTrue(home.contains("messageInterceptionPreferenceRow()"))
+        assertTrue(home.contains("图片预回复"))
+        assertFalse(personalization.contains("messageInterceptionPreferenceRow()"))
+        assertFalse(personalization.contains("图片预回复"))
+        assertFalse(personalization.contains("回复行为设置"))
+        val layout = home.substringAfter("fun create(): View").substringBefore("private fun installLeftEdgeGesture")
+        val order = listOf("content.addView(buildTargetSection()", "content.addView(buildPersonalizationRow(), spaced(18))",
+            "content.addView(messageInterceptionPreferenceRow()", "content.addView(imagePreReplyPreferenceRow()",
+            "content.addView(buildFilterPanel()", "root.addView(buildRunFooter()")
+        assertTrue(order.all { layout.contains(it) })
+        assertTrue(order.zipWithNext().all { (a, b) -> layout.indexOf(a) < layout.indexOf(b) })
+        assertTrue(layout.contains("isFillViewport = true"))
+        assertTrue(layout.contains("content.addView(View(activity), LinearLayout.LayoutParams(-1, 0, 1f))"))
+        val footer = home.substringAfter("private fun buildRunFooter()").substringBefore("private fun buildTargetSection()")
+        assertTrue(footer.contains("R.drawable.ic_run_start"))
+        assertTrue(footer.contains("LinearLayout.LayoutParams(dp(68), dp(68))"))
+        assertTrue(footer.contains("callbacks.onRunClick()"))
+        val main = source("app/src/main/java/com/freedom/MainActivity.kt")
+        assertTrue(main.contains("onImageResourceImportRequested = ::launchImageResourceImport"))
+        assertTrue(main.contains("onImageResourceClearRequested = ::clearImportedImageResources"))
+        assertTrue(main.split("configurationHome?.refreshTaskParameters()").size - 1 == 2)
         assertTrue(model.contains("messageInterceptionThreshold"))
         assertTrue(model.contains("imageSendThreshold"))
         assertTrue(model.contains("imageResourceUris"))
         assertTrue(store.contains("KEY_MESSAGE_INTERCEPTION_THRESHOLD"))
         assertTrue(store.contains("KEY_IMAGE_SEND_THRESHOLD"))
         assertTrue(store.contains("KEY_IMAGE_RESOURCE_URIS"))
-        assertTrue(personalization.contains("回复消息满足后发送图片 / 0 不开启"))
-        assertTrue(personalization.contains("onImageResourceImportRequested"))
+        assertTrue(home.contains("回复消息满足后发送图片 / 0 不开启"))
+        assertTrue(home.contains("callbacks.onImageResourceImportRequested()"))
+        assertTrue(home.contains("callbacks.onImageResourceClearRequested()"))
     }
 
     @Test
@@ -304,16 +324,17 @@ class FloatingActionEntryPointBoundaryTest {
         val model = source("app/src/main/java/com/freedom/ui/config/AiModelConfigurationScreen.kt")
         val target = source("app/src/main/java/com/freedom/ui/config/TargetAppEditor.kt")
         val main = source("app/src/main/java/com/freedom/MainActivity.kt")
-        listOf(home, personalization, model, target, main).forEach {
+        listOf(home, model, target, main).forEach {
             assertTrue(it.contains("FreedomUi.editorInput("))
             assertTrue(it.contains("FreedomUi.createEditorDialog("))
             assertTrue(it.contains("FreedomUi.showEditorDialog("))
         }
         assertTrue(ui.contains("SOFT_INPUT_ADJUST_RESIZE"))
         assertTrue(ui.contains(".setPositiveButton(positiveLabel, null)"))
-        assertTrue(personalization.split("FreedomUi.parseEditorInteger(").size - 1 == 2)
-        assertTrue(personalization.contains("imageSendThresholdValidationError(parsed)"))
-        assertTrue(personalization.contains("parameters.imageSendThreshold > parsed"))
+        assertTrue(home.split("FreedomUi.parseEditorInteger(").size - 1 == 3)
+        assertFalse(personalization.contains("FreedomUi.parseEditorInteger("))
+        assertTrue(home.contains("imageSendThresholdValidationError(parsed)"))
+        assertTrue(home.contains("parameters.imageSendThreshold > parsed"))
         assertTrue(model.contains("apiKey = input.text.toString().trim()"))
         assertTrue(model.contains("isSaveEnabled = false"))
         assertTrue(model.contains("View.IMPORTANT_FOR_AUTOFILL_NO"))
