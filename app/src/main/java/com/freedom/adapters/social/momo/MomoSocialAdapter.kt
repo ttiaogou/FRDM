@@ -293,32 +293,17 @@ internal class MomoSocialAdapter(
     @Volatile private var lastSayHiInspectionAtMs: Long = 0L
     @Volatile private var lastSayHiNavigationEvidenceSignature: String = ""
     @Volatile private var lastMomoNavigationEvidenceAtMs: Long = 0L
-    @Volatile private var receivedGreetingsEntryTapPending: Boolean = false
-    /** Scoped to one read-only probe; it enables manual-list stability, never navigation. */
-    @Volatile private var manualReceivedGreetingsArrivalProbeActive: Boolean = false
-    @Volatile private var sayHiCardListTapPending: Boolean = false
     @Volatile private var sayHiNonSearchGestureInFlight: Boolean = false
     private val sayHiGestureInFlight: Boolean
         get() = sayHiNonSearchGestureInFlight || receivedGreetingsEntrySearchGestureInFlight
     private enum class CompletionBackStage { NONE, LIST_SUBMITTED, CARD_SUBMITTED }
     @Volatile private var completionBackStage = CompletionBackStage.NONE
     private val completionBackRetryGate = MomoCompletionBackRetryGate(SAYHI_DETAIL_BACK_TIMEOUT_MS)
-    @Volatile private var receivedGreetingsEntryTapAtMs: Long = 0L
-    @Volatile private var sayHiCardListTapAtMs: Long = 0L
-    @Volatile private var lastSayHiCardListTapAtMs: Long = 0L
-    @Volatile private var lastReceivedGreetingsEntryTapAtMs: Long = 0L
-    @Volatile private var lastReceivedGreetingsEntryDiagnostic: String = ""
-    @Volatile private var lastReceivedGreetingsEntryDiagnosticAtMs: Long = 0L
-    @Volatile private var lastReceivedGreetingsNavigationWaitActivityClass: String = ""
     private val receivedGreetingsEntrySearchController = MomoReceivedGreetingsEntrySearchController()
     private val receivedGreetingsEntryPositionMemory = MomoReceivedGreetingsEntryPositionMemory()
     private val receivedGreetingsEntrySearchGestureInFlight: Boolean
         get() = receivedGreetingsEntrySearchController.isGestureInFlight()
-    @Volatile private var receivedGreetingsEntrySearchWindowIdentity: String = ""
     @Volatile private var sayHiReadOnlyStage: SayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
-    /** Business-visible read-only wait; never a permission to click or mark a row complete. */
-    @Volatile private var sayHiDeferredSafeEvidenceOnlyWait = false
-    private var sayHiFilterSettingsUnavailableLogged = false
     @Volatile private var sayHiSelectedGreeting: SayHiSelectedGreeting? = null
     @Volatile private var sayHiSelectedContactIdentity: ContactRowIdentity? = null
     @Volatile private var sayHiSelectedIdentityStatus: MomoSayHiPlatformIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
@@ -329,32 +314,27 @@ internal class MomoSocialAdapter(
     private val sayHiDetailBackReturnConfirmation = MomoSayHiListReturnConfirmationPolicy()
     private val sayHiRestoredReturnConfirmation = MomoSayHiListReturnConfirmationPolicy()
     private val sayHiSendReturnJournal = ReceivedGreetingsSendReturnJournal(receivedGreetingsSendReturnRepository)
-    private var sayHiPendingVerifiedReturnRow: String? = null
-    // Only sends admitted in this run earn scheduling credit; restored historical sends
-    // still repair their durable journal but never increment a new run's quota.
-    private val sayHiRunSendReceipts = LinkedHashSet<String>()
-    private val sayHiVerifiedReturnReceipts = LinkedHashSet<String>()
 
     @Synchronized
     override fun consumeReceivedGreetingsVerifiedReturnReceipts(): List<String> {
         if (!isReceivedGreetingsListConfirmed() || sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE ||
             sayHiGestureInFlight || !isAiReplyUiOperationOwned()
         ) return emptyList()
-        return sayHiVerifiedReturnReceipts.toList().also { sayHiVerifiedReturnReceipts.clear() }
+        return sayHiTraversalState.consumeVerifiedReturnReceipts()
     }
 
     @Synchronized
     private fun recordSayHiRunSendReceipt(receipt: String) {
-        sayHiRunSendReceipts.add(receipt)
+        sayHiTraversalState.recordRunSendReceipt(receipt)
     }
 
     @Synchronized
     private fun recordSayHiVerifiedReturnReceipt(receipt: String) {
-        if (sayHiRunSendReceipts.remove(receipt)) sayHiVerifiedReturnReceipts.add(receipt)
+        sayHiTraversalState.recordVerifiedReturnReceipt(receipt)
     }
 
     @Synchronized
-    private fun hasSayHiVerifiedReturnReceipts(): Boolean = sayHiVerifiedReturnReceipts.isNotEmpty()
+    private fun hasSayHiVerifiedReturnReceipts(): Boolean = sayHiTraversalState.hasVerifiedReturnReceipts()
     @Volatile private var sayHiProfileReadAttempts: Int = 0
     @Volatile private var sayHiProfileScrollAttempted: Boolean = false
     private val sayHiProfileDeferredRetryGate = MomoSayHiProfileDeferredRetryGate()
@@ -1149,7 +1129,7 @@ internal class MomoSocialAdapter(
         val currentActivity = activityClass()
         if (currentActivity.isBlank()) return ReceivedGreetingsPageArrivalStatus.UNKNOWN
 
-        manualReceivedGreetingsArrivalProbeActive = true
+        sayHiNavigationFlowController.manualReceivedGreetingsArrivalProbeActive = true
         val inspected = try {
             inspectSayHiPageAndAutonomousBrowse(
                 allowAutonomousScroll = false,
@@ -1157,7 +1137,7 @@ internal class MomoSocialAdapter(
                 forceFresh = true
             )
         } finally {
-            manualReceivedGreetingsArrivalProbeActive = false
+            sayHiNavigationFlowController.manualReceivedGreetingsArrivalProbeActive = false
         }
 
         val listFingerprintVisible = isReceivedGreetingsListStructureVisible()
@@ -1212,8 +1192,8 @@ internal class MomoSocialAdapter(
         sayHiTraversalState.prepareForListReentry()
         clearSayHiSelectedGreeting()
         resetSayHiRowTapTransaction()
-        receivedGreetingsEntryTapPending = false
-        sayHiCardListTapPending = false
+        sayHiNavigationFlowController.receivedGreetingsEntryTapPending = false
+        sayHiNavigationFlowController.sayHiCardListTapPending = false
         // The same logical scan may be resumed through a manually confirmed list.
         // Its direction and outstanding rows are not reset by admission.
         sayHiStableCandidateKey = ""
@@ -1466,7 +1446,7 @@ internal class MomoSocialAdapter(
                 val nowUptimeMs = SystemClock.uptimeMillis()
                 val listWindowIdentity = receivedGreetingsListWindowIdentity()
                 if (sayHiDetailBackReturnConfirmation.observe(listWindowIdentity, nowUptimeMs)) {
-                    val pendingRow = sayHiPendingVerifiedReturnRow
+                    val pendingRow = sayHiTraversalState.sayHiPendingVerifiedReturnRow
                     if (pendingRow != null) {
                         val proof = runCatching { sayHiSendReturnJournal.findByRow(pendingRow) }.getOrNull()
                         if (proof == null || !runCatching {
@@ -1482,7 +1462,7 @@ internal class MomoSocialAdapter(
                         sayHiTraversalState.markProcessedContactHash(proof.contactIdHash)
                         clearSayHiRowDeferral(proof.rowKeyHash)
                         recordSayHiVerifiedReturnReceipt(proof.sendConfirmationHash)
-                        sayHiPendingVerifiedReturnRow = null
+                        sayHiTraversalState.sayHiPendingVerifiedReturnRow = null
                         onLog("GREETING_RETURN_VERIFIED：已通过原列表双快照，独立持久化返回事实并推进游标")
                     }
                     if (sayHiUnverifiedDetailReturnPending) {
@@ -1570,14 +1550,14 @@ internal class MomoSocialAdapter(
         if (sayHiNavigationFlowController.shouldAwaitProfileCardActivity(
                 currentActivityClass = currentActivity,
                 profileCardActivityClass = MomoSayHiPageContract.CARD_ACTIVITY,
-                entryTapPending = receivedGreetingsEntryTapPending
+                entryTapPending = sayHiNavigationFlowController.receivedGreetingsEntryTapPending
             )
         ) {
             val now = System.currentTimeMillis()
-            val elapsedMs = (now - receivedGreetingsEntryTapAtMs).coerceAtLeast(0L)
+            val elapsedMs = (now - sayHiNavigationFlowController.receivedGreetingsEntryTapAtMs).coerceAtLeast(0L)
             if (elapsedMs < RECEIVED_GREETINGS_ENTRY_VERIFY_TIMEOUT_MS) {
-                if (lastReceivedGreetingsNavigationWaitActivityClass != currentActivity) {
-                    lastReceivedGreetingsNavigationWaitActivityClass = currentActivity
+                if (sayHiNavigationFlowController.lastReceivedGreetingsNavigationWaitActivityClass != currentActivity) {
+                    sayHiNavigationFlowController.lastReceivedGreetingsNavigationWaitActivityClass = currentActivity
                     onLog(
                         "收到的招呼导航：入口点击已提交，等待异步进入 NewSayHiCardActivity；" +
                             "当前过渡 Activity=${currentActivity.ifBlank { "UNKNOWN" }}；" +
@@ -1586,8 +1566,8 @@ internal class MomoSocialAdapter(
                 }
                 return true
             }
-            receivedGreetingsEntryTapPending = false
-            lastReceivedGreetingsNavigationWaitActivityClass = ""
+            sayHiNavigationFlowController.receivedGreetingsEntryTapPending = false
+            sayHiNavigationFlowController.lastReceivedGreetingsNavigationWaitActivityClass = ""
             sayHiNavigationFlowController.reset()
             logReceivedGreetingsEntrySkip("PAGE_SWITCH_NOT_CONFIRMED_WITHIN_TIMEOUT")
             onLog(
@@ -1597,17 +1577,17 @@ internal class MomoSocialAdapter(
             return false
         }
         if (currentActivity == MomoSayHiPageContract.CARD_ACTIVITY) {
-            if (receivedGreetingsEntryTapPending) {
-                receivedGreetingsEntryTapPending = false
-                lastReceivedGreetingsNavigationWaitActivityClass = ""
-                lastReceivedGreetingsEntryDiagnostic = ""
+            if (sayHiNavigationFlowController.receivedGreetingsEntryTapPending) {
+                sayHiNavigationFlowController.receivedGreetingsEntryTapPending = false
+                sayHiNavigationFlowController.lastReceivedGreetingsNavigationWaitActivityClass = ""
+                sayHiNavigationFlowController.lastReceivedGreetingsEntryDiagnostic = ""
                 onLog("收到的招呼入口点击后已进入资料卡 Activity；等待卡片与顶部‘列表’控件稳定")
             }
-            if (sayHiCardListTapPending) {
-                if (System.currentTimeMillis() - sayHiCardListTapAtMs < SAYHI_CARD_LIST_VERIFY_TIMEOUT_MS) {
+            if (sayHiNavigationFlowController.sayHiCardListTapPending) {
+                if (System.currentTimeMillis() - sayHiNavigationFlowController.sayHiCardListTapAtMs < SAYHI_CARD_LIST_VERIFY_TIMEOUT_MS) {
                     return true
                 }
-                sayHiCardListTapPending = false
+                sayHiNavigationFlowController.sayHiCardListTapPending = false
                 sayHiNavigationFlowController.markCardListTapFailed()
                 onLog("收到的招呼资料卡：点击‘列表’后未在限定时间内确认列表 Activity；重新复核资料卡")
             }
@@ -1664,7 +1644,7 @@ internal class MomoSocialAdapter(
                 if (!sayHiNavigationFlowController.isReceivedListConfirmed()) {
                     return true
                 }
-                sayHiCardListTapPending = false
+                sayHiNavigationFlowController.sayHiCardListTapPending = false
                 sayHiAutonomousBrowseController.reset()
                 onLog("收到的招呼资料卡‘列表’导航已验证：窗口与外层可滚动 listview 结构连续稳定；Activity 和操作准入由现有 READY 复核")
                 return true
@@ -1688,14 +1668,14 @@ internal class MomoSocialAdapter(
         onLog(
             "收到招呼入口前页面类型：activity=$currentActivity；" +
                 "pageType=$currentMainPageType；" +
-                "entryPending=$receivedGreetingsEntryTapPending"
+                "entryPending=${sayHiNavigationFlowController.receivedGreetingsEntryTapPending}"
         )
         // The received-greetings row is itself the navigation surface. Do not make the
         // generic page classifier a prerequisite: a fresh, unique label plus its clickable
         // item_layout is stronger evidence for this entry than a transient CHAT_LIST result.
 
         val now = System.currentTimeMillis()
-        if (now - lastReceivedGreetingsEntryTapAtMs < RECEIVED_GREETINGS_ENTRY_RETRY_COOLDOWN_MS) {
+        if (now - sayHiNavigationFlowController.lastReceivedGreetingsEntryTapAtMs < RECEIVED_GREETINGS_ENTRY_RETRY_COOLDOWN_MS) {
             logReceivedGreetingsEntrySkip("ENTRY_RETRY_COOLDOWN_ACTIVE")
             return true
         }
@@ -1778,12 +1758,12 @@ internal class MomoSocialAdapter(
         resetSayHiListSnapshotState()
         resetReceivedGreetingsEntrySearch()
         sayHiNavigationFlowController.beginEntryNavigation()
-        receivedGreetingsEntryTapPending = true
-        lastReceivedGreetingsNavigationWaitActivityClass = ""
+        sayHiNavigationFlowController.receivedGreetingsEntryTapPending = true
+        sayHiNavigationFlowController.lastReceivedGreetingsNavigationWaitActivityClass = ""
         sayHiNonSearchGestureInFlight = true
-        receivedGreetingsEntryTapAtMs = tapSubmittedAt
-        lastReceivedGreetingsEntryTapAtMs = tapSubmittedAt
-        lastReceivedGreetingsEntryDiagnostic = ""
+        sayHiNavigationFlowController.receivedGreetingsEntryTapAtMs = tapSubmittedAt
+        sayHiNavigationFlowController.lastReceivedGreetingsEntryTapAtMs = tapSubmittedAt
+        sayHiNavigationFlowController.lastReceivedGreetingsEntryDiagnostic = ""
         val tapRequest = GestureIntentRequest(
             id = "momo-sayhi-entry-${tapSubmittedAt}-${System.nanoTime()}",
             intent = GestureIntent.Tap(
@@ -1807,7 +1787,7 @@ internal class MomoSocialAdapter(
                         "标签路径=${tapTarget.labelPath.joinToString("/")}；" +
                         "点击祖先=${tapTarget.clickableAncestorPath.joinToString("/")}；等待新页面身份验证"
                 } else {
-                    receivedGreetingsEntryTapPending = false
+                    sayHiNavigationFlowController.receivedGreetingsEntryTapPending = false
                     sayHiNavigationFlowController.reset()
                     "收到的招呼入口：协调器手势未完成；status=${result.status}；reason=${result.reason}；不尝试其他坐标"
                 }
@@ -1822,12 +1802,12 @@ internal class MomoSocialAdapter(
             // No tap was dispatched. Restore the entry phase so the next idle inspection can
             // reacquire the same list entry after the overlay/startup guard clears.
             sayHiNonSearchGestureInFlight = false
-            receivedGreetingsEntryTapPending = false
+            sayHiNavigationFlowController.receivedGreetingsEntryTapPending = false
             sayHiNavigationFlowController.reset()
             onLog("收到的招呼入口[DEFERRED_NOT_READY]：页面暂不可操作，未派发点击、未消耗入口重试；保留导航意图并等待新快照")
         } else {
             sayHiNonSearchGestureInFlight = false
-            receivedGreetingsEntryTapPending = false
+            sayHiNavigationFlowController.receivedGreetingsEntryTapPending = false
             sayHiNavigationFlowController.reset()
             logReceivedGreetingsEntrySkip("GESTURE_SUBMISSION_REJECTED")
             onLog("收到的招呼入口：统一手势协调器未接受精确入口点击；保持待机，不执行坐标兜底")
@@ -1840,9 +1820,9 @@ internal class MomoSocialAdapter(
      * control. The actual list page is accepted only after the Activity and list container change.
      */
     private fun dispatchSayHiCardListTap() {
-        if (sayHiGestureInFlight || sayHiCardListTapPending) return
+        if (sayHiGestureInFlight || sayHiNavigationFlowController.sayHiCardListTapPending) return
         val now = System.currentTimeMillis()
-        if (now - lastSayHiCardListTapAtMs < SAYHI_CARD_LIST_TAP_COOLDOWN_MS) return
+        if (now - sayHiNavigationFlowController.lastSayHiCardListTapAtMs < SAYHI_CARD_LIST_TAP_COOLDOWN_MS) return
 
         val first = inspectSayHiCardListTapTarget()
         if (first !is SayHiCardListTapInspection.Ready) {
@@ -1897,8 +1877,8 @@ internal class MomoSocialAdapter(
         resetSayHiListSnapshotState()
         val submittedAt = System.currentTimeMillis()
         sayHiNonSearchGestureInFlight = true
-        sayHiCardListTapPending = true
-        sayHiCardListTapAtMs = submittedAt
+        sayHiNavigationFlowController.sayHiCardListTapPending = true
+        sayHiNavigationFlowController.sayHiCardListTapAtMs = submittedAt
         val request = GestureIntentRequest(
             id = "momo-sayhi-card-list-${submittedAt}-${System.nanoTime()}",
             intent = GestureIntent.Tap(
@@ -1915,24 +1895,24 @@ internal class MomoSocialAdapter(
             if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
             sayHiNonSearchGestureInFlight = false
             if (result.status == GestureExecutionStatus.COMPLETED) {
-                sayHiCardListTapPending = true
-                sayHiCardListTapAtMs = submittedAt
-                lastSayHiCardListTapAtMs = submittedAt
+                sayHiNavigationFlowController.sayHiCardListTapPending = true
+                sayHiNavigationFlowController.sayHiCardListTapAtMs = submittedAt
+                sayHiNavigationFlowController.lastSayHiCardListTapAtMs = submittedAt
                 onLog("收到的招呼资料卡：已通过统一手势执行精确‘列表’控件点击；等待 NewSayHiSessionListActivity 验证")
             } else {
-                sayHiCardListTapPending = false
+                sayHiNavigationFlowController.sayHiCardListTapPending = false
                 sayHiNavigationFlowController.markCardListTapFailed()
                 onLog("收到的招呼资料卡：‘列表’控件手势未完成；status=${result.status}；reason=${result.reason}")
             }
         })
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
             sayHiNonSearchGestureInFlight = false
-            sayHiCardListTapPending = false
+            sayHiNavigationFlowController.sayHiCardListTapPending = false
             sayHiNavigationFlowController.markCardListTapFailed()
             onLog("收到的招呼资料卡列表入口[DEFERRED_NOT_READY]：没有派发点击；清除旧稳定样本，重新采集资料卡快照后再尝试")
         } else if (submission != GestureSubmission.ACCEPTED) {
             sayHiNonSearchGestureInFlight = false
-            sayHiCardListTapPending = false
+            sayHiNavigationFlowController.sayHiCardListTapPending = false
             sayHiNavigationFlowController.markCardListTapFailed()
             logSayHiCardListTapSkip("GESTURE_SUBMISSION_REJECTED:$submission")
         } else {
@@ -2046,14 +2026,14 @@ internal class MomoSocialAdapter(
         // Never infer an action from the handoff's previous snapshot or saved tap coordinates.
         val entryPosition = receivedGreetingsEntryPositionMemory.position
         if (entryPosition == MomoReceivedGreetingsEntryPosition.VISIBLE ||
-            !receivedGreetingsEntrySearchController.isActive() || receivedGreetingsEntrySearchWindowIdentity != windowIdentity
+            !receivedGreetingsEntrySearchController.isActive() || receivedGreetingsEntrySearchController.receivedGreetingsEntrySearchWindowIdentity != windowIdentity
         ) {
             if (!receivedGreetingsEntrySearchController.start(entryPosition)) {
-                receivedGreetingsEntrySearchWindowIdentity = ""
+                receivedGreetingsEntrySearchController.receivedGreetingsEntrySearchWindowIdentity = ""
                 onLog("收到的招呼入口搜索[VISIBLE_RECHECK]：最新列表观察已见入口；不滑过入口，等待现有双快照安全点击复核")
                 return true
             }
-            receivedGreetingsEntrySearchWindowIdentity = windowIdentity
+            receivedGreetingsEntrySearchController.receivedGreetingsEntrySearchWindowIdentity = windowIdentity
             val initialDirection = receivedGreetingsEntrySearchController.direction()
             onLog(
                 "收到的招呼入口搜索开始：已确认普通消息列表窗口=$windowIdentity；" +
@@ -2190,7 +2170,7 @@ internal class MomoSocialAdapter(
     private fun resetReceivedGreetingsEntrySearch(resetRun: Boolean = false) {
         if (resetRun) receivedGreetingsEntrySearchController.resetForRun()
         else receivedGreetingsEntrySearchController.reset()
-        receivedGreetingsEntrySearchWindowIdentity = ""
+        receivedGreetingsEntrySearchController.receivedGreetingsEntrySearchWindowIdentity = ""
     }
 
     private fun inspectReceivedGreetingsTapTarget(
@@ -2278,11 +2258,11 @@ internal class MomoSocialAdapter(
 
     private fun logReceivedGreetingsEntrySkip(reason: String) {
         val now = System.currentTimeMillis()
-        if (reason != lastReceivedGreetingsEntryDiagnostic ||
-            now - lastReceivedGreetingsEntryDiagnosticAtMs >= RECEIVED_GREETINGS_ENTRY_DIAGNOSTIC_INTERVAL_MS
+        if (reason != sayHiNavigationFlowController.lastReceivedGreetingsEntryDiagnostic ||
+            now - sayHiNavigationFlowController.lastReceivedGreetingsEntryDiagnosticAtMs >= RECEIVED_GREETINGS_ENTRY_DIAGNOSTIC_INTERVAL_MS
         ) {
-            lastReceivedGreetingsEntryDiagnostic = reason
-            lastReceivedGreetingsEntryDiagnosticAtMs = now
+            sayHiNavigationFlowController.lastReceivedGreetingsEntryDiagnostic = reason
+            sayHiNavigationFlowController.lastReceivedGreetingsEntryDiagnosticAtMs = now
             onLog("收到的招呼入口：本轮未点击；原因=$reason")
         }
     }
@@ -2522,7 +2502,7 @@ internal class MomoSocialAdapter(
             // A configuration read failure is not evidence that the scan is complete.
             return exhaustedProbePending || settings == null
         }
-        sayHiDeferredSafeEvidenceOnlyWait = false
+        sayHiTraversalState.sayHiDeferredSafeEvidenceOnlyWait = false
         val key = MomoSayHiIdentityFingerprintPolicy.rowKey(candidate)
         if (inspection.listRows.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1) {
             deferSayHiRow(key, "ROW_NOT_SAFELY_ACTIONABLE")
@@ -2560,13 +2540,13 @@ internal class MomoSocialAdapter(
     private fun readSayHiFilterSettings(): ConversationFilterSettings? {
         val settings = runCatching { conversationFilterSettings() }.getOrNull()
         if (settings == null) {
-            if (!sayHiFilterSettingsUnavailableLogged) {
-                sayHiFilterSettingsUnavailableLogged = true
+            if (!sayHiTraversalState.sayHiFilterSettingsUnavailableLogged) {
+                sayHiTraversalState.sayHiFilterSettingsUnavailableLogged = true
                 onLog("CONVERSATION_FILTER_SETTINGS_UNAVAILABLE nextAction=WAIT_FOR_SETTINGS")
             }
             return null
         }
-        sayHiFilterSettingsUnavailableLogged = false
+        sayHiTraversalState.sayHiFilterSettingsUnavailableLogged = false
         sayHiTraversalState.updateFilterSettings(settings)
         return settings
     }
@@ -3149,7 +3129,7 @@ internal class MomoSocialAdapter(
                     verificationScheduled = true
                 }
                 MomoSayHiTraversalState.SafeEvidenceRecovery.REARMED -> {
-                    sayHiDeferredSafeEvidenceOnlyWait = false
+                    sayHiTraversalState.sayHiDeferredSafeEvidenceOnlyWait = false
                     onLog("GREETING_DEFERRED_RECOVERY_REARMED：行身份、窗口及变更后的安全区域已双快照确认；恢复有限点击预算，不计入成功")
                     verificationScheduled = true
                 }
@@ -4149,7 +4129,7 @@ internal class MomoSocialAdapter(
             if (success) {
                 // A gesture accepted by Android does not prove navigation completed.
                 // The source row stays unprocessed until the list double snapshot succeeds.
-                sayHiPendingVerifiedReturnRow = selected.rowKey
+                sayHiTraversalState.sayHiPendingVerifiedReturnRow = selected.rowKey
             } else {
                 // A safe BACK only closes the detail page; it never proves a reply was sent.
                 // Retain the existing deferral behavior for incomplete transactions.
@@ -4253,7 +4233,7 @@ internal class MomoSocialAdapter(
     }
 
     override fun isReceivedGreetingsWaitingForSafeTargetEvidence(): Boolean =
-        sayHiDeferredSafeEvidenceOnlyWait && sayHiTraversalState.hasExhaustedSafeTargetRows &&
+        sayHiTraversalState.sayHiDeferredSafeEvidenceOnlyWait && sayHiTraversalState.hasExhaustedSafeTargetRows &&
             !sayHiTraversalState.hasRetryableDeferredRows() &&
             sayHiReadOnlyStage == SayHiReadOnlyStage.IDLE
 
@@ -4280,7 +4260,7 @@ internal class MomoSocialAdapter(
         if (sayHiNavigationFlowController.shouldAwaitProfileCardActivity(
                 currentActivityClass = currentActivity,
                 profileCardActivityClass = MomoSayHiPageContract.CARD_ACTIVITY,
-                entryTapPending = receivedGreetingsEntryTapPending
+                entryTapPending = sayHiNavigationFlowController.receivedGreetingsEntryTapPending
             ) || sayHiNavigationFlowController.isWaitingForReceivedList()
         ) {
             return ReceivedGreetingsTraversalStatus.NAVIGATING
@@ -4339,8 +4319,8 @@ internal class MomoSocialAdapter(
             // prerequisites for a safe return. An unfinished individual transaction is.
             if (!sayHiNavigationFlowController.isReceivedListConfirmed() ||
                 sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE ||
-                sayHiSelectedGreeting != null || sayHiPendingVerifiedReturnRow != null ||
-                receivedGreetingsEntryTapPending || sayHiCardListTapPending ||
+                sayHiSelectedGreeting != null || sayHiTraversalState.sayHiPendingVerifiedReturnRow != null ||
+                sayHiNavigationFlowController.receivedGreetingsEntryTapPending || sayHiNavigationFlowController.sayHiCardListTapPending ||
                 sessionComponents.inboxIdentity.pendingInboxIdentityCapture != null
             ) return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
             val noPendingSendReturn = runCatching {
@@ -4429,14 +4409,14 @@ internal class MomoSocialAdapter(
         // completed scan retains its business ledger for the next visit.
         if (!runCatching { sayHiTraversalState.suspendTraversal(preserveTraversal) }.isSuccess) return false
         sayHiRunGenerationGuard.invalidatePreviousRun()
-        receivedGreetingsEntryTapPending = false
-        sayHiCardListTapPending = false
+        sayHiNavigationFlowController.receivedGreetingsEntryTapPending = false
+        sayHiNavigationFlowController.sayHiCardListTapPending = false
         sayHiNavigationFlowController.reset()
         sayHiAutonomousBrowseController.reset()
         resetReceivedGreetingsEntrySearch()
         resetSayHiListSnapshotState()
         clearSayHiSelectedGreeting()
-        sayHiDeferredSafeEvidenceOnlyWait = false
+        sayHiTraversalState.sayHiDeferredSafeEvidenceOnlyWait = false
         sayHiStableCandidateKey = ""
         sayHiStableCandidateTarget = null
         sayHiStableCandidateWindow = null
@@ -4745,7 +4725,7 @@ internal class MomoSocialAdapter(
                             "外层 listview 候选=${listContainers.size}；容器完整=${completeListEvidence}"
                     )
                 }
-            } else if (manualReceivedGreetingsArrivalProbeActive &&
+            } else if (sayHiNavigationFlowController.manualReceivedGreetingsArrivalProbeActive &&
                 (sayHiNavigationFlowController.phase == MomoSayHiNavigationPhase.IDLE ||
                     sayHiNavigationFlowController.isManuallyStabilizingReceivedList())
             ) {
@@ -5005,7 +4985,7 @@ internal class MomoSocialAdapter(
                     onLog("收到招呼自主浏览暂未完成：已确认当前 listview 不可滚动，但仍有 ${sayHiTraversalState.deferredRowCount} 个用户待恢复；保留断点并等待回访，不报告完成")
                     scheduleSayHiListSnapshotInspection(2_000L, "DEFERRED_ROWS_WAIT_FOR_FRESH_LIST", retry = false)
                 } else {
-                    sayHiDeferredSafeEvidenceOnlyWait = true
+                    sayHiTraversalState.sayHiDeferredSafeEvidenceOnlyWait = true
                     onLog("收到招呼安全点击已耗尽[READ_ONLY_WAIT]：${sayHiTraversalState.deferredRowCount} 个用户等待新的稳定安全区域证据；不直接重试点击、不报告完成")
                     scheduleSayHiListSnapshotInspection(
                         delayMs = 30_000L,
@@ -5025,7 +5005,7 @@ internal class MomoSocialAdapter(
         }
         if (sayHiAutonomousBrowseController.isFinished() && sayHiTraversalState.hasDeferredRows) {
             if (!hasRetryableSayHiDeferredRows()) {
-                sayHiDeferredSafeEvidenceOnlyWait = true
+                sayHiTraversalState.sayHiDeferredSafeEvidenceOnlyWait = true
                 onLog("收到招呼安全点击已耗尽[READ_ONLY_WAIT]：保留延期行和失败证据；30秒后观察页面变化，不直接清空失败次数")
                 scheduleSayHiListSnapshotInspection(
                     delayMs = 30_000L,
@@ -5070,7 +5050,7 @@ internal class MomoSocialAdapter(
         }
         val now = System.currentTimeMillis()
         if (!sayHiAutonomousBrowseController.isFinished() || hasRetryableSayHiDeferredRows()) {
-            sayHiDeferredSafeEvidenceOnlyWait = false
+            sayHiTraversalState.sayHiDeferredSafeEvidenceOnlyWait = false
         }
         if (!sayHiAutonomousBrowseController.shouldScroll(signature, now, list.scrollable)) {
             if (sayHiAutonomousBrowseController.isFinished()) {
@@ -7062,8 +7042,8 @@ internal class MomoSocialAdapter(
 
         // The session candidate is created from the main list, but identity capture is
         // intentionally executed after navigation on the confirmed chat detail page.
-        if (sayHiGestureInFlight || receivedGreetingsEntryTapPending ||
-            receivedGreetingsEntrySearchGestureInFlight || sayHiCardListTapPending
+        if (sayHiGestureInFlight || sayHiNavigationFlowController.receivedGreetingsEntryTapPending ||
+            receivedGreetingsEntrySearchGestureInFlight || sayHiNavigationFlowController.sayHiCardListTapPending
         ) {
             onLog(
                 "AI 联系人身份采集等待：CHAT_DETAIL_GESTURE_NOT_READY；" +
@@ -7682,29 +7662,19 @@ internal class MomoSocialAdapter(
         resetSayHiRowTapTransaction()
         sayHiRestoredReturnConfirmation.reset()
         sayHiTraversalState.resetFilterSkips()
-        sayHiFilterSettingsUnavailableLogged = false
+        sayHiTraversalState.sayHiFilterSettingsUnavailableLogged = false
 
         sayHiNonSearchGestureInFlight = false
-        sayHiDeferredSafeEvidenceOnlyWait = false
+        sayHiTraversalState.sayHiDeferredSafeEvidenceOnlyWait = false
         sayHiStableCandidateKey = ""
         sayHiStableCandidateTarget = null
         sayHiStableCandidateWindow = null
-        sayHiPendingVerifiedReturnRow = null
+        sayHiTraversalState.sayHiPendingVerifiedReturnRow = null
         synchronized(this) {
-            sayHiRunSendReceipts.clear()
-            sayHiVerifiedReturnReceipts.clear()
+            sayHiTraversalState.clearRunReturnReceipts()
         }
 
-        receivedGreetingsEntryTapPending = false
-        manualReceivedGreetingsArrivalProbeActive = false
-        sayHiCardListTapPending = false
-        receivedGreetingsEntryTapAtMs = 0L
-        sayHiCardListTapAtMs = 0L
-        lastSayHiCardListTapAtMs = 0L
-        lastReceivedGreetingsEntryTapAtMs = 0L
-        lastReceivedGreetingsEntryDiagnostic = ""
-        lastReceivedGreetingsEntryDiagnosticAtMs = 0L
-        lastReceivedGreetingsNavigationWaitActivityClass = ""
+        sayHiNavigationFlowController.resetEntryNavigationRuntime()
         lastSayHiInspectionSignature = ""
         lastSayHiInspectionAtMs = 0L
         lastSayHiNavigationEvidenceSignature = ""

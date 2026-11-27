@@ -105,7 +105,7 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "tools/architecture/test_pp_r00_freeze.py"
                 self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
                 # R04 also pins the reviewed relocation; R03 remains in the R00 gate.
-                expected[path] = "31f66ca59628fcbd983d584402b60062d66e83af"
+                expected[path] = "7983711805ab11036fc9234bdc08a9ce340fe4a0"
             issues.extend(evidence_violations(ROOT, expected))
         # New R04 regression evidence is pinned independently of the historical inventory.
         issues.extend(evidence_violations(ROOT, {
@@ -123,8 +123,12 @@ class PpR01ContractFreezeTest(unittest.TestCase):
             "app/src/test/java/com/freedom/adapters/social/momo/R04HelperConvergenceTest.kt": "6f77d80b80e821eb0d8a2896f25410ec741e5d3d",
         }))
         issues.extend(evidence_violations(ROOT, {
-            "tools/architecture/test_pp_r05_inbox_identity_migration.py": "0601f7476c894baa254767949c3916597612449f",
+            "tools/architecture/test_pp_r05_inbox_identity_migration.py": "df493ddb2d84b33685aa4eeb4e0d745dcff1f18f",
             "app/src/test/java/com/freedom/adapters/social/momo/R05InboxIdentityStateTest.kt": "8980b617f388e0c6db11ffe13ce85d86d81ad4fa",
+        }))
+        issues.extend(evidence_violations(ROOT, {
+            "tools/architecture/test_pp_r05_greetings_state_migration.py": "0fee4582450a7bedc15f9ce3a3e6a24dd5c90178",
+            "app/src/test/java/com/freedom/adapters/social/momo/R05GreetingsStateTest.kt": "0668e9b39fa6add20b716eb4493c9f0e05726b2d",
         }))
         self.assertEqual([], issues)
 

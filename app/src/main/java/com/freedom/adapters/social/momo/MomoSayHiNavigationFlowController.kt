@@ -26,6 +26,32 @@ internal class MomoSayHiNavigationFlowController(
     private var stableSampleCount: Int = 0
     private var lastStableSampleAtMs: Long = 0L
 
+    @Volatile var receivedGreetingsEntryTapPending: Boolean = false
+    /** Scoped to one read-only probe; it enables manual-list stability, never navigation. */
+    @Volatile var manualReceivedGreetingsArrivalProbeActive: Boolean = false
+    @Volatile var sayHiCardListTapPending: Boolean = false
+    @Volatile var receivedGreetingsEntryTapAtMs: Long = 0L
+    @Volatile var sayHiCardListTapAtMs: Long = 0L
+    @Volatile var lastSayHiCardListTapAtMs: Long = 0L
+    @Volatile var lastReceivedGreetingsEntryTapAtMs: Long = 0L
+    @Volatile var lastReceivedGreetingsEntryDiagnostic: String = ""
+    @Volatile var lastReceivedGreetingsEntryDiagnosticAtMs: Long = 0L
+    @Volatile var lastReceivedGreetingsNavigationWaitActivityClass: String = ""
+
+    /** Run-local entry/card evidence; independent of the existing phase reset. */
+    fun resetEntryNavigationRuntime() {
+        receivedGreetingsEntryTapPending = false
+        manualReceivedGreetingsArrivalProbeActive = false
+        sayHiCardListTapPending = false
+        receivedGreetingsEntryTapAtMs = 0L
+        sayHiCardListTapAtMs = 0L
+        lastSayHiCardListTapAtMs = 0L
+        lastReceivedGreetingsEntryTapAtMs = 0L
+        lastReceivedGreetingsEntryDiagnostic = ""
+        lastReceivedGreetingsEntryDiagnosticAtMs = 0L
+        lastReceivedGreetingsNavigationWaitActivityClass = ""
+    }
+
     init {
         require(requiredStableSamples >= 2)
         require(minimumStableSampleIntervalMs >= 0L)

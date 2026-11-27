@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r05_greetings_state_migration import restore_r05a_adapter
 
 ROOT = Path(__file__).resolve().parents[2]
 MOMO = ROOT / "app/src/main/java/com/freedom/adapters/social/momo/"
@@ -56,7 +57,8 @@ class PpR05InboxIdentityMigrationTest(unittest.TestCase):
         self.assertNotIn("private val inboxIdentityCaptureLock", adapter)
         self.assertEqual(2, adapter.count("sessionComponents.inboxIdentity.resetForRun()"))
         self.assertIn("private const val MAX_INBOX_VERIFIED_IDENTITY_CACHE_ENTRIES = 256", owner)
-        reconstructed = adapter.replace(
+        # Reverse R05-B with its exact R05-A hash check before applying the original R05-A assertions.
+        reconstructed = restore_r05a_adapter(adapter).replace(
             "sessionComponents.inboxIdentity.onIdentityVerificationLog(onLog, ", "onIdentityVerificationLog("
         ).replace("sessionComponents.inboxIdentity.", "")
         reconstructed = reconstructed.replace("    private sealed interface SayHiCardListTapInspection",

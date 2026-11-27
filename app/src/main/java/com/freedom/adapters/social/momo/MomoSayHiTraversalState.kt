@@ -18,6 +18,35 @@ internal class MomoSayHiTraversalState(
     private val maxRetryBackoffStage: Int = DEFAULT_MAX_RETRY_BACKOFF_STAGE,
     private val safeTargetFailureReasonPrefix: String = DEFAULT_SAFE_TARGET_FAILURE_REASON_PREFIX
 ) {
+    /** Business-visible read-only wait; never a permission to click or mark a row complete. */
+    @Volatile var sayHiDeferredSafeEvidenceOnlyWait = false
+    var sayHiFilterSettingsUnavailableLogged = false
+    var sayHiPendingVerifiedReturnRow: String? = null
+    // Only sends admitted in this run earn scheduling credit; restored historical sends
+    // still repair their durable journal but never increment a new run's quota.
+    private val sayHiRunSendReceipts = LinkedHashSet<String>()
+    private val sayHiVerifiedReturnReceipts = LinkedHashSet<String>()
+
+    // These run-local credits are guarded by the original adapter monitor at the call sites.
+    // They are not checkpointed and restored historical sends never receive new-run credit.
+    fun consumeVerifiedReturnReceipts(): List<String> =
+        sayHiVerifiedReturnReceipts.toList().also { sayHiVerifiedReturnReceipts.clear() }
+
+    fun recordRunSendReceipt(receipt: String) {
+        sayHiRunSendReceipts.add(receipt)
+    }
+
+    fun recordVerifiedReturnReceipt(receipt: String) {
+        if (sayHiRunSendReceipts.remove(receipt)) sayHiVerifiedReturnReceipts.add(receipt)
+    }
+
+    fun hasVerifiedReturnReceipts(): Boolean = sayHiVerifiedReturnReceipts.isNotEmpty()
+
+    fun clearRunReturnReceipts() {
+        sayHiRunSendReceipts.clear()
+        sayHiVerifiedReturnReceipts.clear()
+    }
+
     private val processedRowKeys = LinkedHashSet<String>()
     private val processedContactIdHashes = LinkedHashSet<String>()
     private val deferredRowKeys = LinkedHashSet<String>()

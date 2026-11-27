@@ -38,6 +38,8 @@ internal class MomoReceivedGreetingsEntrySearchController(
     private data class InFlightGesture(val requestId: String, val generation: Long)
     private var inFlightGesture: InFlightGesture? = null
 
+    @Volatile var receivedGreetingsEntrySearchWindowIdentity: String = ""
+
     init {
         require(unchangedObservationsToConfirmBoundary >= 2)
     }

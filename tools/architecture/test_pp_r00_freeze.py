@@ -173,6 +173,19 @@ class PpR00FreezeTest(unittest.TestCase):
         }.items():
             self.assertEqual(previous, reviewed_s1[path])
             reviewed_s1[path] = replacement
+        # R05-B: exact relocation into existing greeting navigation and traversal owners.
+        for path, (previous, replacement) in {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": (
+                "0c9bf36aad8f4cba2d996be835ae14d731ecd17d", "a1cb58a1eaecb734a48a58656e4bdd454b52466d"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSayHiNavigationFlowController.kt": (
+                "a2b8bb566c4e3a819e0ce332c11c130055a0366e", "a879a36bc84e4a7533a2ada6987c88494d023d21"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoReceivedGreetingsEntrySearchController.kt": (
+                "7d344a81f7fd324d09dd41c6520515ab42d4d608", "45683b9237ef35a3ab7c767fb646f814f2ee3629"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSayHiTraversalState.kt": (
+                "8d5daa83fe133cc685494460d0c786b0d9dd9590", "b0120b7e9a07170fe5063a529a04867334bc92a9"),
+        }.items():
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = replacement
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 
