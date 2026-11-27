@@ -354,6 +354,36 @@ class ChatMessageReadCoordinatorTest {
     }
 
     @Test
+    fun rejectedStructureReadRetiresQueuedSnapshotWhenOwnerRequestsFreshProof() {
+        val first = snapshot("send-proof")
+        val queued = snapshot("old-queued-page")
+        val scheduler = FakeScheduler()
+        val port = TestMessagePort()
+        var rejected = 0
+        var delivered = 0
+        val coordinator = coordinator(
+            scheduler = scheduler,
+            port = port,
+            inspect = { first },
+            current = { _, _, _ -> false },
+            onResult = { _, _, _ -> delivered++ },
+            onRejected = { rejected++; true }
+        )
+        coordinator.request(first)
+        coordinator.request(queued)
+        val callback = requireNotNull(port.pendingCallback)
+        callback(batch())
+        scheduler.runNext(0L)
+        assertEquals(1, rejected)
+        assertEquals(0, delivered)
+        assertEquals(listOf(first), port.requestedSnapshots)
+        assertFalse(coordinator.isInFlight)
+        callback(batch())
+        assertEquals(1, rejected)
+        assertTrue(scheduler.pendingDelays().isEmpty())
+    }
+
+    @Test
     fun receivedGreetingsReadOnlyResultDoesNotDrainQueuedPrivateSnapshotWhenOwnerSaysHold() {
         val first = snapshot("greetings-detail")
         val pending = snapshot("private-detail")
@@ -384,7 +414,8 @@ class ChatMessageReadCoordinatorTest {
         shouldDrain: () -> Boolean = { true },
         onResult: (ChatPageSnapshot, ChatMessageBatch, ChatPageSnapshot) -> Unit = { _, _, _ -> },
         onTimeout: (Long) -> Unit = {},
-        onFailure: () -> Unit = {}
+        onFailure: () -> Unit = {},
+        onRejected: () -> Boolean = { false }
     ) = ChatMessageReadCoordinator(
         scheduler = scheduler,
         messagePort = port,
@@ -394,7 +425,8 @@ class ChatMessageReadCoordinatorTest {
         shouldDrainPendingSnapshot = shouldDrain,
         onValidatedResult = onResult,
         onTimeout = onTimeout,
-        onAdapterFailure = onFailure
+        onAdapterFailure = onFailure,
+        onRejectedResult = onRejected
     )
 
     private fun snapshot(activity: String) = ChatPageSnapshot(

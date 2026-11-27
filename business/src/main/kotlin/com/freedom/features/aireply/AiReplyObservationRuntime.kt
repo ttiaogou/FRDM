@@ -413,12 +413,22 @@ class AiReplyObservationRuntime(
                     "AI 模式消息读取超时：异步适配器未在 ${timeoutMs}ms 内返回；" +
                         "已丢弃该读取代次并安排新鲜页面复核"
                 )
-                scheduleMessageListRetry()
+                if (sessionRunStarted && isSendConfirmationPending()) {
+                    scheduleDeferredSendProofRecheck("STRUCTURE_CALLBACK_TIMEOUT")
+                } else scheduleMessageListRetry()
             },
             onAdapterFailure = {
                 onLog("AI 模式消息读取失败：读取适配器异常；未保留消息正文")
                 cancelMessageReadRetry()
-                schedulePrivatePreSendReadRetry("MESSAGE_READ_ADAPTER_FAILURE")
+                if (sessionRunStarted && isSendConfirmationPending()) {
+                    scheduleDeferredSendProofRecheck("STRUCTURE_REQUEST_FAILED")
+                } else schedulePrivatePreSendReadRetry("MESSAGE_READ_ADAPTER_FAILURE")
+            },
+            onRejectedResult = {
+                if (sessionRunStarted && isSendConfirmationPending()) {
+                    scheduleDeferredSendProofRecheck("STRUCTURE_RESULT_REJECTED")
+                    true
+                } else false
             }
         )
     }
@@ -5085,6 +5095,7 @@ class AiReplyObservationRuntime(
         batch: ChatMessageBatch,
         active: ChatPageSnapshot
     ): Boolean {
+        if (batch.status == MessageReadStatus.WINDOW_STALE) return false
         val expectedWindowSessionKey = windowSessionKey(snapshot)
         if (currentSessionBinding?.observedDetailTarget != null) {
             return observedPrivateDetailVerified(snapshot) && observedPrivateDetailVerified(active) &&
@@ -5179,6 +5190,7 @@ class AiReplyObservationRuntime(
         if (!receivedGreetingsTaskActive && greetingChatBinding == null &&
             currentSessionWindowKey != null && currentSessionWindowKey != sourceWindowKey
         ) return "ACTIVE_WINDOW_BINDING_MISMATCH"
+        if (batch.status == MessageReadStatus.WINDOW_STALE) return "OCR_READ_INVALIDATED"
         if (batch.windowSessionKey != sourceWindowKey) return "OCR_BATCH_WINDOW_MISMATCH"
         return "GATE_REJECTED_UNCLASSIFIED"
     }
@@ -5192,6 +5204,9 @@ class AiReplyObservationRuntime(
         if (!isAiReplyActive() || !sessionRunStarted || !isSendConfirmationPending() ||
             recoveryContext.pending
         ) return
+        // Preserve an already queued proof read; repeated passive events or failures must
+        // not replace its timer or burn through the backoff without a fresh observation.
+        if (hasProtectedSendInspection()) return
         val attempt = ++deferredSendProofRetryAttempt
         val delayMs = RecoveryScheduler.readOnlyRetryDelayMs(attempt)
         onLog("AI 发送确认[READ_ONLY_RETRY_SCHEDULED] reason=$reason；attempt=$attempt；delayMs=$delayMs；保留发送检查点，不重发")
@@ -5637,7 +5652,11 @@ class AiReplyObservationRuntime(
                     if (isAiReplyActive() && sessionRunStarted && !recoveryContext.pending &&
                         ownsTask(RECEIVED_GREETINGS_TASK_ID)
                     ) {
-                        scheduleFullInspectionAfter(GREETING_UNKNOWN_SEND_READ_ONLY_RECHECK_DELAY_MS)
+                        if (isSendConfirmationPending()) {
+                            scheduleDeferredSendProofRecheck("GREETING_SEND_CONFIRMATION_EVIDENCE_UNAVAILABLE")
+                        } else {
+                            scheduleFullInspectionAfter(GREETING_UNKNOWN_SEND_READ_ONLY_RECHECK_DELAY_MS)
+                        }
                     }
                     return true
                 }
@@ -5690,6 +5709,10 @@ class AiReplyObservationRuntime(
 
     private fun handleMessageReadBatch(batch: ChatMessageBatch, snapshot: ChatPageSnapshot) {
         if (isPrivateFollowUpActive()) return
+        if (batch.status == MessageReadStatus.WINDOW_STALE) {
+            if (isSendConfirmationPending()) scheduleDeferredSendProofRecheck("OCR_READ_INVALIDATED")
+            return
+        }
         // A busy adapter did not perform recognition. It is never a draft/send/sample batch.
         if (batch.ocrAdmissionDeferred) {
             deferBusyOcrResult(batch)

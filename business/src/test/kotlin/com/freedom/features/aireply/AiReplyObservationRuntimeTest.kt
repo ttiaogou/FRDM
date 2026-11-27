@@ -5879,7 +5879,16 @@ class AiReplyObservationRuntimeTest {
         // An independently restored original binding is allowed to resume the
         // unchanged OCR/send matcher on the next timer, without input or a new gesture.
         bindingField.set(runtime, originalBinding)
+        port.invalidateNextOcrRead = true
         scheduler.runNextWithDelay(1_000L)
+        runUntil(scheduler, 50) {
+            logs.any { it.contains("AI 发送确认[OCR_REJECTED] reason=OCR_READ_INVALIDATED") }
+        }
+        assertEquals(0, confirmationCalls)
+        assertEquals(gesturesBefore, gestureCalls)
+        assertEquals(0, port.navigateBackCalls)
+        assertTrue(scheduler.hasPendingDelay(2_000L))
+        scheduler.runNextWithDelay(2_000L)
         runUntil(scheduler, 50) { confirmationCalls > 0 }
         assertTrue(logs.any { it.contains("AI 发送确认[READ_ONLY_RECHECK]") })
         assertTrue(logs.any { it.contains("AI 发送确认[OCR_REVALIDATED]") })
@@ -7895,6 +7904,50 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("AI 发送确认[RECHECK_SCHEDULED]") })
         assertTrue(scheduler.hasPendingDelay(500L))
         assertEquals(0, port.greetingDetailCompletionCalls)
+        assertEquals(0, port.navigateBackCalls)
+    }
+
+    @Test
+    fun l10cGreetingEngineFaultKeepsPendingSendUntilFreshProofAndSingleSafeReturn() {
+        val scheduler = FakeScheduler()
+        val logs = ArrayList<String>()
+        val port = greetingDraftTestPort().apply { invalidateNextOcrRead = true }
+        var pending = true
+        var confirmationCalls = 0
+        var draftCalls = 0
+        val runtime = greetingRuntimeFixture(
+            scheduler, port, logs, greetingDraft = { draftCalls++; true },
+            sendConfirmation = {
+                confirmationCalls++
+                pending = false
+                com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED
+            },
+            consumeSendId = { "l10c-greeting-confirmed" },
+            sendConfirmationPending = { pending }
+        )
+        val flow = activateGreetingTestFlow(runtime)
+        readGreetingTestMessages(runtime, port.page)
+        runUntil(scheduler, 30) {
+            logs.any { it.contains("AI 发送确认[OCR_REJECTED] reason=OCR_READ_INVALIDATED") }
+        }
+        assertTrue(pending)
+        assertTrue(flow.ownsTask())
+        assertEquals(0, confirmationCalls)
+        assertEquals(0, draftCalls)
+        assertEquals(0, port.greetingSendJournalWrites)
+        assertEquals(0, port.greetingDetailCompletionCalls)
+        assertTrue(scheduler.hasPendingDelay(500L))
+        repeat(4) { runtime.schedule(event(AccessibilityEventType.WINDOW_CONTENT_CHANGED)) }
+        assertTrue(scheduler.hasPendingDelay(500L))
+        scheduler.runNextWithDelay(500L)
+        // The scheduled read may already have started. The coordinator coalesces duplicates.
+        readGreetingTestMessages(runtime, port.page)
+        runUntilShortestDelay(scheduler, 40) { port.greetingDetailCompletionCalls == 1 }
+        assertFalse(pending)
+        assertEquals(1, confirmationCalls)
+        assertEquals(0, draftCalls)
+        assertEquals(1, port.greetingSendJournalWrites)
+        assertEquals(1, port.greetingDetailSuccessfulCompletions)
         assertEquals(0, port.navigateBackCalls)
     }
 
@@ -10689,6 +10742,7 @@ class AiReplyObservationRuntimeTest {
         var ocrAsyncReadRequests = 0
         var deferNextOcrRead = false
         var deferNextOcrAdmission = false
+        var invalidateNextOcrRead = false
         private var deferredOcrRead: Pair<ChatPageSnapshot, (ChatMessageBatch) -> Unit>? = null
         fun completeDeferredOcrRead() {
             val pending = requireNotNull(deferredOcrRead)
@@ -11031,7 +11085,16 @@ class AiReplyObservationRuntimeTest {
             onResult: (ChatMessageBatch) -> Unit
         ) {
             ocrAsyncReadRequests++
-            if (deferNextOcrAdmission) {
+            if (invalidateNextOcrRead) {
+                invalidateNextOcrRead = false
+                onResult(readRecentMessages(page, limit).copy(
+                    status = MessageReadStatus.WINDOW_STALE,
+                    windowSessionKey = null, messages = emptyList(),
+                    ocrAttempted = false, ocrTargets = emptyList(),
+                    messageListUnavailableReason = "OCR_READ_INVALIDATED",
+                    ocrDebugTextByRowIndex = null
+                ))
+            } else if (deferNextOcrAdmission) {
                 deferNextOcrAdmission = false
                 onResult(readRecentMessages(page, limit).copy(
                     ocrAdmissionDeferred = true, ocrAttempted = false,

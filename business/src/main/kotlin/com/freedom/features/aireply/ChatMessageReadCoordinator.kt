@@ -36,7 +36,8 @@ internal class ChatMessageReadCoordinator(
     private val onTimeout: (timeoutMs: Long) -> Unit,
     private val onAdapterFailure: () -> Unit,
     private val timeoutMs: Long = DEFAULT_CALLBACK_TIMEOUT_MS,
-    private val messageLimit: Int = DEFAULT_MESSAGE_LIMIT
+    private val messageLimit: Int = DEFAULT_MESSAGE_LIMIT,
+    private val onRejectedResult: () -> Boolean = { false }
 ) {
     companion object {
         const val DEFAULT_CALLBACK_TIMEOUT_MS = 65_000L
@@ -244,6 +245,11 @@ internal class ChatMessageReadCoordinator(
             }
             if (activeSnapshot != null && isResultCurrent(requestedSnapshot, batch, activeSnapshot)) {
                 onValidatedResult(requestedSnapshot, batch, activeSnapshot)
+            } else if (onRejectedResult()) {
+                // The owner requested an independent fresh observation. Never replay a
+                // queued snapshot into that recovery transaction.
+                pendingSnapshot = null
+                return
             }
         }
 
