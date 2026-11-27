@@ -44,6 +44,31 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
                 code[path] = code[path].replace(old, new)
                 self.assertTrue(guard.paired_ai_task_boundary_violations(code))
 
+    def test_l07_guard_rejects_child_and_recovery_lifecycle_bypasses(self):
+        runtime = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        traversal = "business/src/main/kotlin/com/freedom/features/aireply/PrivateMessagesTraversalTaskExecutor.kt"
+        adapter = "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt"
+        for path, old, new in (
+            (runtime, "checkpoint.reconciliationRequired || checkpoint.revision != 0L || sendId == null",
+             "false"),
+            (runtime, "val fresh = privateFollowUpReturnedSnapshot(child) ?: run {",
+             "val fresh = inspectFreshPageSnapshot() ?: run {"),
+            (runtime, "if (!checkpointWritten) {", "if (false) {"),
+            (runtime, "if (isPrivateFollowUpActive() || pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())) {",
+             "if (false) {"),
+            (traversal, "if (scanContinuityRecoveryPending && !cleanReadViewport) {",
+             "if (scanContinuityRecoveryPending) {"),
+            (traversal, "unreadBoundaryStabilityCount < UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS",
+             "false"),
+            (adapter, "if (!persistPrivateFollowUpStep(child, previous)) {",
+             "if (false) {"),
+        ):
+            with self.subTest(path=path, old=old):
+                code = dict(self.recovery_code)
+                self.assertIn(old, code[path])
+                code[path] = code[path].replace(old, new)
+                self.assertTrue(guard.paired_ai_task_boundary_violations(code))
+
     def test_automatic_recovery_hard_guards_reject_old_handoff_interfaces_and_files(self):
         runtime = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
         for token in (

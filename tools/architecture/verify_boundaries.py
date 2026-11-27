@@ -1922,6 +1922,60 @@ def paired_ai_task_boundary_violations(code_by_path: dict[str, str]) -> list[str
                   "lifecycle = Lifecycle.SUSPENDED")
     require_order(flow, "evaluatePageSnapshot", "lifecycle.awaitingNormalInboxAfterReturn",
                   "!lifecycle.isActive", "!lifecycle.ownsTask()", "executor.evaluatePageProgress(")
+    # L07: protect the child lifecycle, not a second execution authority. A positive
+    # adapter result must be followed by the original-chat proof and durable commit.
+    traversal = prefix + "PrivateMessagesTraversalTaskExecutor.kt"
+    require_order(runtime, "startPrivateFollowUp",
+                  "privateFollowUpTarget(snapshot)", "checkpoint.reconciliationRequired",
+                  "checkpoint.revision != 0L", "sendId == null",
+                  "port.beginPrivateFollowUp(", "beforeStep =",
+                  "!ownsPrivateFollowUp(child)", "!canPerformPrivateMessagesUiAction()",
+                  "contactMessageLedger.updateFollowUpCheckpoint(")
+    require_order(adapter, "submitPrivateFollowUpStep", "!followUpCurrent(child)",
+                  "!isBoundAiReplyUiOperationOwned(child.target.taskLease)",
+                  "persistPrivateFollowUpStep(child, previous)", "action { status ->")
+    require_order(runtime, "runPrivateFollowUpObservation", "!ownsPrivateFollowUp(child)",
+                  "port.observe()", "scheduleFullInspectionAfter(500L)",
+                  "if (activePrivateFollowUp !== child) return",
+                  "if (!port.privateFollowUpSucceeded())",
+                  "val fresh = if (interception) privateFollowUpReturnedSnapshot(child) else null",
+                  "contactMessageLedger.followUpCheckpoint(child.contactKey) == child.checkpoint",
+                  "val fresh = privateFollowUpReturnedSnapshot(child)",
+                  "contactMessageLedger.confirmImageSent(", "if (!confirmed)",
+                  "activePrivateFollowUp = null", "pendingPrivateFollowUpEnabled(child.contactKey)",
+                  "finishConfirmedPrivateSend(")
+    admission = require_order(
+        traversal, "evaluateUnreadAdmission", "reconcileAdmittedUnread(snapshot)",
+        "val cleanReadViewport =", "if (scanContinuityRecoveryPending && !cleanReadViewport)",
+        "val signature = buildUnreadBoundarySignature(snapshot)",
+        "unreadBoundaryStabilityCount < UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS",
+        "confirmPhysicalEndForReturnTraversal()", "recordVerifiedViewport(snapshot)",
+    )
+    prefix_before_read = admission.split("val cleanReadViewport =", 1)[0]
+    if re.search(r"\bif\s*\(\s*(?:scanContinuityRecoveryPending|incompleteUnreadRelocationActive)\b",
+                 prefix_before_read):
+        issues.append("L07 restored positioning must not bypass fresh READ evidence")
+    require_order(runtime, "continueConfirmedPrivateCompletion", "currentSessionWindowKey != windowSessionKey(snapshot)",
+                  "!isExpectedPrivateSessionDetail(snapshot)", "pendingPrivateFollowUpEnabled(contactKey)",
+                  "startPrivateFollowUp(", "finishConfirmedPrivateSend(")
+    require_order(runtime, "finishConfirmedPrivateSend", "isPrivateFollowUpActive()",
+                  "pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())",
+                  "privateMessagesCheckpointRepository?.save(",
+                  "if (!checkpointWritten)", "privateQuotaReturnReady = true", "scheduleReturnToSessionList(")
+    back = require_order(runtime, "scheduleReturnToSessionList",
+                         "isPrivateFollowUpActive()", "pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())",
+                         "isPrivateFollowUpActive()", "pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())",
+                         "readPageSnapshot(AiReplyPageReadPurpose.RETURN_NAVIGATION_VERIFY)",
+                         "chatSessionManagementPort.navigateBackToSessionList()")
+    # The second check must actually veto the delayed dispatch, rather than merely
+    # logging that a child is still active. The behavioral tests cover timer races.
+    if back.count("pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())") < 2:
+        issues.append("L07 BACK must recheck pending child immediately before dispatch")
+    require_order(runtime, "handlePrivateQuotaBoundary", "isPrivateFollowUpActive()",
+                  "snapshot.pageKind != ChatPageKind.CHAT_LIST",
+                  "if (privateQuotaReturnReady)", "ensureAndroidRecoveryReady(",
+                  "privateSliceQuota.record(receipt)", "startReceivedGreetingsTask(")
+
     for path in (runtime, flow, controller):
         code = code_by_path.get(path, "")
         for token in ("privateRoundCompletedForGreetings", "pollingRoundPending",

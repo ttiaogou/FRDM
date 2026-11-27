@@ -3858,10 +3858,17 @@ class AiReplyObservationRuntimeTest {
         assertM04dPrivateFollowUp(imageConfirmed = true, retryCompletion = true)
     }
 
+    @Test
+    fun l07fCombinedChildRecoveryRejectsWrongReturnAndPreservesSingleSend() {
+        assertM04dPrivateFollowUp(imageConfirmed = true, retryInterception = true,
+            retryCompletion = true, verifyWrongReturn = true)
+    }
+
     private fun assertM04dPrivateFollowUp(
         imageConfirmed: Boolean,
         retryInterception: Boolean = false,
-        retryCompletion: Boolean = false
+        retryCompletion: Boolean = false,
+        verifyWrongReturn: Boolean = false
     ) {
         val scheduler = FakeScheduler()
         val port = FakeChatPort().apply {
@@ -4053,7 +4060,24 @@ class AiReplyObservationRuntimeTest {
                 assertTrue(logs.any { it.contains("INTERCEPTION_RECONCILE_RESTART") })
             }
             if (retryCompletion) failCompletionSave = true
-            result = true
+            if (verifyWrongReturn) {
+                val original = port.page
+                val lease = tasks.currentLease()
+                port.page = original.copy(chatTitleText = "Different contact")
+                result = true
+                runUntilShortestDelay(scheduler, 30) {
+                    logs.any { it.contains("PRIVATE_FOLLOW_UP RETURN_NOT_CONFIRMED") }
+                }
+                assertEquals(0, port.navigateBackCalls)
+                assertEquals(1, requireNotNull(saved).unfinishedSessions.size)
+                assertEquals(0, completionSaveFailures)
+                assertEquals(lease, tasks.currentLease())
+                assertEquals(com.freedom.features.aireply.domain.contact.ContactPendingRecoveryAction.ENABLE_INTERCEPTION,
+                    ledgerRepo.loadAll().single().pendingRecoveryAction)
+                // Only the original chat may retire the child. No new gesture,
+                // draft or adapter begin should be necessary after it reappears.
+                port.page = original
+            } else result = true
             if (retryCompletion) {
                 runUntilShortestDelay(scheduler, 30) { completionSaveFailures == 1 }
                 assertEquals(0, port.navigateBackCalls)
@@ -4069,7 +4093,7 @@ class AiReplyObservationRuntimeTest {
             assertEquals("verified-send-receipt", saved?.lastSuccessfulTaskId)
             if (retryCompletion) {
                 assertEquals(setOf(false, true), rejectedAdmissions)
-                assertEquals(listOf(false, true), actions)
+                assertEquals(if (retryInterception) listOf(false, true, true) else listOf(false, true), actions)
                 assertEquals(1, ledgerRepo.loadAll().single().confirmedTextCount)
                 val returned = ChatPageSnapshot(
                     packageName = "com.immomo.momo", activityClass = "MaintabActivity",

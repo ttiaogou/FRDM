@@ -50,6 +50,31 @@ class MomoInterceptionRecoveryPolicyTest {
         }
     }
 
+    @Test fun delayedSettingsAndRejectedToggleReconcileThroughOriginalChat() {
+        var verifiedOn = false
+        val sequence = listOf(
+            Page.ORIGINAL_CHAT to Action.OPEN_SETTINGS,
+            Page.UNKNOWN to Action.WAIT,
+            Page.SETTINGS_IDENTITY_UNCONFIRMED to Action.WAIT,
+            Page.SETTINGS_STATE_UNKNOWN to Action.WAIT,
+            Page.SETTINGS_OFF to Action.OPEN_CONTROL,
+            Page.POPUP_SOURCE_UNCONFIRMED to Action.WAIT,
+            Page.POPUP_OFF to Action.ENABLE,
+            Page.POPUP_STATE_UNKNOWN to Action.WAIT,
+            Page.POPUP_OFF to Action.ENABLE,
+            Page.POPUP_ON to Action.DISMISS,
+            Page.UNKNOWN to Action.WAIT,
+            Page.SETTINGS_ON to Action.BACK,
+            Page.ORIGINAL_CHAT to Action.COMPLETE
+        )
+        for ((page, expected) in sequence) {
+            val decision = policy.reconcile(page, verifiedOn)
+            assertEquals("page=$page", expected, decision.action)
+            verifiedOn = decision.verifiedOn
+            if (expected == Action.COMPLETE) assertTrue(verifiedOn)
+        }
+    }
+
     @Test fun unknownHoldsProofWithoutAuthorizingAnyGesture() {
         val waiting = policy.reconcile(Page.UNKNOWN, true)
         assertEquals(Action.WAIT, waiting.action)
