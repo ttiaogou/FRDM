@@ -16,7 +16,6 @@ import com.freedom.application.ports.RunDiagnosticsPort
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.ArrayDeque
@@ -38,6 +37,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
     private const val HISTORY_LIMIT = 20
     private const val HISTORY_TOTAL_BYTES = 64L * 1024L * 1024L
     private const val MAX_RECENT_EVENTS = 512
+    private const val WRITER_QUEUE_CAPACITY = 1024
     private const val DEDUP_WINDOW_MS = RunLogBudgetPolicy.DEDUPLICATION_WINDOW_MS
     private const val MARKER_FILE = "active_run.json"
     private const val AI_CONTEXT_RECORD_LIMIT = 512 * 1024
@@ -56,8 +56,12 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         val startedAt: Long,
         val directory: File,
         var nextSequence: Long = 1L,
-        var reservedEventBytes: Long = 0L,
+        val rollingStore: RunEventRollingStore = RunEventRollingStore(directory),
         var writtenEventBytes: Long = 0L,
+        var normalEvictedEvents: Long = 0L,
+        var normalEvictedBytes: Long = 0L,
+        var queueDroppedEvents: Long = 0L,
+        var budgetDroppedEvents: Long = 0L,
         var acceptedEvents: Long = 0L,
         var writtenEvents: Long = 0L,
         var errorEvents: Long = 0L,
@@ -101,7 +105,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         1,
         0L,
         TimeUnit.MILLISECONDS,
-        ArrayBlockingQueue(1024),
+        ArrayBlockingQueue(WRITER_QUEUE_CAPACITY),
         { runnable -> Thread(runnable, "Freedom-RunDiagnosticsWriter").apply { isDaemon = true } },
         ThreadPoolExecutor.AbortPolicy()
     )
@@ -272,6 +276,10 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             state.aiContextDroppedRecords++
             return
         }
+        if (!hasQueueRoom(RunEventRollingStore.Lane.NORMAL)) {
+            state.aiContextDroppedRecords++
+            return
+        }
         state.aiContextReservedBytes += bytes
         try {
             writer.execute {
@@ -287,6 +295,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                 }
             }
         } catch (_: RejectedExecutionException) {
+            state.aiContextReservedBytes -= bytes
             state.aiContextDroppedRecords++
         }
     }
@@ -405,7 +414,6 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                 result = result,
                 reason = reason
             )
-            state.reservedEventBytes += RunDiagnosticEventJsonCodec.encode(finishEvent).toByteArray(Charsets.UTF_8).size.toLong() + 1L
             state.acceptedEvents++
             addRecent(state, finishEvent)
             activeRun = null
@@ -415,6 +423,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         val finalize = Runnable {
             try {
                 appendEventLine(state, finishEvent)
+                sealEvents(state.directory)
                 val finishedAt = System.currentTimeMillis()
                 val storedEvents = readEvents(state.directory)
                 val reportEvents = if (storedEvents.isNotEmpty()) storedEvents else state.recentEvents.toList()
@@ -426,9 +435,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                         it.level == RunLogLevel.WARN && !RunDiagnosticAnalyzer.isPreviousRunRecoveryEvent(it)
                     }.toLong()
                 )
-                File(state.directory, "diagnostic_counters.json").writeText(
-                    RunDiagnosticEventJsonCodec.counters(reportCounters).toString(), Charsets.UTF_8
-                )
+                writeCounterSnapshot(state.directory, RunDiagnosticEventJsonCodec.counters(reportCounters).toString())
                 val baseReport = RunDiagnosticAnalyzer.analyze(
                     runId = state.runId,
                     result = result,
@@ -467,7 +474,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                         .put("directory", state.runId)
                 )
                 runCatching { appendCompletionSummary(report) }
-                runCatching { pruneHistory() }
+                runCatching { pruneHistory(state.runId) }
             } catch (error: Exception) {
                 synchronized(this) { state.writeFailures++ }
                 runCatching {
@@ -476,7 +483,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                         result = "DIAGNOSTIC_FINALIZATION_FAILED",
                         startedAtEpochMs = state.startedAt,
                         finishedAtEpochMs = System.currentTimeMillis(),
-                        events = state.recentEvents.toList(),
+                        events = readEvents(state.directory).ifEmpty { state.recentEvents.toList() },
                         counters = counters(state)
                     ).copy(
                         conclusion = "诊断封存过程发生异常：${error.javaClass.simpleName}。原始运行事件仍保留在本地目录，报告可能不完整。"
@@ -519,9 +526,19 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         safeDirectory.mkdirs()
         val startedAt = marker.optLong("startedAtEpochMs", safeDirectory.lastModified())
         val finishedAt = System.currentTimeMillis()
-        appendRecoveryEvent(safeDirectory, runId, finishedAt)
+        // The process may have stopped before the canonical compatibility file was sealed.
+        val sealed = runCatching { sealEvents(safeDirectory) }.isSuccess
+        // Never create a canonical file containing only a recovery marker if segment sealing
+        // failed: that would hide the original spool. Analyze surviving sources instead.
+        val recoveryMarkerWritten = sealed && runCatching {
+            if (readEvents(safeDirectory).none { it.eventType == "previous_run_recovered_uncleanly" }) {
+                appendRecoveryEvent(safeDirectory, runId, finishedAt)
+            }
+        }.isSuccess
         val recoveredEvents = readEvents(safeDirectory)
-        val reconstructed = countersFromEvents(safeDirectory, recoveredEvents)
+        val reconstructed = countersFromEvents(safeDirectory, recoveredEvents).let {
+            if (recoveryMarkerWritten) it else it.copy(writeFailures = it.writeFailures + 1)
+        }
         val baseReport = RunDiagnosticAnalyzer.analyze(
             runId = runId,
             result = "ABORTED_UNCLEANLY",
@@ -530,7 +547,8 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             events = recoveredEvents,
             counters = reconstructed
         ).copy(
-            conclusion = "上一次进程未留下正常结束标记。此报告由下次启动时恢复生成；进程终止前尚在异步队列中的少量记录可能未落盘。"
+            conclusion = "上一次进程未留下正常结束标记。此报告由下次启动时恢复生成；异步队列及最近计数检查点可能不完整。" +
+                if (recoveryMarkerWritten) "" else "分段封存或恢复标记写入失败，保留可读取的原始证据。"
         )
         val report = RunDiagnosticHistoryAnalyzer.enrich(
             baseReport,
@@ -549,7 +567,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                 .put("result", "ABORTED_UNCLEANLY")
                 .put("directory", runId)
         )
-        pruneHistory()
+        pruneHistory(runId)
         return true
     }
 
@@ -641,20 +659,6 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             val jsonLine = RunDiagnosticEventJsonCodec.encode(boundedEvent)
             val originalBytes = RunDiagnosticEventJsonCodec.encode(event).toByteArray(Charsets.UTF_8).size + 1
             val safeBytes = jsonLine.toByteArray(Charsets.UTF_8).size + 1
-            val critical = event.level == RunLogLevel.ERROR || event.level == RunLogLevel.FATAL
-            val limit = RunLogBudgetPolicy.MAX_RUN_EVENT_BYTES.toLong() +
-                if (critical) RunLogBudgetPolicy.MAX_CRITICAL_EVENT_EXTRA_BYTES.toLong() else 0L
-            if (state.reservedEventBytes + safeBytes > limit) {
-                state.droppedEvents++
-                state.droppedBytes += originalBytes
-                if (detailBytesToReserve > 0L) {
-                    state.errorDetailDroppedCount++
-                    state.errorDetailDroppedBytes += RunLogBudgetPolicy.utf8Size(event.errorDetail.orEmpty()).toLong()
-                }
-                persistCountersSnapshot(state, force = state.droppedEvents == 1L || state.droppedEvents % 25L == 0L)
-                return
-            }
-            state.reservedEventBytes += safeBytes
             state.reservedErrorDetailBytes += detailBytesToReserve
             state.acceptedEvents++
             if (event.level == RunLogLevel.ERROR || event.level == RunLogLevel.FATAL) state.errorEvents++
@@ -664,7 +668,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                 state.truncatedBytes += (originalBytes - safeBytes).toLong()
             }
             addRecent(state, boundedEvent)
-            enqueueEvent(state, boundedEvent, critical)
+            enqueueEvent(state, boundedEvent)
             if (state.acceptedEvents % 50L == 0L) persistCountersSnapshot(state, force = true)
         }
     }
@@ -690,87 +694,140 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         )
         state.pendingDuplicateCount = 0L
         state.pendingDuplicateType = ""
-        val bytes = RunDiagnosticEventJsonCodec.encode(summary).toByteArray(Charsets.UTF_8).size + 1
-        if (state.reservedEventBytes + bytes <= RunLogBudgetPolicy.MAX_RUN_EVENT_BYTES.toLong()) {
-            state.reservedEventBytes += bytes
-            state.acceptedEvents++
-            addRecent(state, summary)
-            enqueueEvent(state, summary, false)
-        } else {
-            state.droppedEvents++
-            state.droppedBytes += bytes
-            persistCountersSnapshot(state, force = state.droppedEvents == 1L || state.droppedEvents % 25L == 0L)
-        }
+        state.acceptedEvents++
+        addRecent(state, summary)
+        enqueueEvent(state, summary)
     }
 
-    private fun enqueueEvent(state: ActiveRun, event: RunDiagnosticEvent, critical: Boolean) {
+    private fun lane(event: RunDiagnosticEvent): RunEventRollingStore.Lane = when {
+        event.eventType == "run_started" || event.eventType == "run_finished" ->
+            RunEventRollingStore.Lane.LIFECYCLE
+        event.level == RunLogLevel.ERROR || event.level == RunLogLevel.FATAL ->
+            RunEventRollingStore.Lane.CRITICAL
+        event.level == RunLogLevel.WARN -> RunEventRollingStore.Lane.WARNING
+        else -> RunEventRollingStore.Lane.NORMAL
+    }
+
+    /** One bounded FIFO writer; reserve capacity for more severe events and the seal barrier. */
+    private fun hasQueueRoom(lane: RunEventRollingStore.Lane): Boolean =
+        RunEventRollingStore.canEnqueue(lane, writer.queue.remainingCapacity())
+
+    private fun enqueueEvent(state: ActiveRun, event: RunDiagnosticEvent) {
         val task = Runnable {
-            appendEventLine(state, event)
-            event.errorDetail?.let { appendErrorDetailLine(state, event, it) }
+            if (appendEventLine(state, event)) {
+                event.errorDetail?.let { appendErrorDetailLine(state, event, it) }
+            }
         }
+        // All producers use the existing manager lock. Neither budget pressure nor a full
+        // queue is allowed to run a file write on the accessibility/business caller.
         try {
+            if (!hasQueueRoom(lane(event))) throw RejectedExecutionException("diagnostic queue reserve")
             writer.execute(task)
         } catch (_: RejectedExecutionException) {
-            if (critical) {
-                // Critical evidence takes priority over normal queue pressure.
-                task.run()
-            } else {
-                synchronized(this) {
-                    state.droppedEvents++
-                    state.droppedBytes += RunDiagnosticEventJsonCodec.encode(event).toByteArray(Charsets.UTF_8).size + 1
-                    persistCountersSnapshot(state, force = true)
-                }
+            synchronized(this) {
+                state.queueDroppedEvents++
+                recordDroppedEvent(state, event)
             }
         }
     }
 
+    private fun recordDroppedEvent(state: ActiveRun, event: RunDiagnosticEvent) {
+        state.droppedEvents++
+        state.droppedBytes += RunDiagnosticEventJsonCodec.encode(event).toByteArray(Charsets.UTF_8).size + 1L
+        event.errorDetail?.let { detail ->
+            state.errorDetailDroppedCount++
+            state.errorDetailDroppedBytes += RunLogBudgetPolicy.utf8Size(detail)
+            val reserved = errorDetailLine(event, detail).toByteArray(Charsets.UTF_8).size + 1L
+            state.reservedErrorDetailBytes = (state.reservedErrorDetailBytes - reserved).coerceAtLeast(0L)
+        }
+    }
+
     private fun enqueueFinalizer(task: Runnable) {
+        // The active run is already detached; no new run can enter while finalization is
+        // pending. The reserved slot normally suffices. Only the finish scheduler may wait
+        // for queue space, never execute the finalizer concurrently with the writer.
         try {
             writer.execute(task)
         } catch (_: RejectedExecutionException) {
-            Thread({
-                runCatching { writer.queue.put(task) }
-                    .onFailure { task.run() }
-            }, "Freedom-Diagnostics-Finalizer").apply { isDaemon = true; start() }
+            var interrupted = false
+            while (true) {
+                try {
+                    writer.queue.put(task)
+                    break
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt()
         }
     }
 
     private fun persistCountersSnapshot(state: ActiveRun, force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && now - state.lastCounterPersistAtMs < 2_000L) return
+        if (!hasQueueRoom(RunEventRollingStore.Lane.NORMAL)) return
         state.lastCounterPersistAtMs = now
         val snapshot = RunDiagnosticEventJsonCodec.counters(counters(state)).toString()
         try {
             // Never perform counter-file I/O on the accessibility callback/UI thread.
             writer.execute {
                 runCatching {
-                    File(state.directory, "diagnostic_counters.json").writeText(snapshot, Charsets.UTF_8)
+                    writeCounterSnapshot(state.directory, snapshot)
                 }.onFailure {
                     synchronized(this) { state.writeFailures++ }
                 }
             }
         } catch (_: RejectedExecutionException) {
+            // A deferred optional checkpoint is not a disk write failure.
             // The finalizer writes a fresh snapshot after draining the writer queue.
-            state.writeFailures++
         }
     }
 
-    private fun appendEventLine(state: ActiveRun, event: RunDiagnosticEvent) {
-        val file = File(state.directory, "events.jsonl")
-        runCatching {
-            val line = RunDiagnosticEventJsonCodec.encode(event) + "\n"
-            val bytes = line.toByteArray(Charsets.UTF_8).size.toLong()
-            FileOutputStream(file, true).use { stream -> stream.write(line.toByteArray(Charsets.UTF_8)) }
-            synchronized(this) {
-                state.writtenEvents++
-                state.writtenEventBytes += bytes
+    private fun writeCounterSnapshot(directory: File, snapshot: String) {
+        val temporary = File(directory, "diagnostic_counters.json.tmp")
+        try {
+            temporary.writeText(snapshot, Charsets.UTF_8)
+            java.nio.file.Files.move(temporary.toPath(), File(directory, "diagnostic_counters.json").toPath(),
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            temporary.delete()
+        }
+    }
+
+    private fun appendEventLine(state: ActiveRun, event: RunDiagnosticEvent): Boolean {
+        val line = RunDiagnosticEventJsonCodec.encode(boundEventFields(event))
+        val bytes = line.toByteArray(Charsets.UTF_8).size.toLong() + 1L
+        val outcome = state.rollingStore.append(lane(event), line)
+        synchronized(this) {
+            state.normalEvictedEvents += outcome.evictedRecords
+            state.normalEvictedBytes += outcome.evictedBytes
+            state.writtenEventBytes = (state.writtenEventBytes - outcome.evictedBytes).coerceAtLeast(0L)
+            when (outcome.status) {
+                RunEventRollingStore.Status.WRITTEN -> {
+                    state.writtenEvents++
+                    state.writtenEventBytes += bytes
+                }
+                RunEventRollingStore.Status.BUDGET_REJECTED -> {
+                    state.budgetDroppedEvents++
+                    recordDroppedEvent(state, event)
+                }
+                RunEventRollingStore.Status.WRITE_FAILED -> {
+                    state.writeFailures++
+                    recordDroppedEvent(state, event)
+                }
             }
-        }.onFailure {
-            synchronized(this) {
-                state.writeFailures++
-                state.droppedEvents++
-                state.droppedBytes += RunDiagnosticEventJsonCodec.encode(event).toByteArray(Charsets.UTF_8).size + 1L
+            if (outcome.evictedRecords > 0L || outcome.status != RunEventRollingStore.Status.WRITTEN) {
+                // Called by the writer. The optional snapshot remains asynchronous and
+                // is suppressed after detachment so it cannot follow the seal barrier.
+                if (activeRun === state) persistCountersSnapshot(state)
             }
+        }
+        return outcome.status == RunEventRollingStore.Status.WRITTEN
+    }
+
+    private fun sealEvents(directory: File) {
+        RunEventRollingStore.seal(directory) { line ->
+            runCatching { JSONObject(line).getLong("sequence") }.getOrDefault(Long.MAX_VALUE)
         }
     }
 
@@ -841,9 +898,10 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             "diagnostic_summary.txt"
         )
         val files = JSONArray()
-        names.map { File(directory, it) }.filter(File::isFile).forEach { file ->
+        (names.map { File(directory, it) } + RunEventRollingStore.sources(directory))
+            .filter(File::isFile).distinctBy { it.absolutePath }.forEach { file ->
             files.put(JSONObject()
-                .put("path", file.name)
+                .put("path", file.relativeTo(directory).invariantSeparatorsPath)
                 .put("sizeBytes", file.length())
                 .put("sha256", sha256(file)))
         }
@@ -855,6 +913,11 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                 .put("integrityScope", "listed_files_only_not_event_capture_completeness")
                 .put("byteBudgets", JSONObject()
                     .put("eventLogMaxBytes", RunLogBudgetPolicy.MAX_RUN_EVENT_BYTES + RunLogBudgetPolicy.MAX_CRITICAL_EVENT_EXTRA_BYTES)
+                    .put("normalRollingMaxBytes", RunLogBudgetPolicy.MAX_NORMAL_EVENT_BYTES)
+                    .put("normalSegmentMaxBytes", RunLogBudgetPolicy.NORMAL_EVENT_SEGMENT_BYTES)
+                    .put("warningMaxBytes", RunLogBudgetPolicy.MAX_WARNING_EVENT_BYTES)
+                    .put("criticalMaxBytes", RunLogBudgetPolicy.MAX_CRITICAL_EVENT_EXTRA_BYTES)
+                    .put("lifecycleMaxBytes", RunLogBudgetPolicy.MAX_LIFECYCLE_EVENT_BYTES)
                     .put("eventRecordMaxBytes", RunLogBudgetPolicy.MAX_RUN_EVENT_RECORD_BYTES)
                     .put("errorDetailMaxBytesPerEntry", RunLogBudgetPolicy.MAX_ERROR_DETAIL_BYTES)
                     .put("errorDetailMaxBytesTotal", RunLogBudgetPolicy.MAX_ERROR_DETAILS_TOTAL_BYTES)
@@ -893,14 +956,20 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         eventBytes = state.writtenEventBytes,
         errorDetailBytes = state.writtenErrorDetailBytes,
         errorDetailDroppedCount = state.errorDetailDroppedCount,
-        errorDetailDroppedBytes = state.errorDetailDroppedBytes
+        errorDetailDroppedBytes = state.errorDetailDroppedBytes,
+        normalEvictedEvents = state.normalEvictedEvents,
+        normalEvictedBytes = state.normalEvictedBytes,
+        retainedEvents = (state.writtenEvents - state.normalEvictedEvents).coerceAtLeast(0L),
+        queueDroppedEvents = state.queueDroppedEvents,
+        budgetDroppedEvents = state.budgetDroppedEvents
     )
 
     private fun countersFromEvents(directory: File, events: List<RunDiagnosticEvent>): RunDiagnosticCounters {
         val markerCounts = runCatching { JSONObject(File(directory, "diagnostic_counters.json").readText()) }.getOrNull()
         return RunDiagnosticCounters(
-            acceptedEvents = events.size.toLong(),
-            writtenEvents = events.size.toLong(),
+            acceptedEvents = maxOf(events.size.toLong(), markerCounts?.optLong("acceptedEvents") ?: 0L),
+            writtenEvents = maxOf(events.size.toLong() + (markerCounts?.optLong("normalEvictedEvents") ?: 0L),
+                markerCounts?.optLong("writtenEvents") ?: 0L),
             errorEvents = events.count(RunDiagnosticAnalyzer::isRuntimeFailureEvent).toLong(),
             warningEvents = events.count {
                 it.level == RunLogLevel.WARN && !RunDiagnosticAnalyzer.isPreviousRunRecoveryEvent(it)
@@ -913,22 +982,28 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             truncatedRecords = markerCounts?.optLong("truncatedRecords") ?: 0L,
             truncatedBytes = markerCounts?.optLong("truncatedBytes") ?: 0L,
             writeFailures = markerCounts?.optLong("writeFailures") ?: 0L,
-            eventBytes = File(directory, "events.jsonl").length(),
+            eventBytes = RunEventRollingStore.sources(directory).sumOf(File::length),
             errorDetailBytes = File(directory, "errors.jsonl").length(),
             errorDetailDroppedCount = markerCounts?.optLong("errorDetailDroppedCount") ?: 0L,
-            errorDetailDroppedBytes = markerCounts?.optLong("errorDetailDroppedBytes") ?: 0L
+            errorDetailDroppedBytes = markerCounts?.optLong("errorDetailDroppedBytes") ?: 0L,
+            normalEvictedEvents = markerCounts?.optLong("normalEvictedEvents") ?: 0L,
+            normalEvictedBytes = markerCounts?.optLong("normalEvictedBytes") ?: 0L,
+            retainedEvents = events.size.toLong(),
+            queueDroppedEvents = markerCounts?.optLong("queueDroppedEvents") ?: 0L,
+            budgetDroppedEvents = markerCounts?.optLong("budgetDroppedEvents") ?: 0L
         )
     }
 
     private fun readEvents(directory: File): List<RunDiagnosticEvent> {
-        val file = File(directory, "events.jsonl")
-        if (!file.isFile) return emptyList()
         val result = ArrayList<RunDiagnosticEvent>()
-        runCatching {
-            file.bufferedReader(Charsets.UTF_8).useLines { lines ->
-                lines.forEach { line ->
-                    if (line.isBlank() || result.size >= 20_000) return@forEach
-                    runCatching { RunDiagnosticEventJsonCodec.decode(JSONObject(line)) }.getOrNull()?.let(result::add)
+        RunEventRollingStore.sources(directory).forEach { file ->
+            runCatching {
+                file.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                    lines.forEach { line ->
+                        if (line.isNotBlank()) {
+                            runCatching { RunDiagnosticEventJsonCodec.decode(JSONObject(line)) }.getOrNull()?.let(result::add)
+                        }
+                    }
                 }
             }
         }
@@ -983,7 +1058,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
 
     private fun appendRecoveryEvent(directory: File, runId: String, finishedAt: Long) {
         val event = RunDiagnosticEvent(
-            sequence = 0L,
+            sequence = (readEvents(directory).maxOfOrNull { it.sequence } ?: -1L) + 1L,
             eventId = UUID.randomUUID().toString(),
             runId = runId,
             taskId = runId,
@@ -1024,15 +1099,20 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         }
     }
 
-    private fun pruneHistory() {
+    private fun pruneHistory(protectedRunId: String) {
         val directories = runsDirectory.listFiles().orEmpty()
             .filter { it.isDirectory }
-            .sortedByDescending(File::lastModified)
+            .sortedBy { File(it, "diagnostic_report.json").lastModified().takeIf { time -> time > 0L } ?: it.lastModified() }
+        var remaining = directories.size
         var totalBytes = directories.sumOf { dir -> dir.walkTopDown().filter(File::isFile).sumOf(File::length) }
-        directories.forEachIndexed { index, directory ->
-            if (index >= HISTORY_LIMIT || totalBytes > HISTORY_TOTAL_BYTES) {
-                val size = directory.walkTopDown().filter(File::isFile).sumOf(File::length)
-                if (directory.deleteRecursively()) totalBytes = (totalBytes - size).coerceAtLeast(0L)
+        for (directory in directories) {
+            if (remaining <= HISTORY_LIMIT && totalBytes <= HISTORY_TOTAL_BYTES) break
+            if (directory.name == protectedRunId || directory.name == activeRun?.runId ||
+                directory.name == finalizingRun?.runId || !File(directory, "diagnostic_report.json").isFile) continue
+            val size = directory.walkTopDown().filter(File::isFile).sumOf(File::length)
+            if (directory.deleteRecursively()) {
+                remaining--
+                totalBytes = (totalBytes - size).coerceAtLeast(0L)
             }
         }
     }

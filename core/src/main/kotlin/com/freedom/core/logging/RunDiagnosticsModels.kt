@@ -126,7 +126,13 @@ data class RunDiagnosticCounters(
     val eventBytes: Long = 0,
     val errorDetailBytes: Long = 0,
     val errorDetailDroppedCount: Long = 0,
-    val errorDetailDroppedBytes: Long = 0
+    val errorDetailDroppedBytes: Long = 0,
+    /** Intentional rotation, not a capture or write failure. */
+    val normalEvictedEvents: Long = 0,
+    val normalEvictedBytes: Long = 0,
+    val retainedEvents: Long = 0,
+    val queueDroppedEvents: Long = 0,
+    val budgetDroppedEvents: Long = 0
 )
 
 data class RunDiagnosticIssue(

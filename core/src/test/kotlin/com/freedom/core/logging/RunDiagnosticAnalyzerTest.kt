@@ -484,6 +484,18 @@ class RunDiagnosticAnalyzerTest {
         assertTrue(report.issues.none { it.code == "POSSIBLE_CROSS_PAGE_ACTION_TRACE_GAP" })
     }
 
+    @Test
+    fun l11cIntentionalNormalRotationIsNotDiagnosticDataLoss() {
+        val report = RunDiagnosticAnalyzer.analyze("RUN", "STOPPED", 0, 10,
+            emptyList(), RunDiagnosticCounters(acceptedEvents = 100, writtenEvents = 100,
+                normalEvictedEvents = 90, normalEvictedBytes = 9000, retainedEvents = 10))
+        assertTrue(report.issues.none { it.code == "DIAGNOSTIC_DATA_INCOMPLETE" })
+        assertEquals(90L, report.counters.normalEvictedEvents)
+        val lost = RunDiagnosticAnalyzer.analyze("RUN", "STOPPED", 0, 10,
+            emptyList(), RunDiagnosticCounters(droppedEvents = 1, queueDroppedEvents = 1))
+        assertTrue(lost.issues.any { it.code == "DIAGNOSTIC_DATA_INCOMPLETE" })
+    }
+
     private fun event(
         sequence: Long,
         timestamp: Long,

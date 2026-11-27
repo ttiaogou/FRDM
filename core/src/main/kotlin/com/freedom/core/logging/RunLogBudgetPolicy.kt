@@ -10,6 +10,11 @@ object RunLogBudgetPolicy {
     const val MAX_RUN_EVENT_BYTES = 8 * 1024 * 1024
     const val MAX_RUN_EVENT_RECORD_BYTES = 20 * 1024
     const val MAX_CRITICAL_EVENT_EXTRA_BYTES = 2 * 1024 * 1024
+    // Reallocate the existing total event budget; do not increase it.
+    const val MAX_WARNING_EVENT_BYTES = 2 * 1024 * 1024
+    const val MAX_LIFECYCLE_EVENT_BYTES = 64 * 1024
+    const val MAX_NORMAL_EVENT_BYTES = MAX_RUN_EVENT_BYTES - MAX_WARNING_EVENT_BYTES - MAX_LIFECYCLE_EVENT_BYTES
+    const val NORMAL_EVENT_SEGMENT_BYTES = 256 * 1024
     const val MAX_ERROR_DETAIL_BYTES = 32 * 1024
     const val MAX_ERROR_DETAILS_TOTAL_BYTES = 2 * 1024 * 1024
     const val MAX_DIAGNOSTIC_REPORT_BYTES = 256 * 1024
