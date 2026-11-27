@@ -257,8 +257,14 @@ internal object SessionSampleArchiveManager {
                     var reportIncluded = false
                     var diagnosticStatus = "未关联诊断运行 ID"
                     if (diagnosticId != null) {
-                        val diagnosticDirectory = File(diagnosticsRunsDirectory, diagnosticId)
-                        val canonicalRoot = diagnosticsRunsDirectory.canonicalFile
+                        val primary = File(diagnosticsRunsDirectory, diagnosticId)
+                        val historyRoot = File(diagnosticsRunsDirectory.parentFile, "incident_history")
+                        val retained = File(historyRoot, diagnosticId)
+                        val useRetained = !File(primary, "diagnostic_report.json").isFile &&
+                            !File(primary, "diagnostic_report.txt").isFile &&
+                            File(retained, "incident_retention.json").isFile
+                        val diagnosticDirectory = if (useRetained) retained else primary
+                        val canonicalRoot = (if (useRetained) historyRoot else diagnosticsRunsDirectory).canonicalFile
                         val canonicalDirectory = diagnosticDirectory.canonicalFile
                         if (canonicalDirectory.path.startsWith(canonicalRoot.path + File.separator) &&
                             canonicalDirectory.isDirectory
@@ -293,6 +299,7 @@ internal object SessionSampleArchiveManager {
                             if (diagnosticStatus == "未关联诊断运行 ID") {
                                 diagnosticStatus = when {
                                     reportIncluded -> "诊断报告及运行记录已打包"
+                                    useRetained -> "普通运行历史已淘汰；独立异常证据已打包"
                                     File(canonicalDirectory, "diagnostic_report.txt").isFile -> "诊断报告存在但未能安全读取或打包"
                                     else -> "诊断目录存在，但报告文件尚未生成"
                                 }

@@ -73,12 +73,13 @@ class RunIncidentEvidenceStoreTest {
         store.observe(event(1), emptyList())
         store.observe(event(2, RunLogLevel.WARN, result = "DEDUPLICATED"), emptyList())
         assertTrue(RunIncidentEvidenceStore.directories(directory).isEmpty())
-        for (n in 10L..29L) store.observe(event(n, RunLogLevel.WARN), emptyList())
+        // Distinct request identities, not repeats of the same transaction.
+        for (n in 10L..29L) store.observe(event(n, RunLogLevel.WARN, trace = "request-$n"), emptyList())
         assertEquals(16L, store.stats.captured)
         assertEquals(4L, store.stats.rejected)
         assertTrue(store.stats.postLimited > 0)
-        store.observe(event(30, RunLogLevel.ERROR), emptyList())
-        store.observe(event(31, RunLogLevel.FATAL), emptyList())
+        store.observe(event(30, RunLogLevel.ERROR, trace = "error-request"), emptyList())
+        store.observe(event(31, RunLogLevel.FATAL, trace = "fatal-request"), emptyList())
         assertEquals(18L, store.stats.captured)
         store.finish()
     }
@@ -89,8 +90,8 @@ class RunIncidentEvidenceStoreTest {
         store.observe(event(1, RunLogLevel.ERROR), emptyList())
         store.observe(event(2, elapsed = 31_000), emptyList())
         assertTrue(java.io.File(directory, "incidents/incident-1/capture_end.json").readText().contains("WINDOW_ELAPSED"))
-        store.observe(event(3, RunLogLevel.ERROR, elapsed = 32_000), emptyList())
-        store.observe(event(4, elapsed = 33_000), emptyList())
+        store.observe(event(3, RunLogLevel.ERROR, trace = "request-b", elapsed = 32_000), emptyList())
+        store.observe(event(4, trace = "request-b", elapsed = 33_000), emptyList())
         assertEquals(0L, RunIncidentEvidenceStore.recoverInterrupted(directory))
         val end = java.io.File(directory, "incidents/incident-3/capture_end.json")
         val saved = end.readText()
@@ -115,6 +116,53 @@ class RunIncidentEvidenceStoreTest {
         assertTrue(lines.last().contains("SAME_TRACE"))
         assertTrue(lines.last().contains("\"sequence\":3"))
         assertEquals(0L, store.stats.postLimited)
+    }
+
+    @Test fun repeatsAfterCaptureWindowMergeAndOnlyExactTerminalProofResolves() {
+        val directory = temp.newFolder()
+        val store = store(directory)
+        fun model(n: Long, type: String, level: RunLogLevel, result: String, generation: Long = 7) =
+            event(n, level, result = result).copy(component = "AiModel", eventType = type,
+                requestGeneration = generation, elapsedRealtimeMs = n * 40_000L)
+        store.observe(model(1, "MODEL_ATTEMPT_FINISHED", RunLogLevel.WARN, "EMPTY_MODEL_OUTPUT"), emptyList())
+        store.observe(model(2, "MODEL_ATTEMPT_FINISHED", RunLogLevel.WARN, "EMPTY_MODEL_OUTPUT"), emptyList())
+        assertEquals(1L, store.stats.captured)
+        assertEquals(1L, store.stats.merged)
+        store.observe(model(3, "MODEL_REQUEST_FINISHED", RunLogLevel.INFO, "SUCCEEDED", 8), emptyList())
+        assertEquals(0L, store.stats.resolved)
+        store.observe(model(4, "MODEL_ATTEMPT_FINISHED", RunLogLevel.INFO, "VALID_DECISION"), emptyList())
+        assertEquals(0L, store.stats.resolved)
+        store.observe(model(5, "MODEL_RETRY_EXECUTING", RunLogLevel.INFO, "EXECUTING"), emptyList())
+        assertEquals(RunIncidentEvidencePolicy.Outcome.RECOVERING,
+            RunIncidentEvidenceStore.transactionState(java.io.File(directory, "incidents/incident-1")))
+        store.observe(model(6, "MODEL_REQUEST_FINISHED", RunLogLevel.INFO, "SUCCEEDED"), emptyList())
+        assertEquals(1L, store.stats.resolved)
+        val original = java.io.File(directory, "incidents/incident-1")
+        val summary = java.io.File(original, "transaction.json").readText()
+        assertTrue(summary.contains("\"occurrences\":2"))
+        assertTrue(summary.contains("\"progressEvents\":1"))
+        assertTrue(summary.contains("\"lastProgressSequence\":5"))
+        assertTrue(java.io.File(original, "latest_evidence.json").readText().contains("\"sequence\":6"))
+        store.observe(model(7, "MODEL_ATTEMPT_FINISHED", RunLogLevel.WARN, "EMPTY_MODEL_OUTPUT"), emptyList())
+        store.finish()
+        assertEquals(2L, store.stats.captured)
+        assertEquals(1L, store.stats.unresolved)
+        assertEquals(RunIncidentEvidencePolicy.Outcome.RESOLVED, RunIncidentEvidenceStore.transactionState(original))
+    }
+
+    @Test fun sendSegmentConfirmationDoesNotSettleWholeSendAndInterruptedClosedWindowIsMarked() {
+        val directory = temp.newFolder()
+        val store = store(directory)
+        fun send(n: Long, type: String, level: RunLogLevel, result: String) =
+            event(n, level, result = result).copy(component = "AiSend", eventType = type,
+                requestGeneration = 1, elapsedRealtimeMs = n * 40_000L)
+        store.observe(send(1, "MESSAGE_SEND_UNCERTAIN", RunLogLevel.WARN, "UNKNOWN"), emptyList())
+        store.observe(send(2, "MESSAGE_SEND_CONFIRMED", RunLogLevel.INFO, "CONFIRMED"), emptyList())
+        val incident = java.io.File(directory, "incidents/incident-1")
+        assertTrue(java.io.File(incident, "capture_end.json").exists())
+        assertEquals(RunIncidentEvidencePolicy.Outcome.RECOVERING, RunIncidentEvidenceStore.transactionState(incident))
+        assertEquals(0L, RunIncidentEvidenceStore.recoverInterrupted(directory))
+        assertEquals(RunIncidentEvidencePolicy.Outcome.INTERRUPTED, RunIncidentEvidenceStore.transactionState(incident))
     }
 
     @Test fun explicitRequestGenerationConflictDoesNotAssociateEvenWithSameTrace() {

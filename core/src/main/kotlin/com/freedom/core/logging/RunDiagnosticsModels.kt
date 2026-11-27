@@ -136,7 +136,11 @@ data class RunDiagnosticCounters(
     val incidentCaptured: Long = 0,
     val incidentRejected: Long = 0,
     val incidentWriteFailures: Long = 0,
-    val incidentPostLimited: Long = 0
+    val incidentPostLimited: Long = 0,
+    val incidentMerged: Long = 0,
+    val incidentResolved: Long = 0,
+    val incidentUnresolved: Long = 0,
+    val incidentInterrupted: Long = 0
 )
 
 data class RunDiagnosticIssue(

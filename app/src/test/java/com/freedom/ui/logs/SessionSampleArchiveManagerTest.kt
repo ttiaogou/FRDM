@@ -281,6 +281,35 @@ class SessionSampleArchiveManagerTest {
         }
     }
 
+    @Test
+    fun l11eExportIncludesRetainedIncidentHistoryWithoutClaimingNormalReportExists() {
+        val directory = Files.createTempDirectory("freedom-retained-incident-export").toFile()
+        try {
+            val id = "diagnostic-retained"
+            val sampleFile = createRunArchive(
+                directory, "sample.zip", "sample", 1L, 2L, 0, 0, false,
+                diagnosticRunId = id
+            )
+            val archive = requireNotNull(SessionSampleArchiveManager.inspect(sampleFile))
+            val runs = File(directory, "freedom_diagnostics/runs").apply { mkdirs() }
+            val retained = File(runs.parentFile, "incident_history/$id").apply { mkdirs() }
+            File(retained, "incident_retention.json").writeText("{}")
+            File(retained, "incidents/incident-1").mkdirs()
+            File(retained, "incidents/incident-1/transaction.json").writeText("""{"state":"UNRESOLVED"}""")
+            val destination = File(directory, "retained.zip")
+            SessionSampleArchiveManager.createExportBundle(listOf(archive), runs, destination)
+            ZipFile(destination).use { bundle ->
+                assertTrue(bundle.getEntry("diagnostics/$id/incidents/incident-1/transaction.json") != null)
+                assertTrue(bundle.getEntry("diagnostics/$id/diagnostic_report.txt") == null)
+                val manifest = bundle.getInputStream(bundle.getEntry("EXPORT-MANIFEST.txt")).bufferedReader().use { it.readText() }
+                assertTrue(manifest.contains("独立异常证据已打包"))
+                assertTrue(manifest.contains("报告已包含=否"))
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
     private fun createRunArchive(
         directory: File,
         fileName: String,

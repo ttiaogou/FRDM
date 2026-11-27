@@ -15,7 +15,8 @@ object RunLogBudgetPolicy {
     const val MAX_LIFECYCLE_EVENT_BYTES = 64 * 1024
     const val MAX_NORMAL_EVENT_BYTES = MAX_RUN_EVENT_BYTES - MAX_WARNING_EVENT_BYTES - MAX_LIFECYCLE_EVENT_BYTES
     const val NORMAL_EVENT_SEGMENT_BYTES = 256 * 1024
-    // Separate evidence budget: 32 bounded captures, at most 120 KiB of payload each.
+    // Separate evidence budget: 32 bounded captures, at most 144 KiB of payload each
+    // including one replaceable latest transaction proof, never an unbounded retry log.
     const val MAX_INCIDENT_CAPTURES = 32
     const val MAX_INCIDENT_TRIGGER_BYTES = 24 * 1024
     const val MAX_INCIDENT_BEFORE_BYTES = 32 * 1024

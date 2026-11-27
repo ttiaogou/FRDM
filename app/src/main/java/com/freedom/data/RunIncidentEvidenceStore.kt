@@ -3,6 +3,8 @@ package com.freedom.data
 import com.freedom.core.logging.RunDiagnosticEvent
 import com.freedom.core.logging.RunIncidentEvidencePolicy
 import com.freedom.core.logging.RunIncidentEvidencePolicy.Relation
+import com.freedom.core.logging.RunIncidentEvidencePolicy.Outcome
+import com.freedom.core.logging.RunIncidentEvidencePolicy.TransactionKey
 import com.freedom.core.logging.RunLogBudgetPolicy
 import com.freedom.core.logging.RunLogLevel
 import java.io.File
@@ -23,13 +25,32 @@ internal class RunIncidentEvidenceStore(
         val captured: Long = 0,
         val rejected: Long = 0,
         val writeFailures: Long = 0,
-        val postLimited: Long = 0
+        val postLimited: Long = 0,
+        val merged: Long = 0,
+        val resolved: Long = 0,
+        val unresolved: Long = 0,
+        val interrupted: Long = 0
+    )
+
+    private data class Transaction(
+        val state: Outcome = Outcome.OPEN,
+        val occurrences: Long = 1,
+        val lastTriggerSequence: Long,
+        val lastTriggerAt: Long,
+        val highestLevel: RunLogLevel,
+        val lastEvidenceSequence: Long,
+        val progressEvents: Long = 0,
+        val lastProgressSequence: Long? = null,
+        val lastProgressCode: String = "NONE",
+        val endReason: String = "NONE"
     )
 
     private data class OpenCapture(
         val directory: File,
         val trigger: RunDiagnosticEvent,
         val level: RunLogLevel,
+        val key: TransactionKey?,
+        var transaction: Transaction,
         var afterRecords: Int = 0,
         var nearbyRecords: Int = 0,
         var nearbyBytes: Long = 0,
@@ -37,6 +58,9 @@ internal class RunIncidentEvidenceStore(
     )
 
     private val open = mutableListOf<OpenCapture>()
+    // Capture windows and transaction lifetimes are independent. Bounded by claimed slots.
+    private val transactions = mutableListOf<OpenCapture>()
+    private val byKey = mutableMapOf<TransactionKey, OpenCapture>()
     private var claimed = 0
     private var warningClaims = 0
     private var nonFatalClaims = 0
@@ -46,6 +70,43 @@ internal class RunIncidentEvidenceStore(
 
     /** Called in FIFO writer order, before adding this event to the existing recent buffer. */
     fun observe(event: RunDiagnosticEvent, recent: Collection<RunDiagnosticEvent>) {
+        val key = RunIncidentEvidencePolicy.transactionKey(event)
+        val level = RunIncidentEvidencePolicy.triggerLevel(event)
+        val matching = key?.let(byKey::get)?.takeUnless {
+            it.transaction.state in setOf(Outcome.RESOLVED, Outcome.INTERRUPTED)
+        }
+        var mergedTrigger = false
+        if (matching != null && event.sequence > matching.transaction.lastEvidenceSequence) {
+            val outcome = RunIncidentEvidencePolicy.outcome(event, requireNotNull(key))
+            if (level != null || outcome != null) {
+                val prior = matching.transaction
+                val updated = prior.copy(
+                    state = outcome ?: prior.state,
+                    occurrences = prior.occurrences + if (level != null) 1L else 0L,
+                    lastTriggerSequence = if (level != null) event.sequence else prior.lastTriggerSequence,
+                    lastTriggerAt = if (level != null) event.timestampEpochMs else prior.lastTriggerAt,
+                    highestLevel = if (level != null && level.ordinal > prior.highestLevel.ordinal) level else prior.highestLevel,
+                    lastEvidenceSequence = event.sequence,
+                    progressEvents = prior.progressEvents + if (outcome == Outcome.RECOVERING) 1L else 0L,
+                    lastProgressSequence = if (outcome == Outcome.RECOVERING) event.sequence else prior.lastProgressSequence,
+                    lastProgressCode = if (outcome == Outcome.RECOVERING) safeCode(event.reason ?: event.eventType)
+                        else prior.lastProgressCode,
+                    endReason = when (outcome) {
+                        Outcome.RESOLVED, Outcome.INTERRUPTED, Outcome.UNRESOLVED -> "EXPLICIT_EVENT"
+                        Outcome.RECOVERING -> "NONE"
+                        else -> prior.endReason
+                    }
+                )
+                if (persistTransaction(matching, updated, event)) {
+                    if (level != null) stats = stats.copy(merged = stats.merged + 1)
+                    if (updated.state in setOf(Outcome.RESOLVED, Outcome.INTERRUPTED)) byKey.remove(key)
+                    refreshOutcomes()
+                }
+                // A failed summary update is an evidence failure, not permission to fabricate
+                // another incident identity. Original trigger and previous summary survive.
+                mergedTrigger = level != null
+            }
+        }
         for (capture in open.toList()) {
             val elapsed = event.elapsedRealtimeMs - capture.trigger.elapsedRealtimeMs
             if (elapsed > WINDOW_MS) {
@@ -53,6 +114,7 @@ internal class RunIncidentEvidenceStore(
                 continue
             }
             if (elapsed < 0 || event.sequence <= capture.trigger.sequence) continue
+            if (mergedTrigger && capture === matching) continue
             val relation = RunIncidentEvidencePolicy.relation(capture.trigger, event) ?: continue
             if (relation == Relation.NEARBY_UNCORRELATED && capture.nearbyRecords >= MAX_NEARBY) continue
             val line = envelope("AFTER", relation.name, event)
@@ -82,7 +144,7 @@ internal class RunIncidentEvidenceStore(
             }
         }
 
-        val level = RunIncidentEvidencePolicy.triggerLevel(event) ?: return
+        if (level == null || mergedTrigger) return
         // Reserve four of the total slots for fatal events, and at least twelve more
         // for errors. Lower severities cannot exhaust all incident capacity.
         if (claimed >= RunLogBudgetPolicy.MAX_INCIDENT_CAPTURES ||
@@ -113,8 +175,17 @@ internal class RunIncidentEvidenceStore(
             }
             writeAtomic(File(directory, CAPTURE),
                 """{"schemaVersion":1,"triggerSequence":${event.sequence},"level":"${level.name}","severitySource":"${event.severitySource.name}","beforeRecords":${before.size},"beforeRelated":${before.count { it.third != Relation.NEARBY_UNCORRELATED }},"windowMs":$WINDOW_MS,"maxAfterRecords":$MAX_CONTEXT_RECORDS,"captureStatus":"OPEN"}""")
+            val capture = OpenCapture(directory, event, level, key,
+                Transaction(state = key?.let { RunIncidentEvidencePolicy.outcome(event, it) } ?: Outcome.OPEN,
+                    lastTriggerSequence = event.sequence, lastTriggerAt = event.timestampEpochMs,
+                    highestLevel = level, lastEvidenceSequence = event.sequence,
+                    endReason = if (key?.let { RunIncidentEvidencePolicy.outcome(event, it) } == Outcome.UNRESOLVED)
+                        "EXPLICIT_EVENT" else "NONE"))
+            check(persistTransaction(capture, capture.transaction, null)) { "initial transaction persistence failed" }
+            transactions.add(capture)
+            if (key != null) byKey[key] = capture
             stats = stats.copy(captured = stats.captured + 1)
-            val capture = OpenCapture(directory, event, level)
+            refreshOutcomes()
             val slotAvailable = open.size < MAX_OPEN &&
                 (level != RunLogLevel.WARN || open.count { it.level == RunLogLevel.WARN } < MAX_OPEN_WARNINGS) &&
                 (level == RunLogLevel.FATAL || open.count { it.level != RunLogLevel.FATAL } < MAX_OPEN - 1)
@@ -169,8 +240,45 @@ internal class RunIncidentEvidenceStore(
         }
     }
 
+    private fun safeCode(value: String): String =
+        value.takeIf { it.length in 1..100 && it.matches(Regex("[A-Za-z0-9_.:-]+")) } ?: "UNKNOWN"
+
+    private fun persistTransaction(capture: OpenCapture, updated: Transaction, evidence: RunDiagnosticEvent?): Boolean {
+        return try {
+            if (evidence != null) {
+                val line = envelope("TRANSACTION", "EXACT_IDENTITY", evidence)
+                check(bytes(line) <= RunLogBudgetPolicy.MAX_INCIDENT_TRIGGER_BYTES)
+                // Latest proof is separately bounded and atomically replaced, never append-only.
+                writeAtomic(File(capture.directory, LATEST), line)
+            }
+            writeAtomic(File(capture.directory, TRANSACTION),
+                """{"schemaVersion":1,"state":"${updated.state.name}","occurrences":${updated.occurrences},"firstTriggerSequence":${capture.trigger.sequence},"firstTriggerAt":${capture.trigger.timestampEpochMs},"lastTriggerSequence":${updated.lastTriggerSequence},"lastTriggerAt":${updated.lastTriggerAt},"highestLevel":"${updated.highestLevel.name}","lastEvidenceSequence":${updated.lastEvidenceSequence},"progressEvents":${updated.progressEvents},"lastProgressSequence":${updated.lastProgressSequence ?: "null"},"lastProgressCode":"${updated.lastProgressCode}","endReason":"${updated.endReason}"}""")
+            capture.transaction = updated
+            true
+        } catch (_: Exception) {
+            stats = stats.copy(writeFailures = stats.writeFailures + 1)
+            false
+        }
+    }
+
+    private fun refreshOutcomes() {
+        stats = stats.copy(
+            resolved = transactions.count { it.transaction.state == Outcome.RESOLVED }.toLong(),
+            interrupted = transactions.count { it.transaction.state == Outcome.INTERRUPTED }.toLong(),
+            unresolved = transactions.count { it.transaction.state !in setOf(Outcome.RESOLVED, Outcome.INTERRUPTED) }.toLong()
+        )
+    }
+
     fun finish() {
         open.toList().forEach { close(it, "RUN_ENDED") }
+        for (capture in transactions) {
+            if (capture.transaction.state in setOf(Outcome.OPEN, Outcome.RECOVERING)) {
+                persistTransaction(capture, capture.transaction.copy(state = Outcome.UNRESOLVED,
+                    endReason = "RUN_ENDED_WITHOUT_PROOF"), null)
+            }
+        }
+        refreshOutcomes()
+        byKey.clear()
     }
 
     companion object {
@@ -178,6 +286,8 @@ internal class RunIncidentEvidenceStore(
         private const val TIMELINE = "timeline.jsonl"
         private const val CAPTURE = "capture.json"
         private const val END = "capture_end.json"
+        private const val TRANSACTION = "transaction.json"
+        private const val LATEST = "latest_evidence.json"
         private const val WINDOW_MS = 30_000L
         private const val MAX_CONTEXT_RECORDS = 32
         private const val MAX_NEARBY = 8
@@ -196,15 +306,34 @@ internal class RunIncidentEvidenceStore(
 
         fun files(runDirectory: File): List<File> =
             directories(runDirectory).flatMap { dir ->
-                listOf(CAPTURE, TIMELINE, END, "error_detail.txt").map { File(dir, it) }.filter(File::isFile)
+                listOf(CAPTURE, TIMELINE, END, TRANSACTION, LATEST, "error_detail.txt").map { File(dir, it) }.filter(File::isFile)
             }
 
-        /** Never resume a capture window in a different process or run. Preserve its evidence. */
+        fun transactionState(directory: File): Outcome? = runCatching {
+            val value = Regex(""""state":"([A-Z_]+)"""").find(File(directory, TRANSACTION).readText())
+                ?.groupValues?.get(1) ?: return@runCatching null
+            Outcome.valueOf(value)
+        }.getOrNull()
+
+        fun mergedOccurrences(directory: File): Long = runCatching {
+            val count = Regex(""""occurrences":([0-9]+)""").find(File(directory, TRANSACTION).readText())
+                ?.groupValues?.get(1)?.toLongOrNull() ?: 1L
+            (count - 1L).coerceAtLeast(0L)
+        }.getOrDefault(0L)
+
+        /** Never resume a capture window or transaction in a different process or run. */
         fun recoverInterrupted(runDirectory: File): Long {
             var failures = 0L
             for (directory in directories(runDirectory)) {
-                if (File(directory, END).isFile) continue
                 try {
+                    val transaction = File(directory, TRANSACTION)
+                    if (transactionState(directory) in setOf(Outcome.OPEN, Outcome.RECOVERING)) {
+                        val original = transaction.readText()
+                        val changed = original.replace("\"state\":\"${transactionState(directory)?.name}\"", "\"state\":\"INTERRUPTED\"")
+                            .replace(Regex(""""endReason":"[A-Z_]+""""), "\"endReason\":\"PROCESS_INTERRUPTED\"")
+                        writeAtomic(transaction, changed)
+                    }
+                    if (File(directory, END).isFile) continue
                     val after = File(directory, TIMELINE).takeIf(File::isFile)?.useLines { lines ->
                         lines.count { it.startsWith("{\"phase\":\"AFTER\"") }
                     } ?: 0

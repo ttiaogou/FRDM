@@ -25,6 +25,56 @@ object RunIncidentEvidencePolicy {
         value?.takeUnless { it.isBlank() || it == runId ||
             it.equals("UNKNOWN", true) || it.equals("NONE", true) || it.equals("null", true) }
 
+    /** Only explicit producer identities can merge or settle an incident. */
+    data class TransactionKey(
+        val runId: String, val taskId: String, val traceId: String,
+        val generation: Long?, val family: String, val reason: String?
+    )
+    enum class Outcome { OPEN, RECOVERING, RESOLVED, UNRESOLVED, INTERRUPTED }
+
+    fun transactionKey(event: RunDiagnosticEvent): TransactionKey? {
+        if (event.severitySource != RunLogSeveritySource.PRODUCER_DECLARED) return null
+        val task = known(event.taskId, event.runId) ?: return null
+        val trace = known(event.traceId, event.runId) ?: known(event.actionId, event.runId) ?: return null
+        val family = when {
+            event.component == "UnifiedRecovery" && event.eventType.startsWith("RECOVERY_TRANSACTION_") -> "RECOVERY"
+            event.component == "AiModel" && event.eventType.startsWith("MODEL_") &&
+                event.requestGeneration != null -> "MODEL"
+            event.component == "AiSend" && event.eventType.startsWith("MESSAGE_SEND_") &&
+                event.requestGeneration != null -> "SEND"
+            else -> "EVENT:${event.component}:${event.eventType}"
+        }
+        return TransactionKey(event.runId, task, trace, event.requestGeneration, family,
+            event.reason.takeIf { family.startsWith("EVENT:") })
+    }
+
+    /** A matching key is necessary but not sufficient: require an authoritative terminal event. */
+    fun outcome(event: RunDiagnosticEvent, key: TransactionKey): Outcome? {
+        if (transactionKey(event) != key) return null
+        return when (key.family) {
+            "RECOVERY" -> when {
+                event.eventType == "RECOVERY_TRANSACTION_RESOLVED" && event.result == "ACTIVE" -> Outcome.RESOLVED
+                event.eventType == "RECOVERY_TRANSACTION_INTERRUPTED" && event.result == "STOPPED_BY_USER" -> Outcome.INTERRUPTED
+                event.eventType == "RECOVERY_TRANSACTION_PROGRESS" &&
+                    event.result in setOf("RECOVERING", "VERIFYING", "RESUMING") -> Outcome.RECOVERING
+                else -> null
+            }
+            "MODEL" -> when {
+                event.eventType == "MODEL_REQUEST_FINISHED" && event.result == "SUCCEEDED" -> Outcome.RESOLVED
+                event.eventType == "MODEL_REQUEST_FINISHED" && event.result == "CANCELLED" -> Outcome.INTERRUPTED
+                event.eventType == "MODEL_REQUEST_FINISHED" && event.result == "FAILED" -> Outcome.UNRESOLVED
+                event.eventType in setOf("MODEL_RETRY_SCHEDULED", "MODEL_RETRY_EXECUTING", "MODEL_ATTEMPT_STARTED") -> Outcome.RECOVERING
+                else -> null
+            }
+            "SEND" -> when {
+                event.eventType == "MESSAGE_SEND_COMPLETED" && event.result == "CONFIRMED" -> Outcome.RESOLVED
+                event.eventType in setOf("MESSAGE_SEND_SUBMITTED", "MESSAGE_SEND_REHYDRATED", "MESSAGE_SEND_CONFIRMED") -> Outcome.RECOVERING
+                else -> null
+            }
+            else -> null
+        }
+    }
+
     fun relation(trigger: RunDiagnosticEvent, candidate: RunDiagnosticEvent): Relation? {
         if (trigger.runId != candidate.runId || trigger.eventId == candidate.eventId) return null
         val task = known(trigger.taskId, trigger.runId)

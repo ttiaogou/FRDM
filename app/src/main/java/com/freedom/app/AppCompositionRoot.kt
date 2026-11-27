@@ -224,7 +224,8 @@ class AppCompositionRoot(context: Context) {
     val recoveryTransactionManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         UnifiedRecoveryTransactionManager(
             currentRunGeneration = runGenerationClock::current,
-            onLog = monitorRepository::addLog
+            onLog = monitorRepository::addLog,
+            onDiagnosticLog = diagnostics::recordInput
         )
     }
     val monitorSnapshotRepository: MonitorSnapshotRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

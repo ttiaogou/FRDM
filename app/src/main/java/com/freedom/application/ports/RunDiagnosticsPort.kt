@@ -1,5 +1,6 @@
 package com.freedom.application.ports
 
+import com.freedom.core.logging.RunDiagnosticInput
 import com.freedom.core.logging.RunLogCategory
 import com.freedom.core.logging.RunLogLevel
 
@@ -8,6 +9,8 @@ interface RunDiagnosticsPort {
     fun activeRunId(): String?
     fun awaitFinalizedRun(runId: String, timeoutMillis: Long = 8_000L): Boolean
     fun latestReportText(): String
+    /** Diagnostic-only input; no monitor-history duplication is required. */
+    fun recordInput(input: RunDiagnosticInput) {}
 
     /** Run-scoped, pre-sanitized wire evidence. Never routed through ordinary runtime logs. */
     fun recordAiContextDiagnostic(runId: String, jsonLine: String) {}

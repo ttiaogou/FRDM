@@ -1,5 +1,10 @@
 package com.freedom.features.recovery
 
+import com.freedom.core.logging.RunDiagnosticInput
+import com.freedom.core.logging.RunLogCategory
+import com.freedom.core.logging.RunLogLevel
+import java.security.MessageDigest
+
 /**
  * P6 process-owned recovery transaction admission point.
  *
@@ -12,7 +17,8 @@ package com.freedom.features.recovery
  */
 class UnifiedRecoveryTransactionManager(
     private val currentRunGeneration: () -> Long,
-    private val onLog: (String) -> Unit = {}
+    private val onLog: (String) -> Unit = {},
+    private val onDiagnosticLog: (RunDiagnosticInput) -> Unit = {}
 ) {
     data class TransactionSnapshot(
         val taskId: String,
@@ -81,6 +87,20 @@ class UnifiedRecoveryTransactionManager(
                 state = next
             )
         }
+        // Observe the admitted reducer result only; logging cannot grant a lease,
+        // alter recovery, or certify a stale/unaccepted event.
+        when {
+            event is RecoveryTransactionEvent.UnknownPage && next == RecoveryTransactionState.RECOVERING ->
+                diagnostic(identity, laneId, "OPENED", next, "UNKNOWN_PAGE", RunLogLevel.WARN)
+            event is RecoveryTransactionEvent.StoppedByUser && old != null && next == RecoveryTransactionState.STOPPED_BY_USER ->
+                diagnostic(identity, laneId, "INTERRUPTED", next, "USER_STOPPED", RunLogLevel.INFO)
+            event == RecoveryTransactionEvent.ResumeCompleted && old != null &&
+                existingState == RecoveryTransactionState.RESUMING && next == RecoveryTransactionState.ACTIVE ->
+                diagnostic(identity, laneId, "RESOLVED", next, "RESUME_COMPLETED", RunLogLevel.INFO)
+            next in setOf(RecoveryTransactionState.RECOVERING, RecoveryTransactionState.VERIFYING, RecoveryTransactionState.RESUMING) &&
+                (next != existingState || event is RecoveryTransactionEvent.RetryScheduled) ->
+                diagnostic(identity, laneId, "PROGRESS", next, event.javaClass.simpleName, RunLogLevel.INFO)
+        }
         return DispatchResult(next, true)
     }
 
@@ -143,6 +163,7 @@ class UnifiedRecoveryTransactionManager(
             observationGeneration = next.observationGeneration,
             state = RecoveryTransactionState.RECOVERING
         )
+        diagnostic(next, PRIMARY_LANE, "PROGRESS", RecoveryTransactionState.RECOVERING, "ROUTE_REBOUND", RunLogLevel.INFO)
         onLog("recoveryManager=route_rebound;taskId=${next.taskId};" +
             "oldRouteId=${previous.routeId};routeId=${next.routeId};checkpointId=${next.checkpointId}")
         return true
@@ -162,8 +183,33 @@ class UnifiedRecoveryTransactionManager(
                 state.runGeneration == identity.runGeneration &&
                 state.checkpointId == identity.checkpointId
         }.keys.toList()
-        keys.forEach { transactions.remove(it) }
+        keys.forEach { key ->
+            transactions.remove(key)?.let { snapshot ->
+                diagnostic(identity.copy(routeId = snapshot.routeId), key.laneId,
+                    "RESOLVED", RecoveryTransactionState.ACTIVE, "VERIFIED_COMPLETION", RunLogLevel.INFO)
+            }
+        }
         return keys.isNotEmpty()
+    }
+
+    /** The route may change; the same checkpoint/lane/run identity must not. */
+    private fun diagnostic(
+        identity: RecoveryEventIdentity, laneId: String, kind: String,
+        state: RecoveryTransactionState, reason: String, level: RunLogLevel
+    ) {
+        runCatching {
+            val digest = MessageDigest.getInstance("SHA-256")
+            val fields = listOf(identity.taskId, identity.runGeneration.toString(), identity.checkpointId, laneId)
+            val trace = digest.digest(fields.joinToString("") { "${it.length}:$it" }.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            onDiagnosticLog(RunDiagnosticInput(
+                eventType = "RECOVERY_TRANSACTION_$kind", level = level,
+                category = RunLogCategory.TASK, component = "UnifiedRecovery",
+                message = "恢复事务诊断；event=$kind；state=${state.name}；reason=$reason；observationGeneration=${identity.observationGeneration}",
+                taskId = identity.taskId, traceId = trace, requestGeneration = identity.runGeneration,
+                result = state.name, reason = reason
+            ))
+        }
     }
 
     @Synchronized

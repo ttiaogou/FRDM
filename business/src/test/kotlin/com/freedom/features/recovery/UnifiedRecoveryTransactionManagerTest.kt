@@ -28,6 +28,30 @@ class UnifiedRecoveryTransactionManagerTest {
         unknownReason = "PAGE_UNKNOWN"
     )
 
+    @Test
+    fun l11eOnlyAcceptedRecoveryCompletionEmitsAuthoritativeCorrelatedDiagnostic() {
+        val events = mutableListOf<com.freedom.core.logging.RunDiagnosticInput>()
+        val manager = UnifiedRecoveryTransactionManager({ 7L }, onDiagnosticLog = events::add)
+        val dispatcher = dispatcher(manager)
+        val id = identity("AI_REPLY_PRIVATE_MESSAGES", checkpoint = "private-checkpoint")
+        dispatcher.activate(id)
+        dispatcher.dispatch(RecoveryTransactionEvent.UnknownPage("PAGE_UNKNOWN"))
+        dispatcher.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        assertTrue(events.none { it.eventType == "RECOVERY_TRANSACTION_RESOLVED" })
+        dispatcher.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        dispatcher.dispatch(RecoveryTransactionEvent.VerificationSample(true))
+        dispatcher.dispatch(RecoveryTransactionEvent.VerificationSample(true))
+        dispatcher.dispatch(RecoveryTransactionEvent.ResumeRequested)
+        dispatcher.dispatch(RecoveryTransactionEvent.ResumeCompleted, id.copy(runGeneration = 6))
+        assertTrue(events.none { it.eventType == "RECOVERY_TRANSACTION_RESOLVED" })
+        dispatcher.dispatch(RecoveryTransactionEvent.ResumeCompleted)
+        val opened = events.first { it.eventType == "RECOVERY_TRANSACTION_OPENED" }
+        val closed = events.single { it.eventType == "RECOVERY_TRANSACTION_RESOLVED" }
+        assertEquals(opened.traceId, closed.traceId)
+        assertEquals("ACTIVE", closed.result)
+        assertFalse(closed.message.contains("private-checkpoint"))
+    }
+
     private fun dispatcher(manager: UnifiedRecoveryTransactionManager) =
         RecoveryEventDispatcher(UnifiedRecoveryTransactionStateMachine(), sharedManager = manager)
 

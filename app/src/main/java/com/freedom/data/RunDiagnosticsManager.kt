@@ -100,6 +100,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
     private val appContext = context.applicationContext
     private val rootDirectory = File(appContext.filesDir, "freedom_diagnostics")
     private val runsDirectory = File(rootDirectory, "runs")
+    private val incidentHistory = RunIncidentHistoryStore(File(rootDirectory, RunIncidentHistoryStore.DIRECTORY))
     private val markerFile = File(rootDirectory, MARKER_FILE)
     private val finishScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "Freedom-RunDiagnosticsFinish").apply { isDaemon = true }
@@ -246,7 +247,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
 
     /** Typed producers share the same sequence, storage and lifecycle as legacy logs. */
     @Synchronized
-    fun recordInput(input: RunDiagnosticInput) {
+    override fun recordInput(input: RunDiagnosticInput) {
         val current = activeRun ?: return
         val event = input.toEvent(
             current.runId, current.nextSequence++, System.currentTimeMillis(), SystemClock.elapsedRealtime()
@@ -622,7 +623,11 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
     private fun recordInternal(state: ActiveRun, event: RunDiagnosticEvent, allowDedup: Boolean) {
         synchronized(this) {
             if (activeRun !== state) return
-            if (allowDedup) {
+            // Count each admitted strongly identified anomaly in its incident transaction.
+            // Ordinary/legacy dedup remains unchanged.
+            val mergeableTrigger = RunIncidentEvidencePolicy.triggerLevel(event) != null &&
+                RunIncidentEvidencePolicy.transactionKey(event) != null
+            if (allowDedup && !mergeableTrigger) {
                 val signature = "${event.level}|${event.category}|${event.eventType}|${event.taskId}|${event.traceId}|${event.actionId}|${event.windowId}|${event.pageGeneration}|${event.requestGeneration}|${event.result}|${event.reason}|${event.message}"
                 val now = event.timestampEpochMs
                 if (signature == state.lastSignature && now - state.lastEventAt in 0..DEDUP_WINDOW_MS) {
@@ -858,11 +863,14 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         for (incident in incidents) {
             val capture = runCatching { JSONObject(File(incident, "capture.json").readText()) }.getOrNull()
             val end = runCatching { JSONObject(File(incident, "capture_end.json").readText()) }.getOrNull()
+            val transaction = runCatching { JSONObject(File(incident, "transaction.json").readText()) }.getOrNull()
             entries.put(JSONObject()
                 .put("id", incident.name)
                 .put("path", "incidents/${incident.name}")
                 .put("capture", capture ?: JSONObject.NULL)
                 .put("end", end ?: JSONObject.NULL)
+                .put("transaction", transaction ?: JSONObject.NULL)
+                .put("businessRecoveryOutcome", transaction?.optString("state") ?: "NOT_EVALUATED")
                 .put("captureStatus", if (capture == null || !File(incident, "timeline.jsonl").isFile)
                     "INCOMPLETE_START" else end?.optString("captureStatus") ?: "INCOMPLETE")
             )
@@ -870,8 +878,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         val file = File(directory, "incidents/index.json")
         val temporary = File(directory, "incidents/index.json.tmp")
         try {
-            temporary.writeText(JSONObject().put("schemaVersion", 1)
-                .put("businessRecoveryOutcome", "NOT_EVALUATED")
+            temporary.writeText(JSONObject().put("schemaVersion", 2)
                 .put("entries", entries).toString(), Charsets.UTF_8)
             java.nio.file.Files.move(temporary.toPath(), file.toPath(),
                 java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
@@ -951,7 +958,8 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             "diagnostic_report.json",
             "diagnostic_report.txt",
             "diagnostic_summary.txt",
-            "incidents/index.json"
+            "incidents/index.json",
+            RunIncidentHistoryStore.RETENTION_MARKER
         )
         val files = JSONArray()
         (names.map { File(directory, it) } + RunEventRollingStore.sources(directory) +
@@ -1026,7 +1034,11 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         incidentCaptured = state.incidentStore.stats.captured,
         incidentRejected = state.incidentStore.stats.rejected + state.incidentQueueRejected,
         incidentWriteFailures = state.incidentStore.stats.writeFailures + state.incidentUnexpectedFailures,
-        incidentPostLimited = state.incidentStore.stats.postLimited
+        incidentPostLimited = state.incidentStore.stats.postLimited,
+        incidentMerged = state.incidentStore.stats.merged,
+        incidentResolved = state.incidentStore.stats.resolved,
+        incidentUnresolved = state.incidentStore.stats.unresolved,
+        incidentInterrupted = state.incidentStore.stats.interrupted
     )
 
     private fun countersFromEvents(directory: File, events: List<RunDiagnosticEvent>): RunDiagnosticCounters {
@@ -1068,7 +1080,20 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                 RunIncidentEvidenceStore.directories(directory).count {
                     val status = runCatching { JSONObject(File(it, "capture_end.json").readText()).optString("captureStatus") }.getOrNull()
                     status == "POST_WINDOW_LIMIT" || status == "POST_BYTE_LIMIT"
-                }.toLong())
+                }.toLong()),
+            incidentMerged = RunIncidentEvidenceStore.directories(directory).sumOf {
+                RunIncidentEvidenceStore.mergedOccurrences(it)
+            },
+            incidentResolved = RunIncidentEvidenceStore.directories(directory).count {
+                RunIncidentEvidenceStore.transactionState(it) == RunIncidentEvidencePolicy.Outcome.RESOLVED
+            }.toLong(),
+            incidentInterrupted = RunIncidentEvidenceStore.directories(directory).count {
+                RunIncidentEvidenceStore.transactionState(it) == RunIncidentEvidencePolicy.Outcome.INTERRUPTED
+            }.toLong(),
+            incidentUnresolved = RunIncidentEvidenceStore.directories(directory).count {
+                RunIncidentEvidenceStore.transactionState(it) !in setOf(
+                    RunIncidentEvidencePolicy.Outcome.RESOLVED, RunIncidentEvidencePolicy.Outcome.INTERRUPTED)
+            }.toLong()
         )
     }
 
@@ -1188,10 +1213,17 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             if (directory.name == protectedRunId || directory.name == activeRun?.runId ||
                 directory.name == finalizingRun?.runId || !File(directory, "diagnostic_report.json").isFile) continue
             val size = directory.walkTopDown().filter(File::isFile).sumOf(File::length)
+            // Normal history must never erase unarchived incident evidence. The history
+            // store has its own cap and prefers keeping unresolved transactions.
+            if (!incidentHistory.preserve(directory) { archived -> writeDiagnosticManifest(archived, directory.name) }) continue
             if (directory.deleteRecursively()) {
                 remaining--
                 totalBytes = (totalBytes - size).coerceAtLeast(0L)
             }
+        }
+        val removedIncidentRuns = incidentHistory.prune()
+        if (removedIncidentRuns > 0) {
+            android.util.Log.i("RunDiagnostics", "INCIDENT_HISTORY_RETENTION_EVICTED runs=$removedIncidentRuns")
         }
     }
 
