@@ -20,6 +20,7 @@ import org.autojs.plugin.common.api.PluginInfo
 import org.autojs.plugin.paddle.ocr.api.IOcrPlugin
 import org.autojs.plugin.paddle.ocr.api.OcrOptions
 import org.autojs.plugin.paddle.ocr.api.OcrPluginContract
+import org.autojs.plugin.paddle.ocr.api.OcrPerformanceDiagnostics
 import org.autojs.plugin.paddle.ocr.api.OcrResult
 import org.autojs.plugin.paddle.ocr.api.PaddleOcrPluginCapabilityKeys
 import org.json.JSONArray
@@ -54,6 +55,7 @@ class OcrPluginService : Service() {
                 ?.getString(OcrPluginContract.EXTRA_DIAGNOSTIC_REQUEST_ID)
                 ?.takeIf { it.isNotBlank() }
                 ?: nextRequestId("aidl")
+            val requestStartedAt = SystemClock.elapsedRealtime()
             logStage(requestId, "REQUEST_RECEIVED", "cpuThreads=${options.cpuThreadNum};detLongSize=${options.detLongSize}")
             val decodeStartedAt = SystemClock.elapsedRealtime()
             val bitmap = traceStage(
@@ -67,15 +69,24 @@ class OcrPluginService : Service() {
             logStage(requestId, "IMAGE_DECODED", "width=${bitmap.width};height=${bitmap.height};config=${bitmap.config};byteCount=${bitmap.byteCount}")
             try {
                 val runResult = recognizeBitmap(bitmap, options, requestId, timings)
+                val performance = performanceExtras(runResult, timings)
                 val results = runResult.results.map { item ->
-                    item.toPluginResult(runResult).apply {
-                        extras?.let { bundle -> timings.forEach { (key, value) -> bundle.putLong(key, value) } }
+                    item.toPluginResult().apply {
+                        extras?.putAll(performance)
                     }
                 }.toMutableList()
+                // Empty results have no OcrResult.extras carrier; log the same evidence locally.
+                val requestMs = SystemClock.elapsedRealtime() - requestStartedAt
+                logStage(requestId, "REQUEST_PERFORMANCE",
+                    "durationMs=$requestMs;slow=${requestMs >= OcrPerformanceDiagnostics.SLOW_REQUEST_MS};" +
+                        OcrPerformanceDiagnostics.formatFields(
+                            { key -> performance.takeIf { it.containsKey(key) }?.getLong(key) },
+                            { key -> performance.getString(key) }
+                        ))
                 logStage(requestId, "REQUEST_SUCCESS", "results=${results.size};totalTimeMs=${runResult.totalTimeMs}")
                 return results
             } catch (failure: Throwable) {
-                logFailure(requestId, "REQUEST", failure)
+                logFailure(requestId, "REQUEST", failure, SystemClock.elapsedRealtime() - requestStartedAt)
                 throw failure
             } finally {
                 if (!bitmap.isRecycled) bitmap.recycle()
@@ -291,7 +302,31 @@ class OcrPluginService : Service() {
         extras = Bundle()
     }
 
-    private fun PaddleResult.toPluginResult(runResult: OCRRunResult): OcrResult {
+    /** Copy existing SDK measurements only; never inspect recognized text for diagnostics. */
+    private fun performanceExtras(runResult: OCRRunResult, timings: Map<String, Long>): Bundle =
+        Bundle().apply {
+            timings.forEach { (key, value) -> putLong(key, value) }
+            putLong(OcrPluginContract.EXTRA_DETECTION_TIME_MS, runResult.detectionTimeMs)
+            putLong(OcrPluginContract.EXTRA_RECOGNITION_TIME_MS, runResult.recognitionTimeMs)
+            putLong(OcrPluginContract.EXTRA_TOTAL_TIME_MS, runResult.totalTimeMs)
+            putLong(OcrPluginContract.EXTRA_COLD_LOAD_TIME_MS, runResult.coldLoadTimeMs)
+            putLong(OcrPluginContract.EXTRA_DET_PREPROCESS_MS, runResult.detPreprocessMs)
+            putLong(OcrPluginContract.EXTRA_DET_INFERENCE_MS, runResult.detInferenceMs)
+            putLong(OcrPluginContract.EXTRA_DET_POSTPROCESS_MS, runResult.detPostprocessMs)
+            putLong(OcrPluginContract.EXTRA_REC_PREPROCESS_MS, runResult.recPreprocessMs)
+            putLong(OcrPluginContract.EXTRA_REC_INFERENCE_MS, runResult.recInferenceMs)
+            putLong(OcrPluginContract.EXTRA_REC_POSTPROCESS_MS, runResult.recPostprocessMs)
+            putLong(OcrPluginContract.EXTRA_PIPELINE_OVERHEAD_MS, runResult.pipelineOverheadMs)
+            putLong(OcrPluginContract.EXTRA_LINE_COUNT, runResult.lineCount.toLong())
+            putString(OcrPluginContract.EXTRA_DET_INPUT_SHAPE,
+                OcrPerformanceDiagnostics.formatShape(runResult.detInputShape))
+            putString(OcrPluginContract.EXTRA_REC_INPUT_SHAPES,
+                OcrPerformanceDiagnostics.formatShapes(runResult.recInputShapes))
+            putString(OcrPluginContract.EXTRA_PER_LINE_REC_MS,
+                OcrPerformanceDiagnostics.formatLineTimes(runResult.perLineRecMs))
+        }
+
+    private fun PaddleResult.toPluginResult(): OcrResult {
         val xs = box.points.map { it.x }
         val ys = box.points.map { it.y }
         return OcrResult().apply {
@@ -308,10 +343,6 @@ class OcrPluginService : Service() {
                     OcrPluginContract.EXTRA_QUAD,
                     this@toPluginResult.box.points.flatMap { point -> listOf(point.x, point.y) }.toFloatArray(),
                 )
-                putLong(OcrPluginContract.EXTRA_DETECTION_TIME_MS, runResult.detectionTimeMs)
-                putLong(OcrPluginContract.EXTRA_RECOGNITION_TIME_MS, runResult.recognitionTimeMs)
-                putLong(OcrPluginContract.EXTRA_TOTAL_TIME_MS, runResult.totalTimeMs)
-                putLong(OcrPluginContract.EXTRA_COLD_LOAD_TIME_MS, runResult.coldLoadTimeMs)
             }
         }
     }

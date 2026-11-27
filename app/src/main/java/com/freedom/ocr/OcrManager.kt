@@ -11,6 +11,8 @@ import android.os.RemoteException
 import android.os.SystemClock
 import org.autojs.plugin.paddle.ocr.api.OcrOptions
 import org.autojs.plugin.paddle.ocr.api.OcrPluginContract
+import org.autojs.plugin.paddle.ocr.api.OcrPerformanceDiagnostics
+import org.autojs.plugin.paddle.ocr.api.OcrSlowCallObservation
 import org.autojs.plugin.paddle.ocr.api.OcrResult
 import org.autojs.plugin.paddle.ocr.api.PaddleOcrOptionExtraKeys
 import java.io.Closeable
@@ -120,6 +122,9 @@ class OcrManager(context: android.content.Context) : Closeable {
             "模型配置由 OCR 插件自身提供；请在 OCR 插件管理中安装或切换模型配置对应的插件。"
         }
         val requestId = "ocr-${requestSequence.incrementAndGet()}"
+        val requestStartedAt = SystemClock.elapsedRealtime()
+        var attemptsUsed = 0
+        var requestOutcome = "FAILED"
         val options = OcrOptions().apply {
             cpuThreadNum = 2
             useSlim = false
@@ -140,6 +145,7 @@ class OcrManager(context: android.content.Context) : Closeable {
 
         try {
         for (attempt in 1..MAX_REQUEST_ATTEMPTS) {
+            attemptsUsed = attempt
             var phase = RequestPhase.BIND
             try {
                 requireCurrentRead()
@@ -193,34 +199,35 @@ class OcrManager(context: android.content.Context) : Closeable {
                     "OCR_CLIENT_BINDER_CALL_START requestId=$requestId;attempt=$attempt;" +
                         "package=${plugin.descriptor.packageName};image=${bitmap.width}x${bitmap.height}"
                 )
+                val slowObservation = OcrSlowCallObservation(binderCallStartedAt)
+                val slowWarning = Runnable {
+                    slowObservation.claimSlowWarning(SystemClock.elapsedRealtime())?.let { elapsed ->
+                        emitDiagnostic("OCR_CLIENT_SLOW_REQUEST requestId=$requestId;attempt=$attempt;" +
+                            "phase=BINDER_IN_FLIGHT;durationMs=$elapsed;thresholdMs=${OcrPerformanceDiagnostics.SLOW_REQUEST_MS};diagnosticOnly=true")
+                    }
+                }
+                // Observe the existing call only: no extra worker, Binder call, cancellation or retry.
+                idleHandler.postDelayed(slowWarning, OcrPerformanceDiagnostics.SLOW_REQUEST_MS)
                 val result = try {
                     requireCurrentRead()
                     plugin.service.detect(transfer.readEnd, options).also {
+                        slowObservation.finish()
+                        idleHandler.removeCallbacks(slowWarning)
                         emitDiagnostic(
                             "OCR_CLIENT_BINDER_CALL_SUCCESS requestId=$requestId;attempt=$attempt;" +
                                 "durationMs=${SystemClock.elapsedRealtime() - binderCallStartedAt};results=${it.size}"
                         )
                         val extras = it.firstOrNull()?.extras
-                        val timingKeys = listOf(
-                            "decodeMs" to OcrPluginContract.EXTRA_IMAGE_DECODE_TIME_MS,
-                            "engineLockWaitMs" to OcrPluginContract.EXTRA_ENGINE_LOCK_WAIT_MS,
-                            "modelPrepareMs" to OcrPluginContract.EXTRA_MODEL_PREPARE_TIME_MS,
-                            "engineAcquireMs" to OcrPluginContract.EXTRA_ENGINE_ACQUIRE_TIME_MS,
-                            "engineCacheHit" to OcrPluginContract.EXTRA_ENGINE_CACHE_HIT,
-                            "engineCreateCount" to OcrPluginContract.EXTRA_ENGINE_CREATE_COUNT,
-                            "detMaxSideLimit" to OcrPluginContract.EXTRA_DET_MAX_SIDE_LIMIT,
-                            "inferenceWallMs" to OcrPluginContract.EXTRA_INFERENCE_WALL_TIME_MS,
-                            "detectionMs" to OcrPluginContract.EXTRA_DETECTION_TIME_MS,
-                            "recognitionMs" to OcrPluginContract.EXTRA_RECOGNITION_TIME_MS,
-                            "coldLoadMs" to OcrPluginContract.EXTRA_COLD_LOAD_TIME_MS,
-                            "engineTotalMs" to OcrPluginContract.EXTRA_TOTAL_TIME_MS
-                        )
                         emitDiagnostic("OCR_CLIENT_PLUGIN_TIMINGS requestId=$requestId;attempt=$attempt;" +
-                            timingKeys.joinToString(";") { (label, key) ->
-                                "$label=${extras?.takeIf { bundle -> bundle.containsKey(key) }?.getLong(key) ?: "UNAVAILABLE"}"
-                            })
+                            "metricsCarrier=${if (extras == null) "UNAVAILABLE" else "RESULT_EXTRAS"};" +
+                            OcrPerformanceDiagnostics.formatFields(
+                                { key -> runCatching { extras?.takeIf { bundle -> bundle.containsKey(key) }?.getLong(key) }.getOrNull() },
+                                { key -> runCatching { extras?.getString(key) }.getOrNull() }
+                            ))
                     }
                 } catch (failure: Throwable) {
+                    slowObservation.finish()
+                    idleHandler.removeCallbacks(slowWarning)
                     detectFailure = failure
                     emitDiagnostic(
                         "OCR_CLIENT_BINDER_CALL_FAILED requestId=$requestId;attempt=$attempt;" +
@@ -229,6 +236,8 @@ class OcrManager(context: android.content.Context) : Closeable {
                     )
                     throw failure
                 } finally {
+                    slowObservation.finish()
+                    idleHandler.removeCallbacks(slowWarning)
                     try {
                         transfer.finish()
                     } catch (finishFailure: Throwable) {
@@ -265,9 +274,11 @@ class OcrManager(context: android.content.Context) : Closeable {
                         "插件成功返回 ${lines.size} 条文字行",
                     )
                 }
+                requestOutcome = if (lines.isEmpty()) "EMPTY_RESULT" else "SUCCESS"
                 return@withLock lines
             } catch (failure: Exception) {
                 if (failure is CancellationException) {
+                    requestOutcome = "INVALIDATED"
                     if (stateMachine.current() != OcrLifecycleState.OCR_TIMEOUT) {
                         // Cancellation is not a plugin failure; retain a healthy binding.
                         if (activePlugin != null) {
@@ -283,6 +294,8 @@ class OcrManager(context: android.content.Context) : Closeable {
                 val typed = failure.asOcrPluginException()
                 lastFailure = typed
                 val alreadyTimedOut = stateMachine.current() == OcrLifecycleState.OCR_TIMEOUT
+                requestOutcome = if (alreadyTimedOut || typed.failureKind == OcrPluginFailureKind.OCR_TIMEOUT)
+                    "TIMEOUT" else typed.failureKind.name
                 val nextState = when {
                     alreadyTimedOut -> OcrLifecycleState.OCR_TIMEOUT
                     phase == RequestPhase.BIND && typed.failureKind in setOf(
@@ -331,6 +344,10 @@ class OcrManager(context: android.content.Context) : Closeable {
             synchronized(activeRequestLock) {
                 if (activeRequestId == requestId) activeRequestId = null
             }
+            val requestMs = SystemClock.elapsedRealtime() - requestStartedAt
+            emitDiagnostic("OCR_CLIENT_REQUEST_FINISHED requestId=$requestId;attempts=$attemptsUsed;" +
+                "outcome=$requestOutcome;durationMs=$requestMs;" +
+                "slow=${requestMs >= OcrPerformanceDiagnostics.SLOW_REQUEST_MS};diagnosticOnly=true")
             scheduleIdleUnbind()
         }
     }
