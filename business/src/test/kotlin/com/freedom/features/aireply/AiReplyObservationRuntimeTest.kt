@@ -1113,6 +1113,9 @@ class AiReplyObservationRuntimeTest {
         val boundary = fixture.runtime.javaClass.getDeclaredMethod("handlePrivateQuotaBoundary", ChatPageSnapshot::class.java)
             .apply { isAccessible = true }
         pending.set(fixture.runtime, "first")
+        ready.setBoolean(fixture.runtime, false)
+        assertEquals(false, boundary.invoke(fixture.runtime, fixture.listPage))
+        assertFalse(fixture.logs.any { it.contains("PAIRED_QUOTA[COUNT] task=PRIVATE") })
         ready.setBoolean(fixture.runtime, true)
         assertEquals(false, boundary.invoke(fixture.runtime, fixture.listPage))
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
@@ -3850,7 +3853,16 @@ class AiReplyObservationRuntimeTest {
         assertM04dPrivateFollowUp(imageConfirmed = true, retryInterception = true)
     }
 
-    private fun assertM04dPrivateFollowUp(imageConfirmed: Boolean, retryInterception: Boolean = false) {
+    @Test
+    fun l07eConfirmedVisitRetriesChildAdmissionAndCompletionCheckpointBeforeBack() {
+        assertM04dPrivateFollowUp(imageConfirmed = true, retryCompletion = true)
+    }
+
+    private fun assertM04dPrivateFollowUp(
+        imageConfirmed: Boolean,
+        retryInterception: Boolean = false,
+        retryCompletion: Boolean = false
+    ) {
         val scheduler = FakeScheduler()
         val port = FakeChatPort().apply {
             verifiedMessageWorkAreaNavigationSupported = true
@@ -3864,9 +3876,18 @@ class AiReplyObservationRuntimeTest {
         val logs = mutableListOf<String>()
         val requestKey = "a".repeat(64)
         var saved: PrivateMessagesTraversalCheckpoint? = null
+        var failCompletionSave = false
+        var completionSaveFailures = 0
         val repository = object : PrivateMessagesTraversalCheckpointRepository {
             override fun load(nowEpochMs: Long) = saved
-            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) { saved = checkpoint }
+            override fun save(checkpoint: PrivateMessagesTraversalCheckpoint) {
+                if (failCompletionSave && checkpoint.unfinishedSessions.isEmpty()) {
+                    failCompletionSave = false
+                    completionSaveFailures++
+                    error("temporary completion checkpoint failure")
+                }
+                saved = checkpoint
+            }
             override fun clear() { saved = null }
         }
         var draftCalls = 0
@@ -3874,6 +3895,7 @@ class AiReplyObservationRuntimeTest {
         var receiptReturned = false
         val ledgerRepo = com.freedom.features.aireply.domain.contact.InMemoryContactMessageLedgerRepository()
         val actions = mutableListOf<Boolean>()
+        val rejectedAdmissions = mutableSetOf<Boolean>()
         var result: Boolean? = null
         var observations = 0
         var transientObservationFailure = false
@@ -3889,6 +3911,7 @@ class AiReplyObservationRuntimeTest {
             ): Boolean {
                 assertEquals(tasks.currentLease(), target.taskLease)
                 assertTrue(ownsTransaction())
+                if (retryCompletion && rejectedAdmissions.add(interception)) return false
                 actions += interception
                 transactionIds += transactionId
                 assertTrue(beforeStep(if (interception)
@@ -3986,6 +4009,11 @@ class AiReplyObservationRuntimeTest {
         assertEquals(0, port.messageWorkAreaEntryAttempts)
         runtime.onSendConfirmationObservationRequested()
         runUntilShortestDelay(scheduler, 40) { receiptReturned }
+        if (retryCompletion) {
+            assertEquals(0, port.navigateBackCalls)
+            assertTrue(actions.isEmpty())
+            runUntilShortestDelay(scheduler, 40) { actions == listOf(false) }
+        }
         assertEquals(listOf(false), actions)
         assertEquals(1, draftCalls)
         assertEquals(1, requireNotNull(saved).unfinishedSessions.size)
@@ -4024,7 +4052,14 @@ class AiReplyObservationRuntimeTest {
                 assertEquals(0, port.navigateBackCalls)
                 assertTrue(logs.any { it.contains("INTERCEPTION_RECONCILE_RESTART") })
             }
+            if (retryCompletion) failCompletionSave = true
             result = true
+            if (retryCompletion) {
+                runUntilShortestDelay(scheduler, 30) { completionSaveFailures == 1 }
+                assertEquals(0, port.navigateBackCalls)
+                assertEquals(1, requireNotNull(saved).unfinishedSessions.size)
+                assertTrue(logs.any { it.contains("PRIVATE_COMPLETION CHECKPOINT_RETRY") })
+            }
             runUntilShortestDelay(scheduler, 30) { requireNotNull(saved).unfinishedSessions.isEmpty() }
             assertEquals(com.freedom.features.aireply.domain.contact.ContactInterceptionStatus.ENABLED,
                 ledgerRepo.loadAll().single().interceptionStatus)
@@ -4032,6 +4067,27 @@ class AiReplyObservationRuntimeTest {
                 ledgerRepo.loadAll().single().pendingRecoveryAction)
             assertEquals(before.nextCursorKey, saved?.nextCursorKey)
             assertEquals("verified-send-receipt", saved?.lastSuccessfulTaskId)
+            if (retryCompletion) {
+                assertEquals(setOf(false, true), rejectedAdmissions)
+                assertEquals(listOf(false, true), actions)
+                assertEquals(1, ledgerRepo.loadAll().single().confirmedTextCount)
+                val returned = ChatPageSnapshot(
+                    packageName = "com.immomo.momo", activityClass = "MaintabActivity",
+                    pageKind = ChatPageKind.CHAT_LIST, scannedNodeCount = 80,
+                    editableInputCount = 0, messageListCount = 0, sendActionCount = 0,
+                    messageRelatedViewIdCount = 0, hasChatTab = true,
+                    messageListTarget = null, inputFieldTarget = null,
+                    chatListViewport = ScreenRect(0, 120, 720, 1480),
+                    chatListCandidates = listOf(sessionCandidate(completeBoundaryEvidence = true,
+                        unreadStatus = ChatUnreadStatus.READ)), windowGeneration = 1L
+                )
+                port.pageAfterBack = returned
+                runUntilShortestDelay(scheduler, 40) { port.navigateBackCalls > 0 }
+                assertEquals(1, port.navigateBackCalls)
+                assertEquals(ChatPageKind.CHAT_LIST, port.page.pageKind)
+                assertEquals("AI_REPLY_PRIVATE_MESSAGES", tasks.currentLease()?.taskId)
+                assertFalse(logs.any { it.contains("PAIRED_QUOTA[COUNT] task=PRIVATE") })
+            }
         }
         assertEquals(1, draftCalls)
         runtime.reset("test stop")

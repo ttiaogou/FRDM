@@ -200,6 +200,7 @@ class AiReplyObservationRuntime(
         privateChatFollowUpPort?.reset("PRIVATE_FOLLOW_UP_LEFT_CHILD")
         activePrivateFollowUp = null
         currentSessionSendConfirmed = false
+        if (!privateQuotaReturnReady) pendingPrivateQuotaReceipt = null
         onLog("PRIVATE_FOLLOW_UP LEFT_CHILD;checkpointRetained=true")
     }
 
@@ -376,7 +377,14 @@ class AiReplyObservationRuntime(
     private val loggedOcrDebugFingerprints = LinkedHashSet<String>()
     private val contactMessageLedger = ContactMessageLedger(contactMessageLedgerRepository)
     private var ocrDebugBatchLimitLogged = false
+    // Run-local receipt for the current confirmed visit only. Durable send/follow-up
+    // facts remain in their existing journals and ledger.
+    private var confirmedPrivateCompletionReceipt: String? = null
     private var currentSessionSendConfirmed = false
+        set(value) {
+            field = value
+            if (!value) confirmedPrivateCompletionReceipt = null
+        }
 
     /** Owns asynchronous OCR/message callback lifetime; Runtime handles only validated results. */
     private val messageReadCoordinator by lazy(LazyThreadSafetyMode.NONE) {
@@ -3991,11 +3999,7 @@ class AiReplyObservationRuntime(
             }
             if (sessionManagerState == SessionManagerState.RETURNING_TO_SESSION_LIST || userInteractionActive) return true
             if (currentSessionSendConfirmed) {
-                // Receipt/count already recorded. Retry only the checkpoint, not the send.
-                if (runCatching { privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint()) }.isSuccess) {
-                    if (sessionTransitionTask == null) scheduleReturnToSessionList(snapshot)
-                } else scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
-                return true
+                return continueConfirmedPrivateCompletion(snapshot)
             }
             if (!observedPrivateDetailVerified(snapshot) ||
                 !AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(),
@@ -5017,6 +5021,12 @@ class AiReplyObservationRuntime(
             return
         }
         if (sessionRunStarted) {
+            if (!receivedGreetingsTaskActive && currentSessionSendConfirmed &&
+                sessionManagerState == SessionManagerState.READING_SESSION
+            ) {
+                continueConfirmedPrivateCompletion(snapshot)
+                return
+            }
             if (currentSessionBinding?.observedDetailTarget != null) {
                 if (currentSessionBinding?.observedBusinessAdmitted == true &&
                     observedPrivateDetailVerified(snapshot) &&
@@ -5341,7 +5351,9 @@ class AiReplyObservationRuntime(
             (checkpoint.step.action == ContactPendingRecoveryAction.SEND_IMAGE && privateImageResourceCount() != 1)
         ) {
             onLog("PRIVATE_FOLLOW_UP ADMISSION_HELD;checkpointRetained=true;noReplay=true")
-            if (interception) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            if (interception || currentSessionSendConfirmed) {
+                scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            }
             return
         }
         val child = PrivateFollowUp(contactKey, sendId, target, checkpoint)
@@ -5369,7 +5381,9 @@ class AiReplyObservationRuntime(
         if (!started) {
             activePrivateFollowUp = null
             onLog("PRIVATE_FOLLOW_UP BEGIN_NOT_ADMITTED;checkpointRetained=true")
-            if (interception) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            if (interception || currentSessionSendConfirmed) {
+                scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            }
             return
         }
         onLog("PRIVATE_FOLLOW_UP BEGIN;action=${checkpoint.step.action};parentLeaseInherited=true")
@@ -5484,8 +5498,39 @@ class AiReplyObservationRuntime(
         }
     }
 
+    /** Re-enter completion only from the original, current task-owned chat. This is
+     * neither another draft nor another send. A started/uncertain image is still
+     * protected by the existing ledger revision and no-replay admission check. */
+    private fun continueConfirmedPrivateCompletion(snapshot: ChatPageSnapshot): Boolean {
+        if (!currentSessionSendConfirmed || receivedGreetingsTaskActive ||
+            sessionManagerState != SessionManagerState.READING_SESSION
+        ) return true
+        if (isPrivateFollowUpActive()) return true
+        if (!canPerformPrivateMessagesUiAction() || userInteractionActive || isPrivateFollowUpTouchActive() ||
+            snapshot.packageName != targetPackage() || snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            isSemanticallyUnconfirmed(snapshot) || currentSessionWindowKey == null ||
+            currentSessionWindowKey != windowSessionKey(snapshot) ||
+            !isExpectedPrivateSessionDetail(snapshot) || currentSessionHeaderMatchMode(snapshot) == null
+        ) {
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        val contactKey = verifiedPrivateLedgerContactKey()
+        if (pendingPrivateFollowUpEnabled(contactKey)) {
+            startPrivateFollowUp(requireNotNull(contactKey), confirmedPrivateCompletionReceipt, snapshot)
+            return true
+        }
+        // A scheduled BACK/draft wait already owns the completion continuation.
+        if (sessionTransitionTask != null) return true
+        return finishConfirmedPrivateSend(confirmedPrivateCompletionReceipt, snapshot)
+    }
+
     /** Existing traversal completion, called after text-only or fully confirmed child actions. */
     private fun finishConfirmedPrivateSend(sendConfirmationId: String?, snapshot: ChatPageSnapshot): Boolean {
+        if (isPrivateFollowUpActive() || pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())) {
+            if (!isPrivateFollowUpActive()) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
         privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
         if (sendConfirmationId != null) privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
         val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
@@ -5494,21 +5539,20 @@ class AiReplyObservationRuntime(
             privateMessagesTraversalTaskExecutor.checkpointTraversalDirection = "BOTTOM_TO_TOP"
         }
         privateMessagesTraversalTaskExecutor.completeCurrentUnfinishedSession()
-        val checkpointWritten = if (observedVisit) {
-            runCatching {
-                privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
-            }.isSuccess
-        } else currentSessionCandidate?.let {
-            privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(it)
-            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
-            true
-        } ?: run {
-            sessionManagerState = SessionManagerState.PAUSED
-            onLog("AI 会话返回被阻止：缺少当前会话稳定键，未写入返回检查点")
-            false
+        if (!observedVisit) {
+            val candidate = currentSessionCandidate ?: run {
+                sessionManagerState = SessionManagerState.PAUSED
+                onLog("AI 会话返回被阻止：缺少当前会话稳定键，未写入返回检查点")
+                return true
+            }
+            privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(candidate)
         }
+        val checkpointWritten = runCatching {
+            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+        }.isSuccess
         if (!checkpointWritten) {
-            if (observedVisit) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            onLog("PRIVATE_COMPLETION CHECKPOINT_RETRY;confirmedSendRetained=true;noReturn=true")
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return true
         }
         if (sendConfirmationId != null && pendingPrivateQuotaReceipt == sendConfirmationId) {
@@ -5564,6 +5608,7 @@ class AiReplyObservationRuntime(
                         scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
                         return true
                     }
+                    confirmedPrivateCompletionReceipt = sendConfirmationId
                     // Only an actual verified send from an admitted unread list row earns
                     // credit. A restored follow-up alone, manual visit or OCR does not.
                     if (currentSessionCandidate?.unreadStatus == ChatUnreadStatus.UNREAD &&
@@ -5579,18 +5624,7 @@ class AiReplyObservationRuntime(
                     }
                     return finishConfirmedPrivateSend(sendConfirmationId, snapshot)
                 }
-                if (!currentSessionSendConfirmed) {
-                    sessionManagerState = SessionManagerState.PAUSED
-                    onLog("AI 会话返回被阻止：最终消息段尚未确认；不返回列表")
-                    return true
-                }
-                if (!currentSessionReadCaptured) {
-                    // A confirmed outgoing bubble and recorded send checkpoint are the return
-                    // proof; optional chat-sample archiving is not part of the send safety gate.
-                    onLog("AI 会话返回门禁[CHAT_SAMPLE_NOT_PERSISTED]：发送已确认；样本归档失败不阻止安全返回")
-                }
-                scheduleReturnToSessionList(snapshot)
-                return true
+                return continueConfirmedPrivateCompletion(snapshot)
             }
             com.freedom.features.aireply.ai.SendConfirmationResult.UNKNOWN -> {
                 if (receivedGreetingsTaskActive) {
@@ -5687,7 +5721,10 @@ class AiReplyObservationRuntime(
         val observedDetail = currentSessionBinding?.observedDetailTarget != null
         if (observedDetail && (currentSessionBinding?.observedBusinessAdmitted != true ||
                 !observedPrivateDetailVerified(snapshot) || batch.windowSessionKey != windowSessionKey(snapshot))) return
-        if (observedDetail && currentSessionSendConfirmed) return
+        if (!receivedGreetingsTaskActive && currentSessionSendConfirmed) {
+            continueConfirmedPrivateCompletion(snapshot)
+            return
+        }
         if (observedDetail && isConversationDraftPending() && !isSendConfirmationPending() &&
             !isSendControlRecoveryPending()) return
         if (receivedGreetingsTaskActive && confirmedGreetingSend != null) {
@@ -7988,6 +8025,8 @@ class AiReplyObservationRuntime(
             privateMessagesTraversalTaskExecutor.isDeferredForCurrentRound(selectedKey)
         ) return
         if (waitForPrivateForegroundQuiet("会话行点击等待目标页面就绪")) return
+        // An interrupted visit cannot lend an unearned slice receipt to a new row.
+        if (!privateQuotaReturnReady) pendingPrivateQuotaReceipt = null
         currentSessionSendConfirmed = false
         confirmedPrivateReturnBackRetryCount = 0
         confirmedPrivateReturnAwaitingRecovery = false
@@ -8588,7 +8627,12 @@ class AiReplyObservationRuntime(
         draftPendingWaitedMs: Long = 0L
     ) {
         if (sessionManagerState != SessionManagerState.READING_SESSION) return
-        if (isPrivateFollowUpActive() || pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())) return
+        if (isPrivateFollowUpActive() || pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())) {
+            if (!isPrivateFollowUpActive() && currentSessionSendConfirmed) {
+                scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            }
+            return
+        }
         if (!canPerformPrivateMessagesUiAction()) {
             onLog("AI 会话返回被阻止：私人消息任务未持有 UI 操作权")
             recoverRetryablePrivateList("PRIVATE_RETURN_LEASE_LOST")
@@ -8641,6 +8685,13 @@ class AiReplyObservationRuntime(
             if (!canPerformPrivateMessagesUiAction()) {
                 onLog("AI 会话返回[STALE_TASK_IGNORED]：私人消息任务租约或恢复门禁已失效；不提交返回动作")
                 recoverRetryablePrivateList("PRIVATE_RETURN_LEASE_CHANGED")
+                return@schedule
+            }
+            // A later child/checkpoint obligation must veto the delayed BACK too.
+            if (isPrivateFollowUpActive() || pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())) {
+                if (!isPrivateFollowUpActive() && currentSessionSendConfirmed) {
+                    scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                }
                 return@schedule
             }
             // A model request or technical pre-send failure can arrive after scheduling.
