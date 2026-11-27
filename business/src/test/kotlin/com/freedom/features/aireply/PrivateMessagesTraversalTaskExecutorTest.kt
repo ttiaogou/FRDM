@@ -14,6 +14,7 @@ import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class PrivateMessagesTraversalTaskExecutorTest {
