@@ -1,6 +1,7 @@
 package com.freedom.data
 
 import com.freedom.core.logging.RunDiagnosticInput
+import com.freedom.application.ports.DisplayLogExportSnapshot
 import android.content.Context
 import com.freedom.core.accessibility.overlay.FloatingButtonPosition
 import com.freedom.core.logging.RunLogBudgetPolicy
@@ -39,6 +40,8 @@ object MonitorStore {
     private val displayLogs = ArrayDeque<String>()
     private var displayLogBytes = 0L
     private var displayLogsInitialized = false
+    private var displayLogSequence = 0L
+    private var legacyImportedThrough = 0L
 
     data class Snapshot(
         val app: String,
@@ -185,6 +188,7 @@ object MonitorStore {
         for (index in 0 until legacy.length()) {
             appendDisplayLog(legacy.optString(index))
         }
+        legacyImportedThrough = displayLogSequence
     }
 
     private fun appendDisplayLog(line: String) {
@@ -193,6 +197,7 @@ object MonitorStore {
             line.take(MAX_LOG_CHARS_PER_ENTRY),
             RunLogBudgetPolicy.MAX_MONITOR_ENTRY_BYTES
         )
+        displayLogSequence++
         displayLogs.addLast(boundedLine)
         displayLogBytes += RunLogBudgetPolicy.utf8Size(boundedLine).toLong()
         while (displayLogs.size > MAX_LOGS || displayLogBytes > RunLogBudgetPolicy.MAX_MONITOR_TOTAL_BYTES) {
@@ -212,6 +217,24 @@ object MonitorStore {
     fun logs(context: Context): List<String> {
         initializeDisplayLogs(context)
         return displayLogs.toList()
+    }
+
+    @Synchronized
+    fun snapshotDisplayLogsForExport(context: Context): DisplayLogExportSnapshot {
+        initializeDisplayLogs(context)
+        return DisplayLogExportSnapshot(displayLogs.toList(), displayLogSequence)
+    }
+
+    @Synchronized
+    fun clearExportedDisplayLogs(context: Context, snapshot: DisplayLogExportSnapshot): Boolean {
+        initializeDisplayLogs(context)
+        val through = snapshot.throughSequence ?: return false
+        if (through > displayLogSequence || through < 0L) return false
+        if (through >= legacyImportedThrough && !prefs(context).edit().remove(KEY_LOGS).commit()) return false
+        while (displayLogs.isNotEmpty() && displayLogSequence - displayLogs.size + 1L <= through) {
+            displayLogBytes -= RunLogBudgetPolicy.utf8Size(displayLogs.removeFirst()).toLong()
+        }
+        return true
     }
 
     @Synchronized

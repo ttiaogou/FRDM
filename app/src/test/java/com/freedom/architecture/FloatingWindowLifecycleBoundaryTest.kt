@@ -90,11 +90,13 @@ class FloatingWindowLifecycleBoundaryTest {
         assertTrue(records.contains("view.typeface = Typeface.DEFAULT_BOLD"))
         assertTrue(records.contains("view.setTextColor(Color.WHITE)"))
         assertTrue(recordsEntry.contains("primary = true"))
-        assertTrue(recordsEntry.contains("launchLogExport(monitorRepository.logs())"))
-        assertTrue(logExport.contains("beginSessionSampleExport(emptyList(), includeAllDiagnostics = true, recentLogText = buildLogExportContent(records))"))
+        assertTrue(recordsEntry.contains("launchLogExport()"))
+        assertTrue(logExport.contains("monitorRepository.snapshotDisplayLogsForExport()"))
+        assertTrue(logExport.contains("beginSessionSampleExport(emptyList(), includeAllDiagnostics = true, displayLogs = snapshot)"))
+        assertTrue(bundleExport.contains("recentLogText = displayLogs?.let { buildLogExportContent(it.records) }"))
         assertTrue(bundleExport.contains("SessionSampleArchiveManager.createExportBundle("))
         assertTrue(bundleExport.contains("withSealedHistory = diagnostics::withSealedHistoryForExport"))
-        assertTrue(bundleExport.contains("launchSessionSampleSavePicker(combinedArchive, temporary = true)"))
+        assertTrue(bundleExport.contains("launchSessionSampleSavePicker(PendingCollectionExport(combinedArchive, it, displayLogs))"))
         assertTrue(picker.contains("Intent.ACTION_CREATE_DOCUMENT"))
         assertTrue(picker.contains("type = \"application/zip\""))
         assertTrue(picker.contains("startActivityForResult(intent, REQUEST_EXPORT_SESSION_SAMPLES)"))
@@ -111,6 +113,10 @@ class FloatingWindowLifecycleBoundaryTest {
         assertFalse(activity.contains("导出运行日志 TXT"))
         assertFalse(activity.contains("REQUEST_EXPORT_LOGS"))
         assertFalse(activity.contains("pendingLogExportContent"))
+        val saveResult = activity.substringAfter("private fun exportSessionSampleArchive(").substringBefore("private fun buildLogExportContent(")
+        assertTrue(saveResult.indexOf("output.use") < saveResult.indexOf("contentResolver.openInputStream(destinationUri)"))
+        assertTrue(saveResult.indexOf("contentResolver.openInputStream(destinationUri)") < saveResult.indexOf("cleanupAfterVerifiedExport("))
+        assertTrue(saveResult.indexOf("cleanupAfterVerifiedExport(") < saveResult.indexOf("clearExportedDisplayLogs("))
     }
     @Test
     fun floatingActionWindowIsAttachedBeforeLauncherAndReusedAcrossExpandCollapse() {

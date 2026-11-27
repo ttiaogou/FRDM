@@ -5,6 +5,9 @@ import com.freedom.core.runtime.RunStateRepository
 import com.freedom.core.runtime.RuntimeLogSink
 import com.freedom.core.accessibility.overlay.FloatingButtonPosition
 
+/** In-process watermark; clearing never uses text equality or removes newer records. */
+data class DisplayLogExportSnapshot(val records: List<String>, val throughSequence: Long?)
+
 /**
  * Application-facing repository for monitor settings, runtime intent, logs and presentation state.
  * Android screens and the AccessibilityService depend on this contract rather than MonitorStore.
@@ -34,6 +37,8 @@ interface MonitorControlRepository :
     fun addLog(line: String)
     fun addDiagnosticLog(input: RunDiagnosticInput) = addLog(input.message)
     fun logs(): List<String>
+    fun snapshotDisplayLogsForExport(): DisplayLogExportSnapshot = DisplayLogExportSnapshot(logs(), null)
+    fun clearExportedDisplayLogs(snapshot: DisplayLogExportSnapshot): Boolean = false
     fun clearLogs()
     fun updateAppPage(appLabel: String? = null, pageLabel: String? = null)
     fun presentationSnapshot(): MonitorPresentationSnapshot

@@ -3,6 +3,7 @@ package com.freedom.data
 import com.freedom.core.logging.RunDiagnosticInput
 import android.content.Context
 import com.freedom.application.ports.MonitorControlRepository
+import com.freedom.application.ports.DisplayLogExportSnapshot
 import com.freedom.core.accessibility.overlay.FloatingButtonPosition
 import com.freedom.application.ports.MonitorPresentationSnapshot
 import java.text.SimpleDateFormat
@@ -94,6 +95,12 @@ class MonitorStoreRepository(context: Context) : MonitorControlRepository {
     }
 
     override fun logs(): List<String> = MonitorStore.logs(appContext)
+
+    override fun snapshotDisplayLogsForExport(): DisplayLogExportSnapshot =
+        MonitorStore.snapshotDisplayLogsForExport(appContext)
+
+    override fun clearExportedDisplayLogs(snapshot: DisplayLogExportSnapshot): Boolean =
+        MonitorStore.clearExportedDisplayLogs(appContext, snapshot)
 
     override fun clearLogs() = MonitorStore.clearLogs(appContext)
 

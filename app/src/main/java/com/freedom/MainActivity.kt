@@ -35,6 +35,7 @@ import com.freedom.adapters.android.MonitorActions
 import com.freedom.application.ports.OcrReviewRepository
 import com.freedom.application.ports.OcrReviewEntry
 import com.freedom.application.ports.MonitorControlRepository
+import com.freedom.application.ports.DisplayLogExportSnapshot
 import com.freedom.adapters.accessibility.android.MonitorOverlay
 import com.freedom.stability.MonitorKeepAliveService
 import com.freedom.ui.calibration.GestureCalibrationUiController
@@ -74,8 +75,13 @@ class MainActivity : Activity() {
 
     private var configurationHome: ConfigurationHome? = null
     private var receiverRegistered = false
-    private var pendingSessionSampleExportFile: File? = null
-    private var pendingSessionSampleExportTemporary = false
+    private data class PendingCollectionExport(
+        val archive: File,
+        val receipt: SessionSampleArchiveManager.ExportReceipt,
+        val displayLogs: DisplayLogExportSnapshot?
+    )
+    private var pendingSessionSampleExport: PendingCollectionExport? = null
+    private var sessionSampleExportRunning = false
     private var pendingNodeDumpExportFile: File? = null
     private var pendingReopenConfigPanelAfterSettings = false
     private var pendingReopenConfigPanelAfterNotificationPermission = false
@@ -1769,7 +1775,7 @@ class MainActivity : Activity() {
                     label = "采集 ZIP 运行日志",
                     description = "运行日志、诊断报告及已封存的异常证据",
                     primary = true
-                ) { launchLogExport(monitorRepository.logs()) },
+                ) { launchLogExport() },
                 CollectionExportDialog.Action(
                     label = "已封存采集归档 ZIP",
                     description = "查看归档、选择导出或等待当前采集封存"
@@ -1975,8 +1981,9 @@ class MainActivity : Activity() {
         archiveSealHandler.post(poll)
     }
 
-    private fun launchLogExport(records: List<String>) {
-        beginSessionSampleExport(emptyList(), includeAllDiagnostics = true, recentLogText = buildLogExportContent(records))
+    private fun launchLogExport() {
+        val snapshot = monitorRepository.snapshotDisplayLogsForExport()
+        beginSessionSampleExport(emptyList(), includeAllDiagnostics = true, displayLogs = snapshot)
     }
 
     /** Exports the latest structural-only node snapshot through the existing SAF path. */
@@ -2118,12 +2125,17 @@ class MainActivity : Activity() {
     private fun beginSessionSampleExport(
         archives: List<SessionSampleArchive>,
         includeAllDiagnostics: Boolean = false,
-        recentLogText: String? = null
+        displayLogs: DisplayLogExportSnapshot? = null
     ) {
         if (archives.isEmpty() && !includeAllDiagnostics) {
             Toast.makeText(this, "请先选择已封存的采集任务", Toast.LENGTH_SHORT).show()
             return
         }
+        if (sessionSampleExportRunning) {
+            Toast.makeText(this, "已有采集 ZIP 导出正在进行", Toast.LENGTH_SHORT).show()
+            return
+        }
+        sessionSampleExportRunning = true
         val exportDirectory = File(cacheDir, "FreedomExports")
         val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss-SSS", java.util.Locale.US)
             .format(java.util.Date())
@@ -2140,7 +2152,7 @@ class MainActivity : Activity() {
                     diagnosticsRunsDirectory = diagnosticsRunsDirectory,
                     destination = combinedArchive,
                     includeAllDiagnostics = includeAllDiagnostics,
-                    recentLogText = recentLogText,
+                    recentLogText = displayLogs?.let { buildLogExportContent(it.records) },
                     withSealedHistory = diagnostics::withSealedHistoryForExport
                 )
             }
@@ -2149,8 +2161,9 @@ class MainActivity : Activity() {
                     runCatching { combinedArchive.delete() }
                 } else {
                     result.onSuccess {
-                        launchSessionSampleSavePicker(combinedArchive, temporary = true)
+                        launchSessionSampleSavePicker(PendingCollectionExport(combinedArchive, it, displayLogs))
                     }.onFailure { error ->
+                        sessionSampleExportRunning = false
                         runCatching { combinedArchive.delete() }
                         monitorRepository.addLog(timestamp() + "  运行诊断与会话样本打包失败：${error.javaClass.simpleName}: " +
                             (error.message ?: "无详细信息"))
@@ -2162,9 +2175,11 @@ class MainActivity : Activity() {
     }
 
     /** Use Android's Storage Access Framework; no broad storage permission is required. */
-    private fun launchSessionSampleSavePicker(archive: File, temporary: Boolean) {
+    private fun launchSessionSampleSavePicker(export: PendingCollectionExport) {
+        val archive = export.archive
         if (!archive.isFile) {
-            Toast.makeText(this, "运行诊断与采集 ZIP 已不存在，请刷新运行记录", Toast.LENGTH_LONG).show()
+            sessionSampleExportRunning = false
+            Toast.makeText(this, "运行诊断与采集 ZIP 已不存在，请重新导出", Toast.LENGTH_LONG).show()
             return
         }
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
@@ -2172,55 +2187,72 @@ class MainActivity : Activity() {
             type = "application/zip"
             putExtra(Intent.EXTRA_TITLE, archive.name)
         }
-        pendingSessionSampleExportFile = archive
-        pendingSessionSampleExportTemporary = temporary
+        pendingSessionSampleExport = export
         try {
             suppressFloatingButtonOnPause = true
             @Suppress("DEPRECATION")
             startActivityForResult(intent, REQUEST_EXPORT_SESSION_SAMPLES)
         } catch (error: Exception) {
             suppressFloatingButtonOnPause = false
-            pendingSessionSampleExportFile = null
-            pendingSessionSampleExportTemporary = false
-            if (temporary) runCatching { archive.delete() }
+            pendingSessionSampleExport = null
+            sessionSampleExportRunning = false
+            runCatching { archive.delete() }
             monitorRepository.addLog(timestamp() + "  启动会话样本导出失败：${error.javaClass.simpleName}")
             Toast.makeText(this, "无法打开文件保存窗口，请稍后重试", Toast.LENGTH_LONG).show()
         }
     }
 
     private fun exportSessionSampleArchive(resultCode: Int, data: Intent?) {
-        val archive = pendingSessionSampleExportFile
-        val temporary = pendingSessionSampleExportTemporary
-        pendingSessionSampleExportFile = null
-        pendingSessionSampleExportTemporary = false
+        val export = pendingSessionSampleExport
+        pendingSessionSampleExport = null
         if (resultCode != RESULT_OK || data?.data == null) {
-            if (temporary) archive?.let { runCatching { it.delete() } }
-            Toast.makeText(this, "已取消运行诊断与采集导出", Toast.LENGTH_SHORT).show()
+            sessionSampleExportRunning = false
+            export?.let { runCatching { it.archive.delete() } }
+            Toast.makeText(this, "已取消导出，原始数据保留", Toast.LENGTH_SHORT).show()
             return
         }
-        if (archive == null || !archive.isFile) {
-            Toast.makeText(this, "运行诊断与采集 ZIP 已不存在，请刷新运行记录后重试", Toast.LENGTH_LONG).show()
+        if (export == null || !export.archive.isFile) {
+            sessionSampleExportRunning = false
+            Toast.makeText(this, "导出事务已失效，原始数据保留，请重新导出", Toast.LENGTH_LONG).show()
             return
         }
         val destinationUri = data.data!!
         Thread {
+            var written = false
             val result = runCatching {
                 val output = contentResolver.openOutputStream(destinationUri, "w")
                     ?: throw java.io.IOException("无法打开所选文件")
-                archive.inputStream().use { input ->
-                    output.use { stream ->
-                        input.copyTo(stream)
-                        stream.flush()
-                    }
+                output.use { stream ->
+                    export.archive.inputStream().use { it.copyTo(stream) }
+                    stream.flush()
                 }
+                written = true
+                val saved = contentResolver.openInputStream(destinationUri)
+                    ?: throw java.io.IOException("无法回读已保存的 ZIP")
+                val cleanup = SessionSampleArchiveManager.cleanupAfterVerifiedExport(
+                    receipt = export.receipt,
+                    savedZip = saved,
+                    sampleRoot = sessionSampleRunsDirectory(),
+                    diagnosticsRunsDirectory = File(filesDir, "freedom_diagnostics/runs"),
+                    withSealedHistory = diagnostics::withSealedHistoryForExport
+                )
+                val displayCleared = export.displayLogs?.let { monitorRepository.clearExportedDisplayLogs(it) } ?: true
+                cleanup to displayCleared
             }
+            runCatching { export.archive.delete() }
             runOnUiThread {
-                if (temporary) runCatching { archive.delete() }
-                result.onSuccess {
-                    Toast.makeText(this, "运行诊断 ZIP 已导出", Toast.LENGTH_LONG).show()
+                sessionSampleExportRunning = false
+                result.onSuccess { (cleanup, displayCleared) ->
+                    refreshScreen()
+                    val failed = cleanup.failed + if (displayCleared) 0 else 1
+                    Toast.makeText(this,
+                        "ZIP 已导出并校验；已清理 ${cleanup.deleted} 项，保护性保留 ${cleanup.retained} 项，清理失败 $failed 项",
+                        Toast.LENGTH_LONG).show()
                 }.onFailure { error ->
-                    monitorRepository.addLog(timestamp() + "  写入会话样本 ZIP 失败：${error.javaClass.simpleName}")
-                    Toast.makeText(this, "样本 ZIP 导出失败：${error.message ?: error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                    monitorRepository.addLog(timestamp() + "  ZIP 导出或清理失败：${error.javaClass.simpleName}")
+                    val message = if (written) "ZIP 已写入，但回读校验或清理未完成，请检查目标文件及剩余数据"
+                        else "ZIP 保存失败，原始数据保留"
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                 }
             }
         }.start()

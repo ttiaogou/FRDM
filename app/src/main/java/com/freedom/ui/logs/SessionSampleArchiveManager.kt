@@ -3,6 +3,11 @@ package com.freedom.ui.logs
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.nio.file.Files
+import java.security.MessageDigest
+import java.util.zip.CRC32
+import java.util.zip.CheckedInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -86,6 +91,138 @@ internal data class SessionSampleArchive(
 
 /** Reads the sealed per-run ZIPs and builds a combined ZIP without modifying source archives. */
 internal object SessionSampleArchiveManager {
+    enum class SourceKind { SAMPLE, DIAGNOSTIC, RETAINED_INCIDENT }
+    data class ExportSource(val file: File, val runId: String, val kind: SourceKind, val fingerprint: String)
+    data class ExportReceipt(val zipSha256: String, val sources: List<ExportSource>)
+    data class CleanupResult(val deleted: Int, val retained: Int, val failed: Int)
+
+    private fun sha256(input: InputStream): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (count > 0) digest.update(buffer, 0, count)
+        }
+        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    private fun fingerprint(file: File): String {
+        check(!Files.isSymbolicLink(file.toPath())) { "导出源不能是符号链接" }
+        if (file.isFile) return file.inputStream().use(::sha256)
+        check(file.isDirectory) { "导出源已不存在" }
+        val root = file.canonicalFile
+        val digest = MessageDigest.getInstance("SHA-256")
+        root.walkTopDown().onFail { _, error -> throw error }.toList()
+            .sortedBy { it.relativeTo(root).invariantSeparatorsPath }.forEach { child ->
+                check(!Files.isSymbolicLink(child.toPath())) { "导出源包含符号链接" }
+                check(child.canonicalFile == root || child.canonicalPath.startsWith(root.path + File.separator)) { "导出源路径越界" }
+                val relative = child.relativeTo(root).invariantSeparatorsPath
+                val identity = if (child.isDirectory) "D" else {
+                    check(child.isFile) { "导出源包含未知文件类型" }
+                    "F:" + child.inputStream().use(::sha256)
+                }
+                digest.update("$relative\u0000$identity\u0000".toByteArray(Charsets.UTF_8))
+            }
+        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    private fun sourceSnapshot(file: File, id: String, kind: SourceKind): ExportSource =
+        ExportSource(file, id, kind, fingerprint(file))
+
+    private fun verifyZip(file: File) {
+        ZipFile(file).use { zip ->
+            check(zip.getEntry("EXPORT-MANIFEST.txt") != null) { "导出 ZIP 缺少清单" }
+            val buffer = ByteArray(64 * 1024)
+            val entries = zip.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                if (entry.isDirectory) continue
+                CheckedInputStream(zip.getInputStream(entry), CRC32()).use { input ->
+                    var size = 0L
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        size += count
+                    }
+                    check(size == entry.size && input.checksum.value == entry.crc) { "导出 ZIP 内容校验失败" }
+                }
+            }
+        }
+    }
+
+    private fun directChild(root: File, file: File): Boolean =
+        !Files.isSymbolicLink(file.toPath()) && file.canonicalFile.parentFile == root.canonicalFile
+
+    private fun sampleIsSealed(root: File, source: ExportSource): Boolean =
+        safeDiagnosticId(source.runId) && directChild(root, source.file) &&
+            source.file.extension.equals("zip", true) &&
+            !File(root, source.runId).exists() && !File(root, ".${source.runId}.active.json").exists()
+
+    /** Only a byte-identical reopened external ZIP authorizes destructive cleanup.
+     * The history-owner lock serializes cleanup against retention.
+     */
+    fun cleanupAfterVerifiedExport(
+        receipt: ExportReceipt,
+        savedZip: InputStream,
+        sampleRoot: File,
+        diagnosticsRunsDirectory: File,
+        withSealedHistory: ((Set<String>) -> Unit) -> Unit
+    ): CleanupResult {
+        check(savedZip.use(::sha256) == receipt.zipSha256) { "已保存 ZIP 回读校验失败，原始数据未清理" }
+        var deleted = 0
+        var retained = 0
+        var failed = 0
+        fun cleanup(source: ExportSource, eligible: () -> Boolean) {
+            try {
+                if (!source.file.exists()) return
+                if (!eligible() || fingerprint(source.file) != source.fingerprint) { retained++; return }
+                val removed = if (source.kind == SourceKind.SAMPLE) source.file.delete()
+                    else source.file.deleteRecursively()
+                if (removed || !source.file.exists()) deleted++ else failed++
+            } catch (_: Exception) { failed++ }
+        }
+        withSealedHistory { excluded ->
+            receipt.sources.filter { it.kind == SourceKind.SAMPLE }.forEach { source ->
+                cleanup(source) { sampleIsSealed(sampleRoot, source) }
+            }
+            // An unreadable archive or unfinished directory with unknown ownership blocks
+            // diagnostic deletion; unselected archives keep their diagnostic dependencies.
+            val referenced = mutableSetOf<String>()
+            var unknownReference = false
+            val remaining = if (sampleRoot.exists()) sampleRoot.listFiles() else emptyArray()
+            if (remaining == null) unknownReference = true
+            remaining.orEmpty().forEach { file ->
+                if (file.isFile && file.extension.equals("zip", true)) {
+                    val archive = inspect(file)
+                    if (archive == null || ("run.jsonl" !in archive.entryNames && "run_manifest.json" !in archive.entryNames)) {
+                        unknownReference = true
+                    } else archive.diagnosticRunId?.let(referenced::add)
+                } else if (file.isDirectory) {
+                    val metadata = runCatching { File(file, "run.jsonl").bufferedReader().use { it.readLine() } }.getOrNull()
+                    val id = metadata?.let { jsonString(it, "diagnosticRunId") }
+                    if (id == null) unknownReference = true else referenced.add(id)
+                } else if (file.name.endsWith(".active.json") || file.name.endsWith(".active.json.tmp")) {
+                    val id = file.name.removePrefix(".").substringBefore(".active.json")
+                    if (!File(sampleRoot, id).isDirectory) unknownReference = true
+                }
+            }
+            val historyRoot = File(diagnosticsRunsDirectory.parentFile, "incident_history")
+            receipt.sources.filter { it.kind != SourceKind.SAMPLE }.forEach { source ->
+                val root = if (source.kind == SourceKind.DIAGNOSTIC) diagnosticsRunsDirectory else historyRoot
+                val marker = if (source.kind == SourceKind.DIAGNOSTIC) "diagnostic_manifest.json" else "incident_retention.json"
+                cleanup(source) {
+                    val omittedEvidence = File(source.file, "events.jsonl.sealing").exists() ||
+                        (File(source.file, "events.jsonl").isFile && File(source.file, "event_segments").exists())
+                    !unknownReference && source.runId !in excluded && source.runId !in referenced &&
+                        safeDiagnosticId(source.runId) && directChild(root, source.file) &&
+                        source.file.name == source.runId && File(source.file, marker).isFile && !omittedEvidence
+                }
+            }
+        }
+        return CleanupResult(deleted, retained, failed)
+    }
+
     /** Active marker files are maintained by the sample store until a verified ZIP is published. */
     fun listActiveRunIds(runsDirectory: File): Set<String> {
         if (!runsDirectory.isDirectory) return emptySet()
@@ -211,7 +348,8 @@ internal object SessionSampleArchiveManager {
         includeAllDiagnostics: Boolean = false,
         recentLogText: String? = null,
         withSealedHistory: ((Set<String>) -> Unit) -> Unit = { copy -> copy(emptySet()) }
-    ) {
+    ): ExportReceipt {
+        val exportedSources = ArrayList<ExportSource>()
         require(archives.isNotEmpty() || includeAllDiagnostics) { "至少需要选择一条已封存采集任务" }
         require(archives.all { it.file.isFile }) { "部分采集归档已不存在，请刷新列表" }
         destination.parentFile?.let { parent ->
@@ -229,6 +367,8 @@ internal object SessionSampleArchiveManager {
                 val usedSampleNames = linkedSetOf<String>()
                 val sampleCounts = mutableListOf<Int>()
                 archives.forEach { archive ->
+                    val snapshot = sourceSnapshot(archive.file, archive.runId, SourceKind.SAMPLE)
+                    check(sampleIsSealed(archive.file.parentFile, snapshot)) { "采集归档尚未完成封存" }
                     val baseName = safePathSegment(archive.runId)
                     var sampleName = baseName
                     var suffix = 2
@@ -246,11 +386,16 @@ internal object SessionSampleArchiveManager {
                             output.putNextEntry(ZipEntry("samples/$sampleName/$entryName").apply {
                                 if (entry.time > 0L) time = entry.time
                             })
-                            source.getInputStream(entry).use { it.copyTo(output) }
+                            CheckedInputStream(source.getInputStream(entry), CRC32()).use { input ->
+                                val size = input.copyTo(output)
+                                check(size == entry.size && input.checksum.value == entry.crc) { "采集归档内容校验失败" }
+                            }
                             output.closeEntry()
                             sampleEntries++
                         }
                     }
+                    check(fingerprint(archive.file) == snapshot.fingerprint && sampleIsSealed(archive.file.parentFile, snapshot)) { "导出期间采集归档发生变化" }
+                    exportedSources += snapshot
                     sampleCounts += sampleEntries
                 }
 
@@ -267,6 +412,13 @@ internal object SessionSampleArchiveManager {
                     }
                     val statuses = linkedMapOf<String, Pair<String, Boolean>>()
                     manifest.append("\n诊断历史范围：").append(if (includeAllDiagnostics) "全部已封存运行及独立异常历史" else "关联运行").append('\n')
+                    fun copyAndRecord(directory: File, prefix: String, id: String, kind: SourceKind): Boolean {
+                        val snapshot = sourceSnapshot(directory, id, kind)
+                        val report = copyDiagnosticDirectory(output, directory, prefix)
+                        check(fingerprint(directory) == snapshot.fingerprint) { "导出期间诊断历史发生变化" }
+                        exportedSources += snapshot
+                        return report
+                    }
                     for (id in allIds) {
                         val primary = File(diagnosticsRunsDirectory, id)
                         val retained = File(historyRoot, id)
@@ -277,20 +429,29 @@ internal object SessionSampleArchiveManager {
                         var reportIncluded = false
                         val status = when {
                             primarySealed && isContainedDirectory(diagnosticsRunsDirectory, primary) -> {
-                                reportIncluded = copyDiagnosticDirectory(output, primary, "diagnostics/$id")
+                                reportIncluded = copyAndRecord(primary, "diagnostics/$id", id, SourceKind.DIAGNOSTIC)
                                 // A partial failed normal-history deletion must not hide the
                                 // independently retained incident files. Verified identical copies
                                 // are not exported twice.
                                 val retainedSeparately = retainedSealed && isContainedDirectory(historyRoot, retained) &&
                                     !retainedEvidenceMatches(primary, retained)
                                 if (retainedSeparately) {
-                                    copyDiagnosticDirectory(output, retained, "incident_history/$id")
+                                    copyAndRecord(retained, "incident_history/$id", id, SourceKind.RETAINED_INCIDENT)
+                                } else if (retainedSealed && isContainedDirectory(historyRoot, retained)) {
+                                    val snapshot = sourceSnapshot(retained, id, SourceKind.RETAINED_INCIDENT)
+                                    val paths = retained.walkTopDown().filter(File::isFile)
+                                        .map { it.relativeTo(retained).invariantSeparatorsPath }.toList()
+                                    if (paths.any { it.startsWith("incidents/") } &&
+                                        paths.all { it.startsWith("incidents/") || it == "diagnostic_manifest.json" || it == "incident_retention.json" } &&
+                                        retainedEvidenceMatches(primary, retained) && fingerprint(retained) == snapshot.fingerprint) {
+                                        exportedSources += snapshot
+                                    }
                                 }
                                 val primaryStatus = if (reportIncluded) "诊断报告及运行记录已打包" else "诊断记录已打包，TXT 报告不存在"
                                 if (retainedSeparately) "$primaryStatus；独立异常副本存在差异，已另行保留" else primaryStatus
                             }
                             retainedSealed && isContainedDirectory(historyRoot, retained) -> {
-                                copyDiagnosticDirectory(output, retained, "diagnostics/$id")
+                                copyAndRecord(retained, "diagnostics/$id", id, SourceKind.RETAINED_INCIDENT)
                                 "普通运行历史已淘汰或不可用；独立异常证据已打包"
                             }
                             id in excluded -> "运行尚未封存，本次未打包"
@@ -321,6 +482,8 @@ internal object SessionSampleArchiveManager {
                 output.closeEntry()
             }
             check(destination.isFile && destination.length() > 0L) { "运行诊断与采集 ZIP 生成失败" }
+            verifyZip(destination)
+            return ExportReceipt(destination.inputStream().use(::sha256), exportedSources.toList())
         } catch (error: Exception) {
             runCatching { destination.delete() }
             throw error

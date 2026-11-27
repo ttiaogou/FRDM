@@ -12,6 +12,75 @@ import org.junit.Test
 
 class SessionSampleArchiveManagerTest {
     @Test
+    fun verifiedExportCleansOnlySelectedUnchangedSourcesAndProtectsReferences() {
+        val root = Files.createTempDirectory("freedom-export-cleanup").toFile()
+        try {
+            val samples = File(root, "samples").apply { mkdirs() }
+            val runs = File(root, "diagnostics/runs").apply { mkdirs() }
+            val selected = createRunArchive(samples, "selected.zip", "selected", 1L, 2L, 0, 0, false, diagnosticRunId = "shared")
+            val remaining = createRunArchive(samples, "remaining.zip", "remaining", 1L, 2L, 0, 0, false, diagnosticRunId = "shared")
+            val diagnostic = File(runs, "shared").apply { mkdirs() }
+            File(diagnostic, "diagnostic_manifest.json").writeText("{}")
+            File(diagnostic, "events.jsonl").writeText("evidence")
+            val output = File(root, "out.zip")
+            val receipt = SessionSampleArchiveManager.createExportBundle(
+                listOf(requireNotNull(SessionSampleArchiveManager.inspect(selected))), runs, output
+            )
+            assertTrue(selected.isFile)
+            val result = SessionSampleArchiveManager.cleanupAfterVerifiedExport(receipt, output.inputStream(), samples, runs) { it(emptySet()) }
+            assertEquals(1, result.deleted)
+            assertEquals(1, result.retained)
+            assertFalse(selected.exists())
+            assertTrue(remaining.isFile)
+            assertTrue(diagnostic.isDirectory)
+            val second = SessionSampleArchiveManager.createExportBundle(
+                listOf(requireNotNull(SessionSampleArchiveManager.inspect(remaining))), runs, output
+            )
+            val finalResult = SessionSampleArchiveManager.cleanupAfterVerifiedExport(second, output.inputStream(), samples, runs) { it(emptySet()) }
+            assertEquals(2, finalResult.deleted)
+            assertFalse(diagnostic.exists())
+            assertFalse(remaining.exists())
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test
+    fun failedReadbackAndChangedOrActiveSourcesNeverAuthorizeDeletion() {
+        val root = Files.createTempDirectory("freedom-export-verify").toFile()
+        try {
+            val samples = File(root, "samples").apply { mkdirs() }
+            val runs = File(root, "diagnostics/runs").apply { mkdirs() }
+            fun diagnostic(id: String): File = File(runs, id).apply {
+                mkdirs()
+                File(this, "diagnostic_manifest.json").writeText("{}")
+                File(this, "events.jsonl").writeText("original")
+            }
+            val changed = diagnostic("changed")
+            val active = diagnostic("active")
+            val stable = diagnostic("stable")
+            val retained = File(runs.parentFile, "incident_history/retained").apply { mkdirs() }
+            File(retained, "incident_retention.json").writeText("{}")
+            File(retained, "incidents").mkdirs()
+            File(retained, "incidents/transaction.json").writeText("evidence")
+            val output = File(root, "out.zip")
+            val receipt = SessionSampleArchiveManager.createExportBundle(emptyList(), runs, output, includeAllDiagnostics = true)
+            val invalid = runCatching {
+                SessionSampleArchiveManager.cleanupAfterVerifiedExport(receipt, byteArrayOf(1).inputStream(), samples, runs) { it(emptySet()) }
+            }
+            assertTrue(invalid.isFailure)
+            assertTrue(stable.isDirectory)
+            File(changed, "events.jsonl").writeText("new evidence")
+            val result = SessionSampleArchiveManager.cleanupAfterVerifiedExport(receipt, output.inputStream(), samples, runs) { it(setOf("active")) }
+            assertEquals(2, result.deleted)
+            assertEquals(2, result.retained)
+            assertTrue(changed.isDirectory)
+            assertTrue(active.isDirectory)
+            assertFalse(stable.exists())
+            assertFalse(retained.exists())
+        } finally { root.deleteRecursively() }
+    }
+
+
+    @Test
     fun listsOnlyRunDirectoriesWithActiveOwnerMarkersAsInProgress() {
         val directory = Files.createTempDirectory("freedom-sample-active").toFile()
         try {
