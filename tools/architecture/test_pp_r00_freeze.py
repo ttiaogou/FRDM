@@ -153,6 +153,17 @@ class PpR00FreezeTest(unittest.TestCase):
         }.items():
             self.assertEqual(previous, reviewed_s1[path])
             reviewed_s1[path] = replacement
+        # R04 batch 4: exact consolidation of existing stateless helper implementations.
+        for path, (previous, replacement) in {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": (
+                "ed23fe9f78461734f1a484ac72287ad2d6a18ad8", "8bab51d20b1d24626041635fda0a767d33eb7ff8"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSayHiAvatarTargetPolicy.kt": (
+                "71aa0ca8a1bf27b9e3baa7a4d2e2c8784943b5f1", "2571b4c6719caab7fa956a8a32fcd3614cab0b1b"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSayHiNavigationEvidenceInspector.kt": (
+                "ee6ab55f92bb78fccad1b29a7e3e439151c4963c", "6f917cf6b61ce1b91dbda2237101972398180fbe"),
+        }.items():
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = replacement
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

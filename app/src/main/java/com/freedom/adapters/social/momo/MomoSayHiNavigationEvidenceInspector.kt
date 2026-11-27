@@ -66,6 +66,22 @@ internal class MomoSayHiNavigationEvidenceInspector(
         require(maxCandidatesPerGroup > 0)
     }
 
+    fun describeNavigationCandidates(candidates: List<MomoNavigationTargetEvidence>, maxItems: Int): String =
+        candidates.take(maxItems).joinToString(";") { candidate ->
+            "path=${candidate.path.joinToString("/")};" +
+                "class=${candidate.className.substringAfterLast('.')};" +
+                "id=${candidate.viewId};" +
+                "bounds=${candidate.bounds.left},${candidate.bounds.top}," +
+                "${candidate.bounds.right},${candidate.bounds.bottom};" +
+                "clickable=${candidate.clickable};enabled=${candidate.enabled};" +
+                "checkable=${candidate.checkable};checked=${candidate.checked};" +
+                "clickAncestor=${candidate.clickableAncestorPath?.joinToString("/") ?: "NONE"};" +
+                "clickAncestorId=${candidate.clickableAncestorViewId.orEmpty()};" +
+                "clickAncestorClass=${candidate.clickableAncestorClassName?.substringAfterLast('.') ?: "NONE"};" +
+                "listLabel=${candidate.hasListRelatedLabel};" +
+                "interceptRelated=${candidate.relatedToInterceptLabel}"
+        }.ifBlank { "NONE" }
+
     fun formatBounds(bounds: ScreenRect): String =
         "[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]"
 

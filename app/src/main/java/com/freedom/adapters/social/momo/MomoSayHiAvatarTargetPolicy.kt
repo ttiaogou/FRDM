@@ -250,7 +250,7 @@ internal object MomoSayHiAvatarTargetPolicy {
         return candidate.width <= avatar.width * 2.5f && candidate.height <= avatar.height * 2.5f
     }
 
-    private fun isWithin(path: NodePath, root: NodePath): Boolean =
+    fun isWithin(path: NodePath, root: NodePath): Boolean =
         path.childIndices.size >= root.childIndices.size &&
             path.childIndices.take(root.childIndices.size) == root.childIndices
 
@@ -261,7 +261,7 @@ internal object MomoSayHiAvatarTargetPolicy {
     private const val MIN_SAFE_TAP_WIDTH = 24
     private const val MIN_SAFE_TAP_HEIGHT = 20
 
-    private fun contains(outer: ScreenRect, inner: ScreenRect): Boolean =
+    fun contains(outer: ScreenRect, inner: ScreenRect): Boolean =
         !outer.isEmpty && !inner.isEmpty && inner.left >= outer.left && inner.top >= outer.top &&
             inner.right <= outer.right && inner.bottom <= outer.bottom
 

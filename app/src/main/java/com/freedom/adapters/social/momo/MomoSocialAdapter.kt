@@ -818,23 +818,23 @@ internal class MomoSocialAdapter(
         val dynamicTarget = row?.let { evidence ->
             browseComponents.navigationController.findClickableNodeForLabel(
                 root = root,
-                label = configPageDynamicTabLabel(),
+                label = config.page.dynamicTabLabel,
                 expectedBounds = evidence.dynamicBounds,
                 minCenterY = 0,
-                maxCenterY = (metrics.heightPixels * configPageDynamicTabUpperBandRatio()).toInt()
+                maxCenterY = (metrics.heightPixels * config.page.dynamicTabUpperBandRatio).toInt()
             )
         }
         val homeTarget = home?.let { evidence ->
             browseComponents.navigationController.findClickableNodeForLabel(
                 root = root,
-                label = configPageHomeTabLabel(),
+                label = config.page.homeTabLabel,
                 expectedBounds = evidence.homeBounds,
-                minCenterY = (metrics.heightPixels * configPageHomeNavLowerBandRatio()).toInt(),
+                minCenterY = (metrics.heightPixels * config.page.homeNavLowerBandRatio).toInt(),
                 maxCenterY = metrics.heightPixels
             ) ?: browseComponents.navigationController.findClickableHomeTabContainer(
                 root = root,
                 expectedLabelBounds = evidence.homeBounds,
-                minCenterY = (metrics.heightPixels * configPageHomeNavLowerBandRatio()).toInt(),
+                minCenterY = (metrics.heightPixels * config.page.homeNavLowerBandRatio).toInt(),
                 maxCenterY = metrics.heightPixels
             )
         }
@@ -1201,31 +1201,16 @@ internal class MomoSocialAdapter(
         val signature = evidence.structuralKey()
         if (signature == lastSayHiNavigationEvidenceSignature) return
         lastSayHiNavigationEvidenceSignature = signature
-        fun describe(candidates: List<MomoNavigationTargetEvidence>): String =
-            candidates.take(MAX_NAVIGATION_EVIDENCE_LOG_ITEMS).joinToString(";") { candidate ->
-                "path=${candidate.path.joinToString("/")};" +
-                    "class=${candidate.className.substringAfterLast('.')};" +
-                    "id=${candidate.viewId};" +
-                    "bounds=${candidate.bounds.left},${candidate.bounds.top}," +
-                    "${candidate.bounds.right},${candidate.bounds.bottom};" +
-                    "clickable=${candidate.clickable};enabled=${candidate.enabled};" +
-                    "checkable=${candidate.checkable};checked=${candidate.checked};" +
-                    "clickAncestor=${candidate.clickableAncestorPath?.joinToString("/") ?: "NONE"};" +
-                    "clickAncestorId=${candidate.clickableAncestorViewId.orEmpty()};" +
-                    "clickAncestorClass=${candidate.clickableAncestorClassName?.substringAfterLast('.') ?: "NONE"};" +
-                    "listLabel=${candidate.hasListRelatedLabel};" +
-                    "interceptRelated=${candidate.relatedToInterceptLabel}"
-            }.ifBlank { "NONE" }
         onLog(
             "陌陌导航结构取证：Activity=${evidence.activityClass};" +
                 "扫描节点=${evidence.visitedNodeCount};截断=${evidence.truncated};" +
                 "收到招呼入口候选=${evidence.receivedGreetingsEntryTargets.size};" +
-                "入口节点=[${describe(evidence.receivedGreetingsEntryTargets)}];" +
+                "入口节点=[${sayHiNavigationEvidenceInspector.describeNavigationCandidates(evidence.receivedGreetingsEntryTargets, MAX_NAVIGATION_EVIDENCE_LOG_ITEMS)}];" +
                 "右上角可点击候选=${evidence.topRightActionTargets.size};" +
-                "右上角节点=[${describe(evidence.topRightActionTargets)}];" +
+                "右上角节点=[${sayHiNavigationEvidenceInspector.describeNavigationCandidates(evidence.topRightActionTargets, MAX_NAVIGATION_EVIDENCE_LOG_ITEMS)}];" +
                 "拦截相关文本节点=${evidence.interceptLabelNodeCount};" +
                 "开关候选=${evidence.toggleTargets.size};" +
-                "开关节点=[${describe(evidence.toggleTargets)}]"
+                "开关节点=[${sayHiNavigationEvidenceInspector.describeNavigationCandidates(evidence.toggleTargets, MAX_NAVIGATION_EVIDENCE_LOG_ITEMS)}]"
         )
     }
 
@@ -3140,10 +3125,10 @@ internal class MomoSocialAdapter(
         if (!containsBounds(targetNode.bounds, target.targetBounds)) {
             return "TARGET_NODE_DOES_NOT_CONTAIN_SAFE_BOUNDS"
         }
-        if (!isPathWithin(rowPath.childIndices, target.path.childIndices)) {
+        if (!MomoSayHiAvatarTargetPolicy.isWithin(rowPath, target.path)) {
             return "TARGET_NODE_NOT_ROW_ANCESTOR"
         }
-        if (!isPathWithin(namePath.childIndices, rowPath.childIndices)) {
+        if (!MomoSayHiAvatarTargetPolicy.isWithin(namePath, rowPath)) {
             return "NAME_NODE_NOT_WITHIN_ROW"
         }
         if (!containsBounds(rowNode.bounds, target.targetBounds)) {
@@ -3166,11 +3151,7 @@ internal class MomoSocialAdapter(
     }
 
     private fun containsBounds(outer: ScreenRect, inner: ScreenRect): Boolean =
-        !outer.isEmpty && !inner.isEmpty && inner.left >= outer.left && inner.top >= outer.top &&
-            inner.right <= outer.right && inner.bottom <= outer.bottom
-
-    private fun isPathWithin(path: List<Int>, ancestor: List<Int>): Boolean =
-        path.size >= ancestor.size && path.take(ancestor.size) == ancestor
+        MomoSayHiAvatarTargetPolicy.contains(outer, inner)
 
     private fun clearSayHiRowTapEvidence() {
         sayHiUnverifiedDetailReturnPending = false
@@ -8509,11 +8490,6 @@ internal class MomoSocialAdapter(
             runCatching { messageComponents.ocrProcessor.close() }
         }
     }
-
-    private fun configPageDynamicTabLabel(): String = config.page.dynamicTabLabel
-    private fun configPageHomeTabLabel(): String = config.page.homeTabLabel
-    private fun configPageDynamicTabUpperBandRatio(): Float = config.page.dynamicTabUpperBandRatio
-    private fun configPageHomeNavLowerBandRatio(): Float = config.page.homeNavLowerBandRatio
 
     private fun Rect.toScreenRect() = ScreenRect(left, top, right, bottom)
 
