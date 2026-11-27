@@ -926,9 +926,9 @@ class AiReplyObservationRuntimeTest {
             fixture.listPage.copy(chatListCandidates = listOf(damaged))
         ))
         val handoff = fixture.runtime.javaClass.getDeclaredMethod(
-            "startReceivedGreetingsTask", String::class.java
+            "requestGreetingsAfterPrivateTraversal", String::class.java, ChatPageSnapshot::class.java
         ).apply { isAccessible = true }
-        handoff.invoke(fixture.runtime, "P0_PENDING_INCOMPLETE")
+        handoff.invoke(fixture.runtime, "P0_PENDING_INCOMPLETE", fixture.listPage)
 
         assertTrue(fixture.logs.any { it.contains("HANDOFF_BLOCKED") })
         assertFalse(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") })
@@ -952,9 +952,9 @@ class AiReplyObservationRuntimeTest {
         executor.attemptedSessionKeys += "processed"
         executor.lockedUnreadSessionKeys += setOf("processed", "offscreen-pending")
         val handoff = fixture.runtime.javaClass.getDeclaredMethod(
-            "startReceivedGreetingsTask", String::class.java
+            "requestGreetingsAfterPrivateTraversal", String::class.java, ChatPageSnapshot::class.java
         ).apply { isAccessible = true }
-        handoff.invoke(fixture.runtime, "P5_PENDING_UNREAD")
+        handoff.invoke(fixture.runtime, "P5_PENDING_UNREAD", fixture.listPage)
         assertTrue(fixture.logs.any { it.contains("HANDOFF_BLOCKED") && it.contains("pendingUnread=1") })
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
         assertEquals(0, fixture.dispatchedGestures())
@@ -962,6 +962,78 @@ class AiReplyObservationRuntimeTest {
         assertTrue(saved.lockedUnreadSetFinalized)
         assertEquals(setOf("processed", "offscreen-pending"), saved.lockedUnreadSessionKeys)
         assertEquals(setOf("processed"), saved.attemptedSessionKeys)
+    }
+
+    private fun invokeSafeSessionBoundaryHandoff(
+        fixture: PreScrollPageRecoveryFixture,
+        snapshot: ChatPageSnapshot = fixture.listPage
+    ) {
+        val handoffType = fixture.runtime.javaClass.declaredClasses.single { it.simpleName == "PrivateToGreetingsHandoff" }
+        val handoff = handoffType.enumConstants.single { (it as Enum<*>).name == "SAFE_SESSION_BOUNDARY" }
+        val method = fixture.runtime.javaClass.getDeclaredMethod(
+            "startReceivedGreetingsTask", String::class.java, ChatPageSnapshot::class.java, handoffType
+        ).apply { isAccessible = true }
+        method.invoke(fixture.runtime, "L01_SAFE_SESSION_BOUNDARY", snapshot, handoff)
+    }
+
+    @Test
+    fun l01SafeHandoffPreservesIncompleteTraversalWithoutClaimingExhaustion() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        fixture.port.receivedGreetingsWorkflowEnabled = true
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+        executor.atTop = false
+        executor.lockedUnreadSetFinalized = false
+        executor.lockedUnreadSessionKeys += "offscreen-pending"
+        executor.attemptedSessionKeys += "processed"
+        executor.unresolvedUnknownUnreadKeys += "unknown-row"
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true, previewBoundsValid = false)
+        assertTrue(executor.observeIncompleteUnreadEvidence(
+            fixture.listPage.copy(chatListCandidates = listOf(damaged))
+        ))
+
+        invokeSafeSessionBoundaryHandoff(fixture)
+
+        val saved = requireNotNull(fixture.checkpoint())
+        assertEquals(SessionListTraversalPhase.POSITIONING_AT_BOTTOM.name, saved.phase)
+        assertFalse(saved.lockedUnreadSetFinalized)
+        assertEquals(setOf("offscreen-pending"), saved.lockedUnreadSessionKeys)
+        assertEquals(setOf("processed"), saved.attemptedSessionKeys)
+        assertTrue("unknown-row" in saved.unresolvedUnknownUnreadKeys)
+        assertTrue(saved.unresolvedIncompleteUnreadKeys.isNotEmpty())
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        assertEquals(1, fixture.port.receivedGreetingsNavigationTaskStarts)
+        assertTrue(fixture.logs.any { it.contains("handoff=SAFE_SESSION_BOUNDARY") })
+        assertFalse(fixture.logs.any { it.contains("AI Reply 低频待机") })
+    }
+
+    @Test
+    fun l01SafeHandoffRejectsUnknownSourceWithoutTransferringLease() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        fixture.port.receivedGreetingsWorkflowEnabled = true
+        invokeSafeSessionBoundaryHandoff(fixture, fixture.listPage.copy(pageKind = ChatPageKind.UNKNOWN))
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(0, fixture.dispatchedGestures())
+        assertTrue(fixture.logs.any { it.contains("PRIVATE_SOURCE_UNVERIFIED") })
+    }
+
+    @Test
+    fun l01SafeHandoffRejectsUnfinishedScrollWithoutTransferringLease() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        fixture.port.receivedGreetingsWorkflowEnabled = true
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.pendingScrollBaseline = listOf("pending-scroll")
+        invokeSafeSessionBoundaryHandoff(fixture)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+        assertEquals(0, fixture.port.receivedGreetingsNavigationTaskStarts)
+        assertEquals(0, fixture.dispatchedGestures())
+        assertTrue(fixture.logs.any { it.contains("HANDOFF_BLOCKED") })
     }
 
     @Test
@@ -1196,9 +1268,9 @@ class AiReplyObservationRuntimeTest {
         assertFalse(executor.normalInboxHadUnread)
 
         val handoff = fixture.runtime.javaClass.getDeclaredMethod(
-            "startReceivedGreetingsTask", String::class.java
+            "requestGreetingsAfterPrivateTraversal", String::class.java, ChatPageSnapshot::class.java
         ).apply { isAccessible = true }
-        handoff.invoke(fixture.runtime, "P6_ONE_EMPTY_VIEWPORT")
+        handoff.invoke(fixture.runtime, "P6_ONE_EMPTY_VIEWPORT", fixture.listPage)
 
         assertTrue("A timed round may not hand off before the boundary has been confirmed",
             fixture.logs.any { it.contains("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF") })
@@ -1211,9 +1283,9 @@ class AiReplyObservationRuntimeTest {
     fun p4IncompletePrivateScanDoesNotHandOffToGreetingsOrTerminate() {
         val fixture = preScrollPageRecoveryFixture()
         val beginGreetings = fixture.runtime.javaClass.getDeclaredMethod(
-            "startReceivedGreetingsTask", String::class.java
+            "requestGreetingsAfterPrivateTraversal", String::class.java, ChatPageSnapshot::class.java
         ).apply { isAccessible = true }
-        beginGreetings.invoke(fixture.runtime, "P4_INCOMPLETE_PRIVATE_SCAN")
+        beginGreetings.invoke(fixture.runtime, "P4_INCOMPLETE_PRIVATE_SCAN", fixture.listPage)
         assertTrue(fixture.logs.any { it.contains("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF") })
         assertTrue(fixture.logs.any { it.contains("PAUSED_CHECKPOINT_SAVED") &&
             it.contains("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF") })

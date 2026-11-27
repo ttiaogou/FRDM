@@ -530,8 +530,10 @@ class AiReplyObservationRuntime(
     /** Archive lifecycle is independent from the optional automatic session traversal state. */
     private var sampleCaptureActive = false
     private var sessionRunStarted = false
-    // Only a verified private completion can retire the previous round's selection state.
-    private var privateRoundCompletedForGreetings = false
+    // Navigation ownership and traversal exhaustion are distinct facts. Only the
+    // exhausted-work path may retire the previous round's selection state.
+    private enum class PrivateToGreetingsHandoff { NONE, TRAVERSAL_EXHAUSTED, SAFE_SESSION_BOUNDARY }
+    private var privateToGreetingsHandoff = PrivateToGreetingsHandoff.NONE
     private var pollingRoundPending = false
     private var pollingRoundDue = false
     private var pollingRoundRetryAttempt = 0
@@ -2876,6 +2878,7 @@ class AiReplyObservationRuntime(
                             scheduleReceivedGreetingsRecoveryRetry("返回已确认，等待原有跨任务租约交接")
                             return
                         }
+                        val traversalExhausted = privateToGreetingsHandoff == PrivateToGreetingsHandoff.TRAVERSAL_EXHAUSTED
                         finishGreetingsToPrivateHandoff()
                         privateMessagesTraversalTaskExecutor.sessionActionCount = 0
                         // The greeting branch returned to the already-established inbox context.
@@ -2891,9 +2894,9 @@ class AiReplyObservationRuntime(
                         }
                         onLog("跨任务交接[PRIVATE_LEASE_TRANSFERRED]：普通消息列表已双快照确认；私聊任务取得唯一操作权")
                         onLog("AI Reply 测试遍历：收到的招呼列表已返回普通消息页；当前位置明确未读=$eligibleUnread；未知=$eligibleUnknown")
-                        if (!privateRoundCompletedForGreetings) {
-                            // A manually admitted greeting list may have interrupted a private
-                            // round. Do not retire its cursor as if the round had completed.
+                        if (!traversalExhausted) {
+                            // A manual or session-boundary handoff interrupted the private
+                            // traversal. Resume its cursor rather than retire the selection.
                             recoverRetryablePrivateList("PRIVATE_RESUME_AFTER_GREETINGS")
                         } else {
                             enterUnreadWait("本轮私聊与招呼任务均已完成；安排下一轮自主复查")
@@ -3360,6 +3363,7 @@ class AiReplyObservationRuntime(
     /** Retire only old task callbacks and transient page evidence; never discard private cursor. */
     private fun finishGreetingsToPrivateHandoff() {
         receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
+        privateToGreetingsHandoff = PrivateToGreetingsHandoff.NONE
         pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
         sessionActionGeneration += 1L
         invalidatePendingMessageRead()
@@ -4582,7 +4586,7 @@ class AiReplyObservationRuntime(
                 !isSendConfirmationPending() && !recoveryContext.pending) ||
                 // NAVIGATING also includes avatar/profile/chat transitions. It is not
                 // proof that a newly visible ordinary inbox belongs to greetings.
-                (privateRoundCompletedForGreetings && !recoveryContext.pending &&
+                (privateToGreetingsHandoff != PrivateToGreetingsHandoff.NONE && !recoveryContext.pending &&
                     !awaitingNormalInboxAfterGreetingsReturn &&
                     lastPageInspection?.pageKind == ChatPageKind.CHAT_LIST &&
                     receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING))
@@ -6689,7 +6693,7 @@ class AiReplyObservationRuntime(
                 PrivateMessagesUnreadAdmissionDecision.NO_UNREAD -> {
                     startupReadinessCoordinator.markInitializationComplete("顶部已读视口完成独立稳定复核")
                     onLog("AI Reply 启动准入[NO_UNREAD_AT_CONFIRMED_TOP]：顶部完整有效视口全部明确已读；不需要向下试探滑动")
-                    startReceivedGreetingsTask("已确认顶部完整有效视口全部明确已读")
+                    requestGreetingsAfterPrivateTraversal("已确认顶部完整有效视口全部明确已读", snapshot)
                     return
                 }
                 PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING -> {
@@ -7019,9 +7023,10 @@ class AiReplyObservationRuntime(
                     scheduleSessionListStabilityRetry("待复核未读身份尚未确认")
                 }
                 else -> {
-                    startReceivedGreetingsTask(
+                    requestGreetingsAfterPrivateTraversal(
                         if (privateMessagesTraversalTaskExecutor.normalInboxHadUnread) "普通聊天列表已完成由下至上扫描，当前没有剩余符合条件的未读会话"
-                        else "普通聊天列表已完成筛选，没有符合条件的新消息"
+                        else "普通聊天列表已完成筛选，没有符合条件的新消息",
+                        snapshot
                     )
                 }
             }
@@ -7124,7 +7129,7 @@ class AiReplyObservationRuntime(
     }
 
     private fun resetPollingRound() {
-        privateRoundCompletedForGreetings = false
+        privateToGreetingsHandoff = PrivateToGreetingsHandoff.NONE
         pollingRoundPending = false
         pollingRoundDue = false
         pollingRoundRetryAttempt = 0
@@ -7220,11 +7225,11 @@ class AiReplyObservationRuntime(
     }
 
     /**
-     * Hand off only after a confirmed unread-region boundary and return to the verified top.
-     * A fixed/random count or an unconfirmed viewport is not evidence of completion.
-     * The adapter owns Momo-specific navigation and the bounded read-only traversal.
+     * The existing no-more-private-work scheduling decision, not a general handoff
+     * authorization. Keep exhaustion proof here until the paired scheduler is migrated.
+     * A session-boundary handoff must not assert that this scan has completed.
      */
-    private fun startReceivedGreetingsTask(reason: String) {
+    private fun requestGreetingsAfterPrivateTraversal(reason: String, snapshot: ChatPageSnapshot) {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
         if (privateMessagesTraversalTaskExecutor.scanContinuityRecoveryPending ||
             privateMessagesTraversalTaskExecutor.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
@@ -7233,8 +7238,8 @@ class AiReplyObservationRuntime(
             privateMessagesTraversalTaskExecutor.unresolvedUnknownUnreadKeys.isNotEmpty()
         ) {
             onLog(
-                "AI Reply 收到的招呼支线暂停：普通会话列表尚未完成底部至顶部的完整复核，" +
-                    "或仍存在 UNKNOWN 未读；不提前切换到收到招呼入口"
+                "AI Reply 私聊无剩余工作判定尚未成立：普通会话列表尚未完成底部至顶部的复核，" +
+                    "或仍存在 UNKNOWN 未读；不得将未完成遍历报告为耗尽"
             )
             recoverRetryablePrivateList("PRIVATE_SCAN_NOT_COMPLETE_FOR_HANDOFF")
             return
@@ -7249,15 +7254,59 @@ class AiReplyObservationRuntime(
             return
         }
         val executor = privateMessagesTraversalTaskExecutor
-        if (!executor.lockedUnreadSetFinalized || executor.pendingKnownUnreadKeys().isNotEmpty() ||
-            executor.pendingScrollBaseline != null || executor.pendingBoundaryConfirmationKeys != null ||
-            executor.identityReturnPending || currentSessionKey != null || isSendConfirmationPending() ||
-            isConversationDraftPending() || activeSessionGestureRequestId != null
-        ) {
+        if (!executor.lockedUnreadSetFinalized || executor.pendingKnownUnreadKeys().isNotEmpty()) {
             privateMessagesCheckpointRepository?.save(executor.checkpoint())
-            onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：未读边界、剩余候选或未决操作尚未完成；" +
+            onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：未读边界或剩余候选尚未完成；" +
                 "pendingUnread=${executor.pendingKnownUnreadKeys().size}；保留本轮检查点")
-            scheduleSessionListStabilityRetry("本轮未读或操作尚未完成")
+            scheduleSessionListStabilityRetry("本轮未读尚未完成")
+            return
+        }
+        startReceivedGreetingsTask(reason, snapshot, PrivateToGreetingsHandoff.TRAVERSAL_EXHAUSTED)
+    }
+
+    /**
+     * Single private-to-greetings admission, shared by exhausted-work scheduling and the
+     * later session-boundary quota. Pending row/scan evidence is checkpoint data, not a
+     * reason to reject a safe task handoff. Call only from a fresh list observation.
+     */
+    private fun startReceivedGreetingsTask(
+        reason: String,
+        snapshot: ChatPageSnapshot,
+        handoff: PrivateToGreetingsHandoff
+    ) {
+        if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
+            handoff == PrivateToGreetingsHandoff.NONE
+        ) return
+        val executor = privateMessagesTraversalTaskExecutor
+        if (!canPerformPrivateMessagesUiAction() || userInteractionActive ||
+            executor.pendingScrollBaseline != null || executor.pendingBoundaryConfirmationKeys != null ||
+            executor.identityReturnPending || currentSessionKey != null || currentSessionSendConfirmed ||
+            confirmedPrivateReturnAwaitingRecovery || isPrivateFollowUpActive() ||
+            isSendConfirmationPending() || isConversationDraftPending() || activeSessionGestureRequestId != null
+        ) {
+            onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：当前事务、手势、恢复或操作权尚未安全交接；保留本轮检查点")
+            scheduleSessionListStabilityRetry("当前私聊事务尚未结束")
+            return
+        }
+        if (snapshot.packageName != targetPackage() || snapshot.pageKind != ChatPageKind.CHAT_LIST ||
+            snapshot.chatListExtractionTruncated || snapshot.windowIdentityKey() == null ||
+            isSemanticallyUnconfirmed(snapshot)
+        ) {
+            onLog("跨任务交接[PRIVATE_SOURCE_UNVERIFIED]：普通消息列表证据不足；不转移操作权")
+            recoverRetryablePrivateList("PRIVATE_HANDOFF_SOURCE_UNVERIFIED")
+            return
+        }
+        if (!ensureAndroidRecoveryReady(snapshot, "PRIVATE_TO_GREETINGS_HANDOFF")) {
+            recoverRetryablePrivateList("PRIVATE_HANDOFF_ANDROID_NOT_READY")
+            return
+        }
+        // A partial traversal may never be handed off without its durable cursor.
+        val repository = privateMessagesCheckpointRepository
+        if ((handoff == PrivateToGreetingsHandoff.SAFE_SESSION_BOUNDARY && repository == null) ||
+            !runCatching { repository?.save(executor.checkpoint()) }.isSuccess
+        ) {
+            onLog("跨任务交接[PRIVATE_CHECKPOINT_NOT_SAVED]：未保存原遍历进度；不转移操作权")
+            scheduleSessionListStabilityRetry("私聊交接检查点尚未保存")
             return
         }
         val start = claimAndBeginReceivedGreetingsTask(
@@ -7268,7 +7317,7 @@ class AiReplyObservationRuntime(
             recoverRetryablePrivateList("GREETING_HANDOFF_${start.name}")
             return
         }
-        privateRoundCompletedForGreetings = true
+        privateToGreetingsHandoff = handoff
         sessionActionGeneration += 1L
         pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
         sessionTransitionTask?.cancel()
@@ -7279,10 +7328,12 @@ class AiReplyObservationRuntime(
         currentSessionName = null
         currentSessionCandidate = null
         invalidateMessageReadTransaction()
-        privateMessagesTraversalTaskExecutor.sessionActionCount = 0
+        if (handoff == PrivateToGreetingsHandoff.TRAVERSAL_EXHAUSTED) {
+            privateMessagesTraversalTaskExecutor.sessionActionCount = 0
+        }
         onLog(
             "AI Reply：切换收到的招呼自动回复任务；原因=$reason；" +
-                "普通消息列表已通过无未读准入或完成扫描；" +
+                "handoff=${handoff.name}；原私聊检查点已保留；" +
                 "普通聊天会话点击次数=$ordinarySessionClickCount；采用头像身份、当前聊天 OCR 及独立草稿发送事务"
         )
         val accepted = receivedGreetingsTaskFlow.performInitialIdleStep()
