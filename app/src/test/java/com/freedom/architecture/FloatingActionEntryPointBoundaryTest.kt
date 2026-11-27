@@ -373,7 +373,7 @@ class FloatingActionEntryPointBoundaryTest {
         assertTrue(home.contains("onSave(parsed)"))
 
         assertTrue(model.contains("val maxLastActiveMinutes: Int = ConversationFilterSettings.DEFAULT_MAX_LAST_ACTIVE_MINUTES"))
-        assertTrue(policy.contains("const val DEFAULT_MAX_LAST_ACTIVE_MINUTES = 60"))
+        assertTrue(policy.contains("const val DEFAULT_MAX_LAST_ACTIVE_MINUTES = 0"))
         assertTrue(store.contains("KEY_MAX_LAST_ACTIVE_MINUTES = \"max_last_active_minutes\""))
         assertTrue(store.contains("maxLastActiveMinutes = readMaxLastActiveMinutes()"))
         assertTrue(store.contains("val default = ConversationFilterSettings.DEFAULT_MAX_LAST_ACTIVE_MINUTES"))

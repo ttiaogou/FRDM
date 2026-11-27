@@ -12,7 +12,7 @@ data class ConversationFilterSettings(
         get() = maxLastActiveMinutes != 0 || maxDistanceKm != 0 || minAge != 0 || maxAge != 0
 
     companion object {
-        const val DEFAULT_MAX_LAST_ACTIVE_MINUTES = 60
+        const val DEFAULT_MAX_LAST_ACTIVE_MINUTES = 0
     }
 }
 

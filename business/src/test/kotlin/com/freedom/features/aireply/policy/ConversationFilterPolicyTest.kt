@@ -4,8 +4,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ConversationFilterPolicyTest {
-    @Test fun defaultIsSixtyAndInclusive() {
+    @Test fun defaultIsZeroAndDoesNotRequireActivityEvidence() {
         val settings = ConversationFilterSettings()
+        assertEquals(0, settings.maxLastActiveMinutes)
+        assertFalse(settings.hasEnabledConditions)
+        assertEquals(ConversationFilterResult.ALLOW,
+            ConversationFilterPolicy.evaluate(settings, ConversationFilterEvidence()).result)
+        assertEquals(ConversationFilterResult.ALLOW,
+            ConversationFilterPolicy.evaluate(settings, ConversationFilterEvidence(lastActiveMinutes = 960L)).result)
+    }
+
+    @Test fun explicitSixtyMinuteThresholdIsInclusive() {
+        val settings = ConversationFilterSettings(maxLastActiveMinutes = 60)
         assertEquals(60, settings.maxLastActiveMinutes)
         for (minutes in listOf(0L, 1L, 38L, 60L)) {
             assertEquals(ConversationFilterResult.ALLOW,
@@ -75,7 +85,7 @@ class ConversationFilterPolicyTest {
         assertEquals(ConversationFilterResult.ALLOW,
             ConversationFilterPolicy.evaluate(ConversationFilterSettings(60, 10, 25, 40), evidence).result)
         assertEquals(ConversationFilterResult.UNKNOWN,
-            ConversationFilterPolicy.evaluate(ConversationFilterSettings(), returnedRow).result)
+            ConversationFilterPolicy.evaluate(ConversationFilterSettings(maxLastActiveMinutes = 60), returnedRow).result)
         assertFalse(ConversationFilterSettings(maxLastActiveMinutes = 0).hasEnabledConditions)
         assertTrue(ConversationFilterSettings(maxLastActiveMinutes = 0, minAge = 18).hasEnabledConditions)
         assertTrue(ConversationFilterSettings(maxLastActiveMinutes = -1).hasEnabledConditions)

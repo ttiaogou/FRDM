@@ -67,7 +67,7 @@ class TaskLaunchParametersStore(context: Context) : TaskLaunchParametersReposito
     }
 
     // The old Boolean was never enforced by the runtime. Initialize the new setting
-    // to the agreed 60-minute default once; an explicitly saved 0 must survive upgrades.
+    // to the current default (0 = unlimited) once; existing saved values survive upgrades.
     private fun readMaxLastActiveMinutes(): Int {
         val default = ConversationFilterSettings.DEFAULT_MAX_LAST_ACTIVE_MINUTES
         if (!preferences.contains(KEY_MAX_LAST_ACTIVE_MINUTES)) {
