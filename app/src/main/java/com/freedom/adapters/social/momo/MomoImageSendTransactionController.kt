@@ -39,15 +39,11 @@ internal class PrivateFollowUpTransaction(
 ) {
     val logPrefix = if (interception) "PRIVATE_INTERCEPTION" else "PRIVATE_IMAGE_SEND"
     val image = MomoImageSendState()
-    @Volatile var switchVerifiedOn = false
+    val interceptionState = MomoInterceptionState()
     @Volatile var succeeded = false
     @Volatile var stage = if (interception) PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS else PrivateFollowUpStage.OPEN_ALBUM
     @Volatile var inFlight = false
     @Volatile var stageStartedAt = SystemClock.uptimeMillis()
-    var interceptionSettingsObserved = false
-    var interceptionLastAction: MomoInterceptionRecoveryPolicy.Action? = null
-    var interceptionRetryAttempt = 0
-    @Volatile var interceptionRetryNotBefore = 0L
     var lastWaitReason: String? = null
     var waitObservationCount = 0L
 }

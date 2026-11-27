@@ -211,6 +211,19 @@ class PpR00FreezeTest(unittest.TestCase):
         self.assertNotIn(path, reviewed_s1)
         self.assertNotIn(path, m["permanent_s0"])
         reviewed_s1[path] = "2517ee16b10ebbb08f31ab3e2b47ab07365c976f"
+        # R05-F: exact interception relocation; preserve the historical source inventory.
+        for path, (previous, replacement) in {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": (
+                "d31b652c8d12b9507d7df6a5fc941a9faf919062", "353ffb311dece0e79f6309862fcc8f71df19f076"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoImageSendTransactionController.kt": (
+                "2517ee16b10ebbb08f31ab3e2b47ab07365c976f", "f6583cfa341c69a1f2e56f3ea827215d16065b23"),
+        }.items():
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = replacement
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoInterceptionTransactionController.kt"
+        self.assertNotIn(path, reviewed_s1)
+        self.assertNotIn(path, m["permanent_s0"])
+        reviewed_s1[path] = "cdf761e0f4a221fc289d0621bbd309900e84cc9e"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

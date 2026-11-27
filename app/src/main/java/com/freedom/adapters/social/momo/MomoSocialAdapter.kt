@@ -5676,7 +5676,7 @@ internal class MomoSocialAdapter(
         val verified = if (child.interception) {
             child.stage != PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS &&
                 (interceptionSettingsPage(root, child) ||
-                    (child.interceptionSettingsObserved &&
+                    (child.interceptionState.interceptionSettingsObserved &&
                         interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息") != null &&
                         interceptionNodeBounds(root, "btn_switch", "android.widget.CompoundButton", checkable = true) != null))
         } else when (child.stage) {
@@ -5798,10 +5798,10 @@ internal class MomoSocialAdapter(
             )
         }
         if (child.interception) {
-            child.interceptionRetryAttempt = (child.interceptionRetryAttempt + 1).coerceAtMost(6)
-            child.interceptionRetryNotBefore = SystemClock.uptimeMillis() + maxOf(
+            child.interceptionState.interceptionRetryAttempt = (child.interceptionState.interceptionRetryAttempt + 1).coerceAtMost(6)
+            child.interceptionState.interceptionRetryNotBefore = SystemClock.uptimeMillis() + maxOf(
                 2_000L,
-                com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(child.interceptionRetryAttempt)
+                com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(child.interceptionState.interceptionRetryAttempt)
             )
         }
         if (!persistPrivateFollowUpStep(child, previous)) {
@@ -5819,8 +5819,8 @@ internal class MomoSocialAdapter(
                     if (child.interception) {
                         // A result is not page evidence. Wait for the settled live state,
                         // including CANCELLED/REJECTED; never roll back blindly to the tap.
-                        child.interceptionRetryNotBefore = maxOf(
-                            child.interceptionRetryNotBefore, SystemClock.uptimeMillis() + 2_000L
+                        child.interceptionState.interceptionRetryNotBefore = maxOf(
+                            child.interceptionState.interceptionRetryNotBefore, SystemClock.uptimeMillis() + 2_000L
                         )
                         child.inFlight = false
                         onLog("${child.logPrefix} GESTURE_RESULT stage=$next;status=$status;reconcile=true")
@@ -5919,136 +5919,29 @@ internal class MomoSocialAdapter(
         return followUpCurrent(child) && runCatching { callback(step) }.getOrDefault(false)
     }
 
-    /** Read-only confirmation of the very same switch in the confirmed interception popup. */
-    private fun interceptionChecked(root: AccessibilityNodeInfo): Boolean? {
-        if (interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息") == null)
-            return null
-        val nodes = root.findAccessibilityNodeInfosByViewId("$targetPackage:id/btn_switch").orEmpty()
-        return try {
-            nodes.singleOrNull {
-                it.packageName?.toString() == targetPackage &&
-                    it.className?.toString() == "android.widget.CompoundButton" &&
-                    it.isVisibleToUser && it.isEnabled && it.isCheckable
-            }?.isChecked
-        } finally {
-            nodes.forEach { runCatching { it.recycle() } }
-        }
-    }
+    private val interceptionTransaction = MomoInterceptionTransactionController(
+        rootAccess = rootAccess,
+        accessibilityGateway = accessibilityGateway,
+        targetPackage = targetPackage,
+        onLog = onLog,
+        nodeBounds = ::interceptionNodeBounds,
+        originalPrivateFollowUpChat = ::originalPrivateFollowUpChat,
+        followUpWait = ::followUpWait,
+        followUpTerminal = ::followUpTerminal,
+        submitInterceptionStep = ::submitInterceptionStep,
+        interceptionDismissBounds = ::interceptionDismissBounds,
+        interceptionReturnedToChat = ::interceptionReturnedToChat,
+        interceptionBackBounds = ::interceptionBackBounds
+    )
 
-    private fun currentInterceptionChecked(): Boolean? =
-        rootAccess.withActiveTargetRoot { root, window ->
-            if (window.packageName != targetPackage || accessibilityGateway.currentGestureWindow() != window) null
-            else interceptionChecked(root).takeIf { accessibilityGateway.currentGestureWindow() == window }
-        }
+    private fun interceptionChecked(root: AccessibilityNodeInfo): Boolean? =
+        interceptionTransaction.interceptionChecked(root)
 
+    private fun interceptionSettingsPage(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean =
+        interceptionTransaction.interceptionSettingsPage(root, child)
 
-    /** Settings-page identity does not depend on the switch/status text being readable yet. */
-    private fun interceptionSettingsPage(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean {
-        val title = child.target.expectedChatTitle ?: return false
-        return interceptionNodeBounds(root, "tv_user_name", "android.widget.TextView", text = title) != null &&
-            interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true) != null
-    }
-
-    /** Status is scoped to the unique interception row, not any "已开启" on the page. */
-    private fun interceptionSettingsChecked(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean? = runCatching {
-        val title = child.target.expectedChatTitle ?: return null
-        if (interceptionNodeBounds(root, "tv_user_name", "android.widget.TextView", text = title) == null) return null
-        val rows = root.findAccessibilityNodeInfosByViewId("$targetPackage:id/setting_layout_harass").orEmpty()
-        try {
-            val row = rows.singleOrNull {
-                it.packageName?.toString() == targetPackage &&
-                    it.className?.toString() == "android.widget.LinearLayout" &&
-                    it.isVisibleToUser && it.isEnabled && it.isClickable
-            } ?: return null
-            val statuses = row.findAccessibilityNodeInfosByViewId("$targetPackage:id/tv_harass_status").orEmpty()
-            try {
-                val status = statuses.singleOrNull {
-                    it.packageName?.toString() == targetPackage &&
-                        it.className?.toString() == "android.widget.TextView" &&
-                        it.isVisibleToUser && it.isEnabled
-                } ?: return null
-                MomoInterceptionRecoveryPolicy.settingsChecked(status.text?.toString().orEmpty())
-            } finally {
-                statuses.forEach { runCatching { it.recycle() } }
-            }
-        } finally {
-            rows.forEach { runCatching { it.recycle() } }
-        }
-    }.getOrNull()
-
-    private fun observeInterceptionPage(child: PrivateFollowUpTransaction): MomoInterceptionRecoveryPolicy.Page {
-        val observed = rootAccess.withActiveTargetRoot { root, window ->
-            if (window.packageName != targetPackage || window.windowId < 0 ||
-                window.generation < child.target.nodeTarget.window.generation ||
-                accessibilityGateway.currentGestureWindow() != window
-            ) return@withActiveTargetRoot MomoInterceptionRecoveryPolicy.Page.UNKNOWN
-            val page = if (interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息") != null) {
-                if (!child.interceptionSettingsObserved) MomoInterceptionRecoveryPolicy.Page.POPUP_SOURCE_UNCONFIRMED
-                else when (interceptionChecked(root)) {
-                    true -> MomoInterceptionRecoveryPolicy.Page.POPUP_ON
-                    false -> MomoInterceptionRecoveryPolicy.Page.POPUP_OFF
-                    null -> MomoInterceptionRecoveryPolicy.Page.POPUP_STATE_UNKNOWN
-                }
-            } else if (interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true) != null) {
-                if (!interceptionSettingsPage(root, child)) MomoInterceptionRecoveryPolicy.Page.SETTINGS_IDENTITY_UNCONFIRMED
-                else when (interceptionSettingsChecked(root, child)) {
-                    true -> MomoInterceptionRecoveryPolicy.Page.SETTINGS_ON
-                    false -> MomoInterceptionRecoveryPolicy.Page.SETTINGS_OFF
-                    null -> MomoInterceptionRecoveryPolicy.Page.SETTINGS_STATE_UNKNOWN
-                }
-            } else null
-            if (accessibilityGateway.currentGestureWindow() == window) page
-            else MomoInterceptionRecoveryPolicy.Page.UNKNOWN
-        }
-        return observed ?: if (originalPrivateFollowUpChat(child)) MomoInterceptionRecoveryPolicy.Page.ORIGINAL_CHAT
-            else MomoInterceptionRecoveryPolicy.Page.UNKNOWN
-    }
-
-    /** Reconcile under the existing parent lease and observer; no independent recovery loop. */
-    private fun reconcileInterception(child: PrivateFollowUpTransaction): Boolean {
-        val page = observeInterceptionPage(child)
-        val decision = MomoInterceptionRecoveryPolicy.reconcile(page, child.switchVerifiedOn)
-        child.switchVerifiedOn = decision.verifiedOn
-        when (page) {
-            MomoInterceptionRecoveryPolicy.Page.SETTINGS_ON,
-            MomoInterceptionRecoveryPolicy.Page.SETTINGS_OFF -> child.interceptionSettingsObserved = true
-            MomoInterceptionRecoveryPolicy.Page.ORIGINAL_CHAT -> child.interceptionSettingsObserved = false
-            else -> Unit
-        }
-        val action = decision.action
-        if (action == MomoInterceptionRecoveryPolicy.Action.WAIT) {
-            followUpWait(child, when (page) {
-                MomoInterceptionRecoveryPolicy.Page.SETTINGS_IDENTITY_UNCONFIRMED -> "INTERCEPTION_SETTINGS_IDENTITY_UNCONFIRMED"
-                MomoInterceptionRecoveryPolicy.Page.SETTINGS_STATE_UNKNOWN -> "INTERCEPTION_SETTINGS_STATE_UNKNOWN"
-                MomoInterceptionRecoveryPolicy.Page.POPUP_SOURCE_UNCONFIRMED -> "INTERCEPTION_POPUP_SOURCE_UNCONFIRMED"
-                MomoInterceptionRecoveryPolicy.Page.POPUP_STATE_UNKNOWN -> "INTERCEPTION_POPUP_STATE_UNKNOWN"
-                else -> "UNKNOWN_INTERCEPTION_PAGE_OR_STATE"
-            })
-            return false
-        }
-        if (action != child.interceptionLastAction) {
-            child.interceptionLastAction = action
-            child.interceptionRetryAttempt = 0
-            child.interceptionRetryNotBefore = 0L
-            child.stageStartedAt = SystemClock.uptimeMillis()
-            child.lastWaitReason = null
-            onLog("PRIVATE_INTERCEPTION RECONCILED page=$page;action=$action;verifiedOn=${decision.verifiedOn}")
-        }
-        if (SystemClock.uptimeMillis() < child.interceptionRetryNotBefore) {
-            followUpWait(child, "INTERCEPTION_RETRY_BACKOFF")
-            return false
-        }
-        child.stage = when (action) {
-            MomoInterceptionRecoveryPolicy.Action.OPEN_SETTINGS -> PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS
-            MomoInterceptionRecoveryPolicy.Action.OPEN_CONTROL -> PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL
-            MomoInterceptionRecoveryPolicy.Action.ENABLE -> PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH
-            MomoInterceptionRecoveryPolicy.Action.DISMISS -> PrivateFollowUpStage.INTERCEPTION_DISMISS
-            MomoInterceptionRecoveryPolicy.Action.BACK -> PrivateFollowUpStage.INTERCEPTION_BACK
-            MomoInterceptionRecoveryPolicy.Action.COMPLETE -> PrivateFollowUpStage.INTERCEPTION_RETURN
-            MomoInterceptionRecoveryPolicy.Action.WAIT -> return false
-        }
-        return true
-    }
+    private fun interceptionSettingsChecked(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean? =
+        interceptionTransaction.interceptionSettingsChecked(root, child)
 
     private fun submitImageRetryOpen(child: PrivateFollowUpTransaction, window: WindowRef) {
         child.stage = PrivateFollowUpStage.IMAGE_RETRY_OPEN
@@ -6218,73 +6111,17 @@ internal class MomoSocialAdapter(
             followUpWait(child, "GESTURE_RESULT_PENDING")
             return
         }
-        if (child.interception && !reconcileInterception(child)) return
+        if (child.interception && !interceptionTransaction.reconcileInterception(child)) return
         when (child.stage) {
             PrivateFollowUpStage.OPEN_ALBUM, PrivateFollowUpStage.WAIT_ALBUM,
             PrivateFollowUpStage.WAIT_DIRECTORY, PrivateFollowUpStage.WAIT_FREEDOM,
             PrivateFollowUpStage.WAIT_SELECTION, PrivateFollowUpStage.WAIT_SEND_RESULT,
             PrivateFollowUpStage.IMAGE_RETRY_OPEN, PrivateFollowUpStage.IMAGE_RETRY_CONFIRM ->
                 imageTransaction.observe(child)
-            PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS -> {
-                if (!originalPrivateFollowUpChat(child)) {
-                    followUpWait(child, "ORIGINAL_CHAT_NOT_CURRENT")
-                    return
-                }
-                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL, "interception-avatar") { root, _ ->
-                    interceptionNodeBounds(root, "chat_toolbar_avatar", "android.widget.ImageView", clickable = true)
-                }
-            }
-            PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL -> {
-                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH, "interception-layout") { root, _ ->
-                    interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true)
-                }
-            }
-            PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH -> {
-                when (currentInterceptionChecked()) {
-                    true -> {
-                        child.switchVerifiedOn = true
-                        child.stage = PrivateFollowUpStage.INTERCEPTION_DISMISS
-                        child.stageStartedAt = SystemClock.uptimeMillis()
-                        return
-                    }
-                    null -> {
-                        followUpWait(child, "SWITCH_STATE_NOT_READABLE")
-                        return
-                    }
-                    false -> Unit
-                }
-                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_DISMISS, "interception-switch") { root, _ ->
-                    interceptionNodeBounds(root, "btn_switch", "android.widget.CompoundButton", checkable = true)
-                }
-            }
-            PrivateFollowUpStage.INTERCEPTION_DISMISS -> {
-                if (currentInterceptionChecked() != true) {
-                    followUpWait(child, "SWITCH_ON_NOT_CONFIRMED")
-                    return
-                }
-                child.switchVerifiedOn = true
-                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_BACK, "interception-dismiss") { root, _ ->
-                    interceptionDismissBounds(root)
-                }
-            }
-            PrivateFollowUpStage.INTERCEPTION_BACK -> {
-                if (interceptionReturnedToChat(child)) {
-                    if (child.switchVerifiedOn) {
-                        followUpTerminal(child, "COMPLETED", "SWITCH_ON_AND_CHAT_RETURN_CONFIRMED")
-                    } else followUpWait(child, "SWITCH_ON_NOT_CONFIRMED")
-                    return
-                }
-                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_RETURN, "interception-back") { _, window ->
-                    interceptionBackBounds(window)
-                }
-            }
-            PrivateFollowUpStage.INTERCEPTION_RETURN -> {
-                if (interceptionReturnedToChat(child)) {
-                    if (child.switchVerifiedOn) {
-                        followUpTerminal(child, "COMPLETED", "SWITCH_ON_AND_CHAT_RETURN_CONFIRMED")
-                    } else followUpWait(child, "SWITCH_ON_NOT_CONFIRMED")
-                } else followUpWait(child, "ORIGINAL_CHAT_RETURN_PENDING")
-            }
+            PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS, PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL,
+            PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH, PrivateFollowUpStage.INTERCEPTION_DISMISS,
+            PrivateFollowUpStage.INTERCEPTION_BACK, PrivateFollowUpStage.INTERCEPTION_RETURN ->
+                interceptionTransaction.observe(child)
             PrivateFollowUpStage.TERMINAL -> Unit
         }
     }

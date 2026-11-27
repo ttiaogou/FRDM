@@ -3,6 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r05_interception_transaction_migration import restore_r05e_sources
 
 ROOT = Path(__file__).resolve().parents[2]
 MOMO = ROOT / "app/src/main/java/com/freedom/adapters/social/momo/"
@@ -30,6 +31,7 @@ def indent(source):
 def restore_r05d_adapter(adapter, owner=None):
     if owner is None:
         owner = (MOMO / "MomoImageSendTransactionController.kt").read_text(encoding="utf-8")
+    adapter, owner = restore_r05e_sources(adapter, owner)
     if git_blob(owner.encode("utf-8")) != OWNER:
         raise AssertionError("R05-E image owner changed")
     state = region(owner, "internal class MomoImageSendState {\n", "\n}\n\n// The existing Momo adapter").split("\n", 1)[1] + "\n"
