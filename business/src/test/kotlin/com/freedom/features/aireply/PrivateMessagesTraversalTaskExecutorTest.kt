@@ -1117,6 +1117,44 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun t04IncompleteHintCannotBeRetiredByMixedWindowOrNonInboxEvidence() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val damaged = candidate(0, "Pending row", ChatUnreadStatus.UNREAD, previewBoundsValid = false)
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(damaged)))
+        val saved = executor.unresolvedIncompleteUnreadKeys.toSet()
+        val repaired = candidate(1, "Pending row", ChatUnreadStatus.UNREAD)
+        val stale = repaired.copy(rowTarget = repaired.rowTarget.copy(
+            window = WindowRef("com.immomo.momo", "MaintabActivity", 2L, 1)
+        ))
+        val healthy = candidate(0, "Other row", ChatUnreadStatus.READ)
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(healthy, stale)))
+        assertEquals(saved, executor.unresolvedIncompleteUnreadKeys)
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(repaired).copy(
+            pageKind = com.freedom.features.aireply.ports.ChatPageKind.CHAT_DETAIL_CANDIDATE
+        )))
+        assertEquals(saved, executor.unresolvedIncompleteUnreadKeys)
+        assertFalse(executor.observeIncompleteUnreadEvidence(snapshot(healthy, repaired)))
+        assertTrue(executor.attemptedSessionKeys.isEmpty())
+    }
+
+    @Test
+    fun t04ClippedSameTitleCannotReleaseNamedIncompleteHint() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val damaged = candidate(0, "Pending row", ChatUnreadStatus.UNREAD, previewBoundsValid = false)
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(damaged)))
+        val saved = executor.unresolvedIncompleteUnreadKeys.toSet()
+        val repaired = candidate(0, "Pending row", ChatUnreadStatus.UNREAD)
+        val clipped = candidate(1, "Pending row", ChatUnreadStatus.READ, top = 1530,
+            rowHeight = 70, clippedAtEdge = true)
+        val healthy = candidate(2, "Independent row", ChatUnreadStatus.UNREAD)
+        assertTrue(executor.observeIncompleteUnreadEvidence(snapshot(repaired, clipped, healthy)))
+        assertEquals(saved, executor.unresolvedIncompleteUnreadKeys)
+        assertTrue(executor.canContinueWithIncompleteUnread(snapshot(repaired, clipped, healthy)))
+        assertTrue(executor.attemptedSessionKeys.isEmpty())
+        assertFalse(executor.observeIncompleteUnreadEvidence(snapshot(repaired, healthy)))
+    }
+
+    @Test
     fun p0NamedIncompleteRowIsLocalAndNeverCompletesTheRound() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val damaged = candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD, previewBoundsValid = false)

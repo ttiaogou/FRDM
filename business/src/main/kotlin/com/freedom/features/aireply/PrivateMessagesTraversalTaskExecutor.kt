@@ -790,22 +790,43 @@ internal class PrivateMessagesTraversalTaskExecutor {
         }
         val activeIncompleteHints = (incomplete + namedClipped).map(::incompleteUnreadHint).toSet()
         unresolvedIncompleteUnreadKeys += activeIncompleteHints
-        if (!snapshot.chatListExtractionTruncated && unresolvedIncompleteUnreadKeys.isNotEmpty()) {
+        val currentWindow = snapshot.windowIdentityKey()
+        if (snapshot.pageKind == ChatPageKind.CHAT_LIST && !snapshot.chatListExtractionTruncated &&
+            currentWindow != null && snapshot.chatListViewport?.isEmpty == false &&
+            unresolvedIncompleteUnreadKeys.isNotEmpty()
+        ) {
             unresolvedIncompleteUnreadKeys.removeAll { saved ->
                 if (saved in activeIncompleteHints) return@removeAll false
-                val matches = rows.filter { row ->
-                    if (saved.startsWith("unnamed:")) anonymousUnreadHint(row) == saved
-                    else incompleteUnreadHint(row) == saved
+                // A clipped or otherwise incomplete same-key row must not disappear from
+                // identity comparison merely because it cannot supply repair evidence.
+                val matches = if (saved.startsWith("unnamed:")) {
+                    rows.filter { anonymousUnreadHint(it) == saved }
+                } else {
+                    snapshot.chatListCandidates.filter { incompleteUnreadHint(it) == saved }
                 }
-                val allExplicit = matches.isNotEmpty() && matches.all {
-                    ChatSessionManagementPolicy.isEligible(it) && !it.rowClippedAtViewportEdge &&
-                        ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport) &&
-                        it.unreadStatus != ChatUnreadStatus.UNKNOWN
+                val allExplicit = matches.isNotEmpty() && matches.all { row ->
+                    val window = row.rowTarget.window
+                    val rowWindow = "${window.packageName}|windowId=${window.windowId}|generation=${window.generation}"
+                    row in rows && window.generation > 0L && rowWindow == currentWindow &&
+                        ChatSessionManagementPolicy.isEligible(row) && !row.rowClippedAtViewportEdge &&
+                        ChatSessionManagementPolicy.isCompleteBoundaryEvidence(row, snapshot.chatListViewport) &&
+                        row.unreadStatus != ChatUnreadStatus.UNKNOWN
                 }
                 val identityConflictStillBlocked = matches.size > 1 && matches.all {
                     ChatSessionManagementPolicy.stableSessionKey(it) in ambiguousSessionIdentityKeys
                 }
-                val resolved = allExplicit && (matches.size == 1 || identityConflictStillBlocked)
+                // Weak title keys require the same uniqueness proof as ordinary admission.
+                // Keep the existing explicitly recorded collision repair path, which retires
+                // only the structural fault and never the durable identity conflict.
+                val uniqueRepair = matches.singleOrNull()?.let { row ->
+                    val key = ChatSessionManagementPolicy.stableSessionKey(row)
+                    val titleKey = ChatSessionManagementPolicy.stableSessionKeyForTitle(row.nameText)
+                    key.isNotBlank() && (key != titleKey || snapshot.chatListCandidates.count {
+                        it.selectionClass != "SYSTEM_ENTRY" &&
+                            ChatSessionManagementPolicy.stableSessionKeyForTitle(it.nameText) == titleKey
+                    } == 1)
+                } == true
+                val resolved = allExplicit && (uniqueRepair || identityConflictStillBlocked)
                 // A named anomaly was never admitted as unread while its row was incomplete.
                 // If it repairs after the ordinary unread set froze, retain that original
                 // pending work in the same round; never admit anonymous geometry as identity.
