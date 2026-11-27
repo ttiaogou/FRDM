@@ -61,8 +61,8 @@ internal object OcrPluginDiagnosticRelay {
         return result
     }
 
-    fun w(tag: String, message: String): Int {
-        val result = Log.w(tag, message)
+    fun w(tag: String, message: String, error: Throwable? = null): Int {
+        val result = if (error == null) Log.w(tag, message) else Log.w(tag, message, error)
         mirror("WARN", tag, message)
         return result
     }
