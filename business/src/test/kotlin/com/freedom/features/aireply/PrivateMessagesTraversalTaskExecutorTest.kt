@@ -2197,6 +2197,72 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertEquals(pending, restored.evaluateListSnapshot(snapshot(pending), false, 2).nextCandidate)
     }
 
+    @Test
+    fun greetingPhysicalBoundaryDoesNotDependOnUnreadBusinessBoundary() {
+        val row = candidate(3, "Read", ChatUnreadStatus.READ)
+        val middle = snapshot(row).copy(
+            windowGeneration = 1L,
+            chatListCollectionRowCount = 20,
+            chatListVisibleCollectionRows = listOf(5, 6, 7),
+            chatListCanScrollForward = true,
+            chatListCanScrollBackward = true
+        )
+        assertEquals(false, com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+            .greetingSearchBoundaryEvidence(middle, toTop = false))
+        val bottom = middle.copy(
+            chatListVisibleCollectionRows = listOf(17, 18, 19),
+            chatListCanScrollForward = false
+        )
+        assertEquals(true, com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+            .greetingSearchBoundaryEvidence(bottom, toTop = false))
+        assertEquals(false, com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+            .greetingSearchBoundaryEvidence(bottom, toTop = true))
+        val top = middle.copy(
+            chatListVisibleCollectionRows = listOf(0, 1, 2),
+            chatListCanScrollBackward = false
+        )
+        assertEquals(true, com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+            .greetingSearchBoundaryEvidence(top, toTop = true))
+        assertEquals(false, com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+            .greetingSearchBoundaryEvidence(top, toTop = false))
+    }
+
+    @Test
+    fun greetingPhysicalBoundaryRejectsContradictoryIncompleteAndMissingProof() {
+        val row = candidate(3, "Read", ChatUnreadStatus.READ)
+        val bottom = snapshot(row).copy(
+            windowGeneration = 1L,
+            chatListCollectionRowCount = 20,
+            chatListVisibleCollectionRows = listOf(17, 18, 19),
+            chatListCanScrollForward = false,
+            chatListCanScrollBackward = true
+        )
+        val policy = com.freedom.features.aireply.ports.ChatSessionManagementPolicy
+        assertEquals(false, policy.greetingSearchBoundaryEvidence(
+            bottom.copy(chatListCanScrollForward = true), toTop = false))
+        assertEquals(null, policy.greetingSearchBoundaryEvidence(
+            bottom.copy(chatListExtractionTruncated = true), toTop = false))
+        assertEquals(null, policy.greetingSearchBoundaryEvidence(
+            bottom.copy(chatListInvalidRowBoundsCount = 1), toTop = false))
+        assertEquals(null, policy.greetingSearchBoundaryEvidence(
+            bottom.copy(chatListVisibleCollectionRows = listOf(17, 17, 19)), toTop = false))
+        assertEquals(null, policy.greetingSearchBoundaryEvidence(
+            bottom.copy(chatListVisibleCollectionRows = emptyList()), toTop = false))
+        assertEquals(null, policy.greetingSearchBoundaryEvidence(
+            bottom.copy(chatListCanScrollBackward = false), toTop = false))
+        assertEquals(null, policy.greetingSearchBoundaryEvidence(
+            bottom.copy(windowGeneration = 0L), toTop = false))
+        val withoutCollection = bottom.copy(
+            chatListCollectionRowCount = null,
+            chatListVisibleCollectionRows = emptyList()
+        )
+        assertEquals(true, policy.greetingSearchBoundaryEvidence(withoutCollection, toTop = false))
+        assertEquals(null, policy.greetingSearchBoundaryEvidence(
+            withoutCollection.copy(chatListCanScrollBackward = false), toTop = false))
+        assertEquals(null, policy.greetingSearchBoundaryEvidence(
+            withoutCollection.copy(chatListCanScrollForward = null), toTop = false))
+    }
+
     private fun snapshot(vararg candidates: ChatListCandidateSnapshot) = ChatPageSnapshot(
         packageName = "com.immomo.momo",
         activityClass = "MaintabActivity",

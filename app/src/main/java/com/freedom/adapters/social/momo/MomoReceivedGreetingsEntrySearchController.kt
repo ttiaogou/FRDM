@@ -1,19 +1,22 @@
 package com.freedom.adapters.social.momo
 
 import com.freedom.core.accessibility.gesture.VerticalSwipeDirection
+import com.freedom.features.recovery.RecoveryScheduler
 
 /**
  * Controls a bounded, two-direction sweep of the ordinary Message list when the received-
  * greetings entry is not present in the current viewport. The run-local inbox observation
  * selects the initial direction only; a missing or stale hint defaults to later rows.
- * A successful gesture is compared with the next fresh viewport fingerprint; two successful
- * no-motion observations confirm one edge. The opposite direction is then swept once.
+ * Completed gestures provide movement evidence only. A physical edge requires independent,
+ * stable live collection/action evidence; failed or stationary swipes alone never prove an edge.
+ * Failure recovery uses the existing read-only retry cadence and spaced fresh READY evidence.
  */
 internal class MomoReceivedGreetingsEntrySearchController(
     private val unchangedObservationsToConfirmBoundary: Int = 2
 ) {
     enum class Observation {
         CONTINUE,
+        WAIT_FOR_OBSERVATION,
         REVERSED,
         COMPLETE
     }
@@ -23,6 +26,13 @@ internal class MomoReceivedGreetingsEntrySearchController(
     private var reversed = false
     private var unchangedCount = 0
     private var pendingBaseline: String? = null
+    private val edgeConfirmation = MomoSayHiListReturnConfirmationPolicy(
+        requiredStableSamples = unchangedObservationsToConfirmBoundary
+    )
+    private val retryConfirmation = MomoSayHiListReturnConfirmationPolicy()
+    private var retryAttempt = 0
+    private var retryNotBeforeMs = 0L
+    private var retryAdmitted = false
     private var complete = false
     private var searchGeneration = 0L
     private data class InFlightGesture(val requestId: String, val generation: Long)
@@ -51,6 +61,8 @@ internal class MomoReceivedGreetingsEntrySearchController(
         unchangedCount = 0
         pendingBaseline = null
         complete = false
+        edgeConfirmation.reset()
+        clearRetry()
         return true
     }
 
@@ -67,8 +79,12 @@ internal class MomoReceivedGreetingsEntrySearchController(
     @Synchronized
     fun tryBeginGesture(expectedGeneration: Long, requestId: String): Boolean {
         if (!active || complete || expectedGeneration != searchGeneration ||
-            inFlightGesture != null || requestId.isBlank()
+            inFlightGesture != null || requestId.isBlank() ||
+            (retryAttempt > 0 && !retryAdmitted)
         ) return false
+        retryAdmitted = false
+        retryConfirmation.reset()
+        edgeConfirmation.reset()
         inFlightGesture = InFlightGesture(requestId, searchGeneration)
         return true
     }
@@ -80,28 +96,89 @@ internal class MomoReceivedGreetingsEntrySearchController(
      * A cancelled/deferred gesture never counts as boundary evidence.
      */
     @Synchronized
-    fun finishGesture(requestId: String, completedBaseline: String?): Boolean {
+    fun finishGesture(requestId: String, completedBaseline: String?, nowMs: Long): Boolean {
         val pending = inFlightGesture ?: return false
         if (pending.requestId != requestId) return false
         inFlightGesture = null
         if (pending.generation != searchGeneration || !active || complete) return false
         pendingBaseline = completedBaseline?.takeIf { it.isNotBlank() }
+        if (pendingBaseline == null) {
+            unchangedCount = 0
+            edgeConfirmation.reset()
+            holdForObservation(nowMs)
+        }
         return true
     }
 
+    /** A missing or unready observation breaks stability, not the sweep direction. */
     @Synchronized
-    fun observeAfterGesture(currentFingerprint: String): Observation {
-        if (!active || complete || currentFingerprint.isBlank()) return Observation.CONTINUE
-        val baseline = pendingBaseline ?: return Observation.CONTINUE
+    fun invalidateObservation() {
         pendingBaseline = null
-        if (currentFingerprint != baseline) {
-            unchangedCount = 0
+        unchangedCount = 0
+        edgeConfirmation.reset()
+        retryConfirmation.reset()
+        retryAdmitted = false
+    }
+
+    /** READY evidence is freshly evaluated by the existing runtime owner; never a write grant. */
+    @Synchronized
+    fun mayDispatch(readyViewportKey: String?, nowMs: Long): Boolean {
+        if (!active || complete || inFlightGesture != null || readyViewportKey.isNullOrBlank()) {
+            retryConfirmation.reset()
+            retryAdmitted = false
+            return false
+        }
+        if (retryAttempt == 0) return true
+        if (nowMs < retryNotBeforeMs) {
+            retryConfirmation.reset()
+            retryAdmitted = false
+            return false
+        }
+        retryAdmitted = retryConfirmation.observe(readyViewportKey, nowMs)
+        return retryAdmitted
+    }
+
+    @Synchronized
+    fun retryAttempt(): Int = retryAttempt
+
+    @Synchronized
+    fun observeAfterGesture(
+        currentFingerprint: String,
+        boundaryEvidence: Boolean?,
+        nowMs: Long
+    ): Observation {
+        if (!active || complete) return Observation.CONTINUE
+        if (inFlightGesture != null) return Observation.WAIT_FOR_OBSERVATION
+        if (currentFingerprint.isBlank()) {
+            invalidateObservation()
+            return Observation.WAIT_FOR_OBSERVATION
+        }
+        val baseline = pendingBaseline
+        pendingBaseline = null
+        if (baseline != null) {
+            if (currentFingerprint != baseline) {
+                unchangedCount = 0
+                clearRetry()
+            } else if (boundaryEvidence != true) {
+                unchangedCount++
+                if (unchangedCount >= unchangedObservationsToConfirmBoundary) {
+                    unchangedCount = 0
+                    holdForObservation(nowMs)
+                    edgeConfirmation.reset()
+                    return Observation.WAIT_FOR_OBSERVATION
+                }
+            }
+        }
+        if (boundaryEvidence != true) {
+            edgeConfirmation.reset()
             return Observation.CONTINUE
         }
-
-        unchangedCount++
-        if (unchangedCount < unchangedObservationsToConfirmBoundary) return Observation.CONTINUE
+        // An actual physical edge can be confirmed without attempting to swipe past it.
+        // No failed dispatch or unchanged fingerprint is counted as independent edge evidence.
+        if (!edgeConfirmation.observe(currentFingerprint, nowMs)) return Observation.WAIT_FOR_OBSERVATION
+        edgeConfirmation.reset()
         unchangedCount = 0
+        clearRetry()
         if (!reversed) {
             reversed = true
             direction = if (direction == VerticalSwipeDirection.UP) {
@@ -114,6 +191,20 @@ internal class MomoReceivedGreetingsEntrySearchController(
         complete = true
         active = false
         return Observation.COMPLETE
+    }
+
+    private fun holdForObservation(nowMs: Long) {
+        retryAttempt = (retryAttempt + 1).coerceAtMost(RecoveryScheduler.fastRetryCount + 1)
+        retryNotBeforeMs = nowMs + RecoveryScheduler.readOnlyRetryDelayMs(retryAttempt)
+        retryConfirmation.reset()
+        retryAdmitted = false
+    }
+
+    private fun clearRetry() {
+        retryAttempt = 0
+        retryNotBeforeMs = 0L
+        retryConfirmation.reset()
+        retryAdmitted = false
     }
 
     @Synchronized
@@ -132,6 +223,8 @@ internal class MomoReceivedGreetingsEntrySearchController(
         unchangedCount = 0
         pendingBaseline = null
         complete = false
+        edgeConfirmation.reset()
+        clearRetry()
     }
 
     /** The run guard has invalidated previous callbacks before a run-level reset. */

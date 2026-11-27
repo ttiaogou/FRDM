@@ -691,18 +691,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
 
     // A collection range is only position evidence. Keep the old identity/geometry keys
     // unchanged for checkpoint restoration, identity return and incomplete-row safety gates.
-    private fun collectionRows(snapshot: ChatPageSnapshot): List<Int>? {
-        if (snapshot.pageKind != ChatPageKind.CHAT_LIST || snapshot.chatListExtractionTruncated ||
-            snapshot.chatListViewport?.isEmpty != false || snapshot.windowGeneration <= 0L ||
-            snapshot.windowIdentityKey() == null
-        ) return null
-        val count = snapshot.chatListCollectionRowCount ?: return null
-        val rows = snapshot.chatListVisibleCollectionRows
-        return rows.takeIf {
-            count > 0 && it.isNotEmpty() && it.all { row -> row in 0 until count } &&
-                it.zipWithNext().all { (a, b) -> b == a + 1 }
-        }
-    }
+    private fun collectionRows(snapshot: ChatPageSnapshot): List<Int>? =
+        ChatSessionManagementPolicy.validatedCollectionRows(snapshot)
 
     private fun collectionPositionKey(snapshot: ChatPageSnapshot): String? =
         collectionRows(snapshot)?.let { rows ->
@@ -732,18 +722,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
             .map { it.substringBefore('@') }.filter(String::isNotBlank)
 
     /** Null means no independent boundary evidence; false prevents a false no-motion boundary. */
-    fun collectionBoundaryEvidence(snapshot: ChatPageSnapshot, toTop: Boolean): Boolean? {
-        val rows = collectionRows(snapshot) ?: return null
-        val count = snapshot.chatListCollectionRowCount ?: return null
-        val atEdge = if (toTop) rows.first() == 0 else rows.last() == count - 1
-        val canScroll = if (toTop) snapshot.chatListCanScrollBackward else snapshot.chatListCanScrollForward
-        if (!atEdge || canScroll == true) return false
-        if (canScroll == null) return null
-        // A missing pair of scroll actions on a multi-viewport list is not proof of an edge.
-        val opposite = if (toTop) snapshot.chatListCanScrollForward else snapshot.chatListCanScrollBackward
-        if (rows.size < count && opposite != true) return null
-        return true
-    }
+    fun collectionBoundaryEvidence(snapshot: ChatPageSnapshot, toTop: Boolean): Boolean? =
+        ChatSessionManagementPolicy.physicalCollectionBoundaryEvidence(snapshot, toTop)
 
     /** Transient scroll baseline: compare row range first; retain old evidence as fallback. */
     fun scrollPositionKeys(snapshot: ChatPageSnapshot): List<String> {

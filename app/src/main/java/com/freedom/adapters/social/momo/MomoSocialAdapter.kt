@@ -1805,6 +1805,8 @@ internal class MomoSocialAdapter(
                 performReceivedGreetingsEntrySearchStep()
             } else {
                 // A visible-but-ambiguous or unsafe label is not permission to scroll past it.
+                // It also breaks consecutive edge/retry observation evidence.
+                receivedGreetingsEntrySearchController.invalidateObservation()
                 true
             }
         }
@@ -2092,10 +2094,12 @@ internal class MomoSocialAdapter(
         if (sayHiGestureInFlight) return true
 
         val fresh = runCatching { inspectChatPage() }.getOrNull() ?: run {
+            receivedGreetingsEntrySearchController.invalidateObservation()
             onLog("收到的招呼入口搜索暂停：无法重新读取普通消息列表；不使用旧视口坐标")
             return false
         }
         if (fresh.packageName != targetPackage) {
+            receivedGreetingsEntrySearchController.invalidateObservation()
             onLog(
                 "收到的招呼入口搜索暂停：当前前台包已离开目标应用；" +
                     "packageMatch=false；不跨应用派发滑动"
@@ -2106,8 +2110,9 @@ internal class MomoSocialAdapter(
             // Accessibility snapshots can briefly classify a transitioning list as UNKNOWN.
             // Keep the task alive and let the next page event retry; never reuse old coordinates.
             if (fresh.pageKind == ChatPageKind.UNKNOWN) {
+                receivedGreetingsEntrySearchController.invalidateObservation()
                 onLog("收到的招呼入口搜索暂缓：列表快照暂时为 UNKNOWN；等待新快照后重新确认，不终止导航")
-                return true
+                return false
             }
             resetReceivedGreetingsEntrySearch()
             onLog(
@@ -2120,15 +2125,17 @@ internal class MomoSocialAdapter(
             ?: fresh.chatListCandidates.firstOrNull()?.rowTarget?.window
             ?: fresh.sessionListNavigationTarget?.nodeTarget?.window
             ?: run {
+                receivedGreetingsEntrySearchController.invalidateObservation()
                 onLog("收到的招呼入口搜索暂缓：新鲜列表快照尚未提供可绑定的窗口身份；等待下一次快照，不终止导航")
-                return true
+                return false
             }
         if (!accessibilityGateway.isWindowCurrent(expectedWindow) ||
             expectedWindow.packageName != targetPackage || expectedWindow.windowId < 0 ||
             fresh.windowGeneration > 0L && expectedWindow.generation != fresh.windowGeneration
         ) {
+            receivedGreetingsEntrySearchController.invalidateObservation()
             onLog("收到的招呼入口搜索暂缓：当前窗口/代次与最新消息列表快照暂不一致；不派发旧坐标滑动，等待重取")
-            return true
+            return false
         }
         val windowIdentity = "${expectedWindow.packageName}|${expectedWindow.windowId}|${expectedWindow.generation}"
         // inspectChatPage() already revalidated the shared run-local memory using this fresh
@@ -2156,13 +2163,32 @@ internal class MomoSocialAdapter(
         val searchGeneration = receivedGreetingsEntrySearchController.captureSearchGeneration()
         val viewportFingerprint = receivedGreetingsEntrySearchViewportFingerprint(fresh)
         if (viewportFingerprint.isBlank()) {
-            onLog("收到的招呼入口搜索暂缓：当前视口暂缺可比较的会话行身份/几何证据；等待新快照，不终止导航")
-            return true
+            receivedGreetingsEntrySearchController.invalidateObservation()
+            onLog("收到的招呼入口搜索[OBSERVATION_HOLD]：列表证据不完整；不派发滑动、不确认边界")
+            return false
         }
-        when (receivedGreetingsEntrySearchController.observeAfterGesture(viewportFingerprint)) {
+        // Same live READY owner as the dedicated greetings list. Lease admission remains
+        // in the existing task executor and unified gesture pipeline; this is read-only.
+        val readiness = runCatching(inspectReceivedGreetingsReadiness).getOrNull()
+        if (readiness?.isReadyForWindow(expectedWindow, RunMode.AI_REPLY) != true ||
+            !accessibilityGateway.isWindowCurrent(expectedWindow)
+        ) {
+            receivedGreetingsEntrySearchController.invalidateObservation()
+            onLog("收到的招呼入口搜索[OBSERVATION_HOLD]：当前普通消息列表窗口尚未 READY；保留方向，仅重新观察")
+            return false
+        }
+        val boundaryEvidence = ChatSessionManagementPolicy.greetingSearchBoundaryEvidence(
+            fresh, toTop = receivedGreetingsEntrySearchController.direction() == VerticalSwipeDirection.DOWN
+        )
+        val nowMs = SystemClock.elapsedRealtime()
+        when (receivedGreetingsEntrySearchController.observeAfterGesture(viewportFingerprint, boundaryEvidence, nowMs)) {
             MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE -> Unit
+            MomoReceivedGreetingsEntrySearchController.Observation.WAIT_FOR_OBSERVATION -> {
+                onLog("收到的招呼入口搜索[OBSERVATION_HOLD]：等待独立边界证据或无位移后的只读恢复；不派发滑动")
+                return false
+            }
             MomoReceivedGreetingsEntrySearchController.Observation.REVERSED -> {
-                onLog("收到的招呼入口搜索：已通过连续两次无位移确认当前方向边界；反转方向，复核剩余列表区域")
+                onLog("收到的招呼入口搜索[PHYSICAL_EDGE_CONFIRMED]：连续新鲜快照确认实际列表边界；反转方向，复核剩余列表区域")
             }
             MomoReceivedGreetingsEntrySearchController.Observation.COMPLETE -> {
                 onLog(
@@ -2191,6 +2217,13 @@ internal class MomoSocialAdapter(
             onLog("收到的招呼入口搜索暂缓：窗口或显示坐标上下文已变化；未派发滑动")
             return true
         }
+        if (!receivedGreetingsEntrySearchController.mayDispatch(
+                "$windowIdentity|$viewportFingerprint|$viewport", SystemClock.elapsedRealtime()
+            )
+        ) {
+            onLog("收到的招呼入口搜索[RETRY_SUPPRESSED]：attempt=${receivedGreetingsEntrySearchController.retryAttempt()}；等待退避及两次新鲜 READY 视口复核")
+            return false
+        }
         val direction = receivedGreetingsEntrySearchController.direction()
         val submittedAt = System.currentTimeMillis()
         val request = GestureIntentRequest(
@@ -2216,7 +2249,7 @@ internal class MomoSocialAdapter(
                 if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
                 val completed = result.status == GestureExecutionStatus.COMPLETED
                 if (!receivedGreetingsEntrySearchController.finishGesture(
-                        request.id, if (completed) viewportFingerprint else null
+                        request.id, if (completed) viewportFingerprint else null, SystemClock.elapsedRealtime()
                     )
                 ) return@GestureExecutionListener
                 if (completed) {
@@ -2227,41 +2260,50 @@ internal class MomoSocialAdapter(
                 } else {
                     onLog(
                         "收到的招呼入口搜索滑动未完成：status=${result.status}；reason=${result.reason}；" +
-                            "保留方向状态，等待新快照后安全重试"
+                            "保留方向状态；attempt=${receivedGreetingsEntrySearchController.retryAttempt()}；进入只读退避，重新确认 READY 后才允许单次探测"
                     )
                 }
             })
         }.getOrElse {
-            receivedGreetingsEntrySearchController.finishGesture(request.id, null)
+            receivedGreetingsEntrySearchController.finishGesture(request.id, null, SystemClock.elapsedRealtime())
             onLog("收到的招呼入口搜索暂停：手势协调器异常=${it.javaClass.simpleName}；未使用坐标兜底")
             return false
         }
         return when (submission) {
             GestureSubmission.ACCEPTED -> true
             GestureSubmission.DEFERRED_NOT_READY -> {
-                receivedGreetingsEntrySearchController.finishGesture(request.id, null)
-                onLog("收到的招呼入口搜索暂缓：手势协调器尚未就绪；保留搜索方向并等待后续快照")
-                true
+                receivedGreetingsEntrySearchController.finishGesture(request.id, null, SystemClock.elapsedRealtime())
+                onLog("收到的招呼入口搜索暂缓：手势协调器尚未就绪；保留搜索方向，进入现有只读恢复")
+                false
             }
             else -> {
-                receivedGreetingsEntrySearchController.finishGesture(request.id, null)
+                receivedGreetingsEntrySearchController.finishGesture(request.id, null, SystemClock.elapsedRealtime())
                 onLog("收到的招呼入口搜索暂停：手势协调器拒绝安全滑动；submission=$submission")
                 false
             }
         }
     }
 
-    private fun receivedGreetingsEntrySearchViewportFingerprint(snapshot: ChatPageSnapshot): String =
-        snapshot.chatListCandidates.joinToString("|") { candidate ->
-            if (!MomoChatListSessionPolicy.hasValidBounds(candidate.rowBounds)) return@joinToString ""
-            // A transiently unreadable nickname must not strand navigation. structuralKey() is
-            // already redacted (length/hash/geometry only) and provides a viewport-change signal
-            // without pretending that the row has a verified person identity.
+    private fun receivedGreetingsEntrySearchViewportFingerprint(snapshot: ChatPageSnapshot): String {
+        if (snapshot.chatListExtractionTruncated || snapshot.chatListInvalidRowBoundsCount != 0 ||
+            snapshot.chatListViewport?.isEmpty != false || snapshot.windowIdentityKey() == null
+        ) return ""
+        val rowKeys = snapshot.chatListCandidates.filter { candidate ->
+            candidate.rowVisibleToUser && candidate.intersectsViewport &&
+                MomoChatListSessionPolicy.hasValidBounds(candidate.rowBounds)
+        }.joinToString("|") { candidate ->
+            // Preserve the existing redacted identity/geometry signal for movement.
             val identity = ChatSessionManagementPolicy.stableSessionKey(candidate)
                 .ifBlank { candidate.structuralKey() }
             "$identity@${candidate.rowBounds.left},${candidate.rowBounds.top}," +
                 "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
-        }.trim('|')
+        }
+        if (rowKeys.isBlank()) return ""
+        val rows = ChatSessionManagementPolicy.validatedCollectionRows(snapshot)
+        return "${snapshot.windowIdentityKey()}|${snapshot.chatListViewport}|" +
+            "${snapshot.chatListCollectionRowCount}:${rows?.firstOrNull()}:${rows?.lastOrNull()}:" +
+            "${snapshot.chatListCanScrollForward}:${snapshot.chatListCanScrollBackward}|$rowKeys"
+    }
 
     private fun resetReceivedGreetingsEntrySearch(resetRun: Boolean = false) {
         if (resetRun) receivedGreetingsEntrySearchController.resetForRun()

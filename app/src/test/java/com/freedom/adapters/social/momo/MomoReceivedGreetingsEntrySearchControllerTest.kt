@@ -8,6 +8,33 @@ import org.junit.Test
 
 class MomoReceivedGreetingsEntrySearchControllerTest {
     private var nextRequest = 0
+    private var clockMs = 0L
+
+    private fun observe(
+        controller: MomoReceivedGreetingsEntrySearchController,
+        fingerprint: String,
+        edge: Boolean? = false
+    ): MomoReceivedGreetingsEntrySearchController.Observation {
+        clockMs += 500L
+        return controller.observeAfterGesture(fingerprint, edge, clockMs)
+    }
+
+    private fun confirmEdge(
+        controller: MomoReceivedGreetingsEntrySearchController,
+        fingerprint: String,
+        expected: MomoReceivedGreetingsEntrySearchController.Observation
+    ) {
+        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.WAIT_FOR_OBSERVATION,
+            observe(controller, fingerprint, true))
+        assertEquals(expected, observe(controller, fingerprint, true))
+    }
+
+    private fun readmit(controller: MomoReceivedGreetingsEntrySearchController, key: String = "ready") {
+        clockMs += com.freedom.features.recovery.RecoveryScheduler.longWaitDelayMs
+        assertFalse(controller.mayDispatch(key, clockMs))
+        clockMs += 500L
+        assertTrue(controller.mayDispatch(key, clockMs))
+    }
 
     private fun beginGesture(controller: MomoReceivedGreetingsEntrySearchController): String {
         val id = "request-${++nextRequest}"
@@ -16,25 +43,18 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
     }
 
     private fun completeGesture(controller: MomoReceivedGreetingsEntrySearchController, baseline: String) {
-        assertTrue(controller.finishGesture(beginGesture(controller), baseline))
+        assertTrue(controller.finishGesture(beginGesture(controller), baseline, clockMs))
     }
 
     @Test
-    fun startsBySearchingLaterRowsAndReversesAfterTwoNoMotionConfirmations() {
+    fun startsBySearchingLaterRowsAndReversesAfterTwoIndependentEdgeConfirmations() {
         val controller = MomoReceivedGreetingsEntrySearchController()
         controller.start()
-
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
         completeGesture(controller, "top-viewport")
-        assertEquals(
-            MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("top-viewport")
-        )
-        completeGesture(controller, "top-viewport")
-        assertEquals(
-            MomoReceivedGreetingsEntrySearchController.Observation.REVERSED,
-            controller.observeAfterGesture("top-viewport")
-        )
+        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
+            observe(controller, "lower-viewport"))
+        confirmEdge(controller, "bottom-viewport", MomoReceivedGreetingsEntrySearchController.Observation.REVERSED)
         assertEquals(VerticalSwipeDirection.DOWN, controller.direction())
         assertTrue(controller.isActive())
     }
@@ -46,24 +66,14 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
         assertEquals(VerticalSwipeDirection.DOWN, controller.direction())
         completeGesture(controller, "middle")
         assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("earlier"))
+            observe(controller, "earlier"))
         assertEquals(VerticalSwipeDirection.DOWN, controller.direction())
-        completeGesture(controller, "top")
-        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("top"))
-        completeGesture(controller, "top")
-        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.REVERSED,
-            controller.observeAfterGesture("top"))
+        confirmEdge(controller, "top", MomoReceivedGreetingsEntrySearchController.Observation.REVERSED)
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
         completeGesture(controller, "top")
         assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("bottom"))
-        completeGesture(controller, "bottom")
-        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("bottom"))
-        completeGesture(controller, "bottom")
-        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.COMPLETE,
-            controller.observeAfterGesture("bottom"))
+            observe(controller, "bottom"))
+        confirmEdge(controller, "bottom", MomoReceivedGreetingsEntrySearchController.Observation.COMPLETE)
     }
 
     @Test
@@ -72,10 +82,7 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
             val controller = MomoReceivedGreetingsEntrySearchController()
             assertTrue(controller.start(position))
             assertEquals(VerticalSwipeDirection.UP, controller.direction())
-            repeat(2) {
-                completeGesture(controller, "bottom")
-                controller.observeAfterGesture("bottom")
-            }
+            confirmEdge(controller, "bottom", MomoReceivedGreetingsEntrySearchController.Observation.REVERSED)
             assertEquals(VerticalSwipeDirection.DOWN, controller.direction())
             assertTrue(controller.isActive())
             assertFalse(controller.isComplete())
@@ -93,7 +100,7 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
         assertFalse(controller.isComplete())
         assertTrue(controller.isGestureInFlight())
         assertFalse(controller.tryBeginGesture(oldGeneration, "stale"))
-        assertFalse(controller.finishGesture(request, "old"))
+        assertFalse(controller.finishGesture(request, "old", clockMs))
         assertFalse(controller.isGestureInFlight())
     }
 
@@ -101,13 +108,16 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
     fun rejectedOrDeferredSwipeNeverReversesKnownAboveSearch() {
         val controller = MomoReceivedGreetingsEntrySearchController()
         controller.start(MomoReceivedGreetingsEntryPosition.ABOVE)
-        repeat(5) {
-            assertTrue(controller.finishGesture(beginGesture(controller), null))
+        repeat(5) { index ->
+            assertTrue(controller.finishGesture(beginGesture(controller), null, clockMs))
+            assertEquals(index + 1, controller.retryAttempt())
+            assertFalse(controller.tryBeginGesture(controller.captureSearchGeneration(), "immediate-$index"))
             assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-                controller.observeAfterGesture("same"))
+                observe(controller, "same", null))
+            assertEquals(VerticalSwipeDirection.DOWN, controller.direction())
+            assertFalse(controller.isComplete())
+            readmit(controller)
         }
-        assertEquals(VerticalSwipeDirection.DOWN, controller.direction())
-        assertFalse(controller.isComplete())
     }
 
     @Test
@@ -115,13 +125,13 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
         val controller = MomoReceivedGreetingsEntrySearchController()
         controller.start(MomoReceivedGreetingsEntryPosition.ABOVE)
         completeGesture(controller, "old")
-        controller.observeAfterGesture("old")
+        observe(controller, "old")
         controller.reset()
         controller.start(MomoReceivedGreetingsEntryPosition.UNKNOWN)
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
         completeGesture(controller, "new")
         assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("new"))
+            observe(controller, "new"))
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
     }
 
@@ -133,17 +143,17 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
         completeGesture(controller, "viewport-a")
         assertEquals(
             MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("viewport-a")
+            observe(controller, "viewport-a")
         )
         completeGesture(controller, "viewport-a")
         assertEquals(
             MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("viewport-b")
+            observe(controller, "viewport-b")
         )
         completeGesture(controller, "viewport-b")
         assertEquals(
             MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("viewport-b")
+            observe(controller, "viewport-b")
         )
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
     }
@@ -152,23 +162,11 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
     fun completesOnlyAfterBothDirectionsReachIndependentlyConfirmedEdges() {
         val controller = MomoReceivedGreetingsEntrySearchController()
         controller.start()
-
-        repeat(2) {
-            completeGesture(controller, "start")
-            controller.observeAfterGesture("start")
-        }
+        confirmEdge(controller, "start", MomoReceivedGreetingsEntrySearchController.Observation.REVERSED)
         assertEquals(VerticalSwipeDirection.DOWN, controller.direction())
-
-        completeGesture(controller, "end")
-        assertEquals(
-            MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("end")
-        )
-        completeGesture(controller, "end")
-        assertEquals(
-            MomoReceivedGreetingsEntrySearchController.Observation.COMPLETE,
-            controller.observeAfterGesture("end")
-        )
+        completeGesture(controller, "start")
+        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE, observe(controller, "end"))
+        confirmEdge(controller, "end", MomoReceivedGreetingsEntrySearchController.Observation.COMPLETE)
         assertTrue(controller.isComplete())
         assertFalse(controller.isActive())
     }
@@ -177,11 +175,95 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
     fun cancelledGestureDoesNotCountAsAListBoundary() {
         val controller = MomoReceivedGreetingsEntrySearchController()
         controller.start()
-        assertTrue(controller.finishGesture(beginGesture(controller), null))
+        assertTrue(controller.finishGesture(beginGesture(controller), null, clockMs))
         assertEquals(
             MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("same")
+            observe(controller, "same")
         )
+        assertEquals(VerticalSwipeDirection.UP, controller.direction())
+    }
+
+    @Test
+    fun twoCompletedStationarySwipesWithUnknownOrContradictoryEdgeEnterObservationHold() {
+        for (edge in listOf(null, false)) {
+            val controller = MomoReceivedGreetingsEntrySearchController()
+            controller.start()
+            completeGesture(controller, "same")
+            assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
+                observe(controller, "same", edge))
+            completeGesture(controller, "same")
+            assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.WAIT_FOR_OBSERVATION,
+                observe(controller, "same", edge))
+            assertEquals(1, controller.retryAttempt())
+            assertEquals(VerticalSwipeDirection.UP, controller.direction())
+            assertFalse(controller.isComplete())
+            assertFalse(controller.tryBeginGesture(controller.captureSearchGeneration(), "blocked"))
+        }
+    }
+
+    @Test
+    fun edgeRequiresSpacedMatchingFreshProofAndNoInFlightGesture() {
+        val controller = MomoReceivedGreetingsEntrySearchController()
+        controller.start()
+        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.WAIT_FOR_OBSERVATION,
+            observe(controller, "edge-a", true))
+        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.WAIT_FOR_OBSERVATION,
+            observe(controller, "edge-b", true))
+        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
+            observe(controller, "edge-b", false))
+        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.WAIT_FOR_OBSERVATION,
+            observe(controller, "edge-b", true))
+        controller.invalidateObservation()
+        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.WAIT_FOR_OBSERVATION,
+            observe(controller, "edge-b", true))
+        val request = beginGesture(controller)
+        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.WAIT_FOR_OBSERVATION,
+            observe(controller, "edge-b", true))
+        assertTrue(controller.finishGesture(request, null, clockMs))
+        confirmEdge(controller, "edge-b", MomoReceivedGreetingsEntrySearchController.Observation.REVERSED)
+    }
+
+    @Test
+    fun rejectionRequiresDeadlineAndTwoMatchingReadyObservationsThenAllowsOnlyOneProbe() {
+        val controller = MomoReceivedGreetingsEntrySearchController()
+        controller.start(MomoReceivedGreetingsEntryPosition.ABOVE)
+        assertTrue(controller.finishGesture(beginGesture(controller), null, 0L))
+        assertFalse(controller.mayDispatch("ready", 499L))
+        assertFalse(controller.mayDispatch("ready", 500L))
+        assertFalse(controller.mayDispatch(null, 1000L))
+        assertFalse(controller.mayDispatch("ready", 1500L))
+        assertFalse(controller.mayDispatch("changed", 2000L))
+        assertTrue(controller.mayDispatch("changed", 2500L))
+        val retry = beginGesture(controller)
+        assertFalse(controller.tryBeginGesture(controller.captureSearchGeneration(), "overlap"))
+        assertTrue(controller.finishGesture(retry, null, 2500L))
+        assertEquals(2, controller.retryAttempt())
+        assertFalse(controller.mayDispatch("changed", 3499L))
+        assertFalse(controller.mayDispatch("changed", 3500L))
+        assertTrue(controller.mayDispatch("changed", 4000L))
+        val probe = beginGesture(controller)
+        assertTrue(controller.finishGesture(probe, "before", 4500L))
+        assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
+            controller.observeAfterGesture("after", false, 5000L))
+        assertEquals(0, controller.retryAttempt())
+        assertEquals(VerticalSwipeDirection.DOWN, controller.direction())
+        assertTrue(controller.mayDispatch("new-ready", 5000L))
+    }
+
+    @Test
+    fun invalidObservationRetiresRetrySamplesButPreservesDirectionAndBackoff() {
+        val controller = MomoReceivedGreetingsEntrySearchController()
+        controller.start(MomoReceivedGreetingsEntryPosition.ABOVE)
+        assertTrue(controller.finishGesture(beginGesture(controller), null, 0L))
+        assertFalse(controller.mayDispatch("ready", 500L))
+        controller.invalidateObservation()
+        assertFalse(controller.mayDispatch("ready", 1000L))
+        assertTrue(controller.mayDispatch("ready", 1500L))
+        assertEquals(VerticalSwipeDirection.DOWN, controller.direction())
+        assertEquals(1, controller.retryAttempt())
+        controller.reset()
+        controller.start()
+        assertEquals(0, controller.retryAttempt())
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
     }
 
@@ -194,14 +276,14 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
         completeGesture(controller, "top-viewport")
         assertEquals(
             MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("middle-viewport")
+            observe(controller, "middle-viewport")
         )
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
 
         completeGesture(controller, "middle-viewport")
         assertEquals(
             MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("lower-viewport")
+            observe(controller, "lower-viewport")
         )
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
         assertTrue(controller.isActive())
@@ -221,17 +303,17 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
         controller.start()
         assertFalse(controller.tryBeginGesture(oldGeneration, "stale-preparation"))
         assertFalse(controller.tryBeginGesture(controller.captureSearchGeneration(), "overlap"))
-        assertFalse(controller.finishGesture(oldRequest, "old-viewport"))
+        assertFalse(controller.finishGesture(oldRequest, "old-viewport", clockMs))
         assertFalse(controller.isGestureInFlight())
         assertTrue(controller.isActive())
 
         val newRequest = beginGesture(controller)
-        assertFalse(controller.finishGesture(oldRequest, "new-viewport"))
-        assertFalse(controller.finishGesture(oldRequest, null))
+        assertFalse(controller.finishGesture(oldRequest, "new-viewport", clockMs))
+        assertFalse(controller.finishGesture(oldRequest, null, clockMs))
         assertTrue(controller.isGestureInFlight())
-        assertTrue(controller.finishGesture(newRequest, "new-viewport"))
+        assertTrue(controller.finishGesture(newRequest, "new-viewport", clockMs))
         assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("new-viewport"))
+            observe(controller, "new-viewport"))
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
         assertFalse(controller.isGestureInFlight())
     }
@@ -248,12 +330,12 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
 
         controller.start()
         val newRequest = beginGesture(controller)
-        assertFalse(controller.finishGesture(oldRequest, "same"))
+        assertFalse(controller.finishGesture(oldRequest, "same", clockMs))
         assertTrue(controller.isGestureInFlight())
-        assertTrue(controller.finishGesture(newRequest, "same"))
-        assertFalse(controller.finishGesture(newRequest, "same"))
+        assertTrue(controller.finishGesture(newRequest, "same", clockMs))
+        assertFalse(controller.finishGesture(newRequest, "same", clockMs))
         assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("same"))
+            observe(controller, "same"))
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
     }
 
@@ -261,10 +343,8 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
     fun completedSearchResetAllowsFreshSearchWithoutStaleBoundaryEvidence() {
         val controller = MomoReceivedGreetingsEntrySearchController()
         controller.start()
-        repeat(4) {
-            completeGesture(controller, "same")
-            controller.observeAfterGesture("same")
-        }
+        confirmEdge(controller, "same", MomoReceivedGreetingsEntrySearchController.Observation.REVERSED)
+        confirmEdge(controller, "same", MomoReceivedGreetingsEntrySearchController.Observation.COMPLETE)
         assertTrue(controller.isComplete())
         assertFalse(controller.isActive())
         controller.reset()
@@ -274,6 +354,6 @@ class MomoReceivedGreetingsEntrySearchControllerTest {
         assertTrue(controller.isActive())
         assertEquals(VerticalSwipeDirection.UP, controller.direction())
         assertEquals(MomoReceivedGreetingsEntrySearchController.Observation.CONTINUE,
-            controller.observeAfterGesture("same"))
+            observe(controller, "same"))
     }
 }

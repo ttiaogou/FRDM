@@ -44,6 +44,56 @@ enum class ChatHeaderMatchMode {
 
 /** Pure rules for selecting stable, geometrically safe session-row candidates. */
 object ChatSessionManagementPolicy {
+    /** Live contiguous collection positions, never recycled child indexes. */
+    fun validatedCollectionRows(snapshot: ChatPageSnapshot): List<Int>? {
+        if (snapshot.pageKind != ChatPageKind.CHAT_LIST || snapshot.chatListExtractionTruncated ||
+            snapshot.chatListViewport?.isEmpty != false || snapshot.windowGeneration <= 0L ||
+            snapshot.windowIdentityKey() == null
+        ) return null
+        val count = snapshot.chatListCollectionRowCount ?: return null
+        val rows = snapshot.chatListVisibleCollectionRows
+        return rows.takeIf {
+            count > 0 && it.isNotEmpty() && it.all { row -> row in 0 until count } &&
+                it.zipWithNext().all { (a, b) -> b == a + 1 }
+        }
+    }
+
+    /** Null means no independent boundary evidence; false prevents a false no-motion boundary. */
+    fun physicalCollectionBoundaryEvidence(snapshot: ChatPageSnapshot, toTop: Boolean): Boolean? {
+        val rows = validatedCollectionRows(snapshot) ?: return null
+        val count = snapshot.chatListCollectionRowCount ?: return null
+        val atEdge = if (toTop) rows.first() == 0 else rows.last() == count - 1
+        val canScroll = if (toTop) snapshot.chatListCanScrollBackward else snapshot.chatListCanScrollForward
+        if (!atEdge || canScroll == true) return false
+        if (canScroll == null) return null
+        // A missing pair of scroll actions on a multi-viewport list is not proof of an edge.
+        val opposite = if (toTop) snapshot.chatListCanScrollForward else snapshot.chatListCanScrollBackward
+        if (rows.size < count && opposite != true) return null
+        return true
+    }
+
+    /**
+     * Greeting discovery uses physical list evidence, never unread status or reply quota.
+     * A positive scroll action refutes an edge. If the provider supplies no collection
+     * metadata, opposite-direction capability can corroborate a one-sided edge; callers
+     * must still independently confirm stable complete viewport evidence.
+     */
+    fun greetingSearchBoundaryEvidence(snapshot: ChatPageSnapshot, toTop: Boolean): Boolean? {
+        if (snapshot.pageKind != ChatPageKind.CHAT_LIST || snapshot.chatListExtractionTruncated ||
+            snapshot.chatListInvalidRowBoundsCount != 0 || snapshot.chatListViewport?.isEmpty != false ||
+            snapshot.windowGeneration <= 0L || snapshot.windowIdentityKey() == null ||
+            snapshot.chatListCandidates.none { isCompleteBoundaryEvidence(it, snapshot.chatListViewport) }
+        ) return null
+        val canScroll = if (toTop) snapshot.chatListCanScrollBackward else snapshot.chatListCanScrollForward
+        if (canScroll == true) return false
+        val collection = physicalCollectionBoundaryEvidence(snapshot, toTop)
+        if (collection != null) return collection
+        // Do not let a directional fallback override incomplete or contradictory collection metadata.
+        if (snapshot.chatListCollectionRowCount != null || snapshot.chatListVisibleCollectionRows.isNotEmpty()) return null
+        val opposite = if (toTop) snapshot.chatListCanScrollForward else snapshot.chatListCanScrollBackward
+        return if (canScroll == false && opposite == true) true else null
+    }
+
     /** Private-inbox boundary semantics only. Keep the provider's original badge for
      * greeting-entry discovery and diagnostics; a system row never becomes a click target. */
     fun privateBoundaryReadStatus(candidate: ChatListCandidateSnapshot): ChatUnreadStatus? =
