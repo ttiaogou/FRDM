@@ -11,6 +11,16 @@ internal enum class MomoReceivedGreetingsEntryPosition {
     VISIBLE, ABOVE, BELOW, UNKNOWN
 }
 
+/** Stable diagnostic codes only; no row titles, coordinates or contact identities. */
+internal enum class MomoReceivedGreetingsPositionReason {
+    RUN_RESET, ENTRY_VISIBLE, ENTRY_CROSSED, CONTINUOUS_VIEWPORT,
+    PARTIAL_ANCHOR_SET_REVALIDATED, INCOMPLETE_VIEWPORT, WEAK_STATIONARY_OVERLAP,
+    AMBIGUOUS_ENTRY, NO_CONFIRMED_BASELINE, SURFACE_CHANGED, VIEWPORT_CHANGED,
+    COLLECTION_COUNT_CHANGED, DISJOINT_ANCHORS, ANCHOR_ORDER_CHANGED,
+    MOVEMENT_UNPROVEN, INSUFFICIENT_ANCHORS, COLLECTION_MOVEMENT_CONFLICT,
+    ENTRY_CROSSING_UNPROVEN
+}
+
 /**
  * Run-local hint derived exclusively from the existing ordinary-inbox row extraction.
  * No nodes, gesture results, entry coordinates, or durable contact IDs are retained.
@@ -34,11 +44,21 @@ internal class MomoReceivedGreetingsEntryPositionMemory {
 
     private enum class Movement { TOWARD_END, TOWARD_START, UNCHANGED, UNPROVEN }
 
+    private data class Inference(
+        val position: MomoReceivedGreetingsEntryPosition,
+        val reason: MomoReceivedGreetingsPositionReason,
+        val retainBaseline: Boolean = false
+    )
+
     private var active = false
     private var lastConfirmed: Viewport? = null
 
     @Volatile
     var position: MomoReceivedGreetingsEntryPosition = MomoReceivedGreetingsEntryPosition.UNKNOWN
+        private set
+
+    @Volatile
+    var reason = MomoReceivedGreetingsPositionReason.RUN_RESET
         private set
 
     @Synchronized
@@ -66,6 +86,7 @@ internal class MomoReceivedGreetingsEntryPositionMemory {
         ) {
             // Incomplete evidence cannot authorize a direction. A later complete observation
             // may still revalidate the previous viewport, without reusing any tap target.
+            reason = MomoReceivedGreetingsPositionReason.INCOMPLETE_VIEWPORT
             position = MomoReceivedGreetingsEntryPosition.UNKNOWN
             return position
         }
@@ -74,6 +95,7 @@ internal class MomoReceivedGreetingsEntryPositionMemory {
         val entries = candidates.filter(::isEntry)
         if (entries.size > 1 || (entries.size == 1 && !hasVisibleName(entries.single()))) {
             clear()
+            reason = MomoReceivedGreetingsPositionReason.AMBIGUOUS_ENTRY
             return position
         }
         val entry = entries.singleOrNull()
@@ -112,23 +134,37 @@ internal class MomoReceivedGreetingsEntryPositionMemory {
                 .filter { it.top >= entry.rowBounds.bottom }.map { it.key }.toSet(),
             position = MomoReceivedGreetingsEntryPosition.UNKNOWN
         )
-        position = if (entry != null) MomoReceivedGreetingsEntryPosition.VISIBLE
-        else lastConfirmed?.let { infer(it, current) } ?: MomoReceivedGreetingsEntryPosition.UNKNOWN
-        lastConfirmed = current.copy(position = position)
+        val inference = if (entry != null) Inference(
+            MomoReceivedGreetingsEntryPosition.VISIBLE, MomoReceivedGreetingsPositionReason.ENTRY_VISIBLE
+        ) else lastConfirmed?.let { infer(it, current) } ?: Inference(
+            MomoReceivedGreetingsEntryPosition.UNKNOWN, MomoReceivedGreetingsPositionReason.NO_CONFIRMED_BASELINE
+        )
+        // A held baseline is evidence for a future independent observation, never a
+        // currently usable position. A contradictory complete observation retires it.
+        if (!inference.retainBaseline) {
+            lastConfirmed = current.copy(position = inference.position)
+        }
+        reason = inference.reason
+        position = inference.position
         return position
     }
 
-    private fun infer(before: Viewport, after: Viewport): MomoReceivedGreetingsEntryPosition {
+    private fun infer(before: Viewport, after: Viewport): Inference {
         val unknown = MomoReceivedGreetingsEntryPosition.UNKNOWN
-        if (before.position == unknown || before.surface != after.surface || before.bounds != after.bounds ||
-            (before.collectionCount != null && after.collectionCount != null &&
-                before.collectionCount != after.collectionCount)
-        ) return unknown
+        fun reject(reason: MomoReceivedGreetingsPositionReason, retain: Boolean = false) =
+            Inference(unknown, reason, retain)
+        if (before.position == unknown) return reject(MomoReceivedGreetingsPositionReason.NO_CONFIRMED_BASELINE)
+        if (before.surface != after.surface) return reject(MomoReceivedGreetingsPositionReason.SURFACE_CHANGED)
+        if (before.bounds != after.bounds) return reject(MomoReceivedGreetingsPositionReason.VIEWPORT_CHANGED)
+        if (before.collectionCount != null && after.collectionCount != null &&
+            before.collectionCount != after.collectionCount
+        ) return reject(MomoReceivedGreetingsPositionReason.COLLECTION_COUNT_CHANGED)
 
         val oldKeys = before.anchors.map { it.key }
         val newKeys = after.anchors.map { it.key }
         val common = oldKeys.filter { it in newKeys }
-        if (common.isEmpty() || newKeys.filter { it in common } != common) return unknown
+        if (common.isEmpty()) return reject(MomoReceivedGreetingsPositionReason.DISJOINT_ANCHORS)
+        if (newKeys.filter { it in common } != common) return reject(MomoReceivedGreetingsPositionReason.ANCHOR_ORDER_CHANGED)
         val oldByKey = before.anchors.associateBy { it.key }
         val newByKey = after.anchors.associateBy { it.key }
         val deltas = common.flatMap {
@@ -138,6 +174,25 @@ internal class MomoReceivedGreetingsEntryPositionMemory {
         }
 
         val rangeMovement = collectionMovement(before, after)
+        val knownOffscreen = before.position == MomoReceivedGreetingsEntryPosition.ABOVE ||
+            before.position == MomoReceivedGreetingsEntryPosition.BELOW
+        // Clipped/temporarily omitted anchors can shrink or expand the observed set
+        // while the independently observed collection range and surviving rows stay put.
+        // Never use this rule to infer the initial entry crossing or across windows.
+        val stationarySubset = before.windowKey == after.windowKey &&
+            deltas.all { it == 0 } &&
+            (common.size == oldKeys.size || common.size == newKeys.size) &&
+            rangeMovement in setOf(Movement.UNCHANGED, Movement.UNPROVEN)
+        if (knownOffscreen && stationarySubset &&
+            (oldKeys != newKeys || common.size < 2)
+        ) {
+            if (common.size >= 2 && rangeMovement == Movement.UNCHANGED) {
+                return Inference(before.position, MomoReceivedGreetingsPositionReason.PARTIAL_ANCHOR_SET_REVALIDATED)
+            }
+            // No direction is authorized from weak evidence. Preserve only the previous
+            // baseline until a later complete, independently overlapping observation.
+            return reject(MomoReceivedGreetingsPositionReason.WEAK_STATIONARY_OVERLAP, retain = true)
+        }
         val movement = when {
             oldKeys == newKeys && deltas.all { it == 0 } -> Movement.UNCHANGED
             deltas.all { it < 0 } && oldKeys.takeLast(common.size) == common &&
@@ -149,24 +204,26 @@ internal class MomoReceivedGreetingsEntryPositionMemory {
         // A single common nickname is weak evidence; require the independent live
         // collection movement in the same window to corroborate it. Never infer a
         // crossing from a collection index or a gesture direction alone.
-        if (movement == Movement.UNPROVEN ||
-            (common.size < 2 && (rangeMovement != movement || movement == Movement.UNCHANGED)) ||
-            (rangeMovement != Movement.UNPROVEN && rangeMovement != movement &&
-                rangeMovement != Movement.UNCHANGED)
-        ) return unknown
+        if (movement == Movement.UNPROVEN)
+            return reject(MomoReceivedGreetingsPositionReason.MOVEMENT_UNPROVEN)
+        if (common.size < 2 && (rangeMovement != movement || movement == Movement.UNCHANGED))
+            return reject(MomoReceivedGreetingsPositionReason.INSUFFICIENT_ANCHORS)
+        if (rangeMovement != Movement.UNPROVEN && rangeMovement != movement &&
+            rangeMovement != Movement.UNCHANGED)
+            return reject(MomoReceivedGreetingsPositionReason.COLLECTION_MOVEMENT_CONFLICT)
 
         if (before.position == MomoReceivedGreetingsEntryPosition.VISIBLE) {
             return when {
                 movement == Movement.TOWARD_END && common.all { it in before.entryBelowKeys } ->
-                    MomoReceivedGreetingsEntryPosition.ABOVE
+                    Inference(MomoReceivedGreetingsEntryPosition.ABOVE, MomoReceivedGreetingsPositionReason.ENTRY_CROSSED)
                 movement == Movement.TOWARD_START && common.all { it in before.entryAboveKeys } ->
-                    MomoReceivedGreetingsEntryPosition.BELOW
-                else -> unknown
+                    Inference(MomoReceivedGreetingsEntryPosition.BELOW, MomoReceivedGreetingsPositionReason.ENTRY_CROSSED)
+                else -> reject(MomoReceivedGreetingsPositionReason.ENTRY_CROSSING_UNPROVEN)
             }
         }
         // Continuous overlapping observations cannot cross the remembered entry without
         // seeing it again. Reordering, disjoint viewports, or a different surface retire the hint.
-        return before.position
+        return Inference(before.position, MomoReceivedGreetingsPositionReason.CONTINUOUS_VIEWPORT)
     }
 
     private fun collectionMovement(before: Viewport, after: Viewport): Movement {
@@ -194,6 +251,7 @@ internal class MomoReceivedGreetingsEntryPositionMemory {
 
     private fun clear() {
         lastConfirmed = null
+        reason = MomoReceivedGreetingsPositionReason.RUN_RESET
         position = MomoReceivedGreetingsEntryPosition.UNKNOWN
     }
 }

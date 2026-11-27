@@ -7171,10 +7171,13 @@ internal class MomoSocialAdapter(
             windowGeneration = window.generation
         )
         val previousEntryPosition = receivedGreetingsEntryPositionMemory.position
+        val previousEntryPositionReason = receivedGreetingsEntryPositionMemory.reason
         val observedEntryPosition = receivedGreetingsEntryPositionMemory.observe(result)
-        if (previousEntryPosition != observedEntryPosition) {
+        val observedEntryPositionReason = receivedGreetingsEntryPositionMemory.reason
+        if (previousEntryPosition != observedEntryPosition || previousEntryPositionReason != observedEntryPositionReason) {
             onLog("收到的招呼入口位置记忆[OBSERVED]：" +
-                "previous=" + previousEntryPosition.name + ";position=" + observedEntryPosition.name)
+                "previous=" + previousEntryPosition.name + ";position=" + observedEntryPosition.name +
+                ";reason=" + observedEntryPositionReason.name)
         }
         if (result.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             pendingInboxIdentityCapture == null

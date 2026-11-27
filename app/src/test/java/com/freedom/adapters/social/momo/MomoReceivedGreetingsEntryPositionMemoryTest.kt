@@ -89,6 +89,63 @@ class MomoReceivedGreetingsEntryPositionMemoryTest {
     }
 
     @Test
+    fun weakStationarySubsetHoldsBaselineButCannotAuthorizeDirection() {
+        memory.observe(page("A", ENTRY, "B", "C"))
+        val known = page("B", "C", "D", "E")
+        assertEquals(MomoReceivedGreetingsEntryPosition.ABOVE, memory.observe(known))
+        // A clipped or omitted name leaves only one unchanged fully visible anchor.
+        val weak = known.copy(chatListCandidates = known.chatListCandidates.take(1))
+        assertEquals(MomoReceivedGreetingsEntryPosition.UNKNOWN, memory.observe(weak))
+        assertEquals(MomoReceivedGreetingsPositionReason.WEAK_STATIONARY_OVERLAP, memory.reason)
+        assertEquals(MomoReceivedGreetingsEntryPosition.UNKNOWN, memory.observe(weak))
+        assertEquals(MomoReceivedGreetingsEntryPosition.ABOVE, memory.observe(known))
+        assertEquals(MomoReceivedGreetingsPositionReason.CONTINUOUS_VIEWPORT, memory.reason)
+    }
+
+    @Test
+    fun independentUnchangedCollectionRangeRevalidatesPartialAnchorSet() {
+        memory.observe(page("A", ENTRY, "B", "C").copy(
+            chatListCollectionRowCount = 20, chatListVisibleCollectionRows = listOf(0, 1, 2, 3)))
+        val known = page("B", "C", "D", "E").copy(
+            chatListCollectionRowCount = 20, chatListVisibleCollectionRows = listOf(2, 3, 4, 5))
+        assertEquals(MomoReceivedGreetingsEntryPosition.ABOVE, memory.observe(known))
+        val partial = known.copy(chatListCandidates = known.chatListCandidates.take(2))
+        assertEquals(MomoReceivedGreetingsEntryPosition.ABOVE, memory.observe(partial))
+        assertEquals(MomoReceivedGreetingsPositionReason.PARTIAL_ANCHOR_SET_REVALIDATED, memory.reason)
+        assertEquals(MomoReceivedGreetingsEntryPosition.ABOVE, memory.observe(known))
+    }
+
+    @Test
+    fun contradictoryCompleteObservationRetiresHeldBaseline() {
+        memory.observe(page("A", ENTRY, "B", "C"))
+        val known = page("B", "C", "D", "E")
+        memory.observe(known)
+        memory.observe(known.copy(chatListCandidates = known.chatListCandidates.take(1)))
+        assertEquals(MomoReceivedGreetingsEntryPosition.UNKNOWN, memory.observe(page("W", "X", "Y", "Z")))
+        assertEquals(MomoReceivedGreetingsPositionReason.DISJOINT_ANCHORS, memory.reason)
+        assertEquals(MomoReceivedGreetingsEntryPosition.UNKNOWN, memory.observe(known))
+        assertEquals(MomoReceivedGreetingsPositionReason.NO_CONFIRMED_BASELINE, memory.reason)
+    }
+
+    @Test
+    fun partialAnchorSetCannotEstablishCrossingOrBridgeDifferentWindow() {
+        val visible = page("A", ENTRY, "B", "C")
+        memory.observe(visible)
+        assertEquals(MomoReceivedGreetingsEntryPosition.UNKNOWN,
+            memory.observe(visible.copy(chatListCandidates = visible.chatListCandidates.filter { it.nameText != ENTRY })))
+        assertEquals(MomoReceivedGreetingsPositionReason.ENTRY_CROSSING_UNPROVEN, memory.reason)
+
+        memory.observe(visible)
+        val known = page("B", "C", "D", "E")
+        memory.observe(known)
+        val differentWindow = page("B", "C", "D", "E", generation = 2L)
+        assertEquals(MomoReceivedGreetingsEntryPosition.UNKNOWN,
+            memory.observe(differentWindow.copy(chatListCandidates = differentWindow.chatListCandidates.take(1))))
+        assertEquals(MomoReceivedGreetingsPositionReason.MOVEMENT_UNPROVEN, memory.reason)
+        assertEquals(MomoReceivedGreetingsEntryPosition.UNKNOWN, memory.observe(known))
+    }
+
+    @Test
     fun contradictoryOrderAndDuplicateLabelsRetireMemory() {
         memory.observe(page("A", ENTRY, "B", "C"))
         memory.observe(page("B", "C", "D", "E"))
