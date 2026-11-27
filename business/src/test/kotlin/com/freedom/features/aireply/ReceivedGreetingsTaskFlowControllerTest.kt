@@ -223,6 +223,24 @@ class ReceivedGreetingsTaskFlowControllerTest {
     }
 
     @Test
+    fun deferredYieldPreservesCheckpointAndCannotBeOverwrittenByExhaustion() {
+        val port = FakePagePort()
+        val flow = createFlow(port)
+        assertTrue(flow.claimOwnership("start"))
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
+        assertTrue(flow.requestSafeHandoffReturn(ReceivedGreetingsTaskController.ReturnReason.DEFERRED_WORK))
+        flow.markTraversalCompleted()
+        assertEquals(ReceivedGreetingsTaskController.ReturnReason.DEFERRED_WORK, flow.returnReason)
+        assertEquals(ReceivedGreetingsTaskFlowController.DecisionKind.RETURN_PENDING,
+            flow.evaluatePageSnapshot(ChatPageKind.NON_CHAT).kind)
+        assertEquals(0, port.idleSteps)
+        assertEquals(ReceivedGreetingsBackResult.BACK_SUBMITTED, flow.returnForPriorityCheck())
+        flow.markReturnRequested()
+        assertTrue(flow.confirmCompletionReturn())
+        assertTrue(port.preservedTraversal)
+    }
+
+    @Test
     fun safeHandoffRequiresActiveLeaseAndIdleListProgress() {
         val port = FakePagePort()
         val flow = createFlow(port)

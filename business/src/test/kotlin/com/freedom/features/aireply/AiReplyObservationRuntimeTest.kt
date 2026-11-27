@@ -1230,10 +1230,12 @@ class AiReplyObservationRuntimeTest {
     @Test
     fun p6TimedPollingWakeupSchedulesReadOnlyInspectionWithoutNewMessages() {
         val fixture = preScrollPageRecoveryFixture()
+        val modeType = fixture.runtime.javaClass.declaredClasses.single { it.simpleName == "PairWakeMode" }
+        val mode = modeType.enumConstants.single { (it as Enum<*>).name == "REFRESH_PRIVATE" }
         val enterWait = fixture.runtime.javaClass.getDeclaredMethod(
-            "enterUnreadWait", String::class.java
+            "enterPairIdle", String::class.java, modeType
         ).apply { isAccessible = true }
-        enterWait.invoke(fixture.runtime, "P6_TIMER_ONLY")
+        enterWait.invoke(fixture.runtime, "P6_TIMER_ONLY", mode)
         val scheduleLog = fixture.logs.last { it.contains("AI Reply 低频待机：") }
         val waitSeconds = requireNotNull(
             Regex("低频待机：(\\d+) 秒后").find(scheduleLog)
@@ -1248,6 +1250,44 @@ class AiReplyObservationRuntimeTest {
         fixture.scheduler.runNextWithDelay(waitSeconds * 1_000L)
         assertTrue(fixture.logs.any { it.contains("自主轮询[ROUND_DUE]") })
         assertTrue(fixture.scheduler.hasPendingDelay(0L))
+        assertEquals(0, fixture.dispatchedGestures())
+    }
+
+    @Test
+    fun l04SafeGreetingYieldRefreshesExhaustedPrivateWithoutPairIdle() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val privateReason = fixture.runtime.javaClass.declaredClasses.single { it.simpleName == "PrivateToGreetingsHandoff" }
+        val reason = privateReason.enumConstants.single { (it as Enum<*>).name == "TRAVERSAL_EXHAUSTED" }
+        val method = fixture.runtime.javaClass.getDeclaredMethod(
+            "schedulePairedContinuation", privateReason,
+            ReceivedGreetingsTaskController.ReturnReason::class.java, Boolean::class.javaPrimitiveType!!
+        ).apply { isAccessible = true }
+        method.invoke(fixture.runtime, reason, ReceivedGreetingsTaskController.ReturnReason.SAFE_SESSION_BOUNDARY, false)
+        assertTrue(fixture.scheduler.hasPendingDelay(0L))
+        assertFalse(fixture.logs.any { it.contains("AI Reply 低频待机") })
+        assertEquals(0, fixture.dispatchedGestures())
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
+    }
+
+    @Test
+    fun l04BothDeferredWaitWithoutRetiringPrivateCursor() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.lockedUnreadSessionKeys += "pending"
+        executor.attemptedSessionKeys += "done"
+        val privateReason = fixture.runtime.javaClass.declaredClasses.single { it.simpleName == "PrivateToGreetingsHandoff" }
+        val reason = privateReason.enumConstants.single { (it as Enum<*>).name == "DEFERRED_WORK" }
+        val method = fixture.runtime.javaClass.getDeclaredMethod(
+            "schedulePairedContinuation", privateReason,
+            ReceivedGreetingsTaskController.ReturnReason::class.java, Boolean::class.javaPrimitiveType!!
+        ).apply { isAccessible = true }
+        method.invoke(fixture.runtime, reason, ReceivedGreetingsTaskController.ReturnReason.DEFERRED_WORK, false)
+        assertTrue(fixture.logs.any { it.contains("低频待机") && it.contains("mode=RESUME_PRIVATE") })
+        assertEquals(setOf("pending"), executor.lockedUnreadSessionKeys)
+        assertEquals(setOf("done"), executor.attemptedSessionKeys)
         assertEquals(0, fixture.dispatchedGestures())
     }
 
@@ -8230,15 +8270,14 @@ class AiReplyObservationRuntimeTest {
         assertTrue(logs.any { it.contains("依次采集头像身份、绑定聊天、读取本次消息；回复完成需独立发送确认") })
         assertTrue(scheduler.hasPendingDelay(1_300L))
 
-        // An all-exhausted stable list must switch to low-frequency, read-only recovery,
-        // without touching the adapter's gesture algorithm or prematurely completing.
+        // Deferred safe evidence yields without declaring traversal complete.
         port.greetingAwaitingSafeTargetEvidenceOnly = true
-        scheduler.runNextWithDelay(1_300L)
-        assertTrue(scheduler.hasPendingDelay(30_000L))
-        assertTrue(logs.any { it.contains("GREETING_DEFERRED_EVIDENCE_ONLY") })
-        port.greetingAwaitingSafeTargetEvidenceOnly = false
-        port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.COMPLETE
         port.receivedGreetingsBackDeferred = true
+        scheduler.runNextWithDelay(1_300L)
+        assertTrue(logs.any { it.contains("GREETING_DEFERRED_EVIDENCE_ONLY") })
+        assertEquals(ReceivedGreetingsTraversalStatus.SCANNING, port.receivedGreetingsTraversalStatusValue)
+        assertFalse(scheduler.hasPendingDelay(30_000L))
+        port.greetingAwaitingSafeTargetEvidenceOnly = false
         runUntilLog(scheduler, logs, "result=GESTURE_IN_FLIGHT")
         assertEquals(0, port.receivedGreetingsPriorityReturns)
         assertEquals(0, port.receivedGreetingsConfirmedReturns)
@@ -8260,6 +8299,8 @@ class AiReplyObservationRuntimeTest {
         runUntilLog(scheduler, logs, "跨任务交接[PRIVATE_LEASE_TRANSFERRED]")
         assertEquals(1, port.receivedGreetingsConfirmedReturns)
         assertEquals(1, port.receivedGreetingsPriorityReturns)
+        assertTrue(port.lastGreetingsReturnPreservedTraversal)
+        assertTrue(logs.any { it.contains("greetings=DEFERRED_WORK") })
         assertTrue(logs.any { it.contains("AI Reply 低频待机") })
 
         // No user event and no unread are required for the second round.
@@ -10454,7 +10495,9 @@ class AiReplyObservationRuntimeTest {
             pageAfterReceivedGreetingsReturn?.let { page = it }
             return ReceivedGreetingsBackResult.BACK_SUBMITTED
         }
+        var lastGreetingsReturnPreservedTraversal = false
         override fun confirmReceivedGreetingsCompletionReturn(preserveTraversal: Boolean): Boolean {
+            lastGreetingsReturnPreservedTraversal = preserveTraversal
             receivedGreetingsConfirmedReturns++
             return true
         }

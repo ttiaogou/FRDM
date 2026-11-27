@@ -15,7 +15,7 @@ internal class ReceivedGreetingsTaskController(
 
     private enum class Lifecycle { IDLE, TRAVERSING, RETURN_PENDING, RETURN_REQUESTED, INBOX_CONFIRMED }
 
-    enum class ReturnReason { TRAVERSAL_EXHAUSTED, SAFE_SESSION_BOUNDARY }
+    enum class ReturnReason { TRAVERSAL_EXHAUSTED, SAFE_SESSION_BOUNDARY, DEFERRED_WORK }
 
     private var lifecycle = Lifecycle.IDLE
     var returnReason: ReturnReason? = null

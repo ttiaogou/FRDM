@@ -1727,8 +1727,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
     }
 
     /**
-     * Start only after a completed pair of tasks and new inbox proof. Re-run the
-     * established admission sequence, preserving run-scoped identity blocks and send audit.
+     * Renew only the exhausted private task's selection after new inbox proof.
+     * Greetings completion is not a prerequisite; preserve identity blocks and send audit.
      */
     fun beginNextPollingRound() {
         check(!scanContinuityRecoveryPending && !normalInboxUnreadStateUnknown && unresolvedUnknownUnreadKeys.isEmpty() &&

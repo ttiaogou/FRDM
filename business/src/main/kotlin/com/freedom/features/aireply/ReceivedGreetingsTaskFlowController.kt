@@ -52,6 +52,8 @@ internal class ReceivedGreetingsTaskFlowController(
         get() = lifecycle.awaitingNormalInboxAfterReturn
     val returnRequested: Boolean
         get() = lifecycle.returnRequested
+    val returnReason: ReceivedGreetingsTaskController.ReturnReason?
+        get() = lifecycle.returnReason
 
     fun claimOwnership(reason: String): Boolean = lifecycle.claimOwnership(reason)
 
@@ -134,7 +136,7 @@ internal class ReceivedGreetingsTaskFlowController(
     fun confirmCompletionReturn(): Boolean {
         if (!lifecycle.awaitingNormalInboxAfterReturn || !lifecycle.ownsTask()) return false
         if (lifecycle.inboxConfirmed) return true
-        val preserveTraversal = lifecycle.returnReason == ReceivedGreetingsTaskController.ReturnReason.SAFE_SESSION_BOUNDARY
+        val preserveTraversal = lifecycle.returnReason != ReceivedGreetingsTaskController.ReturnReason.TRAVERSAL_EXHAUSTED
         if (!executor.confirmCompletionReturn(preserveTraversal)) return false
         lifecycle.markInboxConfirmed()
         return true
@@ -150,17 +152,21 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun markTraversalCompleted() = lifecycle.markTraversalCompleted()
 
-    /** Called at an independently verified idle list boundary by the future paired scheduler. */
-    fun requestSafeHandoffReturn(): Boolean {
-        if (!lifecycle.ownsTask() || !lifecycle.isActive) return false
+    /** A safe list boundary yields without declaring exhaustion. */
+    fun requestSafeHandoffReturn(
+        reason: ReceivedGreetingsTaskController.ReturnReason = ReceivedGreetingsTaskController.ReturnReason.SAFE_SESSION_BOUNDARY
+    ): Boolean {
+        if (reason == ReceivedGreetingsTaskController.ReturnReason.TRAVERSAL_EXHAUSTED ||
+            !lifecycle.ownsTask() || !lifecycle.isActive
+        ) return false
         if (lifecycle.awaitingNormalInboxAfterReturn) {
-            return lifecycle.returnReason == ReceivedGreetingsTaskController.ReturnReason.SAFE_SESSION_BOUNDARY
+            return lifecycle.returnReason == reason
         }
         if (executor.traversalStatus() !in setOf(
                 ReceivedGreetingsTraversalStatus.SCANNING, ReceivedGreetingsTraversalStatus.COMPLETE
             )
         ) return false
-        return lifecycle.requestReturn(ReceivedGreetingsTaskController.ReturnReason.SAFE_SESSION_BOUNDARY)
+        return lifecycle.requestReturn(reason)
     }
 
     fun markReturnRequested() = lifecycle.markReturnRequested()
