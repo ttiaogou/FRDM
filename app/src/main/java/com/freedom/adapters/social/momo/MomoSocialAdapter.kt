@@ -339,8 +339,9 @@ internal class MomoSocialAdapter(
     private val sayHiSnapshotCoordinator = MomoSayHiListSnapshotCoordinator(
         recoveryPolicy = sayHiListSnapshotRecoveryPolicy,
         isNavigationRelevant = {
-            (sayHiNavigationFlowController.isReceivedListConfirmed() ||
-                sayHiNavigationFlowController.isWaitingForReceivedList()) &&
+            completionBackStage == CompletionBackStage.NONE &&
+                (sayHiNavigationFlowController.isReceivedListConfirmed() ||
+                    sayHiNavigationFlowController.isWaitingForReceivedList()) &&
                 (!isSayHiChatNavigationInProgress() || isReceivedGreetingsListStructureVisible())
         },
         isGestureBusy = { sayHiGestureInFlight },
@@ -1563,9 +1564,9 @@ internal class MomoSocialAdapter(
                             "Activity 和操作准入由现有 READY 独立复核；window=$listWindowIdentity"
                     )
                     clearSayHiSelectedGreeting()
-                    return inspectSayHiPageAndAutonomousBrowse(
-                        allowAutonomousScroll = true, minimumIntervalMs = 0L, forceFresh = true
-                    )
+                    // Yield the verified session boundary before selecting another row.
+                    // The next unified observation decides whether to continue or hand off.
+                    return true
                 }
                 if (listWindowIdentity != null && sayHiDetailBackReturnConfirmation.stableSampleCount == 1) {
                     onLog(
@@ -4415,10 +4416,25 @@ internal class MomoSocialAdapter(
         val nextStage: CompletionBackStage
         val sourceWindow: WindowRef
         if (listWindow != null) {
+            // Traversal exhaustion and deferred rows are progress evidence, not
+            // prerequisites for a safe return. An unfinished individual transaction is.
             if (!sayHiNavigationFlowController.isReceivedListConfirmed() ||
-                !sayHiAutonomousBrowseController.isFinished() || sayHiTraversalState.hasDeferredRows ||
-                sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE
+                sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE ||
+                sayHiSelectedGreeting != null || sayHiPendingVerifiedReturnRow != null ||
+                receivedGreetingsEntryTapPending || sayHiCardListTapPending ||
+                pendingInboxIdentityCapture != null
             ) return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+            val noPendingSendReturn = runCatching {
+                receivedGreetingsSendReturnRepository.loadAll().none {
+                    it.phase == ReceivedGreetingsSendReturnPhase.SEND_CONFIRMED
+                }
+            }.getOrDefault(false)
+            if (!noPendingSendReturn) return ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+            // Persist before submitting BACK, including any deferred rows.
+            if (!runCatching { persistSayHiTraversalCheckpoint() }.isSuccess) {
+                onLog("收到的招呼任务返回[CHECKPOINT_NOT_SAVED]：未保存遍历进度；不提交BACK")
+                return ReceivedGreetingsBackResult.REJECTED
+            }
             nextStage = CompletionBackStage.LIST_SUBMITTED
             sourceWindow = listWindow
         } else {
@@ -4458,13 +4474,15 @@ internal class MomoSocialAdapter(
             return ReceivedGreetingsBackResult.REJECTED
         }
         completionBackStage = nextStage
+        // Stop old list-recovery callbacks while this return owns navigation.
+        sayHiSnapshotCoordinator.reset()
         completionBackRetryGate.onSubmitted(SystemClock.uptimeMillis())
         onLog("收到的招呼任务返回[BACK_SUBMITTED]：stage=$nextStage；保留遍历检查点，等待独立页面确认")
         return ReceivedGreetingsBackResult.BACK_SUBMITTED
     }
 
     @Synchronized
-    override fun confirmReceivedGreetingsCompletionReturn(): Boolean {
+    override fun confirmReceivedGreetingsCompletionReturn(preserveTraversal: Boolean): Boolean {
         // The Runtime has independently confirmed the ordinary inbox and retains the greeting
         // lease. Recheck the target window before retiring the completed adapter transaction.
         // Do not invoke the general chat inspection path here: it can advance a separate
@@ -4488,6 +4506,9 @@ internal class MomoSocialAdapter(
         if (!inboxConfirmed || sayHiGestureInFlight || receivedGreetingsEntrySearchGestureInFlight) {
             return false
         }
+        // A safe partial handoff must never use the legacy exhausted-scan cleanup.
+        // L03 will extend cursor restoration; preserve the existing durable ledger now.
+        if (preserveTraversal && !runCatching { persistSayHiTraversalCheckpoint() }.isSuccess) return false
         receivedGreetingsEntryTapPending = false
         sayHiCardListTapPending = false
         sayHiNavigationFlowController.reset()
@@ -4495,13 +4516,13 @@ internal class MomoSocialAdapter(
         resetReceivedGreetingsEntrySearch()
         resetSayHiListSnapshotState()
         clearSayHiSelectedGreeting()
-        sayHiTraversalState.clear()
+        if (!preserveTraversal) sayHiTraversalState.clear()
         sayHiStableCandidateKey = ""
         sayHiStableCandidateTarget = null
         sayHiStableCandidateWindow = null
         completionBackStage = CompletionBackStage.NONE
         completionBackRetryGate.reset()
-        onLog("收到的招呼任务返回[INBOX_CONFIRMED]：普通消息列表已复核；退休本轮遍历状态")
+        onLog("收到的招呼任务返回[INBOX_CONFIRMED]：普通消息列表已复核；preserveTraversal=$preserveTraversal")
         return true
     }
 

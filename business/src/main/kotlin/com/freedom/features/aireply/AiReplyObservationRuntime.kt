@@ -2771,8 +2771,9 @@ class AiReplyObservationRuntime(
                     }
                     return
                 }
-                ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE -> {
-                    requestCompletedGreetingsReturn(observation, inspection)
+                ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE,
+                ReceivedGreetingsTaskFlowController.DecisionKind.RETURN_PENDING -> {
+                    requestGreetingsReturn(observation, inspection)
                     return
                 }
                 ReceivedGreetingsTaskFlowController.DecisionKind.WAIT_FOR_DETAIL_PAGE -> {
@@ -3012,8 +3013,9 @@ class AiReplyObservationRuntime(
                         else RECEIVED_GREETINGS_RECHECK_DELAY_MS
                     )
                         }
-                        ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE -> {
-                            requestCompletedGreetingsReturn(observation, inspection)
+                        ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE,
+                        ReceivedGreetingsTaskFlowController.DecisionKind.RETURN_PENDING -> {
+                            requestGreetingsReturn(observation, inspection)
                         }
                         ReceivedGreetingsTaskFlowController.DecisionKind.PROFILE_CARD_PENDING -> {
                             scheduleReceivedGreetingsRecoveryRetry(
@@ -7591,16 +7593,24 @@ class AiReplyObservationRuntime(
         scheduleFullInspectionAfter(0L)
     }
 
-    private fun requestCompletedGreetingsReturn(
+    private fun requestGreetingsReturn(
         observation: ObservationResult,
         inspection: ChatPageSnapshot
     ) {
         if (!sessionRunStarted || !receivedGreetingsTaskActive) return
         if (!ownsTask(RECEIVED_GREETINGS_TASK_ID) || recoveryContext.pending) {
-            scheduleReceivedGreetingsRecoveryRetry("完成状态仍需有效任务租约与恢复授权")
+            scheduleReceivedGreetingsRecoveryRetry("返回事务仍需有效任务租约与恢复授权")
             return
         }
-        receivedGreetingsTaskFlow.markTraversalCompleted()
+        if (userInteractionActive || isSendConfirmationPending() || isConversationDraftPending()) {
+            scheduleReceivedGreetingsRecoveryRetry("返回事务仍有未决用户操作、发送或草稿")
+            return
+        }
+        // Existing COMPLETE evidence requests the exhausted-work return. A previously
+        // requested safe handoff retains its own reason; do not manufacture COMPLETE.
+        if (!receivedGreetingsTaskFlow.awaitingNormalInboxAfterReturn) {
+            receivedGreetingsTaskFlow.markTraversalCompleted()
+        }
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         if (observation.status != ObservationStatus.CONFIRMED_PAGE ||
             inspection.packageName != targetPackage() ||
@@ -7610,7 +7620,7 @@ class AiReplyObservationRuntime(
             holdGreetingsCompletionReturn("RETURN_PAGE_UNVERIFIED")
             return
         }
-        onLog("收到的招呼任务[RETURN_PENDING]：列表遍历完成；保留任务及UI操作权；进入自动返回流程")
+        onLog("收到的招呼任务[RETURN_PENDING]：安全返回意图已建立；保留任务及UI操作权；进入自动返回流程")
         when (val result = receivedGreetingsTaskFlow.returnForPriorityCheck()) {
             ReceivedGreetingsBackResult.BACK_SUBMITTED -> {
                 receivedGreetingsTaskFlow.markReturnRequested()
@@ -7621,7 +7631,7 @@ class AiReplyObservationRuntime(
             ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION,
             ReceivedGreetingsBackResult.REJECTED -> {
                 onLog("收到的招呼任务[BACK_WAIT]：result=$result；未新增返回提交；保留任务现场")
-                scheduleReceivedGreetingsRecoveryRetry("完成后的安全返回尚未确认：$result")
+                scheduleReceivedGreetingsRecoveryRetry("任务安全返回尚未确认：$result")
             }
             ReceivedGreetingsBackResult.SOURCE_UNVERIFIED,
             ReceivedGreetingsBackResult.OWNERSHIP_REJECTED -> {

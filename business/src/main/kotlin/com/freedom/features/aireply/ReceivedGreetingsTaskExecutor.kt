@@ -165,7 +165,7 @@ internal class ReceivedGreetingsTaskExecutor(
         return runCatching { pagePort.deferReceivedGreetingAfterManualReturn() }.getOrDefault(false)
     }
 
-    /** Returns from a verified greetings boundary only when this task still owns UI operations. */
+    /** Returns from a verified safe greetings source only when this task still owns UI operations. */
     fun returnForPriorityCheck(): ReceivedGreetingsBackResult {
         if (!ownsTask()) return ReceivedGreetingsBackResult.OWNERSHIP_REJECTED
         return runCatching { pagePort.returnFromReceivedGreetingsForPriorityCheck() }
@@ -175,9 +175,9 @@ internal class ReceivedGreetingsTaskExecutor(
     fun isCompletionReturnIntermediate(): Boolean =
         runCatching { pagePort.isReceivedGreetingsCompletionReturnIntermediate() }.getOrDefault(false)
 
-    fun confirmCompletionReturn(): Boolean {
+    fun confirmCompletionReturn(preserveTraversal: Boolean = false): Boolean {
         if (!ownsTask()) return false
-        return runCatching { pagePort.confirmReceivedGreetingsCompletionReturn() }.getOrDefault(false)
+        return runCatching { pagePort.confirmReceivedGreetingsCompletionReturn(preserveTraversal) }.getOrDefault(false)
     }
 
     /** Completing detail inspection can navigate back to the greetings list, so it is lease-gated. */

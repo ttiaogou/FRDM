@@ -704,19 +704,19 @@ interface ChatPagePort {
     /** Records a manually returned, still-unconfirmed greeting row and releases detail state. */
     fun deferReceivedGreetingAfterManualReturn(): Boolean = false
 
-    /** One lease-gated completed-list BACK step from independently verified source evidence. */
+    /** One lease-gated safe list BACK step from independently verified source evidence. */
     fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult =
         ReceivedGreetingsBackResult.REJECTED
 
     /** Read-only proof of the intermediate greeting card reached by a submitted list BACK. */
     fun isReceivedGreetingsCompletionReturnIntermediate(): Boolean = false
 
-    /** Current verified list/card source for recovery of the completed-list BACK transaction. */
+    /** Current verified list/card source for recovery of the task-handoff BACK transaction. */
     fun receivedGreetingsCompletionReturnSourceFingerprint(): String? = null
 
     /** Breaks stale retry samples on a missing window or user interaction; retains submission state. */
     fun invalidateReceivedGreetingsCompletionReturnEvidence() {}
 
-    /** Finalizes adapter traversal state only after the business layer confirms inbox arrival. */
-    fun confirmReceivedGreetingsCompletionReturn(): Boolean = true
+    /** Retires transient return state only after inbox confirmation; a partial scan keeps its checkpoint. */
+    fun confirmReceivedGreetingsCompletionReturn(preserveTraversal: Boolean = false): Boolean = !preserveTraversal
 }

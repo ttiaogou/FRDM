@@ -10454,7 +10454,7 @@ class AiReplyObservationRuntimeTest {
             pageAfterReceivedGreetingsReturn?.let { page = it }
             return ReceivedGreetingsBackResult.BACK_SUBMITTED
         }
-        override fun confirmReceivedGreetingsCompletionReturn(): Boolean {
+        override fun confirmReceivedGreetingsCompletionReturn(preserveTraversal: Boolean): Boolean {
             receivedGreetingsConfirmedReturns++
             return true
         }

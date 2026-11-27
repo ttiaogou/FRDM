@@ -203,7 +203,7 @@ class ReceivedGreetingsTaskExecutorTest {
             priorityReturns++
             return backResult
         }
-        override fun confirmReceivedGreetingsCompletionReturn(): Boolean { confirmedReturns++; return true }
+        override fun confirmReceivedGreetingsCompletionReturn(preserveTraversal: Boolean): Boolean { confirmedReturns++; return true }
         override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean {
             detailCompletions++
             lastDetailSuccess = success

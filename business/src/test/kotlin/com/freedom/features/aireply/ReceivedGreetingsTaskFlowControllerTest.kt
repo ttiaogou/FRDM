@@ -167,7 +167,7 @@ class ReceivedGreetingsTaskFlowControllerTest {
         assertFalse(flow.returnRequested)
         flow.markReturnRequested()
         port.status = ReceivedGreetingsTraversalStatus.UNKNOWN
-        assertEquals(ReceivedGreetingsTaskFlowController.DecisionKind.COMPLETE,
+        assertEquals(ReceivedGreetingsTaskFlowController.DecisionKind.RETURN_PENDING,
             flow.evaluatePageSnapshot(ChatPageKind.NON_CHAT).kind)
         assertTrue(flow.returnRequested)
         assertEquals(0, port.idleSteps)
@@ -188,12 +188,61 @@ class ReceivedGreetingsTaskFlowControllerTest {
         assertTrue(flow.confirmCompletionReturn())
         assertTrue(flow.confirmCompletionReturn())
         assertEquals(1, port.confirmedReturns)
+        assertFalse(port.preservedTraversal)
         assertTrue(flow.isActive)
         assertTrue(flow.awaitingNormalInboxAfterReturn)
         assertEquals(ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION, flow.returnForPriorityCheck())
         flow.markTraversalReturnedToInbox()
         assertFalse(flow.confirmCompletionReturn())
         assertFalse(flow.isActive)
+    }
+
+    @Test
+    fun safeHandoffReturnsWhileStillScanningWithoutFakingTraversalCompletion() {
+        val port = FakePagePort()
+        val flow = createFlow(port)
+        assertTrue(flow.claimOwnership("start"))
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
+        assertEquals(ReceivedGreetingsBackResult.SOURCE_UNVERIFIED, flow.returnForPriorityCheck())
+        assertEquals(0, port.backCalls)
+
+        assertTrue(flow.requestSafeHandoffReturn())
+        val decision = flow.evaluatePageSnapshot(ChatPageKind.NON_CHAT)
+        assertEquals(ReceivedGreetingsTaskFlowController.DecisionKind.RETURN_PENDING, decision.kind)
+        assertEquals(ReceivedGreetingsTraversalStatus.SCANNING, decision.status)
+        assertEquals(0, port.idleSteps)
+        assertTrue(flow.ownsTask())
+        assertEquals(ReceivedGreetingsBackResult.BACK_SUBMITTED, flow.returnForPriorityCheck())
+        flow.markReturnRequested()
+        assertTrue(flow.confirmCompletionReturn())
+        assertTrue(port.preservedTraversal)
+        assertEquals(1, port.confirmedReturns)
+        assertEquals(1, port.backCalls)
+        flow.markTraversalReturnedToInbox()
+        assertFalse(flow.isActive)
+    }
+
+    @Test
+    fun safeHandoffRequiresActiveLeaseAndIdleListProgress() {
+        val port = FakePagePort()
+        val flow = createFlow(port)
+        assertFalse(flow.requestSafeHandoffReturn())
+        assertTrue(flow.claimOwnership("start"))
+        assertEquals(ReceivedGreetingsTaskFlowController.StartResult.STARTED, flow.beginFromConfirmedList())
+        for (status in listOf(
+            ReceivedGreetingsTraversalStatus.NAVIGATING,
+            ReceivedGreetingsTraversalStatus.DETAIL_READY,
+            ReceivedGreetingsTraversalStatus.UNKNOWN,
+            ReceivedGreetingsTraversalStatus.PROFILE_CARD
+        )) {
+            port.status = status
+            assertFalse(flow.requestSafeHandoffReturn())
+            assertFalse(flow.awaitingNormalInboxAfterReturn)
+        }
+        assertEquals(0, port.backCalls)
+        assertTrue(flow.releaseOwnership("test lease loss"))
+        port.status = ReceivedGreetingsTraversalStatus.SCANNING
+        assertFalse(flow.requestSafeHandoffReturn())
     }
 
     private fun createFlow(port: FakePagePort): ReceivedGreetingsTaskFlowController {
@@ -211,6 +260,8 @@ class ReceivedGreetingsTaskFlowControllerTest {
         var idleSteps = 0
         var currentListStarts = 0
         var confirmedReturns = 0
+        var preservedTraversal = false
+        var backCalls = 0
         var status = ReceivedGreetingsTraversalStatus.SCANNING
         var stepAccepted = true
         var workflowSupported = true
@@ -226,10 +277,13 @@ class ReceivedGreetingsTaskFlowControllerTest {
             currentListStarts++
             return currentListStartAccepted
         }
-        override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult =
-            ReceivedGreetingsBackResult.BACK_SUBMITTED
-        override fun confirmReceivedGreetingsCompletionReturn(): Boolean {
+        override fun returnFromReceivedGreetingsForPriorityCheck(): ReceivedGreetingsBackResult {
+            backCalls++
+            return ReceivedGreetingsBackResult.BACK_SUBMITTED
+        }
+        override fun confirmReceivedGreetingsCompletionReturn(preserveTraversal: Boolean): Boolean {
             confirmedReturns++
+            preservedTraversal = preserveTraversal
             return true
         }
         override fun completeReceivedGreetingDetailInspection(success: Boolean): Boolean = true

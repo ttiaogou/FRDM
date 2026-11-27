@@ -3,8 +3,8 @@ package com.freedom.features.aireply
 /**
  * 收到的招呼任务状态所有者。
  *
- * 本类只管理任务生命周期与完成后的返回待确认状态；页面指纹判断、OCR 和列表
- * 遍历仍通过既有 ChatPagePort 执行。列表遍历完成不等于任务结束。
+ * 本类只管理任务生命周期与安全返回待确认状态；页面指纹判断、OCR 和列表
+ * 遍历仍通过既有 ChatPagePort 执行。任务交接不要求列表遍历完成。
  */
 internal class ReceivedGreetingsTaskController(
     private val ownership: AiReplyTaskOwnership
@@ -15,7 +15,11 @@ internal class ReceivedGreetingsTaskController(
 
     private enum class Lifecycle { IDLE, TRAVERSING, RETURN_PENDING, RETURN_REQUESTED, INBOX_CONFIRMED }
 
+    enum class ReturnReason { TRAVERSAL_EXHAUSTED, SAFE_SESSION_BOUNDARY }
+
     private var lifecycle = Lifecycle.IDLE
+    var returnReason: ReturnReason? = null
+        private set
     val isActive: Boolean
         get() = lifecycle != Lifecycle.IDLE
     val awaitingNormalInboxAfterReturn: Boolean
@@ -37,12 +41,22 @@ internal class ReceivedGreetingsTaskController(
     }
 
     fun markStarted() {
+        returnReason = null
         lifecycle = Lifecycle.TRAVERSING
     }
 
-    /** Traversal completion does not end the task or release its lease. */
+    /** Return intent is independent of traversal exhaustion and never releases the lease. */
+    fun requestReturn(reason: ReturnReason): Boolean {
+        if (lifecycle == Lifecycle.TRAVERSING) {
+            returnReason = reason
+            lifecycle = Lifecycle.RETURN_PENDING
+        }
+        return awaitingNormalInboxAfterReturn && returnReason == reason
+    }
+
+    /** Compatibility for the existing exhausted-work decision, not a handoff gate. */
     fun markTraversalCompleted() {
-        if (lifecycle == Lifecycle.TRAVERSING) lifecycle = Lifecycle.RETURN_PENDING
+        requestReturn(ReturnReason.TRAVERSAL_EXHAUSTED)
     }
 
     /** The adapter accepted a return step; this is not proof of arrival. */
@@ -56,15 +70,14 @@ internal class ReceivedGreetingsTaskController(
     }
 
     fun markTraversalReturnedToInbox() {
-        if (awaitingNormalInboxAfterReturn) lifecycle = Lifecycle.IDLE
+        if (awaitingNormalInboxAfterReturn) reset()
     }
 
     /** Pauses this branch for an externally verified business-page handoff without clearing context. */
-    fun pauseForBusinessSwitch() {
-        lifecycle = Lifecycle.IDLE
-    }
+    fun pauseForBusinessSwitch() = reset()
 
     fun reset() {
         lifecycle = Lifecycle.IDLE
+        returnReason = null
     }
 }

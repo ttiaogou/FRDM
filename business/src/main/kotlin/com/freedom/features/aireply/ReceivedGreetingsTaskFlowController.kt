@@ -22,6 +22,7 @@ internal class ReceivedGreetingsTaskFlowController(
     enum class DecisionKind {
         ENTRY_NOT_FOUND,
         COMPLETE,
+        RETURN_PENDING,
         WAIT_FOR_DETAIL_PAGE,
         DETAIL_READY,
         RETRY_REQUIRED,
@@ -119,9 +120,12 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun performInitialIdleStep(): Boolean = executor.performIdleStep()
 
-    fun returnForPriorityCheck(): ReceivedGreetingsBackResult =
-        if (lifecycle.inboxConfirmed) ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
-        else executor.returnForPriorityCheck()
+    fun returnForPriorityCheck(): ReceivedGreetingsBackResult = when {
+        !lifecycle.ownsTask() -> ReceivedGreetingsBackResult.OWNERSHIP_REJECTED
+        !lifecycle.awaitingNormalInboxAfterReturn -> ReceivedGreetingsBackResult.SOURCE_UNVERIFIED
+        lifecycle.inboxConfirmed -> ReceivedGreetingsBackResult.WAITING_FOR_PAGE_CONFIRMATION
+        else -> executor.returnForPriorityCheck()
+    }
 
     fun isCompletionReturnIntermediate(): Boolean =
         lifecycle.awaitingNormalInboxAfterReturn && lifecycle.returnRequested &&
@@ -130,7 +134,8 @@ internal class ReceivedGreetingsTaskFlowController(
     fun confirmCompletionReturn(): Boolean {
         if (!lifecycle.awaitingNormalInboxAfterReturn || !lifecycle.ownsTask()) return false
         if (lifecycle.inboxConfirmed) return true
-        if (!executor.confirmCompletionReturn()) return false
+        val preserveTraversal = lifecycle.returnReason == ReceivedGreetingsTaskController.ReturnReason.SAFE_SESSION_BOUNDARY
+        if (!executor.confirmCompletionReturn(preserveTraversal)) return false
         lifecycle.markInboxConfirmed()
         return true
     }
@@ -145,6 +150,19 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun markTraversalCompleted() = lifecycle.markTraversalCompleted()
 
+    /** Called at an independently verified idle list boundary by the future paired scheduler. */
+    fun requestSafeHandoffReturn(): Boolean {
+        if (!lifecycle.ownsTask() || !lifecycle.isActive) return false
+        if (lifecycle.awaitingNormalInboxAfterReturn) {
+            return lifecycle.returnReason == ReceivedGreetingsTaskController.ReturnReason.SAFE_SESSION_BOUNDARY
+        }
+        if (executor.traversalStatus() !in setOf(
+                ReceivedGreetingsTraversalStatus.SCANNING, ReceivedGreetingsTraversalStatus.COMPLETE
+            )
+        ) return false
+        return lifecycle.requestReturn(ReceivedGreetingsTaskController.ReturnReason.SAFE_SESSION_BOUNDARY)
+    }
+
     fun markReturnRequested() = lifecycle.markReturnRequested()
 
     fun markTraversalReturnedToInbox() = lifecycle.markTraversalReturnedToInbox()
@@ -158,7 +176,7 @@ internal class ReceivedGreetingsTaskFlowController(
      */
     fun evaluatePageSnapshot(pageKind: ChatPageKind): Decision {
         if (lifecycle.awaitingNormalInboxAfterReturn) {
-            return Decision(DecisionKind.COMPLETE, ReceivedGreetingsTraversalStatus.COMPLETE, DecisionOrigin.PAGE_PROGRESS)
+            return Decision(DecisionKind.RETURN_PENDING, executor.traversalStatus(), DecisionOrigin.PAGE_PROGRESS)
         }
         val progress = executor.evaluatePageProgress(pageKind)
         return when (progress.decision) {
