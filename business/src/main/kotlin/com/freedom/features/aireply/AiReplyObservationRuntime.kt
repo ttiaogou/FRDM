@@ -530,8 +530,7 @@ class AiReplyObservationRuntime(
     private var sampleCaptureActive = false
     private var sessionRunStarted = false
     // Task-local yield and pair wake are independent facts.
-    private enum class PrivateToGreetingsHandoff { NONE, TRAVERSAL_EXHAUSTED, SAFE_SESSION_BOUNDARY, DEFERRED_WORK }
-    private var privateToGreetingsHandoff = PrivateToGreetingsHandoff.NONE
+    private var privateToGreetingsHandoff: AiReplyTaskYieldReason? = null
     private enum class PairWakeMode { REFRESH_PRIVATE, RESUME_PRIVATE }
     private data class PairWake(val mode: PairWakeMode, var due: Boolean, var retryAttempt: Int = 0)
     private var pairWake: PairWake? = null
@@ -2763,7 +2762,7 @@ class AiReplyObservationRuntime(
                         inspection.pageKind == ChatPageKind.CHAT_LIST &&
                         matchedRouteId == messageListRecoveryRoute.routeId
                     ) {
-                        receivedGreetingsTaskFlow.markTraversalCompleted()
+                        receivedGreetingsTaskFlow.requestExhaustedReturn()
                         onLog("跨任务交接[ENTRY_ABSENT]：本轮招呼入口搜索完成；在普通消息列表验证后交还私聊任务")
                         scheduleFullInspectionAfter(PRIORITY_RETURN_INSPECTION_DELAY_MS)
                     } else {
@@ -2889,9 +2888,9 @@ class AiReplyObservationRuntime(
                             it.unreadStatus == ChatUnreadStatus.UNKNOWN && ChatSessionManagementPolicy.isEligible(it)
                         }
                         onLog("跨任务交接[PRIVATE_LEASE_TRANSFERRED]：普通消息列表已双快照确认；私聊任务取得唯一操作权")
-                        onLog("AI Reply 测试遍历：收到的招呼列表已返回普通消息页；当前位置明确未读=$eligibleUnread；未知=$eligibleUnknown")
+                        onLog("跨任务循环[PRIVATE_RESUMED]：收到的招呼列表已返回普通消息页；当前位置明确未读=$eligibleUnread；未知=$eligibleUnknown")
                         val executor = privateMessagesTraversalTaskExecutor
-                        val visibleWork = if (privateYield == PrivateToGreetingsHandoff.DEFERRED_WORK) {
+                        val visibleWork = if (privateYield == AiReplyTaskYieldReason.DEFERRED_WORK) {
                             executor.nextFreshReturnCandidate(inspection) != null
                         } else executor.hasUnparkedUnread(inspection) || eligibleUnknown > 0
                         schedulePairedContinuation(privateYield, greetingYield, visibleWork)
@@ -3348,8 +3347,8 @@ class AiReplyObservationRuntime(
 
     /** Retire only old task callbacks and transient page evidence; never discard private cursor. */
     private fun finishGreetingsToPrivateHandoff() {
-        receivedGreetingsTaskFlow.markTraversalReturnedToInbox()
-        privateToGreetingsHandoff = PrivateToGreetingsHandoff.NONE
+        receivedGreetingsTaskFlow.finishVerifiedHandoff()
+        privateToGreetingsHandoff = null
         pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
         sessionActionGeneration += 1L
         invalidatePendingMessageRead()
@@ -3652,7 +3651,7 @@ class AiReplyObservationRuntime(
         sessionRunStarted = false
         pageSelectedPrivateStartupVerificationPending = false
         resetPairWake()
-        privateToGreetingsHandoff = PrivateToGreetingsHandoff.NONE
+        privateToGreetingsHandoff = null
         privateRelocationRetryOwed = false
         startupReadinessCoordinator.resetState(sessionStarted = false)
         sessionManagerState = SessionManagerState.STOPPED
@@ -4392,7 +4391,7 @@ class AiReplyObservationRuntime(
         pageInspectionTask?.cancel()
         pageInspectionTask = null
         if (taskId == RECEIVED_GREETINGS_TASK_ID && !isGreetingsCompletionReturnRecovery()) {
-            receivedGreetingsTaskFlow.pauseForBusinessSwitch()
+            receivedGreetingsTaskFlow.suspendForRecovery()
         }
         sessionManagerState = SessionManagerState.PAUSED
         onLog(
@@ -4574,7 +4573,7 @@ class AiReplyObservationRuntime(
                 !isSendConfirmationPending() && !recoveryContext.pending) ||
                 // NAVIGATING also includes avatar/profile/chat transitions. It is not
                 // proof that a newly visible ordinary inbox belongs to greetings.
-                (privateToGreetingsHandoff != PrivateToGreetingsHandoff.NONE && !recoveryContext.pending &&
+                (privateToGreetingsHandoff != null && !recoveryContext.pending &&
                     !awaitingNormalInboxAfterGreetingsReturn &&
                     lastPageInspection?.pageKind == ChatPageKind.CHAT_LIST &&
                     receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING))
@@ -4681,7 +4680,7 @@ class AiReplyObservationRuntime(
             (receivedGreetingsTaskFlow.supportsWorkflow() && pageSelectedStartup)
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         resetPairWake()
-        privateToGreetingsHandoff = PrivateToGreetingsHandoff.NONE
+        privateToGreetingsHandoff = null
         privateRelocationRetryOwed = false
         receivedGreetingsTaskFlow.reset()
         // Keep the existing lease lifecycle for compatibility, but do not perform any UI action
@@ -6514,8 +6513,8 @@ class AiReplyObservationRuntime(
             val observationCompleted = currentSessionReadCaptured
             val sendAlreadyRecorded = currentSessionSendConfirmed
             onLog(
-                if (observationCompleted) "AI Reply 测试遍历：已验证返回普通消息列表；本次会话只读观察完成"
-                else "AI Reply 测试遍历：已返回普通消息列表，但聊天内容读取未完成；不计入已完成观察数"
+                if (observationCompleted) "AI 私聊会话[LIST_RETURN_VERIFIED]：已验证返回普通消息列表；本次会话只读观察完成"
+                else "AI 私聊会话[LIST_RETURN_VERIFIED]：已返回普通消息列表，但聊天内容读取未完成；不计入已完成观察数"
             )
             retireObservedPrivateDetail("CONFIRMED_LIST_RETURN")
             currentSessionKey = null
@@ -7009,7 +7008,7 @@ class AiReplyObservationRuntime(
                 privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown ||
                     privateMessagesTraversalTaskExecutor.unresolvedUnknownUnreadKeys.isNotEmpty() -> {
                     sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                    onLog("AI Reply 测试遍历暂停：完整扫描中存在未读状态 UNKNOWN 的会话行，不能将未知当作无未读")
+                    onLog("AI 私聊候选[UNREAD_EVIDENCE_PENDING]：存在未读状态 UNKNOWN 的会话行，不能将未知当作无未读")
                     scheduleSessionListStabilityRetry("待复核未读身份尚未确认")
                 }
                 else -> {
@@ -7050,7 +7049,7 @@ class AiReplyObservationRuntime(
         if (!privateRelocationRetryOwed && receivedGreetingsTaskFlow.supportsWorkflow() &&
             privateMessagesCheckpointRepository != null
         ) {
-            startReceivedGreetingsTask("原异常未读待重新定位；先交接招呼任务", snapshot, PrivateToGreetingsHandoff.DEFERRED_WORK)
+            startReceivedGreetingsTask("原异常未读待重新定位；先交接招呼任务", snapshot, AiReplyTaskYieldReason.DEFERRED_WORK)
             return true
         }
         val window = snapshot.windowIdentityKey() ?: return false
@@ -7095,14 +7094,13 @@ class AiReplyObservationRuntime(
 
     /** The paired scheduler uses both task-local yield reasons, never a pair completion gate. */
     private fun schedulePairedContinuation(
-        privateYield: PrivateToGreetingsHandoff,
-        greetingYield: ReceivedGreetingsTaskController.ReturnReason?,
+        privateYield: AiReplyTaskYieldReason?,
+        greetingYield: AiReplyTaskYieldReason?,
         visibleWork: Boolean
     ) {
-        val refreshPrivate = privateYield == PrivateToGreetingsHandoff.TRAVERSAL_EXHAUSTED
-        val privateNoRunnable = refreshPrivate || privateYield == PrivateToGreetingsHandoff.DEFERRED_WORK
-        val greetingNoRunnable = greetingYield == ReceivedGreetingsTaskController.ReturnReason.TRAVERSAL_EXHAUSTED ||
-            greetingYield == ReceivedGreetingsTaskController.ReturnReason.DEFERRED_WORK
+        val refreshPrivate = privateYield == AiReplyTaskYieldReason.TRAVERSAL_EXHAUSTED
+        val privateNoRunnable = privateYield?.hasNoImmediatelyRunnableWork == true
+        val greetingNoRunnable = greetingYield?.hasNoImmediatelyRunnableWork == true
         onLog("跨任务循环[CONTINUATION]：private=$privateYield；greetings=$greetingYield；visibleWork=$visibleWork")
         if (privateNoRunnable && greetingNoRunnable && !visibleWork) {
             enterPairIdle("当前两侧无可立即执行工作；保留未决记录",
@@ -7122,7 +7120,7 @@ class AiReplyObservationRuntime(
             inspection.pageKind == ChatPageKind.NON_CHAT &&
             inspection.packageName == targetPackage() && !recoveryContext.pending && !userInteractionActive &&
             !isSendConfirmationPending() && !isConversationDraftPending() &&
-            receivedGreetingsTaskFlow.requestSafeHandoffReturn(ReceivedGreetingsTaskController.ReturnReason.DEFERRED_WORK)
+            receivedGreetingsTaskFlow.requestSafeHandoffReturn(AiReplyTaskYieldReason.DEFERRED_WORK)
         ) {
             onLog("GREETING_DEFERRED_EVIDENCE_ONLY：保留安全失败证据；交接私聊任务，不报告遍历完成")
             requestGreetingsReturn(observation, inspection)
@@ -7257,7 +7255,7 @@ class AiReplyObservationRuntime(
         val previousSendReceiptPreserved = !executor.checkpointLastSuccessfulTaskId.isNullOrBlank()
         // Rebuild first. Only a successfully admitted new round can retire the parked
         // round's intent; a same-round checkpoint resume must never use this path.
-        executor.beginNextPollingRound()
+        executor.renewExhaustedPrivateSelection()
         privateRelocationRetryOwed = false
         resetPairWake()
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
@@ -7306,7 +7304,7 @@ class AiReplyObservationRuntime(
             scheduleSessionListStabilityRetry("本轮未读尚未完成")
             return
         }
-        startReceivedGreetingsTask(reason, snapshot, PrivateToGreetingsHandoff.TRAVERSAL_EXHAUSTED)
+        startReceivedGreetingsTask(reason, snapshot, AiReplyTaskYieldReason.TRAVERSAL_EXHAUSTED)
     }
 
     /**
@@ -7317,11 +7315,9 @@ class AiReplyObservationRuntime(
     private fun startReceivedGreetingsTask(
         reason: String,
         snapshot: ChatPageSnapshot,
-        handoff: PrivateToGreetingsHandoff
+        handoff: AiReplyTaskYieldReason
     ) {
-        if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
-            handoff == PrivateToGreetingsHandoff.NONE
-        ) return
+        if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
         val executor = privateMessagesTraversalTaskExecutor
         if (!canPerformPrivateMessagesUiAction() || userInteractionActive ||
             executor.pendingScrollBaseline != null || executor.pendingBoundaryConfirmationKeys != null ||
@@ -7347,7 +7343,7 @@ class AiReplyObservationRuntime(
         }
         // A partial traversal may never be handed off without its durable cursor.
         val repository = privateMessagesCheckpointRepository
-        if ((handoff != PrivateToGreetingsHandoff.TRAVERSAL_EXHAUSTED && repository == null) ||
+        if ((handoff != AiReplyTaskYieldReason.TRAVERSAL_EXHAUSTED && repository == null) ||
             !runCatching { repository?.save(executor.checkpoint()) }.isSuccess
         ) {
             onLog("跨任务交接[PRIVATE_CHECKPOINT_NOT_SAVED]：未保存原遍历进度；不转移操作权")
@@ -7363,7 +7359,7 @@ class AiReplyObservationRuntime(
             return
         }
         privateToGreetingsHandoff = handoff
-        if (handoff == PrivateToGreetingsHandoff.DEFERRED_WORK) privateRelocationRetryOwed = true
+        if (handoff == AiReplyTaskYieldReason.DEFERRED_WORK) privateRelocationRetryOwed = true
         incompleteUnreadRelocationWait = null
         sessionActionGeneration += 1L
         pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
@@ -7375,7 +7371,7 @@ class AiReplyObservationRuntime(
         currentSessionName = null
         currentSessionCandidate = null
         invalidateMessageReadTransaction()
-        if (handoff == PrivateToGreetingsHandoff.TRAVERSAL_EXHAUSTED) {
+        if (handoff == AiReplyTaskYieldReason.TRAVERSAL_EXHAUSTED) {
             privateMessagesTraversalTaskExecutor.sessionActionCount = 0
         }
         onLog(
@@ -7460,8 +7456,8 @@ class AiReplyObservationRuntime(
         // its old timer. On return the paired scheduler makes a fresh decision.
         pairWake?.let { wake ->
             privateToGreetingsHandoff = if (wake.mode == PairWakeMode.REFRESH_PRIVATE) {
-                PrivateToGreetingsHandoff.TRAVERSAL_EXHAUSTED
-            } else PrivateToGreetingsHandoff.DEFERRED_WORK
+                AiReplyTaskYieldReason.TRAVERSAL_EXHAUSTED
+            } else AiReplyTaskYieldReason.DEFERRED_WORK
             resetPairWake()
         }
         sessionActionGeneration += 1L
@@ -7661,7 +7657,7 @@ class AiReplyObservationRuntime(
         // Existing COMPLETE evidence requests the exhausted-work return. A previously
         // requested safe handoff retains its own reason; do not manufacture COMPLETE.
         if (!receivedGreetingsTaskFlow.awaitingNormalInboxAfterReturn) {
-            receivedGreetingsTaskFlow.markTraversalCompleted()
+            receivedGreetingsTaskFlow.requestExhaustedReturn()
         }
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         if (observation.status != ObservationStatus.CONFIRMED_PAGE ||

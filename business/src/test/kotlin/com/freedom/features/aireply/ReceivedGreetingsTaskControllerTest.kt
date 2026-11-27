@@ -18,7 +18,7 @@ class ReceivedGreetingsTaskControllerTest {
         assertTrue(controller.isActive)
         assertFalse(controller.awaitingNormalInboxAfterReturn)
 
-        controller.markTraversalCompleted()
+        controller.requestExhaustedReturn()
 
         assertTrue(controller.isActive)
         assertTrue(controller.awaitingNormalInboxAfterReturn)
@@ -30,12 +30,17 @@ class ReceivedGreetingsTaskControllerTest {
     fun traversalReturnClearsOnlyItsOwnTaskState() {
         val controller = ReceivedGreetingsTaskController(AiReplyTaskOwnership(null, { 1L }, {}))
         controller.markStarted()
-        controller.markTraversalCompleted()
+        controller.requestExhaustedReturn()
         controller.markReturnRequested()
 
-        controller.markTraversalReturnedToInbox()
+        // Submission is not destination confirmation.
+        assertFalse(controller.finishVerifiedHandoff())
+        assertTrue(controller.isActive)
+        controller.markInboxConfirmed()
+        assertTrue(controller.finishVerifiedHandoff())
 
         assertFalse(controller.isActive)
+        assertTrue(controller.isSuspended)
         assertFalse(controller.awaitingNormalInboxAfterReturn)
         assertFalse(controller.returnRequested)
     }
@@ -44,11 +49,11 @@ class ReceivedGreetingsTaskControllerTest {
     fun repeatedCompletionDoesNotEndTaskOrRestartTraversal() {
         val controller = ReceivedGreetingsTaskController(AiReplyTaskOwnership(null, { 1L }, {}))
         controller.markStarted()
-        controller.markTraversalCompleted()
+        controller.requestExhaustedReturn()
         controller.markReturnRequested()
 
-        controller.markTraversalCompleted()
-        controller.markNavigationStarted()
+        controller.requestExhaustedReturn()
+        controller.markStarted()
 
         assertTrue(controller.isActive)
         assertTrue(controller.awaitingNormalInboxAfterReturn)
@@ -56,16 +61,32 @@ class ReceivedGreetingsTaskControllerTest {
     }
 
     @Test
+    fun suspensionAndReadmissionDoNotBehaveLikeRunReset() {
+        val controller = ReceivedGreetingsTaskController(AiReplyTaskOwnership(null, { 1L }, {}))
+        controller.markStarted()
+        controller.suspendForRecovery()
+        assertFalse(controller.isActive)
+        assertTrue(controller.isSuspended)
+        assertFalse(controller.requestReturn(AiReplyTaskYieldReason.SAFE_SESSION_BOUNDARY))
+        controller.markStarted()
+        assertTrue(controller.isActive)
+        assertFalse(controller.isSuspended)
+        controller.reset()
+        assertFalse(controller.isActive)
+        assertFalse(controller.isSuspended)
+    }
+
+    @Test
     fun resetClearsLifecycleFlagsWithoutRestoringCompletedTask() {
         val controller = ReceivedGreetingsTaskController(AiReplyTaskOwnership(null, { 1L }, {}))
         controller.markStarted()
-        controller.markTraversalCompleted()
+        controller.requestExhaustedReturn()
         controller.markReturnRequested()
         assertTrue(controller.isActive)
         assertTrue(controller.awaitingNormalInboxAfterReturn)
         assertTrue(controller.returnRequested)
         controller.reset()
-        controller.markTraversalCompleted()
+        controller.requestExhaustedReturn()
         controller.markReturnRequested()
         assertFalse(controller.isActive)
         assertFalse(controller.awaitingNormalInboxAfterReturn)

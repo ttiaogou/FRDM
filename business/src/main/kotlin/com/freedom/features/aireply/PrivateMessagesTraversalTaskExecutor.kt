@@ -175,7 +175,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         traversalDirection = checkpointTraversalDirection,
         unresolvedUnknownUnreadKeys = unresolvedUnknownUnreadKeys.toSet(),
         unknownUnreadViewportKeys = unknownUnreadViewportKeys.toList(),
-        fullListPollingRoundRequired = fullListPollingRoundRequired,
+        fullListPollingRoundRequired = incompleteUnreadRelocationActive,
         unresolvedIncompleteUnreadKeys = unresolvedIncompleteUnreadKeys.toSet(),
         scanContinuityRecoveryPending = scanContinuityRecoveryPending,
         unfinishedSessions = unfinishedSessions.values.toList()
@@ -234,7 +234,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         checkpointTraversalDirection = checkpoint.traversalDirection
         // Old ordinary polling checkpoints must not resurrect forced bottom positioning.
         // A same-round anomaly relocation always starts with finalized locked membership.
-        fullListPollingRoundRequired = checkpoint.fullListPollingRoundRequired && checkpoint.lockedUnreadSetFinalized
+        incompleteUnreadRelocationActive = checkpoint.fullListPollingRoundRequired && checkpoint.lockedUnreadSetFinalized
         unresolvedIncompleteUnreadKeys.clear()
         unresolvedIncompleteUnreadKeys += checkpoint.unresolvedIncompleteUnreadKeys
         unfinishedSessions.clear()
@@ -345,7 +345,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         scanContinuityRecoveryPending = true
         phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
         atTop = false
-        fullListPollingRoundRequired = false
+        incompleteUnreadRelocationActive = false
         clearRecoveryViewportEvidence()
         resetUnreadBoundaryObservation()
     }
@@ -619,7 +619,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
     var lockedUnreadSetFinalized: Boolean = false
     /** Legacy checkpoint field: an exceptional same-round search for pending identities.
      * Stop as soon as an actionable target is rediscovered; physical end is a fallback. */
-    var fullListPollingRoundRequired: Boolean = false
+    var incompleteUnreadRelocationActive: Boolean = false
         private set
     /** Durable obligation to prove a safe scan origin after a discontinuous return. */
     var scanContinuityRecoveryPending: Boolean = false
@@ -969,7 +969,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         if (!canBeginIncompleteUnreadRelocation(snapshot)) return false
         // Reuse the original traversal, stopping at a rediscovered pending target.
         // Do not begin a new polling round or clear any attempt or send receipt.
-        fullListPollingRoundRequired = true
+        incompleteUnreadRelocationActive = true
         phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
         atTop = false
         noProgressScrollCount = 0
@@ -983,7 +983,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
         atTop = false
         lockedUnreadSetFinalized = true
-        fullListPollingRoundRequired = false
+        incompleteUnreadRelocationActive = false
     }
 
     private fun isPendingIncompleteRow(row: ChatListCandidateSnapshot): Boolean =
@@ -1239,7 +1239,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val explicitUnreadWhileWaiting = wasWaitingForUnread && hasUnparkedUnread(snapshot)
         // A viewport observation is not a round transition. Keep the previous round's
         // attempted identities intact until the runtime has independently confirmed
-        // a fresh inbox and explicitly calls beginNextPollingRound().
+        // a fresh inbox and explicitly calls renewExhaustedPrivateSelection().
         val nextCandidate = if (!viewportPositionInvalidated && initialInboxTopPositioningCompleted &&
             !wasWaitingForUnread && !candidatesEmpty && !snapshot.chatListExtractionTruncated &&
             (!incompleteUnreadEvidenceBlocked || incompleteUnreadAllowsIndependentTraversal) &&
@@ -1362,7 +1362,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         }
         // An exceptional same-round search may stop at the first newly actionable
         // pending identity instead of forcing a full physical-bottom scan.
-        if (fullListPollingRoundRequired && lockedUnreadSetFinalized) {
+        if (incompleteUnreadRelocationActive && lockedUnreadSetFinalized) {
             val pendingKeys = pendingKnownUnreadKeys()
             val targets = snapshot.chatListCandidates.filter {
                 (ChatSessionManagementPolicy.stableSessionKey(it) in pendingKeys ||
@@ -1370,7 +1370,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
                     isUniqueCompletePrivateRow(snapshot, it, ambiguousSessionIdentityKeys)
             }
             if (!hasPendingRoundWork() || selectNextCandidate(targets, pendingKeys) != null) {
-                fullListPollingRoundRequired = false
+                incompleteUnreadRelocationActive = false
                 phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
                 resetUnreadBoundaryObservation()
                 return PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED
@@ -1670,7 +1670,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         ambiguousSessionIdentityKeys.clear()
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
-        fullListPollingRoundRequired = false
+        incompleteUnreadRelocationActive = false
         scanContinuityRecoveryPending = false
         resetUnreadBoundaryObservation()
         normalInboxHadUnread = false
@@ -1696,16 +1696,16 @@ internal class PrivateMessagesTraversalTaskExecutor {
     }
 
     /**
-     * Begins a new ordinary-inbox pass after the greetings branch returns to the inbox.
-     * The inbox context was already established; no startup probe gesture is required.
+     * Retires exhausted private selection only. Task handoff and same-cursor recovery
+     * must never call this method.
      */
-    fun resetForReturnedInbox() {
+    fun resetSelectionForNewPass() {
         clearIdentityReturn()
         executionState = SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM
         clearCurrentSession()
         lockedUnreadSessionKeys.clear()
         lockedUnreadSetFinalized = false
-        fullListPollingRoundRequired = false
+        incompleteUnreadRelocationActive = false
         scanContinuityRecoveryPending = false
         resetUnreadBoundaryObservation()
         attemptedSessionKeys.clear()
@@ -1730,14 +1730,14 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * Renew only the exhausted private task's selection after new inbox proof.
      * Greetings completion is not a prerequisite; preserve identity blocks and send audit.
      */
-    fun beginNextPollingRound() {
+    fun renewExhaustedPrivateSelection() {
         check(!scanContinuityRecoveryPending && !normalInboxUnreadStateUnknown && unresolvedUnknownUnreadKeys.isEmpty() &&
             unresolvedIncompleteUnreadKeys.isEmpty())
         // Only an admitted NEW round retires old viewport capture deduplication.
         // A resumeAfterReturnedInbox() or restored same-round checkpoint must keep it.
         // Without this clear, repeated A/B viewport fingerprints are silently treated
         // as already captured in the next complete scan.
-        resetForReturnedInbox()
+        resetSelectionForNewPass()
         unfinishedSessions.entries.forEach { item ->
             val entry = item.value
             if (entry.disposition == UnfinishedPrivateSessionDisposition.SEND_DEFERRED_THIS_ROUND) {

@@ -816,7 +816,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         executor.boundaryStabilityConfirmationCount = 1
         executor.capturedSessionListFingerprints += "audit"
 
-        executor.resetForReturnedInbox()
+        executor.resetSelectionForNewPass()
 
         assertEquals(SessionListTraversalPhase.POSITIONING_AT_BOTTOM, executor.phase)
         assertFalse(executor.atTop)
@@ -866,7 +866,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         executor.checkpointRunGeneration = 7L
         executor.checkpointNextCursorKey = "old-cursor"
 
-        executor.beginNextPollingRound()
+        executor.renewExhaustedPrivateSelection()
 
         assertFalse(executor.initialInboxPositionCheckCompleted)
         assertFalse(executor.initialInboxTopPositioningCompleted)
@@ -925,7 +925,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         ))
 
         // Only a separately verified next-round entry retires frozen membership.
-        executor.beginNextPollingRound()
+        executor.renewExhaustedPrivateSelection()
         assertTrue(executor.attemptedSessionKeys.isEmpty())
         assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
         assertTrue(executor.capturedSessionListFingerprints.isEmpty())
@@ -963,7 +963,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         executor.normalInboxUnreadStateUnknown = true
         executor.unresolvedUnknownUnreadKeys += "unresolved"
 
-        assertTrue(runCatching { executor.beginNextPollingRound() }.isFailure)
+        assertTrue(runCatching { executor.renewExhaustedPrivateSelection() }.isFailure)
         assertEquals(setOf("previously-attempted"), executor.attemptedSessionKeys)
         assertEquals(setOf("previously-frozen"), executor.lockedUnreadSessionKeys)
         assertEquals(setOf("previous-viewport"), executor.capturedSessionListFingerprints)
@@ -985,8 +985,8 @@ class PrivateMessagesTraversalTaskExecutorTest {
             executor.evaluateUnreadAdmission(snapshot(visibleRead)))
         assertEquals(PrivateMessagesUnreadAdmissionDecision.NO_UNREAD,
             executor.evaluateUnreadAdmission(snapshot(visibleRead)))
-        executor.beginNextPollingRound()
-        assertFalse(executor.fullListPollingRoundRequired)
+        executor.renewExhaustedPrivateSelection()
+        assertFalse(executor.incompleteUnreadRelocationActive)
         executor.initialInboxTopPositioningCompleted = true
         executor.atTop = true
 
@@ -1016,14 +1016,14 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(executor.lockedUnreadSetFinalized)
         val evaluation = executor.evaluateListSnapshot(snapshot(offscreenUnread), false, 2)
         assertEquals(offscreenUnread, evaluation.nextCandidate)
-        assertFalse(executor.fullListPollingRoundRequired)
+        assertFalse(executor.incompleteUnreadRelocationActive)
     }
 
     @Test
     fun timedPollingCheckpointDoesNotRestoreObsoleteFullScanAndUnknownBlocksCompletion() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         executor.checkpointLastSuccessfulTaskId = "confirmed-send-prior-round"
-        executor.beginNextPollingRound()
+        executor.renewExhaustedPrivateSelection()
         executor.initialInboxTopPositioningCompleted = true
         executor.atTop = true
         val read = candidate(0, "Read only here", ChatUnreadStatus.READ)
@@ -1035,7 +1035,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         val resumed = PrivateMessagesTraversalTaskExecutor().apply {
             restore(saved.copy(fullListPollingRoundRequired = true))
         }
-        assertFalse(resumed.fullListPollingRoundRequired)
+        assertFalse(resumed.incompleteUnreadRelocationActive)
         assertEquals("confirmed-send-prior-round", resumed.checkpointLastSuccessfulTaskId)
         assertEquals(PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
             resumed.evaluateUnreadAdmission(snapshot(read)))
@@ -1045,11 +1045,11 @@ class PrivateMessagesTraversalTaskExecutorTest {
             resumed.evaluateUnreadAdmission(snapshot(unknown)))
         assertTrue(resumed.normalInboxUnreadStateUnknown)
         assertEquals(setOf(key(unknown)), resumed.unresolvedUnknownUnreadKeys)
-        assertTrue(runCatching { resumed.beginNextPollingRound() }.isFailure)
-        assertFalse(resumed.fullListPollingRoundRequired)
+        assertTrue(runCatching { resumed.renewExhaustedPrivateSelection() }.isFailure)
+        assertFalse(resumed.incompleteUnreadRelocationActive)
         assertEquals("confirmed-send-prior-round", resumed.checkpointLastSuccessfulTaskId)
         executor.reset()
-        assertFalse(executor.fullListPollingRoundRequired)
+        assertFalse(executor.incompleteUnreadRelocationActive)
     }
 
     @Test
@@ -1102,7 +1102,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(recovered.observeIncompleteUnreadEvidence(snapshot(
             candidate(3, "Other safe row", ChatUnreadStatus.READ)
         )))
-        assertTrue(runCatching { recovered.beginNextPollingRound() }.isFailure)
+        assertTrue(runCatching { recovered.renewExhaustedPrivateSelection() }.isFailure)
         assertEquals(checkpoint.unresolvedIncompleteUnreadKeys, recovered.unresolvedIncompleteUnreadKeys)
         assertTrue(recovered.ambiguousSessionIdentityKeys.isEmpty())
 
@@ -1135,7 +1135,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(executor.checkpoint()) }
         assertTrue(restored.observeIncompleteUnreadEvidence(snapshot(healthy)))
         assertTrue(restored.canContinueWithIncompleteUnread(snapshot(healthy)))
-        assertTrue(runCatching { restored.beginNextPollingRound() }.isFailure)
+        assertTrue(runCatching { restored.renewExhaustedPrivateSelection() }.isFailure)
 
         val repaired = candidate(0, "Incomplete A", ChatUnreadStatus.UNREAD)
         assertFalse(restored.observeIncompleteUnreadEvidence(snapshot(repaired, healthy)))
@@ -1224,7 +1224,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(key(repaired) in restored.lockedUnreadSessionKeys)
         assertEquals(PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED,
             restored.evaluateUnreadAdmission(repairedPage))
-        assertFalse(restored.fullListPollingRoundRequired)
+        assertFalse(restored.incompleteUnreadRelocationActive)
         assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, restored.phase)
         assertEquals(repaired, restored.selectNextCandidate(repairedPage.chatListCandidates, restored.lockedUnreadSessionKeys))
         assertEquals(before.attemptedSessionKeys, restored.attemptedSessionKeys)
@@ -1297,7 +1297,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertEquals(unaffected, recovered.selectNextCandidate(
             listOf(complete, repaired, unaffected)
         ))
-        recovered.beginNextPollingRound()
+        recovered.renewExhaustedPrivateSelection()
         assertTrue(recovered.ambiguousSessionIdentityKeys.contains(conflictingKey))
     }
 
@@ -1311,7 +1311,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         val newD = candidate(3, "New D", ChatUnreadStatus.UNREAD)
         val blockedIdentity = key(candidate(4, "Identity collision", ChatUnreadStatus.UNREAD))
 
-        executor.beginNextPollingRound()
+        executor.renewExhaustedPrivateSelection()
         executor.initialInboxTopPositioningCompleted = true
         executor.initialUnreadGateSwipeCompleted = true
         executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
@@ -1327,7 +1327,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         // Simulate a service/process restart by discarding all in-memory executors.
         val saved = executor.checkpoint()
         val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(saved) }
-        assertFalse(restored.fullListPollingRoundRequired)
+        assertFalse(restored.incompleteUnreadRelocationActive)
         assertEquals(saved.unresolvedUnknownUnreadKeys, restored.unresolvedUnknownUnreadKeys)
         assertEquals(saved.unresolvedIncompleteUnreadKeys, restored.unresolvedIncompleteUnreadKeys)
         assertEquals(saved.attemptedSessionKeys, restored.attemptedSessionKeys)
@@ -1342,7 +1342,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(restored.observeIncompleteUnreadEvidence(snapshot(
             candidate(5, "Different read row", ChatUnreadStatus.READ)
         )))
-        assertTrue(runCatching { restored.beginNextPollingRound() }.isFailure)
+        assertTrue(runCatching { restored.renewExhaustedPrivateSelection() }.isFailure)
         assertEquals(setOf(key(processedA)), restored.attemptedSessionKeys)
 
         // The original UNKNOWN viewport and incomplete row each need new explicit proof.
@@ -1352,17 +1352,17 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(restored.observeIncompleteUnreadEvidence(snapshot(
             candidate(5, "Different read row", ChatUnreadStatus.READ)
         )))
-        assertTrue(runCatching { restored.beginNextPollingRound() }.isFailure)
+        assertTrue(runCatching { restored.renewExhaustedPrivateSelection() }.isFailure)
         assertFalse(restored.observeIncompleteUnreadEvidence(snapshot(
             candidate(2, "Incomplete C", ChatUnreadStatus.UNREAD, previewBoundsValid = true)
         )))
 
         // Only now may a new round retire old A's selection cursor, not its send receipt
         // or the run-scoped identity conflict.
-        restored.beginNextPollingRound()
+        restored.renewExhaustedPrivateSelection()
         assertTrue(restored.attemptedSessionKeys.isEmpty())
         assertTrue(restored.lockedUnreadSessionKeys.isEmpty())
-        assertFalse(restored.fullListPollingRoundRequired)
+        assertFalse(restored.incompleteUnreadRelocationActive)
         assertTrue(restored.ambiguousSessionIdentityKeys.contains(blockedIdentity))
         assertEquals("confirmed-prior-send", restored.checkpointLastSuccessfulTaskId)
         assertEquals(17L, restored.checkpointRunGeneration)
@@ -1486,7 +1486,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING, duringPositioning.unreadAdmissionDecision)
         assertEquals(null, duringPositioning.nextCandidate)
         assertEquals(oldKeys, restored.lastStableSessionListVisibleKeys)
-        assertTrue(runCatching { restored.beginNextPollingRound() }.isFailure)
+        assertTrue(runCatching { restored.renewExhaustedPrivateSelection() }.isFailure)
         restored.confirmPhysicalEndForReturnTraversal()
         restored.recordVerifiedViewport(snapshot(pending, unseen))
         assertFalse(restored.scanContinuityRecoveryPending)
@@ -1625,7 +1625,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertFalse(restored.hasPendingVisibleReturnWork(snapshot(original)))
         assertEquals(originalVisit.openedAtMillis, restored.checkpoint().unfinishedSessions.single().openedAtMillis)
         // The original obligation remains, without holding the completed scan.
-        restored.beginNextPollingRound()
+        restored.renewExhaustedPrivateSelection()
         assertEquals(UnfinishedPrivateSessionDisposition.SEND_REVISIT_ELIGIBLE,
             restored.checkpoint().unfinishedSessions.single().disposition)
         assertFalse(restored.isDeferredForCurrentRound(key(original)))
@@ -1674,7 +1674,7 @@ class PrivateMessagesTraversalTaskExecutorTest {
         assertTrue(executor.hasPendingVisibleReturnWork(fresh))
         assertFalse(executor.canRecoverInterruptedRow(fresh, unknown))
         assertTrue(executor.observeUnreadBlockers(fresh))
-        assertTrue(runCatching { executor.beginNextPollingRound() }.isFailure)
+        assertTrue(runCatching { executor.renewExhaustedPrivateSelection() }.isFailure)
         assertEquals(UnfinishedPrivateSessionDisposition.SEND_DEFERRED_THIS_ROUND,
             executor.checkpoint().unfinishedSessions.single().disposition)
     }

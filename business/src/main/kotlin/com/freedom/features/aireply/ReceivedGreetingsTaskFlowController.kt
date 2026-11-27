@@ -52,7 +52,7 @@ internal class ReceivedGreetingsTaskFlowController(
         get() = lifecycle.awaitingNormalInboxAfterReturn
     val returnRequested: Boolean
         get() = lifecycle.returnRequested
-    val returnReason: ReceivedGreetingsTaskController.ReturnReason?
+    val returnReason: AiReplyTaskYieldReason?
         get() = lifecycle.returnReason
 
     fun claimOwnership(reason: String): Boolean = lifecycle.claimOwnership(reason)
@@ -136,7 +136,7 @@ internal class ReceivedGreetingsTaskFlowController(
     fun confirmCompletionReturn(): Boolean {
         if (!lifecycle.awaitingNormalInboxAfterReturn || !lifecycle.ownsTask()) return false
         if (lifecycle.inboxConfirmed) return true
-        val preserveTraversal = lifecycle.returnReason != ReceivedGreetingsTaskController.ReturnReason.TRAVERSAL_EXHAUSTED
+        val preserveTraversal = lifecycle.returnReason != AiReplyTaskYieldReason.TRAVERSAL_EXHAUSTED
         if (!executor.confirmCompletionReturn(preserveTraversal)) return false
         lifecycle.markInboxConfirmed()
         return true
@@ -150,13 +150,13 @@ internal class ReceivedGreetingsTaskFlowController(
     fun deferReceivedGreetingAfterManualReturn(): Boolean =
         executor.deferReceivedGreetingAfterManualReturn()
 
-    fun markTraversalCompleted() = lifecycle.markTraversalCompleted()
+    fun requestExhaustedReturn() = lifecycle.requestExhaustedReturn()
 
     /** A safe list boundary yields without declaring exhaustion. */
     fun requestSafeHandoffReturn(
-        reason: ReceivedGreetingsTaskController.ReturnReason = ReceivedGreetingsTaskController.ReturnReason.SAFE_SESSION_BOUNDARY
+        reason: AiReplyTaskYieldReason = AiReplyTaskYieldReason.SAFE_SESSION_BOUNDARY
     ): Boolean {
-        if (reason == ReceivedGreetingsTaskController.ReturnReason.TRAVERSAL_EXHAUSTED ||
+        if (reason == AiReplyTaskYieldReason.TRAVERSAL_EXHAUSTED ||
             !lifecycle.ownsTask() || !lifecycle.isActive
         ) return false
         if (lifecycle.awaitingNormalInboxAfterReturn) {
@@ -171,9 +171,9 @@ internal class ReceivedGreetingsTaskFlowController(
 
     fun markReturnRequested() = lifecycle.markReturnRequested()
 
-    fun markTraversalReturnedToInbox() = lifecycle.markTraversalReturnedToInbox()
+    fun finishVerifiedHandoff() = lifecycle.finishVerifiedHandoff()
 
-    fun pauseForBusinessSwitch() = lifecycle.pauseForBusinessSwitch()
+    fun suspendForRecovery() = lifecycle.suspendForRecovery()
 
     /**
      * Converts a fresh classified page snapshot into one stable task decision. A classified
@@ -195,7 +195,7 @@ internal class ReceivedGreetingsTaskFlowController(
             ReceivedGreetingsTaskExecutor.PageDecision.DETAIL_READY ->
                 Decision(DecisionKind.DETAIL_READY, progress.status, DecisionOrigin.PAGE_PROGRESS)
             ReceivedGreetingsTaskExecutor.PageDecision.ADVANCE_REQUIRED ->
-                evaluateAdapterStep(classifiedPage = true)
+                evaluateClassifiedAdapterStep()
         }
     }
 
@@ -203,12 +203,10 @@ internal class ReceivedGreetingsTaskFlowController(
     fun evaluateUnclassifiedPageSnapshot(): Decision =
         Decision(DecisionKind.RETRY_REQUIRED, executor.traversalStatus(), DecisionOrigin.PAGE_PROGRESS)
 
-    private fun evaluateAdapterStep(classifiedPage: Boolean): Decision {
+    private fun evaluateClassifiedAdapterStep(): Decision {
         val observation = executor.performIdleStepAndInspect()
         if (!observation.accepted) {
-            if (classifiedPage &&
-                observation.status == ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND
-            ) {
+            if (observation.status == ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND) {
                 return Decision(DecisionKind.ENTRY_NOT_FOUND, observation.status, DecisionOrigin.ADAPTER_STEP)
             }
             return Decision(DecisionKind.RETRY_REQUIRED, observation.status, DecisionOrigin.ADAPTER_STEP)
@@ -216,14 +214,11 @@ internal class ReceivedGreetingsTaskFlowController(
 
         val kind = when (observation.decision) {
             ReceivedGreetingsTaskExecutor.StepDecision.RETRY_REQUIRED -> DecisionKind.RETRY_REQUIRED
-            ReceivedGreetingsTaskExecutor.StepDecision.ENTRY_NOT_FOUND_RECHECK ->
-                if (classifiedPage) DecisionKind.ENTRY_NOT_FOUND_RECHECK else DecisionKind.RETRY_REQUIRED
+            ReceivedGreetingsTaskExecutor.StepDecision.ENTRY_NOT_FOUND_RECHECK -> DecisionKind.ENTRY_NOT_FOUND_RECHECK
             ReceivedGreetingsTaskExecutor.StepDecision.COMPLETE -> DecisionKind.COMPLETE
             ReceivedGreetingsTaskExecutor.StepDecision.LIST_CONTINUES -> DecisionKind.LIST_CONTINUES
-            ReceivedGreetingsTaskExecutor.StepDecision.PROFILE_CARD_PENDING ->
-                if (classifiedPage) DecisionKind.PROFILE_CARD_PENDING else DecisionKind.RETRY_REQUIRED
-            ReceivedGreetingsTaskExecutor.StepDecision.PAGE_TRANSITION_PENDING ->
-                if (classifiedPage) DecisionKind.PAGE_TRANSITION_PENDING else DecisionKind.RETRY_REQUIRED
+            ReceivedGreetingsTaskExecutor.StepDecision.PROFILE_CARD_PENDING -> DecisionKind.PROFILE_CARD_PENDING
+            ReceivedGreetingsTaskExecutor.StepDecision.PAGE_TRANSITION_PENDING -> DecisionKind.PAGE_TRANSITION_PENDING
         }
         return Decision(kind, observation.status, DecisionOrigin.ADAPTER_STEP)
     }

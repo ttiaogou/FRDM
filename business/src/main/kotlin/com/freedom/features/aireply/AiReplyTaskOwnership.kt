@@ -3,6 +3,16 @@ package com.freedom.features.aireply
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.TaskExecutionController
 
+/** Shared business yield reason; neither a lease release nor a traversal state. */
+internal enum class AiReplyTaskYieldReason {
+    TRAVERSAL_EXHAUSTED,
+    SAFE_SESSION_BOUNDARY,
+    DEFERRED_WORK;
+
+    val hasNoImmediatelyRunnableWork: Boolean
+        get() = this == TRAVERSAL_EXHAUSTED || this == DEFERRED_WORK
+}
+
 /**
  * AI Reply 对通用任务执行控制器的领域适配门面。
  * 私聊与收到招呼共享同一个控制器实例，以支持原子租约转交。

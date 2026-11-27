@@ -13,15 +13,15 @@ internal class ReceivedGreetingsTaskController(
         const val TASK_ID = "AI_REPLY_RECEIVED_GREETINGS"
     }
 
-    private enum class Lifecycle { IDLE, TRAVERSING, RETURN_PENDING, RETURN_REQUESTED, INBOX_CONFIRMED }
-
-    enum class ReturnReason { TRAVERSAL_EXHAUSTED, SAFE_SESSION_BOUNDARY, DEFERRED_WORK }
+    private enum class Lifecycle { IDLE, ACTIVE, RETURN_PENDING, RETURN_REQUESTED, INBOX_CONFIRMED, SUSPENDED }
 
     private var lifecycle = Lifecycle.IDLE
-    var returnReason: ReturnReason? = null
+    var returnReason: AiReplyTaskYieldReason? = null
         private set
     val isActive: Boolean
-        get() = lifecycle != Lifecycle.IDLE
+        get() = lifecycle != Lifecycle.IDLE && lifecycle != Lifecycle.SUSPENDED
+    val isSuspended: Boolean
+        get() = lifecycle == Lifecycle.SUSPENDED
     val awaitingNormalInboxAfterReturn: Boolean
         get() = lifecycle == Lifecycle.RETURN_PENDING || lifecycle == Lifecycle.RETURN_REQUESTED ||
             lifecycle == Lifecycle.INBOX_CONFIRMED
@@ -36,28 +36,24 @@ internal class ReceivedGreetingsTaskController(
 
     fun releaseOwnership(reason: String): Boolean = ownership.release(TASK_ID, reason)
 
-    fun markNavigationStarted() {
-        if (!isActive) lifecycle = Lifecycle.TRAVERSING
-    }
-
+    /** A repeated admission cannot overwrite a pending return. */
     fun markStarted() {
+        if (isActive) return
         returnReason = null
-        lifecycle = Lifecycle.TRAVERSING
+        lifecycle = Lifecycle.ACTIVE
     }
 
     /** Return intent is independent of traversal exhaustion and never releases the lease. */
-    fun requestReturn(reason: ReturnReason): Boolean {
-        if (lifecycle == Lifecycle.TRAVERSING) {
+    fun requestReturn(reason: AiReplyTaskYieldReason): Boolean {
+        if (lifecycle == Lifecycle.ACTIVE) {
             returnReason = reason
             lifecycle = Lifecycle.RETURN_PENDING
         }
         return awaitingNormalInboxAfterReturn && returnReason == reason
     }
 
-    /** Compatibility for the existing exhausted-work decision, not a handoff gate. */
-    fun markTraversalCompleted() {
-        requestReturn(ReturnReason.TRAVERSAL_EXHAUSTED)
-    }
+    /** Exhaustion is a yield reason, never a completed task. */
+    fun requestExhaustedReturn() = requestReturn(AiReplyTaskYieldReason.TRAVERSAL_EXHAUSTED)
 
     /** The adapter accepted a return step; this is not proof of arrival. */
     fun markReturnRequested() {
@@ -69,13 +65,22 @@ internal class ReceivedGreetingsTaskController(
         if (awaitingNormalInboxAfterReturn) lifecycle = Lifecycle.INBOX_CONFIRMED
     }
 
-    fun markTraversalReturnedToInbox() {
-        if (awaitingNormalInboxAfterReturn) reset()
+    /** Only the independently acknowledged destination may retire this return intent. */
+    fun finishVerifiedHandoff(): Boolean {
+        if (!inboxConfirmed) return false
+        lifecycle = Lifecycle.SUSPENDED
+        returnReason = null
+        return true
     }
 
-    /** Pauses this branch for an externally verified business-page handoff without clearing context. */
-    fun pauseForBusinessSwitch() = reset()
+    /** Recovery suspension does not stop the run or erase the external checkpoint. */
+    fun suspendForRecovery() {
+        if (!isActive) return
+        lifecycle = Lifecycle.SUSPENDED
+        returnReason = null
+    }
 
+    /** Explicit run reset only. */
     fun reset() {
         lifecycle = Lifecycle.IDLE
         returnReason = null

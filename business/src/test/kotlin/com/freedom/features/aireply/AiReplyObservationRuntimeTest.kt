@@ -968,7 +968,7 @@ class AiReplyObservationRuntimeTest {
         fixture: PreScrollPageRecoveryFixture,
         snapshot: ChatPageSnapshot = fixture.listPage
     ) {
-        val handoffType = fixture.runtime.javaClass.declaredClasses.single { it.simpleName == "PrivateToGreetingsHandoff" }
+        val handoffType = AiReplyTaskYieldReason::class.java
         val handoff = handoffType.enumConstants.single { (it as Enum<*>).name == "SAFE_SESSION_BOUNDARY" }
         val method = fixture.runtime.javaClass.getDeclaredMethod(
             "startReceivedGreetingsTask", String::class.java, ChatPageSnapshot::class.java, handoffType
@@ -1257,13 +1257,13 @@ class AiReplyObservationRuntimeTest {
     fun l04SafeGreetingYieldRefreshesExhaustedPrivateWithoutPairIdle() {
         val fixture = preScrollPageRecoveryFixture()
         cancelFixtureStartupObservation(fixture)
-        val privateReason = fixture.runtime.javaClass.declaredClasses.single { it.simpleName == "PrivateToGreetingsHandoff" }
+        val privateReason = AiReplyTaskYieldReason::class.java
         val reason = privateReason.enumConstants.single { (it as Enum<*>).name == "TRAVERSAL_EXHAUSTED" }
         val method = fixture.runtime.javaClass.getDeclaredMethod(
             "schedulePairedContinuation", privateReason,
-            ReceivedGreetingsTaskController.ReturnReason::class.java, Boolean::class.javaPrimitiveType!!
+            AiReplyTaskYieldReason::class.java, Boolean::class.javaPrimitiveType!!
         ).apply { isAccessible = true }
-        method.invoke(fixture.runtime, reason, ReceivedGreetingsTaskController.ReturnReason.SAFE_SESSION_BOUNDARY, false)
+        method.invoke(fixture.runtime, reason, AiReplyTaskYieldReason.SAFE_SESSION_BOUNDARY, false)
         assertTrue(fixture.scheduler.hasPendingDelay(0L))
         assertFalse(fixture.logs.any { it.contains("AI Reply 低频待机") })
         assertEquals(0, fixture.dispatchedGestures())
@@ -1278,13 +1278,13 @@ class AiReplyObservationRuntimeTest {
             .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
         executor.lockedUnreadSessionKeys += "pending"
         executor.attemptedSessionKeys += "done"
-        val privateReason = fixture.runtime.javaClass.declaredClasses.single { it.simpleName == "PrivateToGreetingsHandoff" }
+        val privateReason = AiReplyTaskYieldReason::class.java
         val reason = privateReason.enumConstants.single { (it as Enum<*>).name == "DEFERRED_WORK" }
         val method = fixture.runtime.javaClass.getDeclaredMethod(
             "schedulePairedContinuation", privateReason,
-            ReceivedGreetingsTaskController.ReturnReason::class.java, Boolean::class.javaPrimitiveType!!
+            AiReplyTaskYieldReason::class.java, Boolean::class.javaPrimitiveType!!
         ).apply { isAccessible = true }
-        method.invoke(fixture.runtime, reason, ReceivedGreetingsTaskController.ReturnReason.DEFERRED_WORK, false)
+        method.invoke(fixture.runtime, reason, AiReplyTaskYieldReason.DEFERRED_WORK, false)
         assertTrue(fixture.logs.any { it.contains("低频待机") && it.contains("mode=RESUME_PRIVATE") })
         assertEquals(setOf("pending"), executor.lockedUnreadSessionKeys)
         assertEquals(setOf("done"), executor.attemptedSessionKeys)
@@ -1300,10 +1300,10 @@ class AiReplyObservationRuntimeTest {
 
         // The timed round begins after the verified inbox wakeup in production.
         // Recreate an admitted round before any stable read-viewport boundary proof.
-        executor.beginNextPollingRound()
+        executor.renewExhaustedPrivateSelection()
         executor.initialInboxTopPositioningCompleted = true
         executor.initialUnreadGateSwipeCompleted = true
-        assertFalse(executor.fullListPollingRoundRequired)
+        assertFalse(executor.incompleteUnreadRelocationActive)
         assertTrue(executor.lockedUnreadSessionKeys.isEmpty())
         assertFalse(executor.normalInboxHadUnread)
 
