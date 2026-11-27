@@ -74,7 +74,7 @@ internal class AiReplyStartupReadinessCoordinator(
         initializationPending = false
         workAreaConfirmed = true
         cancelRecovery()
-        onLog("AI启动就绪[INITIALIZATION_COMPLETE]：$reason；首个自主手势已收到 Android 完成回调；后续任务由最新页面结构决定")
+        onLog("AI启动就绪[INITIALIZATION_COMPLETE]：$reason；后续任务由最新页面结构决定")
     }
 
     fun markWorkAreaConfirmed() {

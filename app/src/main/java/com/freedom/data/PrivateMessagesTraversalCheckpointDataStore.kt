@@ -25,7 +25,6 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
                 json.readSet("ambiguousSessionIdentityKeys"), json.readList("lastStableVisibleKeys"),
                 json.optString("phase", "POSITIONING_AT_BOTTOM"), json.optBoolean("atTop"),
                 json.optBoolean("initialInboxPositionCheckCompleted"),
-                json.optBoolean("initialInboxTopPositioningCompleted"),
                 json.optBoolean("initialUnreadGateSwipeCompleted"),
                 json.optBoolean("lockedUnreadSetFinalized"), json.optBoolean("normalInboxHadUnread"),
                 json.optBoolean("normalInboxUnreadStateUnknown"), saved,
@@ -54,7 +53,6 @@ internal class PrivateMessagesTraversalCheckpointDataStore(context: Context) : P
             .put("lastStableVisibleKeys", JSONArray(checkpoint.lastStableVisibleKeys.takeLast(MAX_KEYS)))
             .put("phase", checkpoint.phase).put("atTop", checkpoint.atTop)
             .put("initialInboxPositionCheckCompleted", checkpoint.initialInboxPositionCheckCompleted)
-            .put("initialInboxTopPositioningCompleted", checkpoint.initialInboxTopPositioningCompleted)
             .put("initialUnreadGateSwipeCompleted", checkpoint.initialUnreadGateSwipeCompleted)
             .put("lockedUnreadSetFinalized", checkpoint.lockedUnreadSetFinalized)
             .put("normalInboxHadUnread", checkpoint.normalInboxHadUnread)

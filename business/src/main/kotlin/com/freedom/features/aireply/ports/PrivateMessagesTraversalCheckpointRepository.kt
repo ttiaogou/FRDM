@@ -9,7 +9,6 @@ data class PrivateMessagesTraversalCheckpoint(
     val phase: String,
     val atTop: Boolean,
     val initialInboxPositionCheckCompleted: Boolean,
-    val initialInboxTopPositioningCompleted: Boolean,
     /** Legacy serialized name; records confirmed-top unread admission, not a mandatory gesture. */
     val initialUnreadGateSwipeCompleted: Boolean,
     val lockedUnreadSetFinalized: Boolean,

@@ -27,7 +27,6 @@ internal enum class SessionListTraversalPhase {
 /** 高层私聊会话流程状态。执行器持有状态，运行时仅负责调度外部副作用。 */
 internal enum class SessionManagerState {
     STOPPED,
-    POSITIONING_SESSION_LIST_AT_TOP,
     POSITIONING_SESSION_LIST_AT_BOTTOM,
     SCANNING_SESSION_LIST_BOTTOM_TO_TOP,
     WAITING_FOR_SESSION_LIST,
@@ -47,7 +46,6 @@ internal data class PrivateMessagesUnreadEvidence(
 )
 
 internal enum class PrivateMessagesUnreadAdmissionDecision {
-    WAIT_FOR_TOP_CONFIRMATION,
     UNKNOWN_BLOCKED,
     NO_UNREAD,
     CONTINUE_BOTTOM_POSITIONING,
@@ -162,7 +160,6 @@ internal class PrivateMessagesTraversalTaskExecutor {
         phase = phase.name,
         atTop = atTop,
         initialInboxPositionCheckCompleted = initialInboxPositionCheckCompleted,
-        initialInboxTopPositioningCompleted = initialInboxTopPositioningCompleted,
         initialUnreadGateSwipeCompleted = initialUnreadGateSwipeCompleted,
         lockedUnreadSetFinalized = lockedUnreadSetFinalized,
         normalInboxHadUnread = normalInboxHadUnread,
@@ -211,7 +208,6 @@ internal class PrivateMessagesTraversalTaskExecutor {
             .getOrDefault(SessionListTraversalPhase.POSITIONING_AT_BOTTOM)
         atTop = checkpoint.atTop
         initialInboxPositionCheckCompleted = checkpoint.initialInboxPositionCheckCompleted
-        initialInboxTopPositioningCompleted = checkpoint.initialInboxTopPositioningCompleted
         initialUnreadGateSwipeCompleted = checkpoint.initialUnreadGateSwipeCompleted
         lockedUnreadSetFinalized = checkpoint.lockedUnreadSetFinalized
         normalInboxHadUnread = checkpoint.normalInboxHadUnread
@@ -447,10 +443,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
     var atTop: Boolean = false
 
     var initialInboxPositionCheckCompleted: Boolean = false
-    /** True only after the startup list-top boundary has been independently confirmed. */
-    var initialInboxTopPositioningCompleted: Boolean = false
-    // Legacy checkpoint field name: true after unread admission observes the confirmed top.
-    // No gesture completion is required or implied by this flag.
+    // Legacy checkpoint field name: true after unread admission observes the current list.
+    // No initial top proof or gesture completion is required or implied by this flag.
     var initialUnreadGateSwipeCompleted: Boolean = false
 
     val attemptedSessionKeys: MutableSet<String> = LinkedHashSet()
@@ -973,8 +967,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * in the SAME round. Never treat a saved hint as an actionable row or a coordinate.
      */
     fun canBeginIncompleteUnreadRelocation(snapshot: ChatPageSnapshot): Boolean =
-        initialInboxPositionCheckCompleted && initialInboxTopPositioningCompleted &&
-            initialUnreadGateSwipeCompleted && lockedUnreadSetFinalized &&
+        initialInboxPositionCheckCompleted && initialUnreadGateSwipeCompleted && lockedUnreadSetFinalized &&
             phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP && atTop &&
             pendingScrollBaseline == null && pendingBoundaryConfirmationKeys == null &&
             currentSessionKey == null && !identityReturnPending &&
@@ -1230,14 +1223,13 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val scrollDecision = if (allowCollectionTopConfirmation && !viewportPositionInvalidated &&
             !wasWaitingForUnread && !atTop && visibleKeys.isNotEmpty() &&
             (!hadPendingScrollBaseline || wasScrollingToTop) &&
-            (!initialInboxTopPositioningCompleted || phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP) &&
+            phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP && lockedUnreadSetFinalized &&
             collectionBoundaryEvidence(snapshot, toTop = true) == true
         ) PrivateMessagesScrollObservationDecision.TOP_BOUNDARY_CANDIDATE
         else observedScrollDecision
         if (!viewportPositionInvalidated) {
             recordVerifiedViewport(snapshot)
-            if (initialInboxTopPositioningCompleted && !wasWaitingForUnread &&
-                phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+            if (!wasWaitingForUnread && phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
             ) {
                 observeUnreadBlockers(snapshot)
                 reconcileAdmittedUnread(snapshot)
@@ -1247,7 +1239,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         val candidatesEmpty = snapshot.chatListCandidates.isEmpty()
         if (!candidatesEmpty) sessionListStabilityRetryCount = 0
 
-        val unreadAdmissionDecision = if (!viewportPositionInvalidated && initialInboxTopPositioningCompleted && !candidatesEmpty &&
+        val unreadAdmissionDecision = if (!viewportPositionInvalidated && !candidatesEmpty &&
             (phase == SessionListTraversalPhase.POSITIONING_AT_BOTTOM ||
                 phase == SessionListTraversalPhase.SEEKING_UNREAD_BOUNDARY) && !wasWaitingForUnread
         ) {
@@ -1266,7 +1258,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
         // A viewport observation is not a round transition. Keep the previous round's
         // attempted identities intact until the runtime has independently confirmed
         // a fresh inbox and explicitly calls renewExhaustedPrivateSelection().
-        val nextCandidate = if (!viewportPositionInvalidated && initialInboxTopPositioningCompleted &&
+        val nextCandidate = if (!viewportPositionInvalidated &&
+            phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP && lockedUnreadSetFinalized &&
             !wasWaitingForUnread && !candidatesEmpty && !snapshot.chatListExtractionTruncated &&
             (!incompleteUnreadEvidenceBlocked || incompleteUnreadAllowsIndependentTraversal) &&
             (!normalInboxUnreadStateUnknown || canContinueWithUnknownUnread(snapshot)) &&
@@ -1364,11 +1357,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
                     row.unreadEvidenceSource == com.freedom.features.aireply.ports.ChatUnreadEvidenceSource.NONE &&
                     row.unreadNodeEvidence.isEmpty()))
 
-    /** Admit the current confirmed-top snapshot itself; no compulsory swipe. */
+    /** Admit the current verified viewport; search the READ suffix before returning upward. */
     fun evaluateUnreadAdmission(snapshot: ChatPageSnapshot): PrivateMessagesUnreadAdmissionDecision {
-        if (!initialInboxTopPositioningCompleted) {
-            return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_TOP_CONFIRMATION
-        }
         initialUnreadGateSwipeCompleted = true
         val unknownBlocked = observeUnreadBlockers(snapshot)
         reconcileAdmittedUnread(snapshot)
@@ -1491,8 +1481,8 @@ internal class PrivateMessagesTraversalTaskExecutor {
             lockedUnreadSetFinalized = true
         }
         resetUnreadBoundaryObservation()
-        // A no-work handoff is possible only at the verified top, after the same
-        // full-read viewport proof used by a non-empty unread round.
+        // A no-work handoff is possible only at the independently verified top.
+        // A READ suffix in the middle is a scan origin, never exhaustion.
         if (atTop && lockedUnreadSessionKeys.isEmpty() && !normalInboxHadUnread &&
             !hasPendingRoundWork() && snapshot.chatListCandidates.none { canRecoverInterruptedRow(snapshot, it) }
         ) return PrivateMessagesUnreadAdmissionDecision.NO_UNREAD
@@ -1711,7 +1701,6 @@ internal class PrivateMessagesTraversalTaskExecutor {
         phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
         atTop = false
         initialInboxPositionCheckCompleted = false
-        initialInboxTopPositioningCompleted = false
         initialUnreadGateSwipeCompleted = false
         attemptedSessionKeys.clear()
         unfinishedSessions.clear()
@@ -1796,7 +1785,6 @@ internal class PrivateMessagesTraversalTaskExecutor {
         }
         capturedSessionListFingerprints.clear()
         initialInboxPositionCheckCompleted = false
-        initialInboxTopPositioningCompleted = false
         initialUnreadGateSwipeCompleted = false
         pendingBoundaryConfirmationKeys = null
         pendingBoundaryConfirmationToTop = false

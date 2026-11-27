@@ -29,7 +29,6 @@ class MessageListCheckpointVerificationTest {
         phase = "SCANNING_BOTTOM_TO_TOP",
         atTop = false,
         initialInboxPositionCheckCompleted = true,
-        initialInboxTopPositioningCompleted = true,
         initialUnreadGateSwipeCompleted = true,
         lockedUnreadSetFinalized = true,
         normalInboxHadUnread = false,
