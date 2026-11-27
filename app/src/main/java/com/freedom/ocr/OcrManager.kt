@@ -31,6 +31,10 @@ data class OcrLineResult(
     val points: List<Pair<Float, Float>>,
 )
 
+/** Exact typed Binder signal; never infer timeout from arbitrary exception text. */
+internal fun isNativeInferenceTimeoutSignal(failure: Exception): Boolean =
+    failure is IllegalStateException && failure.message == OcrPluginContract.INFERENCE_TIMEOUT_SIGNAL
+
 /**
  * Freedom's OCR entry point and owner of the process-wide plugin Binder connection.
  * Startup preflight and real OCR calls share this instance so preflight does not immediately unbind
@@ -517,7 +521,9 @@ class OcrManager(context: android.content.Context) : Closeable {
             this,
             OcrPluginFailureKind.REMOTE_CALL_FAILED,
         )
-        else -> OcrPluginException(
+        else -> if (isNativeInferenceTimeoutSignal(this)) {
+            OcrPluginException("OCR 单张推理已超过期限；插件已退出本次调用", this, OcrPluginFailureKind.OCR_TIMEOUT)
+        } else OcrPluginException(
             "OCR 插件调用失败：${message ?: javaClass.simpleName}",
             this,
             OcrPluginFailureKind.UNKNOWN,

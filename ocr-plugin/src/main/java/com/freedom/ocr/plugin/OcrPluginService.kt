@@ -13,6 +13,7 @@ import com.freedom.ocr.plugin.model.OcrModelManager
 import com.freedom.ocr.plugin.runtime.OcrEngineHolder
 import com.freedom.ocr.plugin.runtime.OcrImageFdDecoder
 import com.paddle.ocr.model.OCRRunResult
+import com.paddle.ocr.engine.OcrInferenceTimeout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.autojs.plugin.common.api.PluginCapabilityKeys
@@ -87,6 +88,10 @@ class OcrPluginService : Service() {
                 return results
             } catch (failure: Throwable) {
                 logFailure(requestId, "REQUEST", failure, SystemClock.elapsedRealtime() - requestStartedAt)
+                if (failure is OcrInferenceTimeout) {
+                    // Parcel supports IllegalStateException across the existing AIDL interface.
+                    throw IllegalStateException(OcrPluginContract.INFERENCE_TIMEOUT_SIGNAL)
+                }
                 throw failure
             } finally {
                 if (!bitmap.isRecycled) bitmap.recycle()
@@ -245,7 +250,7 @@ class OcrPluginService : Service() {
             val inferenceStartedAt = SystemClock.elapsedRealtime()
             return traceStage(requestId, "INFERENCE", "image=${bitmap.width}x${bitmap.height}") {
                 runBlocking(Dispatchers.IO) {
-                    acquisition.engine.recognize(bitmap, acquisition.detMaxSideLimit)
+                    acquisition.engine.recognize(bitmap, acquisition.detMaxSideLimit, requestId)
                 }
             }.let { result ->
                 timings?.put(OcrPluginContract.EXTRA_INFERENCE_WALL_TIME_MS, SystemClock.elapsedRealtime() - inferenceStartedAt)

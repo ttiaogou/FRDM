@@ -73,11 +73,11 @@ class PaddleOCR private constructor(
     }
 
     // Freedom adaptation: per-image resize limit, without rebuilding the ONNX sessions.
-    suspend fun recognize(bitmap: Bitmap, detMaxSideLimit: Int? = null): OCRRunResult {
+    suspend fun recognize(bitmap: Bitmap, detMaxSideLimit: Int? = null, requestId: String = "sdk-bitmap"): OCRRunResult {
         if (bitmap.width == 0 || bitmap.height == 0) {
             throw OCRError.InvalidImage()
         }
-        return recognizeResult { engine.run(bitmap, detMaxSideLimit) }
+        return recognizeResult { engine.run(bitmap, detMaxSideLimit, requestId) }
     }
 
     suspend fun recognize(imageBytes: ByteArray): OCRRunResult {

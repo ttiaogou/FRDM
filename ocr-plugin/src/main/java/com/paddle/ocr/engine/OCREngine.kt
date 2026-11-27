@@ -52,25 +52,28 @@ class OCREngine(
     }
 
     // Freedom adaptation: only the request's detection resize limit changes here.
-    fun run(bitmap: Bitmap, detMaxSideLimit: Int? = null): OCREngineResult {
-        val srcMat = BitmapUtils.bitmapToBGRMat(bitmap)
-        return runWithOwnedMat(srcMat, detMaxSideLimit ?: config.detMaxSideLimit)
-    }
-
-    fun run(imageBytes: ByteArray): OCREngineResult {
-        val srcMat = BitmapUtils.imdecodeBGR(imageBytes)
-        if (srcMat.empty()) {
-            srcMat.release()
-            throw OCRError.InvalidImage()
+    fun run(bitmap: Bitmap, detMaxSideLimit: Int? = null, requestId: String = "sdk-bitmap"): OCREngineResult =
+        ortManager.withInferenceDeadline(requestId) {
+            val srcMat = BitmapUtils.bitmapToBGRMat(bitmap)
+            runWithOwnedMat(srcMat, detMaxSideLimit ?: config.detMaxSideLimit)
         }
-        return runWithOwnedMat(srcMat)
-    }
+
+    fun run(imageBytes: ByteArray): OCREngineResult =
+        ortManager.withInferenceDeadline("sdk-bytes") {
+            val srcMat = BitmapUtils.imdecodeBGR(imageBytes)
+            if (srcMat.empty()) {
+                srcMat.release()
+                throw OCRError.InvalidImage()
+            }
+            runWithOwnedMat(srcMat)
+        }
 
     private fun runWithOwnedMat(
         srcMat: org.opencv.core.Mat,
         detMaxSideLimit: Int = config.detMaxSideLimit,
     ): OCREngineResult {
         return try {
+            ortManager.checkInferenceDeadline()
             run(srcMat, detMaxSideLimit)
         } finally {
             srcMat.release()
@@ -80,6 +83,7 @@ class OCREngine(
     private fun run(srcMat: org.opencv.core.Mat, detMaxSideLimit: Int): OCREngineResult {
         val totalStart = System.currentTimeMillis()
         val detResult = detectionEngine.detect(srcMat, detMaxSideLimit)
+        ortManager.checkInferenceDeadline()
         val boxes = detResult.boxes
 
         if (boxes.isEmpty()) {
@@ -113,6 +117,7 @@ class OCREngine(
 
         var i = 0
         while (i < sortedBoxes.size) {
+            ortManager.checkInferenceDeadline()
             val batchCrops = mutableListOf<org.opencv.core.Mat>()
             val batchBoxIndices = mutableListOf<Int>()
             var next = i
@@ -128,8 +133,10 @@ class OCREngine(
             }
 
             try {
+                ortManager.checkInferenceDeadline()
                 if (batchCrops.isNotEmpty()) {
                     val batchResult = recognitionEngine.recognize(batchCrops)
+                    ortManager.checkInferenceDeadline()
                     totalRecPreMs += batchResult.preprocessMs
                     totalRecInfMs += batchResult.inferenceMs
                     totalRecPostMs += batchResult.postprocessMs

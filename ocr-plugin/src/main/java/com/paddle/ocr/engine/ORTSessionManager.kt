@@ -12,6 +12,8 @@ import com.paddle.ocr.EngineConfig
 import com.paddle.ocr.model.OCRError
 import java.io.File
 import java.nio.FloatBuffer
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 /** PaddleOCR ONNX session manager with support for app-private external model files. */
 class ORTSessionManager(
@@ -23,6 +25,58 @@ class ORTSessionManager(
     private var recSession: OrtSession? = null
     private var detInputName: String = "x"
     private var recInputName: String = "x"
+
+    // Accessed by the synchronous inference owner only. The watchdog holds its own token/options.
+    private data class RequestScope(
+        val requestId: String,
+        val options: OrtSession.RunOptions,
+        val deadline: OcrInferenceDeadline,
+    )
+
+    private var activeRequest: RequestScope? = null
+
+    internal fun <T> withInferenceDeadline(requestId: String, run: () -> T): T {
+        check(activeRequest == null) { "OCR engine already has an inference owner" }
+        val options = OrtSession.RunOptions()
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = OcrInferenceDeadline(SystemClock::elapsedRealtime, {
+            Log.w("FreedomOcrEngine", "OCR_INFERENCE_DEADLINE requestId=$requestId;phase=TERMINATION_REQUESTED;budgetMs=${OcrInferenceDeadline.HOT_INFERENCE_BUDGET_MS}")
+            val termination = runCatching { options.setTerminate(true) }
+            Log.w("FreedomOcrEngine", "OCR_INFERENCE_DEADLINE requestId=$requestId;phase=TERMINATION_SIGNAL;accepted=${termination.isSuccess};type=${termination.exceptionOrNull()?.javaClass?.simpleName ?: "NONE"}")
+        })
+        val scope = RequestScope(requestId, options, deadline)
+        activeRequest = scope
+        try {
+            val watchdog = DEADLINE_WATCHDOG.schedule(
+                { deadline.requestTerminationIfDue() },
+                OcrInferenceDeadline.HOT_INFERENCE_BUDGET_MS,
+                TimeUnit.MILLISECONDS,
+            )
+            try {
+                val result = run()
+                // A late success must never publish even if native code ignored termination.
+                deadline.complete()
+                return result
+            } catch (failure: Throwable) {
+                // Preserve a typed timeout rather than reporting it as an ordinary retryable error.
+                deadline.checkActive()
+                throw failure
+            } finally {
+                // This executes only after the synchronous pipeline actually exits.
+                deadline.retire()
+                watchdog.cancel(false)
+            }
+        } finally {
+            deadline.retire()
+            activeRequest = null
+            options.close()
+            Log.i("FreedomOcrEngine", "OCR_INFERENCE_DEADLINE requestId=$requestId;phase=REQUEST_EXITED;durationMs=${SystemClock.elapsedRealtime() - startedAt}")
+        }
+    }
+
+    internal fun checkInferenceDeadline() {
+        checkNotNull(activeRequest) { "OCR inference requires a request deadline" }.deadline.checkActive()
+    }
     var coldLoadTimeMs: Long = 0
         private set
 
@@ -126,6 +180,8 @@ class ORTSessionManager(
         shape: LongArray,
         modelName: String,
     ): Pair<FloatArray, LongArray> {
+        val scope = checkNotNull(activeRequest) { "Native inference requires a request deadline" }
+        scope.deadline.checkActive()
         val tensor = try {
             OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(input), shape)
         } catch (t: Throwable) {
@@ -133,8 +189,16 @@ class ORTSessionManager(
         }
         val result = try {
             try {
-                session.run(mapOf(inputName to tensor))
+                scope.deadline.checkActive()
+                val nativeStartedAt = SystemClock.elapsedRealtime()
+                Log.i("FreedomOcrEngine", "OCR_NATIVE_RUN requestId=${scope.requestId};model=$modelName;phase=START")
+                try {
+                    session.run(mapOf(inputName to tensor), scope.options)
+                } finally {
+                    Log.i("FreedomOcrEngine", "OCR_NATIVE_RUN requestId=${scope.requestId};model=$modelName;phase=EXITED;durationMs=${SystemClock.elapsedRealtime() - nativeStartedAt}")
+                }
             } catch (t: Throwable) {
+                scope.deadline.checkActive()
                 throw OCRError.InferenceFailed(modelName, t)
             }
         } finally {
@@ -142,18 +206,28 @@ class ORTSessionManager(
         }
         return try {
             try {
+                scope.deadline.checkActive()
                 val outputName = session.outputNames.iterator().next()
                 val ortValue = result.get(outputName)
                     .orElseThrow { Exception("No output tensor found") }
                 val outputTensor = ortValue as? OnnxTensor
                     ?: throw Exception("Output is not an ONNX tensor")
                 Pair(copyFloatBuffer(outputTensor.floatBuffer), outputTensor.info.shape)
+                    .also { scope.deadline.checkActive() }
             } catch (t: Throwable) {
+                scope.deadline.checkActive()
                 throw OCRError.InferenceFailed(modelName, t)
             }
         } finally {
             result.close()
         }
+    }
+
+    companion object {
+        // One lightweight watchdog, not another inference worker; cancelled tasks are removed.
+        private val DEADLINE_WATCHDOG = ScheduledThreadPoolExecutor(1) { runnable ->
+            Thread(runnable, "Freedom-OCR-Deadline").apply { isDaemon = true }
+        }.apply { removeOnCancelPolicy = true }
     }
 
     private fun copyFloatBuffer(buffer: FloatBuffer): FloatArray {
