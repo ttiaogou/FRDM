@@ -4,8 +4,10 @@ import com.freedom.core.accessibility.gesture.VerticalSwipeDirection
 
 /**
  * Controls a bounded, two-direction sweep of the ordinary Message list when the received-
- * greetings entry is not present in the current viewport. A successful gesture is compared with
- * the next fresh viewport fingerprint; two successful no-motion observations confirm one edge.
+ * greetings entry is not present in the current viewport. The run-local inbox observation
+ * selects the initial direction only; a missing or stale hint defaults to later rows.
+ * A successful gesture is compared with the next fresh viewport fingerprint; two successful
+ * no-motion observations confirm one edge. The opposite direction is then swept once.
  */
 internal class MomoReceivedGreetingsEntrySearchController(
     private val unchangedObservationsToConfirmBoundary: Int = 2
@@ -31,14 +33,25 @@ internal class MomoReceivedGreetingsEntrySearchController(
     }
 
     @Synchronized
-    fun start() {
+    fun start(initialPosition: MomoReceivedGreetingsEntryPosition = MomoReceivedGreetingsEntryPosition.UNKNOWN): Boolean {
+        if (initialPosition == MomoReceivedGreetingsEntryPosition.VISIBLE) {
+            // A visible entry must go through the independent fresh-target tap policy.
+            reset()
+            return false
+        }
         searchGeneration++
         active = true
-        direction = VerticalSwipeDirection.UP
+        // UP/DOWN describe finger movement, not list-content direction.
+        direction = if (initialPosition == MomoReceivedGreetingsEntryPosition.ABOVE) {
+            VerticalSwipeDirection.DOWN
+        } else {
+            VerticalSwipeDirection.UP
+        }
         reversed = false
         unchangedCount = 0
         pendingBaseline = null
         complete = false
+        return true
     }
 
     @Synchronized
@@ -91,7 +104,11 @@ internal class MomoReceivedGreetingsEntrySearchController(
         unchangedCount = 0
         if (!reversed) {
             reversed = true
-            direction = VerticalSwipeDirection.DOWN
+            direction = if (direction == VerticalSwipeDirection.UP) {
+                VerticalSwipeDirection.DOWN
+            } else {
+                VerticalSwipeDirection.UP
+            }
             return Observation.REVERSED
         }
         complete = true

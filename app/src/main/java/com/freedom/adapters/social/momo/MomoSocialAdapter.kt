@@ -1347,6 +1347,8 @@ internal class MomoSocialAdapter(
     override fun beginReceivedGreetingsNavigationTask() {
         completionBackStage = CompletionBackStage.NONE
         completionBackRetryGate.reset()
+        // The run-local inbox position memory survives this task handoff; only the
+        // previous navigation sweep is retired. The next live inbox read revalidates it.
         resetReceivedGreetingsEntrySearch()
         sayHiTraversalState.prepareForListReentry()
     }
@@ -2129,12 +2131,25 @@ internal class MomoSocialAdapter(
             return true
         }
         val windowIdentity = "${expectedWindow.packageName}|${expectedWindow.windowId}|${expectedWindow.generation}"
-        if (!receivedGreetingsEntrySearchController.isActive() || receivedGreetingsEntrySearchWindowIdentity != windowIdentity) {
-            receivedGreetingsEntrySearchController.start()
+        // inspectChatPage() already revalidated the shared run-local memory using this fresh
+        // ordinary-inbox observation. A task handoff resets only search progress, not the hint.
+        // Never infer an action from the handoff's previous snapshot or saved tap coordinates.
+        val entryPosition = receivedGreetingsEntryPositionMemory.position
+        if (entryPosition == MomoReceivedGreetingsEntryPosition.VISIBLE ||
+            !receivedGreetingsEntrySearchController.isActive() || receivedGreetingsEntrySearchWindowIdentity != windowIdentity
+        ) {
+            if (!receivedGreetingsEntrySearchController.start(entryPosition)) {
+                receivedGreetingsEntrySearchWindowIdentity = ""
+                onLog("收到的招呼入口搜索[VISIBLE_RECHECK]：最新列表观察已见入口；不滑过入口，等待现有双快照安全点击复核")
+                return true
+            }
             receivedGreetingsEntrySearchWindowIdentity = windowIdentity
+            val initialDirection = receivedGreetingsEntrySearchController.direction()
             onLog(
                 "收到的招呼入口搜索开始：已确认普通消息列表窗口=$windowIdentity；" +
-                    "当前视口未见唯一入口标签；先向列表后续区域搜索，再反向复核全列表"
+                    "position=${entryPosition.name}；initialSwipe=${initialDirection.name}；" +
+                    "initialListDirection=${if (initialDirection == VerticalSwipeDirection.DOWN) "TOWARD_START" else "TOWARD_END"}；" +
+                    "当前方向到达边界仍未发现时，再反向复核全列表"
             )
         }
 
@@ -2188,7 +2203,7 @@ internal class MomoSocialAdapter(
             description = if (direction == VerticalSwipeDirection.UP) {
                 "收到的招呼入口搜索：沿普通消息列表向后续区域安全滚动"
             } else {
-                "收到的招呼入口搜索：反向复核普通消息列表前序区域"
+                "收到的招呼入口搜索：沿普通消息列表向前序区域安全滚动"
             },
             executionContext = executionContext
         )

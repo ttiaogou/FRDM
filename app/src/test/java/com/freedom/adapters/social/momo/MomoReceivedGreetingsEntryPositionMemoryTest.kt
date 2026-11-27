@@ -4,6 +4,7 @@ import com.freedom.core.accessibility.api.NodePath
 import com.freedom.core.accessibility.api.NodeTarget
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.accessibility.api.WindowRef
+import com.freedom.core.accessibility.gesture.VerticalSwipeDirection
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatNodeTextSource
 import com.freedom.features.aireply.ports.ChatPageKind
@@ -22,6 +23,36 @@ class MomoReceivedGreetingsEntryPositionMemoryTest {
         assertEquals(MomoReceivedGreetingsEntryPosition.ABOVE, memory.observe(detail))
         assertEquals(MomoReceivedGreetingsEntryPosition.ABOVE, memory.observe(page("B", "C", "D", "E", generation = 2L)))
         assertEquals(MomoReceivedGreetingsEntryPosition.ABOVE, memory.observe(page("D", "E", "F", "G", generation = 2L)))
+    }
+
+    @Test
+    fun privateTraversalHintSurvivesSearchResetAndSelectsEarlierRowsAfterFreshReturn() {
+        val search = MomoReceivedGreetingsEntrySearchController()
+        memory.observe(page("A", ENTRY, "B", "C"))
+        memory.observe(page("B", "C", "D", "E"))
+        memory.observe(page("B", "C", "D", "E").copy(pageKind = ChatPageKind.CHAT_DETAIL_CANDIDATE))
+        // The existing cross-task handoff resets the navigation controller, not the run memory.
+        search.reset()
+        val fresh = memory.observe(page("B", "C", "D", "E", generation = 2L))
+        assertEquals(MomoReceivedGreetingsEntryPosition.ABOVE, fresh)
+        assertEquals(true, search.start(fresh))
+        assertEquals(VerticalSwipeDirection.DOWN, search.direction())
+    }
+
+    @Test
+    fun noEntryObservedBeforeHandoffStartsTowardLaterRowsAndInvalidatedHintAlsoFallsBack() {
+        val search = MomoReceivedGreetingsEntrySearchController()
+        memory.observe(page("A", "B", "C", "D"))
+        val unknown = memory.observe(page("C", "D", "E", "F"))
+        assertEquals(true, search.start(unknown))
+        assertEquals(VerticalSwipeDirection.UP, search.direction())
+        memory.observe(page("A", ENTRY, "B", "C"))
+        memory.observe(page("B", "C", "D", "E"))
+        search.reset()
+        val disjoint = memory.observe(page("W", "X", "Y", "Z"))
+        assertEquals(MomoReceivedGreetingsEntryPosition.UNKNOWN, disjoint)
+        assertEquals(true, search.start(disjoint))
+        assertEquals(VerticalSwipeDirection.UP, search.direction())
     }
 
     @Test
