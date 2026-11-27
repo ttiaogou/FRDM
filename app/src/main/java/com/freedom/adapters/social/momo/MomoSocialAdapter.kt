@@ -7542,8 +7542,6 @@ internal class MomoSocialAdapter(
         onLog("IDENTITY_VERIFICATION result=${result.name}；reason=$reason；cacheWrite=$cacheWrite；nextAction=$nextAction；anchorHash=${anchorKey.take(12)}")
     }
 
-    private fun localNodeId(viewId: String): String = viewId.substringAfterLast('/')
-
     private fun completePendingInboxIdentityBinding(
         pending: PendingInboxIdentityCapture,
         identityVerified: Boolean

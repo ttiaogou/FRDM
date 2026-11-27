@@ -61,7 +61,6 @@ internal class AndroidAccountBrowseWorkflow(
     private val targetPackage: () -> String,
     private val monitorPageContext: () -> String,
     private val onLog: (String) -> Unit,
-    private val onRequestScreenOff: () -> Boolean = { false },
     private val pageObservationCoordinator: PageObservationCoordinator,
     private val accountBrowseCheckpointRepository: AccountBrowseCheckpointRepository? = null,
     private val recoveryScheduleRepository: RecoveryScheduleRepository? = null,

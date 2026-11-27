@@ -17,7 +17,6 @@ import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
 import com.freedom.adapters.accessibility.android.NodeHierarchyOverlay
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.accessibility.api.UnifiedAccessibilityEvent
-import com.freedom.core.accessibility.api.GlobalAccessibilityAction
 import com.freedom.core.accessibility.api.AccessibilityTreeLimits
 import com.freedom.core.accessibility.api.NodePath
 import com.freedom.core.accessibility.api.NodeTextCapture
@@ -42,13 +41,11 @@ class FreedomAccessibilityService : AccessibilityService() {
             mainHandler = mainHandler,
             addLog = ::addLog,
             dp = ::dp,
-            requestScreenOff = ::requestScreenOff,
             refreshViews = ::refreshViews
         )
     }
     private val monitorRepository get() = dependencies.monitorRepository
     private val diagnostics get() = dependencies.diagnostics
-    private val appLabelResolver get() = dependencies.appLabelResolver
     private val inputOriginClassifier get() = dependencies.inputOriginClassifier
     private val touchInteractionMonitor get() = dependencies.touchInteractionMonitor
     private val monitorLogPresenter get() = dependencies.monitorLogPresenter
@@ -59,23 +56,16 @@ class FreedomAccessibilityService : AccessibilityService() {
     private val accessibilityGateway get() = dependencies.accessibilityGateway
     private val gestureVisualizerDelegate get() = dependencies.gestureVisualizerDelegate
     private val gestureVisualizer get() = dependencies.gestureVisualizer
-    private val gestureSettingsRepository get() = dependencies.gestureSettingsRepository
     private val gestureRuntimeDelegate get() = dependencies.gestureRuntimeDelegate
     private val gestureRuntime get() = dependencies.gestureRuntime
-    private val gesturePolicy get() = dependencies.gesturePolicy
-    private val taskScheduler get() = dependencies.taskScheduler
     private val overlayPort get() = dependencies.overlayPort
     private val globalNodeLayoutVisualizationUseCase get() = dependencies.globalNodeLayoutVisualizationUseCase
     private val momoSocialAdapterDelegate get() = dependencies.momoSocialAdapterDelegate
     private val momoSocialAdapter get() = dependencies.momoSocialAdapter
     private val unifiedAccessibilityEntry get() = dependencies.unifiedAccessibilityEntry
-    private val accountBrowseWorkflow get() = dependencies.accountBrowseWorkflow
-    private val accountBrowseRuntimeAdapter get() = dependencies.accountBrowseRuntimeAdapter
-    private val monitorSnapshotRepository get() = dependencies.monitorSnapshotRepository
     private val accessibilityTreePreviewUseCase get() = dependencies.accessibilityTreePreviewUseCase
     private val monitorPreviewSchedulerDelegate get() = dependencies.monitorPreviewSchedulerDelegate
     private val monitorPreviewScheduler get() = dependencies.monitorPreviewScheduler
-    private val gestureCalibrationHost get() = dependencies.gestureCalibrationHost
     private val gestureCalibrationController get() = dependencies.gestureCalibrationController
     private val serviceReceiverRegistryDelegate get() = dependencies.serviceReceiverRegistryDelegate
     private val serviceReceiverRegistry get() = dependencies.serviceReceiverRegistry
@@ -514,9 +504,6 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()
-
-    private fun requestScreenOff(): Boolean =
-        accessibilityGateway.performGlobalAction(GlobalAccessibilityAction.LOCK_SCREEN)
 
     private fun addLog(message: String) {
         monitorLogPresenter.addLog(message)

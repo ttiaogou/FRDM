@@ -258,7 +258,6 @@ class AppCompositionRoot(context: Context) {
         mainHandler: Handler,
         addLog: (String) -> Unit,
         dp: (Int) -> Int,
-        requestScreenOff: () -> Boolean,
         refreshViews: () -> Unit
     ): AccessibilityServiceDependencies = AccessibilityServiceDependencies(
         root = this,
@@ -266,7 +265,6 @@ class AppCompositionRoot(context: Context) {
         mainHandler = mainHandler,
         addLog = addLog,
         dp = dp,
-        requestScreenOff = requestScreenOff,
         refreshViews = refreshViews
     )
 }
@@ -293,7 +291,6 @@ internal class AccessibilityServiceDependencies internal constructor(
     private val mainHandler: Handler,
     private val addLog: (String) -> Unit,
     private val dp: (Int) -> Int,
-    private val requestScreenOff: () -> Boolean,
     private val refreshViews: () -> Unit
 ) {
     val monitorRepository: MonitorControlRepository = root.monitorRepository
@@ -878,7 +875,6 @@ internal class AccessibilityServiceDependencies internal constructor(
                 "当前识别应用=${snapshot.appLabel}；当前识别页面=${snapshot.pageLabel}"
             },
             onLog = addLog,
-            onRequestScreenOff = requestScreenOff,
             pageObservationCoordinator = pageObservationCoordinator,
             accountBrowseCheckpointRepository = root.accountBrowseCheckpointRepository,
             recoveryScheduleRepository = root.recoveryScheduleRepository,
