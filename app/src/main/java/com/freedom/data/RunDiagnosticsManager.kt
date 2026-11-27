@@ -102,6 +102,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
     private val runsDirectory = File(rootDirectory, "runs")
     private val incidentHistory = RunIncidentHistoryStore(File(rootDirectory, RunIncidentHistoryStore.DIRECTORY))
     private val markerFile = File(rootDirectory, MARKER_FILE)
+    private val historyLock = Any()
     private val finishScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "Freedom-RunDiagnosticsFinish").apply { isDaemon = true }
     }
@@ -136,7 +137,6 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
     override fun awaitFinalizedRun(runId: String, timeoutMillis: Long): Boolean {
         if (!isSafeRunId(runId)) return false
         val report = File(File(runsDirectory, runId), "diagnostic_report.txt")
-        if (report.isFile) return true
         val (state, shouldRequestFinalization) = synchronized(this) {
             val active = activeRun?.takeIf { it.runId == runId }
             val finalizing = finalizingRun?.takeIf { it.runId == runId }
@@ -151,6 +151,14 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             .getOrDefault(false)
         if (!completed) return false
         return report.isFile
+    }
+
+    override fun withSealedHistoryForExport(copy: (Set<String>) -> Unit) {
+        synchronized(historyLock) {
+            // No task is stopped for export. Skip active/finalizing directories, and
+            // serialize the copy with history retention rather than the event writer lock.
+            copy(setOfNotNull(activeRun?.runId, finalizingRun?.runId))
+        }
     }
 
     private fun isSafeRunId(value: String): Boolean =
@@ -420,8 +428,8 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
                 reason = reason
             )
             state.acceptedEvents++
-            activeRun = null
             finalizingRun = state
+            activeRun = null
             finalizationPending = true
         }
         val finalize = Runnable {
@@ -1202,7 +1210,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         }
     }
 
-    private fun pruneHistory(protectedRunId: String) {
+    private fun pruneHistory(protectedRunId: String): Unit = synchronized(historyLock) {
         val directories = runsDirectory.listFiles().orEmpty()
             .filter { it.isDirectory }
             .sortedBy { File(it, "diagnostic_report.json").lastModified().takeIf { time -> time > 0L } ?: it.lastModified() }

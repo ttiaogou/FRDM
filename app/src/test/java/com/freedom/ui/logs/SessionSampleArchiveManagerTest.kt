@@ -310,6 +310,77 @@ class SessionSampleArchiveManagerTest {
         }
     }
 
+    @Test
+    fun logOnlyBundleIncludesUnpairedSealedAndRetainedRunsButExcludesActiveHistory() {
+        val directory = Files.createTempDirectory("freedom-log-only-export").toFile()
+        try {
+            val runs = File(directory, "freedom_diagnostics/runs").apply { mkdirs() }
+            val sealed = File(runs, "normal-run").apply { mkdirs() }
+            File(sealed, "diagnostic_manifest.json").writeText("{}")
+            File(sealed, "events.jsonl").writeText("normal evidence")
+            val active = File(runs, "active-run").apply { mkdirs() }
+            File(active, "diagnostic_manifest.json").writeText("{}")
+            File(active, "events.jsonl").writeText("not sealed")
+            val retained = File(runs.parentFile, "incident_history/retained-run").apply { mkdirs() }
+            File(retained, "incident_retention.json").writeText("{}")
+            File(retained, "incidents/incident-1").mkdirs()
+            File(retained, "incidents/incident-1/transaction.json").writeText("""{"state":"UNRESOLVED"}""")
+            val destination = File(directory, "logs.zip")
+            SessionSampleArchiveManager.createExportBundle(
+                emptyList(), runs, destination, includeAllDiagnostics = true,
+                recentLogText = "recent display", withSealedHistory = { copy -> copy(setOf("active-run")) }
+            )
+            ZipFile(destination).use { zip ->
+                assertTrue(zip.getEntry("diagnostics/normal-run/events.jsonl") != null)
+                assertTrue(zip.getEntry("diagnostics/active-run/events.jsonl") == null)
+                assertTrue(zip.getEntry("diagnostics/retained-run/incidents/incident-1/transaction.json") != null)
+                assertEquals("recent display", zip.getInputStream(zip.getEntry("recent-display.txt")).bufferedReader().use { it.readText() })
+                val manifest = zip.getInputStream(zip.getEntry("EXPORT-MANIFEST.txt")).bufferedReader().use { it.readText() }
+                assertTrue(manifest.contains("运行尚未封存，本次未打包"))
+            }
+            assertTrue(File(sealed, "events.jsonl").isFile)
+            assertTrue(File(retained, "incidents/incident-1/transaction.json").isFile)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun allHistoryExportDeduplicatesIdenticalIncidentCopiesAndPreservesDifferentEvidence() {
+        val directory = Files.createTempDirectory("freedom-incident-export-dedup").toFile()
+        try {
+            val runs = File(directory, "freedom_diagnostics/runs").apply { mkdirs() }
+            val history = File(runs.parentFile, "incident_history").apply { mkdirs() }
+            for (id in listOf("same-run", "different-run")) {
+                val primary = File(runs, id).apply { mkdirs() }
+                val retained = File(history, id).apply { mkdirs() }
+                File(primary, "diagnostic_manifest.json").writeText("{}")
+                File(primary, "events.jsonl").writeText("canonical")
+                File(primary, "event_segments").mkdirs()
+                File(primary, "event_segments/normal-1.jsonl").writeText("duplicate")
+                File(retained, "incident_retention.json").writeText("{}")
+                for (source in listOf(primary, retained)) {
+                    File(source, "incidents/incident-1").mkdirs()
+                    File(source, "incidents/incident-1/transaction.json").writeText("original")
+                }
+                if (id == "different-run") {
+                    File(retained, "incidents/incident-1/transaction.json").writeText("independent")
+                }
+            }
+            val destination = File(directory, "logs.zip")
+            SessionSampleArchiveManager.createExportBundle(emptyList(), runs, destination, includeAllDiagnostics = true)
+            ZipFile(destination).use { zip ->
+                assertTrue(zip.getEntry("diagnostics/same-run/incidents/incident-1/transaction.json") != null)
+                assertTrue(zip.getEntry("incident_history/same-run/incidents/incident-1/transaction.json") == null)
+                assertTrue(zip.getEntry("incident_history/different-run/incidents/incident-1/transaction.json") != null)
+                assertTrue(zip.getEntry("diagnostics/same-run/event_segments/normal-1.jsonl") == null)
+                assertTrue(zip.getEntry("diagnostics/same-run/events.jsonl") != null)
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
     private fun createRunArchive(
         directory: File,
         fileName: String,

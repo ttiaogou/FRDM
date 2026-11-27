@@ -509,15 +509,16 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     private fun addLog(message: String) {
         monitorLogPresenter.addLog(message)
-        // Keep the AI collection ZIP self-contained: archive the same monitor log content
-        // only while its run directory is open. Do not initialize the social adapter merely to log.
+        // Only unpaired legacy sample runs need a local JSONL fallback. Paired runs
+        // reference the canonical diagnostics store; never initialize the adapter merely to log.
         if (momoSocialAdapterDelegate.isInitialized()) {
             runCatching { momoSocialAdapter.recordRuntimeLog(message) }
         }
     }
 
     private fun addDiagnosticLog(input: RunDiagnosticInput) {
-        // One canonical event; the existing display/sample projections remain until L11-F.
+        // One canonical event. The monitor is a bounded display projection; the sample
+        // store accepts only the unpaired-run compatibility fallback.
         monitorRepository.addDiagnosticLog(input)
         monitorLogPresenter.refresh()
         if (momoSocialAdapterDelegate.isInitialized()) {

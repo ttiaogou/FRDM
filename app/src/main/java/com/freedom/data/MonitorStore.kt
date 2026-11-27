@@ -5,7 +5,6 @@ import android.content.Context
 import com.freedom.core.accessibility.overlay.FloatingButtonPosition
 import com.freedom.core.logging.RunLogBudgetPolicy
 import com.freedom.core.logging.RunLogCategory
-import com.freedom.core.logging.RunLogLevel
 import org.json.JSONArray
 
 /** Local-only storage for monitor state, recent events and the latest node snapshot. */
@@ -35,7 +34,11 @@ object MonitorStore {
     private const val KEY_OVERLAY_WIDTH_DP = "overlay_width_dp"
     private const val KEY_OVERLAY_HEIGHT_DP = "overlay_height_dp"
     private const val MAX_LOGS = 300
-    private const val MAX_LOG_CHARS_PER_ENTRY = 5_000 // Legacy guard; UTF-8 byte budget below is authoritative.
+    private const val MAX_LOG_CHARS_PER_ENTRY = 5_000
+    // UI projection only. New runtime logs have exactly one durable owner (diagnostics).
+    private val displayLogs = ArrayDeque<String>()
+    private var displayLogBytes = 0L
+    private var displayLogsInitialized = false
 
     data class Snapshot(
         val app: String,
@@ -173,72 +176,42 @@ object MonitorStore {
         prefs(context).edit().putInt(KEY_OVERLAY_HEIGHT_DP, heightDp.coerceAtLeast(200)).apply()
     }
 
-    @Synchronized
-    fun addLog(context: Context, line: String, input: RunDiagnosticInput? = null) {
-        val diagnostics = RunDiagnosticsManager.get(context)
-        if (input == null) diagnostics.recordLog(line) else diagnostics.recordInput(input)
-        val p = prefs(context)
-        val current = runCatching {
-            JSONArray(p.getString(KEY_LOGS, "[]"))
-        }.getOrElse {
-            JSONArray()
+    /** Import the previous display-only history once; do not rewrite or discard old evidence. */
+    private fun initializeDisplayLogs(context: Context) {
+        if (displayLogsInitialized) return
+        displayLogsInitialized = true
+        val legacy = runCatching { JSONArray(prefs(context).getString(KEY_LOGS, "[]")) }
+            .getOrElse { JSONArray() }
+        for (index in 0 until legacy.length()) {
+            appendDisplayLog(legacy.optString(index))
         }
+    }
+
+    private fun appendDisplayLog(line: String) {
+        if (line.isBlank()) return
         val boundedLine = RunLogBudgetPolicy.truncateUtf8(
             line.take(MAX_LOG_CHARS_PER_ENTRY),
             RunLogBudgetPolicy.MAX_MONITOR_ENTRY_BYTES
         )
-        current.put(boundedLine)
+        displayLogs.addLast(boundedLine)
+        displayLogBytes += RunLogBudgetPolicy.utf8Size(boundedLine).toLong()
+        while (displayLogs.size > MAX_LOGS || displayLogBytes > RunLogBudgetPolicy.MAX_MONITOR_TOTAL_BYTES) {
+            displayLogBytes -= RunLogBudgetPolicy.utf8Size(displayLogs.removeFirst()).toLong()
+        }
+    }
 
-        // Keep the newest records first under both a count limit and a real UTF-8 byte budget.
-        val retainedNewestFirst = ArrayList<String>(MAX_LOGS)
-        var retainedBytes = 0L
-        var removedBytes = 0L
-        var retentionWindowClosed = false
-        for (index in current.length() - 1 downTo 0) {
-            val candidate = RunLogBudgetPolicy.truncateUtf8(
-                current.optString(index),
-                RunLogBudgetPolicy.MAX_MONITOR_ENTRY_BYTES
-            )
-            val bytes = RunLogBudgetPolicy.utf8Size(candidate).toLong()
-            if (retentionWindowClosed ||
-                retainedNewestFirst.size >= MAX_LOGS ||
-                retainedBytes + bytes > RunLogBudgetPolicy.MAX_MONITOR_TOTAL_BYTES
-            ) {
-                retentionWindowClosed = true
-                removedBytes += bytes
-                continue
-            }
-            retainedNewestFirst += candidate
-            retainedBytes += bytes
-        }
-        val trimmed = JSONArray()
-        retainedNewestFirst.asReversed().forEach(trimmed::put)
-        val removedCount = (current.length() - retainedNewestFirst.size).coerceAtLeast(0)
-        if (removedCount > 0) {
-            diagnostics.recordStructured(
-                eventType = "monitor_history_evicted",
-                category = RunLogCategory.DATA_QUALITY,
-                // This is intentional rolling UI history retention; the independent
-                // run archive has its own drop/truncation/write-failure counters.
-                level = RunLogLevel.INFO,
-                component = "MonitorStore",
-                message = "普通运行日志历史达到容量预算；已移除旧记录 $removedCount 条，估算字节=$removedBytes",
-                result = "RETENTION_APPLIED"
-            )
-        }
-        p.edit().putString(KEY_LOGS, trimmed.toString()).apply()
+    @Synchronized
+    fun addLog(context: Context, line: String, input: RunDiagnosticInput? = null) {
+        val diagnostics = RunDiagnosticsManager.get(context)
+        if (input == null) diagnostics.recordLog(line) else diagnostics.recordInput(input)
+        initializeDisplayLogs(context)
+        appendDisplayLog(line)
     }
 
     @Synchronized
     fun logs(context: Context): List<String> {
-        val array = runCatching {
-            JSONArray(prefs(context).getString(KEY_LOGS, "[]"))
-        }.getOrElse {
-            JSONArray()
-        }
-        return (0 until array.length()).mapNotNull {
-            array.optString(it).takeIf(String::isNotBlank)
-        }
+        initializeDisplayLogs(context)
+        return displayLogs.toList()
     }
 
     @Synchronized
@@ -250,6 +223,9 @@ object MonitorStore {
             message = "用户清空了普通运行日志展示历史；任务诊断事件与已生成报告不受影响",
             result = "CLEARED"
         )
+        displayLogsInitialized = true
+        displayLogs.clear()
+        displayLogBytes = 0L
         prefs(context).edit().remove(KEY_LOGS).apply()
     }
 

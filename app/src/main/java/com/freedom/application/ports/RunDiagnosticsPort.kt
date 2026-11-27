@@ -9,6 +9,8 @@ interface RunDiagnosticsPort {
     fun activeRunId(): String?
     fun awaitFinalizedRun(runId: String, timeoutMillis: Long = 8_000L): Boolean
     fun latestReportText(): String
+    /** Export only sealed history; the data owner prevents concurrent retention eviction. */
+    fun withSealedHistoryForExport(copy: (Set<String>) -> Unit) = copy(emptySet())
     /** Diagnostic-only input; no monitor-history duplication is required. */
     fun recordInput(input: RunDiagnosticInput) {}
 

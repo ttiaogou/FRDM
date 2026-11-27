@@ -115,7 +115,7 @@ internal object LogRecordsDialog {
                 bottomMargin = dp(8)
             })
             panel.addView(TextView(activity).apply {
-                text = "运行日志 TXT 用于故障反馈；节点可视化与采集数据导出请从悬浮按钮进入。"
+                text = "运行诊断 ZIP 包含已封存日志、异常证据与最近展示记录；节点可视化与采集数据导出请从悬浮按钮进入。"
                 textSize = 11f
                 setTextColor(FreedomUi.MUTED)
                 setPadding(dp(2), 0, dp(2), dp(8))
@@ -132,7 +132,7 @@ internal object LogRecordsDialog {
                 gravity = Gravity.CENTER
                 setPadding(0, dp(12), 0, 0)
             }
-            footer.addView(actionButton(activity, "导出 TXT", dp, primary = true) {
+            footer.addView(actionButton(activity, "导出 ZIP", dp, primary = true) {
                 dialog.dismiss()
                 onExportLogs(records)
             }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(5) })

@@ -207,9 +207,12 @@ internal object SessionSampleArchiveManager {
     fun createExportBundle(
         archives: List<SessionSampleArchive>,
         diagnosticsRunsDirectory: File,
-        destination: File
+        destination: File,
+        includeAllDiagnostics: Boolean = false,
+        recentLogText: String? = null,
+        withSealedHistory: ((Set<String>) -> Unit) -> Unit = { copy -> copy(emptySet()) }
     ) {
-        require(archives.isNotEmpty()) { "至少需要选择一条已封存采集任务" }
+        require(archives.isNotEmpty() || includeAllDiagnostics) { "至少需要选择一条已封存采集任务" }
         require(archives.all { it.file.isFile }) { "部分采集归档已不存在，请刷新列表" }
         destination.parentFile?.let { parent ->
             check(parent.isDirectory || parent.mkdirs()) { "无法创建运行诊断导出临时目录" }
@@ -224,10 +227,8 @@ internal object SessionSampleArchiveManager {
                     .append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date()))
                     .append("\n采集任务数量：").append(archives.size).append("\n\n")
                 val usedSampleNames = linkedSetOf<String>()
-                val copiedDiagnosticIds = linkedSetOf<String>()
-                val copiedDiagnosticReports = linkedMapOf<String, Boolean>()
-
-                archives.forEachIndexed { index, archive ->
+                val sampleCounts = mutableListOf<Int>()
+                archives.forEach { archive ->
                     val baseName = safePathSegment(archive.runId)
                     var sampleName = baseName
                     var suffix = 2
@@ -242,78 +243,78 @@ internal object SessionSampleArchiveManager {
                             val entry = entries.nextElement()
                             if (entry.isDirectory) continue
                             val entryName = safeEntryPath(entry.name)
-                            val targetName = "samples/$sampleName/$entryName"
-                            output.putNextEntry(ZipEntry(targetName).apply {
+                            output.putNextEntry(ZipEntry("samples/$sampleName/$entryName").apply {
                                 if (entry.time > 0L) time = entry.time
                             })
-                            source.getInputStream(entry).use { input -> input.copyTo(output) }
+                            source.getInputStream(entry).use { it.copyTo(output) }
                             output.closeEntry()
                             sampleEntries++
                         }
                     }
+                    sampleCounts += sampleEntries
+                }
 
-                    val diagnosticId = archive.diagnosticRunId
-                        ?.takeIf { it.matches(Regex("[A-Za-z0-9._-]{1,120}")) && it != "." && it != ".." }
-                    var reportIncluded = false
-                    var diagnosticStatus = "未关联诊断运行 ID"
-                    if (diagnosticId != null) {
-                        val primary = File(diagnosticsRunsDirectory, diagnosticId)
-                        val historyRoot = File(diagnosticsRunsDirectory.parentFile, "incident_history")
-                        val retained = File(historyRoot, diagnosticId)
-                        val useRetained = !File(primary, "diagnostic_report.json").isFile &&
-                            !File(primary, "diagnostic_report.txt").isFile &&
-                            File(retained, "incident_retention.json").isFile
-                        val diagnosticDirectory = if (useRetained) retained else primary
-                        val canonicalRoot = (if (useRetained) historyRoot else diagnosticsRunsDirectory).canonicalFile
-                        val canonicalDirectory = diagnosticDirectory.canonicalFile
-                        if (canonicalDirectory.path.startsWith(canonicalRoot.path + File.separator) &&
-                            canonicalDirectory.isDirectory
-                        ) {
-                            if (copiedDiagnosticIds.add(diagnosticId)) {
-                                val canonicalRunRoot = canonicalDirectory
-                                canonicalDirectory.walkTopDown()
-                                    .filter { it.isFile }
-                                    .sortedBy { it.relativeTo(canonicalDirectory).invariantSeparatorsPath }
-                                    .forEach { file ->
-                                        val canonicalFile = file.canonicalFile
-                                        if (!canonicalFile.path.startsWith(canonicalRunRoot.path + File.separator)) return@forEach
-                                        val relative = safeEntryPath(file.relativeTo(canonicalDirectory).invariantSeparatorsPath)
-                                        val targetName = "diagnostics/$diagnosticId/$relative"
-                                        output.putNextEntry(ZipEntry(targetName).apply {
-                                            time = file.lastModified()
-                                        })
-                                        file.inputStream().use { it.copyTo(output) }
-                                        output.closeEntry()
-                                        if (relative == "diagnostic_report.txt") reportIncluded = true
-                                    }
-                                copiedDiagnosticReports[diagnosticId] = reportIncluded
-                            } else {
-                                // The same diagnostic run is included once for safety and size.
-                                reportIncluded = copiedDiagnosticReports[diagnosticId] == true
-                                diagnosticStatus = if (reportIncluded) {
-                                    "与前一采集任务共享诊断运行，诊断报告已在前项中打包"
-                                } else {
-                                    "与前一采集任务共享诊断运行，但前项未包含报告"
-                                }
-                            }
-                            if (diagnosticStatus == "未关联诊断运行 ID") {
-                                diagnosticStatus = when {
-                                    reportIncluded -> "诊断报告及运行记录已打包"
-                                    useRetained -> "普通运行历史已淘汰；独立异常证据已打包"
-                                    File(canonicalDirectory, "diagnostic_report.txt").isFile -> "诊断报告存在但未能安全读取或打包"
-                                    else -> "诊断目录存在，但报告文件尚未生成"
-                                }
-                            }
-                        } else {
-                            diagnosticStatus = "未找到匹配的诊断运行目录"
+                // The owner locks only diagnostic copying, never the potentially large sample ZIPs.
+                withSealedHistory { excluded ->
+                    val historyRoot = File(diagnosticsRunsDirectory.parentFile, "incident_history")
+                    val linkedIds = archives.mapNotNull { it.diagnosticRunId?.takeIf(::safeDiagnosticId) }
+                    val allIds = linkedSetOf<String>().apply {
+                        addAll(linkedIds)
+                        if (includeAllDiagnostics) {
+                            addAll(diagnosticsRunsDirectory.listFiles().orEmpty().filter(File::isDirectory).map { it.name }.filter(::safeDiagnosticId).sorted())
+                            addAll(historyRoot.listFiles().orEmpty().filter { it.isDirectory && File(it, "incident_retention.json").isFile }.map { it.name }.filter(::safeDiagnosticId).sorted())
                         }
                     }
-                    manifest.append(index + 1).append(". 采集运行=").append(archive.runId)
-                        .append(" | 诊断运行=").append(diagnosticId ?: "无")
-                        .append(" | 采集文件=").append(sampleEntries)
-                        .append(" | 诊断状态=").append(diagnosticStatus)
-                        .append(" | 报告已包含=").append(if (reportIncluded) "是" else "否")
-                        .append('\n')
+                    val statuses = linkedMapOf<String, Pair<String, Boolean>>()
+                    manifest.append("\n诊断历史范围：").append(if (includeAllDiagnostics) "全部已封存运行及独立异常历史" else "关联运行").append('\n')
+                    for (id in allIds) {
+                        val primary = File(diagnosticsRunsDirectory, id)
+                        val retained = File(historyRoot, id)
+                        val primarySealed = id !in excluded &&
+                            (File(primary, "diagnostic_manifest.json").isFile ||
+                                (!includeAllDiagnostics && (File(primary, "diagnostic_report.json").isFile || File(primary, "diagnostic_report.txt").isFile)))
+                        val retainedSealed = File(retained, "incident_retention.json").isFile
+                        var reportIncluded = false
+                        val status = when {
+                            primarySealed && isContainedDirectory(diagnosticsRunsDirectory, primary) -> {
+                                reportIncluded = copyDiagnosticDirectory(output, primary, "diagnostics/$id")
+                                // A partial failed normal-history deletion must not hide the
+                                // independently retained incident files. Verified identical copies
+                                // are not exported twice.
+                                val retainedSeparately = retainedSealed && isContainedDirectory(historyRoot, retained) &&
+                                    !retainedEvidenceMatches(primary, retained)
+                                if (retainedSeparately) {
+                                    copyDiagnosticDirectory(output, retained, "incident_history/$id")
+                                }
+                                val primaryStatus = if (reportIncluded) "诊断报告及运行记录已打包" else "诊断记录已打包，TXT 报告不存在"
+                                if (retainedSeparately) "$primaryStatus；独立异常副本存在差异，已另行保留" else primaryStatus
+                            }
+                            retainedSealed && isContainedDirectory(historyRoot, retained) -> {
+                                copyDiagnosticDirectory(output, retained, "diagnostics/$id")
+                                "普通运行历史已淘汰或不可用；独立异常证据已打包"
+                            }
+                            id in excluded -> "运行尚未封存，本次未打包"
+                            else -> "未找到已封存的诊断运行目录"
+                        }
+                        statuses[id] = status to reportIncluded
+                        manifest.append("诊断运行=").append(id).append(" | ").append(status).append('\n')
+                    }
+                    archives.forEachIndexed { index, archive ->
+                        val id = archive.diagnosticRunId?.takeIf(::safeDiagnosticId)
+                        val (status, report) = id?.let { statuses[it] } ?: ("未关联诊断运行 ID" to false)
+                        manifest.append(index + 1).append(". 采集运行=").append(archive.runId)
+                            .append(" | 诊断运行=").append(id ?: "无")
+                            .append(" | 采集文件=").append(sampleCounts[index])
+                            .append(" | 诊断状态=").append(status)
+                            .append(" | 报告已包含=").append(if (report) "是" else "否").append('\n')
+                    }
+                }
+                // Readable UI projection is generated only on demand, not persisted by a second writer.
+                recentLogText?.let { text ->
+                    output.putNextEntry(ZipEntry("recent-display.txt"))
+                    output.write(text.toByteArray(Charsets.UTF_8))
+                    output.closeEntry()
+                    manifest.append("\nrecent-display.txt 为最近展示记录，不是完整诊断事件；运行中的诊断目录不参与封存导出。\n")
                 }
                 output.putNextEntry(ZipEntry("EXPORT-MANIFEST.txt"))
                 output.write(manifest.toString().toByteArray(Charsets.UTF_8))
@@ -325,6 +326,44 @@ internal object SessionSampleArchiveManager {
             throw error
         }
     }
+
+    private fun safeDiagnosticId(id: String): Boolean =
+        id.matches(Regex("[A-Za-z0-9._-]{1,120}")) && id != "." && id != ".." && !id.startsWith(".")
+
+    private fun isContainedDirectory(root: File, directory: File): Boolean =
+        directory.isDirectory && directory.canonicalFile.path.startsWith(root.canonicalPath + File.separator)
+
+    private fun copyDiagnosticDirectory(output: ZipOutputStream, directory: File, prefix: String): Boolean {
+        val canonicalRoot = directory.canonicalFile
+        var reportIncluded = false
+        val canonicalEventsExist = File(canonicalRoot, "events.jsonl").isFile
+        canonicalRoot.walkTopDown().filter(File::isFile)
+            .filterNot { file ->
+                val relative = file.relativeTo(canonicalRoot).invariantSeparatorsPath
+                relative == "events.jsonl.sealing" ||
+                    (canonicalEventsExist && relative.startsWith("event_segments/"))
+            }
+            .sortedBy { it.relativeTo(canonicalRoot).invariantSeparatorsPath }
+            .forEach { file ->
+                check(file.canonicalPath.startsWith(canonicalRoot.path + File.separator)) { "诊断文件路径越界" }
+                val relative = safeEntryPath(file.relativeTo(canonicalRoot).invariantSeparatorsPath)
+                output.putNextEntry(ZipEntry("$prefix/$relative").apply { time = file.lastModified() })
+                file.inputStream().use { it.copyTo(output) }
+                output.closeEntry()
+                if (relative == "diagnostic_report.txt") reportIncluded = true
+            }
+        return reportIncluded
+    }
+
+    private fun retainedEvidenceMatches(primary: File, retained: File): Boolean =
+        retained.walkTopDown().filter(File::isFile)
+            .filter { it.relativeTo(retained).invariantSeparatorsPath.startsWith("incidents/") }
+            .all { file ->
+                val original = File(primary, file.relativeTo(retained).invariantSeparatorsPath)
+                file.canonicalPath.startsWith(retained.canonicalPath + File.separator) &&
+                    original.isFile && original.canonicalPath.startsWith(primary.canonicalPath + File.separator) &&
+                    original.length() == file.length() && original.readBytes().contentEquals(file.readBytes())
+            }
 
     /** Writes one aggregate ZIP. Each source run is isolated under its own runId directory. */
     fun createBatchArchive(

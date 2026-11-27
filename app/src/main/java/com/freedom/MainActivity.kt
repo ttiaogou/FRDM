@@ -74,7 +74,6 @@ class MainActivity : Activity() {
 
     private var configurationHome: ConfigurationHome? = null
     private var receiverRegistered = false
-    private var pendingLogExportContent: String? = null
     private var pendingSessionSampleExportFile: File? = null
     private var pendingSessionSampleExportTemporary = false
     private var pendingNodeDumpExportFile: File? = null
@@ -1784,6 +1783,7 @@ class MainActivity : Activity() {
         val runRequested = monitorRepository.isRunRequested()
 
         val actions = ArrayList<Pair<String, () -> Unit>>()
+        actions += "导出运行诊断与异常历史 ZIP" to { launchLogExport(monitorRepository.logs()) }
         actions += "导出最近节点预览 ZIP" to { launchNodeDumpExport() }
         when {
             activeRunIds.isNotEmpty() && monitorRepository.isRunRequested() -> {
@@ -2058,27 +2058,8 @@ class MainActivity : Activity() {
         archiveSealHandler.post(poll)
     }
 
-    /** Open Android's system document picker; no storage permission is required. */
     private fun launchLogExport(records: List<String>) {
-        val content = buildLogExportContent(records)
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "text/plain"
-            putExtra(Intent.EXTRA_TITLE, createLogExportFileName())
-        }
-        pendingLogExportContent = content
-        try {
-            suppressFloatingButtonOnPause = true
-            @Suppress("DEPRECATION")
-            startActivityForResult(intent, REQUEST_EXPORT_LOGS)
-        } catch (error: Exception) {
-            suppressFloatingButtonOnPause = false
-            pendingLogExportContent = null
-            monitorRepository.addLog(timestamp() + "  启动日志导出失败：${error.javaClass.simpleName}: " +
-                    (error.message ?: "无详细信息")
-            )
-            Toast.makeText(this, "无法打开文件保存窗口，请稍后重试", Toast.LENGTH_LONG).show()
-        }
+        beginSessionSampleExport(emptyList(), includeAllDiagnostics = true, recentLogText = buildLogExportContent(records))
     }
 
     /** Exports the latest structural-only node snapshot through the existing SAF path. */
@@ -2215,8 +2196,12 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun beginSessionSampleExport(archives: List<SessionSampleArchive>) {
-        if (archives.isEmpty()) {
+    private fun beginSessionSampleExport(
+        archives: List<SessionSampleArchive>,
+        includeAllDiagnostics: Boolean = false,
+        recentLogText: String? = null
+    ) {
+        if (archives.isEmpty() && !includeAllDiagnostics) {
             Toast.makeText(this, "请先选择已封存的采集任务", Toast.LENGTH_SHORT).show()
             return
         }
@@ -2234,7 +2219,10 @@ class MainActivity : Activity() {
                 SessionSampleArchiveManager.createExportBundle(
                     archives = archives,
                     diagnosticsRunsDirectory = diagnosticsRunsDirectory,
-                    destination = combinedArchive
+                    destination = combinedArchive,
+                    includeAllDiagnostics = includeAllDiagnostics,
+                    recentLogText = recentLogText,
+                    withSealedHistory = diagnostics::withSealedHistoryForExport
                 )
             }
             runOnUiThread {
@@ -2310,7 +2298,7 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (temporary) runCatching { archive.delete() }
                 result.onSuccess {
-                    Toast.makeText(this, "会话采集 ZIP 已导出", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "运行诊断 ZIP 已导出", Toast.LENGTH_LONG).show()
                 }.onFailure { error ->
                     monitorRepository.addLog(timestamp() + "  写入会话样本 ZIP 失败：${error.javaClass.simpleName}")
                     Toast.makeText(this, "样本 ZIP 导出失败：${error.message ?: error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
@@ -2329,16 +2317,11 @@ class MainActivity : Activity() {
         append("\n记录数量：").append(records.size)
         append("\n导出内容：包含完整技术详情\n")
         append("=".repeat(72)).append("\n\n")
-        append(LogTextFormatter.formatLogLines(records, includeTechnicalDetails = true))
+        append(LogTextFormatter.formatLogLines(
+            records.map(com.freedom.core.logging.RunLogBudgetPolicy::redactSensitivePayload),
+            includeTechnicalDetails = true
+        ))
         if (records.isNotEmpty()) append('\n')
-    }
-
-    private fun createLogExportFileName(): String {
-        val time = java.text.SimpleDateFormat(
-            "yyyyMMdd-HHmmss",
-            java.util.Locale.getDefault()
-        ).format(java.util.Date())
-        return "Freedom-运行日志-$time.txt"
     }
 
     @Deprecated("Use the document picker result to write the selected URI")
@@ -2413,38 +2396,7 @@ class MainActivity : Activity() {
             exportNodeDumpArchive(resultCode, data)
             return
         }
-        if (requestCode != REQUEST_EXPORT_LOGS) return
 
-        val content = pendingLogExportContent
-        pendingLogExportContent = null
-        if (resultCode != RESULT_OK || data?.data == null) {
-            Toast.makeText(this, "已取消日志导出", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (content == null) {
-            Toast.makeText(this, "导出内容已失效，请重新导出", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        try {
-            val uri = data.data!!
-            val output = contentResolver.openOutputStream(uri, "w")
-                ?: throw java.io.IOException("无法打开所选文件")
-            output.use { stream ->
-                stream.write(content.toByteArray(Charsets.UTF_8))
-                stream.flush()
-            }
-            Toast.makeText(this, "运行记录已导出", Toast.LENGTH_LONG).show()
-        } catch (error: Exception) {
-            monitorRepository.addLog(timestamp() + "  写入日志文件失败：${error.javaClass.simpleName}: " +
-                    (error.message ?: "无详细信息")
-            )
-            Toast.makeText(
-                this,
-                "日志导出失败：${error.message ?: error.javaClass.simpleName}",
-                Toast.LENGTH_LONG
-            ).show()
-        }
     }
 
     // Retained utility views from the existing Activity implementation.
@@ -2485,7 +2437,6 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_IMAGE_RESOURCE_IMPORT = 2007
         private const val REQUEST_OCR_IMAGE_TEST = 2006
-        private const val REQUEST_EXPORT_LOGS = 2002
         private const val REQUEST_NOTIFICATION_PERMISSION = 2003
         private const val REQUEST_EXPORT_SESSION_SAMPLES = 2004
         private const val REQUEST_EXPORT_NODE_DUMP = 2005

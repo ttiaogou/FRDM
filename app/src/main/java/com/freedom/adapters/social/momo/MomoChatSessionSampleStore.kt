@@ -169,10 +169,10 @@ internal class MomoChatSessionSampleStore(
         return directory.absolutePath
     }
 
-    /** Archives the same monitor log message in the active AI collection run. */
+    /** Compatibility fallback for a sample run that has no canonical diagnostic run ID. */
     @Synchronized
     fun recordRuntimeLog(message: String) {
-        if (!runAcceptingRecords) return
+        if (!runAcceptingRecords || diagnosticRunId != null) return
         val directory = runDirectory ?: return
         val originalBytes = RunLogBudgetPolicy.utf8Size(message).toLong()
         runtimeLogSequence++
@@ -187,8 +187,6 @@ internal class MomoChatSessionSampleStore(
         val redacted = RunLogBudgetPolicy.redactSensitivePayload(charBounded)
         val capturedAt = System.currentTimeMillis()
         val sequence = runtimeLogSequence
-        val timestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US)
-            .format(java.util.Date(capturedAt))
         var messageBudget = minOf(
             RunLogBudgetPolicy.utf8Size(redacted),
             RunLogBudgetPolicy.MAX_SAMPLE_RUNTIME_LOG_RECORD_BYTES / 2
@@ -197,7 +195,6 @@ internal class MomoChatSessionSampleStore(
         var messageWasTruncated = normalized.length > charBounded.length ||
             RunLogBudgetPolicy.utf8Size(redacted) > messageBudget
         var jsonLine = ""
-        var textLine = ""
         var recordBytes = 0L
         while (true) {
             val record = JSONObject()
@@ -208,9 +205,7 @@ internal class MomoChatSessionSampleStore(
                 .put("originalMessageBytes", originalBytes)
                 .put("storedMessageBytes", RunLogBudgetPolicy.utf8Size(safeMessage))
             jsonLine = record.toString() + "\n"
-            textLine = "$timestamp  $safeMessage\n"
-            recordBytes = RunLogBudgetPolicy.utf8Size(jsonLine).toLong() +
-                RunLogBudgetPolicy.utf8Size(textLine).toLong()
+            recordBytes = RunLogBudgetPolicy.utf8Size(jsonLine).toLong()
             if (recordBytes <= RunLogBudgetPolicy.MAX_SAMPLE_RUNTIME_LOG_RECORD_BYTES || messageBudget <= 0) break
             messageBudget = (messageBudget * 3 / 4).coerceAtLeast(0)
             safeMessage = RunLogBudgetPolicy.truncateUtf8(redacted, messageBudget)
@@ -234,18 +229,14 @@ internal class MomoChatSessionSampleStore(
             return
         }
         val jsonFile = File(directory, "runtime_logs.jsonl")
-        val textFile = File(directory, "runtime_logs.txt")
         val jsonBefore = jsonFile.length()
-        val textBefore = textFile.length()
         try {
             jsonFile.appendText(jsonLine, Charsets.UTF_8)
-            textFile.appendText(textLine, Charsets.UTF_8)
             runtimeLogCount++
             runtimeLogBytes += recordBytes
         } catch (error: Exception) {
             val jsonWritten = (jsonFile.length() - jsonBefore).coerceAtLeast(0L)
-            val textWritten = (textFile.length() - textBefore).coerceAtLeast(0L)
-            val actualWrittenBytes = jsonWritten + textWritten
+            val actualWrittenBytes = jsonWritten
             runtimeLogBytes += actualWrittenBytes
             runtimeLogsTruncated = true
             runtimeLogDroppedCount++
@@ -254,7 +245,7 @@ internal class MomoChatSessionSampleStore(
             diagnostics.recordException(
                 component = "MomoChatSessionSampleStore",
                 eventType = "runtime_log_write_failed",
-                message = "AI采集运行日志部分写入或写入失败；sequence=$sequence；jsonWrittenBytes=$jsonWritten；textWrittenBytes=$textWritten",
+                message = "AI采集运行日志部分写入或写入失败；sequence=$sequence；jsonWrittenBytes=$jsonWritten",
                 error = error
             )
         }
@@ -609,6 +600,7 @@ internal class MomoChatSessionSampleStore(
                     .put("diagnosticRunId", diagnosticRunId ?: JSONObject.NULL)
                     .put("finishedAtEpochMs", finishedAt)
                     .put("containsRuntimeLogs", runtimeLogCount > 0)
+                    .put("runtimeLogSource", if (diagnosticRunId != null) "CANONICAL_DIAGNOSTICS" else "UNPAIRED_SAMPLE_FALLBACK")
                     .put("runtimeLogCount", runtimeLogCount)
                     .put("runtimeLogSequenceCount", runtimeLogSequence)
                     .put("runtimeLogsTruncated", runtimeLogsTruncated)
