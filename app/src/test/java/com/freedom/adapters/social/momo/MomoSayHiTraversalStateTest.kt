@@ -443,7 +443,7 @@ class MomoSayHiTraversalStateTest {
         state.markProcessedRow("sent")
         state.deferRow("recover", "DRAFT_MODEL_FAILURE", 1_000L)
         val before = repository.value
-        state.updateFilterSettings(ConversationFilterSettings())
+        state.updateFilterSettings(ConversationFilterSettings(maxLastActiveMinutes = 60))
         assertTrue(state.markFilterSkipped("excluded", ConversationFilterEvidence(lastActiveMinutes = 240), ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)))
         assertFalse(state.markFilterSkipped("excluded", ConversationFilterEvidence(lastActiveMinutes = 240), ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)))
         assertTrue(state.isFilterSkipped("excluded", ConversationFilterEvidence(lastActiveMinutes = 240)))
@@ -456,7 +456,7 @@ class MomoSayHiTraversalStateTest {
 
         val restored = MomoSayHiTraversalState(store)
         restored.restore()
-        restored.updateFilterSettings(ConversationFilterSettings())
+        restored.updateFilterSettings(ConversationFilterSettings(maxLastActiveMinutes = 60))
         assertFalse(restored.isFilterSkipped("excluded", ConversationFilterEvidence(lastActiveMinutes = 240)))
         assertTrue(restored.isProcessedRow("sent"))
         assertTrue(restored.isDeferredRow("recover"))
@@ -465,7 +465,7 @@ class MomoSayHiTraversalStateTest {
     @Test
     fun filterConfigurationChangeAndNewScanReleaseSkipsButNotRecovery() {
         val state = MomoSayHiTraversalState(MomoSayHiTraversalCheckpointStore(InMemoryRepository()))
-        val settings = ConversationFilterSettings()
+        val settings = ConversationFilterSettings(maxLastActiveMinutes = 60)
         state.updateFilterSettings(settings)
         assertTrue(state.markFilterSkipped("a", ConversationFilterEvidence(lastActiveMinutes = 240), ConversationFilterDecision(ConversationFilterResult.EXCLUDE, ConversationFilterReason.ACTIVE_TIME_EXCEEDED)))
         state.updateFilterSettings(settings.copy())
