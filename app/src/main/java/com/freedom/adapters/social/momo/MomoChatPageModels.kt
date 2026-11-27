@@ -1,5 +1,8 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.core.accessibility.api.NodeTarget
+import com.freedom.features.aireply.ports.ChatRegionSnapshot
+
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 
@@ -51,6 +54,44 @@ internal object MomoChatPageContract {
     const val CHAT_EDITOR_LAYOUT_VIEW_ID = "com.immomo.momo:id/editor_layout"
     const val CHAT_APPBAR_VIEW_ID = "com.immomo.momo:id/appbar_id"
     const val CHAT_TOOLBAR_VIEW_ID = "com.immomo.momo:id/toolbar_id"
+
+    fun previousRegionInspection(
+        previous: ChatPageSnapshot,
+        messageListTarget: NodeTarget?,
+        inputFieldTarget: NodeTarget?
+    ): MomoChatPageInspection = MomoChatPageInspection(
+        pageType = when (previous.pageKind) {
+            ChatPageKind.UNKNOWN -> MomoChatPageType.UNKNOWN
+            ChatPageKind.NON_CHAT -> MomoChatPageType.NON_CHAT
+            ChatPageKind.CHAT_LIST -> MomoChatPageType.CHAT_LIST
+            ChatPageKind.CHAT_DETAIL_CANDIDATE -> MomoChatPageType.CHAT_DETAIL_CANDIDATE
+        },
+        windowPackage = previous.packageName,
+        activityClass = previous.activityClass,
+        scannedNodeCount = previous.scannedNodeCount,
+        editableInputCount = previous.editableInputCount,
+        messageListCount = previous.messageListCount,
+        sendActionCount = previous.sendActionCount,
+        messageRelatedViewIdCount = previous.messageRelatedViewIdCount,
+        hasChatTab = previous.hasChatTab,
+        messageListPath = messageListTarget?.path?.childIndices,
+        inputFieldPath = inputFieldTarget?.path?.childIndices,
+        messageListClassName = messageListTarget?.expectedClassName,
+        messageListViewId = messageListTarget?.expectedViewId,
+        hasCanonicalMessageList =
+            messageListTarget?.expectedClassName == MomoChatPageContract.MESSAGE_LIST_CLASS_NAME &&
+                messageListTarget?.expectedViewId == MomoChatPageContract.MESSAGE_LIST_VIEW_ID
+    )
+
+    fun refreshedRegionSnapshot(refreshed: MomoChatRegionRefresh): ChatRegionSnapshot =
+        ChatRegionSnapshot(
+            packageMatches = refreshed.packageMatches,
+            messageRegionNodeCount = refreshed.messageRegionNodeCount,
+            messageRegionTextNodeCount = refreshed.messageRegionTextNodeCount,
+            inputRegionNodeCount = refreshed.inputRegionNodeCount,
+            inputRegionEditableNodeCount = refreshed.inputRegionEditableNodeCount,
+            pathsResolved = refreshed.pathsResolved
+        )
 
     fun supportsChatDetailActivity(activityClass: String): Boolean =
         activityClass == CHAT_DETAIL_ACTIVITY || activityClass == MAIN_ACTIVITY

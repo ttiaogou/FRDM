@@ -136,6 +136,23 @@ class PpR00FreezeTest(unittest.TestCase):
         }.items():
             self.assertEqual(previous, reviewed_s1[path])
             reviewed_s1[path] = replacement
+        # R04 batch 3: exact greeting evidence and message read helper relocations.
+        for path, (previous, replacement) in {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": (
+                "2d6f690d5b3504fa13bb177a14737180c3bd8a73", "ed23fe9f78461734f1a484ac72287ad2d6a18ad8"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSayHiAccessibilityInspector.kt": (
+                "5bf48e5b2befd09562ccce5e98ccbd10fb4d5888", "c3560c93fc19bb5acec659a040a216ef491d3503"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSayHiNavigationEvidenceInspector.kt": (
+                "cc24b37e75f2e1dcaa584fff5af034cd68482e58", "ee6ab55f92bb78fccad1b29a7e3e439151c4963c"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSayHiIdentityFingerprintPolicy.kt": (
+                "4f709f87c43bfe9ec1e2d586e2413d44f90754c1", "4f9094a13631680ac5a37c631c0d28e1b37486af"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoChatPageModels.kt": (
+                "3fb5dd10b74ba2d161759ebd33a20d5e24220a82", "830a1a38d32b76c75d07977890501c8bed662eb2"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoChatMessageReader.kt": (
+                "5d951b290b6c8eed9d425765ce9fabd9ae786f55", "1cc8714d36bcf379ee108dccb108aa988dc33fa2"),
+        }.items():
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = replacement
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

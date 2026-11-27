@@ -1851,8 +1851,8 @@ internal class MomoSocialAdapter(
             "收到的招呼入口[PRE_TAP_REVALIDATED]：windowGeneration=${tree.window.generation}；" +
                 "windowId=${tree.windowId}；snapshotAt=${tree.capturedAtEpochMs}；" +
                 "display=${metrics.widthPixels}x${metrics.heightPixels}；" +
-                "labelBounds=${formatBounds(tapTarget.tapBounds)}；" +
-                "clickableParentBounds=${formatBounds(tapTarget.clickableAncestorBounds)}；" +
+                "labelBounds=${sayHiNavigationEvidenceInspector.formatBounds(tapTarget.tapBounds)}；" +
+                "clickableParentBounds=${sayHiNavigationEvidenceInspector.formatBounds(tapTarget.clickableAncestorBounds)}；" +
                 "点击使用第二次独立快照的位置"
         )
 
@@ -2038,7 +2038,7 @@ internal class MomoSocialAdapter(
             // the Gesture API is still executing. The callback closes it on cancellation.
             onLog(
                 "收到的招呼资料卡[PRE_TAP_REVALIDATED]：已唯一确认 close_container 与子节点‘列表’；" +
-                    "labelBounds=${formatBounds(target.tapBounds)}；controlBounds=${formatBounds(target.controlBounds)}"
+                    "labelBounds=${sayHiNavigationEvidenceInspector.formatBounds(target.tapBounds)}；controlBounds=${sayHiNavigationEvidenceInspector.formatBounds(target.controlBounds)}"
             )
         }
     }
@@ -2374,9 +2374,6 @@ internal class MomoSocialAdapter(
         targetedSubtree
     )
 
-    private fun formatBounds(bounds: ScreenRect): String =
-        "[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]"
-
     private fun logReceivedGreetingsEntrySkip(reason: String) {
         val now = System.currentTimeMillis()
         if (reason != lastReceivedGreetingsEntryDiagnostic ||
@@ -2396,12 +2393,9 @@ internal class MomoSocialAdapter(
     private fun inspectVisibleReceivedGreetingsWindow(
         request: TreeInspectionRequest
     ): AccessibilityTreeSnapshot? {
-        val candidates = accessibilityGateway.inspectTargetWindows(request).filter { candidate ->
-            candidate.window.packageName == targetPackage &&
-                !candidate.truncated &&
-                sayHiAccessibilityInspector.hasReceivedGreetingsListFingerprint(candidate)
-        }
-        return candidates.firstOrNull { !it.truncated } ?: candidates.firstOrNull()
+        return sayHiAccessibilityInspector.selectVisibleReceivedGreetingsWindow(
+            accessibilityGateway.inspectTargetWindows(request), targetPackage
+        )
     }
 
     private fun processReceivedGreetingRows(
@@ -2730,7 +2724,7 @@ internal class MomoSocialAdapter(
                 // Do not relax the tap bounds: let the outer vertical list move it fully onscreen.
                 onLog(
                     "收到招呼头像点击暂缓：头像未完整落在显示范围内；" +
-                        "目标=${formatBounds(target.targetBounds)}；先滚动外层 listview，再重新识别"
+                        "目标=${sayHiNavigationEvidenceInspector.formatBounds(target.targetBounds)}；先滚动外层 listview，再重新识别"
                 )
                 return false
             }
@@ -2923,7 +2917,7 @@ internal class MomoSocialAdapter(
             MomoSayHiTapReadiness.NEEDS_SCROLL -> {
                 onLog(
                     "收到招呼详情点击暂缓：原消息行未完整落在显示范围内；" +
-                        "目标=${formatBounds(target.targetBounds)}；先滚动外层 listview"
+                        "目标=${sayHiNavigationEvidenceInspector.formatBounds(target.targetBounds)}；先滚动外层 listview"
                 )
                 return false
             }
@@ -2941,12 +2935,12 @@ internal class MomoSocialAdapter(
         val selected = sayHiSelectedGreeting ?: return false
         val revalidationFailure = revalidateSayHiRowTarget(tree, row, target, selected)
         if (revalidationFailure != null) {
-            val diagnostic = describeSayHiRowTargetRevalidation(tree, row, target, revalidationFailure)
+            val diagnostic = sayHiNavigationEvidenceInspector.describeSayHiRowTargetRevalidation(tree, row, target, revalidationFailure)
             sayHiNonSearchGestureInFlight = false
             deferSayHiRow(
                 selected.rowKey,
                 "$SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX:$revalidationFailure",
-                failureEvidenceHash = sayHiSafeTargetEvidenceHash(tree, row, target)
+                failureEvidenceHash = MomoSayHiIdentityFingerprintPolicy.sayHiSafeTargetEvidenceHash(tree, row, target)
             )
             onLog(
                 "收到招呼整行点击取消：安全区域二次校验失败；reason=$revalidationFailure；" +
@@ -3175,30 +3169,6 @@ internal class MomoSocialAdapter(
         !outer.isEmpty && !inner.isEmpty && inner.left >= outer.left && inner.top >= outer.top &&
             inner.right <= outer.right && inner.bottom <= outer.bottom
 
-    /** Contains geometry and node-path evidence only; no display name, greeting text or platform ID. */
-    private fun describeSayHiRowTargetRevalidation(
-        tree: AccessibilityTreeSnapshot,
-        row: MomoSayHiListRow,
-        target: MomoSayHiTapTarget,
-        reason: String
-    ): String {
-        val index = NodeTreeIndex(tree)
-        val rowNode = index.nodeAt(NodePath(row.rowPath))
-        val targetNode = index.nodeAt(target.path)
-        val localTargetId = targetNode?.viewId.orEmpty().substringAfterLast('/')
-        val ageMs = (System.currentTimeMillis() - tree.capturedAtEpochMs).coerceAtLeast(0L)
-        return "rowPath=${row.rowPath};namePath=${row.namePath?.childIndices};" +
-            "targetPath=${target.path.childIndices};windowId=${tree.window.windowId};" +
-            "windowGeneration=${tree.window.generation};activity=${tree.window.activityClass};" +
-            "snapshotAgeMs=$ageMs;capturedAtEpochMs=${tree.capturedAtEpochMs};truncated=${tree.truncated};" +
-            "rowBounds=${formatBounds(row.bounds)};rowNodeBounds=${rowNode?.bounds?.let(::formatBounds) ?: "MISSING"};" +
-            "targetBounds=${formatBounds(target.targetBounds)};preferredBounds=${formatBounds(target.preferredBounds)};" +
-            "excludedBounds=${target.excludedBounds.joinToString(",") { formatBounds(it) }};" +
-            "targetNodeId=$localTargetId;targetNodeBounds=${targetNode?.bounds?.let(::formatBounds) ?: "MISSING"};" +
-            "targetVisible=${targetNode?.visible};targetEnabled=${targetNode?.enabled};" +
-            "targetClickable=${targetNode?.clickable};reasonCode=$reason"
-    }
-
     private fun isPathWithin(path: List<Int>, ancestor: List<Int>): Boolean =
         path.size >= ancestor.size && path.take(ancestor.size) == ancestor
 
@@ -3223,26 +3193,6 @@ internal class MomoSocialAdapter(
         sayHiRowTapHitReason = ""
     }
 
-
-    /**
-     * A diagnostic hash of the CURRENT row's safe geometry and existing structural
-     * fingerprint. No unredacted name, chat content, node handle, or click coordinate
-     * survives beyond the current evidence check.
-     */
-    private fun sayHiSafeTargetEvidenceHash(
-        tree: AccessibilityTreeSnapshot, row: MomoSayHiListRow, target: MomoSayHiTapTarget
-    ): String {
-        val evidence = listOf(
-            MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree),
-            row.bounds.toString(), row.rowPath.joinToString("/"),
-            target.path.childIndices.joinToString("/"),
-            target.targetBounds.toString(), target.preferredBounds.toString(),
-            target.excludedBounds.joinToString("|") { it.toString() }
-        ).joinToString("\u0000")
-        return java.security.MessageDigest.getInstance("SHA-256")
-            .digest(evidence.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
-            .joinToString("") { "%02x".format(it) }
-    }
 
     /**
      * Never rearm an exhausted row from a timestamp or a mere changed list position.
@@ -3285,7 +3235,7 @@ internal class MomoSocialAdapter(
                     MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree)
             )
             if (revalidateSayHiRowTarget(tree, row, target, selected) != null) continue
-            val evidenceHash = sayHiSafeTargetEvidenceHash(tree, row, target)
+            val evidenceHash = MomoSayHiIdentityFingerprintPolicy.sayHiSafeTargetEvidenceHash(tree, row, target)
             val result = sayHiTraversalState.observeExhaustedSafeTargetEvidence(
                 rowKey = key,
                 evidenceHash = evidenceHash,
@@ -8338,29 +8288,7 @@ internal class MomoSocialAdapter(
             return ChatRegionSnapshot(false, 0, 0, 0, 0, false)
         }
 
-        val previousInspection = MomoChatPageInspection(
-            pageType = when (previous.pageKind) {
-                ChatPageKind.UNKNOWN -> MomoChatPageType.UNKNOWN
-                ChatPageKind.NON_CHAT -> MomoChatPageType.NON_CHAT
-                ChatPageKind.CHAT_LIST -> MomoChatPageType.CHAT_LIST
-                ChatPageKind.CHAT_DETAIL_CANDIDATE -> MomoChatPageType.CHAT_DETAIL_CANDIDATE
-            },
-            windowPackage = previous.packageName,
-            activityClass = previous.activityClass,
-            scannedNodeCount = previous.scannedNodeCount,
-            editableInputCount = previous.editableInputCount,
-            messageListCount = previous.messageListCount,
-            sendActionCount = previous.sendActionCount,
-            messageRelatedViewIdCount = previous.messageRelatedViewIdCount,
-            hasChatTab = previous.hasChatTab,
-            messageListPath = messageListTarget?.path?.childIndices,
-            inputFieldPath = inputFieldTarget?.path?.childIndices,
-            messageListClassName = messageListTarget?.expectedClassName,
-            messageListViewId = messageListTarget?.expectedViewId,
-            hasCanonicalMessageList =
-                messageListTarget?.expectedClassName == MomoChatPageContract.MESSAGE_LIST_CLASS_NAME &&
-                    messageListTarget?.expectedViewId == MomoChatPageContract.MESSAGE_LIST_VIEW_ID
-        )
+        val previousInspection = MomoChatPageContract.previousRegionInspection(previous, messageListTarget, inputFieldTarget)
 
         return rootAccess.withActiveTargetRoot { root, currentWindow ->
             // Node paths are meaningful only inside the exact window generation in which
@@ -8373,14 +8301,7 @@ internal class MomoSocialAdapter(
                 targetPackage = targetPackage,
                 previous = previousInspection
             )
-            ChatRegionSnapshot(
-                packageMatches = refreshed.packageMatches,
-                messageRegionNodeCount = refreshed.messageRegionNodeCount,
-                messageRegionTextNodeCount = refreshed.messageRegionTextNodeCount,
-                inputRegionNodeCount = refreshed.inputRegionNodeCount,
-                inputRegionEditableNodeCount = refreshed.inputRegionEditableNodeCount,
-                pathsResolved = refreshed.pathsResolved
-            )
+            MomoChatPageContract.refreshedRegionSnapshot(refreshed)
         } ?: ChatRegionSnapshot(false, 0, 0, 0, 0, false)
     }
 
@@ -8404,16 +8325,7 @@ internal class MomoSocialAdapter(
         onResult(runCatching {
             messageComponents.reader.readRecentMessages(page, limit)
         }.getOrElse {
-            ChatMessageBatch(
-                status = MessageReadStatus.MESSAGE_LIST_UNAVAILABLE,
-                windowSessionKey = null,
-                messages = emptyList(),
-                scannedRowCount = 0,
-                candidateRowCount = 0,
-                truncated = false,
-                capturedAtMillis = System.currentTimeMillis(),
-                messageListUnavailableReason = "消息结构读取异常"
-            )
+            messageComponents.reader.structuralReadFailure()
         })
     }
 
@@ -8521,7 +8433,7 @@ internal class MomoSocialAdapter(
                 return@acquireObservationVisibility
             }
 
-            val formalBodyRows = (structuralBatch.messages.map { it.bounds } + structuralBatch.ocrTargets.map { it.rowBounds }).distinct().size
+            val formalBodyRows = messageComponents.reader.formalBodyRowCount(structuralBatch)
             onLog("AI 正文容器读取：扫描行=${structuralBatch.scannedRowCount}；正式正文行=$formalBodyRows；正文OCR=${structuralBatch.ocrTargets.size}；仅采集正式文本容器，不分类卡片")
             if (structuralBatch.ocrTargets.isEmpty()) {
                 invalidateOcrRecognitionReuse()

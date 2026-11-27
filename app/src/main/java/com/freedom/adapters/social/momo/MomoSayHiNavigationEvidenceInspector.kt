@@ -1,5 +1,7 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.core.accessibility.api.NodePath
+
 import com.freedom.core.accessibility.api.AccessibilityNodeSnapshot
 import com.freedom.core.accessibility.api.AccessibilityTreeSnapshot
 import com.freedom.core.accessibility.api.ScreenRect
@@ -62,6 +64,33 @@ internal class MomoSayHiNavigationEvidenceInspector(
 ) {
     init {
         require(maxCandidatesPerGroup > 0)
+    }
+
+    fun formatBounds(bounds: ScreenRect): String =
+        "[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]"
+
+    /** Contains geometry and node-path evidence only; no display name, greeting text or platform ID. */
+    fun describeSayHiRowTargetRevalidation(
+        tree: AccessibilityTreeSnapshot,
+        row: MomoSayHiListRow,
+        target: MomoSayHiTapTarget,
+        reason: String
+    ): String {
+        val index = NodeTreeIndex(tree)
+        val rowNode = index.nodeAt(NodePath(row.rowPath))
+        val targetNode = index.nodeAt(target.path)
+        val localTargetId = targetNode?.viewId.orEmpty().substringAfterLast('/')
+        val ageMs = (System.currentTimeMillis() - tree.capturedAtEpochMs).coerceAtLeast(0L)
+        return "rowPath=${row.rowPath};namePath=${row.namePath?.childIndices};" +
+            "targetPath=${target.path.childIndices};windowId=${tree.window.windowId};" +
+            "windowGeneration=${tree.window.generation};activity=${tree.window.activityClass};" +
+            "snapshotAgeMs=$ageMs;capturedAtEpochMs=${tree.capturedAtEpochMs};truncated=${tree.truncated};" +
+            "rowBounds=${formatBounds(row.bounds)};rowNodeBounds=${rowNode?.bounds?.let(::formatBounds) ?: "MISSING"};" +
+            "targetBounds=${formatBounds(target.targetBounds)};preferredBounds=${formatBounds(target.preferredBounds)};" +
+            "excludedBounds=${target.excludedBounds.joinToString(",") { formatBounds(it) }};" +
+            "targetNodeId=$localTargetId;targetNodeBounds=${targetNode?.bounds?.let(::formatBounds) ?: "MISSING"};" +
+            "targetVisible=${targetNode?.visible};targetEnabled=${targetNode?.enabled};" +
+            "targetClickable=${targetNode?.clickable};reasonCode=$reason"
     }
 
     fun inspect(

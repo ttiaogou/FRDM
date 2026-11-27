@@ -350,6 +350,18 @@ internal class MomoSayHiAccessibilityInspector(
         )
     }
 
+    fun selectVisibleReceivedGreetingsWindow(
+        snapshots: List<AccessibilityTreeSnapshot>,
+        targetPackage: String
+    ): AccessibilityTreeSnapshot? {
+        val candidates = snapshots.filter { candidate ->
+            candidate.window.packageName == targetPackage &&
+                !candidate.truncated &&
+                hasReceivedGreetingsListFingerprint(candidate)
+        }
+        return candidates.firstOrNull { !it.truncated } ?: candidates.firstOrNull()
+    }
+
     /**
      * Received-greetings list page fingerprint shared with the live AccessibilityNodeInfo path.
      * The unique, non-empty content/list shell is mandatory; only the section title or greeting-

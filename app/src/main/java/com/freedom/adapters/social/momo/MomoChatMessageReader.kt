@@ -245,6 +245,21 @@ internal class MomoChatMessageReader(
         )
     }
 
+    fun structuralReadFailure(): ChatMessageBatch =
+        ChatMessageBatch(
+            status = MessageReadStatus.MESSAGE_LIST_UNAVAILABLE,
+            windowSessionKey = null,
+            messages = emptyList(),
+            scannedRowCount = 0,
+            candidateRowCount = 0,
+            truncated = false,
+            capturedAtMillis = System.currentTimeMillis(),
+            messageListUnavailableReason = "消息结构读取异常"
+        )
+
+    fun formalBodyRowCount(structuralBatch: ChatMessageBatch): Int =
+        (structuralBatch.messages.map { it.bounds } + structuralBatch.ocrTargets.map { it.rowBounds }).distinct().size
+
     /** Merges ephemeral local OCR output back through the existing platform-neutral parser. */
     fun applyOcrResults(
         batch: ChatMessageBatch,

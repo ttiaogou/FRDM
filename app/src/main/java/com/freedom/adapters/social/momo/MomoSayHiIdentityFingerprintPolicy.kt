@@ -25,6 +25,26 @@ internal object MomoSayHiIdentityFingerprintPolicy {
             .digest(value.toByteArray(Charsets.UTF_8))
             .joinToString("") { byte -> "%02x".format(byte) }
 
+    /**
+     * A diagnostic hash of the CURRENT row's safe geometry and existing structural
+     * fingerprint. No unredacted name, chat content, node handle, or click coordinate
+     * survives beyond the current evidence check.
+     */
+    fun sayHiSafeTargetEvidenceHash(
+        tree: AccessibilityTreeSnapshot, row: MomoSayHiListRow, target: MomoSayHiTapTarget
+    ): String {
+        val evidence = listOf(
+            MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree),
+            row.bounds.toString(), row.rowPath.joinToString("/"),
+            target.path.childIndices.joinToString("/"),
+            target.targetBounds.toString(), target.preferredBounds.toString(),
+            target.excludedBounds.joinToString("|") { it.toString() }
+        ).joinToString("\u0000")
+        return java.security.MessageDigest.getInstance("SHA-256")
+            .digest(evidence.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
     fun contactIdHash(contactId: String): String =
         sha256(contactId.trim())
 
