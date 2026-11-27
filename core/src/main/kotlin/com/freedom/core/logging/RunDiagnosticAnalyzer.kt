@@ -122,12 +122,18 @@ object RunDiagnosticAnalyzer {
         val unknownOriginEvents = sorted.filter {
             val text = it.message.uppercase()
             it.inputOrigin.equals("UNKNOWN", ignoreCase = true) ||
-                text.contains("ORIGIN=UNKNOWN") || text.contains("INPUTORIGIN=UNKNOWN") ||
                 it.inputOriginEvidence.equals("NO_MATCHING_FREEDOM_ACTION", ignoreCase = true) ||
-                text.contains("NO_MATCHING_FREEDOM_ACTION")
+                (it.severitySource == RunLogSeveritySource.LEGACY_INFERRED &&
+                    !it.eventType.startsWith("MODEL_") && !it.eventType.startsWith("MESSAGE_SEND_") &&
+                    (Regex("(?:^|[;；\\s])(?:INPUTORIGIN|ORIGIN)=UNKNOWN(?:$|[;；\\s])").containsMatchIn(text) ||
+                        text.contains("NO_MATCHING_FREEDOM_ACTION")))
         }
         if (unknownOriginEvents.isNotEmpty()) {
-            val relatedActionEvents = sorted.filter { it.actionId != null }
+            val relatedActionEvents = sorted.filter {
+                it.actionId != null &&
+                    (it.severitySource == RunLogSeveritySource.LEGACY_INFERRED ||
+                        it.category in setOf(RunLogCategory.INPUT, RunLogCategory.GESTURE, RunLogCategory.NAVIGATION))
+            }
             val evidence = (unknownOriginEvents.take(10) + relatedActionEvents.takeLast(10))
                 .map { it.sequence }.distinct().sorted()
             val crossWindowHint = unknownOriginEvents.any { unknown ->
@@ -273,9 +279,10 @@ object RunDiagnosticAnalyzer {
         !isPreviousRunRecoveryEvent(event) && (
             event.level == RunLogLevel.FATAL ||
                 (event.level == RunLogLevel.ERROR &&
-                    !isLegacyBenignObservation(event) &&
-                    (!event.errorType.isNullOrBlank() || !event.errorDetail.isNullOrBlank() ||
-                        !RunLogBudgetPolicy.isNonFatalQualityWarningMessage(event.message)))
+                    (event.severitySource == RunLogSeveritySource.PRODUCER_DECLARED ||
+                        (!isLegacyBenignObservation(event) &&
+                            (!event.errorType.isNullOrBlank() || !event.errorDetail.isNullOrBlank() ||
+                                !RunLogBudgetPolicy.isNonFatalQualityWarningMessage(event.message)))))
             )
 
     private fun isMessageDirectionUnresolvedEvent(event: RunDiagnosticEvent): Boolean =

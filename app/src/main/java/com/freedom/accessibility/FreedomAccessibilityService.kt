@@ -1,5 +1,6 @@
 package com.freedom.accessibility
 
+import com.freedom.core.logging.RunDiagnosticInput
 import com.freedom.application.ports.GestureCalibrationContract
 
 import android.accessibilityservice.AccessibilityService
@@ -40,6 +41,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             service = this,
             mainHandler = mainHandler,
             addLog = ::addLog,
+            addDiagnosticLog = ::addDiagnosticLog,
             dp = ::dp,
             refreshViews = ::refreshViews
         )
@@ -511,6 +513,15 @@ class FreedomAccessibilityService : AccessibilityService() {
         // only while its run directory is open. Do not initialize the social adapter merely to log.
         if (momoSocialAdapterDelegate.isInitialized()) {
             runCatching { momoSocialAdapter.recordRuntimeLog(message) }
+        }
+    }
+
+    private fun addDiagnosticLog(input: RunDiagnosticInput) {
+        // One canonical event; the existing display/sample projections remain until L11-F.
+        monitorRepository.addDiagnosticLog(input)
+        monitorLogPresenter.refresh()
+        if (momoSocialAdapterDelegate.isInitialized()) {
+            runCatching { momoSocialAdapter.recordRuntimeLog(input.message) }
         }
     }
 

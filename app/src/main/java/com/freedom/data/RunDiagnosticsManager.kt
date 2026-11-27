@@ -1,5 +1,7 @@
 package com.freedom.data
 
+import com.freedom.core.logging.RunDiagnosticInput
+import com.freedom.core.logging.RunLogSeveritySource
 import android.content.Context
 import android.os.SystemClock
 import com.freedom.core.logging.RunDiagnosticAnalyzer
@@ -234,6 +236,17 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         )
     }
 
+    /** Typed producers share the same sequence, storage and lifecycle as legacy logs. */
+    @Synchronized
+    fun recordInput(input: RunDiagnosticInput) {
+        val current = activeRun ?: return
+        val event = input.toEvent(
+            current.runId, current.nextSequence++, System.currentTimeMillis(), SystemClock.elapsedRealtime()
+        )
+        recordInternal(current, event,
+            allowDedup = input.level != RunLogLevel.ERROR && input.level != RunLogLevel.FATAL)
+    }
+
     /** The plugin pipe is bound to the run that issued the OCR request, never a later run. */
     @Synchronized
     internal fun recordOcrPluginDiagnostic(runId: String, requestId: String, attempt: Int, level: RunLogLevel, message: String) {
@@ -303,35 +316,15 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
     ) {
         val state = activeRun ?: return
         val event = synchronized(this) {
-            val current = activeRun ?: return
-            RunDiagnosticEvent(
-                sequence = current.nextSequence++,
-                eventId = UUID.randomUUID().toString(),
-                runId = current.runId,
-                taskId = current.runId,
-                traceId = actionId ?: current.runId,
-                timestampEpochMs = System.currentTimeMillis(),
-                elapsedRealtimeMs = SystemClock.elapsedRealtime(),
-                level = level,
-                category = category,
-                component = component,
-                eventType = eventType,
-                message = RunLogBudgetPolicy.redactSensitivePayload(message),
-                actionId = actionId,
-                windowId = windowId,
-                packageName = packageName,
-                activityClass = activityClass,
-                pageGeneration = pageGeneration,
-                inputOrigin = inputOrigin,
-                inputOriginEvidence = inputOriginEvidence,
-                viewId = viewId,
-                previousState = previousState,
-                currentState = currentState,
-                result = result,
-                reason = reason,
-                errorType = errorType,
-                errorDetail = errorDetail
-            )
+            if (activeRun !== state) return
+            RunDiagnosticInput(
+                eventType = eventType, level = level, category = category,
+                component = component, message = message, actionId = actionId,
+                windowId = windowId, previousState = previousState, currentState = currentState,
+                result = result, reason = reason, errorType = errorType, errorDetail = errorDetail,
+                packageName = packageName, activityClass = activityClass, pageGeneration = pageGeneration,
+                inputOrigin = inputOrigin, inputOriginEvidence = inputOriginEvidence, viewId = viewId
+            ).toEvent(state.runId, state.nextSequence++, System.currentTimeMillis(), SystemClock.elapsedRealtime())
         }
         recordInternal(state, event, allowDedup = result == "DEDUPLICATED")
     }
@@ -601,7 +594,7 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         synchronized(this) {
             if (activeRun !== state) return
             if (allowDedup) {
-                val signature = "${event.category}|${event.eventType}|${event.message}"
+                val signature = "${event.level}|${event.category}|${event.eventType}|${event.taskId}|${event.traceId}|${event.actionId}|${event.windowId}|${event.pageGeneration}|${event.requestGeneration}|${event.result}|${event.reason}|${event.message}"
                 val now = event.timestampEpochMs
                 if (signature == state.lastSignature && now - state.lastEventAt in 0..DEDUP_WINDOW_MS) {
                     state.deduplicatedEvents++
@@ -687,8 +680,9 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             traceId = state.runId,
             timestampEpochMs = state.lastEventAt,
             elapsedRealtimeMs = SystemClock.elapsedRealtime(),
-            level = RunLogLevel.WARN,
+            level = RunLogLevel.INFO,
             category = RunLogCategory.DATA_QUALITY,
+            severitySource = RunLogSeveritySource.PRODUCER_DECLARED,
             component = "RunLogProcessor",
             eventType = "event_dedup_summary",
             message = "重复事件已提纯合并；type=${state.pendingDuplicateType}；repeatCount=$count；windowMs=$DEDUP_WINDOW_MS",
@@ -700,7 +694,6 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         if (state.reservedEventBytes + bytes <= RunLogBudgetPolicy.MAX_RUN_EVENT_BYTES.toLong()) {
             state.reservedEventBytes += bytes
             state.acceptedEvents++
-            state.warningEvents++
             addRecent(state, summary)
             enqueueEvent(state, summary, false)
         } else {

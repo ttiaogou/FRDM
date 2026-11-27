@@ -443,6 +443,47 @@ class RunDiagnosticAnalyzerTest {
         assertTrue(report.issues.none { it.code == "MESSAGE_DIRECTION_UNRESOLVED" })
     }
 
+    @Test
+    fun l11bProducerSeverityIsAuthoritativeAndLegacyUnknownSendOriginIsNotInput() {
+        val normal = RunDiagnosticInput(
+            "MODEL_REQUEST_FINISHED", RunLogLevel.INFO, RunLogCategory.TASK,
+            "AiModel", "origin=UNKNOWN; error=0; sendAttemptOrigin=UNKNOWN",
+            taskId = "AI_REPLY_PRIVATE_MESSAGES", traceId = "request-1", result = "SUCCEEDED",
+            requestGeneration = 7
+        ).toEvent("RUN", 1, 1, 1)
+        val declaredFailure = RunDiagnosticInput(
+            "explicit_failure", RunLogLevel.ERROR, RunLogCategory.DATA_QUALITY,
+            "Test", "AI 模式消息读取：状态=OCR_PARTIAL；OCR失败区域=1"
+        ).toEvent("RUN", 2, 2, 2)
+        val legacySend = event(3, 3, "MESSAGE_SEND_COMPLETED", "sendAttemptOrigin=UNKNOWN")
+        assertEquals(RunLogSeveritySource.PRODUCER_DECLARED, normal.severitySource)
+        assertEquals("AI_REPLY_PRIVATE_MESSAGES", normal.taskId)
+        assertEquals(7L, normal.requestGeneration)
+        assertTrue(RunDiagnosticAnalyzer.isRuntimeFailureEvent(declaredFailure))
+        val report = RunDiagnosticAnalyzer.analyze("RUN", "STOPPED", 0, 4,
+            listOf(normal, declaredFailure, legacySend), RunDiagnosticCounters(errorEvents = 1))
+        assertEquals(1L, report.counters.errorEvents)
+        assertEquals(0L, report.counters.warningEvents)
+        assertTrue(report.issues.none { it.code == "INPUT_ORIGIN_UNRESOLVED" ||
+            it.code == "POSSIBLE_CROSS_PAGE_ACTION_TRACE_GAP" })
+    }
+
+    @Test
+    fun l11bDeclaredOcrRequestIsNotCrossPageGestureEvidence() {
+        val ocr = RunDiagnosticInput(
+            "ocr_plugin_diagnostic", RunLogLevel.INFO, RunLogCategory.COLLECTION,
+            "OcrPlugin", "OCR request", actionId = "OCR-1"
+        ).toEvent("RUN", 1, 100, 100)
+        val input = RunDiagnosticInput(
+            "accessibility_event", RunLogLevel.WARN, RunLogCategory.INPUT,
+            "InputClassifier", "source unknown", inputOrigin = "UNKNOWN"
+        ).toEvent("RUN", 2, 200, 200)
+        val report = RunDiagnosticAnalyzer.analyze("RUN", "STOPPED", 0, 300,
+            listOf(ocr, input), RunDiagnosticCounters(warningEvents = 1))
+        assertTrue(report.issues.any { it.code == "INPUT_ORIGIN_UNRESOLVED" })
+        assertTrue(report.issues.none { it.code == "POSSIBLE_CROSS_PAGE_ACTION_TRACE_GAP" })
+    }
+
     private fun event(
         sequence: Long,
         timestamp: Long,

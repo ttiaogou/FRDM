@@ -1,5 +1,6 @@
 package com.freedom.data
 
+import com.freedom.core.logging.RunDiagnosticInput
 import android.content.Context
 import com.freedom.application.ports.MonitorControlRepository
 import com.freedom.core.accessibility.overlay.FloatingButtonPosition
@@ -72,6 +73,11 @@ class MonitorStoreRepository(context: Context) : MonitorControlRepository {
     override fun setOverlayHeightDp(heightDp: Int) = MonitorStore.setOverlayHeightDp(appContext, heightDp)
 
     override fun addLog(line: String) = MonitorStore.addLog(appContext, line)
+
+    override fun addDiagnosticLog(input: RunDiagnosticInput) {
+        val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
+        MonitorStore.addLog(appContext, "$timestamp  ${input.message}", input)
+    }
 
     override fun append(message: String) {
         val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())

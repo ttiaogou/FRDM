@@ -1,5 +1,6 @@
 package com.freedom.application.ports
 
+import com.freedom.core.logging.RunDiagnosticInput
 import com.freedom.core.runtime.RunStateRepository
 import com.freedom.core.runtime.RuntimeLogSink
 import com.freedom.core.accessibility.overlay.FloatingButtonPosition
@@ -31,6 +32,7 @@ interface MonitorControlRepository :
     fun overlayHeightDp(): Int
     fun setOverlayHeightDp(heightDp: Int)
     fun addLog(line: String)
+    fun addDiagnosticLog(input: RunDiagnosticInput) = addLog(input.message)
     fun logs(): List<String>
     fun clearLogs()
     fun updateAppPage(appLabel: String? = null, pageLabel: String? = null)

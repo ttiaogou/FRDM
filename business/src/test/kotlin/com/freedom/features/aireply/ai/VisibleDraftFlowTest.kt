@@ -442,13 +442,40 @@ class VisibleDraftFlowTest {
             taskId = AiDecisionTaskIds.PRIVATE_MESSAGES, generation = 11,
             eventType = "MESSAGE_SEND_UNCERTAIN", reasonCode = secret,
             sendAttemptId = secret, sendConfirmationId = secret, sendStatus = "UNKNOWN"
-        )
+        ).message
         assertFalse(log.contains(secret))
         assertFalse(log.contains("sk-example-secret"))
         assertFalse(log.contains("\n"))
         assertEquals("UNKNOWN", traceField(log, "requestId"))
         assertEquals("UNKNOWN", traceField(log, "reasonCode"))
         assertTrue(log.length < 1024)
+    }
+
+    @Test fun l11bTraceUsesBusinessOutcomeInsteadOfUnknownOptionalFields() {
+        fun event(type: String, outcome: String? = null, final: String? = null, send: String? = null) =
+            AiReplyTraceContract.format(
+                component = if (type.startsWith("MODEL_")) "MODEL" else "SEND",
+                requestId = "request-1", taskId = AiDecisionTaskIds.PRIVATE_MESSAGES,
+                generation = 11, eventType = type, outcomeCategory = outcome,
+                finalState = final, sendStatus = send
+            )
+        for (item in listOf(
+            event("MODEL_ATTEMPT_FINISHED", "VALID_DECISION"),
+            event("MODEL_REQUEST_FINISHED", final = "SUCCEEDED"),
+            event("MESSAGE_SEND_CONFIRMED", send = "CONFIRMED"),
+            event("MESSAGE_SEND_COMPLETED", send = "CONFIRMED")
+        )) {
+            assertEquals(com.freedom.core.logging.RunLogLevel.INFO, item.level)
+            assertTrue(item.message.contains("UNKNOWN"))
+            assertEquals("request-1", item.traceId)
+            assertEquals(11L, item.requestGeneration)
+        }
+        assertEquals(com.freedom.core.logging.RunLogLevel.WARN,
+            event("MODEL_ATTEMPT_FINISHED", "EMPTY_MODEL_OUTPUT").level)
+        assertEquals(com.freedom.core.logging.RunLogLevel.ERROR,
+            event("MODEL_REQUEST_FINISHED", final = "FAILED").level)
+        assertEquals(com.freedom.core.logging.RunLogLevel.WARN,
+            event("MESSAGE_SEND_UNCERTAIN", send = "UNKNOWN").level)
     }
 
     @Test fun registeredTasksOnlyReleaseSendGateAfterConfirmedBubbleWithoutDuplicateReceipt() {

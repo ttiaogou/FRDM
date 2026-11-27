@@ -1,5 +1,6 @@
 package com.freedom.app
 
+import com.freedom.core.logging.RunDiagnosticInput
 import android.app.Activity
 import android.content.Context
 import android.os.Handler
@@ -257,6 +258,7 @@ class AppCompositionRoot(context: Context) {
         service: FreedomAccessibilityService,
         mainHandler: Handler,
         addLog: (String) -> Unit,
+        addDiagnosticLog: (RunDiagnosticInput) -> Unit,
         dp: (Int) -> Int,
         refreshViews: () -> Unit
     ): AccessibilityServiceDependencies = AccessibilityServiceDependencies(
@@ -264,6 +266,7 @@ class AppCompositionRoot(context: Context) {
         service = service,
         mainHandler = mainHandler,
         addLog = addLog,
+        addDiagnosticLog = addDiagnosticLog,
         dp = dp,
         refreshViews = refreshViews
     )
@@ -290,6 +293,7 @@ internal class AccessibilityServiceDependencies internal constructor(
     private val service: FreedomAccessibilityService,
     private val mainHandler: Handler,
     private val addLog: (String) -> Unit,
+    private val addDiagnosticLog: (RunDiagnosticInput) -> Unit,
     private val dp: (Int) -> Int,
     private val refreshViews: () -> Unit
 ) {
@@ -595,6 +599,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             scheduler = taskScheduler,
             isAiReplyActive = { runSessionCoordinator.isRuntimeReady(RunMode.AI_REPLY) },
             onLog = addLog,
+            onDiagnosticLog = addDiagnosticLog,
             createGateway = { configuration ->
                 // Development evidence is automatic for an active diagnostic run. The sink is
                 // bound once, so a response from an old run cannot be written into a new one.
@@ -675,6 +680,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                 } else 0L
             },
             onLog = addLog,
+            onDiagnosticLog = addDiagnosticLog,
             fullInspectionDebounceMs = FreedomAccessibilityService.AI_CHAT_INSPECT_DEBOUNCE_MS,
             regionRefreshDebounceMs = FreedomAccessibilityService.AI_CHAT_REGION_DEBOUNCE_MS,
             draftStartupFailure = { aiReplyDraftCoordinator.startupFailure() },
@@ -983,7 +989,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                 diagnostics.recordStructured(
                     eventType = "accessibility_duplicate_suppressed",
                     category = RunLogCategory.DATA_QUALITY,
-                    level = RunLogLevel.WARN,
+                    level = RunLogLevel.INFO,
                     component = "AndroidAccessibilityEventPipeline",
                     message = "重复无障碍事件合并；type=${event.type}；package=${event.packageName}; class=${event.className.substringAfterLast('.')}; windowId=${event.windowId}",
                     actionId = decision?.actionId,

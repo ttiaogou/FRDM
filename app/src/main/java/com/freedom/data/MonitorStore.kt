@@ -1,5 +1,6 @@
 package com.freedom.data
 
+import com.freedom.core.logging.RunDiagnosticInput
 import android.content.Context
 import com.freedom.core.accessibility.overlay.FloatingButtonPosition
 import com.freedom.core.logging.RunLogBudgetPolicy
@@ -173,9 +174,9 @@ object MonitorStore {
     }
 
     @Synchronized
-    fun addLog(context: Context, line: String) {
+    fun addLog(context: Context, line: String, input: RunDiagnosticInput? = null) {
         val diagnostics = RunDiagnosticsManager.get(context)
-        diagnostics.recordLog(line)
+        if (input == null) diagnostics.recordLog(line) else diagnostics.recordInput(input)
         val p = prefs(context)
         val current = runCatching {
             JSONArray(p.getString(KEY_LOGS, "[]"))

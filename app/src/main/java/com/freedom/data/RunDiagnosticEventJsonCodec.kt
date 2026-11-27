@@ -1,5 +1,6 @@
 package com.freedom.data
 
+import com.freedom.core.logging.RunLogSeveritySource
 import com.freedom.core.logging.RunDiagnosticCounters
 import com.freedom.core.logging.RunDiagnosticEvent
 import com.freedom.core.logging.RunLogCategory
@@ -9,7 +10,7 @@ import org.json.JSONObject
 /** Keeps the persisted diagnostic event schema in one place. Field names are compatibility data. */
 internal object RunDiagnosticEventJsonCodec {
     fun encode(event: RunDiagnosticEvent): String = JSONObject()
-        .put("schemaVersion", 1)
+        .put("schemaVersion", 2)
         .put("sequence", event.sequence)
         .put("eventId", event.eventId)
         .put("runId", event.runId)
@@ -35,6 +36,8 @@ internal object RunDiagnosticEventJsonCodec {
         .put("result", event.result ?: JSONObject.NULL)
         .put("reason", event.reason ?: JSONObject.NULL)
         .put("errorType", event.errorType ?: JSONObject.NULL)
+        .put("severitySource", event.severitySource.name)
+        .put("requestGeneration", event.requestGeneration ?: JSONObject.NULL)
         .toString()
 
     fun decode(json: JSONObject): RunDiagnosticEvent = RunDiagnosticEvent(
@@ -62,7 +65,11 @@ internal object RunDiagnosticEventJsonCodec {
         currentState = json.optString("currentState").takeIf(String::isNotBlank),
         result = json.optString("result").takeIf(String::isNotBlank),
         reason = json.optString("reason").takeIf(String::isNotBlank),
-        errorType = json.optString("errorType").takeIf(String::isNotBlank)
+        errorType = json.optString("errorType").takeIf(String::isNotBlank),
+        severitySource = runCatching { RunLogSeveritySource.valueOf(json.optString("severitySource")) }
+            .getOrDefault(RunLogSeveritySource.LEGACY_INFERRED),
+        requestGeneration = if (json.has("requestGeneration") && !json.isNull("requestGeneration"))
+            json.optLong("requestGeneration") else null
     )
 
     fun counters(counters: RunDiagnosticCounters) = JSONObject()

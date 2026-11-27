@@ -1,5 +1,8 @@
 package com.freedom.features.aireply
 
+import com.freedom.core.logging.RunDiagnosticInput
+import com.freedom.core.logging.RunLogCategory
+import com.freedom.core.logging.RunLogLevel
 import com.freedom.gesture.api.GestureApi
 import com.freedom.core.accessibility.events.AccessibilityEventEnvelope
 import com.freedom.core.accessibility.events.AccessibilityEventType
@@ -180,8 +183,22 @@ class AiReplyObservationRuntime(
         { _, _, _, _ -> false },
     private val privateChatFollowUpPort: com.freedom.features.aireply.ports.PrivateChatFollowUpPort? = null,
     private val isPrivateFollowUpTouchActive: () -> Boolean = { false },
-    private val privateImageResourceCount: () -> Int = { 0 }
+    private val privateImageResourceCount: () -> Int = { 0 },
+    private val onDiagnosticLog: (RunDiagnosticInput) -> Unit = { onLog(it.message) }
 ) {
+    /** Private evidence only; logging is not a recovery decision or operation permit. */
+    private fun recordPrivateUnreadDiagnostic(
+        type: String, level: RunLogLevel, result: String, message: String
+    ) {
+        runCatching {
+            onDiagnosticLog(RunDiagnosticInput(
+                eventType = type, level = level, category = RunLogCategory.DATA_QUALITY,
+                component = "PrivateMessagesTraversal", message = message,
+                taskId = "AI_REPLY_PRIVATE_MESSAGES", result = result
+            ))
+        }
+    }
+
     // Ephemeral binding for the existing adapter execution; the ledger remains the durable owner.
     private class PrivateFollowUp(
         val contactKey: String,
@@ -6677,7 +6694,7 @@ class AiReplyObservationRuntime(
         } else if (listEvaluation.unreadAdmissionDecision == PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED &&
             relocationPending && !privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationActive
         ) {
-            onLog("AI 私聊异常会话[RELOCATION_ORIGIN_VERIFIED]：已重新找到目标或确认已读边界；保留未解决身份")
+            recordPrivateUnreadDiagnostic("RELOCATION_ORIGIN_VERIFIED", RunLogLevel.INFO, "ORIGIN_VERIFIED", "AI 私聊异常会话[RELOCATION_ORIGIN_VERIFIED]：已重新找到目标或确认已读边界；保留未解决身份")
         }
         if (hadUnknownUnreadBeforeFreshSnapshot &&
             !privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown &&
@@ -6711,7 +6728,11 @@ class AiReplyObservationRuntime(
                     hint.startsWith("identity:") && it.matches(Regex("[0-9a-f]{24}"))
                 }?.take(12)
             }.sorted().joinToString(",")
-            onLog("AI 私聊异常会话[INCOMPLETE_UNREAD_EVIDENCE_DELTA]：task=PRIVATE_MESSAGES；" +
+            recordPrivateUnreadDiagnostic(
+                "INCOMPLETE_UNREAD_EVIDENCE_DELTA",
+                if (newlyPendingIncomplete.isNotEmpty()) RunLogLevel.WARN else RunLogLevel.INFO,
+                if (incompleteAfterObservation.isEmpty()) "RESOLVED" else "PENDING",
+                "AI 私聊异常会话[INCOMPLETE_UNREAD_EVIDENCE_DELTA]：task=PRIVATE_MESSAGES；" +
                 "added=${newlyPendingIncomplete.size}；addedRowHashes=${opaqueRows(newlyPendingIncomplete)}；" +
                 "resolved=${repairedIncomplete.size}；resolvedRowHashes=${opaqueRows(repairedIncomplete)}；" +
                 "remaining=${incompleteAfterObservation.size}；cacheWrite=false")
@@ -6726,7 +6747,8 @@ class AiReplyObservationRuntime(
             val scope = if (listEvaluation.incompleteUnreadAllowsIndependentTraversal)
                 "ROW_SCOPED_BLOCK；仅隔离待复核会话；其余列表动作仍须通过原有窗口、租约与手势门禁；禁止提前完成本轮"
             else "LIST_EVIDENCE_INSUFFICIENT；缺少独立完整行证据或存在无法安全跨视口匹配的匿名行；保持原恢复门禁"
-            onLog("AI 私聊异常会话[INCOMPLETE_UNREAD_RETRYABLE]：" +
+            recordPrivateUnreadDiagnostic("INCOMPLETE_UNREAD_RETRYABLE", RunLogLevel.WARN, "RETRYABLE",
+                "AI 私聊异常会话[INCOMPLETE_UNREAD_RETRYABLE]：" +
                 "unresolved=${privateMessagesTraversalTaskExecutor.unresolvedIncompleteUnreadKeys.size}；" +
                 "cacheWrite=false；保持检查点，待原行新鲜可操作证据确认；scope=$scope")
             if (!listEvaluation.incompleteUnreadAllowsIndependentTraversal) {
@@ -7140,7 +7162,7 @@ class AiReplyObservationRuntime(
                 return
             }
             if (privateMessagesTraversalTaskExecutor.hasUnresolvedVisibleEdgeEvidence(snapshot)) {
-                onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：边缘未读证据尚未明确；重新观察，不计为已读")
+                recordPrivateUnreadDiagnostic("HANDOFF_BLOCKED", RunLogLevel.WARN, "BLOCKED", "AI 私聊异常会话[HANDOFF_BLOCKED]：边缘未读证据尚未明确；重新观察，不计为已读")
                 scheduleSessionListStabilityRetry("边缘未读证据待复核")
                 return
             }
@@ -7189,7 +7211,7 @@ class AiReplyObservationRuntime(
         if (!privateRelocationRetryOwed && receivedGreetingsTaskFlow.supportsWorkflow() &&
             privateMessagesCheckpointRepository != null
         ) {
-            onLog("AI 私聊异常会话[DEFERRED_WORK_HANDOFF]：局部待复核身份不计为完成；保留检查点并安全交接")
+            recordPrivateUnreadDiagnostic("DEFERRED_WORK_HANDOFF", RunLogLevel.INFO, "DEFERRED", "AI 私聊异常会话[DEFERRED_WORK_HANDOFF]：局部待复核身份不计为完成；保留检查点并安全交接")
             startReceivedGreetingsTask("原异常未读待重新定位；先交接招呼任务", snapshot, AiReplyTaskYieldReason.DEFERRED_WORK)
             return true
         }
@@ -7212,7 +7234,7 @@ class AiReplyObservationRuntime(
             }
             privateRelocationRetryOwed = false
             privateMessagesCheckpointRepository?.save(executor.checkpoint())
-            onLog("AI 私聊异常会话[RELOCATION_STARTED]：保留原轮次、已处理记录与未决身份；重新寻找待处理目标，找到后立即反向处理")
+            recordPrivateUnreadDiagnostic("RELOCATION_STARTED", RunLogLevel.INFO, "RECOVERING", "AI 私聊异常会话[RELOCATION_STARTED]：保留原轮次、已处理记录与未决身份；重新寻找待处理目标，找到后立即反向处理")
             scrollSessionList(snapshot, toTop = false)
             return true
         }
@@ -7223,7 +7245,7 @@ class AiReplyObservationRuntime(
         )
         incompleteUnreadRelocationWait = ticket
         privateMessagesCheckpointRepository?.save(executor.checkpoint())
-        onLog("AI 私聊异常会话[RELOCATION_WAIT]：已确认顶部但原异常未解决；按现有退避等待下一次新鲜列表观察")
+        recordPrivateUnreadDiagnostic("RELOCATION_WAIT", RunLogLevel.WARN, "RETRYABLE", "AI 私聊异常会话[RELOCATION_WAIT]：已确认顶部但原异常未解决；按现有退避等待下一次新鲜列表观察")
         scheduleSessionListStabilityRetry("原异常未读会话受控重新定位") {
             if (incompleteUnreadRelocationWait === ticket &&
                 ticket.runGeneration == currentRunGeneration() &&
@@ -7503,14 +7525,14 @@ class AiReplyObservationRuntime(
             // unread row is resolved. Keep the cursor and retry observations, without
             // promoting a row-local completion blocker into a new UNKNOWN page.
             privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
-            onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：存在待复核的不完整未读会话；保留本轮检查点，不切换收到招呼任务")
+            recordPrivateUnreadDiagnostic("HANDOFF_BLOCKED", RunLogLevel.WARN, "BLOCKED", "AI 私聊异常会话[HANDOFF_BLOCKED]：存在待复核的不完整未读会话；保留本轮检查点，不切换收到招呼任务")
             scheduleSessionListStabilityRetry("原异常未读会话尚未重新确认")
             return
         }
         val executor = privateMessagesTraversalTaskExecutor
         if (!executor.lockedUnreadSetFinalized || executor.pendingKnownUnreadKeys().isNotEmpty()) {
             privateMessagesCheckpointRepository?.save(executor.checkpoint())
-            onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：未读边界或剩余候选尚未完成；" +
+            recordPrivateUnreadDiagnostic("HANDOFF_BLOCKED", RunLogLevel.WARN, "BLOCKED", "AI 私聊异常会话[HANDOFF_BLOCKED]：未读边界或剩余候选尚未完成；" +
                 "pendingUnread=${executor.pendingKnownUnreadKeys().size}；保留本轮检查点")
             scheduleSessionListStabilityRetry("本轮未读尚未完成")
             return
@@ -7536,7 +7558,7 @@ class AiReplyObservationRuntime(
             confirmedPrivateReturnAwaitingRecovery || isPrivateFollowUpActive() ||
             isSendConfirmationPending() || isConversationDraftPending() || activeSessionGestureRequestId != null
         ) {
-            onLog("AI 私聊异常会话[HANDOFF_BLOCKED]：当前事务、手势、恢复或操作权尚未安全交接；保留本轮检查点")
+            recordPrivateUnreadDiagnostic("HANDOFF_BLOCKED", RunLogLevel.WARN, "BLOCKED", "AI 私聊异常会话[HANDOFF_BLOCKED]：当前事务、手势、恢复或操作权尚未安全交接；保留本轮检查点")
             scheduleSessionListStabilityRetry("当前私聊事务尚未结束")
             return
         }
@@ -8914,7 +8936,7 @@ class AiReplyObservationRuntime(
                 }
             }
             if (stillPending && !privateMessagesTraversalTaskExecutor.canContinueWithIncompleteUnread(fresh)) {
-                onLog("AI 私聊异常会话[PRE_SCROLL_EVIDENCE_LOST]：滚动前新快照缺少独立完整行证据；不使用旧视口")
+                recordPrivateUnreadDiagnostic("PRE_SCROLL_EVIDENCE_LOST", RunLogLevel.WARN, "RETRYABLE", "AI 私聊异常会话[PRE_SCROLL_EVIDENCE_LOST]：滚动前新快照缺少独立完整行证据；不使用旧视口")
                 recoverRetryablePrivateList("PRIVATE_INCOMPLETE_UNREAD_ROW")
                 return
             }

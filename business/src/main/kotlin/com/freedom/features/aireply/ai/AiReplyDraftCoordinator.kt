@@ -1,5 +1,8 @@
 package com.freedom.features.aireply.ai
 
+import com.freedom.core.logging.RunDiagnosticInput
+import com.freedom.core.logging.RunLogCategory
+import com.freedom.core.logging.RunLogLevel
 import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
@@ -60,7 +63,7 @@ internal object AiReplyTraceContract {
         sendStatus: String? = null,
         finalState: String? = null,
         sendAttemptOrigin: String? = null
-    ): String {
+    ): RunDiagnosticInput {
         // Never serialize arbitrary provider, adapter or persisted identifier text.
         fun safe(value: String?): String = value?.takeIf {
             it.length in 1..128 && it.all { char ->
@@ -73,7 +76,7 @@ internal object AiReplyTraceContract {
                 it == AiDecisionTaskIds.RECEIVED_GREETINGS
         } ?: "UNKNOWN"
         val prefix = if (component == "MODEL") "AI 模型生命周期：" else "AI 消息发送链路："
-        return prefix +
+        val message = prefix +
             "component=${safe(component)}；requestId=${safe(requestId)}；taskId=$safeTask；" +
             "generation=$generation；eventType=${safe(eventType)}；" +
             "attemptIndex=${attemptIndex ?: "NONE"}；retryState=${safe(retryState)}；" +
@@ -83,6 +86,34 @@ internal object AiReplyTraceContract {
             "sendAttemptId=${safe(sendAttemptId)}；sendConfirmationId=${safe(sendConfirmationId)}；" +
             "sendStatus=${safe(sendStatus)}；sendAttemptOrigin=${safe(sendAttemptOrigin)}；" +
             "finalState=${safe(finalState)}"
+        val level = when (eventType) {
+            "MODEL_REQUEST_FINISHED" -> when (finalState) {
+                "SUCCEEDED", "CANCELLED" -> RunLogLevel.INFO
+                else -> RunLogLevel.ERROR
+            }
+            "MODEL_ATTEMPT_FINISHED" -> when (outcomeCategory) {
+                "VALID_DECISION", "LOCAL_PRECHECK_BLOCKED" -> RunLogLevel.INFO
+                else -> RunLogLevel.WARN
+            }
+            "MODEL_RETRY_SCHEDULE_FAILED" -> RunLogLevel.ERROR
+            "MESSAGE_SEND_UNCERTAIN", "MESSAGE_SEND_REJECTED", "MESSAGE_SEND_DEFERRED" -> RunLogLevel.WARN
+            "MODEL_ATTEMPT_STARTED", "MODEL_RETRY_SCHEDULED", "MODEL_RETRY_EXECUTING",
+            "MODEL_RETRY_CANCELLED", "MESSAGE_SEND_SUBMITTED", "MESSAGE_SEND_REHYDRATED",
+            "MESSAGE_SEND_CONFIRMED", "MESSAGE_SEND_COMPLETED" -> RunLogLevel.INFO
+            else -> RunLogLevel.WARN
+        }
+        return RunDiagnosticInput(
+            eventType = safe(eventType),
+            level = level,
+            category = RunLogCategory.TASK,
+            component = if (component == "MODEL") "AiModel" else "AiSend",
+            message = message,
+            taskId = safeTask.takeUnless { it == "UNKNOWN" },
+            traceId = safe(requestId).takeUnless { it == "UNKNOWN" },
+            result = safe(finalState ?: sendStatus ?: outcomeCategory ?: retryState),
+            reason = safe(reasonCode),
+            requestGeneration = generation
+        )
     }
 }
 
@@ -155,7 +186,8 @@ class AiReplyDraftCoordinator(
     /** Greeting flow can provide the last verified message observation immediately before send. */
     private val captureGreetingPreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null },
     /** Private-message flow uses the same pre-send diff baseline contract. */
-    private val capturePrivatePreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null }
+    private val capturePrivatePreSendOutgoingKeys: (ChatDraftInputTarget) -> Set<String>? = { null },
+    private val onDiagnosticLog: (RunDiagnosticInput) -> Unit = { onLog(it.message) }
 ) {
     private val pending = AtomicBoolean(false)
     private val awaitingUserSend = AtomicBoolean(false)
@@ -190,13 +222,26 @@ class AiReplyDraftCoordinator(
         delayMs: Long? = null,
         responseMode: String = "UNKNOWN",
         finalState: String? = null
-    ): String = AiReplyTraceContract.format(
+    ): RunDiagnosticInput = AiReplyTraceContract.format(
         component = "MODEL", requestId = trace.requestId, taskId = trace.taskId,
         generation = trace.requestGeneration, eventType = eventType,
         attemptIndex = trace.attemptIndex, retryState = retryState, reasonCode = reasonCode,
         delayMs = delayMs, responseMode = responseMode,
         outcomeCategory = trace.lastOutcomeCategory, finalState = finalState
     )
+
+    private fun recordModelEvidence(
+        type: String, level: RunLogLevel, taskId: String, requestId: String,
+        requestGeneration: Long, result: String, message: String
+    ) {
+        runCatching {
+            onDiagnosticLog(RunDiagnosticInput(
+                eventType = type, level = level, category = RunLogCategory.TASK,
+                component = "AiModel", message = message, taskId = taskId,
+                traceId = requestId, requestGeneration = requestGeneration, result = result
+            ))
+        }
+    }
 
     /** Emits fixed diagnostic codes only; model output and exception messages never enter this log. */
     private fun recordModelLifecycle(
@@ -226,7 +271,7 @@ class AiReplyDraftCoordinator(
             lifecycleRecord(trace, eventType, retryState, reasonCode, delayMs, responseMode)
         }
         // Diagnostics must never cause a model decision or UI action to fail.
-        log?.let { runCatching { onLog(it) } }
+        log?.let { runCatching { onDiagnosticLog(it) } }
     }
 
     private fun terminalLifecycleRecord(
@@ -240,7 +285,7 @@ class AiReplyDraftCoordinator(
                 trace.scheduledRetries == MAX_EMPTY_MODEL_RETRIES -> "EXHAUSTED"
             else -> "NONE"
         }
-    ): String = lifecycleRecord(
+    ): RunDiagnosticInput = lifecycleRecord(
         trace, "MODEL_REQUEST_FINISHED", retryState, reasonCode, finalState = finalState
     )
 
@@ -260,7 +305,7 @@ class AiReplyDraftCoordinator(
             if (retryState == null) terminalLifecycleRecord(trace, finalState, reasonCode)
             else terminalLifecycleRecord(trace, finalState, reasonCode, retryState)
         }
-        log?.let { runCatching { onLog(it) } }
+        log?.let { runCatching { onDiagnosticLog(it) } }
     }
     private var activeInputObservationAtMillis = 0L
     private var activeMessageKey: String? = null
@@ -362,7 +407,7 @@ class AiReplyDraftCoordinator(
             )
         }
         // Logging is observational only: callback failure cannot affect send state.
-        log?.let { runCatching { onLog(it) } }
+        log?.let { runCatching { onDiagnosticLog(it) } }
     }
 
     private fun recordSendTrace(
@@ -478,7 +523,7 @@ class AiReplyDraftCoordinator(
 
     /** AI 回复运行环境停止或重建时，使迟到的回调失效。 */
     fun resetForRuntimeReset() {
-        var cancelledModelLogs: List<String> = emptyList()
+        var cancelledModelLogs: List<RunDiagnosticInput> = emptyList()
         var uncertainRecordRetained = false
         synchronized(lock) {
             // Invalidate callbacks even when the optional UNKNOWN journal update fails.
@@ -550,7 +595,7 @@ class AiReplyDraftCoordinator(
             sendControlRetryScheduled = false
             sendControlRetryTicket++
         }
-        cancelledModelLogs.forEach { runCatching { onLog(it) } }
+        cancelledModelLogs.forEach { runCatching { onDiagnosticLog(it) } }
         if (uncertainRecordRetained) runCatching {
             onLog("AI 任务隔离[UNKNOWN_JOURNAL_UPDATE_UNCONFIRMED]：保留原有发送持久化证据；仅允许后续原会话只读核验，不重发")
         }
@@ -993,7 +1038,10 @@ class AiReplyDraftCoordinator(
                 reasonCode = outcomeCategory.name, responseMode = responseMode,
                 outcomeCategory = outcomeCategory.name
             )
-            onLog("AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
+            recordModelEvidence("MODEL_RESULT_CLASSIFIED",
+                if (outcomeCategory == AiModelOutputCategory.LOCAL_PRECHECK_BLOCKED) RunLogLevel.INFO else RunLogLevel.WARN,
+                policy.taskId, requestId, requestGeneration, outcomeCategory.name,
+                "AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
                 "generation=$requestGeneration；outcomeCategory=${outcomeCategory.name}；" +
                 "safeCode=${safeLog(safeCode)}；contentState=${safeLog(contentState)}；" +
                 "executionState=${evaluation.status.name}；" +
@@ -1116,7 +1164,9 @@ class AiReplyDraftCoordinator(
         val draftPresent = !decision.draft.isNullOrBlank()
         val draftLength = decision.draft?.codePointCount(0, decision.draft.length) ?: 0
         val messageCount = if (draftPresent) ReplyMessageSegments.parse(decision.draft!!).messages.size else 0
-        onLog("AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
+        recordModelEvidence("MODEL_RESULT_CLASSIFIED", RunLogLevel.INFO,
+            policy.taskId, requestId, requestGeneration, "VALID_DECISION",
+            "AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
             "generation=$requestGeneration；outcomeCategory=VALID_DECISION；" +
             "safeCode=MODEL_DECISION_${decision.action.name}；contentState=PRESENT；" +
             "action=${decision.action.name}；reasonHash=${diagnosticHash(decision.reason)}；" +
@@ -1135,7 +1185,9 @@ class AiReplyDraftCoordinator(
                 "reasonHash=${diagnosticHash(decision.reason)}；" +
                 "draftPresent=${!decision.draft.isNullOrBlank()}"
         )
-        onLog("AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
+        recordModelEvidence("MODEL_DECISION_DETAIL", RunLogLevel.DEBUG,
+            policy.taskId, requestId, requestGeneration, "VALID_DECISION",
+            "AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
             "reasonHash=${diagnosticHash(decision.reason)}；" +
             "reasonDetailPresent=${!decision.reasonDetail.isNullOrBlank()}；" +
             "reasonDetailLength=${decision.reasonDetail?.length ?: 0}；" +
@@ -2209,7 +2261,7 @@ class AiReplyDraftCoordinator(
     }
 
     private fun finish(reasonCode: String, requestGeneration: Long) {
-        var terminalLog: String? = null
+        var terminalLog: RunDiagnosticInput? = null
         val technicalPreSendFailure = reasonCode in setOf(
             "DRAFT_GENERATION_FAILED", "BACKGROUND_EXECUTOR_REJECTED",
             "MODEL_DECISION_MODEL_CALL_FAILED", "MODEL_DECISION_EMPTY_MODEL_OUTPUT",
@@ -2283,7 +2335,7 @@ class AiReplyDraftCoordinator(
                 readyToDefer = attempts >= MODEL_FAILURE_MAX_ATTEMPTS
             ) else null
         }
-        terminalLog?.let { runCatching { onLog(it) } }
+        terminalLog?.let { runCatching { onDiagnosticLog(it) } }
         onLog("AI 回复草稿处理结束：$reasonCode")
         if (event != null) {
             onLog("AI 模型失败交接[PRE_SEND_NO_GESTURE]：reason=${event.reasonCode}；" +
