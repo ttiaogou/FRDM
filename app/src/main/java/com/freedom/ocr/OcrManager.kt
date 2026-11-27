@@ -15,6 +15,7 @@ import org.autojs.plugin.paddle.ocr.api.OcrResult
 import org.autojs.plugin.paddle.ocr.api.PaddleOcrOptionExtraKeys
 import java.io.Closeable
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
@@ -106,7 +107,15 @@ class OcrManager(context: android.content.Context) : Closeable {
         }
     }
 
-    fun recognize(bitmap: Bitmap, modelId: String? = null): List<OcrLineResult> = operationLock.withLock {
+    fun recognize(
+        bitmap: Bitmap,
+        modelId: String? = null,
+        isRequestCurrent: () -> Boolean = { true }
+    ): List<OcrLineResult> = operationLock.withLock {
+        fun requireCurrentRead() {
+            if (!isRequestCurrent()) throw CancellationException("OCR_READ_INVALIDATED")
+        }
+        requireCurrentRead()
         require(modelId.isNullOrBlank()) {
             "模型配置由 OCR 插件自身提供；请在 OCR 插件管理中安装或切换模型配置对应的插件。"
         }
@@ -133,6 +142,7 @@ class OcrManager(context: android.content.Context) : Closeable {
         for (attempt in 1..MAX_REQUEST_ATTEMPTS) {
             var phase = RequestPhase.BIND
             try {
+                requireCurrentRead()
                 if (activePlugin == null) {
                     transition(
                         OcrLifecycleState.DISCOVERING,
@@ -147,6 +157,7 @@ class OcrManager(context: android.content.Context) : Closeable {
                 if (stateMachine.current() == OcrLifecycleState.OCR_TIMEOUT) {
                     throw OcrPluginException("OCR 请求在插件连接阶段已超时", failureKind = OcrPluginFailureKind.OCR_TIMEOUT)
                 }
+                requireCurrentRead()
                 phase = RequestPhase.RECOGNIZE
                 transition(
                     OcrLifecycleState.SERVICE_READY,
@@ -183,6 +194,7 @@ class OcrManager(context: android.content.Context) : Closeable {
                         "package=${plugin.descriptor.packageName};image=${bitmap.width}x${bitmap.height}"
                 )
                 val result = try {
+                    requireCurrentRead()
                     plugin.service.detect(transfer.readEnd, options).also {
                         emitDiagnostic(
                             "OCR_CLIENT_BINDER_CALL_SUCCESS requestId=$requestId;attempt=$attempt;" +
@@ -194,6 +206,9 @@ class OcrManager(context: android.content.Context) : Closeable {
                             "engineLockWaitMs" to OcrPluginContract.EXTRA_ENGINE_LOCK_WAIT_MS,
                             "modelPrepareMs" to OcrPluginContract.EXTRA_MODEL_PREPARE_TIME_MS,
                             "engineAcquireMs" to OcrPluginContract.EXTRA_ENGINE_ACQUIRE_TIME_MS,
+                            "engineCacheHit" to OcrPluginContract.EXTRA_ENGINE_CACHE_HIT,
+                            "engineCreateCount" to OcrPluginContract.EXTRA_ENGINE_CREATE_COUNT,
+                            "detMaxSideLimit" to OcrPluginContract.EXTRA_DET_MAX_SIDE_LIMIT,
                             "inferenceWallMs" to OcrPluginContract.EXTRA_INFERENCE_WALL_TIME_MS,
                             "detectionMs" to OcrPluginContract.EXTRA_DETECTION_TIME_MS,
                             "recognitionMs" to OcrPluginContract.EXTRA_RECOGNITION_TIME_MS,
@@ -231,6 +246,7 @@ class OcrManager(context: android.content.Context) : Closeable {
                 if (stateMachine.current() == OcrLifecycleState.OCR_TIMEOUT) {
                     throw OcrPluginException("OCR 请求已超时；丢弃迟到的插件结果", failureKind = OcrPluginFailureKind.OCR_TIMEOUT)
                 }
+                requireCurrentRead()
                 val lines = result.mapNotNull(::toLineResult)
                 if (lines.isEmpty()) {
                     transition(
@@ -251,6 +267,19 @@ class OcrManager(context: android.content.Context) : Closeable {
                 }
                 return@withLock lines
             } catch (failure: Exception) {
+                if (failure is CancellationException) {
+                    if (stateMachine.current() != OcrLifecycleState.OCR_TIMEOUT) {
+                        // Cancellation is not a plugin failure; retain a healthy binding.
+                        if (activePlugin != null) {
+                            transition(OcrLifecycleState.SERVICE_READY, requestId, attempt,
+                                activePlugin?.descriptor?.packageName, "OCR_READ_INVALIDATED")
+                        } else {
+                            transition(OcrLifecycleState.IDLE, requestId, attempt, reason = "OCR_READ_INVALIDATED")
+                        }
+                    }
+                    emitDiagnostic("OCR_CLIENT_READ_INVALIDATED requestId=$requestId;attempt=$attempt;nextRequest=false")
+                    throw failure
+                }
                 val typed = failure.asOcrPluginException()
                 lastFailure = typed
                 val alreadyTimedOut = stateMachine.current() == OcrLifecycleState.OCR_TIMEOUT
@@ -285,7 +314,8 @@ class OcrManager(context: android.content.Context) : Closeable {
                 }
                 releaseBinding()
 
-                if (!alreadyTimedOut && phase == RequestPhase.RECOGNIZE && attempt < MAX_REQUEST_ATTEMPTS && typed.failureKind.isRetryable()) {
+                if (!alreadyTimedOut && isRequestCurrent() && phase == RequestPhase.RECOGNIZE &&
+                    attempt < MAX_REQUEST_ATTEMPTS && typed.failureKind.isRetryable()) {
                     emitDiagnostic(
                         "OCR 自动恢复：requestId=$requestId;attempt=$attempt;" +
                             "failure=${typed.failureKind};delayMs=$REQUEST_RETRY_DELAY_MS;重新发现并绑定"

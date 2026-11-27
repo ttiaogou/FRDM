@@ -18,7 +18,11 @@ import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
 import com.freedom.features.aireply.domain.message.ChatMessageOcrTarget
 import com.freedom.features.aireply.domain.message.OcrContentToken
+import com.freedom.features.aireply.domain.message.OcrContentKind
+import com.freedom.features.aireply.domain.message.OcrContentRect
+import com.freedom.features.aireply.domain.message.OcrIsolatedTextEvidence
 import com.freedom.features.aireply.domain.message.OcrTextProjection
+import com.freedom.features.aireply.domain.message.OcrTextProjectionStatus
 import com.freedom.features.aireply.domain.message.MessageContentQuality
 import com.freedom.ocr.OcrManager
 import kotlin.math.ceil
@@ -58,22 +62,59 @@ internal class MomoChatMessageOcrProcessor(
         val textProjection: OcrTextProjection? = null
     )
 
-    internal data class IncomingCropKey(
+    internal data class CropReuseKey(
         val windowSessionKey: String,
-        val rowIndex: Int,
+        // Incoming reuse is recognition-only; visible row identity is rebuilt from the fresh batch.
+        // Outgoing baselines still require the exact row and full target geometry.
+        val rowIndex: Int?,
         val structureSignature: String,
         val timeHint: String?,
-        val digest: String
+        val digest: String,
+        // Outgoing baseline reuse requires exact geometry, directions and neighbor evidence.
+        val outgoingTarget: ChatMessageOcrTarget? = null
     )
 
-    private data class PreviousIncomingBatch(
+    private data class PreviousRecognitionBatch(
         val capturedAtMillis: Long,
-        val entries: Map<IncomingCropKey, CropRecognition>
+        val windowSessionKey: String,
+        val observationId: String,
+        val windowSnapshotSignature: String,
+        val entries: Map<CropReuseKey, CropRecognition>
     )
 
     // One previous fully completed batch, bounded by MAX_TARGETS_PER_BATCH. Recognition
     // evidence only: no new conversation identity, node handles, or send receipts.
-    @Volatile private var previousIncomingBatch: PreviousIncomingBatch? = null
+    // Taking or invalidating the slot retires every earlier publication token.
+    internal class RecognitionReuseSlot<T> {
+        internal data class Read<T>(val generation: Long, val previous: T?)
+        private var generation = 0L
+        private var previous: T? = null
+        private var closed = false
+
+        @Synchronized fun begin(): Read<T> {
+            val read = Read(++generation, previous)
+            previous = null
+            return read
+        }
+
+        @Synchronized fun publish(read: Read<T>, value: T): Boolean {
+            if (closed || generation != read.generation) return false
+            previous = value
+            return true
+        }
+
+        @Synchronized fun invalidate() {
+            generation++
+            previous = null
+        }
+
+        @Synchronized fun close() {
+            closed = true
+            invalidate()
+        }
+    }
+
+    private val recognitionReuse = RecognitionReuseSlot<PreviousRecognitionBatch>()
 
     private val executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "Freedom-Momo-Local-OCR").apply { isDaemon = true }
@@ -100,8 +141,19 @@ internal class MomoChatMessageOcrProcessor(
         expectedPackage: String,
         expectedActivity: String,
         reuseVerifiedIncoming: Boolean = false,
+        confirmedBaselineObservationId: String? = null,
+        isRequestCurrent: () -> Boolean = { true },
         onComplete: (MomoChatOcrResult) -> Unit
     ) {
+        val isCurrent = retainOcrReadValidity { !closed && isRequestCurrent() }
+        fun invalidatedResult(stage: String): MomoChatOcrResult {
+            onLog("OCR_BATCH_INVALIDATED stage=$stage;nextRequest=false")
+            return MomoChatOcrResult(emptyMap(), 0, 0, invalidated = true)
+        }
+        if (!isCurrent()) {
+            onComplete(invalidatedResult("BEFORE_CAPTURE"))
+            return
+        }
         val batchLease = batchAdmission.tryAcquire()
         if (batchLease == null) {
             onComplete(
@@ -116,12 +168,20 @@ internal class MomoChatMessageOcrProcessor(
         }
 
         lastEngineFailureReason = null
-        val prior = previousIncomingBatch
-        previousIncomingBatch = null
-        val reuseCandidates = prior?.takeIf {
-            reuseVerifiedIncoming &&
-                batch.capturedAtMillis - it.capturedAtMillis in 0L..OCR_BATCH_TIMEOUT_MS
-        }?.entries.orEmpty()
+        val reuseRead = recognitionReuse.begin()
+        val prior = reuseRead.previous?.takeIf {
+            reuseVerifiedIncoming && canReusePreviousRecognitionBatch(
+                batch, it.windowSessionKey, it.capturedAtMillis
+            )
+        }
+        val allowOutgoingReuse = canReuseConfirmedOutgoingBaseline(
+            confirmedBaselineObservationId, prior?.observationId,
+            batch.windowSnapshotSignature, prior?.windowSnapshotSignature
+        )
+        val reuseCandidates = prior?.entries.orEmpty().filterKeys { it.outgoingTarget == null || allowOutgoingReuse }
+        if (confirmedBaselineObservationId != null) {
+            onLog("OCR_NEXT_SEGMENT_BASELINE_REUSE eligible=$allowOutgoingReuse;cachedRows=${reuseCandidates.size}")
+        }
         val targets = batch.ocrTargets.take(MAX_TARGETS_PER_BATCH)
         if (targets.isEmpty()) {
             batchLease.close()
@@ -144,6 +204,15 @@ internal class MomoChatMessageOcrProcessor(
         try {
             capture.captureActiveDisplay(expectedPackage, expectedActivity) { frame ->
                 captureCallbackEntered.set(true)
+                if (!isCurrent()) {
+                    try {
+                        frame?.close()
+                    } finally {
+                        batchLease.close()
+                        onComplete(invalidatedResult("CAPTURE_RETURNED"))
+                    }
+                    return@captureActiveDisplay
+                }
                 if (frame == null) {
                     batchLease.close()
                     onComplete(MomoChatOcrResult(emptyMap(), targets.size, targets.size, "系统截图失败或当前窗口不可截图"))
@@ -154,7 +223,7 @@ internal class MomoChatMessageOcrProcessor(
                     .onFailure { failure -> onLog("OCR_CAPTURE_SAMPLE_SAVE_FAILED：${failure.javaClass.simpleName}") }
                     .getOrNull()
                 val completionDelivered = java.util.concurrent.atomic.AtomicBoolean(false)
-                val currentIncoming = LinkedHashMap<IncomingCropKey, CropRecognition>()
+                val currentRecognition = LinkedHashMap<CropReuseKey, CropRecognition>()
                 val timeoutHandler = Handler(Looper.getMainLooper())
                 lateinit var timeoutRunnable: Runnable
                 val captureDescription = when (frame.scope) {
@@ -166,17 +235,25 @@ internal class MomoChatMessageOcrProcessor(
                         timeoutHandler.removeCallbacks(timeoutRunnable)
                         // Only the winning, complete recognition callback can publish reuse
                         // evidence. A timed-out worker must never seed a later batch.
-                        if (!closed && result.failureReason == null &&
-                            result.failedTargetCount == 0 && result.attemptedTargetCount == targets.size
+                        val validResult = if (isCurrent()) result else invalidatedResult("BEFORE_DELIVERY")
+                        val session = batch.windowSessionKey
+                        if (!validResult.invalidated && validResult.failureReason == null &&
+                            validResult.failedTargetCount == 0 &&
+                            validResult.attemptedTargetCount == targets.size &&
+                            session != null && canRetainRecognitionBatch(batch) &&
+                            currentRecognition.isNotEmpty()
                         ) {
-                            previousIncomingBatch = PreviousIncomingBatch(batch.capturedAtMillis, currentIncoming.toMap())
+                            recognitionReuse.publish(reuseRead, PreviousRecognitionBatch(
+                                batch.capturedAtMillis, session, batch.effectiveObservationBatchId,
+                                batch.windowSnapshotSignature, currentRecognition.toMap()
+                            ))
                         }
                         try {
                             // Keep the monitor hidden while the consumer synchronously merges and
                             // persists any capture-derived sample data.
-                            onComplete(result.copy(
+                            onComplete(validResult.copy(
                                 captureDescription = captureDescription,
-                                sampleScreenshotPath = result.sampleScreenshotPath ?: sampleScreenshotPath,
+                                sampleScreenshotPath = validResult.sampleScreenshotPath ?: sampleScreenshotPath,
                                 observationBatchId = batch.effectiveObservationBatchId
                             ))
                         } finally {
@@ -205,19 +282,19 @@ internal class MomoChatMessageOcrProcessor(
                     deliver(MomoChatOcrResult(emptyMap(), targets.size, targets.size, "消息坐标空间不可用"))
                     return@captureActiveDisplay
                 }
-                if (closed) {
+                if (!isCurrent()) {
                     runCatching { bitmap.recycle() }
                     batchLease.close()
-                    deliver(MomoChatOcrResult(emptyMap(), targets.size, targets.size, "本地 OCR 任务已停止"))
+                    deliver(invalidatedResult("BEFORE_WORKER"))
                     return@captureActiveDisplay
                 }
                 runCatching {
                     executor.execute {
                         try {
-                            if (completionDelivered.get() || closed) {
+                            if (completionDelivered.get() || !isCurrent()) {
                                 runCatching { bitmap.recycle() }
                                 if (!completionDelivered.get()) {
-                                    deliver(MomoChatOcrResult(emptyMap(), targets.size, targets.size, "本地 OCR 任务已停止"))
+                                    deliver(invalidatedResult("WORKER_START"))
                                 }
                                 return@execute
                             }
@@ -244,8 +321,9 @@ internal class MomoChatMessageOcrProcessor(
                                 failed = 0,
                                 batch = batch,
                                 reuseCandidates = reuseCandidates,
-                                currentIncoming = currentIncoming,
+                                currentRecognition = currentRecognition,
                                 isCompleted = { completionDelivered.get() },
+                                isRequestCurrent = isCurrent,
                                 onComplete = deliver
                             )
                         } catch (_: Exception) {
@@ -300,18 +378,19 @@ internal class MomoChatMessageOcrProcessor(
         cropPaths: LinkedHashMap<Int, String>,
         failed: Int,
         batch: ChatMessageBatch,
-        reuseCandidates: Map<IncomingCropKey, CropRecognition>,
-        currentIncoming: LinkedHashMap<IncomingCropKey, CropRecognition>,
+        reuseCandidates: Map<CropReuseKey, CropRecognition>,
+        currentRecognition: LinkedHashMap<CropReuseKey, CropRecognition>,
         isCompleted: () -> Boolean,
+        isRequestCurrent: () -> Boolean,
         onComplete: (MomoChatOcrResult) -> Unit
     ) {
         if (isCompleted()) {
             runCatching { bitmap.recycle() }
             return
         }
-        if (closed) {
-            runCatching { bitmap.recycle() }
-            onComplete(MomoChatOcrResult(emptyMap(), targets.size, targets.size, "本地 OCR 任务已停止"))
+        if (!isRequestCurrent()) {
+            onLog("OCR_BATCH_INVALIDATED stage=BEFORE_ROW;index=$index;nextRequest=false")
+            onComplete(MomoChatOcrResult(emptyMap(), 0, 0, invalidated = true))
             return
         }
         if (index >= targets.size) {
@@ -362,24 +441,58 @@ internal class MomoChatMessageOcrProcessor(
                 latinRecognized, qualityByRowIndex, tokensByRowIndex, textProjectionsByRowIndex,
                 confidenceByRowIndex, lineCountByRowIndex,
                 captureDescription, sampleScreenshotPath, reviewBatchId, cropPaths, failed + 1,
-                batch, reuseCandidates, currentIncoming, isCompleted, onComplete
+                batch, reuseCandidates, currentRecognition, isCompleted, isRequestCurrent, onComplete
             )
             return
         }
 
         sampleStore?.saveCropBitmap(target.rowIndex, crop)?.let { cropPaths[target.rowIndex] = it }
         val cropPng = runCatching { crop.toPngBytes() }.getOrNull()
-        val reuseKey = cropPng?.let { incomingCropReuseKey(batch, target, it) }
+        val reuseKey = cropPng?.let {
+            incomingCropReuseKey(batch, target, it) ?: outgoingBaselineCropReuseKey(batch, target, it)
+        }
         val reused = reuseKey?.let(reuseCandidates::get)
         if (reused != null) {
-            onLog("OCR_INCOMING_CROP_REUSED：当前截图正文像素、会话窗口和行结构一致；row=${target.rowIndex}；己方发送核验仍须独立识别")
+            if (reuseKey?.outgoingTarget != null) {
+                onLog("OCR_OUTGOING_BASELINE_CROP_REUSED row=${target.rowIndex};purpose=NEXT_SEGMENT_BASELINE;newBinderRequest=false")
+            } else {
+                onLog("OCR_INCOMING_CROP_REUSED：当前截图正文像素、会话窗口和行结构一致；row=${target.rowIndex}；己方发送核验仍须独立识别")
+                if (MomoOcrQualityPolicy.classify(reused.finalText) == MessageContentQuality.AMBIGUOUS) {
+                    onLog("OCR_INCOMING_ISOLATED_EVIDENCE_REUSED row=${target.rowIndex};originalQualityUnchanged=true;newBinderRequest=false")
+                }
+            }
         }
-        val recognition = reused ?: runCatching { recognizeCrop(crop) }
+        if (isCompleted() || !isRequestCurrent()) {
+            runCatching { crop.recycle() }
+            if (!isCompleted()) {
+                onLog("OCR_BATCH_INVALIDATED stage=BEFORE_CROP_REQUEST;index=$index;nextRequest=false")
+                onComplete(MomoChatOcrResult(emptyMap(), 0, 0, invalidated = true))
+            }
+            return
+        }
+        val recognition = reused ?: runCatching {
+            // Never add a projection read to outgoing send-confirmation evidence.
+            val incoming = target.explicitDirectionHint == ChatMessageDirection.INCOMING &&
+                target.identityDirectionHint != ChatMessageDirection.OUTGOING ||
+                target.identityDirectionHint == ChatMessageDirection.INCOMING &&
+                target.explicitDirectionHint != ChatMessageDirection.OUTGOING
+            recognizeCrop(crop, incoming) { !isCompleted() && isRequestCurrent() }
+        }
             .getOrElse { failure ->
                 val detail = failure.message?.takeIf { it.isNotBlank() } ?: "无异常消息"
                 lastEngineFailureReason = "${failure.javaClass.simpleName}: $detail"
                 CropRecognition("", "", "", null, 0)
             }
+        // An in-flight Binder call cannot be forcibly interrupted. Discard its result before
+        // publishing evidence or admitting another row if the owning read has been invalidated.
+        if (isCompleted() || !isRequestCurrent()) {
+            runCatching { crop.recycle() }
+            if (!isCompleted()) {
+                onLog("OCR_BATCH_INVALIDATED stage=AFTER_CROP_REQUEST;index=$index;nextRequest=false")
+                onComplete(MomoChatOcrResult(emptyMap(), 0, 0, invalidated = true))
+            }
+            return
+        }
         val annotatedCrop = createAnnotatedCrop(crop, recognition.detectionBoxes)
         reviewBatchId?.let { id ->
             val saved = ocrReviewStore.saveEntry(
@@ -397,11 +510,11 @@ internal class MomoChatMessageOcrProcessor(
         annotatedCrop?.let { runCatching { it.recycle() } }
         val finalText = normalizeRecognizedText(recognition.finalText)
         val modelText = normalizeRecognizedText(recognition.chineseText)
-        if (reuseKey != null && finalText.isNotBlank() && recognition.lineCount > 0 &&
-            MomoOcrQualityPolicy.classify(finalText) == MessageContentQuality.VERIFIED &&
-            !MomoChatUiTextFilter.isNonMessageUiText(finalText) && !isCompleted() && !closed
+        if (reuseKey != null && canCacheCropRecognition(
+                reuseKey, finalText, recognition.lineCount, recognition.tokens, recognition.textProjection
+            ) && !isCompleted() && !closed
         ) {
-            currentIncoming[reuseKey] = recognition
+            currentRecognition[reuseKey] = recognition
         }
         if (finalText.isNotBlank()) {
             recognized[target.rowIndex] = finalText
@@ -435,8 +548,9 @@ internal class MomoChatMessageOcrProcessor(
             failed = failed + if (finalText.isBlank()) 1 else 0,
             batch = batch,
             reuseCandidates = reuseCandidates,
-            currentIncoming = currentIncoming,
+            currentRecognition = currentRecognition,
             isCompleted = isCompleted,
+            isRequestCurrent = isRequestCurrent,
             onComplete = onComplete
         )
     }
@@ -445,9 +559,14 @@ internal class MomoChatMessageOcrProcessor(
      * Sends one already-cropped message body to the independently-installed OCR plugin.
      * Freedom itself does not load the OCR runtime or model files.
      */
-    private fun recognizeCrop(crop: Bitmap): CropRecognition {
-        if (closed) return CropRecognition("", "", "", null, 0)
-        val result = ocrManager.recognize(crop)
+    private fun recognizeCrop(
+        crop: Bitmap,
+        allowIsolatedText: Boolean,
+        isRequestCurrent: () -> Boolean
+    ): CropRecognition {
+        if (!isRequestCurrent()) return CropRecognition("", "", "", null, 0)
+        val result = ocrManager.recognize(crop, isRequestCurrent = isRequestCurrent)
+        if (!isRequestCurrent()) return CropRecognition("", "", "", null, 0)
         val colorRegions = MomoOcrVisualSymbolGuard.detectColorRegions(
             width = crop.width,
             height = crop.height
@@ -476,10 +595,13 @@ internal class MomoChatMessageOcrProcessor(
         }
         val reconciled = MomoOcrVisualSymbolGuard.reconcileWithTokens(lines, colorRegions)
         val finalText = normalizeRecognizedText(reconciled.text)
+        val evidenceTokens = if (allowIsolatedText && lines.size == 1 && colorRegions.isNotEmpty() &&
+            reconciled.text.length <= MAX_RECOGNIZED_TEXT_LENGTH && isRequestCurrent()
+        ) isolateEdgeText(crop, reconciled, colorRegions, isRequestCurrent) else reconciled.tokens
         // Projection is separate from the existing P0 text/quality. A truncated OCR render
         // cannot prove that its tokens align with the complete captured message.
         val textProjection = reconciled.text.takeIf { it.length <= MAX_RECOGNIZED_TEXT_LENGTH }
-            ?.let { MomoOcrTextProjector.extract(it, reconciled.tokens) }
+            ?.let { MomoOcrTextProjector.extract(it, evidenceTokens) }
             ?.let { projection ->
                 val usable = normalizeRecognizedText(projection.text)
                 if (usable.isNotBlank() &&
@@ -504,9 +626,77 @@ internal class MomoChatMessageOcrProcessor(
             meanConfidence = validConfidences.takeIf { it.isNotEmpty() }?.average()?.toFloat(),
             lineCount = lines.size,
             detectionBoxes = detectionBoxes,
-            tokens = reconciled.tokens,
+            tokens = evidenceTokens,
             textProjection = textProjection
         )
+    }
+
+    /**
+     * One extra read at most, using the same captured bitmap and existing OCR manager.
+     * Raw text, quality, line count and geometry remain unchanged; this is projection-only evidence.
+     */
+    private fun isolateEdgeText(
+        crop: Bitmap,
+        reconciled: OcrVisualReconciliation,
+        colorRegions: List<OcrVisualRect>,
+        isRequestCurrent: () -> Boolean
+    ): List<OcrContentToken> {
+        val tokens = reconciled.tokens
+        val text = OcrTextProjection.isolatedTextCandidate(tokens) ?: return tokens
+        val marker = tokens.single { it.kind == OcrContentKind.PLACEHOLDER }
+        if (MomoOcrQualityPolicy.classify(text.text) != MessageContentQuality.VERIFIED) return tokens
+        val line = text.lineBounds ?: return tokens
+        val region = marker.symbolBounds ?: return tokens
+        // Every detected component must be covered by the same marker. Do not isolate a
+        // subset of a message's visual evidence, even if its remaining crop looks clean.
+        val detected = colorRegions.map { OcrContentRect(it.left, it.top, it.right, it.bottom) }
+        val represented = marker.visualRegions.ifEmpty { listOf(region) }
+        if (represented.size != detected.size || represented.toSet() != detected.toSet()) return tokens
+        val bounds = OcrTextProjection.isolatedCropBounds(line, region, crop.width, crop.height) ?: return tokens
+        if (!isRequestCurrent()) return tokens
+        val isolated = Bitmap.createBitmap(crop, bounds.left, bounds.top,
+            bounds.right - bounds.left, bounds.bottom - bounds.top)
+        try {
+            // Reject residual colored glyphs rather than guessing that the cut was sufficient.
+            if (MomoOcrVisualSymbolGuard.detectColorRegions(isolated.width, isolated.height) { x, y ->
+                    isolated.getPixel(x, y)
+                }.isNotEmpty() || !isRequestCurrent()
+            ) return tokens
+            val result = runCatching { ocrManager.recognize(isolated, isRequestCurrent = isRequestCurrent) }
+                .getOrElse {
+                    onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=FAILED;reason=LOCAL_OCR_FAILED")
+                    return tokens
+                }
+            if (!isRequestCurrent()) return tokens
+            val read = result.singleOrNull() ?: return tokens
+            val recognized = normalizeRecognizedText(read.text)
+            if (recognized != normalizeRecognizedText(text.text) ||
+                read.points.isEmpty() || !read.confidence.isFinite() ||
+                read.confidence !in OcrTextProjection.MIN_ISOLATED_TEXT_CONFIDENCE..1f
+            ) {
+                onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=REJECTED;reason=TEXT_OR_CONFIDENCE_MISMATCH")
+                return tokens
+            }
+            if (read.points.any { !it.first.toDouble().isFinite() || !it.second.toDouble().isFinite() }) return tokens
+            val observed = OcrContentRect(
+                bounds.left + floor(read.points.minOf { it.first.toDouble() }).toInt(),
+                bounds.top + floor(read.points.minOf { it.second.toDouble() }).toInt(),
+                bounds.left + ceil(read.points.maxOf { it.first.toDouble() }).toInt(),
+                bounds.top + ceil(read.points.maxOf { it.second.toDouble() }).toInt()
+            )
+            val updated = tokens.map { token ->
+                if (token === text) token.copy(isolatedTextEvidence =
+                    OcrIsolatedTextEvidence(bounds, observed, recognized, read.confidence)) else token
+            }
+            if (MomoOcrTextProjector.extract(reconciled.text, updated) == null) {
+                onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=REJECTED;reason=GEOMETRY_OR_PROJECTION")
+                return tokens
+            }
+            onLog("OCR_ISOLATED_TEXT_EVIDENCE outcome=VERIFIED;originalQualityUnchanged=true;visualRegions=${represented.size}")
+            return updated
+        } finally {
+            if (isolated !== crop) isolated.recycle()
+        }
     }
 
     private fun createAnnotatedCrop(source: Bitmap, boxes: List<OcrDetectionBox>): Bitmap? {
@@ -539,9 +729,13 @@ internal class MomoChatMessageOcrProcessor(
         .trim()
         .take(MAX_RECOGNIZED_TEXT_LENGTH)
 
+    fun invalidateRecognitionReuse() {
+        recognitionReuse.invalidate()
+    }
+
     override fun close() {
         closed = true
-        previousIncomingBatch = null
+        recognitionReuse.close()
         // 这是进程级共享管理器：关闭当前 Momo 采集器只撤销日志订阅并安排空闲释放，
         // 不立即解绑启动预检刚建立、其他采集批次仍可复用的 Binder 连接。
         ocrDiagnosticSubscription.close()
@@ -550,22 +744,90 @@ internal class MomoChatMessageOcrProcessor(
     }
 
     companion object {
+        internal fun canRetainRecognitionBatch(batch: ChatMessageBatch): Boolean {
+            val session = batch.windowSessionKey
+            return !batch.truncated && batch.coordinateSpaceReliable &&
+                !session.isNullOrBlank() && !session.endsWith("conversation=unknown") &&
+                batch.ocrTargets.size in 1..MAX_TARGETS_PER_BATCH
+        }
+
+        internal fun canReusePreviousRecognitionBatch(
+            batch: ChatMessageBatch,
+            previousWindowSessionKey: String,
+            previousCapturedAtMillis: Long
+        ): Boolean = canRetainRecognitionBatch(batch) &&
+            batch.windowSessionKey == previousWindowSessionKey &&
+            batch.capturedAtMillis >= previousCapturedAtMillis &&
+            batch.capturedAtMillis - previousCapturedAtMillis in 0L..OCR_BATCH_TIMEOUT_MS
+
+        /**
+         * Cache recognition evidence, never message admission. Only incoming single-line
+         * visual placeholders with independently proved text extend the original verified path.
+         * Re-derive the projection using the existing evidence rules; keep raw quality ambiguous.
+         */
+        internal fun canCacheCropRecognition(
+            key: CropReuseKey,
+            finalText: String,
+            lineCount: Int,
+            tokens: List<OcrContentToken>,
+            projection: OcrTextProjection?
+        ): Boolean {
+            if (finalText.isBlank() || lineCount <= 0 ||
+                MomoChatUiTextFilter.isNonMessageUiText(finalText)
+            ) return false
+            val quality = MomoOcrQualityPolicy.classify(finalText)
+            if (quality == MessageContentQuality.VERIFIED) return true
+            if (key.outgoingTarget != null || quality != MessageContentQuality.AMBIGUOUS ||
+                lineCount != 1 || projection == null ||
+                projection.status != OcrTextProjectionStatus.PARTIAL
+            ) return false
+            val text = OcrTextProjection.isolatedTextCandidate(tokens) ?: return false
+            if (text.isolatedTextEvidence == null) return false
+            return MomoOcrTextProjector.extract(finalText, tokens) == projection
+        }
+
         internal fun incomingCropReuseKey(
             batch: ChatMessageBatch,
             target: ChatMessageOcrTarget,
             cropPng: ByteArray
-        ): IncomingCropKey? {
+        ): CropReuseKey? = cropReuseKey(batch, target, cropPng, ChatMessageDirection.INCOMING)
+
+        internal fun outgoingBaselineCropReuseKey(
+            batch: ChatMessageBatch,
+            target: ChatMessageOcrTarget,
+            cropPng: ByteArray
+        ): CropReuseKey? = cropReuseKey(batch, target, cropPng, ChatMessageDirection.OUTGOING)
+
+        internal fun canReuseConfirmedOutgoingBaseline(
+            confirmedObservationId: String?,
+            cachedObservationId: String?,
+            currentStructureSignature: String,
+            cachedStructureSignature: String?
+        ): Boolean = !confirmedObservationId.isNullOrBlank() &&
+            confirmedObservationId == cachedObservationId &&
+            currentStructureSignature.isNotBlank() &&
+            currentStructureSignature == cachedStructureSignature
+
+        private fun cropReuseKey(
+            batch: ChatMessageBatch,
+            target: ChatMessageOcrTarget,
+            cropPng: ByteArray,
+            direction: ChatMessageDirection
+        ): CropReuseKey? {
             val session = batch.windowSessionKey?.takeIf {
                 it.isNotBlank() && !it.endsWith("conversation=unknown")
             } ?: return null
             val signature = target.structureSignature?.takeIf { it.isNotBlank() } ?: return null
             if (batch.truncated || !batch.coordinateSpaceReliable || !target.isMessageTextTarget ||
-                target.explicitDirectionHint != ChatMessageDirection.INCOMING ||
-                target.identityDirectionHint != ChatMessageDirection.INCOMING || cropPng.isEmpty()
+                target.explicitDirectionHint != direction ||
+                target.identityDirectionHint != direction || cropPng.isEmpty() ||
+                (direction == ChatMessageDirection.OUTGOING && batch.windowSnapshotSignature.isBlank())
             ) return null
             val digest = java.security.MessageDigest.getInstance("SHA-256").digest(cropPng)
                 .joinToString("") { "%02x".format(it.toInt() and 0xff) }
-            return IncomingCropKey(session, target.rowIndex, signature, target.timeHint, digest)
+            val outgoingTarget = target.takeIf { direction == ChatMessageDirection.OUTGOING }
+            return CropReuseKey(session, outgoingTarget?.rowIndex, signature, target.timeHint, digest,
+                outgoingTarget = outgoingTarget)
         }
 
         private val PROCESS_BATCH_ADMISSION = OcrBatchAdmissionGate()

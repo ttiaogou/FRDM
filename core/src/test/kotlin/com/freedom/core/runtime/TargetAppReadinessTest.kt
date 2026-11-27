@@ -106,6 +106,27 @@ class TargetAppReadinessTest {
     }
 
     @Test
+    fun commandVerifiedChildWindowDoesNotRequireIndependentActivityButKeepsOtherGates() {
+        val controller = TargetAppReadinessController(foregroundQuietPeriodMs = 0L)
+        val child = readyEvidence().copy(activityClass = "", windowId = 4652, pageGeneration = 22L)
+        assertEquals(TargetAppReadinessStatus.STARTING, controller.evaluate(child, 100L).status)
+        val bound = child.copy(transactionChildWindowConfirmed = true)
+        val ready = controller.evaluate(bound, 200L)
+        assertEquals(TargetAppReadinessStatus.READY, ready.status)
+        assertEquals("", ready.activityClass)
+        assertFalse(ready.isReadyForWindow(WindowRef(child.targetPackage, "", 22L, 4652), RunMode.AI_REPLY))
+        assertEquals(TargetAppReadinessStatus.STARTING,
+            controller.evaluate(bound.copy(businessPageReady = false), 300L).status)
+        assertEquals(TargetAppReadinessStatus.BLOCKED,
+            controller.evaluate(bound.copy(blockingReason = "overlay"), 400L).status)
+        assertEquals(TargetAppReadinessStatus.BLOCKED,
+            controller.evaluate(bound.copy(foregroundPackage = "other"), 500L).status)
+        assertEquals(TargetAppReadinessStatus.STARTING,
+            controller.evaluate(bound.copy(runMode = RunMode.ACCOUNT_BROWSE), 600L).status)
+        assertEquals(TargetAppReadinessStatus.STARTING, controller.evaluate(child, 700L).status)
+    }
+
+    @Test
     fun foregroundQuietHintUsesExistingClockAndDoesNotAuthorizeOrAdvanceReadiness() {
         val controller = TargetAppReadinessController()
         assertEquals(null, controller.foregroundQuietRemainingMs(100L))

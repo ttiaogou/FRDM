@@ -34,7 +34,8 @@ class AndroidGestureDispatcher(
     private val currentWindowGeneration: () -> Long,
     private val activeWindowId: () -> Int,
     private val currentActiveWindowPackage: () -> String,
-    private val inspectAutonomousDispatchReadiness: () -> String?
+    private val inspectAutonomousDispatchReadiness: () -> String?,
+    private val inspectBoundAutonomousDispatchReadiness: ((String) -> String?)? = null
 ) : GestureExecutionPort {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val dispatchActionSequence = AtomicLong(0L)
@@ -53,6 +54,14 @@ class AndroidGestureDispatcher(
     override fun dispatchGesture(
         spec: GestureSpec,
         listener: GestureResultListener,
+        canDispatch: () -> Boolean,
+        onPlatformDispatch: () -> Unit
+    ): GestureSubmission = dispatchGesture(spec, listener, null, canDispatch, onPlatformDispatch)
+
+    override fun dispatchGesture(
+        spec: GestureSpec,
+        listener: GestureResultListener,
+        commandId: String?,
         canDispatch: () -> Boolean,
         onPlatformDispatch: () -> Unit
     ): GestureSubmission {
@@ -98,7 +107,10 @@ class AndroidGestureDispatcher(
                 return GestureSubmission.REJECTED
             }
         } else {
-            val readinessFailure = inspectAutonomousDispatchReadiness()
+            val boundReadiness = inspectBoundAutonomousDispatchReadiness
+            val readinessFailure = if (commandId != null && boundReadiness != null) {
+                boundReadiness(commandId)
+            } else inspectAutonomousDispatchReadiness()
             if (readinessFailure != null) {
                 val readiness = targetAppReadinessController.current()
                 if (readiness.status == TargetAppReadinessStatus.STARTING) {

@@ -6,4 +6,5 @@ import com.freedom.application.TaskLaunchParameters
 interface TaskLaunchParametersRepository {
     fun read(): TaskLaunchParameters
     fun write(parameters: TaskLaunchParameters)
+
 }

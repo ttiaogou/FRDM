@@ -25,3 +25,12 @@ internal class OcrBatchAdmissionGate {
         }
     }
 }
+
+/** A once-invalidated read may never resume from the same captured frame. No new owner. */
+internal fun retainOcrReadValidity(isCurrent: () -> Boolean): () -> Boolean {
+    val invalidated = AtomicBoolean(false)
+    return {
+        if (!invalidated.get() && !runCatching(isCurrent).getOrDefault(false)) invalidated.set(true)
+        !invalidated.get()
+    }
+}

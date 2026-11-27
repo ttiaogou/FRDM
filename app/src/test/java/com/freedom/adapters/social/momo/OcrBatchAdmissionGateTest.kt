@@ -57,4 +57,24 @@ class OcrBatchAdmissionGateTest {
         leases.forEach { it.close() }
     }
 
+
+    @org.junit.Test
+    fun lostReadCannotResumeOldScreenshotEvenWhenPageReturns() {
+        var current = true
+        var calls = 0
+        val admission = retainOcrReadValidity { calls++; current }
+        org.junit.Assert.assertTrue(admission())
+        current = false
+        org.junit.Assert.assertFalse(admission())
+        current = true
+        org.junit.Assert.assertFalse(admission())
+        org.junit.Assert.assertEquals(2, calls)
+    }
+
+    @org.junit.Test
+    fun failedWindowCheckRetiresReadRatherThanAllowingFurtherRequests() {
+        val admission = retainOcrReadValidity { error("window unavailable") }
+        org.junit.Assert.assertFalse(admission())
+        org.junit.Assert.assertFalse(admission())
+    }
 }

@@ -109,6 +109,184 @@ class AiSafeConversationTextTest {
         ), message))
     }
 
+    @Test fun sharedProjectionRuleRejectsSameLineUncertaintyEvenWithPermissiveTextPolicy() {
+        val marker = OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.PLACEHOLDER, OcrTokenStatus.UNVERIFIED, marker,
+                OcrTokenSource.VISUAL_GUARD, 0, line, OcrContentRect(70, 2, 80, 25)),
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.AMBIGUOUS, " 哈哈，我也是，牛马生活",
+                OcrTokenSource.OCR_LINE, 0, line)
+        )
+        val raw = tokens.joinToString("") { it.text }
+        assertNull(OcrTextProjection.derive(raw, tokens, { it }, { it }))
+        // Even a forged RECOGNIZED flag cannot replace missing independent evidence.
+        val changed = tokens.map { it.copy(status = if (it.kind == OcrContentKind.TEXT)
+            OcrTokenStatus.RECOGNIZED else it.status) }
+        assertNull(OcrTextProjection.derive(raw, changed, { it }, { it }))
+    }
+
+    @Test fun sharedProjectionStillEnforcesLineGeometryAndTokenOrder() {
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED, "你好",
+                OcrTokenSource.OCR_LINE, 0, line),
+            OcrContentToken(OcrContentKind.EMOJI, OcrTokenStatus.UNVERIFIED, "😊",
+                OcrTokenSource.UNICODE_EMOJI, 0, line)
+        )
+        val expected = OcrTextProjection("你好", OcrTextProjectionStatus.PARTIAL, listOf(0), emptyList())
+        assertEquals(expected, OcrTextProjection.derive("你好😊", tokens, { it }, { it.takeIf(String::isNotBlank) }))
+        assertNull(OcrTextProjection.derive("你好😊", tokens.reversed(), { it }, { it }))
+        assertNull(OcrTextProjection.derive("你好😊", tokens.map { it.copy(lineBounds = null) }, { it }, { it }))
+    }
+
+    @Test fun isolatedEdgeEvidenceAdmitsOnlyMatchingIndependentTextAndPreservesRawQuality() {
+        val marker = OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY
+        val lineBounds = OcrContentRect(0, 0, 392, 59)
+        val region = OcrContentRect(355, 14, 391, 48)
+        val proof = OcrIsolatedTextEvidence(OcrContentRect(0, 0, 353, 59),
+            OcrContentRect(1, 16, 350, 47), "哈哈，我也是，牛马生活", 0.95f)
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.PLACEHOLDER, OcrTokenStatus.UNVERIFIED, marker,
+                OcrTokenSource.VISUAL_GUARD, 0, lineBounds, region),
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.AMBIGUOUS, " 哈哈，我也是，牛马生活",
+                OcrTokenSource.OCR_LINE, 0, lineBounds, isolatedTextEvidence = proof)
+        )
+        val raw = tokens.joinToString("") { it.text }
+        val projection = OcrTextProjection("哈哈，我也是，牛马生活", OcrTextProjectionStatus.PARTIAL,
+            listOf(0), emptyList())
+        val (batch, message) = sample(raw, tokens, projection)
+        assertEquals(projection.text, AiSafeConversationText.visible(batch, message))
+        assertEquals(projection.text, VisibleDraftContext.build(batch)!!.messages.single().content)
+        assertEquals(MessageContentQuality.AMBIGUOUS, message.contentQuality)
+        assertFalse(message.isAiInputEligible)
+        assertEquals(raw, message.content)
+        assertNull(AiSafeConversationText.legacy(raw))
+        for (invalid in listOf(
+            proof.copy(recognizedText = "错误文字"),
+            proof.copy(confidence = 0.5f),
+            proof.copy(cropBounds = OcrContentRect(0, 0, 390, 59)),
+            proof.copy(recognizedBounds = OcrContentRect(1, 16, 355, 47))
+        )) {
+            val bad = tokens.map { if (it.kind == OcrContentKind.TEXT)
+                it.copy(isolatedTextEvidence = invalid) else it }
+            assertNull(AiSafeConversationText.visible(batch.copy(ocrTokensByRowIndex = mapOf(3 to bad)), message))
+        }
+        assertNull(AiSafeConversationText.visible(batch.copy(ocrTokensByRowIndex = mapOf(3 to
+            tokens.map { it.copy(isolatedTextEvidence = null) })), message))
+        assertNull(AiSafeConversationText.visible(batch, message.copy(direction = ChatMessageDirection.UNKNOWN)))
+        assertFalse(proof.toString().contains(proof.recognizedText))
+    }
+
+    @Test fun edgeEmojiWithIndependentProofAdmitsOnlyVerifiedTextToDraft() {
+        val lineBounds = OcrContentRect(0, 0, 145, 59)
+        val region = OcrContentRect(108, 15, 142, 47)
+        val proof = OcrIsolatedTextEvidence(OcrContentRect(0, 0, 106, 59),
+            OcrContentRect(1, 16, 94, 46), "怎么说", 0.95f)
+        val tokens = listOf(
+            OcrContentToken(OcrContentKind.PLACEHOLDER, OcrTokenStatus.UNVERIFIED,
+                OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY, OcrTokenSource.VISUAL_GUARD, 0, lineBounds, region),
+            OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.AMBIGUOUS, " 怎么说",
+                OcrTokenSource.OCR_LINE, 0, lineBounds, isolatedTextEvidence = proof),
+            OcrContentToken(OcrContentKind.EMOJI, OcrTokenStatus.UNVERIFIED, "😌",
+                OcrTokenSource.UNICODE_EMOJI, 0, lineBounds)
+        )
+        val projection = OcrTextProjection("怎么说", OcrTextProjectionStatus.PARTIAL,
+            listOf(0), emptyList())
+        val raw = tokens.joinToString("") { it.text }
+        val (batch, message) = sample(raw, tokens, projection)
+        assertEquals("怎么说", AiSafeConversationText.visible(batch, message))
+        assertEquals("怎么说", VisibleDraftContext.build(batch)!!.messages.single().content)
+        assertEquals(raw, message.content)
+        assertEquals(MessageContentQuality.AMBIGUOUS, message.contentQuality)
+        assertFalse(message.isAiInputEligible)
+        assertNull(AiSafeConversationText.legacy(raw))
+
+        val marker = tokens[0]
+        val text = tokens[1]
+        val emoji = tokens[2]
+        val rejected = listOf(
+            listOf(marker, text.copy(isolatedTextEvidence = null), emoji),
+            listOf(marker, text.copy(isolatedTextEvidence = proof.copy(recognizedText = "错误")), emoji),
+            listOf(marker, text.copy(isolatedTextEvidence = proof.copy(confidence = 0.79f)), emoji),
+            listOf(marker, text.copy(isolatedTextEvidence = proof.copy(cropBounds = lineBounds)), emoji),
+            listOf(marker, text, emoji.copy(status = OcrTokenStatus.RECOGNIZED)),
+            listOf(marker, text, emoji.copy(lineBounds = region)),
+            listOf(marker, text, emoji.copy(isolatedTextEvidence = proof)),
+            listOf(marker, emoji, text),
+            listOf(marker, text, emoji, emoji),
+            listOf(marker.copy(symbolBounds = OcrContentRect(55, 15, 89, 47)), text, emoji)
+        )
+        rejected.forEach { bad ->
+            val badRaw = bad.joinToString("") { it.text }
+            val (badBatch, badMessage) = sample(badRaw, bad, projection)
+            assertNull(AiSafeConversationText.visible(badBatch, badMessage))
+            assertNull(VisibleDraftContext.build(badBatch))
+        }
+    }
+
+    @Test fun groupedEdgeEvidenceKeepsAllThreeIncomingMessagesInOrder() {
+        val lineBounds = OcrContentRect(0, 0, 176, 59)
+        val regions = listOf(OcrContentRect(3, 14, 37, 49), OcrContentRect(43, 14, 77, 49))
+        val union = OcrContentRect(3, 14, 77, 49)
+        val proof = OcrIsolatedTextEvidence(OcrContentRect(79, 0, 176, 59),
+            OcrContentRect(81, 16, 173, 47), "我请你", 0.95f)
+        val marker = OcrContentToken(OcrContentKind.PLACEHOLDER, OcrTokenStatus.UNVERIFIED,
+            OcrUncertaintyMarkers.UNCERTAIN_SYMBOL_ONLY, OcrTokenSource.VISUAL_GUARD,
+            0, lineBounds, union, visualRegions = regions)
+        val text = OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.AMBIGUOUS,
+            " 我请你", OcrTokenSource.OCR_LINE, 0, lineBounds, isolatedTextEvidence = proof)
+        val tokens = listOf(marker, text)
+        val raw = tokens.joinToString("") { it.text }
+        val projection = OcrTextProjection("我请你", OcrTextProjectionStatus.PARTIAL, listOf(0), emptyList())
+        val (batch, message) = sample(raw, tokens, projection)
+        assertEquals("我请你", AiSafeConversationText.visible(batch, message))
+        assertEquals(MessageContentQuality.AMBIGUOUS, message.contentQuality)
+        assertFalse(message.isAiInputEligible)
+        assertEquals(raw, message.content)
+        val lastLine = OcrContentRect(0, 0, 145, 59)
+        val lastTokens = listOf(
+            marker.copy(lineBounds = lastLine, symbolBounds = OcrContentRect(108, 15, 142, 47),
+                visualRegions = emptyList()),
+            text.copy(text = " 怎么说", lineBounds = lastLine, isolatedTextEvidence =
+                OcrIsolatedTextEvidence(OcrContentRect(0, 0, 106, 59),
+                    OcrContentRect(1, 16, 94, 46), "怎么说", 0.95f)),
+            OcrContentToken(OcrContentKind.EMOJI, OcrTokenStatus.UNVERIFIED, "😌",
+                OcrTokenSource.UNICODE_EMOJI, 0, lastLine))
+        val first = msg("出来吃烧烤吗", MessageContentQuality.VERIFIED, 2).copy(
+            id = "first", logicalMessageId = "first", bounds = ScreenRect(0, 0, 100, 9))
+        val last = msg(lastTokens.joinToString("") { it.text }, MessageContentQuality.AMBIGUOUS, 4)
+            .copy(id = "last", logicalMessageId = "last", bounds = ScreenRect(0, 31, 100, 60))
+        // A real OCR batch also includes row-bound evidence for the pure-text message.
+        // Do not bypass the mixed-batch safety gate by relying on its VERIFIED flag alone.
+        val firstTokens = listOf(OcrContentToken(OcrContentKind.TEXT, OcrTokenStatus.RECOGNIZED,
+            "出来吃烧烤吗", OcrTokenSource.OCR_LINE, 0, OcrContentRect(0, 0, 192, 59)))
+        val firstProjection = OcrTextProjection("出来吃烧烤吗", OcrTextProjectionStatus.COMPLETE,
+            listOf(0), emptyList())
+        val all = batch.copy(messages = listOf(first, message, last),
+            scannedRowCount = 3, candidateRowCount = 3,
+            ocrTokensByRowIndex = mapOf(2 to firstTokens, 3 to tokens, 4 to lastTokens),
+            ocrTextProjectionsByRowIndex = mapOf(2 to firstProjection, 3 to projection,
+                4 to OcrTextProjection("怎么说", OcrTextProjectionStatus.PARTIAL, listOf(0), emptyList())))
+        assertEquals(listOf("出来吃烧烤吗", "我请你", "怎么说"),
+            VisibleDraftContext.build(all)!!.messages.map { it.content })
+        assertNull(AiSafeConversationText.visible(all.copy(
+            ocrTokensByRowIndex = all.ocrTokensByRowIndex - 2), first))
+        assertNull(AiSafeConversationText.visible(all.copy(
+            ocrTextProjectionsByRowIndex = all.ocrTextProjectionsByRowIndex - 2), first))
+        val rejected = listOf(
+            listOf(marker, text.copy(isolatedTextEvidence = null)),
+            listOf(marker, text.copy(isolatedTextEvidence = proof.copy(confidence = 0.79f))),
+            listOf(marker, text.copy(isolatedTextEvidence = proof.copy(recognizedText = "错误"))),
+            listOf(marker, text.copy(isolatedTextEvidence = proof.copy(cropBounds = OcrContentRect(50, 0, 176, 59)))),
+            listOf(marker.copy(symbolBounds = regions.first()), text),
+            listOf(marker.copy(visualRegions = listOf(regions.first(), OcrContentRect(139, 14, 173, 49))), text),
+            listOf(marker.copy(visualRegions = listOf(regions.first(), regions.first())), text),
+            listOf(marker, text.copy(visualRegions = regions))
+        )
+        rejected.forEach { bad ->
+            assertNull(AiSafeConversationText.visible(batch.copy(ocrTokensByRowIndex = mapOf(3 to bad)), message))
+        }
+    }
+
     @Test fun missingProjectionNeverUpgradesAmbiguousContent() {
         val marker = OcrUncertaintyMarkers.UNKNOWN_VISUAL_SYMBOL
         val raw = "你好${marker}"

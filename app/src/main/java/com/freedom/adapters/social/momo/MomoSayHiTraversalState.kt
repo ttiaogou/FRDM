@@ -1,5 +1,7 @@
 package com.freedom.adapters.social.momo
 
+import com.freedom.features.aireply.policy.ConversationFilterSettings
+
 /**
  * Sole owner of the received-greetings traversal ledger: processed identities, deferred rows,
  * bounded retry counters, and its privacy-preserving checkpoint.
@@ -16,6 +18,9 @@ internal class MomoSayHiTraversalState(
     private val processedRowKeys = LinkedHashSet<String>()
     private val processedContactIdHashes = LinkedHashSet<String>()
     private val deferredRowKeys = LinkedHashSet<String>()
+    // Filter skips belong only to this scan, never to the durable processed/deferred ledger.
+    private val filterSkippedRowKeys = LinkedHashSet<String>()
+    private var filterSettings: ConversationFilterSettings? = null
     private val retryCounts = LinkedHashMap<String, Int>()
     private val retryAfterEpochMs = LinkedHashMap<String, Long>()
     private val safeTargetValidationFailures = LinkedHashMap<String, Int>()
@@ -82,6 +87,26 @@ internal class MomoSayHiTraversalState(
         deferredReturnToTopActive = false
         deferredReplayStarted = false
         return RestoreSummary(processedRowKeys.size, deferredRowKeys.size, processedContactIdHashes.size)
+    }
+
+    fun updateFilterSettings(settings: ConversationFilterSettings) {
+        if (settings != filterSettings) {
+            filterSkippedRowKeys.clear()
+            filterSettings = settings
+        }
+    }
+
+    fun isFilterSkipped(rowKey: String): Boolean =
+        rowKey in filterSkippedRowKeys && !isDeferredRow(rowKey)
+
+    /** Never suppress a recovery row. This is intentionally not a checkpoint write. */
+    fun markFilterSkipped(rowKey: String): Boolean =
+        filterSettings?.hasEnabledConditions == true && !isDeferredRow(rowKey) &&
+            filterSkippedRowKeys.add(rowKey)
+
+    fun resetFilterSkips() {
+        filterSkippedRowKeys.clear()
+        filterSettings = null
     }
 
     fun isProcessedRow(rowKey: String): Boolean = rowKey in processedRowKeys
@@ -255,6 +280,7 @@ internal class MomoSayHiTraversalState(
 
     /** Clears both in-memory traversal state and its persisted checkpoint after explicit exit. */
     fun clear() {
+        resetFilterSkips()
         processedRowKeys.clear()
         processedContactIdHashes.clear()
         deferredRowKeys.clear()

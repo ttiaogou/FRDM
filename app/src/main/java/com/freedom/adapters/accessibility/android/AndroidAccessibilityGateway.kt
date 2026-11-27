@@ -82,7 +82,8 @@ internal class AndroidAccessibilityGateway(
     private val targetAppReadinessController: TargetAppReadinessController,
     private val uiWriteAuthorization: UiWriteAuthorization,
     private val onReadinessDiagnostic: (String) -> Unit = {},
-    private val onActivityBindingMissing: () -> Unit = {}
+    private val onActivityBindingMissing: () -> Unit = {},
+    private val inspectBoundPageReadiness: ((AccessibilityNodeInfo, String, RunMode, String) -> TargetAppPageReadiness)? = null
 ) : AccessibilityGateway, GestureExecutionPort, AndroidActiveWindowRootAccess, AndroidScreenshotCapture {
 
     @Volatile
@@ -111,7 +112,10 @@ internal class AndroidAccessibilityGateway(
             currentWindowGeneration = { windowGeneration },
             activeWindowId = ::activeWindowId,
             currentActiveWindowPackage = ::currentActiveWindowPackage,
-            inspectAutonomousDispatchReadiness = ::inspectAutonomousDispatchReadiness
+            inspectAutonomousDispatchReadiness = ::inspectAutonomousDispatchReadiness,
+            inspectBoundAutonomousDispatchReadiness = { commandId ->
+                inspectAutonomousDispatchReadiness(commandId)
+            }
         )
     }
     private val screenshotCapture by lazy(LazyThreadSafetyMode.NONE) {
@@ -632,9 +636,17 @@ internal class AndroidAccessibilityGateway(
         listener: GestureResultListener,
         canDispatch: () -> Boolean,
         onPlatformDispatch: () -> Unit
+    ): GestureSubmission = dispatchGesture(spec, listener, null, canDispatch, onPlatformDispatch)
+
+    override fun dispatchGesture(
+        spec: GestureSpec,
+        listener: GestureResultListener,
+        commandId: String?,
+        canDispatch: () -> Boolean,
+        onPlatformDispatch: () -> Unit
     ): GestureSubmission =
         authorizedGestureDispatch(spec) {
-            gestureDispatcher.dispatchGesture(spec, listener, canDispatch, onPlatformDispatch)
+            gestureDispatcher.dispatchGesture(spec, listener, commandId, canDispatch, onPlatformDispatch)
         }
 
     /**
@@ -644,15 +656,19 @@ internal class AndroidAccessibilityGateway(
      */
     fun inspectRecoveryReadiness(): TargetAppReadinessSnapshot = evaluateCurrentReadiness()
 
-    private fun inspectAutonomousDispatchReadiness(): String? {
-        val snapshot = evaluateCurrentReadiness()
+    private fun inspectAutonomousDispatchReadiness(): String? = inspectAutonomousDispatchReadiness(null)
+
+    private fun inspectAutonomousDispatchReadiness(commandId: String?): String? {
+        val snapshot = if (commandId == null) evaluateCurrentReadiness() else evaluateCurrentReadiness(commandId)
         if (snapshot.status == TargetAppReadinessStatus.READY) return null
         emitReadinessRejection(snapshot.status, snapshot.reason, snapshot.runMode, snapshot.windowId)
         return snapshot.reason
     }
 
     /** Shared live safety evaluation. Observing readiness is not a rejected dispatch. */
-    private fun evaluateCurrentReadiness(): TargetAppReadinessSnapshot {
+    private fun evaluateCurrentReadiness(): TargetAppReadinessSnapshot = evaluateCurrentReadiness(null)
+
+    private fun evaluateCurrentReadiness(commandId: String?): TargetAppReadinessSnapshot {
         val expectedPackage = targetPackage()
         val mode = runCatching { activeRunMode() }.getOrNull()
         val root = runCatching { service.rootInActiveWindow }.getOrNull()
@@ -679,13 +695,13 @@ internal class AndroidAccessibilityGateway(
             val currentActivity = if (foregroundPackage == expectedPackage) {
                 windowActivityClass(windowId, generation)
             } else ""
-            if (foregroundPackage == expectedPackage && currentActivity.isBlank()) {
-                // A missing or mismatched clue may only wake the existing read-only recovery.
-                onActivityBindingMissing()
-            }
             val pageReadiness = if (mode != null && foregroundPackage == expectedPackage) {
-                runCatching { inspectPageReadiness(root, currentActivity, mode) }
-                    .getOrElse {
+                runCatching {
+                    val boundInspector = inspectBoundPageReadiness
+                    if (commandId != null && boundInspector != null) {
+                        boundInspector(root, currentActivity, mode, commandId)
+                    } else inspectPageReadiness(root, currentActivity, mode)
+                }.getOrElse {
                         TargetAppPageReadiness(
                             ready = false,
                             reason = "页面准入检查异常：${it.javaClass.simpleName}"
@@ -696,6 +712,12 @@ internal class AndroidAccessibilityGateway(
                     ready = false,
                     reason = "未进入目标应用页面检查；前台包名或运行模式不匹配"
                 )
+            }
+            val childWindowConfirmed = commandId != null && inspectBoundPageReadiness != null &&
+                pageReadiness.ready && pageReadiness.transactionChildWindowConfirmed
+            if (foregroundPackage == expectedPackage && currentActivity.isBlank() && !childWindowConfirmed) {
+                // Ordinary missing Activity evidence still wakes the existing read-only recovery.
+                onActivityBindingMissing()
             }
             val snapshot = targetAppReadinessController.evaluate(
                 TargetAppReadinessEvidence(
@@ -711,7 +733,8 @@ internal class AndroidAccessibilityGateway(
                     // is diagnostic only; exhaustion never authorizes an action or ends the task.
                     blockingReason = pageReadiness.blockingReason.takeUnless { pageReadiness.retryable },
                     businessPageReady = pageReadiness.ready,
-                    businessPageReason = pageReadiness.reason
+                    businessPageReason = pageReadiness.reason,
+                    transactionChildWindowConfirmed = childWindowConfirmed
                 ),
                 SystemClock.uptimeMillis()
             )

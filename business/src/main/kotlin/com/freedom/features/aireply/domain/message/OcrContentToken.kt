@@ -7,6 +7,17 @@ enum class OcrTokenSource { OCR_LINE, UNICODE_EMOJI, VISUAL_GUARD, OCR_SYMBOL }
 
 data class OcrContentRect(val left: Int, val top: Int, val right: Int, val bottom: Int)
 
+/** Independent second OCR read from the same immutable message crop; all bounds are crop-local. */
+data class OcrIsolatedTextEvidence(
+    val cropBounds: OcrContentRect,
+    val recognizedBounds: OcrContentRect,
+    val recognizedText: String,
+    val confidence: Float
+) {
+    override fun toString(): String =
+        "OcrIsolatedTextEvidence(cropBounds=$cropBounds,recognizedBounds=$recognizedBounds,text=[REDACTED])"
+}
+
 /**
  * Ordered OCR content piece. lineBounds is the whole OCR-line rectangle, NOT the piece bounds.
  * symbolBounds is null when no character/visual-region coordinates exist.
@@ -20,9 +31,12 @@ data class OcrContentToken(
     val source: OcrTokenSource,
     val lineIndex: Int,
     val lineBounds: OcrContentRect? = null,
-    val symbolBounds: OcrContentRect? = null
+    val symbolBounds: OcrContentRect? = null,
+    val isolatedTextEvidence: OcrIsolatedTextEvidence? = null,
+    /** Original components of a grouped edge marker; empty for the legacy single region. */
+    val visualRegions: List<OcrContentRect> = emptyList()
 ) {
     override fun toString(): String =
         "OcrContentToken(kind=$kind,status=$status,source=$source,lineIndex=$lineIndex," +
-            "lineBounds=$lineBounds,symbolBounds=$symbolBounds,text=[REDACTED])"
+            "lineBounds=$lineBounds,symbolBounds=$symbolBounds,isolatedEvidence=${isolatedTextEvidence != null},text=[REDACTED])"
 }

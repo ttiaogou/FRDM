@@ -35,6 +35,7 @@ internal class PersonalizationScreen(
     private val taskParameters: () -> TaskLaunchParameters,
     private val onTaskParametersChanged: (TaskLaunchParameters) -> Unit,
     private val onImageResourceImportRequested: () -> Unit,
+    private val onImageResourceClearRequested: () -> Unit,
     private val loadAiReplyPersonalization: () -> AiReplyPersonalization,
     private val onAiReplyPersonalizationChanged: (AiReplyPersonalization) -> Unit
 ) {
@@ -456,13 +457,13 @@ internal class PersonalizationScreen(
                     input.error = "请输入大于或等于 0 的数字"
                     return@setOnClickListener
                 }
-                if (parsed > 0 && parameters.messageInterceptionThreshold > 0 &&
-                    parsed > parameters.messageInterceptionThreshold
-                ) {
-                    input.error = "图片发送阈值大于消息拦截阈值；拦截会先阻断后续回复"
+                val latest = taskParameters()
+                val validationError = latest.imageSendThresholdValidationError(parsed)
+                if (validationError != null) {
+                    input.error = validationError
                     return@setOnClickListener
                 }
-                parameters = parameters.copy(imageSendThreshold = parsed)
+                parameters = latest.copy(imageSendThreshold = parsed)
                 onTaskParametersChanged(parameters)
                 imageSendThresholdValue?.apply {
                     text = parsed.toString()
@@ -485,6 +486,22 @@ internal class PersonalizationScreen(
                 onImageResourceImportRequested()
             }
         })
+        if (parameters.imageResourceUris.isNotEmpty()) {
+            content.addView(Button(activity).apply {
+                text = "清空图片池"
+                setOnClickListener {
+                    AlertDialog.Builder(activity)
+                        .setTitle("清空图片池")
+                        .setMessage("将移除 Freedom 专用相册中的已导入副本，不删除原始图片。确定继续？")
+                        .setNegativeButton("取消", null)
+                        .setPositiveButton("清空") { _, _ ->
+                            dialog.dismiss()
+                            onImageResourceClearRequested()
+                        }
+                        .show()
+                }
+            })
+        }
         dialog.show()
         FreedomUi.styleAlertDialog(dialog, activity, dp)
     }

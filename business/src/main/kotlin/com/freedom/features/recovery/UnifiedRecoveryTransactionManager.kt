@@ -117,10 +117,46 @@ class UnifiedRecoveryTransactionManager(
         return true
     }
 
+    /**
+     * Change only the execution destination of an unresolved checkpoint after the
+     * feature has independently identified a fresh page. Never complete recovery
+     * or grant ownership here: the new route starts with zero verification samples.
+     */
+    @Synchronized
+    fun rebindPendingRoute(previous: RecoveryEventIdentity, next: RecoveryEventIdentity): Boolean {
+        val generation = currentRunGeneration()
+        if (previous.runGeneration != generation || next.runGeneration != generation ||
+            previous.taskId != next.taskId || previous.checkpointId != next.checkpointId ||
+            previous.routeId == next.routeId ||
+            next.observationGeneration <= previous.observationGeneration
+        ) return false
+        val key = LaneKey(previous.taskId, PRIMARY_LANE)
+        val old = transactions[key] ?: return false
+        if (old.routeId != previous.routeId || old.checkpointId != previous.checkpointId ||
+            old.runGeneration != generation ||
+            previous.observationGeneration < old.observationGeneration ||
+            old.state == RecoveryTransactionState.ACTIVE ||
+            old.state == RecoveryTransactionState.STOPPED_BY_USER
+        ) return false
+        transactions[key] = old.copy(
+            routeId = next.routeId,
+            observationGeneration = next.observationGeneration,
+            state = RecoveryTransactionState.RECOVERING
+        )
+        onLog("recoveryManager=route_rebound;taskId=${next.taskId};" +
+            "oldRouteId=${previous.routeId};routeId=${next.routeId};checkpointId=${next.checkpointId}")
+        return true
+    }
+
     /** Called after the original route verifier and UI lease transfer both succeed. */
     @Synchronized
     fun completeVerified(identity: RecoveryEventIdentity): Boolean {
         if (identity.runGeneration != currentRunGeneration()) return false
+        val primary = transactions[LaneKey(identity.taskId, PRIMARY_LANE)]
+        if (primary != null && (primary.routeId != identity.routeId ||
+                primary.checkpointId != identity.checkpointId ||
+                identity.observationGeneration < primary.observationGeneration)
+        ) return false
         val keys = transactions.filter { (key, state) ->
             key.taskId == identity.taskId &&
                 state.runGeneration == identity.runGeneration &&

@@ -29,4 +29,13 @@ interface GestureExecutionPort {
         if (!runCatching(canDispatch).getOrDefault(false)) return GestureSubmission.REJECTED
         return dispatchGesture(spec, listener, onPlatformDispatch)
     }
+
+    /** Preserve the existing command identity for request-scoped platform readiness checks. */
+    fun dispatchGesture(
+        spec: GestureSpec,
+        listener: GestureResultListener,
+        commandId: String?,
+        canDispatch: () -> Boolean,
+        onPlatformDispatch: () -> Unit
+    ): GestureSubmission = dispatchGesture(spec, listener, canDispatch, onPlatformDispatch)
 }

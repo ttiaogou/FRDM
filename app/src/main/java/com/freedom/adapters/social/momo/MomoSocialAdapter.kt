@@ -55,6 +55,8 @@ import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.MessageWorkAreaNavigationOutcome
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
+import com.freedom.features.aireply.ports.PrivateChatFollowUpPort
+import com.freedom.features.aireply.ports.PrivateChatFollowUpProgress
 import com.freedom.features.aireply.ports.ChatDraftInputPort
 import com.freedom.features.aireply.ports.ChatDraftInputTarget
 import com.freedom.features.aireply.ports.ChatDraftInputResult
@@ -63,10 +65,12 @@ import com.freedom.features.aireply.ports.ChatDraftSendPort
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
 import com.freedom.features.aireply.ports.ContactIdentityCaptureOutcome
+import com.freedom.features.aireply.ports.ObservedPrivateChatIdentityTarget
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import kotlin.math.abs
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import com.freedom.features.aireply.application.message.ChatMessageParser
 import com.freedom.application.ports.GestureSettingsRepository
 import com.freedom.features.aireply.ports.ChatPageSnapshot
@@ -81,6 +85,11 @@ import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnJournal
 import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnPhase
 import com.freedom.features.aireply.ports.ReceivedGreetingsSendReturnRepository
+import com.freedom.features.aireply.policy.ConversationFilterDecision
+import com.freedom.features.aireply.policy.ConversationFilterEvidence
+import com.freedom.features.aireply.policy.ConversationFilterPolicy
+import com.freedom.features.aireply.policy.ConversationFilterResult
+import com.freedom.features.aireply.policy.ConversationFilterSettings
 
 /**
  * Android-side Momo adapter. It owns app-specific inspectors and controllers and exposes
@@ -108,12 +117,13 @@ internal class MomoSocialAdapter(
     private val sampleArchivePort: SessionSampleArchivePort,
     /** Fresh observation from the existing Android READY owner; not a UI write grant. */
     private val inspectReceivedGreetingsReadiness: () -> TargetAppReadinessSnapshot,
+    private val conversationFilterSettings: () -> ConversationFilterSettings,
     /** The AI task lease must still be current when a send gesture is admitted. */
     private val isAiReplyUiOperationOwned: () -> Boolean = { true },
     /** Exact lease captured at model admission; task handoff revokes old async callbacks. */
     private val isBoundAiReplyUiOperationOwned: (com.freedom.core.runtime.TaskLease?) -> Boolean = { true }
 ) : SocialBrowsePort, ChatPagePort, ChatMessagePort, ChatSessionManagementPort, ChatDraftInputPort,
-    ChatDraftSendPort {
+    ChatDraftSendPort, PrivateChatFollowUpPort {
 
     override fun isReceivedGreetingsListActivity(activityClass: String): Boolean =
         activityClass == MomoSayHiPageContract.LIST_ACTIVITY
@@ -171,7 +181,9 @@ internal class MomoSocialAdapter(
         val greetingText: String?,
         val timestampText: String?,
         val sourceWindow: WindowRef,
-        val sourceStructureFingerprint: String
+        val sourceStructureFingerprint: String,
+        val listFilterEvidence: ConversationFilterEvidence = ConversationFilterEvidence(),
+        val profileFilterEvidence: ConversationFilterEvidence? = null
     )
 
     private enum class InboxIdentityCaptureStage {
@@ -184,20 +196,40 @@ internal class MomoSocialAdapter(
      * Exact, short-lived row evidence used only to bind a profile ID back to the row that opened
      * it. A nickname by itself is deliberately insufficient to restore the association.
      */
+    private sealed interface InboxIdentityAnchor {
+        val displayName: String
+        fun opaqueKey(): String
+        fun matches(candidate: ChatListCandidateSnapshot): Boolean = false
+    }
+
+    private data class ObservedDetailIdentityAnchor(
+        override val displayName: String,
+        val sourceWindow: WindowRef,
+        val runGeneration: Long,
+        val visitToken: String
+    ) : InboxIdentityAnchor {
+        override fun opaqueKey(): String = listOf(
+            "OBSERVED_DETAIL", sourceWindow.packageName, sourceWindow.windowId,
+            sourceWindow.generation, runGeneration, visitToken
+        ).joinToString("|").let(::sha256IdentityAnchor)
+
+        override fun toString(): String = "ObservedDetailIdentityAnchor(anchor=[REDACTED])"
+    }
+
     private data class InboxIdentityRowAnchor(
         val rowIndex: Int,
         val rowPath: List<Int>,
-        val displayName: String,
+        override val displayName: String,
         val rowBounds: ScreenRect
-    ) {
-        fun matches(candidate: ChatListCandidateSnapshot): Boolean =
+    ) : InboxIdentityAnchor {
+        override fun matches(candidate: ChatListCandidateSnapshot): Boolean =
             candidate.selectionClass == "PRIVATE_CHAT" &&
                 candidate.rowIndex == rowIndex &&
                 candidate.rowTarget.path.childIndices == rowPath &&
                 normalizeIdentityDisplayName(candidate.nameText) == normalizeIdentityDisplayName(displayName) &&
                 candidate.rowBounds == rowBounds
 
-        fun opaqueKey(): String = listOf(
+        override fun opaqueKey(): String = listOf(
             rowIndex,
             rowPath.joinToString("."),
             normalizeIdentityDisplayName(displayName),
@@ -206,7 +238,7 @@ internal class MomoSocialAdapter(
     }
 
     private class PendingInboxIdentityCapture(
-        val anchor: InboxIdentityRowAnchor,
+        val anchor: InboxIdentityAnchor,
         stage: InboxIdentityCaptureStage,
         lastTransitionAtMs: Long
     ) {
@@ -334,7 +366,9 @@ internal class MomoSocialAdapter(
     /** Scoped to one read-only probe; it enables manual-list stability, never navigation. */
     @Volatile private var manualReceivedGreetingsArrivalProbeActive: Boolean = false
     @Volatile private var sayHiCardListTapPending: Boolean = false
-    @Volatile private var sayHiGestureInFlight: Boolean = false
+    @Volatile private var sayHiNonSearchGestureInFlight: Boolean = false
+    private val sayHiGestureInFlight: Boolean
+        get() = sayHiNonSearchGestureInFlight || receivedGreetingsEntrySearchGestureInFlight
     private enum class CompletionBackStage { NONE, LIST_SUBMITTED, CARD_SUBMITTED }
     @Volatile private var completionBackStage = CompletionBackStage.NONE
     private val completionBackRetryGate = MomoCompletionBackRetryGate(SAYHI_DETAIL_BACK_TIMEOUT_MS)
@@ -346,13 +380,13 @@ internal class MomoSocialAdapter(
     @Volatile private var lastReceivedGreetingsEntryDiagnosticAtMs: Long = 0L
     @Volatile private var lastReceivedGreetingsNavigationWaitActivityClass: String = ""
     private val receivedGreetingsEntrySearchController = MomoReceivedGreetingsEntrySearchController()
-    @Volatile private var receivedGreetingsEntrySearchActive: Boolean = false
-    @Volatile private var receivedGreetingsEntrySearchComplete: Boolean = false
-    @Volatile private var receivedGreetingsEntrySearchGestureInFlight: Boolean = false
+    private val receivedGreetingsEntrySearchGestureInFlight: Boolean
+        get() = receivedGreetingsEntrySearchController.isGestureInFlight()
     @Volatile private var receivedGreetingsEntrySearchWindowIdentity: String = ""
     @Volatile private var sayHiReadOnlyStage: SayHiReadOnlyStage = SayHiReadOnlyStage.IDLE
     /** Business-visible read-only wait; never a permission to click or mark a row complete. */
     @Volatile private var sayHiDeferredSafeEvidenceOnlyWait = false
+    private var sayHiFilterSettingsUnavailableLogged = false
     @Volatile private var sayHiSelectedGreeting: SayHiSelectedGreeting? = null
     @Volatile private var sayHiSelectedContactIdentity: ContactRowIdentity? = null
     @Volatile private var sayHiSelectedIdentityStatus: MomoSayHiPlatformIdentityStatus = MomoSayHiPlatformIdentityStatus.MISSING
@@ -394,6 +428,7 @@ internal class MomoSocialAdapter(
     private val inboxIdentityCaptureLock = Any()
     @Volatile private var pendingInboxIdentityCapture: PendingInboxIdentityCapture? = null
     @Volatile private var identityReturnReinspectionPending: Boolean = false
+    private var observedDetailIdentityReturnKey: String? = null
     @Volatile private var lastConfirmedChatDetailSnapshot: ChatPageSnapshot? = null
     private val failedInboxIdentityCaptureKeys = LinkedHashSet<String>()
     private val loggedInboxIdentityFailureKeys = LinkedHashSet<String>()
@@ -478,8 +513,15 @@ internal class MomoSocialAdapter(
     fun inspectGesturePageReadiness(
         root: AccessibilityNodeInfo,
         currentActivity: String,
-        mode: RunMode
-    ): TargetAppPageReadiness = pageInspectionComponents.gestureReadinessInspector.inspect(root, currentActivity, mode)
+        mode: RunMode,
+        commandId: String? = null
+    ): TargetAppPageReadiness = pageInspectionComponents.gestureReadinessInspector.inspect(
+        root, currentActivity, mode,
+        activeAlbumSelectorPermit.get()?.takeIf { it.matchesCommand(commandId) }
+    )
+
+    // A single short-lived dispatch capability, not a second media workflow or task owner.
+    private val activeAlbumSelectorPermit = AtomicReference<MomoAlbumGesturePermit?>(null)
 
     override fun isDetailActivity(activityClass: String): Boolean =
         activityClass == detailActivityClass
@@ -567,7 +609,16 @@ internal class MomoSocialAdapter(
                             pageInspectionComponents.gestureReadinessInspector.hasVisibleViewId(
                                 root, setOf(MomoSayHiPageContract.CARD_CONTENT_VIEW_ID, MomoSayHiPageContract.CARD_CLOSE_VIEW_ID)
                             )
-                        chatConfirmed || cardConfirmed || (profileTransaction && isSayHiProfileSurfacePresent())
+                        val privateFollowUp = privateFollowUp?.takeIf {
+                            currentTaskId == "AI_REPLY_PRIVATE_MESSAGES"
+                        }
+                        if (privateFollowUp != null) {
+                            // During the child, another chat is not a continuation of this transaction.
+                            if (chat.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE) {
+                                originalPrivateFollowUpChat(privateFollowUp) &&
+                                    chat.chatTitleText == privateFollowUp.target.expectedChatTitle
+                            } else inspectPrivateFollowUpOwnedPage()
+                        } else chatConfirmed || cardConfirmed || (profileTransaction && isSayHiProfileSurfacePresent())
                     }
                     else -> false
                 }
@@ -1227,6 +1278,7 @@ internal class MomoSocialAdapter(
         completionBackRetryGate.reset()
         resetReceivedGreetingsEntrySearch()
         sayHiAutonomousBrowseController.reset()
+        sayHiTraversalState.resetFilterSkips()
         clearSayHiSelectedGreeting()
         resetSayHiRowTapTransaction()
         receivedGreetingsEntryTapPending = false
@@ -1320,7 +1372,7 @@ internal class MomoSocialAdapter(
                 if (System.currentTimeMillis() - sayHiReadOnlyStageStartedAtMs > SAYHI_PROFILE_SCROLL_TIMEOUT_MS) {
                     sayHiProfileScrollRequestId = null
                     sayHiProfileScrollInFlight = false
-                    sayHiGestureInFlight = false
+                    sayHiNonSearchGestureInFlight = false
                     sayHiProfileScrollFailed = true
                     sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
                     sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
@@ -1791,7 +1843,7 @@ internal class MomoSocialAdapter(
         sayHiNavigationFlowController.beginEntryNavigation()
         receivedGreetingsEntryTapPending = true
         lastReceivedGreetingsNavigationWaitActivityClass = ""
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         receivedGreetingsEntryTapAtMs = tapSubmittedAt
         lastReceivedGreetingsEntryTapAtMs = tapSubmittedAt
         lastReceivedGreetingsEntryDiagnostic = ""
@@ -1810,7 +1862,7 @@ internal class MomoSocialAdapter(
         val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = gesturePolicy.execute(tapRequest, GestureExecutionListener { result ->
             if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             val completed = result.status == GestureExecutionStatus.COMPLETED
             onLog(
                 if (completed) {
@@ -1832,12 +1884,12 @@ internal class MomoSocialAdapter(
         } else if (submission == GestureSubmission.DEFERRED_NOT_READY) {
             // No tap was dispatched. Restore the entry phase so the next idle inspection can
             // reacquire the same list entry after the overlay/startup guard clears.
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             receivedGreetingsEntryTapPending = false
             sayHiNavigationFlowController.reset()
             onLog("收到的招呼入口[DEFERRED_NOT_READY]：页面暂不可操作，未派发点击、未消耗入口重试；保留导航意图并等待新快照")
         } else {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             receivedGreetingsEntryTapPending = false
             sayHiNavigationFlowController.reset()
             logReceivedGreetingsEntrySkip("GESTURE_SUBMISSION_REJECTED")
@@ -1907,7 +1959,7 @@ internal class MomoSocialAdapter(
         }
         resetSayHiListSnapshotState()
         val submittedAt = System.currentTimeMillis()
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         sayHiCardListTapPending = true
         sayHiCardListTapAtMs = submittedAt
         val request = GestureIntentRequest(
@@ -1924,7 +1976,7 @@ internal class MomoSocialAdapter(
         val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = gesturePolicy.execute(request, GestureExecutionListener { result ->
             if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             if (result.status == GestureExecutionStatus.COMPLETED) {
                 sayHiCardListTapPending = true
                 sayHiCardListTapAtMs = submittedAt
@@ -1937,12 +1989,12 @@ internal class MomoSocialAdapter(
             }
         })
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiCardListTapPending = false
             sayHiNavigationFlowController.markCardListTapFailed()
             onLog("收到的招呼资料卡列表入口[DEFERRED_NOT_READY]：没有派发点击；清除旧稳定样本，重新采集资料卡快照后再尝试")
         } else if (submission != GestureSubmission.ACCEPTED) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiCardListTapPending = false
             sayHiNavigationFlowController.markCardListTapFailed()
             logSayHiCardListTapSkip("GESTURE_SUBMISSION_REJECTED:$submission")
@@ -2004,8 +2056,8 @@ internal class MomoSocialAdapter(
      * viewport that excludes the mf_view overlay.
      */
     private fun performReceivedGreetingsEntrySearchStep(): Boolean {
-        if (receivedGreetingsEntrySearchComplete) return false
-        if (receivedGreetingsEntrySearchGestureInFlight) return true
+        if (receivedGreetingsEntrySearchController.isComplete()) return false
+        if (sayHiGestureInFlight) return true
 
         val fresh = runCatching { inspectChatPage() }.getOrNull() ?: run {
             onLog("收到的招呼入口搜索暂停：无法重新读取普通消息列表；不使用旧视口坐标")
@@ -2047,11 +2099,8 @@ internal class MomoSocialAdapter(
             return true
         }
         val windowIdentity = "${expectedWindow.packageName}|${expectedWindow.windowId}|${expectedWindow.generation}"
-        if (!receivedGreetingsEntrySearchActive || receivedGreetingsEntrySearchWindowIdentity != windowIdentity) {
-            receivedGreetingsEntrySearchController.reset()
+        if (!receivedGreetingsEntrySearchController.isActive() || receivedGreetingsEntrySearchWindowIdentity != windowIdentity) {
             receivedGreetingsEntrySearchController.start()
-            receivedGreetingsEntrySearchActive = true
-            receivedGreetingsEntrySearchComplete = false
             receivedGreetingsEntrySearchWindowIdentity = windowIdentity
             onLog(
                 "收到的招呼入口搜索开始：已确认普通消息列表窗口=$windowIdentity；" +
@@ -2059,6 +2108,7 @@ internal class MomoSocialAdapter(
             )
         }
 
+        val searchGeneration = receivedGreetingsEntrySearchController.captureSearchGeneration()
         val viewportFingerprint = receivedGreetingsEntrySearchViewportFingerprint(fresh)
         if (viewportFingerprint.isBlank()) {
             onLog("收到的招呼入口搜索暂缓：当前视口暂缺可比较的会话行身份/几何证据；等待新快照，不终止导航")
@@ -2070,8 +2120,6 @@ internal class MomoSocialAdapter(
                 onLog("收到的招呼入口搜索：已通过连续两次无位移确认当前方向边界；反转方向，复核剩余列表区域")
             }
             MomoReceivedGreetingsEntrySearchController.Observation.COMPLETE -> {
-                receivedGreetingsEntrySearchComplete = true
-                receivedGreetingsEntrySearchActive = false
                 onLog(
                     "收到的招呼入口搜索完成：已从当前起点双向扫描普通消息列表并复核两端边界；" +
                         "仍未发现唯一‘收到的招呼’标签；不盲点其它行，也不把未命中伪装成进入成功"
@@ -2114,22 +2162,24 @@ internal class MomoSocialAdapter(
             },
             executionContext = executionContext
         )
-        receivedGreetingsEntrySearchGestureInFlight = true
-        sayHiGestureInFlight = true
         val callbackGeneration = sayHiRunGenerationGuard.capture()
+        if (sayHiGestureInFlight ||
+            !receivedGreetingsEntrySearchController.tryBeginGesture(searchGeneration, request.id)
+        ) return true
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
                 if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
-                receivedGreetingsEntrySearchGestureInFlight = false
-                sayHiGestureInFlight = false
-                if (result.status == GestureExecutionStatus.COMPLETED) {
-                    receivedGreetingsEntrySearchController.onGestureCompleted(viewportFingerprint)
+                val completed = result.status == GestureExecutionStatus.COMPLETED
+                if (!receivedGreetingsEntrySearchController.finishGesture(
+                        request.id, if (completed) viewportFingerprint else null
+                    )
+                ) return@GestureExecutionListener
+                if (completed) {
                     onLog(
                         "收到的招呼入口搜索滑动完成：方向=${direction.name}；" +
                             "等待新的会话行身份/位置快照后继续搜索"
                     )
                 } else {
-                    receivedGreetingsEntrySearchController.onGestureFailed()
                     onLog(
                         "收到的招呼入口搜索滑动未完成：status=${result.status}；reason=${result.reason}；" +
                             "保留方向状态，等待新快照后安全重试"
@@ -2137,25 +2187,19 @@ internal class MomoSocialAdapter(
                 }
             })
         }.getOrElse {
-            receivedGreetingsEntrySearchGestureInFlight = false
-            sayHiGestureInFlight = false
-            receivedGreetingsEntrySearchController.onGestureFailed()
+            receivedGreetingsEntrySearchController.finishGesture(request.id, null)
             onLog("收到的招呼入口搜索暂停：手势协调器异常=${it.javaClass.simpleName}；未使用坐标兜底")
             return false
         }
         return when (submission) {
             GestureSubmission.ACCEPTED -> true
             GestureSubmission.DEFERRED_NOT_READY -> {
-                receivedGreetingsEntrySearchGestureInFlight = false
-                sayHiGestureInFlight = false
-                receivedGreetingsEntrySearchController.onGestureFailed()
+                receivedGreetingsEntrySearchController.finishGesture(request.id, null)
                 onLog("收到的招呼入口搜索暂缓：手势协调器尚未就绪；保留搜索方向并等待后续快照")
                 true
             }
             else -> {
-                receivedGreetingsEntrySearchGestureInFlight = false
-                sayHiGestureInFlight = false
-                receivedGreetingsEntrySearchController.onGestureFailed()
+                receivedGreetingsEntrySearchController.finishGesture(request.id, null)
                 onLog("收到的招呼入口搜索暂停：手势协调器拒绝安全滑动；submission=$submission")
                 false
             }
@@ -2174,11 +2218,9 @@ internal class MomoSocialAdapter(
                 "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
         }.trim('|')
 
-    private fun resetReceivedGreetingsEntrySearch() {
-        receivedGreetingsEntrySearchController.reset()
-        receivedGreetingsEntrySearchActive = false
-        receivedGreetingsEntrySearchComplete = false
-        receivedGreetingsEntrySearchGestureInFlight = false
+    private fun resetReceivedGreetingsEntrySearch(resetRun: Boolean = false) {
+        if (resetRun) receivedGreetingsEntrySearchController.resetForRun()
+        else receivedGreetingsEntrySearchController.reset()
         receivedGreetingsEntrySearchWindowIdentity = ""
     }
 
@@ -2402,6 +2444,26 @@ internal class MomoSocialAdapter(
                 clearSayHiSelectedGreeting()
                 return false
             }
+            // A new conversation needs final admission only after the existing return,
+            // platform identity and durable send/duplicate recovery gates have succeeded.
+            if (!sayHiTraversalState.isDeferredRow(selected.rowKey)) {
+                val settings = readSayHiFilterSettings() ?: return true
+                val evidence = (selected.profileFilterEvidence ?: ConversationFilterEvidence())
+                    .supplementedBy(row.filterEvidence)
+                val decision = ConversationFilterPolicy.evaluate(settings, evidence)
+                if (decision.result != ConversationFilterResult.ALLOW) {
+                    if (sayHiTraversalState.markFilterSkipped(selected.rowKey)) {
+                        logSayHiFilterDecision(decision, settings, evidence, "PROFILE_RETURN")
+                    }
+                    clearSayHiSelectedGreeting()
+                    // Let the normal next idle step select another visible candidate before
+                    // the outer list is allowed to scroll. No extra collection is scheduled.
+                    return true
+                }
+                if (settings.hasEnabledConditions) {
+                    logSayHiFilterDecision(decision, settings, evidence, "PROFILE_RETURN")
+                }
+            }
             val namePath = row.namePath ?: run {
                 deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
                 onLog("收到招呼详情点击跳过：重新定位的原始消息行缺少姓名节点路径；不使用旧节点路径或坐标")
@@ -2473,9 +2535,16 @@ internal class MomoSocialAdapter(
         val candidates = inspection.listRows.filter { row ->
             row.unread.status == EvidenceStatus.CONFIRMED && row.unread.value == true
         }
+        val settings = readSayHiFilterSettings()
         val unprocessedCandidates = candidates.filter { row ->
             val key = MomoSayHiIdentityFingerprintPolicy.rowKey(row)
-            key !in confirmedRows && !sayHiTraversalState.isProcessedRow(key) && !sayHiTraversalState.isDeferredRow(key)
+            key !in confirmedRows && !sayHiTraversalState.isProcessedRow(key) && !sayHiTraversalState.isDeferredRow(key) &&
+                settings != null && (!settings.hasEnabledConditions ||
+                    (!sayHiTraversalState.isFilterSkipped(key) &&
+                        // Keep the existing duplicate-row safety path authoritative. An ambiguous row
+                        // key must not be used to cache a filter exclusion for another visible row.
+                        (inspection.listRows.count { MomoSayHiIdentityFingerprintPolicy.rowKey(it) == key } != 1 ||
+                            passesSayHiListFilter(key, settings, row.filterEvidence))))
         }
         // Read-only recovery probe: the old finite click budget is never reset just
         // because a timer fired. Inspect a NEW unique and independently safe row target.
@@ -2500,7 +2569,8 @@ internal class MomoSocialAdapter(
             sayHiStableCandidateTarget = null
             sayHiStableCandidateWindow = null
             // Do not scroll away while the second safe-evidence observation is pending.
-            return exhaustedProbePending
+            // A configuration read failure is not evidence that the scan is complete.
+            return exhaustedProbePending || settings == null
         }
         sayHiDeferredSafeEvidenceOnlyWait = false
         val key = MomoSayHiIdentityFingerprintPolicy.rowKey(candidate)
@@ -2531,9 +2601,59 @@ internal class MomoSocialAdapter(
             greetingText = candidate.greetingText.value,
             timestampText = candidate.timestampText.value,
             sourceWindow = tree.window,
-            sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree)
+            sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(tree),
+            listFilterEvidence = candidate.filterEvidence
         )
         return dispatchSayHiReadOnlyAvatarTap(tree, selected, target)
+    }
+
+    private fun readSayHiFilterSettings(): ConversationFilterSettings? {
+        val settings = runCatching { conversationFilterSettings() }.getOrNull()
+        if (settings == null) {
+            if (!sayHiFilterSettingsUnavailableLogged) {
+                sayHiFilterSettingsUnavailableLogged = true
+                onLog("CONVERSATION_FILTER_SETTINGS_UNAVAILABLE nextAction=WAIT_FOR_SETTINGS")
+            }
+            return null
+        }
+        sayHiFilterSettingsUnavailableLogged = false
+        sayHiTraversalState.updateFilterSettings(settings)
+        return settings
+    }
+
+    private fun passesSayHiListFilter(
+        rowKey: String, settings: ConversationFilterSettings, evidence: ConversationFilterEvidence
+    ): Boolean {
+        if (sayHiTraversalState.isDeferredRow(rowKey) || !settings.hasEnabledConditions) return true
+        if (sayHiTraversalState.isFilterSkipped(rowKey)) return false
+        val decision = ConversationFilterPolicy.evaluate(settings, evidence)
+        // Missing list evidence is not a rejection: the original profile visit can fill it.
+        if (decision.result != ConversationFilterResult.EXCLUDE) return true
+        if (sayHiTraversalState.markFilterSkipped(rowKey)) {
+            logSayHiFilterDecision(decision, settings, evidence, "LIST")
+        }
+        return false
+    }
+
+    private fun logSayHiFilterDecision(
+        decision: ConversationFilterDecision,
+        settings: ConversationFilterSettings,
+        evidence: ConversationFilterEvidence,
+        stage: String
+    ) {
+        val nextAction = if (decision.result == ConversationFilterResult.ALLOW)
+            "CONTINUE_ORIGINAL_WORKFLOW" else "CONTINUE_TRAVERSAL"
+        val event = when (decision.result) {
+            ConversationFilterResult.ALLOW -> "CONVERSATION_FILTER_ALLOWED"
+            ConversationFilterResult.EXCLUDE -> "CONVERSATION_FILTER_EXCLUDED"
+            ConversationFilterResult.UNKNOWN -> "CONVERSATION_FILTER_UNKNOWN"
+        }
+        // Only normalized threshold/decision information; no raw identifiers or profile text.
+        onLog("$event stage=$stage reason=${decision.reason ?: "NONE"};" +
+            "thresholdMinutes=${settings.maxLastActiveMinutes};" +
+            "observedMinutes=${evidence.lastActiveMinutes ?: "UNKNOWN"};" +
+            "maxDistanceKm=${settings.maxDistanceKm};minAge=${settings.minAge};maxAge=${settings.maxAge};" +
+            "nextAction=$nextAction")
     }
 
     private fun dispatchSayHiReadOnlyAvatarTap(
@@ -2622,11 +2742,21 @@ internal class MomoSocialAdapter(
                 tree = freshTree,
                 selected = selected.copy(
                     sourceWindow = freshTree.window,
-                    sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(freshTree)
+                    sourceStructureFingerprint = MomoSayHiIdentityFingerprintPolicy.treeStructureFingerprint(freshTree),
+                    listFilterEvidence = matchingRows.single().filterEvidence
                 ),
                 target = freshTarget,
                 allowFreshRevalidation = false
             )
+        }
+        if (!sayHiTraversalState.isDeferredRow(selected.rowKey)) {
+            val settings = readSayHiFilterSettings() ?: return true
+            if (!passesSayHiListFilter(selected.rowKey, settings, selected.listFilterEvidence)) {
+                sayHiStableCandidateKey = ""
+                sayHiStableCandidateTarget = null
+                sayHiStableCandidateWindow = null
+                return true
+            }
         }
         val metrics = accessibilityGateway.displayMetrics()
         val executionContext = gesturePolicy.captureContext(tree.window, metrics.toGestureCoordinateContext())
@@ -2660,7 +2790,7 @@ internal class MomoSocialAdapter(
         sayHiProfileBackWindowId = -1
         sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
         sayHiReadOnlyStage = SayHiReadOnlyStage.AVATAR_TAP_PENDING
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         val request = GestureIntentRequest(
             id = "momo-sayhi-avatar-${System.nanoTime()}",
             intent = GestureIntent.Tap(
@@ -2676,7 +2806,7 @@ internal class MomoSocialAdapter(
         val submission = runCatching {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
                 if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
-                sayHiGestureInFlight = false
+                sayHiNonSearchGestureInFlight = false
                 if (result.status == GestureExecutionStatus.COMPLETED) {
                     sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_PROFILE
                     sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
@@ -2697,14 +2827,14 @@ internal class MomoSocialAdapter(
                 }
             })
         }.getOrElse {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
             clearSayHiSelectedGreeting()
             onLog("收到招呼头像导航失败：手势执行器异常；不执行坐标兜底")
             return true
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             clearSayHiSelectedGreeting()
             sayHiStableCandidateKey = selected.rowKey
             onLog("收到招呼头像导航[DEFERRED_NOT_READY]：弹窗/页面准入暂未放行；未点击、未标记跳过；下一轮使用新列表快照重新识别原用户行")
@@ -2714,7 +2844,7 @@ internal class MomoSocialAdapter(
                 retry = false
             )
         } else if (submission != GestureSubmission.ACCEPTED) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             deferSayHiRow(selected.rowKey, "ITEM_NOT_READY")
             clearSayHiSelectedGreeting()
             onLog("收到招呼头像导航未提交：统一手势协调器拒绝；submission=$submission")
@@ -2752,7 +2882,7 @@ internal class MomoSocialAdapter(
         val revalidationFailure = revalidateSayHiRowTarget(tree, row, target, selected)
         if (revalidationFailure != null) {
             val diagnostic = describeSayHiRowTargetRevalidation(tree, row, target, revalidationFailure)
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             deferSayHiRow(
                 selected.rowKey,
                 "$SAYHI_SAFE_TARGET_VALIDATION_FAILURE_REASON_PREFIX:$revalidationFailure",
@@ -2786,7 +2916,7 @@ internal class MomoSocialAdapter(
             }
         sayHiReadOnlyStage = SayHiReadOnlyStage.ROW_TAP_PENDING
         sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         pendingSayHiRowTapTarget = target
         sayHiUnverifiedBackAttempted = false
         sayHiUnverifiedBackAttemptActivity = ""
@@ -2820,7 +2950,7 @@ internal class MomoSocialAdapter(
 
                 override fun onResult(result: com.freedom.core.accessibility.gesture.GestureExecutionResult) {
                     if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return
-                    sayHiGestureInFlight = false
+                    sayHiNonSearchGestureInFlight = false
                     if (result.status == GestureExecutionStatus.COMPLETED) {
                         sayHiReadOnlyStage = SayHiReadOnlyStage.WAITING_DETAIL
                         sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
@@ -2861,7 +2991,7 @@ internal class MomoSocialAdapter(
                 }
             })
         }.getOrElse { error ->
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             val activityAfterFailure = activityClass()
             if (activityAfterFailure.isNotBlank() &&
                 !isReceivedGreetingsListStructureVisible() && inspectCurrentChatDetailFingerprint() == null
@@ -2880,7 +3010,7 @@ internal class MomoSocialAdapter(
             return true
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             resetSayHiRowTapTransaction()
             sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_BACK_PENDING
             onLog("收到招呼消息行点击[DEFERRED_NOT_READY]：平台手势未派发；保留已验证身份和原始行，不进入详情；重新扫描后再确认")
@@ -2890,7 +3020,7 @@ internal class MomoSocialAdapter(
                 retry = false
             )
         } else if (submission != GestureSubmission.ACCEPTED) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             val activityAfterRejection = activityClass()
             if (activityAfterRejection.isNotBlank() &&
                 !isReceivedGreetingsListStructureVisible() && inspectCurrentChatDetailFingerprint() == null
@@ -3299,6 +3429,19 @@ internal class MomoSocialAdapter(
         if (inspectCurrentChatDetailFingerprint() != null ||
             !accessibilityGateway.isWindowCurrent(tree.window)
         ) return true
+        // Reuse only the already acquired identity snapshot. Keep the first-screen evidence
+        // across the existing one allowed ID swipe; later available fields may fill gaps.
+        // None of these optional fields can authorize a profile, ID or navigation action.
+        if (!sayHiTraversalState.isDeferredRow(selected.rowKey) &&
+            readSayHiFilterSettings()?.hasEnabledConditions == true
+        ) {
+            val observed = MomoConversationFilterEvidenceParser.fromProfile(tree)
+            if (sayHiSelectedGreeting === selected) {
+                sayHiSelectedGreeting = selected.copy(
+                    profileFilterEvidence = selected.profileFilterEvidence?.supplementedBy(observed) ?: observed
+                )
+            }
+        }
         if (readout.status == MomoSayHiPlatformIdentityStatus.CONFIRMED) {
             val resolved = sessionComponents.contactIdentityManager.resolveSnapshot(
                 snapshotId = "sayhi-${System.currentTimeMillis()}-${selected.rowKey.take(12)}",
@@ -3424,7 +3567,7 @@ internal class MomoSocialAdapter(
         sayHiProfileScrollFailed = false
         sayHiReadOnlyStage = SayHiReadOnlyStage.PROFILE_SCROLL_PENDING
         sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         onLog(
             "收到招呼身份采集[PROFILE_SCROLL]：已唯一确认可滚动资料内容视口；" +
                 "candidates=${decision.candidateCount}；fingerprint=${decision.reason}；" +
@@ -3437,7 +3580,7 @@ internal class MomoSocialAdapter(
             gesturePolicy.execute(request, GestureExecutionListener { result ->
                 if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
                 if (sayHiProfileScrollRequestId != request.id) return@GestureExecutionListener
-                sayHiGestureInFlight = false
+                sayHiNonSearchGestureInFlight = false
                 sayHiProfileScrollInFlight = false
                 sayHiProfileScrollRequestId = null
                 if (result.status == GestureExecutionStatus.COMPLETED) {
@@ -3466,7 +3609,7 @@ internal class MomoSocialAdapter(
                 }
             })
         }.getOrElse {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiProfileScrollInFlight = false
             sayHiProfileScrollRequestId = null
             sayHiProfileScrollFailed = true
@@ -3477,7 +3620,7 @@ internal class MomoSocialAdapter(
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
             sayHiProfileDeferredRetryGate.onDeferred(request.id, tree.window, SystemClock.uptimeMillis())
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiProfileScrollInFlight = false
             sayHiProfileScrollRequestId = null
             sayHiProfileScrollAttempted = false
@@ -3486,7 +3629,7 @@ internal class MomoSocialAdapter(
             sayHiReadOnlyStageStartedAtMs = System.currentTimeMillis()
             onLog("收到招呼身份资料页上滑[DEFERRED_NOT_READY]：页面暂不可操作，未派发滑动且不消耗唯一滑动机会；等待新鲜资料页快照")
         } else if (submission != GestureSubmission.ACCEPTED) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiProfileScrollInFlight = false
             sayHiProfileScrollRequestId = null
             sayHiProfileScrollFailed = true
@@ -4198,10 +4341,10 @@ internal class MomoSocialAdapter(
 
     override fun receivedGreetingsTraversalStatus(): ReceivedGreetingsTraversalStatus {
         val currentActivity = activityClass()
-        if (receivedGreetingsEntrySearchActive || receivedGreetingsEntrySearchGestureInFlight) {
+        if (receivedGreetingsEntrySearchController.isActive() || receivedGreetingsEntrySearchGestureInFlight) {
             return ReceivedGreetingsTraversalStatus.NAVIGATING
         }
-        if (receivedGreetingsEntrySearchComplete) return ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND
+        if (receivedGreetingsEntrySearchController.isComplete()) return ReceivedGreetingsTraversalStatus.ENTRY_NOT_FOUND
         if (sayHiReadOnlyStage == SayHiReadOnlyStage.WAITING_DETAIL &&
             sayHiRowTapFeedbackState != SayHiRowTapFeedbackState.REJECTED
         ) {
@@ -5021,12 +5164,12 @@ internal class MomoSocialAdapter(
             )
             return
         }
-        sayHiGestureInFlight = true
+        sayHiNonSearchGestureInFlight = true
         val callbackGeneration = sayHiRunGenerationGuard.capture()
         val submission = try {
             gesturePolicy.execute(request, GestureExecutionListener { result ->
                 if (!sayHiRunGenerationGuard.isCurrent(callbackGeneration)) return@GestureExecutionListener
-                sayHiGestureInFlight = false
+                sayHiNonSearchGestureInFlight = false
                 if (result.status == GestureExecutionStatus.DEFERRED) {
                     sayHiAutonomousBrowseController.onGestureDeferred()
                     sayHiListSnapshotRecoveryPolicy.onGestureDeferred()
@@ -5054,7 +5197,7 @@ internal class MomoSocialAdapter(
                 }
             })
         } catch (failure: Throwable) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiAutonomousBrowseController.onGestureCompleted(false)
             val settleDelayMs = sayHiListSnapshotRecoveryPolicy.onGestureFinished(
                 SystemClock.elapsedRealtime()
@@ -5071,7 +5214,7 @@ internal class MomoSocialAdapter(
             return
         }
         if (submission == GestureSubmission.DEFERRED_NOT_READY) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiAutonomousBrowseController.onGestureDeferred()
             sayHiListSnapshotRecoveryPolicy.onGestureDeferred()
             scheduleSayHiListSnapshotInspection(
@@ -5081,7 +5224,7 @@ internal class MomoSocialAdapter(
             )
             onLog("收到招呼自主浏览[DEFERRED_NOT_READY]：弹窗/窗口准入暂未放行；未派发滑动、不计失败、不消耗滚动机会；等待新快照")
         } else if (submission != GestureSubmission.ACCEPTED) {
-            sayHiGestureInFlight = false
+            sayHiNonSearchGestureInFlight = false
             sayHiAutonomousBrowseController.onGestureCompleted(false)
             val settleDelayMs = sayHiListSnapshotRecoveryPolicy.onGestureFinished(
                 SystemClock.elapsedRealtime()
@@ -5283,6 +5426,1071 @@ internal class MomoSocialAdapter(
                 titleNodes.forEach { node -> runCatching { node.recycle() } }
             }
         } ?: false
+    }
+
+    /** The parent chat already holds the lease. Locate only the current image-entry control. */
+    internal fun openImageAlbum(
+        target: ChatDraftInputTarget,
+        transactionId: String,
+        ownsTransaction: () -> Boolean,
+        onGestureResult: (GestureExecutionStatus) -> Unit
+    ): GestureSubmission {
+        val window = accessibilityGateway.currentGestureWindow() ?: return GestureSubmission.DEFERRED_NOT_READY
+        val original = target.nodeTarget.window
+        if (window.packageName != original.packageName || window.windowId != original.windowId ||
+            window.generation < original.generation) return GestureSubmission.DEFERRED_NOT_READY
+        return submitVerifiedAlbumTap(
+            target, window, transactionId, ownsTransaction, "image-entry",
+            resolve = { root, _ ->
+                chatComponents.pageInspector.inspectImageEntry(AccessibilityNodeInfo.obtain(root), targetPackage)
+            },
+            boundsOf = { ScreenRect(it.left, it.top, it.right, it.bottom) },
+            onGestureResult = onGestureResult
+        )
+    }
+
+    /** M02.4-B.2: submit one selector tap, then the caller observes directory arrival. */
+    internal fun openImageAlbumDirectory(
+        target: ChatDraftInputTarget,
+        albumWindow: WindowRef,
+        transactionId: String,
+        ownsTransaction: () -> Boolean,
+        onGestureResult: (GestureExecutionStatus) -> Unit
+    ): GestureSubmission = submitVerifiedAlbumTap(
+        target, albumWindow, transactionId, ownsTransaction, "selector",
+        resolve = { root, _ -> MomoAlbumSelectorInspector.inspect(root, targetPackage) },
+        boundsOf = { ScreenRect(it.left, it.top, it.right, it.bottom) },
+        onGestureResult = onGestureResult
+    )
+
+    /** Only the actual foreground window, never a visible-window fallback. */
+    private fun freshMediaSnapshot(expectedWindow: WindowRef? = null): AccessibilityTreeSnapshot? {
+        val window = accessibilityGateway.currentGestureWindow() ?: return null
+        if (window.packageName != targetPackage || window.windowId < 0 ||
+            (expectedWindow != null && window != expectedWindow)) return null
+        val snapshot = accessibilityGateway.inspectActiveWindow(
+            TreeInspectionRequest(
+                maxNodes = NAVIGATION_EVIDENCE_MAX_NODES,
+                textCapture = NodeTextCapture.EPHEMERAL
+            )
+        ) ?: return null
+        return snapshot.takeIf {
+            it.window == window && !it.truncated && !it.timeBudgetExceeded &&
+                accessibilityGateway.currentGestureWindow() == window
+        }
+    }
+
+    /** Read-only dropdown evidence while the page router is resolving the window change. */
+    internal fun inspectImageAlbumDirectory(albumWindow: WindowRef): Boolean {
+        val snapshot = freshMediaSnapshot() ?: return false
+        return isAlbumDirectoryArrival(albumWindow, snapshot) &&
+            MomoAlbumDirectoryInspector.resolveFreedomName(snapshot, targetPackage) != null
+    }
+
+    private fun isAlbumDirectoryArrival(albumWindow: WindowRef, snapshot: AccessibilityTreeSnapshot): Boolean =
+        MomoAlbumDirectoryInspector.isNewDirectoryWindow(albumWindow, snapshot.window, targetPackage)
+
+    /** M02.5: unique directory name, with the name's own safe bounds. */
+    internal fun inspectFreedomDirectory(albumWindow: WindowRef): MomoFreedomDirectoryTarget? {
+        val snapshot = freshMediaSnapshot() ?: return null
+        if (!isAlbumDirectoryArrival(albumWindow, snapshot)) return null
+        return MomoAlbumDirectoryInspector.resolveFreedomName(snapshot, targetPackage)
+    }
+
+    /** M02.6: click only the name; caller must observe the Freedom title before selecting. */
+    internal fun openFreedomAlbum(
+        target: ChatDraftInputTarget,
+        albumWindow: WindowRef,
+        transactionId: String,
+        ownsTransaction: () -> Boolean,
+        onGestureResult: (GestureExecutionStatus) -> Unit
+    ): GestureSubmission {
+        val directory = inspectFreedomDirectory(albumWindow) ?: return GestureSubmission.DEFERRED_NOT_READY
+        return submitVerifiedAlbumTap(
+            target, directory.window, transactionId, ownsTransaction, "freedom-name",
+            resolve = { _, window ->
+                freshMediaSnapshot(window)?.takeIf { isAlbumDirectoryArrival(albumWindow, it) }
+                    ?.let { MomoAlbumDirectoryInspector.resolveFreedomName(it, targetPackage) }
+            },
+            boundsOf = { it.nameBounds },
+            onGestureResult = onGestureResult
+        )
+    }
+
+    /** The selected Freedom album only needs its current select control. */
+    internal fun selectFreedomImage(
+        target: ChatDraftInputTarget,
+        albumWindow: WindowRef,
+        transactionId: String,
+        ownsTransaction: () -> Boolean,
+        onGestureResult: (GestureExecutionStatus) -> Unit
+    ): GestureSubmission = submitVerifiedAlbumTap(
+        target, albumWindow, transactionId, ownsTransaction, "select-image",
+        resolve = { _, window ->
+            freshMediaSnapshot(window)?.let { MomoFreedomAlbumInspector.ownedSelectionTarget(it, targetPackage) }
+        },
+        boundsOf = { it.second },
+        onGestureResult = onGestureResult
+    )
+
+    /** The current finish control itself proves one selection. Baseline absence never blocks send. */
+    internal fun sendFreedomImage(
+        target: ChatDraftInputTarget,
+        albumWindow: WindowRef,
+        transactionId: String,
+        ownsTransaction: () -> Boolean,
+        baseline: MomoImageSendBaseline?,
+        onDispatched: (MomoImageSendAttempt) -> Unit,
+        onGestureResult: (GestureExecutionStatus) -> Unit
+    ): GestureSubmission {
+        val verifiedBaseline = baseline?.takeIf { it.belongsTo(target, transactionId) }
+        return submitVerifiedAlbumTap(
+            target, albumWindow, transactionId, ownsTransaction, "send-image",
+            resolve = { _, window ->
+                freshMediaSnapshot(window)?.let { MomoFreedomAlbumInspector.ownedSendTarget(it, targetPackage) }
+            },
+            boundsOf = { it.bounds },
+            onPlatformDispatched = { commandId, atUptimeMs ->
+                onDispatched(MomoImageSendAttempt(verifiedBaseline, commandId, atUptimeMs))
+            },
+            onGestureResult = onGestureResult
+        )
+    }
+
+    /**
+     * All album actions share the already audited request-scoped permit and GestureApi.
+     * Each call is a single action; the caller owns stage progression and result reconciliation.
+     */
+    private fun <T : Any> submitVerifiedAlbumTap(
+        target: ChatDraftInputTarget,
+        expectedWindow: WindowRef,
+        transactionId: String,
+        ownsTransaction: () -> Boolean,
+        action: String,
+        resolve: (AccessibilityNodeInfo, WindowRef) -> T?,
+        boundsOf: (T) -> ScreenRect,
+        onPlatformDispatched: (String, Long) -> Unit = { _, _ -> },
+        onGestureResult: (GestureExecutionStatus) -> Unit
+    ): GestureSubmission {
+        val lease = target.taskLease ?: return GestureSubmission.DEFERRED_NOT_READY
+        fun ownsWrite(): Boolean = runCatching {
+            ownsTransaction() && isAiReplyUiOperationOwned() && isBoundAiReplyUiOperationOwned(lease)
+        }.getOrDefault(false)
+        // All media steps belong to the admitted parent chat, including child windows without
+        // a new Activity. The exact command, live target and parent lease remain mandatory.
+        if (transactionId.isBlank() || target.packageName != targetPackage ||
+            expectedWindow.packageName != targetPackage || expectedWindow.windowId < 0 ||
+            !ownsWrite()
+        ) return GestureSubmission.DEFERRED_NOT_READY
+        return rootAccess.withActiveTargetRoot { root, window ->
+            if (window != expectedWindow || accessibilityGateway.currentGestureWindow() != window) {
+                return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            }
+            val evidence = resolve(root, window) ?: return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            val bounds = boundsOf(evidence)
+            val executionContext = gesturePolicy.captureContext(window)
+                ?: return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            if (bounds.isEmpty || executionContext.taskLease != lease ||
+                executionContext.targetWindow != window || !ownsWrite()) {
+                return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            }
+            fun targetStillCurrent(): Boolean =
+                ownsWrite() && rootAccess.withActiveTargetRoot { freshRoot, freshWindow ->
+                    freshWindow == window && accessibilityGateway.currentGestureWindow() == window &&
+                        resolve(freshRoot, freshWindow) == evidence &&
+                        accessibilityGateway.currentGestureWindow() == window
+                } == true
+            val commandId = "momo-album-$action-${System.nanoTime()}"
+            val permit = MomoAlbumGesturePermit(
+                transactionId = transactionId,
+                expectedWindow = window,
+                currentWindow = accessibilityGateway::currentGestureWindow,
+                ownsTransaction = ::ownsWrite,
+                commandId = commandId,
+                targetStillCurrent = ::targetStillCurrent,
+                transactionChildAction = true
+            )
+            if (!activeAlbumSelectorPermit.compareAndSet(null, permit)) {
+                return@withActiveTargetRoot GestureSubmission.DEFERRED_NOT_READY
+            }
+            val submission = runCatching {
+                if (!inspectGesturePageReadiness(root, window.activityClass, RunMode.AI_REPLY, commandId).ready ||
+                    !ownsWrite() || accessibilityGateway.currentGestureWindow() != window
+                ) GestureSubmission.DEFERRED_NOT_READY
+                else gesturePolicy.execute(
+                    GestureIntentRequest(
+                        id = commandId,
+                        intent = GestureIntent.Tap(
+                            preferredBounds = bounds, targetBounds = bounds,
+                            durationMs = SEND_TAP_DURATION_MS,
+                            feedbackIntent = if (action == "select-image" || action == "interception-switch")
+                                com.freedom.core.accessibility.api.GestureFeedbackIntent.STANDARD
+                            else com.freedom.core.accessibility.api.GestureFeedbackIntent.NAVIGATION_ENTRY
+                        ),
+                        description = "Verified Momo album $action",
+                        executionContext = executionContext
+                    ),
+                    object : GestureExecutionListener {
+                        override fun isDispatchTargetCurrent(commandId: String): Boolean =
+                            activeAlbumSelectorPermit.get() === permit && permit.matchesCommand(commandId) &&
+                                permit.confirmsCurrentTarget()
+
+                        override fun onDispatched(commandId: String, dispatchedAtUptimeMs: Long) {
+                            if (activeAlbumSelectorPermit.get() === permit && permit.matchesCommand(commandId) && ownsWrite()) {
+                                onPlatformDispatched(commandId, dispatchedAtUptimeMs)
+                            }
+                        }
+
+                        override fun onResult(result: com.freedom.core.accessibility.gesture.GestureExecutionResult) {
+                            if (!permit.matchesCommand(result.commandId) ||
+                                !activeAlbumSelectorPermit.compareAndSet(permit, null)) return
+                            if (runCatching(ownsTransaction).getOrDefault(false)) onGestureResult(result.status)
+                        }
+                    }
+                )
+            }.getOrDefault(GestureSubmission.REJECTED)
+            if (submission != GestureSubmission.ACCEPTED) {
+                activeAlbumSelectorPermit.compareAndSet(permit, null)
+            }
+            onLog("MEDIA_ALBUM_ACTION action=$action;submission=$submission;windowId=${window.windowId}" +
+                if (action == "freedom-name")
+                    ";generation=${window.generation};bounds=$bounds;display=${executionContext.coordinateContext.widthPixels}x${executionContext.coordinateContext.heightPixels}"
+                else "")
+            submission
+        } ?: GestureSubmission.DEFERRED_NOT_READY
+    }
+
+    /** Capture the original chat's tail BEFORE opening the album. No message content is retained. */
+    internal fun captureImageSendBaseline(
+        target: ChatDraftInputTarget,
+        transactionId: String,
+        ownsTransaction: () -> Boolean
+    ): MomoImageSendBaseline? {
+        if (target.taskLease == null || transactionId.isBlank() ||
+            !runCatching(ownsTransaction).getOrDefault(false) ||
+            !isBoundAiReplyUiOperationOwned(target.taskLease)
+        ) return null
+        val snapshot = freshMediaSnapshot(target.nodeTarget.window) ?: return null
+        return MomoImageSendEvidenceInspector.baseline(snapshot, target, transactionId)
+    }
+
+    /**
+     * Re-read the exact original conversation and appended outgoing image.
+     * Recognized node states are sufficient; legacy non-clickable status color remains
+     * a supplemental positive-success proof. No mutation is performed here.
+     */
+    internal fun inspectImageSendResult(
+        attempt: MomoImageSendAttempt,
+        target: ChatDraftInputTarget,
+        transactionId: String,
+        ownsTransaction: () -> Boolean,
+        onResult: (MomoImageSendResult) -> Unit
+    ) {
+        val baseline = attempt.baseline
+        if (baseline == null) {
+            if (runCatching(ownsTransaction).getOrDefault(false)) onResult(MomoImageSendResult.UNKNOWN)
+            return
+        }
+        fun current(): Boolean = attempt.commandId.startsWith("momo-album-send-image-") &&
+            attempt.dispatchedAtUptimeMs >= 0L && baseline.belongsTo(target, transactionId) &&
+            runCatching(ownsTransaction).getOrDefault(false)
+        if (!current()) return
+        val snapshot = freshMediaSnapshot()
+        val proof = snapshot?.let { MomoImageSendEvidenceInspector.newImage(it, baseline, target) }
+        if (proof == null) {
+            if (current()) onResult(MomoImageSendResult.UNKNOWN)
+            return
+        }
+        if (proof.nodeResult != MomoImageSendResult.UNKNOWN) {
+            if (current() && accessibilityGateway.currentGestureWindow() == proof.window) {
+                onLog("MEDIA_IMAGE_SEND_EVIDENCE result=${proof.nodeResult};source=NODE;windowId=${proof.window.windowId}")
+                onResult(proof.nodeResult)
+            } else if (current()) onResult(MomoImageSendResult.UNKNOWN)
+            return
+        }
+        val capture = screenshotCapture
+        if (capture == null || proof.statusClickable) {
+            // Legacy visual evidence may confirm a non-clickable success, but can never authorize resend.
+            if (current()) onResult(MomoImageSendResult.UNKNOWN)
+            return
+        }
+        capture.captureActiveDisplay(proof.window.packageName, proof.window.activityClass) { frame ->
+            val result = try {
+                if (!current() || frame == null || !frame.monitorOverlayHidden ||
+                    accessibilityGateway.currentGestureWindow() != proof.window
+                ) MomoImageSendResult.UNKNOWN
+                else {
+                    val after = freshMediaSnapshot(proof.window)
+                        ?.let { MomoImageSendEvidenceInspector.newImage(it, baseline, target) }
+                    if (after != proof) MomoImageSendResult.UNKNOWN
+                    else MomoImageSendEvidenceInspector.classifyStatus(
+                        frame.bitmap, proof,
+                        frame.scope == com.freedom.adapters.accessibility.android.AndroidScreenshotScope.TARGET_WINDOW
+                    ).takeIf { it == MomoImageSendResult.SUCCESS } ?: MomoImageSendResult.UNKNOWN
+                }
+            } catch (_: Exception) {
+                MomoImageSendResult.UNKNOWN
+            } finally {
+                runCatching { frame?.bitmap?.recycle() }
+                frame?.close()
+            }
+            if (current()) {
+                onLog("MEDIA_IMAGE_SEND_EVIDENCE result=$result;windowId=${proof.window.windowId}")
+                onResult(result)
+            }
+        }
+    }
+
+    // The existing Momo adapter owns this short-lived platform navigation transaction.
+    // The AI runtime owns scheduling/admission; TaskCoordinator remains the only lease owner.
+    private enum class PrivateFollowUpStage {
+        OPEN_ALBUM, WAIT_ALBUM, WAIT_DIRECTORY, WAIT_FREEDOM, WAIT_SELECTION, WAIT_SEND_RESULT,
+        IMAGE_RETRY_OPEN, IMAGE_RETRY_CONFIRM,
+        INTERCEPTION_OPEN_SETTINGS, INTERCEPTION_OPEN_CONTROL, INTERCEPTION_TAP_SWITCH,
+        INTERCEPTION_DISMISS, INTERCEPTION_BACK, INTERCEPTION_RETURN, TERMINAL
+    }
+
+    private class PrivateFollowUpTransaction(
+        val target: ChatDraftInputTarget,
+        val id: String,
+        val owner: () -> Boolean,
+        val interception: Boolean,
+        val beforeStep: (com.freedom.features.aireply.domain.contact.ContactFollowUpStep) -> Boolean
+    ) {
+        val logPrefix = if (interception) "PRIVATE_INTERCEPTION" else "PRIVATE_IMAGE_SEND"
+        var baseline: MomoImageSendBaseline? = null
+        @Volatile var sendAttempt: MomoImageSendAttempt? = null
+        // The original failed-row tap must really have been dispatched by this transaction.
+        @Volatile var imageRetryDialogRequested = false
+        var imageRetryDialogWindowId: Int? = null
+        var imageRetryAttempt = 0
+        @Volatile var imageRetryNotBefore = 0L
+        @Volatile var switchVerifiedOn = false
+        @Volatile var succeeded = false
+        @Volatile var stage = if (interception) PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS else PrivateFollowUpStage.OPEN_ALBUM
+        @Volatile var inFlight = false
+        @Volatile var stageStartedAt = SystemClock.uptimeMillis()
+        var albumWindow: WindowRef? = null
+        var directoryRejectedRetries = 0
+        var interceptionSettingsObserved = false
+        var interceptionLastAction: MomoInterceptionRecoveryPolicy.Action? = null
+        var interceptionRetryAttempt = 0
+        @Volatile var interceptionRetryNotBefore = 0L
+        var lastWaitReason: String? = null
+    }
+
+    @Volatile private var privateFollowUp: PrivateFollowUpTransaction? = null
+
+    override fun progress(): PrivateChatFollowUpProgress = when (privateFollowUp?.stage) {
+        null -> PrivateChatFollowUpProgress.IDLE
+        PrivateFollowUpStage.TERMINAL -> PrivateChatFollowUpProgress.TERMINAL
+        else -> PrivateChatFollowUpProgress.ACTIVE
+    }
+
+    private fun followUpCurrent(child: PrivateFollowUpTransaction): Boolean =
+        privateFollowUp === child && child.stage != PrivateFollowUpStage.TERMINAL &&
+            runCatching(child.owner).getOrDefault(false)
+
+    private fun originalPrivateFollowUpChat(child: PrivateFollowUpTransaction): Boolean {
+        val live = accessibilityGateway.currentGestureWindow() ?: return false
+        val original = child.target.nodeTarget.window
+        return live.packageName == original.packageName && live.windowId == original.windowId &&
+            live.generation >= original.generation &&
+            live.activityClass == original.activityClass && interceptionReturnedToChat(child)
+    }
+
+    /** Parent ownership persists during its own media transaction, including transient child windows.
+     * This is routing evidence only: each write still requires a fresh step-specific target. */
+    internal fun inspectPrivateFollowUpOwnedPage(): Boolean {
+        val child = privateFollowUp ?: return false
+        if (!followUpCurrent(child)) return false
+        val live = accessibilityGateway.currentGestureWindow() ?: return false
+        return live.packageName == targetPackage && live.windowId >= 0 &&
+            live.generation >= child.target.nodeTarget.window.generation &&
+            (child.stage !in setOf(PrivateFollowUpStage.OPEN_ALBUM, PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS) ||
+                originalPrivateFollowUpChat(child))
+    }
+
+    override fun beginPrivateFollowUp(
+        target: ChatDraftInputTarget,
+        transactionId: String,
+        interception: Boolean,
+        beforeStep: (com.freedom.features.aireply.domain.contact.ContactFollowUpStep) -> Boolean,
+        ownsTransaction: () -> Boolean
+    ): Boolean {
+        if (privateFollowUp != null || transactionId.isBlank() || target.packageName != targetPackage ||
+            target.expectedChatTitle.isNullOrBlank() || target.conversationIdentityKey.isBlank() ||
+            !runCatching(ownsTransaction).getOrDefault(false) ||
+            !isBoundAiReplyUiOperationOwned(target.taskLease) ||
+            accessibilityGateway.currentGestureWindow() != target.nodeTarget.window) return false
+        val id = transactionId
+        val child = PrivateFollowUpTransaction(target, id, ownsTransaction, interception, beforeStep)
+        if (!interception) {
+            // The normal send must have a baseline before leaving the original chat.
+            child.baseline = captureImageSendBaseline(target, id, ownsTransaction) ?: return false
+        }
+        privateFollowUp = child
+        onLog("${child.logPrefix} BEGIN parentLeaseInherited=true")
+        return true
+    }
+
+    override fun privateFollowUpSucceeded(): Boolean =
+        privateFollowUp?.let { it.stage == PrivateFollowUpStage.TERMINAL && it.succeeded } == true
+
+    private fun followUpWait(child: PrivateFollowUpTransaction, reason: String) {
+        if (child.lastWaitReason != reason) {
+            child.lastWaitReason = reason
+            onLog("${child.logPrefix} WAIT stage=${child.stage};reason=$reason")
+        }
+    }
+
+    private fun followUpTerminal(child: PrivateFollowUpTransaction, result: String, reason: String) {
+        if (privateFollowUp !== child || child.stage == PrivateFollowUpStage.TERMINAL) return
+        val previous = child.stage
+        child.succeeded = result == "COMPLETED"
+        child.stage = PrivateFollowUpStage.TERMINAL
+        child.inFlight = false
+        onLog("${child.logPrefix} TERMINAL result=$result;stage=$previous;reason=$reason;retrySend=false")
+    }
+
+    override fun abort(reason: String) {
+        privateFollowUp?.let { followUpTerminal(it, "UNKNOWN", reason) }
+    }
+
+    override fun reset(reason: String) {
+        abort("RUNTIME_RESET")
+        privateFollowUp = null
+    }
+
+    /** Persist before submission. Never replay an ambiguous album send; reconcile live results. */
+    private fun submitPrivateFollowUpStep(
+        child: PrivateFollowUpTransaction,
+        next: PrivateFollowUpStage,
+        action: ((GestureExecutionStatus) -> Unit) -> GestureSubmission
+    ) {
+        if (!followUpCurrent(child) || child.inFlight || !isBoundAiReplyUiOperationOwned(child.target.taskLease)) {
+            followUpWait(child, "PAGE_WRITE_LEASE_WAIT")
+            return
+        }
+        val previous = child.stage
+        val previousStartedAt = child.stageStartedAt
+        val imageRetry = previous == PrivateFollowUpStage.IMAGE_RETRY_OPEN ||
+            previous == PrivateFollowUpStage.IMAGE_RETRY_CONFIRM
+        if (imageRetry) {
+            child.imageRetryAttempt = (child.imageRetryAttempt + 1).coerceAtMost(6)
+            child.imageRetryNotBefore = SystemClock.uptimeMillis() + maxOf(
+                2_000L,
+                com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(child.imageRetryAttempt)
+            )
+        }
+        if (child.interception) {
+            child.interceptionRetryAttempt = (child.interceptionRetryAttempt + 1).coerceAtMost(6)
+            child.interceptionRetryNotBefore = SystemClock.uptimeMillis() + maxOf(
+                2_000L,
+                com.freedom.features.recovery.RecoveryScheduler.readOnlyRetryDelayMs(child.interceptionRetryAttempt)
+            )
+        }
+        if (!persistPrivateFollowUpStep(child, previous)) {
+            if (child.interception || imageRetry) followUpWait(child, "UNKNOWN_CHECKPOINT_WRITE_RETRY")
+            else followUpTerminal(child, "UNKNOWN", "CHECKPOINT_WRITE_NOT_CONFIRMED")
+            return
+        }
+        child.stage = next
+        child.stageStartedAt = SystemClock.uptimeMillis()
+        child.inFlight = true
+        child.lastWaitReason = null
+        val submission = runCatching {
+            action { status ->
+                if (followUpCurrent(child)) {
+                    if (child.interception) {
+                        // A result is not page evidence. Wait for the settled live state,
+                        // including CANCELLED/REJECTED; never roll back blindly to the tap.
+                        child.interceptionRetryNotBefore = maxOf(
+                            child.interceptionRetryNotBefore, SystemClock.uptimeMillis() + 2_000L
+                        )
+                        child.inFlight = false
+                        onLog("${child.logPrefix} GESTURE_RESULT stage=$next;status=$status;reconcile=true")
+                        return@action
+                    }
+                    if (imageRetry || (next == PrivateFollowUpStage.WAIT_SEND_RESULT && child.sendAttempt != null)) {
+                        child.imageRetryNotBefore = maxOf(
+                            child.imageRetryNotBefore, SystemClock.uptimeMillis() + 2_000L
+                        )
+                        child.inFlight = false
+                        onLog("${child.logPrefix} GESTURE_RESULT stage=$next;status=$status;reconcile=true")
+                        return@action
+                    }
+                    child.inFlight = false
+                    onLog("${child.logPrefix} GESTURE_RESULT stage=$next;status=$status")
+                    if (status == GestureExecutionStatus.DEFERRED) {
+                        // No platform dispatch: keep the original stage and reacquire the target.
+                        child.stage = previous
+                        child.stageStartedAt = previousStartedAt
+                    } else if (status == GestureExecutionStatus.REJECTED &&
+                        previous == PrivateFollowUpStage.WAIT_DIRECTORY && child.directoryRejectedRetries == 0
+                    ) {
+                        // Directory navigation is not a send/toggle. Reacquire once on rejection.
+                        child.directoryRejectedRetries++
+                        child.stage = previous
+                        child.stageStartedAt = previousStartedAt
+                        followUpWait(child, "DIRECTORY_TAP_REJECTED_REACQUIRE")
+                    } else if (status != GestureExecutionStatus.COMPLETED) {
+                        // An ambiguous send/toggle is never replayed.
+                        followUpTerminal(child, "UNKNOWN", "GESTURE_NOT_CONFIRMED")
+                    }
+                }
+            }
+        }.getOrDefault(GestureSubmission.REJECTED)
+        onLog("${child.logPrefix} SUBMISSION from=$previous;to=$next;submission=$submission")
+        // A synchronous result may have completed or rolled back the stage already.
+        if (!followUpCurrent(child) || child.stage != next) return
+        if (child.interception) {
+            if (submission != GestureSubmission.ACCEPTED) {
+                child.inFlight = false
+                followUpWait(child, "UNKNOWN_GESTURE_ADMISSION_RECHECK")
+            }
+            return
+        }
+        if (imageRetry || (next == PrivateFollowUpStage.WAIT_SEND_RESULT && child.sendAttempt != null)) {
+            if (submission != GestureSubmission.ACCEPTED) {
+                child.inFlight = false
+                followUpWait(child, "UNKNOWN_IMAGE_GESTURE_ADMISSION_RECHECK")
+            }
+            return
+        }
+        when (submission) {
+            GestureSubmission.ACCEPTED -> Unit
+            GestureSubmission.DEFERRED_NOT_READY -> {
+                child.inFlight = false
+                child.stage = previous
+                child.stageStartedAt = previousStartedAt
+                followUpWait(child, "FRESH_ADMISSION_REQUIRED")
+            }
+            GestureSubmission.REJECTED -> {
+                // Directory navigation is not a send/toggle. A rejected submission may be
+                // retried once, only after the observer reacquires the current directory.
+                if (previous == PrivateFollowUpStage.WAIT_DIRECTORY &&
+                    child.directoryRejectedRetries == 0 && followUpCurrent(child)
+                ) {
+                    child.directoryRejectedRetries++
+                    child.inFlight = false
+                    child.stage = previous
+                    child.stageStartedAt = previousStartedAt
+                    followUpWait(child, "DIRECTORY_TAP_REJECTED_REACQUIRE")
+                } else followUpTerminal(child, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
+            }
+            else -> followUpTerminal(child, "UNKNOWN", "GESTURE_SUBMISSION_REJECTED")
+        }
+    }
+
+    private fun persistPrivateFollowUpStep(child: PrivateFollowUpTransaction, stage: PrivateFollowUpStage): Boolean {
+        val callback = child.beforeStep
+        val step = when (stage) {
+            PrivateFollowUpStage.OPEN_ALBUM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_OPEN_ALBUM
+            PrivateFollowUpStage.WAIT_ALBUM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_OPEN_DIRECTORY
+            PrivateFollowUpStage.WAIT_DIRECTORY -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_OPEN_FREEDOM
+            PrivateFollowUpStage.WAIT_FREEDOM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SELECT
+            PrivateFollowUpStage.WAIT_SELECTION -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_SEND
+            PrivateFollowUpStage.WAIT_SEND_RESULT -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_VERIFY
+            PrivateFollowUpStage.IMAGE_RETRY_OPEN -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_RETRY_OPEN
+            PrivateFollowUpStage.IMAGE_RETRY_CONFIRM -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_RETRY_CONFIRM
+            PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_OPEN_SETTINGS
+            PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_OPEN_CONTROL
+            PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_SWITCH
+            PrivateFollowUpStage.INTERCEPTION_DISMISS -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_DISMISS
+            PrivateFollowUpStage.INTERCEPTION_BACK -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_BACK
+            PrivateFollowUpStage.INTERCEPTION_RETURN -> com.freedom.features.aireply.domain.contact.ContactFollowUpStep.INTERCEPTION_RETURN
+            PrivateFollowUpStage.TERMINAL -> return false
+        }
+        return followUpCurrent(child) && runCatching { callback(step) }.getOrDefault(false)
+    }
+
+    /** Read-only confirmation of the very same switch in the confirmed interception popup. */
+    private fun interceptionChecked(root: AccessibilityNodeInfo): Boolean? {
+        if (interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息") == null)
+            return null
+        val nodes = root.findAccessibilityNodeInfosByViewId("$targetPackage:id/btn_switch").orEmpty()
+        return try {
+            nodes.singleOrNull {
+                it.packageName?.toString() == targetPackage &&
+                    it.className?.toString() == "android.widget.CompoundButton" &&
+                    it.isVisibleToUser && it.isEnabled && it.isCheckable
+            }?.isChecked
+        } finally {
+            nodes.forEach { runCatching { it.recycle() } }
+        }
+    }
+
+    private fun currentInterceptionChecked(): Boolean? =
+        rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || accessibilityGateway.currentGestureWindow() != window) null
+            else interceptionChecked(root).takeIf { accessibilityGateway.currentGestureWindow() == window }
+        }
+
+
+    /** Status is scoped to the unique interception row, not any "已开启" on the page. */
+    private fun interceptionSettingsChecked(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean? = runCatching {
+        val title = child.target.expectedChatTitle ?: return null
+        if (interceptionNodeBounds(root, "tv_user_name", "android.widget.TextView", text = title) == null) return null
+        val rows = root.findAccessibilityNodeInfosByViewId("$targetPackage:id/setting_layout_harass").orEmpty()
+        try {
+            val row = rows.singleOrNull {
+                it.packageName?.toString() == targetPackage &&
+                    it.className?.toString() == "android.widget.LinearLayout" &&
+                    it.isVisibleToUser && it.isEnabled && it.isClickable
+            } ?: return null
+            val statuses = row.findAccessibilityNodeInfosByViewId("$targetPackage:id/tv_harass_status").orEmpty()
+            try {
+                val status = statuses.singleOrNull {
+                    it.packageName?.toString() == targetPackage &&
+                        it.className?.toString() == "android.widget.TextView" &&
+                        it.isVisibleToUser && it.isEnabled
+                } ?: return null
+                MomoInterceptionRecoveryPolicy.settingsChecked(status.text?.toString().orEmpty())
+            } finally {
+                statuses.forEach { runCatching { it.recycle() } }
+            }
+        } finally {
+            rows.forEach { runCatching { it.recycle() } }
+        }
+    }.getOrNull()
+
+    private fun observeInterceptionPage(child: PrivateFollowUpTransaction): MomoInterceptionRecoveryPolicy.Page {
+        val observed = rootAccess.withActiveTargetRoot { root, window ->
+            if (window.packageName != targetPackage || window.windowId < 0 ||
+                window.generation < child.target.nodeTarget.window.generation ||
+                accessibilityGateway.currentGestureWindow() != window
+            ) return@withActiveTargetRoot MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+            val page = if (interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息") != null) {
+                if (!child.interceptionSettingsObserved) MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+                else when (interceptionChecked(root)) {
+                    true -> MomoInterceptionRecoveryPolicy.Page.POPUP_ON
+                    false -> MomoInterceptionRecoveryPolicy.Page.POPUP_OFF
+                    null -> MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+                }
+            } else if (interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true) != null) {
+                when (interceptionSettingsChecked(root, child)) {
+                    true -> MomoInterceptionRecoveryPolicy.Page.SETTINGS_ON
+                    false -> MomoInterceptionRecoveryPolicy.Page.SETTINGS_OFF
+                    null -> MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+                }
+            } else null
+            if (accessibilityGateway.currentGestureWindow() == window) page
+            else MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+        }
+        return observed ?: if (originalPrivateFollowUpChat(child)) MomoInterceptionRecoveryPolicy.Page.ORIGINAL_CHAT
+            else MomoInterceptionRecoveryPolicy.Page.UNKNOWN
+    }
+
+    /** Reconcile under the existing parent lease and observer; no independent recovery loop. */
+    private fun reconcileInterception(child: PrivateFollowUpTransaction): Boolean {
+        val page = observeInterceptionPage(child)
+        val decision = MomoInterceptionRecoveryPolicy.reconcile(page, child.switchVerifiedOn)
+        child.switchVerifiedOn = decision.verifiedOn
+        when (page) {
+            MomoInterceptionRecoveryPolicy.Page.SETTINGS_ON,
+            MomoInterceptionRecoveryPolicy.Page.SETTINGS_OFF -> child.interceptionSettingsObserved = true
+            MomoInterceptionRecoveryPolicy.Page.ORIGINAL_CHAT -> child.interceptionSettingsObserved = false
+            else -> Unit
+        }
+        val action = decision.action
+        if (action == MomoInterceptionRecoveryPolicy.Action.WAIT) {
+            followUpWait(child, "UNKNOWN_INTERCEPTION_PAGE_OR_STATE")
+            return false
+        }
+        if (action != child.interceptionLastAction) {
+            child.interceptionLastAction = action
+            child.interceptionRetryAttempt = 0
+            child.interceptionRetryNotBefore = 0L
+            child.stageStartedAt = SystemClock.uptimeMillis()
+            child.lastWaitReason = null
+            onLog("PRIVATE_INTERCEPTION RECONCILED page=$page;action=$action;verifiedOn=${decision.verifiedOn}")
+        }
+        if (SystemClock.uptimeMillis() < child.interceptionRetryNotBefore) {
+            followUpWait(child, "INTERCEPTION_RETRY_BACKOFF")
+            return false
+        }
+        child.stage = when (action) {
+            MomoInterceptionRecoveryPolicy.Action.OPEN_SETTINGS -> PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS
+            MomoInterceptionRecoveryPolicy.Action.OPEN_CONTROL -> PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL
+            MomoInterceptionRecoveryPolicy.Action.ENABLE -> PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH
+            MomoInterceptionRecoveryPolicy.Action.DISMISS -> PrivateFollowUpStage.INTERCEPTION_DISMISS
+            MomoInterceptionRecoveryPolicy.Action.BACK -> PrivateFollowUpStage.INTERCEPTION_BACK
+            MomoInterceptionRecoveryPolicy.Action.COMPLETE -> PrivateFollowUpStage.INTERCEPTION_RETURN
+            MomoInterceptionRecoveryPolicy.Action.WAIT -> return false
+        }
+        return true
+    }
+
+    /** Same append proof as initial send; never search globally for historical failure icons. */
+    private fun imageRetryProof(child: PrivateFollowUpTransaction, snapshot: AccessibilityTreeSnapshot): MomoImageSendProof? {
+        val attempt = child.sendAttempt ?: return null
+        val baseline = attempt.baseline ?: return null
+        if (!attempt.commandId.startsWith("momo-album-send-image-") ||
+            !baseline.belongsTo(child.target, child.id) || !followUpCurrent(child)) return null
+        return MomoImageSendEvidenceInspector.newImage(snapshot, baseline, child.target)
+    }
+
+    private fun submitImageRetryOpen(child: PrivateFollowUpTransaction, window: WindowRef) {
+        child.stage = PrivateFollowUpStage.IMAGE_RETRY_OPEN
+        submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT) { callback ->
+            submitVerifiedAlbumTap(
+                child.target, window, child.id, { followUpCurrent(child) }, "image-retry-open",
+                resolve = { _, live ->
+                    freshMediaSnapshot(live)?.let { snapshot ->
+                        if (MomoImageSendEvidenceInspector.networkDisconnected(snapshot)) null
+                        else imageRetryProof(child, snapshot)
+                            ?.takeIf { it.nodeResult == MomoImageSendResult.FAILED }
+                    }
+                }, boundsOf = { it.statusBounds },
+                onPlatformDispatched = { _, _ ->
+                    if (followUpCurrent(child)) {
+                        child.imageRetryDialogRequested = true
+                        child.imageRetryDialogWindowId = null
+                        onLog("PRIVATE_IMAGE_SEND RETRY_OPEN_DISPATCHED")
+                    }
+                },
+                onGestureResult = callback
+            )
+        }
+    }
+
+    private fun submitImageRetryConfirm(child: PrivateFollowUpTransaction, window: WindowRef) {
+        child.stage = PrivateFollowUpStage.IMAGE_RETRY_CONFIRM
+        submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT) { callback ->
+            submitVerifiedAlbumTap(
+                child.target, window, child.id, { followUpCurrent(child) }, "image-retry-confirm",
+                resolve = { _, live ->
+                    if (!child.imageRetryDialogRequested || child.imageRetryDialogWindowId != live.windowId) null
+                    else freshMediaSnapshot(live)?.let(MomoImageSendEvidenceInspector::retryConfirmation)
+                }, boundsOf = { it },
+                onGestureResult = callback
+            )
+        }
+    }
+
+    private fun verifyPrivateImageSend(child: PrivateFollowUpTransaction) {
+        val attempt = child.sendAttempt ?: run {
+            followUpWait(child, "UNKNOWN_SEND_DISPATCH_EVIDENCE_MISSING")
+            return
+        }
+        val snapshot = freshMediaSnapshot() ?: run {
+            followUpWait(child, "UNKNOWN_IMAGE_PAGE_NOT_CONFIRMED")
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        if (MomoImageSendEvidenceInspector.retryConfirmation(snapshot) != null) {
+            if (!child.imageRetryDialogRequested ||
+                (child.imageRetryDialogWindowId != null && child.imageRetryDialogWindowId != snapshot.window.windowId)) {
+                followUpWait(child, "UNKNOWN_UNOWNED_RETRY_DIALOG")
+                return
+            }
+            child.imageRetryDialogWindowId = snapshot.window.windowId
+            if (now < child.imageRetryNotBefore) {
+                followUpWait(child, "IMAGE_RETRY_BACKOFF")
+                return
+            }
+            submitImageRetryConfirm(child, snapshot.window)
+            return
+        }
+        val proof = imageRetryProof(child, snapshot)
+        if (proof == null) {
+            followUpWait(child, "UNKNOWN_IMAGE_RESULT_NOT_CONFIRMED")
+            return
+        }
+        // The exact original append is visible again: any prior modal authorization is retired.
+        // A new modal requires a new actual failure-control dispatch.
+        child.imageRetryDialogRequested = false
+        child.imageRetryDialogWindowId = null
+        if (proof.nodeResult == MomoImageSendResult.FAILED) {
+            if (MomoImageSendEvidenceInspector.networkDisconnected(snapshot)) {
+                followUpWait(child, "IMAGE_NETWORK_DISCONNECTED")
+                return
+            }
+            if (now < child.imageRetryNotBefore) {
+                followUpWait(child, "IMAGE_RETRY_BACKOFF")
+                return
+            }
+            submitImageRetryOpen(child, snapshot.window)
+            return
+        }
+        if (proof.nodeResult == MomoImageSendResult.SENDING) {
+            followUpWait(child, "IMAGE_SENDING")
+            return
+        }
+        child.inFlight = true
+        inspectImageSendResult(attempt, child.target, child.id, { followUpCurrent(child) }) { result ->
+            if (followUpCurrent(child)) {
+                child.inFlight = false
+                when (result) {
+                    MomoImageSendResult.SUCCESS -> followUpTerminal(child, "COMPLETED", "OUTGOING_IMAGE_CONFIRMED")
+                    MomoImageSendResult.SENDING -> followUpWait(child, "IMAGE_SENDING")
+                    MomoImageSendResult.FAILED,
+                    MomoImageSendResult.UNKNOWN -> followUpWait(child, "UNKNOWN_IMAGE_RESULT_NOT_CONFIRMED")
+                }
+            }
+        }
+    }
+
+    /**
+     * Interception uses the same parent-bound serial tap pipeline as image sending.
+     * Resolve only the current action's target; switch verification is kept outside the frozen locator.
+     */
+    private fun interceptionNodeBounds(
+        root: AccessibilityNodeInfo,
+        id: String,
+        className: String,
+        clickable: Boolean = false,
+        checkable: Boolean = false,
+        text: String? = null
+    ): ScreenRect? = runCatching {
+        val nodes = root.findAccessibilityNodeInfosByViewId("$targetPackage:id/$id").orEmpty()
+        try {
+            val node = nodes.singleOrNull {
+                it.packageName?.toString() == targetPackage && it.className?.toString() == className &&
+                    it.isVisibleToUser && it.isEnabled && (!clickable || it.isClickable) &&
+                    (!checkable || it.isCheckable) && (text == null || it.text?.toString()?.trim() == text)
+            } ?: return null
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            bounds.toScreenRect().takeUnless { it.isEmpty }
+        } finally {
+            nodes.forEach { runCatching { it.recycle() } }
+        }
+    }.getOrNull()
+
+    private fun submitInterceptionStep(
+        child: PrivateFollowUpTransaction,
+        next: PrivateFollowUpStage,
+        action: String,
+        resolve: (AccessibilityNodeInfo, WindowRef) -> ScreenRect?
+    ) {
+        val window = accessibilityGateway.currentGestureWindow() ?: return
+        if (window.packageName != targetPackage || window.windowId < 0) return
+        submitPrivateFollowUpStep(child, next) { callback ->
+            var layoutBoundsLogged = false
+            submitVerifiedAlbumTap(
+                child.target, window, child.id, { followUpCurrent(child) }, action,
+                resolve = { root, liveWindow ->
+                    // The toggle must still be OFF at dispatch revalidation.
+                    val safe = when (action) {
+                        "interception-avatar" -> liveWindow.windowId == child.target.nodeTarget.window.windowId &&
+                            liveWindow.activityClass == child.target.nodeTarget.window.activityClass &&
+                            interceptionNodeBounds(root, "chat_user_name", "android.widget.TextView",
+                                text = child.target.expectedChatTitle) != null
+                        "interception-layout" -> interceptionSettingsChecked(root, child) == false
+                        "interception-switch" -> interceptionChecked(root) == false
+                        "interception-dismiss" -> interceptionChecked(root) == true
+                        "interception-back" -> interceptionSettingsChecked(root, child) == true
+                        else -> true
+                    }
+                    (if (safe) resolve(root, liveWindow) else null)?.also { bounds ->
+                        if (action == "interception-layout" && !layoutBoundsLogged) {
+                            layoutBoundsLogged = true
+                            onLog("PRIVATE_INTERCEPTION LAYOUT_TARGET windowId=${liveWindow.windowId};" +
+                                "generation=${liveWindow.generation};bounds=$bounds")
+                        }
+                    }
+                }, boundsOf = { it },
+                onGestureResult = callback
+            )
+        }
+    }
+
+    private fun interceptionDismissBounds(root: AccessibilityNodeInfo): ScreenRect? {
+        val title = interceptionNodeBounds(root, "tv_title", "android.widget.TextView", text = "拦截消息")
+            ?: return null
+        val rootBounds = Rect()
+        root.getBoundsInScreen(rootBounds)
+        // The user-confirmed safe scrim is ABOVE the title, not the entire FrameLayout.
+        // Derive it from the live window and title; never reuse screenshot coordinates.
+        return ScreenRect(rootBounds.left, rootBounds.top, rootBounds.right, title.top)
+            .takeUnless { it.isEmpty || title.top > rootBounds.bottom }
+    }
+
+    /** Verify the bound original chat before entry and after the toggle. */
+    private fun interceptionReturnedToChat(child: PrivateFollowUpTransaction): Boolean =
+        rootAccess.withActiveTargetRoot { root, window ->
+            window.packageName == child.target.packageName &&
+                window.generation >= child.target.nodeTarget.window.generation &&
+                window.windowId == child.target.nodeTarget.window.windowId &&
+                window.activityClass == child.target.nodeTarget.window.activityClass &&
+                interceptionNodeBounds(root, "chat_toolbar_avatar", "android.widget.ImageView", clickable = true) != null &&
+                (child.target.expectedChatTitle == null ||
+                    interceptionNodeBounds(root, "chat_user_name", "android.widget.TextView",
+                        text = child.target.expectedChatTitle) != null) &&
+                accessibilityGateway.currentGestureWindow() == window
+        } == true
+
+    private fun interceptionBackBounds(window: WindowRef): ScreenRect? {
+        val snapshot = freshMediaSnapshot(window) ?: return null
+        val nodes = snapshot.nodes.filter { it.packageName == targetPackage && it.windowId == window.windowId }
+        val root = nodes.singleOrNull { it.path.childIndices.isEmpty() }?.bounds ?: return null
+        if (root.isEmpty) return null
+        // The supplied return ImageButton has no id. Its local top-left header position
+        // identifies the safe target; never fall back to a fixed absolute point.
+        return nodes.singleOrNull {
+            val b = it.bounds
+            it.className == "android.widget.ImageButton" && it.clickable && it.enabled && it.visible &&
+                !b.isEmpty && b.left >= root.left && b.top >= root.top &&
+                b.right <= root.left + root.width / 3 &&
+                b.bottom <= root.top + root.height / 5
+        }?.bounds
+    }
+
+    override fun observe() {
+        val child = privateFollowUp ?: return
+        if (child.stage == PrivateFollowUpStage.TERMINAL) return
+        if (!followUpCurrent(child)) {
+            followUpTerminal(child, "UNKNOWN", "EXACT_TRANSACTION_OWNERSHIP_LOST")
+            return
+        }
+        if (SystemClock.uptimeMillis() - child.stageStartedAt > 45_000L) {
+            if (!child.interception && child.stage !in setOf(
+                    PrivateFollowUpStage.WAIT_SEND_RESULT, PrivateFollowUpStage.IMAGE_RETRY_OPEN,
+                    PrivateFollowUpStage.IMAGE_RETRY_CONFIRM
+                )) {
+                followUpTerminal(child, "UNKNOWN", "STAGE_OBSERVATION_TIMEOUT")
+                return
+            }
+            // Keep the exact transaction/lease; observation can continue indefinitely.
+            // A pending command still blocks all writes until its result is delivered.
+            onLog("${child.logPrefix} UNKNOWN stage=${child.stage};reason=STAGE_OBSERVATION_TIMEOUT;retainCheckpoint=true")
+            child.stageStartedAt = SystemClock.uptimeMillis()
+        }
+        if (child.inFlight) {
+            followUpWait(child, "GESTURE_RESULT_PENDING")
+            return
+        }
+        if (child.interception && !reconcileInterception(child)) return
+        val owns = { followUpCurrent(child) }
+        when (child.stage) {
+            PrivateFollowUpStage.OPEN_ALBUM -> {
+                if (!originalPrivateFollowUpChat(child)) {
+                    followUpWait(child, "ORIGINAL_CHAT_NOT_CURRENT")
+                    return
+                }
+                submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_ALBUM) { callback ->
+                    openImageAlbum(child.target, child.id, owns, callback)
+                }
+            }
+            PrivateFollowUpStage.WAIT_ALBUM -> {
+                val window = accessibilityGateway.currentGestureWindow()
+                if (window == null || window.packageName != targetPackage ||
+                    window.generation < child.target.nodeTarget.window.generation) {
+                    followUpWait(child, "ALBUM_SELECTOR_WINDOW_UNAVAILABLE")
+                    return
+                }
+                child.albumWindow = window
+                submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_DIRECTORY) { callback ->
+                    openImageAlbumDirectory(child.target, window, child.id, owns, callback)
+                }
+            }
+            PrivateFollowUpStage.WAIT_DIRECTORY -> {
+                val window = child.albumWindow ?: return
+                val directory = inspectFreedomDirectory(window)
+                if (directory == null) {
+                    followUpWait(child, "FREEDOM_NAME_NOT_FOUND_IN_CURRENT_CHILD_WINDOW")
+                    return
+                }
+                onLog("PRIVATE_IMAGE_SEND DIRECTORY_NAME_FOUND windowId=${directory.window.windowId};" +
+                    "generation=${directory.window.generation};bounds=${directory.nameBounds};activityRequired=false;name=Freedom")
+                submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_FREEDOM) { callback ->
+                    openFreedomAlbum(child.target, window, child.id, owns, callback)
+                }
+            }
+            PrivateFollowUpStage.WAIT_FREEDOM -> {
+                val window = accessibilityGateway.currentGestureWindow() ?: return
+                if (window.packageName != targetPackage) return
+                child.albumWindow = window
+                submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SELECTION) { callback ->
+                    selectFreedomImage(child.target, window, child.id, owns, callback)
+                }
+            }
+            PrivateFollowUpStage.WAIT_SELECTION -> {
+                val selectedWindow = child.albumWindow ?: return
+                val window = accessibilityGateway.currentGestureWindow() ?: return
+                if (window.packageName != selectedWindow.packageName || window.windowId != selectedWindow.windowId ||
+                    window.generation < selectedWindow.generation) {
+                    followUpWait(child, "SELECTED_ALBUM_WINDOW_NOT_CURRENT")
+                    return
+                }
+                submitPrivateFollowUpStep(child, PrivateFollowUpStage.WAIT_SEND_RESULT) { callback ->
+                    sendFreedomImage(child.target, window, child.id, owns, baseline = child.baseline,
+                        onDispatched = { attempt ->
+                            if (followUpCurrent(child)) {
+                                child.sendAttempt = attempt
+                                onLog("${child.logPrefix} SEND_TAP_DISPATCHED")
+                            }
+                        },
+                        onGestureResult = callback)
+                }
+            }
+            PrivateFollowUpStage.WAIT_SEND_RESULT,
+            PrivateFollowUpStage.IMAGE_RETRY_OPEN,
+            PrivateFollowUpStage.IMAGE_RETRY_CONFIRM -> verifyPrivateImageSend(child)
+            PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS -> {
+                if (!originalPrivateFollowUpChat(child)) {
+                    followUpWait(child, "ORIGINAL_CHAT_NOT_CURRENT")
+                    return
+                }
+                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL, "interception-avatar") { root, _ ->
+                    interceptionNodeBounds(root, "chat_toolbar_avatar", "android.widget.ImageView", clickable = true)
+                }
+            }
+            PrivateFollowUpStage.INTERCEPTION_OPEN_CONTROL -> {
+                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH, "interception-layout") { root, _ ->
+                    interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true)
+                }
+            }
+            PrivateFollowUpStage.INTERCEPTION_TAP_SWITCH -> {
+                when (currentInterceptionChecked()) {
+                    true -> {
+                        child.switchVerifiedOn = true
+                        child.stage = PrivateFollowUpStage.INTERCEPTION_DISMISS
+                        child.stageStartedAt = SystemClock.uptimeMillis()
+                        return
+                    }
+                    null -> {
+                        followUpWait(child, "SWITCH_STATE_NOT_READABLE")
+                        return
+                    }
+                    false -> Unit
+                }
+                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_DISMISS, "interception-switch") { root, _ ->
+                    interceptionNodeBounds(root, "btn_switch", "android.widget.CompoundButton", checkable = true)
+                }
+            }
+            PrivateFollowUpStage.INTERCEPTION_DISMISS -> {
+                if (currentInterceptionChecked() != true) {
+                    followUpWait(child, "SWITCH_ON_NOT_CONFIRMED")
+                    return
+                }
+                child.switchVerifiedOn = true
+                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_BACK, "interception-dismiss") { root, _ ->
+                    interceptionDismissBounds(root)
+                }
+            }
+            PrivateFollowUpStage.INTERCEPTION_BACK -> {
+                if (interceptionReturnedToChat(child)) {
+                    if (child.switchVerifiedOn) {
+                        followUpTerminal(child, "COMPLETED", "SWITCH_ON_AND_CHAT_RETURN_CONFIRMED")
+                    } else followUpTerminal(child, "UNKNOWN", "SWITCH_ON_NOT_CONFIRMED")
+                    return
+                }
+                submitInterceptionStep(child, PrivateFollowUpStage.INTERCEPTION_RETURN, "interception-back") { _, window ->
+                    interceptionBackBounds(window)
+                }
+            }
+            PrivateFollowUpStage.INTERCEPTION_RETURN -> {
+                if (interceptionReturnedToChat(child)) {
+                    if (child.switchVerifiedOn) {
+                        followUpTerminal(child, "COMPLETED", "SWITCH_ON_AND_CHAT_RETURN_CONFIRMED")
+                    } else followUpTerminal(child, "UNKNOWN", "SWITCH_ON_NOT_CONFIRMED")
+                } else followUpWait(child, "ORIGINAL_CHAT_RETURN_PENDING")
+            }
+            PrivateFollowUpStage.TERMINAL -> Unit
+        }
     }
 
     override fun sendDraft(target: ChatDraftInputTarget, expectedText: String): ChatDraftInputResult =
@@ -5790,6 +6998,10 @@ internal class MomoSocialAdapter(
                 onLog("AI 联系人身份采集失败：CANDIDATE_ANCHOR_INVALID；未进入聊天详情头像采集")
                 return ContactIdentityCaptureRequestResult.REJECTED
             }
+        return requestContactIdentityCapture(anchor)
+    }
+
+    private fun requestContactIdentityCapture(anchor: InboxIdentityAnchor): ContactIdentityCaptureRequestResult {
         onLog("AI 头像点击事务：进入 AVATAR_CLICK_PREPARING；准备基于当前聊天详情重新定位头像")
         val anchorKey = anchor.opaqueKey()
         synchronized(inboxIdentityCaptureLock) {
@@ -5812,6 +7024,13 @@ internal class MomoSocialAdapter(
                     "gestureInFlight=$sayHiGestureInFlight"
             )
             return ContactIdentityCaptureRequestResult.RETRY_LATER
+        }
+
+        if (anchor is ObservedDetailIdentityAnchor) {
+            val current = inspectCurrentChatDetailFingerprint(anchor.displayName)
+            if (current == null || current.first != anchor.sourceWindow ||
+                extractChatPeerName(current.second.chatTitleText) != normalizeIdentityDisplayName(anchor.displayName)
+            ) return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
 
         val pending = PendingInboxIdentityCapture(
@@ -5846,7 +7065,8 @@ internal class MomoSocialAdapter(
             return ContactIdentityCaptureRequestResult.RETRY_LATER
         }
         if (tree.truncated || tree.window.packageName != targetPackage ||
-            !accessibilityGateway.isWindowCurrent(tree.window)
+            !accessibilityGateway.isWindowCurrent(tree.window) ||
+            (anchor is ObservedDetailIdentityAnchor && tree.window != anchor.sourceWindow)
         ) {
             onLog(
                 "AI 联系人身份采集失败：CHAT_DETAIL_WINDOW_NOT_READY；" +
@@ -5968,6 +7188,63 @@ internal class MomoSocialAdapter(
                 ContactIdentityCaptureRequestResult.REJECTED,
                 "IDENTITY_CAPTURE_CANDIDATE_ANCHOR_INVALID"
             )
+        // Preserve the established row entry's verified-identity check and diagnostics.
+        return observeContactIdentityCapture(anchor) { requestContactIdentityCapture(candidate) }
+    }
+
+    override fun supportsObservedPrivateChatIdentityCapture(): Boolean = true
+
+    private fun createObservedDetailIdentityAnchor(target: ObservedPrivateChatIdentityTarget): ObservedDetailIdentityAnchor? {
+        val window = target.sourceWindow() ?: return null
+        if (window.packageName != targetPackage) return null
+        val peer = extractChatPeerName(target.snapshot.chatTitleText)
+        if (peer.isBlank()) return null
+        return ObservedDetailIdentityAnchor(peer, window, target.runGeneration, target.visitToken)
+    }
+
+    override fun observeContactIdentityCapture(target: ObservedPrivateChatIdentityTarget): ContactIdentityCaptureOutcome {
+        val anchor = createObservedDetailIdentityAnchor(target) ?: return ContactIdentityCaptureOutcome.failed(
+            ContactIdentityCaptureRequestResult.REJECTED, "OBSERVED_DETAIL_ANCHOR_INVALID"
+        )
+        return observeContactIdentityCapture(anchor)
+    }
+
+    override fun hasPendingObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget): Boolean {
+        val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
+        return synchronized(inboxIdentityCaptureLock) {
+            pendingInboxIdentityCapture?.anchor?.opaqueKey() == key
+        }
+    }
+
+    override fun hasObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean {
+        val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
+        return synchronized(inboxIdentityCaptureLock) { observedDetailIdentityReturnKey == key }
+    }
+
+    override fun consumeObservedPrivateChatIdentityReturn(target: ObservedPrivateChatIdentityTarget): Boolean {
+        val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return false
+        return synchronized(inboxIdentityCaptureLock) {
+            if (observedDetailIdentityReturnKey != key) false else {
+                observedDetailIdentityReturnKey = null
+                true
+            }
+        }
+    }
+
+    override fun cancelObservedPrivateChatIdentityCapture(target: ObservedPrivateChatIdentityTarget) {
+        val key = createObservedDetailIdentityAnchor(target)?.opaqueKey() ?: return
+        synchronized(inboxIdentityCaptureLock) {
+            if (pendingInboxIdentityCapture?.anchor?.opaqueKey() == key) pendingInboxIdentityCapture = null
+            completedInboxIdentityOutcomes.remove(key)
+            if (observedDetailIdentityReturnKey == key) observedDetailIdentityReturnKey = null
+            failedInboxIdentityCaptureKeys.remove(key)
+        }
+    }
+
+    private fun observeContactIdentityCapture(
+        anchor: InboxIdentityAnchor,
+        requestCapture: () -> ContactIdentityCaptureRequestResult = { requestContactIdentityCapture(anchor) }
+    ): ContactIdentityCaptureOutcome {
         val key = anchor.opaqueKey()
         synchronized(inboxIdentityCaptureLock) {
             completedInboxIdentityOutcomes[key]?.let { return it }
@@ -5982,7 +7259,7 @@ internal class MomoSocialAdapter(
                 }
             }
         }
-        return when (val request = requestContactIdentityCapture(candidate)) {
+        return when (val request = requestCapture()) {
             ContactIdentityCaptureRequestResult.STARTED,
             ContactIdentityCaptureRequestResult.IN_PROGRESS,
             ContactIdentityCaptureRequestResult.RETRY_LATER ->
@@ -6043,7 +7320,10 @@ internal class MomoSocialAdapter(
             val anchorKey = pending.anchor.opaqueKey()
             if (identityVerified && !pending.platformUserId.isNullOrBlank()) {
                 failedInboxIdentityCaptureKeys.remove(anchorKey)
-                verifiedInboxIdentityByAnchor[anchorKey] = pending.platformUserId!!
+                // An observed detail has no list row to populate in the row cache.
+                if (pending.anchor is InboxIdentityRowAnchor) {
+                    verifiedInboxIdentityByAnchor[anchorKey] = pending.platformUserId!!
+                }
                 val identity = sessionComponents.contactIdentityManager.resolveSnapshot(
                     snapshotId = "inbox-identity-${System.nanoTime()}",
                     observations = listOf(
@@ -6225,10 +7505,16 @@ internal class MomoSocialAdapter(
                 // Inspect the stable three-anchor chat fingerprint directly; calling
                 // inspectChatPage() here would re-enter this pending transaction and keep
                 // returning UNKNOWN.
-                val restoredChat = inspectCurrentChatDetailFingerprint(pending.anchor.displayName)?.second
+                val restoredEvidence = inspectCurrentChatDetailFingerprint(pending.anchor.displayName)
+                val restoredChat = restoredEvidence?.second
                 val restoredTitle = extractChatPeerName(restoredChat?.chatTitleText)
                 val anchorTitle = normalizeIdentityDisplayName(pending.anchor.displayName)
-                val restored = restoredChat != null &&
+                val detailAnchor = pending.anchor as? ObservedDetailIdentityAnchor
+                // Without list-row evidence, require the actual original chat window ID too.
+                val originalDetailWindow = detailAnchor == null ||
+                    (restoredEvidence?.first?.packageName == detailAnchor.sourceWindow.packageName &&
+                        restoredEvidence?.first?.windowId == detailAnchor.sourceWindow.windowId)
+                val restored = restoredChat != null && originalDetailWindow &&
                     restoredTitle.isNotBlank() && anchorTitle.isNotBlank() &&
                     restoredTitle == anchorTitle
                 if (restored) {
@@ -6250,7 +7536,14 @@ internal class MomoSocialAdapter(
                         "资料页身份读取完成并返回原聊天详情"
                     )
                     synchronized(inboxIdentityCaptureLock) {
-                        identityReturnReinspectionPending = true
+                        if (pending.anchor is ObservedDetailIdentityAnchor) {
+                            val key = pending.anchor.opaqueKey()
+                            if (completedInboxIdentityOutcomes[key]?.verifiedIdentity != null) {
+                                observedDetailIdentityReturnKey = key
+                            }
+                        } else {
+                            identityReturnReinspectionPending = true
+                        }
                     }
                     onLog(
                         "AI 身份回接[REQUEST_PRODUCED]：result=PRODUCED；" +
@@ -6410,12 +7703,14 @@ internal class MomoSocialAdapter(
         resetSayHiListSnapshotState()
         sayHiNavigationFlowController.reset()
         sayHiAutonomousBrowseController.reset()
-        resetReceivedGreetingsEntrySearch()
+        resetReceivedGreetingsEntrySearch(resetRun = true)
         clearSayHiSelectedGreeting()
         resetSayHiRowTapTransaction()
         sayHiRestoredReturnConfirmation.reset()
+        sayHiTraversalState.resetFilterSkips()
+        sayHiFilterSettingsUnavailableLogged = false
 
-        sayHiGestureInFlight = false
+        sayHiNonSearchGestureInFlight = false
         sayHiDeferredSafeEvidenceOnlyWait = false
         sayHiStableCandidateKey = ""
         sayHiStableCandidateTarget = null
@@ -6451,6 +7746,7 @@ internal class MomoSocialAdapter(
         synchronized(inboxIdentityCaptureLock) {
             pendingInboxIdentityCapture = null
             identityReturnReinspectionPending = false
+            observedDetailIdentityReturnKey = null
             lastConfirmedChatDetailSnapshot = null
             failedInboxIdentityCaptureKeys.clear()
             loggedInboxIdentityFailureKeys.clear()
@@ -6482,6 +7778,7 @@ internal class MomoSocialAdapter(
         synchronized(inboxIdentityCaptureLock) {
             pendingInboxIdentityCapture = null
             identityReturnReinspectionPending = false
+            observedDetailIdentityReturnKey = null
             lastConfirmedChatDetailSnapshot = null
             failedInboxIdentityCaptureKeys.clear()
             loggedInboxIdentityFailureKeys.clear()
@@ -6982,6 +8279,13 @@ internal class MomoSocialAdapter(
         } ?: ChatRegionSnapshot(false, 0, 0, 0, 0, false)
     }
 
+    override fun invalidateOcrRecognitionReuse() {
+        // Do not initialize the lazy OCR processor just to retire recognition evidence.
+        if (messageComponents.ocrProcessorDelegate.isInitialized()) {
+            messageComponents.ocrProcessor.invalidateRecognitionReuse()
+        }
+    }
+
     override fun readRecentMessages(page: ChatPageSnapshot, limit: Int): ChatMessageBatch =
         messageComponents.reader.readRecentMessages(page, limit)
 
@@ -7012,20 +8316,65 @@ internal class MomoSocialAdapter(
         page: ChatPageSnapshot,
         limit: Int,
         onResult: (ChatMessageBatch) -> Unit
-    ) = readRecentMessagesWithOcr(page, limit, false, onResult)
+    ) = readRecentMessagesAsync(page, limit, { true }, onResult)
+
+    override fun readRecentMessagesAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesWithOcr(page, limit, false, isRequestCurrent, null, onResult)
 
     override fun readRecentMessagesForSendConfirmationAsync(
         page: ChatPageSnapshot,
         limit: Int,
         onResult: (ChatMessageBatch) -> Unit
-    ) = readRecentMessagesWithOcr(page, limit, true, onResult)
+    ) = readRecentMessagesForSendConfirmationAsync(page, limit, { true }, onResult)
+
+    override fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesForSendConfirmationAsync(page, limit, isRequestCurrent, null, onResult)
+
+    override fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        confirmedBaselineObservationId: String?,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesWithOcr(page, limit, true, isRequestCurrent, confirmedBaselineObservationId, onResult)
 
     private fun readRecentMessagesWithOcr(
         page: ChatPageSnapshot,
         limit: Int,
         reuseVerifiedIncoming: Boolean,
+        isRequestCurrent: () -> Boolean,
+        confirmedBaselineObservationId: String?,
         onResult: (ChatMessageBatch) -> Unit
     ) {
+        val expectedWindow = page.messageListTarget?.window
+        // Read-only live root identity, not a new page recognizer or a full tree traversal.
+        // Once an observation is lost, the old screenshot may never become current again.
+        val isCurrent = retainOcrReadValidity {
+            isRequestCurrent() && expectedWindow != null && expectedWindow.windowId >= 0 &&
+                rootAccess.withActiveTargetRoot { _, current ->
+                    current.packageName == expectedWindow.packageName &&
+                        current.windowId == expectedWindow.windowId &&
+                        current.generation == expectedWindow.generation
+                } == true && isRequestCurrent()
+        }
+        fun staleBatch() = ChatMessageBatch(
+            status = MessageReadStatus.WINDOW_STALE,
+            windowSessionKey = null,
+            messages = emptyList(),
+            scannedRowCount = 0,
+            candidateRowCount = 0,
+            truncated = false,
+            capturedAtMillis = System.currentTimeMillis(),
+            messageListUnavailableReason = "OCR_READ_INVALIDATED"
+        )
         // Hide the monitor before the structural node read, not only before the screenshot.
         // The nested screenshot lease in AndroidAccessibilityGateway keeps the same hidden
         // state through capture/OCR; reference counting prevents either layer restoring early.
@@ -7034,7 +8383,7 @@ internal class MomoSocialAdapter(
             val deliver: (ChatMessageBatch) -> Unit = { batch ->
                 if (resultDelivered.compareAndSet(false, true)) {
                     try {
-                        onResult(batch)
+                        onResult(if (isCurrent()) batch else staleBatch())
                     } catch (_: Exception) {
                         onLog("AI 模式消息读取结果回调异常；监控悬浮窗已安排恢复")
                     } finally {
@@ -7043,9 +8392,15 @@ internal class MomoSocialAdapter(
                 }
             }
 
+            if (!isCurrent()) {
+                onLog("OCR_BATCH_INVALIDATED stage=BEFORE_STRUCTURE;nextRequest=false")
+                deliver(staleBatch())
+                return@acquireObservationVisibility
+            }
             val structuralBatch = try {
                 messageComponents.reader.readRecentMessages(page, limit)
             } catch (_: Exception) {
+                invalidateOcrRecognitionReuse()
                 deliver(
                     ChatMessageBatch(
                         status = com.freedom.features.aireply.domain.message.MessageReadStatus.READ_FAILED,
@@ -7064,6 +8419,7 @@ internal class MomoSocialAdapter(
             val formalBodyRows = (structuralBatch.messages.map { it.bounds } + structuralBatch.ocrTargets.map { it.rowBounds }).distinct().size
             onLog("AI 正文容器读取：扫描行=${structuralBatch.scannedRowCount}；正式正文行=$formalBodyRows；正文OCR=${structuralBatch.ocrTargets.size}；仅采集正式文本容器，不分类卡片")
             if (structuralBatch.ocrTargets.isEmpty()) {
+                invalidateOcrRecognitionReuse()
                 deliver(structuralBatch)
                 return@acquireObservationVisibility
             }
@@ -7073,8 +8429,14 @@ internal class MomoSocialAdapter(
                     batch = structuralBatch,
                     expectedPackage = page.packageName,
                     expectedActivity = page.activityClass,
-                    reuseVerifiedIncoming = reuseVerifiedIncoming
+                    reuseVerifiedIncoming = reuseVerifiedIncoming,
+                    confirmedBaselineObservationId = confirmedBaselineObservationId,
+                    isRequestCurrent = isCurrent
                 ) { ocrResult ->
+                    if (ocrResult.invalidated || !isCurrent()) {
+                        deliver(staleBatch())
+                        return@recognize
+                    }
                     if (ocrResult.admissionDeferred) {
                         // The worker gate belongs to actual worker exit, not caller timeout.
                         // Never merge this as an empty OCR result or charge failure counters.

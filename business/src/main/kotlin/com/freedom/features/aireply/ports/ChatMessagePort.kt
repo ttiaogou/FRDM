@@ -9,6 +9,9 @@ import com.freedom.features.aireply.domain.message.ChatMessageBatch
 interface ChatMessagePort {
     fun readRecentMessages(page: ChatPageSnapshot, limit: Int = 10): ChatMessageBatch
 
+    /** Retire adapter-local OCR recognition evidence at a read/task boundary; no I/O or UI action. */
+    fun invalidateOcrRecognitionReuse() {}
+
     /**
      * Reads message structure only. Implementations must not capture the screen or start OCR.
      * This is the pre-identity/context stage of the AI reply pipeline.
@@ -31,6 +34,27 @@ interface ChatMessagePort {
         onResult: (ChatMessageBatch) -> Unit
     ) = readRecentMessagesAsync(page, limit, onResult)
 
+    /** Same send-proof read, with the owning read transaction's thread-safe validity predicate. */
+    fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesForSendConfirmationAsync(page, limit, onResult)
+
+    /**
+     * Only preparation of a later segment may reuse outgoing recognition from the exact
+     * confirmed observation. A null ID means independent outgoing recognition for send proof.
+     * Adapters without reuse support retain the existing full OCR behavior.
+     */
+    fun readRecentMessagesForSendConfirmationAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        confirmedBaselineObservationId: String?,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesForSendConfirmationAsync(page, limit, isRequestCurrent, onResult)
+
     /**
      * Async extension for adapters that need a screenshot or an on-device recognizer. The default
      * keeps existing providers synchronous and source-compatible. Implementations must return
@@ -43,4 +67,12 @@ interface ChatMessagePort {
     ) {
         onResult(readRecentMessages(page, limit))
     }
+
+    /** Same OCR continuation; asynchronous adapters check this before each new request. */
+    fun readRecentMessagesAsync(
+        page: ChatPageSnapshot,
+        limit: Int,
+        isRequestCurrent: () -> Boolean,
+        onResult: (ChatMessageBatch) -> Unit
+    ) = readRecentMessagesAsync(page, limit, onResult)
 }

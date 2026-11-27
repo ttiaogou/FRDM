@@ -30,8 +30,31 @@ data class PrivateMessagesTraversalCheckpoint(
     /** Legacy serialized name; retained for exceptional same-round incomplete-row relocation. */
     val fullListPollingRoundRequired: Boolean = false,
     /** Opaque, retryable incomplete unread row hints; never equivalent to a blocked identity. */
-    val unresolvedIncompleteUnreadKeys: Set<String> = emptySet()
+    val unresolvedIncompleteUnreadKeys: Set<String> = emptySet(),
+    /** An interrupted scan must independently prove the physical bottom before continuing. */
+    val scanContinuityRecoveryPending: Boolean = false,
+    /** Verified detail entries whose business outcome has not yet been established. */
+    val unfinishedSessions: List<UnfinishedPrivateSession> = emptyList()
 )
+
+/** Opaque recovery hints only: never a node, coordinate, raw contact ID or message. */
+data class UnfinishedPrivateSession(
+    val sourceKey: String,
+    val titleKey: String,
+    val verifiedKey: String?,
+    val conversationKey: String,
+    val openedAtMillis: Long,
+    val disposition: UnfinishedPrivateSessionDisposition = UnfinishedPrivateSessionDisposition.INTERRUPTED,
+    /** Opaque SHA-256 request key linking this verified visit to its existing reply journal. */
+    val replyRequestKey: String? = null
+)
+
+/** A submitted send is an outstanding obligation, not a completed visit or a round-wide hold. */
+enum class UnfinishedPrivateSessionDisposition {
+    INTERRUPTED,
+    SEND_DEFERRED_THIS_ROUND,
+    SEND_REVISIT_ELIGIBLE
+}
 
 interface PrivateMessagesTraversalCheckpointRepository {
     fun load(nowEpochMs: Long = System.currentTimeMillis()): PrivateMessagesTraversalCheckpoint?

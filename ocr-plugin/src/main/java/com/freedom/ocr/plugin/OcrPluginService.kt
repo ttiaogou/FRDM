@@ -138,7 +138,7 @@ class OcrPluginService : Service() {
             val status = modelManager.status(modelId, selectedModelId())
             check(status.installed) { "模型尚未安装：$modelId" }
             synchronized(engineLock) {
-                if (selectedModelId() != modelId) engineHolder.release()
+                if (selectedModelId() != modelId) engineHolder.release("MODEL_SWITCH")
                 preferences.edit().putString(KEY_SELECTED_MODEL, modelId).apply()
             }
             JSONObject().put("ok", true).put("selectedModelId", modelId).toString()
@@ -161,7 +161,7 @@ class OcrPluginService : Service() {
         }.getOrElse { errorPayload(it) }
 
         override fun releaseEngine() {
-            synchronized(engineLock) { engineHolder.release() }
+            synchronized(engineLock) { engineHolder.release("EXPLICIT") }
         }
     }
 
@@ -169,12 +169,12 @@ class OcrPluginService : Service() {
         if (intent?.action == OcrPluginContract.ACTION_OCR) autoJsBinder else legacyBinder
 
     override fun onUnbind(intent: Intent?): Boolean {
-        synchronized(engineLock) { engineHolder.release() }
+        synchronized(engineLock) { engineHolder.release("UNBIND") }
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        synchronized(engineLock) { engineHolder.release() }
+        synchronized(engineLock) { engineHolder.release("DESTROY") }
         super.onDestroy()
     }
 
@@ -223,15 +223,23 @@ class OcrPluginService : Service() {
             }
             timings?.put(OcrPluginContract.EXTRA_MODEL_PREPARE_TIME_MS, SystemClock.elapsedRealtime() - modelStartedAt)
             val engineStartedAt = SystemClock.elapsedRealtime()
-            val engine = traceStage(requestId, "ENGINE_ACQUIRE", "modelId=${files.modelId};version=${files.version}") {
+            val acquisition = traceStage(requestId, "ENGINE_ACQUIRE", "modelId=${files.modelId};version=${files.version}") {
                 engineHolder.get(files, options)
             }
             timings?.put(OcrPluginContract.EXTRA_ENGINE_ACQUIRE_TIME_MS, SystemClock.elapsedRealtime() - engineStartedAt)
+            timings?.put(OcrPluginContract.EXTRA_ENGINE_CACHE_HIT, if (acquisition.cacheHit) 1L else 0L)
+            timings?.put(OcrPluginContract.EXTRA_ENGINE_CREATE_COUNT, acquisition.creationCount)
+            timings?.put(OcrPluginContract.EXTRA_DET_MAX_SIDE_LIMIT, acquisition.detMaxSideLimit.toLong())
+            logStage(requestId, "ENGINE_REUSE", "cacheHit=${acquisition.cacheHit};creationCount=${acquisition.creationCount};detMaxSideLimit=${acquisition.detMaxSideLimit}")
             val inferenceStartedAt = SystemClock.elapsedRealtime()
             return traceStage(requestId, "INFERENCE", "image=${bitmap.width}x${bitmap.height}") {
-                runBlocking(Dispatchers.IO) { engine.recognize(bitmap) }
-            }.also {
+                runBlocking(Dispatchers.IO) {
+                    acquisition.engine.recognize(bitmap, acquisition.detMaxSideLimit)
+                }
+            }.let { result ->
                 timings?.put(OcrPluginContract.EXTRA_INFERENCE_WALL_TIME_MS, SystemClock.elapsedRealtime() - inferenceStartedAt)
+                // SDK coldLoadTimeMs is the engine's lifetime initial load time, not per-request.
+                result.copy(coldLoadTimeMs = if (acquisition.cacheHit) 0L else result.coldLoadTimeMs)
             }
         }
     }

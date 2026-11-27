@@ -1,8 +1,16 @@
 package com.freedom.features.aireply.ai
 
+import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.ChatMessageDirection
+import com.freedom.features.aireply.domain.message.ChatMessageType
+import com.freedom.features.aireply.domain.message.DirectionEvidence
 import com.freedom.features.aireply.domain.message.MessageContentQuality
+import com.freedom.features.aireply.domain.message.MessageReadStatus
+import com.freedom.features.aireply.domain.message.OcrContentKind
+import com.freedom.features.aireply.domain.message.OcrTokenStatus
+import com.freedom.features.aireply.domain.message.OcrTokenSource
+import com.freedom.features.aireply.domain.message.OcrTextProjectionStatus
 import com.freedom.features.aireply.ports.ChatDraftInputPort
 import com.freedom.features.aireply.ports.ChatDraftSendPort
 import com.freedom.features.aireply.ports.ChatDraftInputResult
@@ -261,6 +269,10 @@ class AiReplyDraftCoordinator(
     private var activeDraftVisitToken: String? = null
     private var activeExistingOutgoingKeys: Set<String> = emptySet()
     private var activeTaskId: String? = null
+    private var completedPrivateNoReplyVisit: Pair<String, String>? = null
+
+    fun isPrivateNoReplyCompleted(visitToken: String, windowSessionKey: String): Boolean =
+        synchronized(lock) { completedPrivateNoReplyVisit == (visitToken to windowSessionKey) }
     private var pendingSendConfirmation: PendingSendConfirmation? = null
     /** A confirmed segment must obtain a fresh chat/composer observation before the next one starts. */
     private var pendingNextMessageSegment: PendingNextMessageSegment? = null
@@ -290,6 +302,7 @@ class AiReplyDraftCoordinator(
         val segmentIndex: Int,
         val requestGeneration: Long,
         val confirmedObservationAtMillis: Long,
+        val confirmedObservationBatchId: String,
         val previousTarget: ChatDraftInputTarget
     )
 
@@ -388,6 +401,13 @@ class AiReplyDraftCoordinator(
     val isSendConfirmationPending: Boolean get() = synchronized(lock) {
         pendingSendConfirmation != null || pendingNextMessageSegment != null
     }
+    /** Only a durably confirmed preceding segment may authorize cached outgoing baseline evidence. */
+    val nextSegmentConfirmedObservationId: String? get() = synchronized(lock) {
+        pendingNextMessageSegment?.takeIf {
+            pendingSendConfirmation == null && isCurrentGeneration(it.requestGeneration) &&
+                activeRequestId == it.requestId
+        }?.confirmedObservationBatchId
+    }
     val isConversationReturnBlocked: Boolean get() = synchronized(lock) {
         pending.get() || awaitingUserSend.get() ||
             pendingSendConfirmation != null || replyAwaitingConfirmedSend
@@ -413,19 +433,46 @@ class AiReplyDraftCoordinator(
         true
     }
 
-    /** Same handoff for the ordinary private-message traversal. */
+    /** Release only a submitted private send backed by the existing durable journal. */
     fun deferPrivateUnconfirmedSendForManualReturn(): Boolean = synchronized(lock) {
-        if (activeTaskId != AiDecisionTaskIds.PRIVATE_MESSAGES ||
-            pendingSendConfirmation == null
+        val confirmation = pendingSendConfirmation ?: return false
+        if ((activeTaskId != AiDecisionTaskIds.PRIVATE_MESSAGES &&
+                !(activeTaskId == null && confirmation.recoveredFromLedger)) ||
+            pendingSendControl != null || pendingNextMessageSegment != null ||
+            !isCurrentGeneration(confirmation.requestGeneration) ||
+            activeRequestId != confirmation.requestId
         ) return false
+        val requestKey = activeMessageKey ?: return false
+        val durable = runCatching {
+            val record = replySegmentTaskRepository?.find(
+                "${confirmation.requestId}:segment:${confirmation.segmentIndex}"
+            ) ?: return@runCatching false
+            val owner = replyTaskRepository?.find(requestKey) ?: return@runCatching false
+            record.requestId == confirmation.requestId &&
+                record.conversationKey == confirmation.conversationKey &&
+                record.segmentIndex == confirmation.segmentIndex &&
+                record.segmentCount == confirmation.segmentCount &&
+                record.segmentContentHash == confirmation.segmentContentHash &&
+                record.status in setOf(ReplySegmentTaskStatus.SENDING,
+                    ReplySegmentTaskStatus.SENT_UNCONFIRMED, ReplySegmentTaskStatus.UNKNOWN) &&
+                record.sendAttemptStartedAt != null &&
+                record.sendWindowSessionKey?.endsWith("|conversation=${confirmation.conversationKey}") == true &&
+                !record.sendChatTitleHash.isNullOrBlank() && record.sendRequestKey == requestKey &&
+                owner.requestId == confirmation.requestId &&
+                owner.conversationKey == confirmation.conversationKey &&
+                owner.status in setOf(ReplyTaskStatus.PENDING_SEND, ReplyTaskStatus.SENDING,
+                    ReplyTaskStatus.SENT_UNCONFIRMED, ReplyTaskStatus.UNKNOWN)
+        }.getOrDefault(false)
+        if (!durable) {
+            onLog("私聊未确认发送[DEFER_JOURNAL_NOT_VERIFIED]：原发送持久化证据未复核；保留当前只读核验")
+            return false
+        }
+        // Retire the live hold first so reset does not rewrite a durable
+        // SENT_UNCONFIRMED as UNKNOWN. The existing reset invalidates generations,
+        // queued model/input/send callbacks and all old in-memory locators.
         pendingSendConfirmation = null
-        pendingNextMessageSegment = null
-        pendingSendControl = null
-        pending.set(false)
-        awaitingUserSend.set(false)
-        replyAwaitingConfirmedSend = false
-        sendConfirmationChecks = 0
-        onLog("私聊未确认发送[MANUAL_RETURN_DEFERRED]：保留SENT_UNCONFIRMED记录；释放当前聊天页，不重发")
+        resetForRuntimeReset()
+        onLog("私聊未确认发送[MANUAL_RETURN_DEFERRED]：保留原发送记录；释放当前聊天页，不重发")
         true
     }
 
@@ -463,6 +510,22 @@ class AiReplyDraftCoordinator(
                     }.getOrDefault(false)
                 }
             }
+            // Only an owned pre-input model request with no durable segment can
+            // be reclaimed. Existing send/control and uncertain segment guards remain.
+            val abandonedKey = activeMessageKey
+            val abandonedId = activeRequestId
+            if (activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES &&
+                abandonedKey != null && abandonedId != null && activeMessageSegments.isEmpty() &&
+                pendingSendConfirmation == null && pendingNextMessageSegment == null &&
+                pendingSendControl == null && !awaitingUserSend.get()
+            ) runCatching {
+                val journal = replyTaskRepository
+                val record = journal?.find(abandonedKey)
+                if (record?.requestId == abandonedId &&
+                    record.status in setOf(ReplyTaskStatus.REQUESTED, ReplyTaskStatus.MODEL_COMPLETED) &&
+                    replySegmentTaskRepository?.findByRequest(abandonedId)?.isEmpty() == true
+                ) journal.updateStatus(abandonedKey, abandonedId, ReplyTaskStatus.FAILED_RETRYABLE, nowMillis())
+            }
             pending.set(false)
             awaitingUserSend.set(false)
             processedMessageKeys.clear()
@@ -475,6 +538,7 @@ class AiReplyDraftCoordinator(
             activeDraftVisitToken = null
             activeExistingOutgoingKeys = emptySet()
             activeTaskId = null
+            completedPrivateNoReplyVisit = null
             pendingSendConfirmation = null
             pendingNextMessageSegment = null
             readOnlyRecoveredMatch = null
@@ -500,20 +564,43 @@ class AiReplyDraftCoordinator(
     }
 
     /** 无生成前确认；合并已解析联系人历史与当前窗口消息。 */
+    private fun replyRequestKey(contactId: String, conversation: String, incoming: ChatMessage): String =
+        fingerprint("$contactId|$conversation|${incoming.stableLogicalMessageId}|${incoming.effectiveContentRevision}")
+
+    /** Same key used by the shared visible-draft entry, with no side effects or model call. */
+    fun privateVisibleReplyRequestKey(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): String? {
+        val conversation = snapshot.conversationIdentityKey() ?: return null
+        val contact = batch.windowSessionKey ?: return null
+        if (!VisibleDraftContext.assess(batch).accepted) return null
+        val incoming = batch.messagesBottomToTop.firstOrNull {
+            it.direction == ChatMessageDirection.INCOMING && VisibleDraftContext.eligible(batch, it)
+        } ?: return null
+        return replyRequestKey(contact, conversation, incoming)
+    }
+
     fun generateVisibleDraft(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
                              visitToken: String = batch.windowSessionKey.orEmpty(),
                              history: VerifiedDraftHistory? = null,
-                             taskId: String = AiDecisionTaskIds.PRIVATE_MESSAGES): Boolean {
+                             taskId: String = AiDecisionTaskIds.PRIVATE_MESSAGES,
+                             recoveredPrivateRequestKey: String? = null): Boolean {
         val policy = policyRegistry.resolve(taskId)?.takeIf { it.taskId == taskId }
             ?: return reject("AI_TASK_POLICY_NOT_REGISTERED")
-        val visible = VisibleDraftContext.build(batch, visitToken) ?: return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
+        val visible = VisibleDraftContext.build(batch, visitToken) ?: run {
+            runCatching {
+                val admission = VisibleDraftContext.assess(batch)
+                onLog("AI_CONTEXT_SOURCE batchAccepted=false;observation=${diagnosticHash(batch.effectiveObservationBatchId)};" +
+                    "sourceMessages=${batch.messages.size};reason=${if (visitToken.isBlank()) "VISIT_TOKEN_MISSING" else admission.reason}")
+            }
+            return reject("VISIBLE_DRAFT_CONTEXT_UNAVAILABLE")
+        }
         val context = DraftHistoryMerger.merge(visible, batch, policy.contextPolicy().selectHistory(history))
         val contextScope = if (context.messages.size > visible.messages.size) {
             ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW
         } else {
             ModelContextScope.CURRENT_WINDOW_ONLY
         }
-        return generateAndFill(batch, null, snapshot, context, visitToken, taskId, contextScope)
+        return generateAndFill(batch, null, snapshot, context, visitToken, taskId, contextScope,
+            recoveredPrivateRequestKey)
     }
 
     /** 仅在平台身份和当前聊天标题均已验证后调用。 */
@@ -528,7 +615,8 @@ class AiReplyDraftCoordinator(
             ModelContextScope.CURRENT_WINDOW_ONLY
         } else {
             ModelContextScope.VERIFIED_HISTORY_WITH_CURRENT_WINDOW
-        }
+        },
+        recoveredPrivateRequestKey: String? = null
     ): Boolean {
         val policy = policyRegistry.resolve(taskId)?.takeIf { it.taskId == taskId }
             ?: return reject("AI_TASK_POLICY_NOT_REGISTERED")
@@ -596,7 +684,17 @@ class AiReplyDraftCoordinator(
         )
         // 窗口代次用于防止旧回调继续执行，不代表新的模型任务身份。
         val dedupeConversationKey = conversationIdentity
-        val dedupeKey = fingerprint("$contactId|$dedupeConversationKey|${latestIncoming.stableLogicalMessageId}|${latestIncoming.effectiveContentRevision}")
+        val currentDedupeKey = replyRequestKey(contactId, dedupeConversationKey, latestIncoming)
+        val dedupeKey = if (recoveredPrivateRequestKey == null) currentDedupeKey else {
+            if (taskId != AiDecisionTaskIds.PRIVATE_MESSAGES || !localDraft) return reject("PRIVATE_PENDING_RESTORE_SCOPE_MISMATCH")
+            val original = replyTaskRepository?.find(recoveredPrivateRequestKey)
+            if (original == null || original.conversationKey != dedupeConversationKey ||
+                original.logicalMessageId != latestIncoming.stableLogicalMessageId ||
+                original.contentRevision != latestIncoming.effectiveContentRevision ||
+                original.status != ReplyTaskStatus.PENDING_SEND
+            ) return reject("PRIVATE_PENDING_RESTORE_REQUEST_MISMATCH")
+            recoveredPrivateRequestKey
+        }
         // 新的已验证聊天观察可以将尚未提交的待发送动作重新绑定到新的
         // 窗口代次；不得重新生成模型回复，也不得重写输入框内容。
         val awaitingControl = synchronized(lock) { pendingSendControl }
@@ -628,7 +726,7 @@ class AiReplyDraftCoordinator(
                 val pendingRecord = pendingRecords.singleOrNull() ?: return@mapNotNull null
                 if (sorted.size != pendingRecord.segmentCount ||
                     sorted.indices.any { sorted[it].segmentIndex != it } ||
-                    sorted.take(pendingRecord.segmentIndex).any { it.status != ReplySegmentTaskStatus.SENT } ||
+                    sorted.take(pendingRecord.segmentIndex).any { !hasConfirmedSendReceipt(it) } ||
                     sorted.any { it.status in setOf(ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) } ||
                     sorted.any { it.segmentContent.isBlank() || fingerprint(it.segmentContent) != it.segmentContentHash }
                 ) return@mapNotNull null
@@ -638,7 +736,9 @@ class AiReplyDraftCoordinator(
                 if (batch.messages.any {
                         it.direction == ChatMessageDirection.OUTGOING &&
                             it.contentQuality == MessageContentQuality.VERIFIED &&
-                            fingerprint(it.content.orEmpty()) == pendingRecord.segmentContentHash
+                            (fingerprint(it.content.orEmpty()) == pendingRecord.segmentContentHash ||
+                                matchesWrappedSendText(batch, it, pendingRecord.segmentContent,
+                                    pendingRecord.segmentContentHash))
                     }
                 ) return@mapNotNull null
                 sorted
@@ -667,11 +767,14 @@ class AiReplyDraftCoordinator(
             schedulePendingSendControlRetry()
             return true
         }
+        // A linked restore is not a request to create a model draft. Missing queue or
+        // composer proof must retain the old obligation rather than regenerate it.
+        if (recoveredPrivateRequestKey != null) return reject("PRIVATE_PENDING_RESTORE_QUEUE_NOT_VERIFIED")
         // UNKNOWN and SENT_UNCONFIRMED may already have reached the platform. A missing
         // outgoing bubble is not proof the send gesture was never submitted.
         // Resume only by read-only send verification; never recreate draft chunks here.
         val uncertainSend = replySegmentTaskRepository?.findByConversation(dedupeConversationKey)
-            ?.firstOrNull { it.status in setOf(ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) }
+            ?.firstOrNull { it.status in setOf(ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT_UNCONFIRMED) }
         if (uncertainSend != null) {
             onLog("AI 段任务恢复[READ_ONLY_REQUIRED]：requestId=${uncertainSend.requestId.take(12)}；" +
                 "segmentIndex=${uncertainSend.segmentIndex}；status=${uncertainSend.status.name}；禁止重新输入或发送")
@@ -741,6 +844,9 @@ class AiReplyDraftCoordinator(
                 modelLifecycleTrace = ModelLifecycleTrace(requestId, policy.taskId, requestGeneration)
             }
         }
+        // Diagnostics observe the already selected context; they do not select, repair or
+        // change it. A diagnostic failure cannot change the claimed model transaction.
+        runCatching { logContextDiagnostics(batch, visible, context, requestId, contextScope) }
         val accepted = runCatching {
             backgroundExecutor.execute {
                 try {
@@ -758,6 +864,49 @@ class AiReplyDraftCoordinator(
         }
         onLog("AI 回复草稿：已提交后台模型请求；不会自动发送")
         return true
+    }
+
+    private fun logContextDiagnostics(
+        batch: ChatMessageBatch, visible: ConversationContext?, context: ConversationContext,
+        requestId: String, scope: ModelContextScope
+    ) {
+        val observation = diagnosticHash(batch.effectiveObservationBatchId)
+        val rows = batch.messagesBottomToTop.asReversed()
+        onLog("AI_CONTEXT_SOURCE requestId=$requestId;observation=$observation;sourceMessages=${rows.size};" +
+            "batchStatus=${batch.status};truncated=${batch.truncated};scope=$scope")
+        if (visible != null) {
+            val evaluated = rows.map { it to AiSafeConversationText.visible(batch, it) }
+            // Use the size and actual text lengths of the selected context rather than
+            // duplicating the context limit or modifying its admission policy.
+            val selected = evaluated.indices.filter { evaluated[it].second != null }
+                .takeLast(visible.messages.size).withIndex().associate { it.value to it.index }
+            for ((index, pair) in evaluated.withIndex()) {
+                val (message, safeText) = pair
+                val row = message.observationRowIndex
+                val projection = row?.let { batch.ocrTextProjectionsByRowIndex[it] }
+                val included = index in selected
+                val contextChars = selected[index]?.let { visible.messages[it].content.length } ?: 0
+                val visualRegions = row?.let { batch.ocrTokensByRowIndex[it] }.orEmpty().sumOf { token ->
+                    if (token.visualRegions.isNotEmpty()) token.visualRegions.size
+                    else if (token.symbolBounds != null) 1 else 0
+                }
+                val reason = when {
+                    safeText == null -> AiSafeConversationText.diagnosticRejectionReason(batch, message)
+                    !included -> "VISIBLE_CONTEXT_LIMIT"
+                    else -> "ACCEPTED"
+                }
+                onLog("AI_CONTEXT_ADMISSION requestId=$requestId;sourceIndex=$index;row=${row ?: -1};" +
+                    "direction=${message.direction};type=${message.type};quality=${message.contentQuality};" +
+                    "projection=${projection?.status ?: "NONE"};visualRegions=$visualRegions;accepted=$included;reason=$reason;" +
+                    "sourceChars=${message.content?.length ?: 0};contextChars=$contextChars")
+            }
+            onLog("AI_CONTEXT_ADMISSION_SUMMARY requestId=$requestId;accepted=${selected.size};" +
+                "rejected=${rows.size - selected.size}")
+        }
+        val roles = context.messages.joinToString(",") { it.role.name }
+        val counts = if (visible != null) "history=${context.messages.size - visible.messages.size};current=${visible.messages.size}"
+            else "history=UNKNOWN;current=UNKNOWN"
+        onLog("AI_CONTEXT_MERGED requestId=$requestId;$counts;total=${context.messages.size};roles=$roles;scope=$scope")
     }
 
     private fun generateOnBackground(
@@ -1121,17 +1270,26 @@ class AiReplyDraftCoordinator(
     private fun sendMessageSegment(target: ChatDraftInputTarget, message: String, segmentIndex: Int, requestGeneration: Long) {
         if (!isCurrentGeneration(requestGeneration) || !isAiReplyActive() || !hasActiveTaskOwner()) return
         if (synchronized(lock) { pendingSendConfirmation != null }) return
+        var capturedOutgoingBaseline = false
         // For received greetings, refresh the outgoing baseline immediately before the
         // local gesture. The model-request observation may be stale while the remote call
         // was in flight; only messages appearing after this baseline can prove this send.
         if (synchronized(lock) { activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS }) {
             captureGreetingPreSendOutgoingKeys(target)?.let { keys ->
-                synchronized(lock) { activeExistingOutgoingKeys = keys.toSet() }
+                capturedOutgoingBaseline = true
+                synchronized(lock) {
+                    activeExistingOutgoingKeys = if (segmentIndex == 0) keys.toSet()
+                        else activeExistingOutgoingKeys + keys
+                }
                 onLog("收到招呼发送前快照[BASELINE_CAPTURED]：己方消息=${keys.size}；发送前重新建立差分基线")
             }
         } else if (synchronized(lock) { activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES }) {
             capturePrivatePreSendOutgoingKeys(target)?.let { keys ->
-                synchronized(lock) { activeExistingOutgoingKeys = keys.toSet() }
+                capturedOutgoingBaseline = true
+                synchronized(lock) {
+                    activeExistingOutgoingKeys = if (segmentIndex == 0) keys.toSet()
+                        else activeExistingOutgoingKeys + keys
+                }
                 onLog("私聊发送前快照[BASELINE_CAPTURED]：己方消息=${keys.size}；发送前重新建立差分基线")
             }
         }
@@ -1154,7 +1312,9 @@ class AiReplyDraftCoordinator(
                     sendAttemptStartedAt = nowMillis(),
                     sendWindowSessionKey = target.windowSessionKey,
                     sendChatTitleHash = fingerprint(normalizeTitle(target.expectedChatTitle)),
-                    preSendOutgoingKeyHashes = synchronized(lock) { activeExistingOutgoingKeys.mapTo(LinkedHashSet()) { fingerprint(it) } },
+                    preSendOutgoingKeyHashes = synchronized(lock) {
+                        durableOutgoingBaselineHashes(activeExistingOutgoingKeys, capturedOutgoingBaseline)
+                    },
                     sendRequestKey = requestKey
                 )
                 requestId.isNotBlank() && requestKey.isNotBlank() &&
@@ -1541,8 +1701,83 @@ class AiReplyDraftCoordinator(
      * or invoke the send port during recovery. Legacy records without a pre-send
      * baseline remain unresolved rather than accepting a same-text historical bubble.
      */
+    /**
+     * A manually observed detail has already matched its platform-ID visit ledger.
+     * Refuse title-indexed obligations outside that visit, or an old unsent draft
+     * that the existing exact composer/dedupe restore path cannot safely own.
+     * This is read-only and never creates a receipt or a new send.
+     */
+    fun observedPrivateJournalAdmitted(
+        batch: ChatMessageBatch, snapshot: ChatPageSnapshot, openedAtMillis: Long,
+        visitRequestKey: String?
+    ): Boolean {
+        val conversation = snapshot.conversationIdentityKey() ?: return false
+        if (openedAtMillis <= 0L || batch.windowSessionKey.isNullOrBlank()) return false
+        val repository = replySegmentTaskRepository ?: return false
+        val groups = runCatching { repository.findByConversation(conversation).groupBy { it.requestId }.values }
+            .getOrNull() ?: return false
+        val latest = batch.messagesBottomToTop.firstOrNull {
+            it.direction == ChatMessageDirection.INCOMING && VisibleDraftContext.eligible(batch, it)
+        }
+        val linkedOwner = visitRequestKey?.let { replyTaskRepository?.find(it) }
+        for (group in groups) {
+            val started = group.any { it.status in setOf(
+                ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.SENT_UNCONFIRMED,
+                ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT
+            ) }
+            val unsent = group.any { it.status in setOf(
+                ReplySegmentTaskStatus.CREATED, ReplySegmentTaskStatus.DRAFT_APPLIED,
+                ReplySegmentTaskStatus.PENDING_SEND
+            ) }
+            if (!started && !unsent) continue
+            val fullyConfirmed = group.sortedBy { it.segmentIndex }.let { records ->
+                val last = records.last()
+                records.size == last.segmentCount && records.indices.all { index ->
+                    records[index].segmentIndex == index && records[index].segmentCount == records.size &&
+                        hasConfirmedSendReceipt(records[index])
+                } && last.sendRequestKey?.let { key ->
+                    replyTaskRepository?.find(key)?.let { it.requestId == last.requestId &&
+                        it.conversationKey == conversation && it.status == ReplyTaskStatus.SENT }
+                } == true
+            }
+            val old = group.any { it.createdAt < openedAtMillis }
+            if (fullyConfirmed && group.all { it.createdAt < openedAtMillis }) {
+                // A previously confirmed identical incoming revision must not be sent
+                // again just because this visit has a different window generation.
+                val previous = group.last().sendRequestKey?.let { replyTaskRepository?.find(it) }
+                if (latest != null && previous != null &&
+                    previous.logicalMessageId == latest.stableLogicalMessageId &&
+                    previous.contentRevision == latest.effectiveContentRevision) return false
+                continue
+            }
+            // No title-only association, including a complete receipt from a different
+            // visit created after this visit opened. Old unlinked obligations stay held.
+            if (old || visitRequestKey.isNullOrBlank() || linkedOwner == null ||
+                linkedOwner.requestId != group.first().requestId || linkedOwner.conversationKey != conversation ||
+                linkedOwner.requestKey != visitRequestKey ||
+                group.any { it.sendRequestKey != null && it.sendRequestKey != visitRequestKey } ||
+                group.any { it.status in setOf(ReplySegmentTaskStatus.SENDING, ReplySegmentTaskStatus.SENT_UNCONFIRMED,
+                    ReplySegmentTaskStatus.UNKNOWN, ReplySegmentTaskStatus.SENT) && it.sendRequestKey != visitRequestKey }
+            ) return false
+            if (fullyConfirmed) continue
+            if (!started && unsent) {
+                val live = synchronized(lock) { activeRequestId == group.first().requestId &&
+                    activeMessageKey == visitRequestKey && (pending.get() || pendingSendControl != null) }
+                if (!live) {
+                    val pending = group.singleOrNull { it.status == ReplySegmentTaskStatus.PENDING_SEND }
+                    if (pending == null || latest == null ||
+                        linkedOwner.logicalMessageId != latest.stableLogicalMessageId ||
+                        linkedOwner.contentRevision != latest.effectiveContentRevision ||
+                        linkedOwner.status != ReplyTaskStatus.PENDING_SEND) return false
+                }
+            }
+        }
+        return true
+    }
+
     private fun restoreUncertainSendConfirmation(
-        batch: ChatMessageBatch, snapshot: ChatPageSnapshot
+        batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
+        recoveredPrivateOpenedAtMillis: Long? = null
     ): SendConfirmationResult {
         val conversationKey = snapshot.conversationIdentityKey() ?: return SendConfirmationResult.NOT_PENDING
         val repository = replySegmentTaskRepository ?: return SendConfirmationResult.NOT_PENDING
@@ -1554,7 +1789,37 @@ class AiReplyDraftCoordinator(
                 ReplySegmentTaskStatus.UNKNOWN
             )
         }
-        if (uncertain.isEmpty()) return SendConfirmationResult.NOT_PENDING
+        if (uncertain.isEmpty()) {
+            if (recoveredPrivateOpenedAtMillis != null) {
+                val originalGroups = all.filter { it.createdAt >= recoveredPrivateOpenedAtMillis }
+                    .groupBy { it.requestId }.values
+                val startedGroups = originalGroups.filter { group ->
+                    group.any { it.status == ReplySegmentTaskStatus.SENT }
+                }
+                if (startedGroups.isNotEmpty()) {
+                    val group = startedGroups.singleOrNull()?.sortedBy { it.segmentIndex }
+                    val last = group?.lastOrNull()
+                    val receipt = last?.confirmationId
+                    val owner = last?.sendRequestKey?.let { replyTaskRepository?.find(it) }
+                    val complete = group != null && last != null && group.size == last.segmentCount &&
+                        group.indices.all { index ->
+                            val record = group[index]
+                            record.segmentIndex == index && record.segmentCount == group.size &&
+                                hasConfirmedSendReceipt(record)
+                        } && owner != null && owner.requestId == last.requestId &&
+                        owner.conversationKey == conversationKey && owner.status == ReplyTaskStatus.SENT
+                    if (complete && !receipt.isNullOrBlank()) {
+                        synchronized(lock) { lastConfirmedSendId = receipt; replyAwaitingConfirmedSend = false }
+                        return SendConfirmationResult.CONFIRMED
+                    }
+                    // A partial queue is not permission to start a different model reply.
+                    synchronized(lock) { replyAwaitingConfirmedSend = true }
+                    onLog("AI 私聊业务[PARTIAL_SEND_HELD]：原消息段队列未取得完整发送收据；不生成新草稿、不重发")
+                    return SendConfirmationResult.UNKNOWN
+                }
+            }
+            return SendConfirmationResult.NOT_PENDING
+        }
         synchronized(lock) { replyAwaitingConfirmedSend = true }
         val candidate = uncertain.singleOrNull()
         val segments = candidate?.let { current ->
@@ -1568,6 +1833,7 @@ class AiReplyDraftCoordinator(
         val currentWindowKey = if (session == null) null
             else "${session.packageName}|${session.windowId}|${session.generation}|conversation=$conversationKey"
         val valid = candidate != null && segments != null && startedAt != null &&
+            (recoveredPrivateOpenedAtMillis == null || candidate.createdAt >= recoveredPrivateOpenedAtMillis) &&
             !requestKey.isNullOrBlank() && candidate.sendChatTitleHash != null &&
             candidate.sendWindowSessionKey?.endsWith("|conversation=$conversationKey") == true &&
             snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
@@ -1581,7 +1847,7 @@ class AiReplyDraftCoordinator(
                 record.segmentIndex == index && record.segmentCount == candidate.segmentCount &&
                     record.segmentContent.isNotBlank() && fingerprint(record.segmentContent) == record.segmentContentHash &&
                     (when {
-                        index < candidate.segmentIndex -> record.status == ReplySegmentTaskStatus.SENT
+                        index < candidate.segmentIndex -> hasConfirmedSendReceipt(record)
                         index == candidate.segmentIndex -> record.status == candidate.status
                         else -> record.status == ReplySegmentTaskStatus.CREATED
                     })
@@ -1597,14 +1863,8 @@ class AiReplyDraftCoordinator(
         if (!valid || candidate == null || segments == null || targetNode == null ||
             windowIdentity == null || currentWindowKey == null || requestKey == null || startedAt == null
         ) {
-            if (candidate != null && (activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS ||
-                activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES
-            )) {
-                archiveUnconfirmedAttempt(candidate, segments.orEmpty())
-                val taskLabel = if (activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS) "收到招呼" else "私聊"
-                onLog("$taskLabel 历史发送[ARCHIVED_UNCONFIRMED]：补登记证据不足；本轮跳过历史发送，仅继续处理新消息")
-                return SendConfirmationResult.NOT_PENDING
-            }
+            // Insufficient proof never manufactures a success receipt. Keep the
+            // original journal untouched and non-replayable for a later observation.
             candidate?.let {
                 recordSendTrace(
                     "MESSAGE_SEND_UNCERTAIN", it.requestId, generation.get(),
@@ -1664,43 +1924,19 @@ class AiReplyDraftCoordinator(
         return SendConfirmationResult.WAITING
     }
 
-    /** Treats an unprovable historical send as handled for this round, never as resent. */
-    private fun archiveUnconfirmedAttempt(
-        candidate: ReplySegmentTaskRecord,
-        segments: List<ReplySegmentTaskRecord>
-    ) {
-        val archiveId = fingerprint("${candidate.requestId}|${candidate.conversationKey}|UNCERTAIN_ARCHIVED")
-        replySegmentTaskRepository?.let { repository ->
-            segments.filter {
-                it.status in setOf(
-                    ReplySegmentTaskStatus.SENDING,
-                    ReplySegmentTaskStatus.SENT_UNCONFIRMED,
-                    ReplySegmentTaskStatus.UNKNOWN
-                )
-            }.forEach { record ->
-                repository.update(record.copy(
-                    status = ReplySegmentTaskStatus.SENT,
-                    sentAt = record.sentAt ?: nowMillis(),
-                    confirmationId = record.confirmationId ?: archiveId
-                ))
-            }
-        }
-        candidate.sendRequestKey?.let { requestKey ->
-            replyTaskRepository?.updateStatus(
-                requestKey,
-                candidate.requestId,
-                ReplyTaskStatus.SENT,
-                nowMillis()
-            )
-        }
-    }
+    /** Legacy UNCERTAIN_ARCHIVED was stored as SENT only to suppress replay, not as proof. */
+    private fun hasConfirmedSendReceipt(record: ReplySegmentTaskRecord): Boolean =
+        record.status == ReplySegmentTaskStatus.SENT &&
+            !record.confirmationId.isNullOrBlank() &&
+            record.confirmationId != fingerprint("${record.requestId}|${record.conversationKey}|UNCERTAIN_ARCHIVED")
 
-    fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): SendConfirmationResult {
+    fun confirmSendResult(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
+                          recoveredPrivateOpenedAtMillis: Long? = null): SendConfirmationResult {
         val pending = synchronized(lock) { pendingSendConfirmation }
         if (pending == null) {
             val next = synchronized(lock) { pendingNextMessageSegment }
             if (next != null) return resumeConfirmedNextMessageSegment(batch, snapshot, next)
-            return restoreUncertainSendConfirmation(batch, snapshot)
+            return restoreUncertainSendConfirmation(batch, snapshot, recoveredPrivateOpenedAtMillis)
         }
         if (generation.get() != pending.requestGeneration) {
             recordSendTrace(
@@ -1733,7 +1969,11 @@ class AiReplyDraftCoordinator(
             onLog("AI 发送结果核验：WAITING；当前批次不属于发送后的稳定聊天观察；检查次数=$checks")
             return SendConfirmationResult.WAITING
         }
-        val diffTransaction = synchronized(lock) {
+        // The visit timestamp scopes durable journal lookup only. An admitted
+        // detail-origin visit can submit a new send through that same entry point.
+        // Select the existing live diff policy by the pending transaction's origin,
+        // never by how the chat was entered. Rehydrated sends retain strict proof.
+        val liveDiffTransaction = !pending.recoveredFromLedger && synchronized(lock) {
             activeTaskId == AiDecisionTaskIds.RECEIVED_GREETINGS ||
                 activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES
         }
@@ -1741,15 +1981,15 @@ class AiReplyDraftCoordinator(
             message.direction == ChatMessageDirection.OUTGOING &&
                 messageKey(message.stableLogicalMessageId, message.effectiveContentRevision) !in pending.existingOutgoingKeys &&
                 fingerprint(messageKey(message.stableLogicalMessageId, message.effectiveContentRevision)) !in pending.previousOutgoingKeyHashes
-                && (diffTransaction || (
-                    message.contentQuality == MessageContentQuality.VERIFIED &&
-                    fingerprint(message.content.orEmpty()) == pending.segmentContentHash
-                ))
+                && (liveDiffTransaction || matchesStrictSendEvidence(batch, message, pending))
         }
         // A reconstructed transaction needs a single, stable bubble on two fresh reads;
         // a matching string on one OCR pass is never sufficient proof.
         val matched = if (pending.recoveredFromLedger) eligibleMatches.singleOrNull() else eligibleMatches.firstOrNull()
         if (matched != null) {
+            if (!liveDiffTransaction && fingerprint(matched.content.orEmpty()) != pending.segmentContentHash) {
+                onLog("AI 发送结果核验[OCR_LINE_WRAP_MATCHED]：同一完整己方消息行；原正文Hash一致；继续原发送核验门禁")
+            }
             if (pending.recoveredFromLedger) {
                 val matchKey = messageKey(matched.stableLogicalMessageId, matched.effectiveContentRevision)
                 val prior = synchronized(lock) { readOnlyRecoveredMatch }
@@ -1768,13 +2008,27 @@ class AiReplyDraftCoordinator(
             }
             val confirmationId = fingerprint("${pending.requestId}|${pending.segmentIndex}|${pending.segmentContentHash}|${matched.stableLogicalMessageId}|${matched.effectiveContentRevision}")
             if (updateSegmentStatusAndContinue(pending, confirmationId)) {
+                val nextIndex = pending.segmentIndex + 1
+                if (nextIndex == pending.segmentCount) {
+                    val allSegmentsSent = runCatching {
+                        replySegmentTaskRepository?.findByRequest(pending.requestId)
+                            ?.let { records ->
+                                records.size == pending.segmentCount && records.all(::hasConfirmedSendReceipt)
+                            } ?: true
+                    }.getOrDefault(false)
+                    if (!allSegmentsSent ||
+                        !runCatching { updateTaskStatus(ReplyTaskStatus.SENT, pending.requestGeneration) }.getOrDefault(false)
+                    ) {
+                        onLog("AI 发送结果核验：整体任务完成门禁未通过；原收据尚未完整落盘；禁止返回列表")
+                        return SendConfirmationResult.WAITING
+                    }
+                }
                 recordSendTrace(
                     "MESSAGE_SEND_CONFIRMED", pending, "CONFIRMED",
                     sendConfirmationId = confirmationId
                 )
                 onLog("AI 发送结果核验：SENT；sendConfirmationId=${confirmationId.take(12)}；" +
                     "sendAttemptId=${pending.sendAttemptId.take(12)}")
-                val nextIndex = pending.segmentIndex + 1
                 synchronized(lock) {
                     pendingSendConfirmation = null
                     awaitingUserSend.set(false)
@@ -1788,7 +2042,7 @@ class AiReplyDraftCoordinator(
                     if (nextIndex < activeMessageSegments.size) {
                         pendingNextMessageSegment = PendingNextMessageSegment(
                             pending.requestId, nextIndex, pending.requestGeneration,
-                            batch.capturedAtMillis, pending.target
+                            batch.capturedAtMillis, batch.effectiveObservationBatchId, pending.target
                         )
                     }
                 }
@@ -1797,16 +2051,7 @@ class AiReplyDraftCoordinator(
                         "等待新鲜聊天与空输入框复核后启动 segmentIndex=$nextIndex")
                     return SendConfirmationResult.WAITING
                 }
-                val allSegmentsSent = replySegmentTaskRepository?.findByRequest(pending.requestId)
-                    ?.let { records ->
-                        records.size == pending.segmentCount && records.all { it.status == ReplySegmentTaskStatus.SENT }
-                    } ?: true
-                if (!allSegmentsSent) {
-                    onLog("AI 发送结果核验：整体任务完成门禁未通过；仍存在未确认消息段；禁止返回列表")
-                    return SendConfirmationResult.WAITING
-                }
                 lastConfirmedSendId = confirmationId
-                updateTaskStatus(ReplyTaskStatus.SENT, pending.requestGeneration)
                 recordSendTrace(
                     "MESSAGE_SEND_COMPLETED", pending, "CONFIRMED",
                     reasonCode = "ALL_SEGMENTS_CONFIRMED", sendConfirmationId = confirmationId
@@ -1881,7 +2126,7 @@ class AiReplyDraftCoordinator(
             val segment = records.getOrNull(next.segmentIndex)
             val valid = records.size == activeMessageSegments.size &&
                 records.indices.all { records[it].segmentIndex == it && records[it].requestId == next.requestId } &&
-                records.take(next.segmentIndex).all { it.status == ReplySegmentTaskStatus.SENT } &&
+                records.take(next.segmentIndex).all(::hasConfirmedSendReceipt) &&
                 segment?.status == ReplySegmentTaskStatus.CREATED &&
                 segment?.segmentContentHash == activeMessageSegments.getOrNull(next.segmentIndex)?.let(::fingerprint)
             if (!valid) {
@@ -1897,6 +2142,11 @@ class AiReplyDraftCoordinator(
             if (pendingNextMessageSegment != next || pendingSendConfirmation != null ||
                 activeRequestId != next.requestId || !isCurrentGeneration(next.requestGeneration)) false
             else {
+                // Preserve all previously confirmed outgoing keys, including the just-confirmed
+                // segment, and augment them with the fresh pre-next-segment observation.
+                activeExistingOutgoingKeys = activeExistingOutgoingKeys + batch.messages
+                    .filter { it.direction == ChatMessageDirection.OUTGOING }
+                    .map { messageKey(it.stableLogicalMessageId, it.effectiveContentRevision) }
                 pendingNextMessageSegment = null
                 pending.set(true)
                 true
@@ -1948,8 +2198,9 @@ class AiReplyDraftCoordinator(
      * while the final confirmed segment yields one consumable transaction receipt. The
      * receipt is delivered alongside the final outcome, never as a separate later callback.
      */
-    fun confirmSendTransaction(batch: ChatMessageBatch, snapshot: ChatPageSnapshot): ReplySendTransactionOutcome {
-        val result = confirmSendResult(batch, snapshot)
+    fun confirmSendTransaction(batch: ChatMessageBatch, snapshot: ChatPageSnapshot,
+                               recoveredPrivateOpenedAtMillis: Long? = null): ReplySendTransactionOutcome {
+        val result = confirmSendResult(batch, snapshot, recoveredPrivateOpenedAtMillis)
         return ReplySendTransactionOutcome(
             status = result,
             finalSendConfirmationId = if (result == SendConfirmationResult.CONFIRMED) {
@@ -1993,6 +2244,10 @@ class AiReplyDraftCoordinator(
             activeRequestId = null
             activeDraftTarget = null
             activeDraftVisitToken = null
+            if (preSend && activeTaskId == AiDecisionTaskIds.PRIVATE_MESSAGES &&
+                reasonCode in setOf("MODEL_BUSINESS_WAIT", "MODEL_BUSINESS_DO_NOT_REPLY") &&
+                visitToken != null && originalTarget != null
+            ) completedPrivateNoReplyVisit = visitToken to originalTarget.windowSessionKey
             var attempts = 0
             if (key != null && (technicalPreSendFailure ||
                     reasonCode == "DRAFT_INPUT_CONFIRMED_EMPTY_RETRYABLE")) {
@@ -2137,6 +2392,95 @@ class AiReplyDraftCoordinator(
     private fun fingerprint(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(StandardCharsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
+
+    // Keep the existing content/version hashes and add domain-separated logical-row hashes
+    // in the same durable evidence set. Older records lack the marker and cannot use wrap
+    // fallback: their baseline cannot exclude an old row whose OCR line breaks changed.
+    private fun logicalBaselineMarker(): String = fingerprint("SEND_BASELINE_LOGICAL_V1")
+
+    private fun logicalBaselineHash(logicalId: String): String =
+        fingerprint("SEND_BASELINE_LOGICAL_V1|$logicalId")
+
+    private fun durableOutgoingBaselineHashes(keys: Set<String>, capturedBaseline: Boolean): Set<String> =
+        keys.mapTo(LinkedHashSet()) { fingerprint(it) }.apply {
+            if (capturedBaseline && keys.all { it.lastIndexOf('|') > 0 && it.substringAfterLast('|').isNotBlank() }) {
+                add(logicalBaselineMarker())
+                keys.forEach { add(logicalBaselineHash(it.substringBeforeLast('|'))) }
+            }
+        }
+
+    private fun matchesStrictSendEvidence(
+        batch: ChatMessageBatch, message: ChatMessage, pending: PendingSendConfirmation
+    ): Boolean {
+        if (message.contentQuality != MessageContentQuality.VERIFIED) return false
+        val hasLogicalBaseline = logicalBaselineMarker() in pending.previousOutgoingKeyHashes
+        if (pending.recoveredFromLedger && hasLogicalBaseline &&
+            logicalBaselineHash(message.stableLogicalMessageId) in pending.previousOutgoingKeyHashes
+        ) return false
+        // Preserve the original exact-content path, including legacy journal records.
+        if (fingerprint(message.content.orEmpty()) == pending.segmentContentHash) return true
+        // Only a new, complete tail row may use the more conservative wrap proof.
+        if (batch.completeTailRowBounds != message.bounds ||
+            batch.messagesBottomToTop.firstOrNull() != message ||
+            (pending.recoveredFromLedger && !hasLogicalBaseline) ||
+            pending.existingOutgoingKeys.any { it.substringBeforeLast('|') == message.stableLogicalMessageId }
+        ) return false
+        return matchesWrappedSendText(batch, message, pending.draft, pending.segmentContentHash)
+    }
+
+    /**
+     * Send-only equality for a single-line draft displayed in several OCR line boxes.
+     * This cannot distinguish a real line break from a visual one in the source app.
+     * Consequently it requires exact original characters, full verified row evidence,
+     * and the surrounding send transaction's independent new-row/identity/time gates.
+     * No normalized text is stored or used as a message identity.
+     */
+    internal fun matchesWrappedSendText(
+        batch: ChatMessageBatch, message: ChatMessage, expected: String, expectedHash: String
+    ): Boolean {
+        val raw = message.content ?: return false
+        if (expected.isBlank() || expected.any { it == '\n' || it == '\r' || it == '\u2028' || it == '\u2029' } ||
+            fingerprint(expected) != expectedHash ||
+            message.direction != ChatMessageDirection.OUTGOING || message.type != ChatMessageType.TEXT ||
+            message.directionEvidence == DirectionEvidence.AMBIGUOUS ||
+            message.contentQuality != MessageContentQuality.VERIFIED ||
+            batch.status != MessageReadStatus.SUCCESS || !batch.coordinateSpaceReliable || batch.truncated ||
+            batch.windowSessionKey.isNullOrBlank() || batch.ocrAdmissionDeferred || !batch.ocrAttempted ||
+            batch.ocrFailedTargetCount != 0 || batch.ocrAttemptedTargetCount != batch.ocrTargets.size
+        ) return false
+        val row = message.observationRowIndex ?: return false
+        if (batch.messages.count { it.observationRowIndex == row } != 1 || message !in batch.messages) return false
+        val target = batch.ocrTargets.singleOrNull { it.rowIndex == row } ?: return false
+        val list = batch.coordinateListBounds ?: return false
+        if (!target.isMessageTextTarget || target.rowBounds != message.bounds ||
+            target.explicitDirectionHint != ChatMessageDirection.OUTGOING ||
+            target.identityDirectionHint != ChatMessageDirection.OUTGOING ||
+            message.bounds.isEmpty || list.isEmpty ||
+            message.bounds.left < list.left || message.bounds.top < list.top ||
+            message.bounds.right > list.right || message.bounds.bottom > list.bottom ||
+            batch.ocrSampleTextByRowIndex[row] != raw
+        ) return false
+        val lines = batch.ocrTokensByRowIndex[row] ?: return false
+        if (lines.size < 2 || batch.ocrLineCountByRowIndex[row] != lines.size) return false
+        val projection = batch.ocrTextProjectionsByRowIndex[row] ?: return false
+        if (projection.status != OcrTextProjectionStatus.COMPLETE || projection.text != raw ||
+            projection.includedLineIndices != lines.indices.toList() || projection.excludedLineIndices.isNotEmpty()
+        ) return false
+        for ((index, token) in lines.withIndex()) {
+            val bounds = token.lineBounds ?: return false
+            if (token.lineIndex != index || token.kind != OcrContentKind.TEXT ||
+                token.status != OcrTokenStatus.RECOGNIZED || token.source != OcrTokenSource.OCR_LINE ||
+                token.symbolBounds != null || token.isolatedTextEvidence != null ||
+                token.text.isBlank() || token.text.any { it == '\n' || it == '\r' || it == '\u2028' || it == '\u2029' } ||
+                bounds.left < 0 || bounds.top < 0 || bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
+                (index > 0 && (lines[index - 1].lineBounds?.bottom ?: return false) > bounds.top)
+            ) return false
+        }
+        if (lines.joinToString("\n") { it.text } != raw) return false
+        // Remove only separators introduced between the independently observed line boxes.
+        val joined = lines.joinToString("") { it.text }
+        return joined == expected && fingerprint(joined) == expectedHash
+    }
 
     private fun messageKey(id: String, revision: String): String = "$id|$revision"
 

@@ -30,6 +30,12 @@ import com.freedom.features.aireply.domain.contact.ContactMessageLedger
 import com.freedom.features.aireply.domain.contact.ContactMessageLedgerRepository
 import com.freedom.features.aireply.domain.contact.InMemoryContactMessageLedgerRepository
 import com.freedom.features.aireply.domain.contact.ContactSendCountUpdate
+import com.freedom.features.aireply.domain.contact.ContactSendRecordStatus
+import com.freedom.features.aireply.domain.contact.ContactFollowUpCheckpoint
+import com.freedom.features.aireply.domain.contact.ContactFollowUpStep
+import com.freedom.features.aireply.domain.contact.ContactPendingRecoveryAction
+import com.freedom.features.aireply.ports.ChatDraftInputTarget
+import com.freedom.features.aireply.ports.PrivateChatFollowUpProgress
 import com.freedom.features.aireply.ports.ChatMessagePort
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPagePort
@@ -39,17 +45,21 @@ import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ChatSessionManagementPort
 import com.freedom.features.aireply.ports.ContactIdentityCaptureRequestResult
 import com.freedom.features.aireply.ports.ContactIdentityCaptureOutcome
+import com.freedom.features.aireply.ports.ObservedPrivateChatIdentityTarget
+import com.freedom.core.accessibility.events.InputOrigin
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.features.aireply.ports.ChatUnreadStatus
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpointRepository
+import com.freedom.features.aireply.ports.UnfinishedPrivateSessionDisposition
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRecord
 import com.freedom.features.aireply.ports.MomoSayHiTraversalCheckpointRepository
 import com.freedom.features.recovery.RecoveryCheckpointRestoreSource
 import com.freedom.features.recovery.RecoveryCheckpointVerificationResult
 import com.freedom.features.recovery.RecoveryTransactionEvent
+import com.freedom.features.recovery.RecoveryTransactionState
 import com.freedom.features.recovery.UnifiedRecoveryTransactionStateMachine
 import com.freedom.features.recovery.RecoveryContext
 import com.freedom.features.recovery.RecoveryEventDispatcher
@@ -95,6 +105,8 @@ class AiReplyObservationRuntime(
     private val isConversationDraftPending: () -> Boolean = { false },
     /** Read-only proof that an already submitted send still needs confirmation. */
     private val isSendConfirmationPending: () -> Boolean = { false },
+    /** Existing draft coordinator owns the confirmed segment and its exact observation ID. */
+    private val nextSegmentConfirmedObservationId: () -> String? = { null },
     /** Releases only a greeting chat hold after a user-returned list; durable proof remains. */
     private val deferGreetingSendForManualReturn: () -> Boolean = { false },
     /** Releases only a private-chat send hold after a user-returned inbox; durable proof remains. */
@@ -153,8 +165,41 @@ class AiReplyObservationRuntime(
     /** Report a synchronous failed business admission after releasing its exact lease. */
     private val onPageTaskAdmissionRolledBack: (com.freedom.core.runtime.TaskLease) -> Unit = {},
     /** Read-only hint from the existing Android foreground clock, not a write permit. */
-    private val foregroundQuietRemainingMs: () -> Long = { 0L }
+    private val foregroundQuietRemainingMs: () -> Long = { 0L },
+    private val privateNoReplyCompleted: (String, String) -> Boolean = { _, _ -> false },
+    private val onRecoveredPrivateSendTransaction: (ChatMessageBatch, ChatPageSnapshot, Long) ->
+        com.freedom.features.aireply.ai.ReplySendTransactionOutcome = { batch, snapshot, _ ->
+            onSendTransaction(batch, snapshot)
+        },
+    /** Production checks the existing durable segment journal before admitting a detail-origin visit. */
+    private val observedPrivateJournalAdmitted: (ChatMessageBatch, ChatPageSnapshot, Long, String?) -> Boolean =
+        { _, _, _, _ -> false },
+    private val privateReplyRequestKey: (ChatMessageBatch, ChatPageSnapshot) -> String? = { _, _ -> null },
+    private val restoreObservedPrivatePendingDraft: (ChatMessageBatch, ChatPageSnapshot, String, String) -> Boolean =
+        { _, _, _, _ -> false },
+    private val privateChatFollowUpPort: com.freedom.features.aireply.ports.PrivateChatFollowUpPort? = null,
+    private val isPrivateFollowUpTouchActive: () -> Boolean = { false },
+    private val privateImageResourceCount: () -> Int = { 0 }
 ) {
+    // Ephemeral binding for the existing adapter execution; the ledger remains the durable owner.
+    private class PrivateFollowUp(
+        val contactKey: String,
+        val sendConfirmationId: String?,
+        val target: ChatDraftInputTarget,
+        @Volatile var checkpoint: ContactFollowUpCheckpoint
+    )
+    @Volatile private var activePrivateFollowUp: PrivateFollowUp? = null
+    fun isPrivateFollowUpActive(): Boolean = activePrivateFollowUp != null
+
+    /** The unified entry has independently recognized a top-level destination. */
+    fun onPrivateFollowUpTopLevelObserved() {
+        if (activePrivateFollowUp == null) return
+        privateChatFollowUpPort?.reset("PRIVATE_FOLLOW_UP_LEFT_CHILD")
+        activePrivateFollowUp = null
+        currentSessionSendConfirmed = false
+        onLog("PRIVATE_FOLLOW_UP LEFT_CHILD;checkpointRetained=true")
+    }
+
     companion object {
         /**
          * The persisted business checkpoint identifies the observation schedule, not the
@@ -225,6 +270,7 @@ class AiReplyObservationRuntime(
         private const val GREETINGS_RETURN_RECOVERY_REASON = "GREETING_COMPLETION_RETURN"
         private const val GREETINGS_TO_PRIVATE_HANDOFF_GATE = "AI_REPLY_GREETINGS_TO_PRIVATE_HANDOFF"
         private const val NEXT_POLLING_ROUND_GATE = "AI_REPLY_NEXT_POLLING_ROUND"
+        private const val PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE = "AI_REPLY_PRIVATE_STARTUP_DETAIL_OWNERSHIP"
         private val PAGE_CHANGE_RECHECK_EVENT_TYPES = setOf(
             AccessibilityEventType.WINDOW_STATE_CHANGED,
             AccessibilityEventType.WINDOWS_CHANGED,
@@ -326,8 +372,6 @@ class AiReplyObservationRuntime(
     private var lastMessageFingerprint = ""
     private val loggedOcrDebugFingerprints = LinkedHashSet<String>()
     private val contactMessageLedger = ContactMessageLedger(contactMessageLedgerRepository)
-    /** Session keys awaiting an externally verified intercept-toggle result, in threshold order. */
-    private val pendingInterceptionContactKeys = LinkedHashSet<String>()
     private var ocrDebugBatchLimitLogged = false
     private var currentSessionSendConfirmed = false
 
@@ -422,6 +466,9 @@ class AiReplyObservationRuntime(
     /** The private UNKNOWN/checkpoint identity is suspended, never completed, during a
      * separately verified manual Received Greetings task. The persisted cursor is untouched. */
     private var suspendedPrivateRecovery: RecoveryContext.Snapshot? = null
+    // A verified child visit can temporarily replace list execution, not list proof.
+    // Recheck the original list fault against the updated durable cursor on return.
+    private var privateListRecoveryReasonAfterObservedDetail: String? = null
     private var receivedGreetingsCheckpointForUnified: MomoSayHiTraversalCheckpointRecord? = null
     private var receivedGreetingsCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PROCESS_RESTART
     private val messageListRecoveryRoute: PageRecoveryRouteAdapter by lazy(LazyThreadSafetyMode.NONE) {
@@ -653,11 +700,15 @@ class AiReplyObservationRuntime(
     private var activeSessionGestureRequestId: String? = null
     private data class CurrentSessionBinding(
         val sourceWindowKey: String,
-        val sourceRowPath: String,
-        val sourceRowBounds: ScreenRect,
+        val sourceRowPath: String?,
+        val sourceRowBounds: ScreenRect?,
         val sourceAvatarBounds: ScreenRect?,
         val chatWindowKey: String,
-        val chatSurfaceKey: String
+        val chatSurfaceKey: String,
+        val observedDetailTarget: ObservedPrivateChatIdentityTarget? = null,
+        val observedVerifiedIdentity: ContactRowIdentity? = null,
+        val observedTaskLease: TaskLease? = null,
+        val observedBusinessAdmitted: Boolean = false
     ) {
         fun matches(snapshot: ChatPageSnapshot, currentChatWindowKey: String?): Boolean =
             currentChatWindowKey == chatWindowKey &&
@@ -912,7 +963,6 @@ class AiReplyObservationRuntime(
                 return
             }
             confirmed.sendJournalSaved = true
-            recordSuccessfulSend(confirmed.confirmationId)
             onLog("GREETING_SEND_FACT_PERSISTED：已确认发送事实落盘；尚未确认安全返回")
         }
         if (!confirmed.finalSampleSaved) {
@@ -1124,6 +1174,10 @@ class AiReplyObservationRuntime(
                 missedPrivateSessionTapKey = null
                 missedPrivateSessionTapCount = 0
             }
+            if (privateMessagesTraversalTaskExecutor.recordVerifiedDetailEntry(snapshot, System.currentTimeMillis())) {
+                privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+                onLog("AI 私聊业务[UNFINISHED_RETAINED]：已验证进入会话；尚未确认业务终态")
+            }
             onLog("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定；昵称仅作辅助校验")
         }
     }
@@ -1238,7 +1292,12 @@ class AiReplyObservationRuntime(
     private fun runFullInspection(purpose: AiReplyPageReadPurpose) {
         pageInspectionTask = null
         if (!isAiReplyActive()) return
+        if (isPrivateFollowUpActive()) {
+            runPrivateFollowUpObservation()
+            return
+        }
         if (!chatPagePort.supportsTargetPackage(targetPackage())) {
+            pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
             if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
                 holdGreetingsCompletionReturn("EXTERNAL_PAGE")
                 return
@@ -1257,6 +1316,7 @@ class AiReplyObservationRuntime(
             return
         }
         if (sessionRunStarted && userInteractionActive) {
+            pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
             onLog("统一恢复事务[USER_ACTIVE]：用户仍在操作；暂停页面复核和业务动作，10s后重新检查")
             scheduleFullInspectionAfter(RECEIVED_GREETINGS_USER_ACTIVE_RECHECK_DELAY_MS)
             return
@@ -1276,6 +1336,21 @@ class AiReplyObservationRuntime(
         )
         diagnosePendingIdentityReturn(observationDecision, inspection)
         if (observationDecision.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) {
+            currentSessionBinding?.observedDetailTarget?.let { target ->
+                if (sessionRunStarted && ownsTask(PRIVATE_MESSAGES_TASK_ID) && !recoveryContext.pending &&
+                    chatSessionManagementPort.hasPendingObservedPrivateChatIdentityCapture(target)
+                ) {
+                    // The existing avatar/profile transaction intentionally hides the old chat snapshot.
+                    scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                    return
+                }
+                // Once business is admitted, the existing durable recovery owns its
+                // checkpoint. Never discard an in-flight send or its verified identity here.
+                if (currentSessionBinding?.observedBusinessAdmitted != true) {
+                    retireObservedPrivateDetail("SNAPSHOT_UNAVAILABLE")
+                }
+            }
+            pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
             // A target-app transitional sample is not an EMPTY_SNAPSHOT recovery if the
             // original navigation is still awaiting its destination. No snapshot or a
             // foreign package still follows the existing recovery path.
@@ -1336,6 +1411,13 @@ class AiReplyObservationRuntime(
         }
         transientEmptySnapshotRecovery.reset()
         val recovered = inspection!!
+        // Once a business recovery owns the checkpoint, only its route verifier may
+        // advance the reducer or acknowledge completion. The legacy empty-snapshot
+        // timer is observation bookkeeping, not a second recovery authority.
+        if (recoveryContext.pending && snapshotRecoveryStartedAtMs != 0L) {
+            pageRecoveryVerificationGate.reset(SNAPSHOT_RECOVERY_ROUTE_ID)
+            snapshotRecoveryStartedAtMs = 0L
+        }
         if (sessionRunStarted &&
             (snapshotRecoveryStartedAtMs != 0L ||
                 (receivedGreetingsRecoveryVerificationPending && receivedGreetingsCheckpointForUnified == null)) &&
@@ -1506,30 +1588,44 @@ class AiReplyObservationRuntime(
         }
     }
 
-    /** Uses the original checkpoint re-anchor algorithm; never reuses saved row coordinates. */
+    /** Page recovery is complete; independently decide whether the scan can continue. */
     private fun reanchorRestoredMessageList(inspection: ChatPageSnapshot) {
         if (!messageListCheckpointRestored) return
-        if (recoveryContext.reason == "PRIVATE_LIST_POSITION_UNVERIFIED") {
-            // Position recovery is not identity migration. Preserve the entire round ledger.
-            privateMessagesTraversalTaskExecutor.recordVerifiedViewport(inspection)
-            messageListCheckpointRestored = false
-            onLog("消息列表检查点恢复[POSITION_REANCHORED]：新鲜页面已验证；保留本轮身份与原遍历方向")
-            return
-        }
-        val compatible = privateMessagesTraversalTaskExecutor.isRestoredViewportCompatible(inspection)
-        if (!compatible) {
-            val reanchor = privateMessagesTraversalTaskExecutor.reanchorRestoredCheckpoint(inspection)
-            onLog(
-                "消息列表检查点恢复[REANCHOR]：当前视口与保存视口不同；" +
-                    "status=${reanchor.status.name}；" +
-                    "已重新读取当前位置，不复用旧坐标；" +
-                    "目标会话=${if (reanchor.matchedCandidate != null) "已定位" else "未定位，继续按原方向扫描"}"
-            )
+        val executor = privateMessagesTraversalTaskExecutor
+        executor.clearRecoveryViewportEvidence()
+        if (executor.scanContinuityRecoveryPending) {
+            onLog("消息列表检查点恢复[RESCAN_RETAINED]：原安全补扫尚未确认底部；继续同轮定位")
+        } else if (executor.isRestoredViewportCompatible(inspection) &&
+            (executor.lastStableSessionListVisibleKeys.orEmpty().isEmpty() ||
+                executor.hasRestoredViewportContinuity(inspection))
+        ) {
+            executor.recordVerifiedViewport(inspection)
+            // A restored top assertion needs fresh position evidence as well.
+            if (executor.atTop && executor.collectionBoundaryEvidence(inspection, toTop = true) != true) {
+                executor.atTop = false
+            }
+            onLog("消息列表检查点恢复[CONTINUE]：原视口连续；保留本轮记录与遍历游标")
         } else {
-            privateMessagesTraversalTaskExecutor.recordVerifiedViewport(inspection)
-            onLog("消息列表检查点恢复[CONTINUE]：页面已验证；保留原检查点和遍历游标继续处理")
+            val continuous = executor.hasRestoredViewportContinuity(inspection)
+            val reanchor = executor.reanchorRestoredCheckpoint(inspection)
+            if (continuous && reanchor.status != PrivateMessagesTraversalTaskExecutor.RestoreReanchorStatus.AMBIGUOUS) {
+                if (reanchor.status != PrivateMessagesTraversalTaskExecutor.RestoreReanchorStatus.REANCHORED) {
+                    executor.recordVerifiedViewport(inspection)
+                }
+                executor.atTop = false
+                onLog("消息列表检查点恢复[REANCHOR]：status=${reanchor.status.name}；邻接身份连续；重新获取当前行，不复用旧坐标")
+            } else if (executor.initialInboxTopPositioningCompleted) {
+                executor.beginScanContinuityRecovery()
+                onLog("消息列表检查点恢复[SAFE_RESCAN_REQUIRED]：status=${reanchor.status.name}；原位置未证明；保留原锚点、本轮记录和方向；等待底部独立验证")
+            } else {
+                // The startup top gate has not yet admitted a scan. Keep its
+                // original positioning policy; this is not a restored scan origin.
+                executor.atTop = false
+                onLog("消息列表检查点恢复[STARTUP_POSITION_WAIT]：初始顶部尚未确认；保留原准入流程")
+            }
         }
         messageListCheckpointRestored = false
+        privateMessagesCheckpointRepository?.save(executor.checkpoint())
     }
 
     private fun recoveryStructuralKey(snapshot: ChatPageSnapshot): String = listOf(
@@ -1544,7 +1640,23 @@ class AiReplyObservationRuntime(
     /** System touch boundaries pause received-greetings recovery without becoming page evidence. */
     fun onGlobalTouchEvent(event: AccessibilityEventEnvelope) {
         if (!sessionRunStarted) return
-        val recoveryContextActive = receivedGreetingsTaskActive || pollingRoundPending ||
+        if (isPrivateFollowUpActive() && event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER) {
+            privateChatFollowUpPort?.abort("PRIVATE_FOLLOW_UP_USER_INTERACTION")
+            onPrivateFollowUpTopLevelObserved()
+            onLog("PRIVATE_FOLLOW_UP USER_INTERACTION;checkpointRetained=true;noReplay=true")
+            // Fall through to existing physical-interaction handling, not a new recovery route.
+        }
+        pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
+        val observedPhysicalInterruption = event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER &&
+            currentSessionBinding?.observedDetailTarget != null
+        if (observedPhysicalInterruption) {
+            if (currentSessionBinding?.observedBusinessAdmitted == true) {
+                requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "PRIVATE_DETAIL_USER_INTERACTION")
+            } else {
+                retireObservedPrivateDetail("PHYSICAL_INTERACTION")
+            }
+        }
+        val recoveryContextActive = observedPhysicalInterruption || receivedGreetingsTaskActive || pollingRoundPending ||
             messageListRecoveryVerificationPending ||
             recoveryContext.pending || incompleteUnreadRelocationWait != null || userInteractionActive
         if (!recoveryContextActive) return
@@ -1635,6 +1747,7 @@ class AiReplyObservationRuntime(
     /** Applies a newly acquired page snapshot after ordinary debounce or verified user stability. */
     /** Consumes the semantic observation result; the snapshot remains evidence only. */
     private fun handleInspectionSnapshot(observation: ObservationResult) {
+        if (isPrivateFollowUpActive()) return
         val incomingInspection = observation.snapshot ?: return
         if (observation.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) return
         val previous = lastPageInspection
@@ -1655,6 +1768,11 @@ class AiReplyObservationRuntime(
             )?.routeId
         } else null
 
+        // The observed detail is a source of the same session binding, not another task.
+        if (currentSessionBinding?.observedDetailTarget != null) {
+            if (handleObservedPrivateDetail(observation, inspection, matchedRouteId)) return
+        }
+
         if (sessionRunStarted && receivedGreetingsTaskActive &&
             !ownsTask(RECEIVED_GREETINGS_TASK_ID) && !awaitingNormalInboxAfterGreetingsReturn &&
             !recoveryContext.pending
@@ -1667,6 +1785,20 @@ class AiReplyObservationRuntime(
             onLog("收到的招呼恢复[LEASE_LOST_READ_ONLY]：已读取当前页面；等待既有恢复验证重新确认操作权")
             scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return
+        }
+
+        // A detail-origin visit may be retired before identity capture finishes. Its
+        // deferred list recovery must still earn independent list proof on return.
+        if (privateListRecoveryReasonAfterObservedDetail != null &&
+            !recoveryContext.pending && sessionRunStarted && !receivedGreetingsTaskActive &&
+            currentSessionBinding == null && currentSessionKey == null &&
+            matchedRouteId == messageListRecoveryRoute.routeId &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE
+        ) {
+            if (requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "OBSERVED_DETAIL_RETURN")) {
+                scheduleFullInspectionAfter(0L)
+                return
+            }
         }
 
         // A pending recovery owns verification of this observation, including the existing
@@ -1782,6 +1914,11 @@ class AiReplyObservationRuntime(
             }
         }
 
+        // A selected private-list startup may be interrupted before its first lease claim.
+        // Admit the verified chat subpage to that SAME task, without pretending a list
+        // initialization, selected row, contact binding or unfinished transaction exists.
+        if (handlePrivateStartupDetailOwnership(observation, inspection, matchedRouteId)) return
+
         if (sessionRunStarted && pollingRoundPending && !receivedGreetingsTaskActive &&
             !recoveryContext.pending && !messageListRecoveryVerificationPending &&
             !isSendConfirmationPending() && !isConversationDraftPending()
@@ -1892,6 +2029,10 @@ class AiReplyObservationRuntime(
             selfInitiatedTransition == null &&
             previous != null &&
             inboxPageRecognizer.isChatDetail(previous) &&
+            // The unbound startup detail never opened a visit or advanced the list cursor.
+            // Returning from it must still run the original list startup verification.
+            !(pageSelectedPrivateStartupVerificationPending && currentSessionCandidate == null &&
+                currentSessionBinding == null && matchedRouteId == messageListRecoveryRoute.routeId) &&
             matchedRouteId == activeRouteId
         // A private-message row tap moves from the owned inbox route into its chat-detail
         // subpage. That subpage is part of the active task's normal workflow, not an UNKNOWN
@@ -2031,7 +2172,25 @@ class AiReplyObservationRuntime(
             !verifiedGreetingsInboxReturn && !verifiedGreetingsReturnIntermediate &&
             previous != null && matchedRouteId != activeRouteId &&
             pageIdentityChanged(previous, inspection)
-        if ((shouldCreateRouteRecovery || (unmatchedReturnToOwnedRoute && !pendingGreetingDetailReturn)) &&
+        // The submitted send belongs to its original conversation, not to the
+        // current inbox UI. A confirmed inbox must reach the existing checkpoint
+        // handoff even when the last observation was already a list.
+        val privateSendReturnedToInbox = sessionRunStarted &&
+            activeTaskId == PRIVATE_MESSAGES_TASK_ID && !receivedGreetingsTaskActive &&
+            isSendConfirmationPending() && !isSendControlRecoveryPending() &&
+            matchedRouteId == messageListRecoveryRoute.routeId &&
+            inspection.packageName == targetPackage() && inspection.pageKind == ChatPageKind.CHAT_LIST &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE
+        val interruptedPrivateVisitReturned = sessionRunStarted && !recoveryContext.pending &&
+            activeTaskId == PRIVATE_MESSAGES_TASK_ID && !receivedGreetingsTaskActive &&
+            sessionManagerState == SessionManagerState.READING_SESSION &&
+            privateMessagesTraversalTaskExecutor.currentUnfinishedSession() != null &&
+            matchedRouteId == messageListRecoveryRoute.routeId &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE &&
+            !isSendConfirmationPending() && !isSendControlRecoveryPending()
+        if ((shouldCreateRouteRecovery || interruptedPrivateVisitReturned ||
+                (privateSendReturnedToInbox && !recoveryContext.pending) ||
+                (unmatchedReturnToOwnedRoute && !pendingGreetingDetailReturn)) &&
             activeTaskId != null
         ) {
             if (awaitingNormalInboxAfterGreetingsReturn && activeTaskId == RECEIVED_GREETINGS_TASK_ID) {
@@ -2047,6 +2206,28 @@ class AiReplyObservationRuntime(
             // The unattributed transition returned to the already-owned route. It was observed,
             // but it did not establish a new recovery destination.
             unmatchedNavigationObservationPending = false
+        }
+
+        // A confirmed list can replace the execution destination of an interrupted
+        // identity/detail read, but cannot replace its durable business checkpoint.
+        // Selection alone grants no lease; the existing list/greetings verifier
+        // below must still independently prove the destination.
+        if (recoveryContext.pending &&
+            recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+            recoveryContext.routeId == chatDetailRecoveryRoute.routeId &&
+            (matchedRouteId == messageListRecoveryRoute.routeId ||
+                matchedRouteId == receivedGreetingsRecoveryRoute.routeId) &&
+            observation.status == ObservationStatus.CONFIRMED_PAGE &&
+            !receivedGreetingsTaskActive && !isSendControlRecoveryPending() &&
+            (!isSendConfirmationPending() || privateSendReturnedToInbox)
+        ) {
+            if (!ensureAndroidRecoveryReady(inspection, "PRIVATE_DETAIL_ROUTE_HANDOFF") ||
+                !retargetInterruptedPrivateDetail(observation.observationGeneration, privateSendReturnedToInbox)
+            ) {
+                lastPageInspection = inspection
+                scheduleFullInspectionAfter(350L)
+                return
+            }
         }
 
         if (tryVerifiedPrivateRecoveryToGreetingsHandoff(observation, inspection, matchedRouteId,
@@ -2284,9 +2465,8 @@ class AiReplyObservationRuntime(
                     receivedGreetingsRecoveryRetryAttempt = 0
                     pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
                 } else {
-                    // Re-anchor only from the new list snapshot, before acknowledging resume.
+                    // Page/lease proof does not yet admit a new scan origin.
                     sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                    reanchorRestoredMessageList(inspection)
                     if (!messageListCheckpointVerifier.completeResume()) {
                         sessionManagerState = SessionManagerState.PAUSED
                         onLog("消息列表统一检查点[COMPLETE_REJECTED]：尚未完成恢复事务确认；保持暂停")
@@ -2329,11 +2509,6 @@ class AiReplyObservationRuntime(
                 return
             }
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID && targetRoute == messageListRecoveryRoute.routeId) {
-                // The fallback verifier must consume the same position-only recovery
-                // before recoveryContext.clear() retires the original reason.
-                if (recoveryContext.reason == "PRIVATE_LIST_POSITION_UNVERIFIED") {
-                    reanchorRestoredMessageList(inspection)
-                }
                 messageRecoveryRetryAttempt = 0
             }
             if (privateListFaultEvidence != PrivateListRecoveryFaultEvidence.NOT_APPLICABLE) {
@@ -2415,6 +2590,7 @@ class AiReplyObservationRuntime(
                 }
                 readVisibleMessages(inspection)
             } else if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
+                privateListRecoveryReasonAfterObservedDetail = null
                 sessionManagerState = if (confirmedPrivateReturnAwaitingRecovery &&
                     currentSessionSendConfirmed
                 ) {
@@ -2422,11 +2598,34 @@ class AiReplyObservationRuntime(
                     SessionManagerState.RETURNING_TO_SESSION_LIST
                 } else SessionManagerState.WAITING_FOR_SESSION_LIST
                 confirmedPrivateReturnAwaitingRecovery = false
+                val observedReturn = currentSessionBinding?.observedBusinessAdmitted == true
+                if ((sessionManagerState == SessionManagerState.WAITING_FOR_SESSION_LIST || observedReturn) &&
+                    currentSessionKey != null && !isSendConfirmationPending() && !isSendControlRecoveryPending()
+                ) {
+                    // Retire the departed visit, not its unfinished business obligation.
+                    if (isConversationDraftPending()) onDraftRuntimeReset()
+                    invalidatePendingMessageRead()
+                    retireObservedPrivateDetail("LIST_RECOVERY_VERIFIED")
+                    privateMessagesTraversalTaskExecutor.clearCurrentSession()
+                    currentSessionBinding = null
+                    expectedPrivateSessionDetailNavigation = null
+                    currentSessionSendConfirmed = false
+                    if (observedReturn) sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+                    onLog("AI 私聊业务[INTERRUPTED_VISIT_RETAINED]：旧详情执行资格失效；原未完成记录保留")
+                }
                 reanchorRestoredMessageList(inspection)
                 lastPageInspection = inspection
                 // A page recovery is not startup admission. If the startup probe was
                 // interrupted, it must collect its original three fresh samples first.
-                if (!startupReadinessCoordinator.resumeAfterPageRecovery()) {
+                if (pageSelectedPrivateStartupVerificationPending &&
+                    startupReadinessCoordinator.initializationPending &&
+                    !startupReadinessCoordinator.workAreaConfirmed
+                ) {
+                    pageSelectedPrivateStartupVerificationPending = false
+                    if (!startupReadinessCoordinator.resumeAfterPageRecovery()) {
+                        startupReadinessCoordinator.beginVerificationIfNeeded()
+                    }
+                } else if (!startupReadinessCoordinator.resumeAfterPageRecovery()) {
                     handleSessionListPage(inspection)
                 }
             } else {
@@ -2721,20 +2920,6 @@ class AiReplyObservationRuntime(
                                 onLog("收到招呼手动返回[CONTINUE_LIST]：未确认发送已落盘；当前行延期，继续处理其他招呼")
                             } else {
                                 onLog("收到招呼手动返回[DEFER_REJECTED]：未确认发送仍由原聊天事务持有；保持只读恢复")
-                                return
-                            }
-                        }
-                        if (!receivedGreetingsTaskActive && isSendConfirmationPending()) {
-                            if (deferPrivateSendForManualReturn()) {
-                                privateMessagesTraversalTaskExecutor.clearCurrentSession()
-                                currentSessionSendConfirmed = false
-                                privateMessagesCheckpointRepository?.save(
-                                    privateMessagesTraversalTaskExecutor.checkpoint()
-                                )
-                                sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
-                                onLog("私聊手动返回[CONTINUE_LIST]：未确认发送已落盘；当前会话延期，继续处理其他会话")
-                            } else {
-                                onLog("私聊手动返回[DEFER_REJECTED]：未确认发送仍由原聊天事务持有；保持只读恢复")
                                 return
                             }
                         }
@@ -3402,6 +3587,10 @@ class AiReplyObservationRuntime(
     }
 
     fun reset(reason: String = "未指定", preservePendingRecovery: Boolean = true) {
+        if (isPrivateFollowUpActive()) {
+            privateChatFollowUpPort?.reset("PRIVATE_FOLLOW_UP_RUNTIME_RESET")
+            activePrivateFollowUp = null
+        }
         runCatching { onDraftRuntimeReset() }
         sessionActionGeneration += 1L
         incompleteUnreadRelocationWait = null
@@ -3443,6 +3632,7 @@ class AiReplyObservationRuntime(
         receivedGreetingsCheckpointVerifier.reset()
         receivedGreetingsCheckpointForUnified = null
         suspendedPrivateRecovery = null
+        privateListRecoveryReasonAfterObservedDetail = null
         if (!preservePendingRecovery || !recoveryContext.pending) recoveryContext.clear()
         messageListRecoveryVerificationPending = false
         messageListCheckpointRestored = false
@@ -3481,6 +3671,7 @@ class AiReplyObservationRuntime(
         currentSessionReadCaptured = false
         currentSessionSendConfirmed = false
         currentSessionWindowKey = null
+        retireObservedPrivateDetail("RUN_RESET")
         currentSessionBinding = null
         expectedPrivateSessionDetailNavigation = null
         pendingNavigationSourceResult = null
@@ -3499,8 +3690,8 @@ class AiReplyObservationRuntime(
         userInteractionActive = false
         privateMessagesTraversalTaskExecutor.reset()
         lastMessageFingerprint = ""
-        contactMessageLedger.clearAll()
-        pendingInterceptionContactKeys.clear()
+        // The private contact ledger is durable business state, not run-local traversal state.
+        // Resetting the runtime must preserve counts and unresolved follow-up checkpoints.
         receivedGreetingsTaskFlow.reset()
         receivedGreetingsRecoveryRetryAttempt = 0
         receivedGreetingsPageProbePending = false
@@ -3510,6 +3701,381 @@ class AiReplyObservationRuntime(
      * Route ownership requests through the controller that owns the requested business task.
      * Read-only page observations remain outside the UI-operation lease.
      */
+    /**
+     * R04-A: only a previously page-selected private task can acquire its startup
+     * detail subpage. A residual detail at cold entry is not an independent task.
+     * This admits task ownership, NOT a chat visit or a permission to send.
+     * Existing protected transactions, recovery routes and list-startup proof win.
+     */
+    private fun handlePrivateStartupDetailOwnership(
+        observation: ObservationResult,
+        snapshot: ChatPageSnapshot,
+        matchedRouteId: String?
+    ): Boolean {
+        val gate = PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE
+        val observedDetailSupported = chatSessionManagementPort.supportsObservedPrivateChatIdentityCapture()
+        val alreadyOwnedIdleList = observedDetailSupported && ownsTask(PRIVATE_MESSAGES_TASK_ID) &&
+            (!startupReadinessCoordinator.initializationPending ||
+                startupReadinessCoordinator.workAreaConfirmed) && sessionTransitionTask == null &&
+            sessionManagerState in setOf(
+                SessionManagerState.WAITING_FOR_SESSION_LIST,
+                SessionManagerState.POSITIONING_SESSION_LIST_AT_TOP,
+                SessionManagerState.POSITIONING_SESSION_LIST_AT_BOTTOM,
+                SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
+            )
+        val pendingListRecovery = observedDetailSupported && recoveryContext.pending &&
+            recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
+            recoveryContext.runGeneration == currentRunGeneration() &&
+            messageListCheckpointForUnified != null &&
+            (recoveryContext.routeId == messageListRecoveryRoute.routeId ||
+                (recoveryContext.routeId == chatDetailRecoveryRoute.routeId &&
+                    privateListRecoveryReasonAfterObservedDetail != null))
+        val eligible = (pendingListRecovery || pageSelectedPrivateStartupVerificationPending || alreadyOwnedIdleList) &&
+            sessionRunStarted && isAiReplyActive() && !receivedGreetingsTaskActive &&
+            !receivedGreetingsOwnershipRecheckPending && !awaitingNormalInboxAfterGreetingsReturn &&
+            (pendingListRecovery || (!recoveryContext.pending && !messageListRecoveryVerificationPending)) &&
+            !pollingRoundPending && suspendedPrivateRecovery == null &&
+            !confirmedPrivateReturnAwaitingRecovery && !currentSessionSendConfirmed &&
+            currentSessionCandidate == null && currentSessionKey == null &&
+            currentSessionBinding == null && expectedPrivateSessionDetailNavigation == null &&
+            privateMessagesTraversalTaskExecutor.currentUnfinishedSession() == null &&
+            !privateMessagesTraversalTaskExecutor.recoveringUnfinishedSession &&
+            activeSessionGestureRequestId == null && !isConversationDraftPending() &&
+            !isSendConfirmationPending() && !isSendControlRecoveryPending() &&
+            taskOwnership.activeTaskId()?.let { it == PRIVATE_MESSAGES_TASK_ID } != false
+        if (!eligible || snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE) {
+            pageRecoveryVerificationGate.reset(gate)
+            return false
+        }
+
+        // Retire old locators even on the first sample; this subpage is not yet a bound visit.
+        lastPageInspection = snapshot
+        unmatchedNavigationObservationPending = false
+        val windowKey = windowSessionKey(snapshot)
+        val surfaceKey = chatSurfaceKey(snapshot)
+        val verified = observation.status == ObservationStatus.CONFIRMED_PAGE &&
+            matchedRouteId == chatDetailRecoveryRoute.routeId &&
+            snapshot.packageName == targetPackage() && snapshot.windowIdentityKey() != null &&
+            windowKey != null && surfaceKey != null && snapshot.scannedNodeCount > 0 &&
+            snapshot.messageListCount > 0 && snapshot.editableInputCount > 0 &&
+            !snapshot.nodeTreeProbeTruncated && !userInteractionActive
+        val readiness = if (verified) runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()
+            else null
+        val admission = AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(), readiness)
+        if (!verified || !admission.allowed) {
+            pageRecoveryVerificationGate.reset(gate)
+            if (pendingListRecovery) recoveryContext.invalidateFingerprint()
+            onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_WAIT reason=${if (!verified) "PAGE_EVIDENCE" else admission.reasonCode}")
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        // The existing lease is retained, but this unbound page cannot start message work.
+        if (ownsTask(PRIVATE_MESSAGES_TASK_ID) && !observedDetailSupported) {
+            pageRecoveryVerificationGate.reset(gate)
+            return true
+        }
+        val generation = currentRunGeneration()
+        // Check the actual detail evidence before changing any pending recovery route.
+        val target = if (observedDetailSupported) ObservedPrivateChatIdentityTarget(
+            snapshot, generation, java.util.UUID.randomUUID().toString()
+        ) else null
+        if (pendingListRecovery && (target?.sourceWindow() == null ||
+                !prepareUnboundPrivateDetailRecovery(observation.observationGeneration))
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            recoveryContext.invalidateFingerprint()
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        val key = "$generation|$windowKey|$surfaceKey|${if (pendingListRecovery) recoveryContext.checkpointId else ""}"
+        val stable = pageRecoveryVerificationGate.observe(gate, key)
+        val recoveryStable = !pendingListRecovery || recoveryContext.observeTarget(chatDetailRecoveryRoute.routeId, key)
+        if (!stable || !recoveryStable) {
+            onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_VERIFYING samples=1/2;binding=false")
+            scheduleFullInspectionAfter(350L)
+            return true
+        }
+        // Re-evaluate the live Android gate before claiming through the existing coordinator.
+        val beforeClaim = runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()
+        if (generation != currentRunGeneration() || !isAiReplyActive() ||
+            !AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(), beforeClaim).allowed ||
+            ((pendingListRecovery || !ownsTask(PRIVATE_MESSAGES_TASK_ID)) &&
+                !claimTaskOwnership(PRIVATE_MESSAGES_TASK_ID, "已启动私人消息任务的聊天子页面双快照验证完成",
+                    verifiedHandoff = pendingListRecovery))
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            if (pendingListRecovery) recoveryContext.invalidateFingerprint()
+            onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_WAIT reason=LEASE_OR_READINESS")
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        if (pendingListRecovery && (!ensureAndroidRecoveryReady(snapshot, "OBSERVED_DETAIL_BEFORE_RESUME_ACK") ||
+                !completeUnboundPrivateDetailRecovery(observation.observationGeneration))
+        ) {
+            pageRecoveryVerificationGate.reset(gate)
+            recoveryContext.invalidateFingerprint()
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        pageRecoveryVerificationGate.reset(gate)
+        onLog("PRIVATE_STARTUP_DETAIL_OWNERSHIP_RESTORED task=$PRIVATE_MESSAGES_TASK_ID;binding=false;listStartupPreserved=true")
+        // The list initialization and cursor stay unchanged. No synthetic row/tap ticket.
+        if (target != null) {
+            val sourceWindowKey = snapshot.windowIdentityKey()
+            if (target.sourceWindow() != null && sourceWindowKey != null && windowKey != null && surfaceKey != null) {
+                invalidatePendingMessageRead()
+                currentSessionBinding = CurrentSessionBinding(
+                    sourceWindowKey, null, null, null, windowKey, surfaceKey, observedDetailTarget = target,
+                    observedTaskLease = taskCoordinator?.currentLease()
+                )
+                onLog("OBSERVED_PRIVATE_CHAT_BOUND source=LIVE_DETAIL;identityVerified=false;listCursorPreserved=true")
+                scheduleFullInspectionAfter(0L)
+            }
+        }
+        return true
+    }
+
+    /** Rebind only the execution destination of the original persisted list checkpoint.
+     * Neither a route selection nor a retained lease authorizes identity capture.
+     */
+    private fun prepareUnboundPrivateDetailRecovery(observationGeneration: Long): Boolean {
+        val checkpoint = messageListCheckpointForUnified ?: return false
+        val saved = recoveryContext.snapshot()
+        val old = recoveryTransaction.currentIdentity() ?: return false
+        if (!recoveryContext.matches(old) || old.taskId != PRIVATE_MESSAGES_TASK_ID ||
+            old.runGeneration != currentRunGeneration() || observationGeneration <= old.observationGeneration ||
+            (!saved.checkpointSaved && !saved.checkpointLoaded) ||
+            runCatching { privateMessagesCheckpointRepository?.load() }.getOrNull() != checkpoint
+        ) return false
+        if (old.routeId == chatDetailRecoveryRoute.routeId &&
+            privateListRecoveryReasonAfterObservedDetail != null
+        ) return true
+        if (old.routeId != messageListRecoveryRoute.routeId) return false
+        val reason = saved.reason ?: return false
+        val next = old.copy(routeId = chatDetailRecoveryRoute.routeId, observationGeneration = observationGeneration)
+        if (recoveryTransactionManager?.rebindPendingRoute(old, next) == false) return false
+
+        // Cancel only the stale list verifier. The live executor and durable cursor
+        // are not restored/reset; they will be independently verified on the list.
+        messageListCheckpointVerifier.reset()
+        privateListRecoveryReasonAfterObservedDetail = reason
+        recoveryContext.request(next.taskId, reason, next.routeId, next.runGeneration,
+            next.checkpointId, next.observationGeneration)
+        recoveryContext.markCheckpointSaved()
+        if (saved.checkpointLoaded) recoveryContext.markCheckpointLoaded()
+        recoveryTransaction.reset()
+        recoveryTransaction.activate(next)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.CheckpointLoaded(
+            RecoveryTransactionEvent.Source.PAGE_OBSERVATION))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+        onLog("OBSERVED_PRIVATE_RECOVERY_ROUTE_REBOUND checkpointId=${next.checkpointId};listCursorPreserved=true;listVerified=false")
+        return true
+    }
+
+    /** Two fresh detail samples and the current lease have already been verified.
+     * Complete the detail destination only, never acknowledge a list checkpoint proof.
+     */
+    private fun completeUnboundPrivateDetailRecovery(observationGeneration: Long): Boolean {
+        val old = recoveryTransaction.currentIdentity() ?: return false
+        if (!recoveryContext.matches(old) || old.routeId != chatDetailRecoveryRoute.routeId ||
+            old.runGeneration != currentRunGeneration() || !recoveryContext.fingerprintVerified ||
+            !ownsTask(PRIVATE_MESSAGES_TASK_ID) || userInteractionActive ||
+            observationGeneration <= old.observationGeneration
+        ) return false
+        val identity = old.copy(observationGeneration = observationGeneration)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true), identity)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true), identity)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested, identity)
+        if (recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted, identity) !=
+            RecoveryTransactionState.ACTIVE ||
+            recoveryTransactionManager?.snapshot(PRIVATE_MESSAGES_TASK_ID) != null
+        ) return false
+        recoveryContext.markUiOwnershipTransferred()
+        recoveryContext.clear()
+        recoveryTransaction.reset()
+        messageListCheckpointForUnified = null
+        messageListRecoveryVerificationPending = false
+        // A fresh list recovery will revalidate the original fault and the latest
+        // ledger. Do not mark the list initialized or advance its scan phase here.
+        sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
+        onLog("OBSERVED_PRIVATE_RECOVERY_DETAIL_READY checkpointId=${identity.checkpointId};listVerified=false;identityVerified=false")
+        return true
+    }
+
+    private fun retireObservedPrivateDetail(reason: String) {
+        val target = currentSessionBinding?.observedDetailTarget ?: return
+        currentSessionBinding = null
+        runCatching { chatSessionManagementPort.cancelObservedPrivateChatIdentityCapture(target) }
+        invalidatePendingMessageRead()
+        pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
+        onLog("OBSERVED_PRIVATE_CHAT_RETIRED reason=$reason;listCursorPreserved=true")
+    }
+
+    private fun observedTaskLeaseCurrent(binding: CurrentSessionBinding): Boolean =
+        if (taskCoordinator == null) ownsTask(PRIVATE_MESSAGES_TASK_ID)
+        else binding.observedTaskLease?.let { taskCoordinator.isCurrent(it) } == true
+
+    private fun observedPrivateBindingMatches(snapshot: ChatPageSnapshot): Boolean {
+        val binding = currentSessionBinding ?: return false
+        val target = binding.observedDetailTarget ?: return false
+        val identity = binding.observedVerifiedIdentity ?: return false
+        return sessionRunStarted && isAiReplyActive() && !receivedGreetingsTaskActive &&
+            target.runGeneration == currentRunGeneration() && observedTaskLeaseCurrent(binding) &&
+            identity.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED && !identity.contactId.isNullOrBlank() &&
+            snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE && snapshot.packageName == targetPackage() &&
+            snapshot.conversationIdentityKey() == target.snapshot.conversationIdentityKey() &&
+            ChatSessionManagementPolicy.normalizeSessionTitle(snapshot.chatTitleText) ==
+                ChatSessionManagementPolicy.normalizeSessionTitle(target.snapshot.chatTitleText) &&
+            binding.matches(snapshot, windowSessionKey(snapshot)) &&
+            (!binding.observedBusinessAdmitted ||
+                currentSessionKey == ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId))
+    }
+
+    private fun observedPrivateDetailVerified(snapshot: ChatPageSnapshot): Boolean =
+        observedPrivateBindingMatches(snapshot) && canPerformPrivateMessagesUiAction() && !userInteractionActive
+
+    private fun admitObservedPrivateBusiness(snapshot: ChatPageSnapshot): Boolean {
+        val binding = currentSessionBinding ?: return false
+        if (binding.observedBusinessAdmitted) return observedPrivateDetailVerified(snapshot)
+        val identity = binding.observedVerifiedIdentity ?: return false
+        val key = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId)
+        val title = snapshot.chatTitleText?.trim() ?: return false
+        val peer = title.takeIf { it.startsWith("与") && it.endsWith("对话") }
+            ?.removePrefix("与")?.removeSuffix("对话") ?: return false
+        val window = windowSessionKey(snapshot) ?: return false
+        if (!observedPrivateDetailVerified(snapshot) || key.isBlank() ||
+            chatSessionManagementPort.isSessionIdentityBlocked(key)) return false
+        val executor = privateMessagesTraversalTaskExecutor
+        // Re-use the retained entry after a transient repository write failure.
+        val existing = executor.currentUnfinishedSession()
+        if (existing == null) {
+            if (!executor.beginVerifiedObservedDetail(snapshot, key, peer, window, System.currentTimeMillis())) {
+                onLog("OBSERVED_PRIVATE_BUSINESS_WAIT reason=UNFINISHED_IDENTITY_NOT_UNIQUE")
+                return false
+            }
+        } else if (existing.verifiedKey != key || existing.conversationKey != snapshot.conversationIdentityKey() ||
+            currentSessionKey != key || currentSessionWindowKey != window) return false
+        if (runCatching { privateMessagesCheckpointRepository?.save(executor.checkpoint()) }.isFailure) {
+            onLog("OBSERVED_PRIVATE_BUSINESS_WAIT reason=CHECKPOINT_NOT_SAVED")
+            return false
+        }
+        sessionManagerState = SessionManagerState.READING_SESSION
+        currentSessionSendConfirmed = false
+        currentSessionBinding = binding.copy(observedBusinessAdmitted = true)
+        onLog("OBSERVED_PRIVATE_BUSINESS_ADMITTED recovered=${executor.recoveringUnfinishedSession};listCursorPreserved=true")
+        return true
+    }
+
+    private fun handleObservedPrivateDetail(
+        observation: ObservationResult,
+        snapshot: ChatPageSnapshot,
+        matchedRouteId: String?
+    ): Boolean {
+        val binding = currentSessionBinding ?: return false
+        val target = binding.observedDetailTarget ?: return false
+        // The unified recovery transaction has precedence over this ordinary observer.
+        if (recoveryContext.pending) return false
+        if (binding.observedBusinessAdmitted) {
+            val sameDetail = observation.status == ObservationStatus.CONFIRMED_PAGE &&
+                matchedRouteId == chatDetailRecoveryRoute.routeId && observedPrivateBindingMatches(snapshot)
+            if (!sameDetail) {
+                requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "OBSERVED_DETAIL_DEPARTED")
+                scheduleFullInspectionAfter(0L)
+                return true
+            }
+            if (sessionManagerState == SessionManagerState.RETURNING_TO_SESSION_LIST || userInteractionActive) return true
+            if (currentSessionSendConfirmed) {
+                // Receipt/count already recorded. Retry only the checkpoint, not the send.
+                if (runCatching { privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint()) }.isSuccess) {
+                    if (sessionTransitionTask == null) scheduleReturnToSessionList(snapshot)
+                } else scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                return true
+            }
+            if (!observedPrivateDetailVerified(snapshot) ||
+                !AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(),
+                    runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()).allowed
+            ) {
+                scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                return true
+            }
+            if (!isConversationDraftPending() || isSendConfirmationPending() || isSendControlRecoveryPending()) {
+                readVisibleMessages(snapshot)
+            }
+            return true
+        }
+        if (!sessionRunStarted || !isAiReplyActive() || receivedGreetingsTaskActive ||
+            !ownsTask(PRIVATE_MESSAGES_TASK_ID) ||
+            receivedGreetingsOwnershipRecheckPending || awaitingNormalInboxAfterGreetingsReturn ||
+            target.runGeneration != currentRunGeneration() || !observedTaskLeaseCurrent(binding) ||
+            isSendConfirmationPending() || isSendControlRecoveryPending() || isConversationDraftPending()
+        ) {
+            retireObservedPrivateDetail("TASK_OR_TRANSACTION_CHANGED")
+            return false
+        }
+        if (observation.status != ObservationStatus.CONFIRMED_PAGE ||
+            matchedRouteId != chatDetailRecoveryRoute.routeId ||
+            snapshot.packageName != targetPackage() || snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE
+        ) {
+            if (observation.status != ObservationStatus.CONFIRMED_PAGE &&
+                chatSessionManagementPort.hasPendingObservedPrivateChatIdentityCapture(target)
+            ) {
+                scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                return true
+            }
+            retireObservedPrivateDetail("PAGE_CHANGED")
+            return false
+        }
+        val originalWindow = target.sourceWindow()
+        val currentWindow = snapshot.messageListTarget?.window
+        val sameSource = originalWindow != null && currentWindow != null &&
+            originalWindow.packageName == currentWindow.packageName &&
+            originalWindow.windowId == currentWindow.windowId &&
+            snapshot.conversationIdentityKey() == target.snapshot.conversationIdentityKey()
+        val readiness = runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()
+        val windowKey = windowSessionKey(snapshot)
+        val surfaceKey = chatSurfaceKey(snapshot)
+        if (!sameSource || windowKey == null || surfaceKey == null) {
+            retireObservedPrivateDetail("DETAIL_IDENTITY_CHANGED")
+            scheduleFullInspectionAfter(350L)
+            return true
+        }
+        if (!AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(), readiness).allowed ||
+            userInteractionActive
+        ) {
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        if (observedPrivateDetailVerified(snapshot)) {
+            if (admitObservedPrivateBusiness(snapshot)) readVisibleMessages(snapshot)
+            else scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        val returned = chatSessionManagementPort.hasObservedPrivateChatIdentityReturn(target)
+        if (!binding.matches(snapshot, windowKey) && !returned) {
+            retireObservedPrivateDetail("DETAIL_WINDOW_CHANGED_WITHOUT_RETURN")
+            scheduleFullInspectionAfter(350L)
+            return true
+        }
+        val outcome = runCatching { chatSessionManagementPort.observeContactIdentityCapture(target) }
+            .getOrElse { ContactIdentityCaptureOutcome.waiting(ContactIdentityCaptureRequestResult.RETRY_LATER) }
+        val identity = outcome.verifiedIdentity
+        if (identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+            !identity.contactId.isNullOrBlank() && returned &&
+            chatSessionManagementPort.consumeObservedPrivateChatIdentityReturn(target)
+        ) {
+            currentSessionBinding = binding.copy(chatWindowKey = windowKey, chatSurfaceKey = surfaceKey,
+                observedVerifiedIdentity = identity)
+            onLog("OBSERVED_PRIVATE_CHAT_IDENTITY_VERIFIED source=PROFILE_RETURN;listCursorPreserved=true")
+            if (admitObservedPrivateBusiness(snapshot)) readVisibleMessages(snapshot)
+            else scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+        } else {
+            // No name-only fallback or cached list ID for a detail-origin visit.
+            onLog("OBSERVED_PRIVATE_CHAT_IDENTITY_WAIT request=${outcome.request.name};verified=false")
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+        }
+        return true
+    }
+
     private fun claimTaskOwnership(taskId: String, reason: String, verifiedHandoff: Boolean = false): Boolean {
         val claimed = when (taskId) {
             PrivateMessagesTaskController.TASK_ID -> !receivedGreetingsOwnershipRecheckPending &&
@@ -3579,9 +4145,18 @@ class AiReplyObservationRuntime(
         if (!sessionRunStarted || receivedGreetingsTaskActive || !isAiReplyActive() ||
             !ownsTask(PRIVATE_MESSAGES_TASK_ID)
         ) return false
+        val binding = currentSessionBinding ?: return false
+        if (binding.observedBusinessAdmitted) {
+            val identity = binding.observedVerifiedIdentity ?: return false
+            val key = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId)
+            return key.isNotBlank() && currentSessionKey == key &&
+                binding.observedDetailTarget?.runGeneration == currentRunGeneration() &&
+                observedTaskLeaseCurrent(binding) && binding.chatWindowKey == currentSessionWindowKey &&
+                identity.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+                !chatSessionManagementPort.isSessionIdentityBlocked(key)
+        }
         val candidate = currentSessionCandidate ?: return false
         val expected = expectedPrivateSessionDetailNavigation ?: return false
-        val binding = currentSessionBinding ?: return false
         val chatWindowKey = currentSessionWindowKey ?: return false
         val selectedKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
         val sourceWindow = candidate.rowTarget.window
@@ -3598,15 +4173,136 @@ class AiReplyObservationRuntime(
 
     /** Recheck the actual detail surface independently of the saved source-row evidence. */
     private fun isVerifiedRecoveredPrivateDetail(snapshot: ChatPageSnapshot): Boolean =
-        hasBoundPrivateDetailRecoverySession() &&
+        if (currentSessionBinding?.observedBusinessAdmitted == true) {
+            hasBoundPrivateDetailRecoverySession() && observedPrivateBindingMatches(snapshot)
+        } else hasBoundPrivateDetailRecoverySession() &&
             snapshot.packageName == targetPackage() &&
             snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             isExpectedPrivateSessionDetail(snapshot) &&
             currentSessionHeaderMatchMode(snapshot) != null &&
             windowSessionKey(snapshot) != null
 
+    /**
+     * Retire the old detail execution route, not its business progress. Only called
+     * with a freshly confirmed destination and Android readiness. The existing
+     * list verifier (or cross-task handoff) must still earn fresh proof and ownership.
+     */
+    private fun retargetInterruptedPrivateDetail(
+        observationGeneration: Long,
+        confirmedPrivateInboxWithPendingSend: Boolean = false
+    ): Boolean {
+        val old = recoveryTransaction.currentIdentity() ?: return false
+        val saved = recoveryContext.snapshot()
+        if (!sessionRunStarted || !isAiReplyActive() || receivedGreetingsTaskActive ||
+            !recoveryContext.matches(old) || old.taskId != PRIVATE_MESSAGES_TASK_ID ||
+            old.routeId != chatDetailRecoveryRoute.routeId ||
+            old.runGeneration != currentRunGeneration() ||
+            observationGeneration <= old.observationGeneration ||
+            !saved.checkpointSaved || isSendControlRecoveryPending() ||
+            (isSendConfirmationPending() && !confirmedPrivateInboxWithPendingSend)
+        ) return false
+
+        val traversal = privateMessagesTraversalTaskExecutor
+        var checkpoint = if (privateMessagesCheckpointRepository != null) {
+            privateMessagesCheckpointRepository.load() ?: return false
+        } else traversal.checkpoint()
+        val listReason = privateListRecoveryReasonAfterObservedDetail ?: saved.reason ?: return false
+        val next = old.copy(
+            routeId = messageListRecoveryRoute.routeId,
+            observationGeneration = observationGeneration,
+            unknownReason = listReason
+        )
+        // Only the independently recognized private inbox may retire a submitted
+        // send's live hold. The coordinator checks its existing durable journal
+        // before invalidating callbacks; neither this step nor route selection
+        // grants the list lease or claims that the message was sent.
+        if (isSendConfirmationPending()) {
+            // The durable send must have a corresponding original visit.
+            if (traversal.currentUnfinishedSession() == null) {
+                onLog("私聊手动返回[DEFER_REJECTED]：缺少原未完成会话检查点；保持只读恢复")
+                return false
+            }
+            if (!runCatching { deferPrivateSendForManualReturn() }.getOrDefault(false) ||
+                isSendConfirmationPending() || isSendControlRecoveryPending() ||
+                isConversationDraftPending()
+            ) {
+                onLog("私聊手动返回[DEFER_REJECTED]：原发送证据或执行资格尚未安全释放；保持只读恢复")
+                return false
+            }
+            if (!traversal.deferCurrentUnfinishedSend()) return false
+            deferredSendProofRetryAttempt = 0
+            currentSessionSendConfirmed = false
+            onLog("私聊手动返回[CONTINUE_LIST]：未确认发送已落盘；原会话延期；等待列表双快照和操作权")
+        }
+        // A failed save/rebind keeps this route pending. Retry the same parked
+        // checkpoint before exposing it to the independent list verifier.
+        if (traversal.currentUnfinishedSession()?.disposition ==
+            UnfinishedPrivateSessionDisposition.SEND_DEFERRED_THIS_ROUND
+        ) {
+            checkpoint = traversal.checkpoint()
+            if (runCatching { privateMessagesCheckpointRepository?.save(checkpoint) }.isFailure) {
+                onLog("AI 私聊业务[DEFER_CHECKPOINT_WAIT]：延期记录尚未写入；保持原恢复路由")
+                return false
+            }
+            onLog("AI 私聊业务[DEFERRED_THIS_ROUND]：保留原业务；本轮不重新打开延期会话")
+        }
+        // Existing runtime reset invalidates model callbacks and preserves durable
+        // evidence for ordinary pre-send detail interruption.
+        if (isConversationDraftPending()) {
+            if (runCatching { onDraftRuntimeReset() }.isFailure ||
+                isConversationDraftPending() || isSendConfirmationPending() ||
+                isSendControlRecoveryPending()
+            ) return false
+        }
+        if (recoveryTransactionManager?.rebindPendingRoute(old, next) == false) return false
+
+        messageListCheckpointVerifier.reset()
+        pageRecoveryVerificationGate.reset()
+        recoveryContext.request(
+            taskId = next.taskId,
+            recoveryReason = listReason,
+            routeId = next.routeId,
+            generation = next.runGeneration,
+            recoveryCheckpointId = next.checkpointId,
+            pageObservationGeneration = next.observationGeneration
+        )
+        recoveryContext.markCheckpointSaved()
+        if (saved.checkpointLoaded) recoveryContext.markCheckpointLoaded()
+        recoveryTransaction.reset()
+        recoveryTransaction.activate(next)
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.CheckpointLoaded(
+            RecoveryTransactionEvent.Source.PAGE_OBSERVATION
+        ))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
+
+        // Do not restore/reset the traversal executor: its existing cursor and
+        // round ledger belong to the checkpoint, not to the departed UI window.
+        messageListCheckpointForUnified = checkpoint
+        messageListCheckpointRestored = true
+        messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION
+        sessionActionGeneration += 1L
+        invalidatePendingMessageRead()
+        latestPrivateMessageBatch = null
+        expectedPrivateSessionDetailNavigation = null
+        retireObservedPrivateDetail("DETAIL_TO_LIST_RECOVERY")
+        currentSessionBinding = null
+        privateMessagesTraversalTaskExecutor.clearCurrentSession()
+        // Retire the obsolete one-shot signal; this is not detail-return proof.
+        if (chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()) {
+            onLog("AI 身份回接[REQUEST_RETIRED]：旧详情页执行路由已退出；不启动OCR或草稿")
+        }
+        lastIdentityReturnNotConsumedReason = null
+        sessionManagerState = SessionManagerState.PAUSED
+        onLog("统一恢复[DETAIL_TO_LIST_ROUTE_REBOUND]：checkpointId=${next.checkpointId}；" +
+            "原业务检查点保留；旧详情回调失效；等待列表独立验证及UI操作权")
+        return true
+    }
+
     /** Single pause/checkpoint entry used by page-route changes and UNKNOWN observations. */
     private fun requestUnifiedPauseAndCheckpoint(taskId: String, reason: String): Boolean {
+        if (currentSessionBinding?.observedBusinessAdmitted != true) {
+            retireObservedPrivateDetail("UNIFIED_RECOVERY")
+        }
         if (recoveryContext.pending) {
             if (taskId == recoveryContext.sourceTaskId) {
                 onLog("统一恢复[TRANSACTION_REUSED]：task=$taskId；checkpointId=${recoveryContext.checkpointId}；" +
@@ -3631,11 +4327,10 @@ class AiReplyObservationRuntime(
             confirmedPrivateReturnAwaitingRecovery = true
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
         }
-        // A submitted but unconfirmed private send must keep its chat-detail recovery
-        // destination across any route change. A list checkpoint cannot authorize new
-        // traversal while the original send still requires read-only verification.
-        // This only selects the recovery route: fresh target identity, Android READY,
-        // two independent snapshots and the UI lease remain mandatory for resumption.
+        // Initially keep a submitted send on its detail recovery route. Only a
+        // fresh confirmed private inbox and a durable deferral may rebind it;
+        // UNKNOWN and a different chat never release the original send hold.
+        // Android READY, two independent snapshots and the UI lease remain mandatory.
         val pendingPrivateSend = taskId == PRIVATE_MESSAGES_TASK_ID &&
             !receivedGreetingsTaskActive && isSendConfirmationPending()
         // Other private recoveries retain the primary list route, except the existing
@@ -3652,6 +4347,7 @@ class AiReplyObservationRuntime(
             messageListCheckpointVerifier.reset()
             messageListCheckpointForUnified = if (recoverCurrentChatDetail) null
                 else privateMessagesCheckpointRepository?.load()
+            if (!recoverCurrentChatDetail) messageListCheckpointRestored = true
             messageListCheckpointRestoreSource = RecoveryCheckpointRestoreSource.PAGE_OBSERVATION
             if (recoverCurrentChatDetail) {
                 if (pendingPrivateSend) {
@@ -3672,12 +4368,15 @@ class AiReplyObservationRuntime(
             RECEIVED_GREETINGS_TASK_ID -> receivedGreetingsCheckpointForUnified?.savedAtEpochMs
             else -> null
         }
+        val recoveryReason = if (taskId == PRIVATE_MESSAGES_TASK_ID && route.routeId == messageListRecoveryRoute.routeId) {
+            privateListRecoveryReasonAfterObservedDetail ?: reason
+        } else reason
         activateRecoveryIdentity(
-            taskId, reason, durableRecoveryCheckpointId(taskId, savedAtEpochMs, reason),
+            taskId, recoveryReason, durableRecoveryCheckpointId(taskId, savedAtEpochMs, recoveryReason),
             routeId = route.routeId
         )
         recoveryContext.markCheckpointSaved()
-        recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(reason))
+        recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage(recoveryReason))
         recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
         // A new recovery transaction also invalidates pending structure/OCR callbacks.
         // Their old batch cannot resume identity processing or start a draft before route proof.
@@ -3811,6 +4510,11 @@ class AiReplyObservationRuntime(
     fun isReceivedGreetingsRecoveryPending(): Boolean =
         recoveryContext.sourceTaskId == RECEIVED_GREETINGS_TASK_ID
 
+    /** Read-only veto for an admitted detail-origin private visit during recovery/user touch. */
+    fun isObservedPrivateRecoveryPending(): Boolean =
+        currentSessionBinding?.observedBusinessAdmitted == true &&
+            (recoveryContext.pending || userInteractionActive)
+
     /** The lease is a reserved task slot; the recovery context gates actual UI actions. */
     private fun canPerformPrivateMessagesUiAction(): Boolean =
         !recoveryContext.pending && !receivedGreetingsOwnershipRecheckPending &&
@@ -3824,17 +4528,20 @@ class AiReplyObservationRuntime(
         }
     }
 
-    /**
-     * Records only a confirmed successful send, never a message merely observed in history.
-     * The send executor must call this after the target app confirms the message was accepted.
-     */
+    /** A title-only traversal key is never a durable contact identity. */
+    private fun verifiedPrivateLedgerContactKey(): String? {
+        if (receivedGreetingsTaskActive || sessionManagerState != SessionManagerState.READING_SESSION) return null
+        val binding = currentSessionBinding ?: return null
+        val identity = if (binding.observedBusinessAdmitted) binding.observedVerifiedIdentity
+            else currentSessionCandidate?.contactIdentity
+        if (identity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) return null
+        val key = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId)
+        return key.takeIf { it.isNotBlank() && it == currentSessionKey }
+    }
+
+    /** Confirmed private text sends only. No greeting count, no title-only durable identity. */
     fun recordSuccessfulSend(sendConfirmationId: String): ContactSendCountUpdate {
-        val contactKey = if (receivedGreetingsTaskActive) {
-            // The avatar profile supplied the platform ID; never use a display-name key.
-            greetingChatBinding?.contactId?.let(ChatSessionManagementPolicy::stableSessionKeyForVerifiedContact)
-        } else {
-            currentSessionKey.takeIf { sessionManagerState == SessionManagerState.READING_SESSION }
-        }
+        val contactKey = verifiedPrivateLedgerContactKey()
         val interceptionThreshold = messageInterceptionThreshold().coerceAtLeast(0)
         val imageThreshold = imageSendThreshold().coerceAtLeast(0)
         val update = contactMessageLedger.recordSuccessfulSend(
@@ -3843,35 +4550,25 @@ class AiReplyObservationRuntime(
             interceptionThreshold = interceptionThreshold,
             imageThreshold = imageThreshold
         )
-        if (update.imageThresholdReachedNow) {
-            onLog(
-                "AI 联系人临时账本：当前会话达到图片发送阈值=$imageThreshold；" +
-                    "图片发送事务尚未接入，本次仅保留已达阈值状态"
-            )
-        }
-        if (update.thresholdReachedNow) {
-            contactKey?.let(pendingInterceptionContactKeys::add)
-            onLog(
-                "AI 联系人临时账本：当前会话达到发送上限=${update.threshold}；" +
-                    "已暂停该联系人后续发送并等待消息拦截开关确认"
-            )
+        if (update.imageThresholdReachedNow || update.thresholdReachedNow) {
+            onLog("PRIVATE_CONTACT_LEDGER FOLLOW_UP_PENDING;imageDue=${update.imageThresholdReachedNow};" +
+                "interceptionDue=${update.thresholdReachedNow}")
+        } else if (update.status == ContactSendRecordStatus.INVALID_INPUT) {
+            onLog("PRIVATE_CONTACT_LEDGER RECORD_SKIPPED;reason=UNVERIFIED_PRIVATE_CONTACT_OR_INVALID_RECEIPT")
         }
         return update
     }
 
-    /**
-     * Clears the oldest threshold-reached contact only after an external controller has
-     * independently verified that the intended intercept switch is ON. This survives the
-     * normal return-to-inbox transition, which clears currentSessionKey.
-     */
-    fun confirmMessageInterceptionEnabled(): Boolean {
-        val contactKey = pendingInterceptionContactKeys.firstOrNull() ?: return false
-        val cleared = contactMessageLedger.confirmInterceptionEnabled(contactKey)
-        if (cleared) {
-            pendingInterceptionContactKeys.remove(contactKey)
-            onLog("AI 联系人临时账本：消息拦截状态已确认开启；该联系人临时数据已清除")
+    /** The later private child transaction must supply its exact verified contact and checkpoint.
+     * No FIFO contact selection and no implicit use of whatever chat is currently visible. */
+    fun confirmMessageInterceptionEnabled(
+        contactKey: String,
+        expected: ContactFollowUpCheckpoint
+    ): Boolean {
+        if (receivedGreetingsTaskActive || verifiedPrivateLedgerContactKey() != contactKey) return false
+        return contactMessageLedger.confirmInterceptionEnabled(contactKey, expected).also { confirmed ->
+            if (confirmed) onLog("PRIVATE_CONTACT_LEDGER INTERCEPTION_CONFIRMED;contactRecordRetained=true")
         }
-        return cleared
     }
 
     /** Request a fresh observation for page-driven startup/handoff without replacing
@@ -3891,6 +4588,11 @@ class AiReplyObservationRuntime(
                     receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING))
 
     fun requestPageRouteObservation() {
+        if (isPrivateFollowUpActive()) {
+            if (isAiReplyActive() && sessionRunStarted && pageInspectionTask == null)
+                scheduleFullInspectionAfter(fullInspectionDebounceMs)
+            return
+        }
         if (!isAiReplyActive() || !sessionRunStarted ||
             hasProtectedPrivateInspection() || hasProtectedSendInspection()
         ) return
@@ -3909,6 +4611,7 @@ class AiReplyObservationRuntime(
 
     private fun scheduleInitialObservation(selectedTaskId: String?) {
         pageSelectedPrivateStartupVerificationPending = false
+        pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
         resetCrossTaskGreetingsHandoffRetry()
         val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
         if (failure != null) {
@@ -3925,6 +4628,7 @@ class AiReplyObservationRuntime(
         startupReadinessCoordinator.cancelRecovery()
         recoveryContext.clear()
         suspendedPrivateRecovery = null
+        privateListRecoveryReasonAfterObservedDetail = null
         messageListCheckpointVerifier.reset()
         receivedGreetingsCheckpointVerifier.reset()
         messageListCheckpointForUnified = null
@@ -4174,6 +4878,10 @@ class AiReplyObservationRuntime(
 
     /** Schedules bounded page or known-region inspection from a normalized, redacted event. */
     fun schedule(event: AccessibilityEventEnvelope) {
+        if (isPrivateFollowUpActive()) {
+            requestPageRouteObservation()
+            return
+        }
         if (!chatPagePort.supportsTargetPackage(targetPackage())) return
         // Navigation-hit verification is an ephemeral adapter concern and must remain active
         // even when durable sample capture is off. The port implementation only persists events
@@ -4232,6 +4940,7 @@ class AiReplyObservationRuntime(
             }
         }
         if (windowTransition || chatListNavigation) {
+            pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
             // Invalidate before scheduling a debounced inspection. An OCR callback that returns
             // during the debounce window must not be delivered to a different chat/session.
             invalidatePendingMessageRead()
@@ -4292,12 +5001,29 @@ class AiReplyObservationRuntime(
      * complete asynchronously; message bodies remain ephemeral and are never logged here.
      */
     private fun readVisibleMessages(snapshot: ChatPageSnapshot) {
+        if (isPrivateFollowUpActive()) return
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
         if (sessionRunStarted && recoveryContext.pending) {
             onLog("AI 身份业务续接[READ_DEFERRED]：恢复事务未完成；禁止旧消息批次启动 OCR 或草稿")
             return
         }
         if (sessionRunStarted) {
+            if (currentSessionBinding?.observedDetailTarget != null) {
+                if (currentSessionBinding?.observedBusinessAdmitted == true &&
+                    observedPrivateDetailVerified(snapshot) &&
+                    sessionManagerState == SessionManagerState.READING_SESSION &&
+                    !currentSessionSendConfirmed && ocrAdmissionRetryTask == null &&
+                    (!isConversationDraftPending() || isSendConfirmationPending() || isSendControlRecoveryPending())
+                ) messageReadCoordinator.request(snapshot)
+                return
+            }
+            if (pageSelectedPrivateStartupVerificationPending && !receivedGreetingsTaskActive &&
+                currentSessionCandidate == null && currentSessionBinding == null
+            ) {
+                // A startup detail lease is not a conversation binding. The same guard
+                // covers known-region refreshes while the original list startup is pending.
+                return
+            }
             if (receivedGreetingsTaskActive) {
                 // The region-refresh path reaches this entry too. Apply the same draft hold
                 // as full observation, while preserving pending-send and confirmed-return proof.
@@ -4339,6 +5065,11 @@ class AiReplyObservationRuntime(
         active: ChatPageSnapshot
     ): Boolean {
         val expectedWindowSessionKey = windowSessionKey(snapshot)
+        if (currentSessionBinding?.observedDetailTarget != null) {
+            return observedPrivateDetailVerified(snapshot) && observedPrivateDetailVerified(active) &&
+                expectedWindowSessionKey != null && batch.windowSessionKey == expectedWindowSessionKey &&
+                hasSameWindowSession(snapshot, active)
+        }
         if (receivedGreetingsTaskActive || greetingChatBinding != null) {
             val reason = greetingBindingRejectReason(active)
             if (reason != null) {
@@ -4451,14 +5182,19 @@ class AiReplyObservationRuntime(
      * same-conversation and same-task check before giving it to the unchanged send matcher.
      */
     private fun requestPendingSendConfirmationOcr(snapshot: ChatPageSnapshot) {
+        val confirmedBaselineId = nextSegmentConfirmedObservationId()
         val visit = draftVisitToken
         val runGeneration = currentRunGeneration()
         val greetingBinding = greetingChatBinding.takeIf { receivedGreetingsTaskActive }
+        val recoveredVisit = if (!receivedGreetingsTaskActive &&
+            privateMessagesTraversalTaskExecutor.recoveringUnfinishedSession
+        ) privateMessagesTraversalTaskExecutor.currentUnfinishedSession() else null
         messageReadCoordinator.requestOcr(
             snapshot = snapshot,
             limit = 10,
             forceScheduledDelivery = true,
             sendConfirmation = true,
+            confirmedBaselineObservationId = confirmedBaselineId,
             onTimeout = { scheduleDeferredSendProofRecheck("OCR_CALLBACK_TIMEOUT") },
             onFailure = {
                 onLog("AI 发送确认[OCR_REQUEST_FAILED]：只读采集无法启动；保留待核验发送")
@@ -4469,6 +5205,12 @@ class AiReplyObservationRuntime(
                 visit != draftVisitToken || (sessionRunStarted && runGeneration != currentRunGeneration())
             ) {
                 onLog("AI 发送确认[OCR_STALE_IGNORED]：原发送事务或运行代次已变化")
+                return@sendOcr
+            }
+            // Baseline reuse may never become proof of a newly submitted message.
+            if (confirmedBaselineId != null && nextSegmentConfirmedObservationId() != confirmedBaselineId) {
+                onLog("AI 消息段基线[STALE_IGNORED]：原已确认段已变化；禁止将复用结果用于发送确认")
+                scheduleDeferredSendProofRecheck("SEGMENT_BASELINE_CHANGED")
                 return@sendOcr
             }
             val fresh = runCatching { readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY) }.getOrNull()
@@ -4490,10 +5232,241 @@ class AiReplyObservationRuntime(
                 return@sendOcr
             }
             if (deferBusyOcrResult(ocrBatch)) return@sendOcr
-            deferredSendProofRetryAttempt = 0
-            onLog("AI 发送确认[OCR_REVALIDATED]：新鲜聊天页面与任务租约已验证；核对己方消息")
-            handleSendConfirmationResult(onSendTransaction(ocrBatch, snapshot), ocrBatch, snapshot)
+            // Fresh page evidence alone is not progress in send proof. Keep the
+            // read-only backoff until the matcher reports progress or confirmation.
+            // The full validated OCR batch, not the preceding geometry-only read, is the
+            // immediate diff baseline. Never publish a failed or empty OCR as a new baseline.
+            if (ocrBatch.status == MessageReadStatus.SUCCESS &&
+                ocrBatch.ocrFailedTargetCount == 0 && !ocrBatch.truncated
+            ) {
+                if (receivedGreetingsTaskActive) latestGreetingMessageBatch = ocrBatch
+                else latestPrivateMessageBatch = ocrBatch
+            }
+            if (confirmedBaselineId == null) {
+                onLog("AI 发送确认[OCR_REVALIDATED]：新鲜聊天页面与任务租约已验证；核对己方消息")
+            } else {
+                onLog("AI 消息段基线[REVALIDATED]：新鲜聊天与任务租约已验证；仅准备下一段，不确认新发送")
+            }
+            val observedBinding = currentSessionBinding?.takeIf { it.observedBusinessAdmitted }
+            val transaction = if (observedBinding != null) {
+                val entry = privateMessagesTraversalTaskExecutor.currentUnfinishedSession()
+                val key = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(observedBinding.observedVerifiedIdentity?.contactId)
+                if (entry == null || entry.replyRequestKey == null || entry.verifiedKey != key ||
+                    entry.conversationKey != fresh.conversationIdentityKey() || !observedPrivateDetailVerified(fresh) ||
+                    !runCatching { observedPrivateJournalAdmitted(ocrBatch, fresh, entry.openedAtMillis, entry.replyRequestKey) }.getOrDefault(false)
+                ) {
+                    scheduleDeferredSendProofRecheck("OBSERVED_PRIVATE_JOURNAL_WAIT")
+                    return@sendOcr
+                }
+                onRecoveredPrivateSendTransaction(ocrBatch, snapshot, entry.openedAtMillis)
+            } else if (recoveredVisit != null) {
+                val traversal = privateMessagesTraversalTaskExecutor
+                val candidate = currentSessionCandidate
+                if (traversal.currentUnfinishedSession() != recoveredVisit || candidate == null ||
+                    recoveredVisit.conversationKey != fresh.conversationIdentityKey() ||
+                    currentSessionBinding?.matchesRestoredChatSurface(fresh) != true ||
+                    !traversal.verifyUnfinishedIdentity(candidate)
+                ) {
+                    onLog("AI 私聊历史发送[STALE_REVISIT_IGNORED]：原访问或平台身份未重新确认；不补登记")
+                    scheduleDeferredSendProofRecheck("UNFINISHED_SESSION_IDENTITY_WAIT")
+                    return@sendOcr
+                }
+                onRecoveredPrivateSendTransaction(ocrBatch, snapshot, recoveredVisit.openedAtMillis)
+            } else onSendTransaction(ocrBatch, snapshot)
+            handleSendConfirmationResult(transaction, ocrBatch, snapshot)
         }
+    }
+
+    private fun followUpEnabled(action: ContactPendingRecoveryAction): Boolean = when (action) {
+        ContactPendingRecoveryAction.SEND_IMAGE -> imageSendThreshold() > 0
+        ContactPendingRecoveryAction.ENABLE_INTERCEPTION -> messageInterceptionThreshold() > 0
+        ContactPendingRecoveryAction.NONE -> false
+    }
+
+    private fun pendingPrivateFollowUpEnabled(contactKey: String?): Boolean =
+        followUpEnabled(contactMessageLedger.pendingRecoveryAction(contactKey))
+
+    private fun ownsPrivateFollowUp(child: PrivateFollowUp): Boolean =
+        activePrivateFollowUp === child && sessionRunStarted && isAiReplyActive() &&
+            !receivedGreetingsTaskActive && canPerformPrivateMessagesUiAction() &&
+            verifiedPrivateLedgerContactKey() == child.contactKey &&
+            child.target.taskLease?.let { taskCoordinator?.isCurrent(it) } == true &&
+            followUpEnabled(child.checkpoint.step.action)
+
+    private fun privateFollowUpTarget(snapshot: ChatPageSnapshot): ChatDraftInputTarget? {
+        val fresh = inspectFreshPageSnapshot() ?: return null
+        val lease = taskCoordinator?.currentLease()?.takeIf {
+            it.taskId == PRIVATE_MESSAGES_TASK_ID && it.runGeneration == currentRunGeneration()
+        } ?: return null
+        val input = fresh.inputFieldTarget ?: return null
+        val title = fresh.chatTitleText?.takeIf(String::isNotBlank) ?: return null
+        val conversation = fresh.conversationIdentityKey() ?: return null
+        val windowKey = windowSessionKey(fresh) ?: return null
+        if (!canPerformPrivateMessagesUiAction() || userInteractionActive || isPrivateFollowUpTouchActive() ||
+            fresh.packageName != targetPackage() || fresh.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
+            isSemanticallyUnconfirmed(fresh) || !hasSameWindowSession(snapshot, fresh) ||
+            title != snapshot.chatTitleText || currentSessionWindowKey != windowKey ||
+            currentSessionHeaderMatchMode(fresh) == null || !isExpectedPrivateSessionDetail(fresh)) return null
+        return ChatDraftInputTarget(fresh.packageName, fresh.activityClass, windowKey, conversation,
+            windowKey, input, title, lease)
+    }
+
+    /** Only interception can reconcile a persisted prior action from a freshly verified chat.
+     * Image admission retains the M04-D no-replay contract. */
+    private fun startPrivateFollowUp(contactKey: String, sendId: String?, snapshot: ChatPageSnapshot) {
+        val checkpoint = contactMessageLedger.followUpCheckpoint(contactKey) ?: return
+        val interception = checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION
+        val port = privateChatFollowUpPort
+        val target = privateFollowUpTarget(snapshot)
+        if ((!interception && (checkpoint.reconciliationRequired || checkpoint.revision != 0L || sendId == null)) ||
+            port == null || target == null || !followUpEnabled(checkpoint.step.action) ||
+            verifiedPrivateLedgerContactKey() != contactKey ||
+            (checkpoint.step.action == ContactPendingRecoveryAction.SEND_IMAGE && privateImageResourceCount() != 1)
+        ) {
+            onLog("PRIVATE_FOLLOW_UP ADMISSION_HELD;checkpointRetained=true;noReplay=true")
+            if (interception) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return
+        }
+        val child = PrivateFollowUp(contactKey, sendId, target, checkpoint)
+        activePrivateFollowUp = child
+        sessionTransitionTask?.cancel()
+        sessionTransitionTask = null
+        regionRefreshTask?.cancel()
+        regionRefreshTask = null
+        invalidatePendingMessageRead()
+        port.reset("PRIVATE_FOLLOW_UP_BEGIN")
+        val started = port.beginPrivateFollowUp(
+            target, checkpoint.transactionId, checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION,
+            beforeStep = { step ->
+                val expected = child.checkpoint
+                if (!ownsPrivateFollowUp(child) ||
+                    !contactMessageLedger.updateFollowUpCheckpoint(contactKey, expected, step, true)) false
+                else {
+                    child.checkpoint = requireNotNull(contactMessageLedger.followUpCheckpoint(contactKey))
+                    true
+                }
+            },
+            ownsTransaction = { ownsPrivateFollowUp(child) }
+        )
+        if (!started) {
+            activePrivateFollowUp = null
+            onLog("PRIVATE_FOLLOW_UP BEGIN_NOT_ADMITTED;checkpointRetained=true")
+            if (interception) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return
+        }
+        onLog("PRIVATE_FOLLOW_UP BEGIN;action=${checkpoint.step.action};parentLeaseInherited=true")
+        // The same shared observer that drives the validated test advances the normal child.
+        runPrivateFollowUpObservation()
+    }
+
+    /** Rebind only the exact original chat after adapter result evidence; never restore old nodes. */
+    private fun privateFollowUpReturnedSnapshot(child: PrivateFollowUp): ChatPageSnapshot? {
+        val fresh = inspectFreshPageSnapshot() ?: return null
+        val live = fresh.inputFieldTarget?.window ?: return null
+        val original = child.target.nodeTarget.window
+        val windowKey = windowSessionKey(fresh) ?: return null
+        val surfaceKey = chatSurfaceKey(fresh) ?: return null
+        val binding = currentSessionBinding ?: return null
+        if (!ownsPrivateFollowUp(child) || userInteractionActive || isPrivateFollowUpTouchActive() ||
+            fresh.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE || isSemanticallyUnconfirmed(fresh) ||
+            live.packageName != original.packageName || live.activityClass != original.activityClass ||
+            live.windowId != original.windowId || live.generation < original.generation ||
+            fresh.chatTitleText != child.target.expectedChatTitle ||
+            fresh.conversationIdentityKey() != child.target.conversationIdentityKey ||
+            currentSessionHeaderMatchMode(fresh) == null) return null
+        currentSessionWindowKey = windowKey
+        currentSessionBinding = binding.copy(chatWindowKey = windowKey, chatSurfaceKey = surfaceKey)
+        if (!isExpectedPrivateSessionDetail(fresh)) {
+            currentSessionWindowKey = binding.chatWindowKey
+            currentSessionBinding = binding
+            return null
+        }
+        return fresh
+    }
+
+    private fun runPrivateFollowUpObservation() {
+        val child = activePrivateFollowUp ?: return
+        val port = privateChatFollowUpPort ?: return
+        if (!ownsPrivateFollowUp(child)) {
+            onPrivateFollowUpTopLevelObserved()
+            return
+        }
+        if (userInteractionActive || isPrivateFollowUpTouchActive()) {
+            port.abort("PRIVATE_FOLLOW_UP_USER_INTERACTION")
+            return
+        }
+        if (port.progress() == PrivateChatFollowUpProgress.ACTIVE) port.observe()
+        if (port.progress() == PrivateChatFollowUpProgress.ACTIVE) {
+            scheduleFullInspectionAfter(500L)
+            return
+        }
+        if (!port.privateFollowUpSucceeded()) {
+            onLog("PRIVATE_FOLLOW_UP RESULT_UNCONFIRMED;checkpointRetained=true;noReturn=true")
+            return
+        }
+        val interception = child.checkpoint.step.action == ContactPendingRecoveryAction.ENABLE_INTERCEPTION
+        val fresh = privateFollowUpReturnedSnapshot(child) ?: run {
+            onLog("PRIVATE_FOLLOW_UP RETURN_NOT_CONFIRMED;checkpointRetained=true")
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return
+        }
+        val checkpoint = child.checkpoint
+        val confirmed = when (checkpoint.step.action) {
+            ContactPendingRecoveryAction.SEND_IMAGE -> contactMessageLedger.confirmImageSent(child.contactKey, checkpoint)
+            ContactPendingRecoveryAction.ENABLE_INTERCEPTION -> confirmMessageInterceptionEnabled(child.contactKey, checkpoint)
+            ContactPendingRecoveryAction.NONE -> false
+        }
+        if (!confirmed) {
+            onLog("PRIVATE_FOLLOW_UP RESULT_NOT_PERSISTED;noReturn=true")
+            scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return
+        }
+        onLog("PRIVATE_FOLLOW_UP CONFIRMED;action=${checkpoint.step.action}")
+        port.reset("PRIVATE_FOLLOW_UP_CONFIRMED")
+        activePrivateFollowUp = null
+        if (pendingPrivateFollowUpEnabled(child.contactKey)) {
+            startPrivateFollowUp(child.contactKey, child.sendConfirmationId, fresh)
+        } else {
+            // A resumed interception is a durable follow-up result, not a new text send.
+            // Keep the old send receipt instead of inventing one when re-entered later.
+            if (interception) currentSessionSendConfirmed = true
+            finishConfirmedPrivateSend(child.sendConfirmationId, fresh)
+        }
+    }
+
+    /** Existing traversal completion, called after text-only or fully confirmed child actions. */
+    private fun finishConfirmedPrivateSend(sendConfirmationId: String?, snapshot: ChatPageSnapshot): Boolean {
+        privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
+        if (sendConfirmationId != null) privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
+        val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
+        if (!observedVisit) {
+            privateMessagesTraversalTaskExecutor.checkpointNextCursorKey = currentSessionKey
+            privateMessagesTraversalTaskExecutor.checkpointTraversalDirection = "BOTTOM_TO_TOP"
+        }
+        privateMessagesTraversalTaskExecutor.completeCurrentUnfinishedSession()
+        val checkpointWritten = if (observedVisit) {
+            runCatching {
+                privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            }.isSuccess
+        } else currentSessionCandidate?.let {
+            privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(it)
+            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            true
+        } ?: run {
+            sessionManagerState = SessionManagerState.PAUSED
+            onLog("AI 会话返回被阻止：缺少当前会话稳定键，未写入返回检查点")
+            false
+        }
+        if (!checkpointWritten) {
+            if (observedVisit) scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+            return true
+        }
+        onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
+        if (!currentSessionReadCaptured) {
+            onLog("AI 会话返回门禁[CHAT_SAMPLE_NOT_PERSISTED]：发送已确认；样本归档失败不阻止安全返回")
+        }
+        scheduleReturnToSessionList(snapshot)
+        return true
     }
 
     /** Only a fully verified outgoing message may release the send hold or advance its queue. */
@@ -4504,6 +5477,7 @@ class AiReplyObservationRuntime(
     ): Boolean {
         when (transaction.status) {
             com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED -> {
+                deferredSendProofRetryAttempt = 0
                 if (receivedGreetingsTaskActive) {
                     val bound = greetingChatBinding ?: run {
                         onLog("GREETING_SEND_RETURN_BLOCKED reason=BINDING_MISSING")
@@ -4529,22 +5503,20 @@ class AiReplyObservationRuntime(
                         onLog("AI 发送成功记录被阻止：缺少稳定 sendConfirmationId；不返回列表")
                         return true
                     }
-                    recordSuccessfulSend(sendConfirmationId)
-                    privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
-                    privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
-                    privateMessagesTraversalTaskExecutor.checkpointNextCursorKey = currentSessionKey
-                    privateMessagesTraversalTaskExecutor.checkpointTraversalDirection = "BOTTOM_TO_TOP"
-                    val checkpointWritten = currentSessionCandidate?.let {
-                        privateMessagesTraversalTaskExecutor.rememberRecoveryAnchor(it)
-                        privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
-                        true
-                    } ?: run {
-                        sessionManagerState = SessionManagerState.PAUSED
-                        onLog("AI 会话返回被阻止：缺少当前会话稳定键，未写入返回检查点")
-                        false
+                    val countUpdate = recordSuccessfulSend(sendConfirmationId)
+                    if (countUpdate.status == ContactSendRecordStatus.PERSISTENCE_FAILED) {
+                        currentSessionSendConfirmed = false
+                        onLog("PRIVATE_CONTACT_LEDGER WRITE_FAILED;retainConfirmedSendJournal=true;noReturn=true")
+                        requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "PRIVATE_DETAIL_CONTACT_LEDGER_WRITE_FAILED")
+                        scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
+                        return true
                     }
-                    if (!checkpointWritten) return true
-                    onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
+                    val contactKey = verifiedPrivateLedgerContactKey()
+                    if (pendingPrivateFollowUpEnabled(contactKey)) {
+                        startPrivateFollowUp(requireNotNull(contactKey), sendConfirmationId, snapshot)
+                        return true
+                    }
+                    return finishConfirmedPrivateSend(sendConfirmationId, snapshot)
                 }
                 if (!currentSessionSendConfirmed) {
                     sessionManagerState = SessionManagerState.PAUSED
@@ -4572,6 +5544,36 @@ class AiReplyObservationRuntime(
                     }
                     return true
                 }
+                // A send UNKNOWN is not a page UNKNOWN. Recheck the live surface
+                // after the matcher callback; only retain the read-only route if the
+                // original conversation, window and lease still hold.
+                if (!isAiReplyActive() || !sessionRunStarted) return true
+                if (recoveryContext.pending) return true
+                if (isSendConfirmationPending()) {
+                    val visit = draftVisitToken
+                    val runGeneration = currentRunGeneration()
+                    val fresh = runCatching {
+                        readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY)
+                    }.getOrNull()
+                    if (!isAiReplyActive() || !sessionRunStarted || recoveryContext.pending ||
+                        !isSendConfirmationPending() || receivedGreetingsTaskActive ||
+                        visit != draftVisitToken || runGeneration != currentRunGeneration()
+                    ) return true
+                    if (fresh != null && !userInteractionActive &&
+                        sessionManagerState == SessionManagerState.READING_SESSION &&
+                        canPerformPrivateMessagesUiAction() &&
+                        isVerifiedRecoveredPrivateDetail(fresh) &&
+                        currentSessionWindowKey != null &&
+                        currentSessionWindowKey == windowSessionKey(fresh) &&
+                        hasSameWindowSession(snapshot, fresh)
+                    ) {
+                        onLog("AI 发送确认[UNKNOWN_PROOF_ONLY]：原聊天、窗口和任务租约仍有效；仅等待新鲜发送证据，不创建页面恢复、不重发")
+                        scheduleDeferredSendProofRecheck("SEND_CONFIRMATION_EVIDENCE_UNAVAILABLE")
+                        return true
+                    }
+                }
+                // Missing binding/page evidence or a historical obligation that has not
+                // yet been rehydrated still follows the existing checkpoint route.
                 if (!requestSendConfirmationRecovery("SEND_CONFIRMATION_UNKNOWN")) {
                     onLog("AI 发送结果核验：UNKNOWN；恢复事务已在等待新鲜页面证据；不返回列表、不重发")
                 }
@@ -4590,6 +5592,7 @@ class AiReplyObservationRuntime(
     }
 
     private fun handleMessageReadBatch(batch: ChatMessageBatch, snapshot: ChatPageSnapshot) {
+        if (isPrivateFollowUpActive()) return
         // A busy adapter did not perform recognition. It is never a draft/send/sample batch.
         if (batch.ocrAdmissionDeferred) {
             deferBusyOcrResult(batch)
@@ -4612,31 +5615,41 @@ class AiReplyObservationRuntime(
                 onLog("GREETING_CHAT_BATCH_REJECTED reason=${reason ?: "MESSAGE_WINDOW_MISMATCH"}")
                 return
             }
-            latestGreetingMessageBatch = batch
+            if (batch.ocrAttempted || batch.ocrTargets.isEmpty()) latestGreetingMessageBatch = batch
         } else if (sessionRunStarted && !receivedGreetingsTaskActive &&
             snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             currentSessionWindowKey == windowSessionKey(snapshot) &&
-            currentSessionCandidate != null
+            (currentSessionCandidate != null || currentSessionBinding?.observedBusinessAdmitted == true)
         ) {
-            latestPrivateMessageBatch = batch
+            if (batch.ocrAttempted || batch.ocrTargets.isEmpty()) latestPrivateMessageBatch = batch
         }
+        val observedDetail = currentSessionBinding?.observedDetailTarget != null
+        if (observedDetail && (currentSessionBinding?.observedBusinessAdmitted != true ||
+                !observedPrivateDetailVerified(snapshot) || batch.windowSessionKey != windowSessionKey(snapshot))) return
+        if (observedDetail && currentSessionSendConfirmed) return
+        if (observedDetail && isConversationDraftPending() && !isSendConfirmationPending() &&
+            !isSendControlRecoveryPending()) return
         if (receivedGreetingsTaskActive && confirmedGreetingSend != null) {
             completeConfirmedGreetingSend(batch, snapshot)
             return
         }
-        if (isSendConfirmationPending() && !batch.ocrAttempted && batch.ocrTargets.isNotEmpty()) {
-            requestPendingSendConfirmationOcr(snapshot)
-            return
+        val resumedPrivateVisit = !receivedGreetingsTaskActive &&
+            privateMessagesTraversalTaskExecutor.recoveringUnfinishedSession
+        if (!resumedPrivateVisit && !observedDetail) {
+            if (isSendConfirmationPending() && !batch.ocrAttempted && batch.ocrTargets.isNotEmpty()) {
+                requestPendingSendConfirmationOcr(snapshot)
+                return
+            }
+            if (handleSendConfirmationResult(onSendTransaction(batch, snapshot), batch, snapshot)) return
         }
-        if (handleSendConfirmationResult(onSendTransaction(batch, snapshot), batch, snapshot)) return
         // Recheck after the send-confirmation callback: it is a separate external
         // boundary and may have changed the current task or binding. OCR callbacks also
         // revalidate against an independently acquired live chat snapshot.
         val greetingDetail = sessionRunStarted && receivedGreetingsTaskActive &&
             greetingBindingRejectReason(snapshot) == null
-        val privateDetail = sessionRunStarted && !receivedGreetingsTaskActive && currentSessionCandidate != null &&
+        val privateDetail = observedDetail || (sessionRunStarted && !receivedGreetingsTaskActive && currentSessionCandidate != null &&
             currentSessionWindowKey == windowSessionKey(snapshot) &&
-            ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null
+            ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null)
         val draftTargetConfirmed = greetingDetail || privateDetail
         if (privateDetail && privateModelFailureRecovery != null) {
             // Page events and identity-timeout reads can arrive during model cooldown.
@@ -4661,7 +5674,7 @@ class AiReplyObservationRuntime(
             )
         }
         var identityJustVerified = false
-        if (privateDetail) {
+        if (privateDetail && !observedDetail) {
             val identitySessionKey = currentSessionWindowKey
             if (identityCaptureSessionKey != identitySessionKey) {
                 identityCaptureSessionKey = identitySessionKey
@@ -4787,13 +5800,21 @@ class AiReplyObservationRuntime(
                             val before = ChatSessionManagementPolicy.stableSessionKey(candidate!!)
                             val expected = expectedPrivateSessionDetailNavigation
                             val boundBefore = hasBoundPrivateDetailRecoverySession()
+                            val previousIdentity = candidate.contactIdentity
                             candidate.contactIdentity = verifiedIdentity
+                            if (!privateMessagesTraversalTaskExecutor.verifyUnfinishedIdentity(candidate)) {
+                                candidate.contactIdentity = previousIdentity
+                                onLog("AI 私聊业务[RECOVERY_IDENTITY_MISMATCH]：原平台身份未匹配；保留待恢复记录，不启动草稿")
+                                schedulePrivatePreSendReadRetry("UNFINISHED_SESSION_IDENTITY_MISMATCH")
+                                return
+                            }
                             val after = ChatSessionManagementPolicy.stableSessionKey(candidate)
                             if (before != after && boundBefore && expected != null) {
                                 privateMessagesTraversalTaskExecutor.preserveAttemptAfterVerifiedIdentityUpgrade(before, after)
                                 currentSessionKey = after
                                 expectedPrivateSessionDetailNavigation = expected.copy(sessionKey = after)
                             }
+                            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
                             onLog("AI 身份升级：keyChanged=${before != after}；boundBefore=$boundBefore；" +
                                 "currentKeyMatches=${currentSessionKey == after}；" +
                                 "expectedKeyMatches=${expectedPrivateSessionDetailNavigation?.sessionKey == after}")
@@ -4844,7 +5865,7 @@ class AiReplyObservationRuntime(
             readVisibleMessages(snapshot)
             return
         }
-        val currentWindowOnlyFallback = privateDetail &&
+        val currentWindowOnlyFallback = privateDetail && !observedDetail &&
             currentSessionWindowKey != null &&
             identityCaptureTerminalSessionKey == currentSessionWindowKey
         if (currentWindowOnlyFallback && !isFreshCurrentTargetForIdentityFallback(snapshot)) {
@@ -4853,11 +5874,38 @@ class AiReplyObservationRuntime(
             scheduleFullInspection()
             return
         }
+        if (resumedPrivateVisit && !observedDetail) {
+            val entry = privateMessagesTraversalTaskExecutor.currentUnfinishedSession()
+            val candidate = currentSessionCandidate
+            if (!privateDetail || entry == null || candidate == null ||
+                entry.conversationKey != snapshot.conversationIdentityKey() ||
+                currentWindowOnlyFallback || currentSessionBinding?.matchesRestoredChatSurface(snapshot) != true ||
+                !privateMessagesTraversalTaskExecutor.verifyUnfinishedIdentity(candidate)
+            ) {
+                onLog("AI 私聊业务[RECOVERY_IDENTITY_WAIT]：尚未重新确认原会话及平台身份；禁止草稿和发送核验")
+                schedulePrivatePreSendReadRetry("UNFINISHED_SESSION_IDENTITY_WAIT")
+                return
+            }
+            if (entry != privateMessagesTraversalTaskExecutor.currentUnfinishedSession()) {
+                privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            }
+            if (isSendConfirmationPending() && !batch.ocrAttempted && batch.ocrTargets.isNotEmpty()) {
+                requestPendingSendConfirmationOcr(snapshot)
+                return
+            }
+            if (handleSendConfirmationResult(
+                    onRecoveredPrivateSendTransaction(batch, snapshot, entry.openedAtMillis), batch, snapshot
+                )) return
+        }
         // The coordinator now delivers a structural batch first. OCR is deliberately deferred
         // until identity is terminal and the adapter has confirmed the chat detail page is
         // restored. The OCR callback re-enters this method with an OCR-complete batch.
+        if (observedDetail && isSendConfirmationPending() && !batch.ocrAttempted && batch.ocrTargets.isNotEmpty()) {
+            requestPendingSendConfirmationOcr(snapshot)
+            return
+        }
         if ((privateDetail || greetingDetail) && !batch.ocrAttempted && batch.ocrTargets.isNotEmpty()) {
-            if (privateDetail) {
+            if (privateDetail && !observedDetail) {
                 val preOcrIdentity = if (currentWindowOnlyFallback) null else runCatching {
                     resolveConversationIdentity(currentSessionCandidate?.contactIdentity, snapshot.chatTitleText)
                 }.getOrNull()
@@ -4880,7 +5928,7 @@ class AiReplyObservationRuntime(
             val started = messageReadCoordinator.requestOcr(
                 snapshot = ocrSnapshot,
                 limit = 10,
-                forceScheduledDelivery = ocrGreetingBinding != null,
+                forceScheduledDelivery = ocrGreetingBinding != null || observedDetail,
                 onTimeout = { scheduleOcrReadRecheck("OCR_CALLBACK_TIMEOUT") },
                 onFailure = { scheduleOcrReadRecheck("OCR_REQUEST_FAILED") }
             ) ocrDelivery@{ ocrBatch, revalidate ->
@@ -4891,7 +5939,7 @@ class AiReplyObservationRuntime(
                         onLog("AI OCR 结果已丢弃：窗口任务已变化")
                         return@ocrDelivery
                     }
-                    if (revalidate) {
+                    if (revalidate || observedDetail) {
                         val fresh = runCatching { readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY) }.getOrNull()
                         if (fresh == null || !isMessageReadResultCurrent(ocrSnapshot, ocrBatch, fresh) ||
                             !ownsTask(PRIVATE_MESSAGES_TASK_ID)
@@ -4901,6 +5949,7 @@ class AiReplyObservationRuntime(
                             return@ocrDelivery
                         }
                     }
+                    if (observedDetail && !observedPrivateDetailVerified(ocrSnapshot)) return@ocrDelivery
                     if (deferBusyOcrResult(ocrBatch)) return@ocrDelivery
                     handleMessageReadBatch(ocrBatch, ocrSnapshot)
                 } else {
@@ -4930,6 +5979,35 @@ class AiReplyObservationRuntime(
             return
         }
         val draftAdmission = com.freedom.features.aireply.ai.VisibleDraftContext.assess(batch)
+        if (observedDetail) {
+            val executor = privateMessagesTraversalTaskExecutor
+            val entry = executor.currentUnfinishedSession()
+            val identityKey = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(
+                currentSessionBinding?.observedVerifiedIdentity?.contactId
+            )
+            if (entry == null) {
+                // A previously completed/no-reply visit may still be awaiting BACK.
+                scheduleReturnToSessionList(snapshot)
+                return
+            }
+            if (entry.verifiedKey != identityKey || entry.conversationKey != snapshot.conversationIdentityKey()) return
+            val journalAdmitted = runCatching {
+                observedPrivateJournalAdmitted(batch, snapshot, entry.openedAtMillis, entry.replyRequestKey)
+            }.getOrDefault(false)
+            onLog("OBSERVED_PRIVATE_BUSINESS_STATUS reason=${draftAdmission.reason};" +
+                "replyEligible=${draftAdmission.accepted};retryable=${draftAdmission.retryable};" +
+                "identityVerified=true;journalAdmitted=$journalAdmitted")
+            if (!journalAdmitted) {
+                schedulePrivatePreSendReadRetry("OBSERVED_PRIVATE_JOURNAL_WAIT")
+                return
+            }
+            // Use the original visit time, not the manual navigation time, for
+            // historical send proof. New visits also reject older uncertain records.
+            if (entry.replyRequestKey != null && handleSendConfirmationResult(
+                    onRecoveredPrivateSendTransaction(batch, snapshot, entry.openedAtMillis), batch, snapshot
+                )) return
+            if (!observedPrivateDetailVerified(snapshot) || isSendConfirmationPending()) return
+        }
         if (draftTargetConfirmed && draftAdmission.retryable) {
             // 使用新快照重新 OCR；不把重试成功等同于内容已验证。
             if (draftRetryTask != null) return
@@ -4962,18 +6040,61 @@ class AiReplyObservationRuntime(
             privateOcrRecoveryAttempt = 0
             draftReadRetries = 0
         }
-        val rowIdentity = if (receivedGreetingsTaskActive) receivedGreetingsTaskFlow.currentContactIdentity()
-            else currentSessionCandidate?.contactIdentity
+        val rowIdentity = when {
+            receivedGreetingsTaskActive -> receivedGreetingsTaskFlow.currentContactIdentity()
+            observedDetail -> currentSessionBinding?.observedVerifiedIdentity
+            else -> currentSessionCandidate?.contactIdentity
+        }
         // Received greetings uses only the identity collected from the current avatar/profile.
         // Never resolve that identity by display name or consult previously stored contacts.
         val identity = when {
-            receivedGreetingsTaskActive -> rowIdentity
+            receivedGreetingsTaskActive || observedDetail -> rowIdentity
             currentWindowOnlyFallback -> null
             else -> runCatching {
                 resolveConversationIdentity(rowIdentity, snapshot.chatTitleText)
             }.getOrElse {
                 onLog("AI 历史联系人解析失败：CONTACT_HISTORY_LOOKUP_FAILED；exception=${it.javaClass.simpleName}")
                 rowIdentity
+            }
+        }
+        if (privateDetail && !receivedGreetingsTaskActive &&
+            identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
+            pendingPrivateFollowUpEnabled(ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId))
+        ) {
+            val contactKey = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId)
+            if (contactMessageLedger.pendingRecoveryAction(contactKey) == ContactPendingRecoveryAction.ENABLE_INTERCEPTION &&
+                verifiedPrivateLedgerContactKey() == contactKey &&
+                !isSendConfirmationPending() && !isConversationDraftPending()
+            ) {
+                onLog("PRIVATE_FOLLOW_UP PRIOR_INTERCEPTION_RECONCILE;noNewDraft=true")
+                startPrivateFollowUp(contactKey, null, snapshot)
+            } else {
+                onLog("PRIVATE_FOLLOW_UP PRIOR_PENDING;noNewDraft=true;checkpointRetained=true")
+            }
+            return
+        }
+        // Link a verified private visit to the actual dedupe key BEFORE the shared
+        // draft entry can create a model request or segment journal. Legacy row-based
+        // behavior stays compatible; observed details fail closed on missing linkage.
+        var originalPendingRequestKey: String? = null
+        if (privateDetail && draftAdmission.accepted && !currentWindowOnlyFallback &&
+            identity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED
+        ) {
+            val executor = privateMessagesTraversalTaskExecutor
+            val key = runCatching { privateReplyRequestKey(batch, snapshot) }.getOrNull()
+            val original = executor.currentUnfinishedSession()?.replyRequestKey
+            if (observedDetail && original != null && original != key) {
+                // A new window changes the local dedupe key. The only permitted use
+                // of the old key is the existing exact-composer PENDING_SEND restore.
+                originalPendingRequestKey = original
+            } else {
+                val linked = key != null && executor.recordVerifiedVisitReplyRequestKey(key) &&
+                    runCatching { privateMessagesCheckpointRepository?.save(executor.checkpoint()) }.isSuccess
+                if (observedDetail && !linked) {
+                    onLog("OBSERVED_PRIVATE_BUSINESS_WAIT reason=REQUEST_LINK_NOT_VERIFIED")
+                    schedulePrivatePreSendReadRetry("OBSERVED_PRIVATE_REQUEST_LINK_WAIT")
+                    return
+                }
             }
         }
         val draftHoldsPage = if (draftTargetConfirmed && draftAdmission.accepted) {
@@ -4983,7 +6104,12 @@ class AiReplyObservationRuntime(
                 onDraftConversationObserved
             }
             val invokeDraft = {
-                runCatching { draftCallback(batch, snapshot, identity, draftVisitToken) }.getOrElse {
+                runCatching {
+                    val original = originalPendingRequestKey
+                    if (observedDetail && original != null) {
+                        restoreObservedPrivatePendingDraft(batch, snapshot, draftVisitToken, original)
+                    } else draftCallback(batch, snapshot, identity, draftVisitToken)
+                }.getOrElse {
                     onLog("AI 草稿入口异常：[DRAFT_CALLBACK_FAILED]；未执行发送")
                     false
                 }
@@ -5001,6 +6127,10 @@ class AiReplyObservationRuntime(
                         false
                     }
                 }
+            } else if (observedDetail && taskCoordinator != null) {
+                val lease = currentSessionBinding?.observedTaskLease
+                if (lease == null || !observedPrivateDetailVerified(snapshot)) false
+                else taskCoordinator.withCurrentLease(lease, invokeDraft) ?: false
             } else {
                 invokeDraft()
             }
@@ -5048,10 +6178,21 @@ class AiReplyObservationRuntime(
         }
         // This method is reached only after the asynchronous callback has passed the active
         // package/activity/window-generation check. Never log OCR output before that point.
+        if (privateDetail && !draftAdmission.accepted && !draftAdmission.retryable &&
+            !draftHoldsPage && !isConversationDraftPending() &&
+            !isSendConfirmationPending() && !isSendControlRecoveryPending()
+        ) {
+            // Existing local policy has established that no automated reply is due.
+            completePrivateBusinessObservation("LOCAL_${draftAdmission.reason}")
+        }
         if (draftTargetConfirmed && draftAdmission.accepted &&
-            !draftHoldsPage && !currentSessionSendConfirmed
+            !draftHoldsPage && !currentSessionSendConfirmed &&
+            !(privateDetail && currentSessionWindowKey?.let {
+                privateNoReplyCompleted(draftVisitToken, it)
+            } == true)
         ) {
             onLog("AI 会话返回门禁[DRAFT_NOT_STARTED]：最新对方消息可回复，但草稿任务未取得有效终态；不返回列表")
+            if (resumedPrivateVisit || observedDetail) schedulePrivatePreSendReadRetry("UNFINISHED_DRAFT_NOT_ADMITTED")
             return
         }
         logTemporaryOcrResults(batch)
@@ -5382,6 +6523,7 @@ class AiReplyObservationRuntime(
                 if (observationCompleted) "AI Reply 测试遍历：已验证返回普通消息列表；本次会话只读观察完成"
                 else "AI Reply 测试遍历：已返回普通消息列表，但聊天内容读取未完成；不计入已完成观察数"
             )
+            retireObservedPrivateDetail("CONFIRMED_LIST_RETURN")
             currentSessionKey = null
             currentSessionName = null
             currentSessionCandidate = null
@@ -5815,7 +6957,13 @@ class AiReplyObservationRuntime(
                     onLog("AI 会话管理：顶部边界经延迟独立快照复核通过；检查顶部当前可见会话行")
                 }
             } else {
+                val repairing = privateMessagesTraversalTaskExecutor.scanContinuityRecoveryPending
                 privateMessagesTraversalTaskExecutor.confirmPhysicalEndForReturnTraversal()
+                if (repairing) {
+                    privateMessagesTraversalTaskExecutor.recordVerifiedViewport(fresh)
+                    privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+                    onLog("消息列表检查点恢复[SAFE_ORIGIN_VERIFIED]：底部独立复核通过；同轮由下至上补扫")
+                }
                 sessionManagerState = SessionManagerState.SCANNING_SESSION_LIST_BOTTOM_TO_TOP
                 onLog("AI 会话管理：底部边界经延迟独立快照复核通过；本轮未读边界已确认，候选仍可补充；进入从底部向顶部的处理阶段")
             }
@@ -6029,7 +7177,7 @@ class AiReplyObservationRuntime(
             )
             return
         }
-        val unread = executor.unreadEvidence(snapshot).hasUnread
+        val unread = executor.hasUnparkedUnread(snapshot)
         if (!pollingRoundDue && !unread) return
         pollingRoundDue = true
         if (userInteractionActive || activeSessionGestureRequestId != null ||
@@ -6078,7 +7226,8 @@ class AiReplyObservationRuntime(
      */
     private fun startReceivedGreetingsTask(reason: String) {
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive) return
-        if (privateMessagesTraversalTaskExecutor.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
+        if (privateMessagesTraversalTaskExecutor.scanContinuityRecoveryPending ||
+            privateMessagesTraversalTaskExecutor.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
             !privateMessagesTraversalTaskExecutor.atTop ||
             privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown ||
             privateMessagesTraversalTaskExecutor.unresolvedUnknownUnreadKeys.isNotEmpty()
@@ -6566,7 +7715,9 @@ class AiReplyObservationRuntime(
         sourceWindow: com.freedom.core.accessibility.api.WindowRef,
         selectedName: String?
     ) {
-        if (!isAiReplyActive() || !sessionRunStarted || !canPerformPrivateMessagesUiAction()) return
+        if (!isAiReplyActive() || !sessionRunStarted || !canPerformPrivateMessagesUiAction() ||
+            privateMessagesTraversalTaskExecutor.isDeferredForCurrentRound(selectedKey)
+        ) return
         if (waitForPrivateForegroundQuiet("会话行点击等待目标页面就绪")) return
         currentSessionSendConfirmed = false
         confirmedPrivateReturnBackRetryCount = 0
@@ -6590,6 +7741,7 @@ class AiReplyObservationRuntime(
             isCurrentTraversalSelection = { fresh, key ->
                 val traversal = privateMessagesTraversalTaskExecutor
                 actionGeneration == sessionActionGeneration &&
+                    !traversal.isDeferredForCurrentRound(key) &&
                     (!traversal.lockedUnreadSetFinalized ||
                         traversal.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
                         traversal.nextFreshReturnCandidate(
@@ -6598,6 +7750,13 @@ class AiReplyObservationRuntime(
                                 sessionManagerState == SessionManagerState.OPENING_SESSION && currentSessionKey == it
                             }
                         )?.let { ChatSessionManagementPolicy.stableSessionKey(it) == key } == true)
+            },
+            isInterruptedReadRecovery = { fresh, row ->
+                val traversal = privateMessagesTraversalTaskExecutor
+                actionGeneration == sessionActionGeneration &&
+                    traversal.phase == SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP &&
+                    traversal.lockedUnreadSetFinalized && !traversal.scanContinuityRecoveryPending &&
+                    traversal.canRecoverInterruptedRow(fresh, row)
             },
             onGestureDispatched = { requestId, uptime ->
                 scheduler.schedule(0L) {
@@ -7005,6 +8164,9 @@ class AiReplyObservationRuntime(
      * to the selected conversation. Keep that decision entirely in the message layer.
      */
     private fun isExpectedPrivateSessionDetail(snapshot: ChatPageSnapshot): Boolean {
+        if (currentSessionBinding?.observedBusinessAdmitted == true) {
+            return observedPrivateBindingMatches(snapshot)
+        }
         val selected = currentSessionCandidate ?: return false
         val selectedKey = ChatSessionManagementPolicy.stableSessionKey(selected)
         val currentKey = currentSessionKey ?: return false
@@ -7064,7 +8226,10 @@ class AiReplyObservationRuntime(
         ) {
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
             onLog("AI 私聊发送返回[INBOX_VERIFIED]：Back 后重新获取到私聊列表；恢复原遍历游标")
-            handleSessionListPage(observed)
+            if (currentSessionBinding?.observedBusinessAdmitted == true) {
+                requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "OBSERVED_DETAIL_RETURN")
+                scheduleFullInspectionAfter(0L)
+            } else handleSessionListPage(observed)
             return
         }
 
@@ -7142,11 +8307,19 @@ class AiReplyObservationRuntime(
         scheduleConfirmedPrivateReturnVerification("BACK_RETRY", delayMs)
     }
 
+    private fun completePrivateBusinessObservation(reason: String) {
+        if (privateMessagesTraversalTaskExecutor.completeCurrentUnfinishedSession()) {
+            privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+            onLog("AI 私聊业务[TERMINAL_CONFIRMED]：reason=$reason；已清除本次未完成记录")
+        }
+    }
+
     private fun scheduleReturnToSessionList(
         snapshot: ChatPageSnapshot,
         draftPendingWaitedMs: Long = 0L
     ) {
         if (sessionManagerState != SessionManagerState.READING_SESSION) return
+        if (isPrivateFollowUpActive() || pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())) return
         if (!canPerformPrivateMessagesUiAction()) {
             onLog("AI 会话返回被阻止：私人消息任务未持有 UI 操作权")
             recoverRetryablePrivateList("PRIVATE_RETURN_LEASE_LOST")
@@ -7213,12 +8386,25 @@ class AiReplyObservationRuntime(
                 return@schedule
             }
             val current = runCatching { readPageSnapshot(AiReplyPageReadPurpose.RETURN_NAVIGATION_VERIFY) }.getOrNull()
+            val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
+            if (observedVisit && (current == null || !observedPrivateDetailVerified(current) ||
+                    !AndroidRecoveryExecutionGate.assess(current, targetPackage(),
+                        runCatching { inspectAndroidRecoveryReadiness(current) }.getOrNull()).allowed ||
+                    isSendConfirmationPending() || isSendControlRecoveryPending()
+                )) {
+                requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "OBSERVED_DETAIL_RETURN_UNVERIFIED")
+                scheduleFullInspectionAfter(0L)
+                return@schedule
+            }
             if (current == null || current.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
                 current.packageName != snapshot.packageName || !hasSameWindowSession(snapshot, current)
             ) {
                 onLog("AI 会话管理已暂停：返回前聊天窗口身份已变化；不执行全局返回")
                 recoverRetryablePrivateList("PRIVATE_RETURN_DETAIL_UNVERIFIED")
                 return@schedule
+            }
+            if (currentSessionWindowKey?.let { privateNoReplyCompleted(draftVisitToken, it) } == true) {
+                completePrivateBusinessObservation("MODEL_NO_REPLY")
             }
             sessionManagerState = SessionManagerState.RETURNING_TO_SESSION_LIST
             val accepted = runCatching {
@@ -7243,6 +8429,12 @@ class AiReplyObservationRuntime(
                 return@schedule
             }
             onLog("AI 会话管理：消息采集完成，已提交系统返回动作；等待会话列表页面验证")
+            if (observedVisit) {
+                // Reuse the unified list checkpoint verifier, not direct list admission.
+                requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "OBSERVED_DETAIL_RETURN")
+                scheduleFullInspectionAfter(SESSION_RETURN_VERIFY_DELAY_MS)
+                return@schedule
+            }
             sessionTransitionTask = scheduler.schedule(SESSION_RETURN_VERIFY_DELAY_MS) {
                 sessionTransitionTask = null
                 val returned = inspectFreshPageSnapshot()
@@ -7324,6 +8516,20 @@ class AiReplyObservationRuntime(
             // scroll attempt, but not strand the retained private-message task.
             // Recovery will re-acquire all page evidence after the user returns.
             recoverRetryablePrivateList("MESSAGE_LIST_PRE_SCROLL_PAGE_IDENTITY_MISMATCH")
+            return
+        }
+        // The pre-scroll read is independent; a manual jump between selection and
+        // submission must not silently redefine the scan origin.
+        if (toTop && !receivedGreetingsTaskActive &&
+            privateMessagesTraversalTaskExecutor.reconcileUnrequestedViewportChange(
+                hadPendingScrollBaseline = false,
+                wasWaitingForUnread = false,
+                visibleKeys = privateMessagesTraversalTaskExecutor.visibleSessionKeys(fresh),
+                snapshot = fresh
+            )
+        ) {
+            messageListCheckpointRestored = true
+            recoverRetryablePrivateList("PRIVATE_LIST_POSITION_UNVERIFIED")
             return
         }
         // The independent read can reveal a newly clipped/unknown row, or prove a

@@ -211,6 +211,8 @@ class SessionSampleArchiveManagerTest {
             val diagnosticDirectory = File(diagnosticsRuns, diagnosticRunId).apply { mkdirs() }
             File(diagnosticDirectory, "diagnostic_report.txt").writeText("run diagnostic report")
             File(diagnosticDirectory, "events.jsonl").writeText("{\"eventType\":\"test\"}\n")
+            val contextEvidence = "{\"stage\":\"REQUEST_PREPARED\",\"messages\":[{\"role\":\"user\",\"content\":\"我请你\"}]}\n"
+            File(diagnosticDirectory, "ai_context_diagnostics.jsonl").writeText(contextEvidence)
             File(diagnosticDirectory, "diagnostic_counters.json").writeText("{}")
             val export = File(directory, "export-bundle.zip")
 
@@ -221,6 +223,9 @@ class SessionSampleArchiveManagerTest {
                 assertTrue(bundle.getEntry("samples/paired-run/runtime_logs.txt") != null)
                 assertTrue(bundle.getEntry("diagnostics/$diagnosticRunId/diagnostic_report.txt") != null)
                 assertTrue(bundle.getEntry("diagnostics/$diagnosticRunId/events.jsonl") != null)
+                assertEquals(contextEvidence, bundle.getInputStream(
+                    bundle.getEntry("diagnostics/$diagnosticRunId/ai_context_diagnostics.jsonl"))
+                    .bufferedReader(Charsets.UTF_8).use { it.readText() })
                 assertTrue(bundle.getEntry("diagnostics/$diagnosticRunId/diagnostic_counters.json") != null)
                 val manifest = bundle.getInputStream(bundle.getEntry("EXPORT-MANIFEST.txt"))
                     .bufferedReader().use { it.readText() }

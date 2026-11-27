@@ -22,12 +22,17 @@ internal class MomoReceivedGreetingsEntrySearchController(
     private var unchangedCount = 0
     private var pendingBaseline: String? = null
     private var complete = false
+    private var searchGeneration = 0L
+    private data class InFlightGesture(val requestId: String, val generation: Long)
+    private var inFlightGesture: InFlightGesture? = null
 
     init {
         require(unchangedObservationsToConfirmBoundary >= 2)
     }
 
+    @Synchronized
     fun start() {
+        searchGeneration++
         active = true
         direction = VerticalSwipeDirection.UP
         reversed = false
@@ -36,18 +41,42 @@ internal class MomoReceivedGreetingsEntrySearchController(
         complete = false
     }
 
+    @Synchronized
     fun direction(): VerticalSwipeDirection = direction
 
-    fun onGestureCompleted(baselineFingerprint: String) {
-        if (!active || complete || baselineFingerprint.isBlank()) return
-        pendingBaseline = baselineFingerprint
+    @Synchronized
+    fun captureSearchGeneration(): Long = searchGeneration
+
+    @Synchronized
+    fun isGestureInFlight(): Boolean = inFlightGesture != null
+
+    /** Bind an actual dispatch to the current search; never overlap two search gestures. */
+    @Synchronized
+    fun tryBeginGesture(expectedGeneration: Long, requestId: String): Boolean {
+        if (!active || complete || expectedGeneration != searchGeneration ||
+            inFlightGesture != null || requestId.isBlank()
+        ) return false
+        inFlightGesture = InFlightGesture(requestId, searchGeneration)
+        return true
     }
 
-    /** A cancelled/deferred gesture is not evidence that a list boundary was reached. */
-    fun onGestureFailed() {
-        pendingBaseline = null
+    /**
+     * A matching terminal result alone may release this request's busy marker. A reset
+     * invalidates its viewport evidence but retains physical in-flight ownership until
+     * the terminal result. Unrelated/duplicate results cannot release a newer request.
+     * A cancelled/deferred gesture never counts as boundary evidence.
+     */
+    @Synchronized
+    fun finishGesture(requestId: String, completedBaseline: String?): Boolean {
+        val pending = inFlightGesture ?: return false
+        if (pending.requestId != requestId) return false
+        inFlightGesture = null
+        if (pending.generation != searchGeneration || !active || complete) return false
+        pendingBaseline = completedBaseline?.takeIf { it.isNotBlank() }
+        return true
     }
 
+    @Synchronized
     fun observeAfterGesture(currentFingerprint: String): Observation {
         if (!active || complete || currentFingerprint.isBlank()) return Observation.CONTINUE
         val baseline = pendingBaseline ?: return Observation.CONTINUE
@@ -70,16 +99,28 @@ internal class MomoReceivedGreetingsEntrySearchController(
         return Observation.COMPLETE
     }
 
+    @Synchronized
     fun isActive(): Boolean = active
 
+    @Synchronized
     fun isComplete(): Boolean = complete
 
+    /** Retire search evidence without pretending an accepted gesture has ended. */
+    @Synchronized
     fun reset() {
+        searchGeneration++
         active = false
         direction = VerticalSwipeDirection.UP
         reversed = false
         unchangedCount = 0
         pendingBaseline = null
         complete = false
+    }
+
+    /** The run guard has invalidated previous callbacks before a run-level reset. */
+    @Synchronized
+    fun resetForRun() {
+        reset()
+        inFlightGesture = null
     }
 }

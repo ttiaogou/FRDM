@@ -67,16 +67,12 @@ android {
 }
 
 // SDK source is pinned to the same immutable PaddleOCR revision documented for Freedom.
-// The two source files changed locally are excluded from this list; local copies add support
-// for loading model files from the plugin's private files directory rather than APK assets.
+// Locally adapted SDK files are excluded from generation; retain only one source for each class.
 val paddleOcrRevision = "dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf"
 val paddleOcrSdkFiles = listOf(
-    "PaddleOCR.kt",
     "PaddleOCRConfig.kt",
     "EngineConfig.kt",
-    "engine/OCREngine.kt",
     "engine/OCREngineResult.kt",
-    "engine/DetectionEngine.kt",
     "engine/RecognitionEngine.kt",
     "model/OCRBox.kt",
     "model/OCRError.kt",
@@ -103,6 +99,8 @@ val freedomOcrCacheDir = providers.gradleProperty("freedomOcrCacheDir")
     ?: File(gradle.gradleUserHomeDir, "caches/freedom-ocr")
 val paddleOcrCacheRoot = File(freedomOcrCacheDir, "paddleocr/$paddleOcrRevision")
 val preparePaddleOcrSdk = tasks.register("preparePaddleOcrSdk") {
+    inputs.property("sdkSourceFiles", paddleOcrSdkFiles)
+    inputs.property("sdkRevision", paddleOcrRevision)
     outputs.dir(paddleOcrGeneratedSources)
     outputs.dir(paddleOcrGeneratedAssets)
     outputs.upToDateWhen {
@@ -163,7 +161,14 @@ val preparePaddleOcrSdk = tasks.register("preparePaddleOcrSdk") {
             check(stagingRoot.renameTo(paddleOcrCacheRoot)) { "Unable to promote PaddleOCR SDK cache" }
         }
 
-        cachedSourcesRoot.copyRecursively(sourceRoot, overwrite = true)
+        // An older SDK cache may contain classes that now have local source adaptations.
+        // Copy only the current allowlist, never the whole cached source tree.
+        paddleOcrSdkFiles.forEach { relative ->
+            val source = File(cachedSourcesRoot, "com/paddle/ocr/$relative")
+            val destination = File(sourceRoot, "com/paddle/ocr/$relative")
+            destination.parentFile?.mkdirs()
+            source.copyTo(destination, overwrite = true)
+        }
         cachedAssetsRoot.copyRecursively(assetsRoot, overwrite = true)
         logger.lifecycle("PaddleOCR SDK cache: ${if (cacheIsComplete) "hit" else "refreshed"} ($paddleOcrRevision)")
     }
@@ -304,4 +309,5 @@ dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.21.1")
     implementation("org.opencv:opencv:4.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    testImplementation("junit:junit:4.13.2")
 }

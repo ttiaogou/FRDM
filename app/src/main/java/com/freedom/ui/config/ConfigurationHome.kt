@@ -43,8 +43,7 @@ internal class ConfigurationHome(
     private var distanceValue: TextView? = null
     private var minAgeValue: TextView? = null
     private var maxAgeValue: TextView? = null
-    private var allStatusChip: TextView? = null
-    private var onlineOnlyChip: TextView? = null
+    private var activeTimeValue: TextView? = null
     private var parameters = callbacks.taskParameters()
 
     fun refresh(running: Boolean) {
@@ -277,37 +276,51 @@ internal class ConfigurationHome(
             setTextColor(Color.WHITE)
         })
 
-        val onlineStatusRow = LinearLayout(activity).apply {
+        val activeTimeRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(2), dp(8), dp(2), dp(10))
+            setPadding(dp(6), dp(7), dp(6), dp(9))
+            background = clickableBackground(8)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "活跃时间 ${parameters.maxLastActiveMinutes} 分钟，点击编辑"
+            setOnClickListener {
+                showNumberEditor(
+                    title = "活跃时间",
+                    value = parameters.maxLastActiveMinutes,
+                    suffix = "分钟",
+                    validate = { value -> if (value < 0) "活跃时间不能小于 0" else null },
+                    onSave = { value -> saveParameters(parameters.copy(maxLastActiveMinutes = value)) }
+                )
+            }
         }
-        onlineStatusRow.addView(TextView(activity).apply {
-            text = "在线状态"
+        activeTimeRow.addView(TextView(activity).apply {
+            text = "活跃时间"
             textSize = 13f
             setTextColor(PANEL_MUTED)
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        val statusChoices = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        val activeTimeColumn = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
         }
-        val allChip = filterChip("不限", selected = !parameters.onlineOnly) {
-            saveParameters(parameters.copy(onlineOnly = false))
+        val activeTimeNumber = TextView(activity).apply {
+            text = parameters.maxLastActiveMinutes.toString()
+            contentDescription = "活跃时间 ${parameters.maxLastActiveMinutes} 分钟，点击编辑"
+            textSize = 34f
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            setTextColor(LIME)
+            gravity = Gravity.END
         }
-        val onlyOnlineChip = filterChip("仅在线", selected = parameters.onlineOnly) {
-            saveParameters(parameters.copy(onlineOnly = true))
-        }
-        allStatusChip = allChip
-        onlineOnlyChip = onlyOnlineChip
-        statusChoices.addView(allChip, LinearLayout.LayoutParams(dp(62), dp(34)))
-        statusChoices.addView(onlyOnlineChip, LinearLayout.LayoutParams(dp(76), dp(34)).apply {
-            leftMargin = dp(8)
+        activeTimeValue = activeTimeNumber
+        activeTimeColumn.addView(activeTimeNumber)
+        activeTimeColumn.addView(TextView(activity).apply {
+            text = "分钟（0为不限）"
+            textSize = 10f
+            setTextColor(PANEL_MUTED)
         })
-        onlineStatusRow.addView(statusChoices)
-        panel.addView(onlineStatusRow)
-        panel.addView(View(activity).apply {
-            setBackgroundColor(0xFF465149.toInt())
-        }, LinearLayout.LayoutParams(-1, dp(1)))
+        activeTimeRow.addView(activeTimeColumn)
+        panel.addView(activeTimeRow, LinearLayout.LayoutParams(-1, -2))
+        panel.addView(View(activity).apply { setBackgroundColor(0xFF465149.toInt()) }, LinearLayout.LayoutParams(-1, dp(1)))
 
         val distanceRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -441,31 +454,6 @@ internal class ConfigurationHome(
         return row
     }
 
-    private fun filterChip(
-        label: String,
-        selected: Boolean,
-        onClick: () -> Unit
-    ): TextView = TextView(activity).apply {
-        text = label
-        textSize = 12f
-        typeface = Typeface.DEFAULT_BOLD
-        gravity = Gravity.CENTER
-        isClickable = true
-        isFocusable = true
-        updateFilterChipStyle(this, selected)
-        setOnClickListener { onClick() }
-    }
-
-    private fun updateFilterChipStyle(chip: TextView, selected: Boolean) {
-        chip.setTextColor(if (selected) TEXT else PANEL_MUTED)
-        chip.background = GradientDrawable().apply {
-            setColor(if (selected) LIME else 0xFF2D3931.toInt())
-            cornerRadius = dp(9).toFloat()
-            setStroke(dp(1), if (selected) LIME else 0xFF68736A.toInt())
-        }
-        chip.contentDescription = if (selected) "${chip.text}，已选中" else "${chip.text}，未选中"
-    }
-
     private fun panelValue(value: String, onClick: () -> Unit) = TextView(activity).apply {
         text = value
         textSize = 15f
@@ -494,8 +482,10 @@ internal class ConfigurationHome(
             text = updated.maxAge.toString()
             contentDescription = "当前值 ${updated.maxAge}，点击编辑"
         }
-        allStatusChip?.let { updateFilterChipStyle(it, selected = !updated.onlineOnly) }
-        onlineOnlyChip?.let { updateFilterChipStyle(it, selected = updated.onlineOnly) }
+        activeTimeValue?.apply {
+            text = updated.maxLastActiveMinutes.toString()
+            contentDescription = "活跃时间 ${updated.maxLastActiveMinutes} 分钟，点击编辑"
+        }
     }
 
     private fun showNumberEditor(

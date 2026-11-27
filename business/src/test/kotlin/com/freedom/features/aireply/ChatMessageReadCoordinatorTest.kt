@@ -14,6 +14,35 @@ import org.junit.Test
 
 class ChatMessageReadCoordinatorTest {
     @Test
+    fun invalidationRevokesWorkerAdmissionForBothOcrPurposesAndNeverRevivesOldRead() {
+        val scheduler = FakeScheduler()
+        val page = snapshot("same-chat")
+        val port = TestMessagePort()
+        val coordinator = coordinator(scheduler, port, inspect = { page })
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {}) { _, _ ->
+            error("invalidated read must not reach business")
+        })
+        val old = requireNotNull(port.workerAdmission)
+        val oldCallback = requireNotNull(port.pendingCallback)
+        assertTrue(old())
+        coordinator.invalidatePending()
+        assertEquals(1, port.ocrReuseInvalidations)
+        assertFalse(old())
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {},
+            sendConfirmation = true) { _, _ -> })
+        val replacement = requireNotNull(port.workerAdmission)
+        assertTrue(replacement())
+        assertFalse(old())
+        oldCallback(batch())
+        scheduler.runNext(0L)
+        assertTrue(replacement())
+        scheduler.runNext(ChatMessageReadCoordinator.DEFAULT_CALLBACK_TIMEOUT_MS)
+        assertEquals(2, port.ocrReuseInvalidations)
+        assertFalse(replacement())
+        assertFalse(old())
+    }
+
+    @Test
     fun onlySendConfirmationUsesTheDedicatedReadPurpose() {
         val scheduler = FakeScheduler()
         val page = snapshot("send-proof")
@@ -26,6 +55,25 @@ class ChatMessageReadCoordinatorTest {
         assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {},
             sendConfirmation = true) { _, _ -> })
         assertEquals(1, port.sendProofReads)
+        requireNotNull(port.pendingCallback)(batch())
+        scheduler.runNext(0L)
+        assertFalse(coordinator.isInFlight)
+    }
+
+    @Test
+    fun confirmedBaselineObservationIsForwardedOnlyForExplicitSegmentPreparation() {
+        val scheduler = FakeScheduler()
+        val page = snapshot("send-proof")
+        val port = TestMessagePort()
+        val coordinator = coordinator(scheduler, port, inspect = { page })
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {},
+            sendConfirmation = true, confirmedBaselineObservationId = "confirmed-batch") { _, _ -> })
+        assertEquals("confirmed-batch", port.confirmedBaselineObservationId)
+        requireNotNull(port.pendingCallback)(batch())
+        scheduler.runNext(0L)
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {},
+            sendConfirmation = true) { _, _ -> })
+        assertEquals(null, port.confirmedBaselineObservationId)
         requireNotNull(port.pendingCallback)(batch())
         scheduler.runNext(0L)
         assertFalse(coordinator.isInFlight)
@@ -374,7 +422,39 @@ class ChatMessageReadCoordinatorTest {
     )
 
     private class TestMessagePort : ChatMessagePort {
+        var ocrReuseInvalidations = 0
+        override fun invalidateOcrRecognitionReuse() {
+            ocrReuseInvalidations++
+        }
+
         var sendProofReads = 0
+        var workerAdmission: (() -> Boolean)? = null
+        var confirmedBaselineObservationId: String? = null
+
+        override fun readRecentMessagesForSendConfirmationAsync(
+            page: ChatPageSnapshot, limit: Int, isRequestCurrent: () -> Boolean,
+            confirmedBaselineObservationId: String?, onResult: (ChatMessageBatch) -> Unit
+        ) {
+            this.confirmedBaselineObservationId = confirmedBaselineObservationId
+            readRecentMessagesForSendConfirmationAsync(page, limit, isRequestCurrent, onResult)
+        }
+
+        override fun readRecentMessagesAsync(
+            page: ChatPageSnapshot, limit: Int, isRequestCurrent: () -> Boolean,
+            onResult: (ChatMessageBatch) -> Unit
+        ) {
+            workerAdmission = isRequestCurrent
+            readRecentMessagesAsync(page, limit, onResult)
+        }
+
+        override fun readRecentMessagesForSendConfirmationAsync(
+            page: ChatPageSnapshot, limit: Int, isRequestCurrent: () -> Boolean,
+            onResult: (ChatMessageBatch) -> Unit
+        ) {
+            workerAdmission = isRequestCurrent
+            readRecentMessagesForSendConfirmationAsync(page, limit, onResult)
+        }
+
         override fun readRecentMessagesForSendConfirmationAsync(
             page: ChatPageSnapshot, limit: Int, onResult: (ChatMessageBatch) -> Unit
         ) {

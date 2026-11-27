@@ -304,7 +304,7 @@ internal class GestureExecutionCoordinator(
                                         execution, GestureExecutionStatus.CANCELLED, "android_gesture_cancelled"
                                     )
                                 }
-                            }, canDispatch = {
+                            }, commandId = command.id, canDispatch = {
                                 val targetCurrent = runCatching {
                                     execution.listener.isDispatchTargetCurrent(command.id)
                                 }.getOrDefault(false)

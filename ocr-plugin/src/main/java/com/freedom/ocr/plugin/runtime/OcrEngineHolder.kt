@@ -24,39 +24,42 @@ internal class OcrEngineHolder(context: Context) {
 
     @Volatile private var cachedKey: EngineKey? = null
     @Volatile private var cachedEngine: PaddleOCR? = null
+    private var engineCreateCount = 0L
     @Volatile var isLoaded: Boolean = false
         private set
 
-    fun get(files: OcrModelManager.ModelFiles, options: OcrOptions): PaddleOCR {
+    internal data class Acquisition(
+        val engine: PaddleOCR,
+        val detMaxSideLimit: Int,
+        val cacheHit: Boolean,
+        val creationCount: Long,
+    )
+
+    fun get(files: OcrModelManager.ModelFiles, options: OcrOptions): Acquisition {
         val extras = options.extras ?: Bundle().also { options.extras = it }
-        val key = EngineKey(
-            modelId = files.modelId,
-            modelVersion = files.version,
-            threads = options.cpuThreadNum.coerceAtLeast(1),
+        val requestLimit = resolveDetectionMaxSideLimit(
+            extras.getInt(PaddleOcrOptionExtraKeys.DET_MAX_SIDE_LIMIT, 0), options.detLongSize
+        )
+        val requestConfig = PaddleOCRConfig(
             detLimitSideLen = extras.getInt(PaddleOcrOptionExtraKeys.DET_LIMIT_SIDE_LEN, 64).coerceAtLeast(1),
             detLimitType = extras.getString(PaddleOcrOptionExtraKeys.DET_LIMIT_TYPE, "min") ?: "min",
-            detMaxSideLimit = extras.getInt(PaddleOcrOptionExtraKeys.DET_MAX_SIDE_LIMIT, 0)
-                .takeIf { it > 0 } ?: options.detLongSize.takeIf { it > 0 } ?: 4000,
+            detMaxSideLimit = requestLimit,
             detThresh = extras.getFloat(PaddleOcrOptionExtraKeys.DET_THRESH, 0.3f),
             detBoxThresh = extras.getFloat(PaddleOcrOptionExtraKeys.DET_BOX_THRESH, 0.6f),
             detUnclipRatio = extras.getFloat(PaddleOcrOptionExtraKeys.DET_UNCLIP_RATIO, 1.5f),
             recScoreThresh = if (options.scoreThreshold >= 0f) options.scoreThreshold else 0f,
             recBatchSize = extras.getInt(PaddleOcrOptionExtraKeys.REC_BATCH_SIZE, 1).coerceAtLeast(1),
         )
-        cachedEngine?.let {
-            if (cachedKey == key) {
-                Log.i(LOG_TAG, "OCR_ENGINE_CACHE_HIT modelId=${files.modelId};version=${files.version};thread=${Thread.currentThread().name}")
-                return it
-            }
-        }
+        val key = EngineKey.from(files.modelId, files.version, options.cpuThreadNum.coerceAtLeast(1), requestConfig)
         synchronized(lock) {
             cachedEngine?.let {
                 if (cachedKey == key) {
-                    Log.i(LOG_TAG, "OCR_ENGINE_CACHE_HIT modelId=${files.modelId};version=${files.version};thread=${Thread.currentThread().name}")
-                    return it
+                    Log.i(LOG_TAG, "OCR_ENGINE_CACHE_HIT modelId=${files.modelId};version=${files.version};creationCount=$engineCreateCount;requestMaxSide=$requestLimit")
+                    return Acquisition(it, requestLimit, true, engineCreateCount)
                 }
             }
-            releaseLocked()
+            Log.i(LOG_TAG, "OCR_ENGINE_CACHE_MISS modelId=${files.modelId};version=${files.version};reason=${if (cachedEngine == null) "NOT_LOADED" else "ENGINE_KEY_CHANGED"}")
+            releaseLocked("ENGINE_KEY_CHANGED")
             val openCvStartedAt = SystemClock.elapsedRealtime()
             Log.i(LOG_TAG, "OCR_ENGINE_STAGE stage=OPENCV_INIT_START;modelId=${files.modelId};pid=${android.os.Process.myPid()};thread=${Thread.currentThread().name}")
             val openCvReady = try {
@@ -87,16 +90,7 @@ internal class OcrEngineHolder(context: Context) {
                 runBlocking(Dispatchers.IO) {
                     PaddleOCR.create(
                         context = appContext,
-                        config = PaddleOCRConfig(
-                            detLimitSideLen = key.detLimitSideLen,
-                            detLimitType = key.detLimitType,
-                            detMaxSideLimit = key.detMaxSideLimit,
-                            detThresh = key.detThresh,
-                            detBoxThresh = key.detBoxThresh,
-                            detUnclipRatio = key.detUnclipRatio,
-                            recScoreThresh = key.recScoreThresh,
-                            recBatchSize = key.recBatchSize,
-                        ),
+                        config = key.config,
                         engineConfig = EngineConfig(numThreads = key.threads),
                         detModelAssetPath = files.detectionModel.absolutePath,
                         recModelAssetPath = files.recognitionModel.absolutePath,
@@ -111,40 +105,45 @@ internal class OcrEngineHolder(context: Context) {
             cachedKey = key
             cachedEngine = created
             isLoaded = true
-            return created
+            engineCreateCount++
+            return Acquisition(created, requestLimit, false, engineCreateCount)
         }
     }
 
-    fun release() = synchronized(lock) { releaseLocked() }
+    fun release(reason: String) = synchronized(lock) { releaseLocked(reason) }
 
-    private fun releaseLocked() {
+    private fun releaseLocked(reason: String) {
         val old = cachedEngine
         cachedEngine = null
         cachedKey = null
         isLoaded = false
         if (old != null) {
             val startedAt = SystemClock.elapsedRealtime()
-            Log.i(LOG_TAG, "OCR_ENGINE_STAGE stage=ENGINE_RELEASE_START;thread=${Thread.currentThread().name}")
-            runCatching { runBlocking(Dispatchers.IO) { old.release() } }
-            Log.i(LOG_TAG, "OCR_ENGINE_STAGE stage=ENGINE_RELEASE_END;durationMs=${SystemClock.elapsedRealtime() - startedAt}")
+            Log.i(LOG_TAG, "OCR_ENGINE_STAGE stage=ENGINE_RELEASE_START;reason=$reason;creationCount=$engineCreateCount;thread=${Thread.currentThread().name}")
+            val released = runCatching { runBlocking(Dispatchers.IO) { old.release() } }
+            Log.i(LOG_TAG, "OCR_ENGINE_STAGE stage=ENGINE_RELEASE_END;reason=$reason;success=${released.isSuccess};durationMs=${SystemClock.elapsedRealtime() - startedAt}")
         }
     }
 
-    private data class EngineKey(
+    internal data class EngineKey(
         val modelId: String,
         val modelVersion: String,
         val threads: Int,
-        val detLimitSideLen: Int,
-        val detLimitType: String,
-        val detMaxSideLimit: Int,
-        val detThresh: Float,
-        val detBoxThresh: Float,
-        val detUnclipRatio: Float,
-        val recScoreThresh: Float,
-        val recBatchSize: Int,
-    )
+        val config: PaddleOCRConfig,
+    ) {
+        companion object {
+            // Only the per-image resize cap is excluded. All other former cache-key fields
+            // remain significant; the actual cap is carried by Acquisition to inference.
+            fun from(modelId: String, modelVersion: String, threads: Int, request: PaddleOCRConfig) =
+                EngineKey(modelId, modelVersion, threads, request.copy(detMaxSideLimit = 4000))
+        }
+    }
 
     companion object {
         private const val LOG_TAG = "FreedomOcrEngine"
     }
 }
+
+/** Preserve the old explicit / legacy / default limit precedence for every image. */
+internal fun resolveDetectionMaxSideLimit(explicit: Int, legacy: Int): Int =
+    explicit.takeIf { it > 0 } ?: legacy.takeIf { it > 0 } ?: 4000

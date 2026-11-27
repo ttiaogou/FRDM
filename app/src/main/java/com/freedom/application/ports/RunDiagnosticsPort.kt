@@ -9,6 +9,9 @@ interface RunDiagnosticsPort {
     fun awaitFinalizedRun(runId: String, timeoutMillis: Long = 8_000L): Boolean
     fun latestReportText(): String
 
+    /** Run-scoped, pre-sanitized wire evidence. Never routed through ordinary runtime logs. */
+    fun recordAiContextDiagnostic(runId: String, jsonLine: String) {}
+
     fun recordStructured(
         eventType: String,
         category: RunLogCategory,

@@ -46,6 +46,7 @@ import com.freedom.application.ports.OcrReviewRepository
 import com.freedom.application.ports.RunDiagnosticsPort
 import com.freedom.application.ports.SessionSampleArchivePort
 import com.freedom.application.ports.TaskLaunchParametersRepository
+import com.freedom.application.ports.ImagePoolResourcePort
 import com.freedom.application.runtime.RunSessionCommandUseCase
 import com.freedom.application.runtime.RunGenerationClock
 import com.freedom.application.runtime.RunSessionCoordinator
@@ -75,6 +76,7 @@ import com.freedom.data.RunDiagnosticsManager
 import com.freedom.data.SharedPreferencesAiModelCloudConsent
 import com.freedom.data.SharedPreferencesGestureSettingsRepository
 import com.freedom.data.TaskLaunchParametersStore
+import com.freedom.data.ImagePoolMediaStore
 import com.freedom.data.ContactMessageLedgerDataStore
 import com.freedom.data.ai.EncryptedAiModelConfigurationRepository
 import com.freedom.data.ai.AiReplyPersonalizationStore
@@ -147,6 +149,9 @@ class AppCompositionRoot(context: Context) {
     }
     val taskLaunchParametersRepository: TaskLaunchParametersRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         TaskLaunchParametersStore(appContext)
+    }
+    val imagePoolResourcePort: ImagePoolResourcePort by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ImagePoolMediaStore(appContext)
     }
     val contactMessageLedgerRepository: ContactMessageLedgerRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         ContactMessageLedgerDataStore(appContext)
@@ -234,6 +239,7 @@ class AppCompositionRoot(context: Context) {
     fun createActivityDependencies(activity: Activity): ActivityDependencies = ActivityDependencies(
         monitorRepository = monitorRepository,
         taskLaunchParametersRepository = taskLaunchParametersRepository,
+        imagePoolResourcePort = imagePoolResourcePort,
         aiModelCloudConsent = aiModelCloudConsent,
         aiModelConfigurationRepository = aiModelConfigurationRepository,
         aiReplyPersonalizationRepository = aiReplyPersonalizationRepository,
@@ -269,6 +275,7 @@ class AppCompositionRoot(context: Context) {
 class ActivityDependencies internal constructor(
     val monitorRepository: MonitorControlRepository,
     val taskLaunchParametersRepository: TaskLaunchParametersRepository,
+    val imagePoolResourcePort: ImagePoolResourcePort,
     val aiModelCloudConsent: AiModelCloudConsentSettings,
     val aiModelConfigurationRepository: AiModelConfigurationRepository,
     val aiReplyPersonalizationRepository: AiReplyPersonalizationRepository,
@@ -364,34 +371,37 @@ internal class AccessibilityServiceDependencies internal constructor(
                     var greetingNavigationAwaitingHandoff = false
                     val recognized = runCatching {
                         val observed = momoSocialAdapter.inspectUnifiedEntryPage(currentTaskId)
-                        if (observed == null || generation != runSessionCoordinator.currentRunGeneration() ||
-                            !runSessionCoordinator.isPageObservationAllowed()
-                        ) false else {
+                        val targetTask = if (observed == null) null else {
                             val (fingerprint, nestedProof) = observed
-                            val targetTask = when (pageObservationCoordinator.matchFingerprint(fingerprint)) {
+                            ownedNestedPage = nestedProof
+                            when (pageObservationCoordinator.matchFingerprint(fingerprint)) {
                                 "ENTRY:AI_REPLY_PRIVATE_MESSAGES" -> "AI_REPLY_PRIVATE_MESSAGES"
                                 "ENTRY:AI_REPLY_RECEIVED_GREETINGS" -> "AI_REPLY_RECEIVED_GREETINGS"
                                 "ENTRY:ACCOUNT_BROWSE" -> "ACCOUNT_BROWSE"
                                 else -> null
                             }
-                            ownedNestedPage = nestedProof
-                            if (targetTask == null) false else {
-                                val mode = if (targetTask == "ACCOUNT_BROWSE") RunMode.ACCOUNT_BROWSE
-                                    else RunMode.AI_REPLY
-                                val verifiedGreetingNavigation =
-                                    targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
-                                    currentTaskId == "AI_REPLY_RECEIVED_GREETINGS" &&
-                                    aiReplyObservationRuntime.isVerifiedGreetingsNavigationPending()
-                                if (verifiedGreetingNavigation) {
-                                    runSessionCoordinator.reconcileUnclassifiedPage(generation, true)
-                                } else {
-                                    runSessionCoordinator.routeIndependentPageTask(mode, targetTask, generation)
-                                }
-                                greetingNavigationAwaitingHandoff =
-                                    targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
-                                    runSessionCoordinator.currentPageRuntimeSession()?.taskId == "AI_REPLY_RECEIVED_GREETINGS"
-                                true
+                        }
+                        if (targetTask == null || generation != runSessionCoordinator.currentRunGeneration() ||
+                            !runSessionCoordinator.isPageObservationAllowed()
+                        ) false else {
+                            if (aiReplyObservationRuntime.isPrivateFollowUpActive()) {
+                                aiReplyObservationRuntime.onPrivateFollowUpTopLevelObserved()
                             }
+                            val mode = if (targetTask == "ACCOUNT_BROWSE") RunMode.ACCOUNT_BROWSE
+                                else RunMode.AI_REPLY
+                            val verifiedGreetingNavigation =
+                                targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
+                                currentTaskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                                aiReplyObservationRuntime.isVerifiedGreetingsNavigationPending()
+                            if (verifiedGreetingNavigation) {
+                                runSessionCoordinator.reconcileUnclassifiedPage(generation, true)
+                            } else {
+                                runSessionCoordinator.routeIndependentPageTask(mode, targetTask, generation)
+                            }
+                            greetingNavigationAwaitingHandoff =
+                                targetTask == "AI_REPLY_PRIVATE_MESSAGES" &&
+                                runSessionCoordinator.currentPageRuntimeSession()?.taskId == "AI_REPLY_RECEIVED_GREETINGS"
+                            true
                         }
                     }.onFailure {
                         addLog("统一入口观察[READ_RETRY]：type=${it.javaClass.simpleName}；保留运行授权")
@@ -401,6 +411,12 @@ internal class AccessibilityServiceDependencies internal constructor(
                         runSessionCoordinator.reconcileUnclassifiedPage(
                             generation, ownedNestedPage && session.taskId == currentTaskId
                         )
+                    }
+                    // Explicitly wake the existing business observer after route reconciliation.
+                    // This also covers a quiet chat with no further accessibility events.
+                    if (aiReplyObservationRuntime.isPrivateFollowUpActive() &&
+                        (recognized || ownedNestedPage)) {
+                        aiReplyObservationRuntime.requestPageRouteObservation()
                     }
                     // Keep the independent observation alive even in READY. Unknown,
                     // startup, cleanup and a protected greeting handoff use the existing
@@ -461,8 +477,10 @@ internal class AccessibilityServiceDependencies internal constructor(
                 runSessionCoordinator.currentWriteRoute()?.takeUnless { route ->
                     // A reserved greeting lease and READY page route do not authorize
                     // platform mutations while that business is recovering.
-                    route.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
-                        aiReplyObservationRuntime.isReceivedGreetingsRecoveryPending()
+                    (route.taskId == "AI_REPLY_RECEIVED_GREETINGS" &&
+                        aiReplyObservationRuntime.isReceivedGreetingsRecoveryPending()) ||
+                        (route.taskId == "AI_REPLY_PRIVATE_MESSAGES" &&
+                            aiReplyObservationRuntime.isObservedPrivateRecoveryPending())
                 }
             }
         )
@@ -477,6 +495,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             inspectPageReadiness = { root, activity, mode ->
                 momoSocialAdapter.inspectGesturePageReadiness(root, activity, mode)
+            },
+            inspectBoundPageReadiness = { root, activity, mode, commandId ->
+                momoSocialAdapter.inspectGesturePageReadiness(root, activity, mode, commandId)
             },
             targetAppReadinessController = targetAppReadinessController,
             inputOriginClassifier = inputOriginClassifier,
@@ -545,6 +566,9 @@ internal class AccessibilityServiceDependencies internal constructor(
             ocrReviewRepository = root.ocrReviewRepository,
             sampleArchivePort = root.sampleArchivePort,
             inspectReceivedGreetingsReadiness = accessibilityGateway::inspectRecoveryReadiness,
+            conversationFilterSettings = {
+                root.taskLaunchParametersRepository.read().conversationFilterSettings()
+            },
             isAiReplyUiOperationOwned = {
                 uiWriteAuthorization.permits(UiWriteScope.AI_COMPOSER) ||
                     uiWriteAuthorization.permits(UiWriteScope.VERIFIED_GREETING_COMPOSER)
@@ -567,10 +591,26 @@ internal class AccessibilityServiceDependencies internal constructor(
             isAiReplyActive = { runSessionCoordinator.isRuntimeReady(RunMode.AI_REPLY) },
             onLog = addLog,
             createGateway = { configuration ->
+                // Development evidence is automatic for an active diagnostic run. The sink is
+                // bound once, so a response from an old run cannot be written into a new one.
+                val contextRunId = diagnostics.activeRunId()
+                val contextSink: ((String) -> Unit)? = contextRunId?.let { runId ->
+                    { line: String -> diagnostics.recordAiContextDiagnostic(runId, line) }
+                }
+                val contextLog: (String) -> Unit = { line ->
+                    if (contextRunId != null && diagnostics.activeRunId() == contextRunId) addLog(line)
+                }
                 val transport = when (configuration.provider) {
-                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration).also { it.diagnosticLog = addLog }
+                    AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport(configuration).also {
+                        it.diagnosticLog = addLog
+                        it.wireDiagnostic = contextSink
+                        it.wireDiagnosticLog = contextLog
+                    }
                     AiModelServiceProvider.OPENAI,
-                    AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport(configuration)
+                    AiModelServiceProvider.CUSTOM_OPENAI_COMPAT -> OpenAiCompatibleAiModelTransport(configuration).also {
+                        it.wireDiagnostic = contextSink
+                        it.wireDiagnosticLog = contextLog
+                    }
                 }
                 val providerName = when (configuration.provider) {
                     AiModelServiceProvider.DEEPSEEK -> DeepSeekAiModelTransport.PROVIDER_NAME
@@ -719,6 +759,23 @@ internal class AccessibilityServiceDependencies internal constructor(
             onSendTransaction = { batch, snapshot ->
                 aiReplyDraftCoordinator.confirmSendTransaction(batch, snapshot)
             },
+            privateNoReplyCompleted = { visit, window ->
+                aiReplyDraftCoordinator.isPrivateNoReplyCompleted(visit, window)
+            },
+            onRecoveredPrivateSendTransaction = { batch, snapshot, openedAt ->
+                aiReplyDraftCoordinator.confirmSendTransaction(batch, snapshot, openedAt)
+            },
+            observedPrivateJournalAdmitted = { batch, snapshot, openedAt, requestKey ->
+                aiReplyDraftCoordinator.observedPrivateJournalAdmitted(batch, snapshot, openedAt, requestKey)
+            },
+            privateReplyRequestKey = { batch, snapshot ->
+                aiReplyDraftCoordinator.privateVisibleReplyRequestKey(batch, snapshot)
+            },
+            restoreObservedPrivatePendingDraft = { batch, snapshot, visitToken, requestKey ->
+                aiReplyDraftCoordinator.generateVisibleDraft(
+                    batch, snapshot, visitToken = visitToken, recoveredPrivateRequestKey = requestKey
+                )
+            },
             verifyGreetingPreSendModelFailure = { failure, snapshot ->
                 aiReplyDraftCoordinator.verifyGreetingPreSendFailure(failure, snapshot)
             },
@@ -766,6 +823,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             sharedPageObservationCoordinator = pageObservationCoordinator,
             isConversationDraftPending = { aiReplyDraftCoordinator.isConversationReturnBlocked },
             isSendConfirmationPending = { aiReplyDraftCoordinator.isSendConfirmationPending },
+            nextSegmentConfirmedObservationId = { aiReplyDraftCoordinator.nextSegmentConfirmedObservationId },
             deferGreetingSendForManualReturn = {
                 aiReplyDraftCoordinator.deferUnconfirmedSendForManualReturn()
             },
@@ -783,6 +841,11 @@ internal class AccessibilityServiceDependencies internal constructor(
             },
             imageSendThreshold = {
                 root.taskLaunchParametersRepository.read().imageSendThreshold
+            },
+            privateChatFollowUpPort = momoSocialAdapter,
+            isPrivateFollowUpTouchActive = { touchInteractionMonitor.snapshot().interactionActive },
+            privateImageResourceCount = {
+                root.taskLaunchParametersRepository.read().imageResourceUris.count { it.isNotBlank() }
             },
             contactMessageLedgerRepository = root.contactMessageLedgerRepository,
             privateMessagesCheckpointRepository = root.privateMessagesCheckpointRepository,

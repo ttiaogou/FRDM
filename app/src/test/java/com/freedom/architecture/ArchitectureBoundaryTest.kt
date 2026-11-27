@@ -322,6 +322,44 @@ class ArchitectureBoundaryTest {
         )
     }
 
+    @Test
+    fun greetingFilterIsNewAdmissionOnlyAndReusesIdentityObservation() {
+        val adapter = projectFile("app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt").readText()
+        val composition = projectFile("app/src/main/java/com/freedom/app/AppCompositionRoot.kt").readText()
+        val processing = adapter.substringAfter("private fun processReceivedGreetingRows(")
+            .substringBefore("private fun readSayHiFilterSettings(")
+        val profileReturn = processing.substringBefore("if (sayHiReadOnlyStage != SayHiReadOnlyStage.IDLE) return true")
+        val finalDecision = profileReturn.indexOf("ConversationFilterPolicy.evaluate(settings, evidence)")
+        assertTrue(finalDecision > profileReturn.indexOf("val resolvedContactId = sayHiSelectedContactIdentity"))
+        assertTrue(finalDecision > profileReturn.indexOf("val priorSend = priorSendRecords.firstOrNull"))
+        assertTrue(profileReturn.indexOf("return dispatchSayHiReadOnlyRowTap(tree, row, target)") > finalDecision)
+        val rejection = profileReturn.substringAfter("if (decision.result != ConversationFilterResult.ALLOW) {")
+            .substringBefore("if (settings.hasEnabledConditions)")
+        assertTrue(rejection.contains("markFilterSkipped"))
+        assertTrue(rejection.contains("clearSayHiSelectedGreeting()"))
+        assertTrue(rejection.contains("return true"))
+        assertFalse(rejection.contains("deferSayHiRow("))
+        assertFalse(rejection.contains("markProcessedRow("))
+        assertFalse(rejection.contains("persistSayHiTraversalCheckpoint("))
+
+        val newCandidates = processing.substringAfter("val unprocessedCandidates =")
+            .substringBefore("val deferredRetryCandidates =")
+        assertTrue(newCandidates.contains("passesSayHiListFilter"))
+        val recoveryCandidates = processing.substringAfter("val deferredRetryCandidates =")
+            .substringBefore("val candidate =")
+        assertTrue(recoveryCandidates.contains("isDeferredRetryDue"))
+        assertFalse(recoveryCandidates.contains("passesSayHiListFilter"))
+        assertTrue(processing.indexOf("val pendingReturns =") < processing.indexOf("val unprocessedCandidates ="))
+
+        val profile = adapter.substringAfter("private fun inspectPendingSayHiAvatarProfile(")
+            .substringBefore("private fun dispatchSayHiProfileIdentityScroll(")
+        assertEquals(1, Regex("accessibilityGateway.inspectActiveWindow").findAll(profile).count())
+        val evidence = profile.indexOf("MomoConversationFilterEvidenceParser.fromProfile(tree)")
+        assertTrue(evidence > profile.indexOf("if (isReceivedGreetingsListConfirmed())"))
+        assertTrue(evidence < profile.indexOf("return dispatchSayHiProfileIdentityScroll(tree)"))
+        assertTrue(composition.contains("root.taskLaunchParametersRepository.read().conversationFilterSettings()"))
+    }
+
     private val forbiddenTouchAction = Regex(
         "(?:AccessibilityNodeInfo\\.)?ACTION_(?:CLICK|LONG_CLICK|SCROLL_FORWARD|SCROLL_BACKWARD)"
     )

@@ -6,6 +6,8 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
+import android.os.SystemClock
+import android.util.Log
 import com.paddle.ocr.EngineConfig
 import com.paddle.ocr.model.OCRError
 import java.io.File
@@ -25,7 +27,7 @@ class ORTSessionManager(
         private set
 
     fun loadModels(detAssetPath: String, recAssetPath: String) {
-        val loadStart = System.currentTimeMillis()
+        val loadStart = SystemClock.elapsedRealtime()
         env = OrtEnvironment.getEnvironment()
         val opts = OrtSession.SessionOptions().apply {
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
@@ -33,15 +35,15 @@ class ORTSessionManager(
         }
         try {
             val ortEnv = env ?: throw OCRError.ModelLoadFailed("OCR", Exception("Environment not initialized"))
-            val detBytes = readModel(detAssetPath)
-            val recBytes = readModel(recAssetPath)
+            val detBytes = timedLoadStage("DETECTION_FILE_READ") { readModel(detAssetPath) }
+            val recBytes = timedLoadStage("RECOGNITION_FILE_READ") { readModel(recAssetPath) }
             try {
-                detSession = ortEnv.createSession(detBytes, opts)
+                detSession = timedLoadStage("DETECTION_SESSION_CREATE") { ortEnv.createSession(detBytes, opts) }
             } catch (t: Throwable) {
                 throw OCRError.ModelLoadFailed("detection", t)
             }
             try {
-                recSession = ortEnv.createSession(recBytes, opts)
+                recSession = timedLoadStage("RECOGNITION_SESSION_CREATE") { ortEnv.createSession(recBytes, opts) }
             } catch (t: Throwable) {
                 detSession?.close()
                 detSession = null
@@ -57,9 +59,21 @@ class ORTSessionManager(
             } catch (t: Throwable) {
                 throw OCRError.ModelLoadFailed("recognition", t)
             }
-            coldLoadTimeMs = System.currentTimeMillis() - loadStart
+            coldLoadTimeMs = SystemClock.elapsedRealtime() - loadStart
         } finally {
             opts.close()
+        }
+    }
+
+    private inline fun <T> timedLoadStage(stage: String, action: () -> T): T {
+        val started = SystemClock.elapsedRealtime()
+        return try {
+            action().also {
+                Log.i("FreedomOcrEngine", "OCR_MODEL_LOAD stage=$stage;success=true;durationMs=${SystemClock.elapsedRealtime() - started}")
+            }
+        } catch (failure: Throwable) {
+            Log.w("FreedomOcrEngine", "OCR_MODEL_LOAD stage=$stage;success=false;durationMs=${SystemClock.elapsedRealtime() - started};type=${failure.javaClass.simpleName}")
+            throw failure
         }
     }
 

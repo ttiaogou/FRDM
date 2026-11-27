@@ -307,13 +307,17 @@ object ChatSessionManagementPolicy {
     fun selectNext(
         candidates: List<ChatListCandidateSnapshot>,
         attemptedKeys: Set<String>,
-        blockedIdentityKeys: Set<String> = emptySet()
+        blockedIdentityKeys: Set<String> = emptySet(),
+        interruptedReadKeys: Set<String> = emptySet()
     ): ChatListCandidateSnapshot? {
         val ambiguousKeys = ambiguousSessionIdentityKeys(candidates) + blockedIdentityKeys
         return orderBottomToTop(candidates)
             .asSequence()
             .filter(::isEligible)
-            .filter { it.unreadStatus == ChatUnreadStatus.UNREAD }
+            .filter {
+                it.unreadStatus == ChatUnreadStatus.UNREAD ||
+                    (it.unreadStatus == ChatUnreadStatus.READ && stableSessionKey(it) in interruptedReadKeys)
+            }
             .firstOrNull {
                 val key = stableSessionKey(it)
                 key !in attemptedKeys && key !in ambiguousKeys
