@@ -7,7 +7,7 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.os.SystemClock
-import android.util.Log
+import com.freedom.ocr.plugin.runtime.OcrPluginDiagnosticRelay as Log
 import com.paddle.ocr.EngineConfig
 import com.paddle.ocr.model.OCRError
 import java.io.File
@@ -122,6 +122,7 @@ class ORTSessionManager(
 
     private inline fun <T> timedLoadStage(stage: String, action: () -> T): T {
         val started = SystemClock.elapsedRealtime()
+        Log.i("FreedomOcrEngine", "OCR_MODEL_LOAD stage=$stage;phase=START")
         return try {
             action().also {
                 Log.i("FreedomOcrEngine", "OCR_MODEL_LOAD stage=$stage;success=true;durationMs=${SystemClock.elapsedRealtime() - started}")

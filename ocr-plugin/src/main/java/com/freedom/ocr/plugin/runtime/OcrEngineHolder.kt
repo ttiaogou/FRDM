@@ -3,7 +3,7 @@ package com.freedom.ocr.plugin.runtime
 import android.content.Context
 import android.os.Bundle
 import android.os.SystemClock
-import android.util.Log
+import com.freedom.ocr.plugin.runtime.OcrPluginDiagnosticRelay as Log
 import com.freedom.ocr.plugin.model.OcrModelManager
 import com.paddle.ocr.EngineConfig
 import com.paddle.ocr.PaddleOCR

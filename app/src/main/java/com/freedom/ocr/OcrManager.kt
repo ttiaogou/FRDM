@@ -9,6 +9,7 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.os.SystemClock
+import com.freedom.data.RunDiagnosticsManager
 import org.autojs.plugin.paddle.ocr.api.OcrOptions
 import org.autojs.plugin.paddle.ocr.api.OcrPluginContract
 import org.autojs.plugin.paddle.ocr.api.OcrPerformanceDiagnostics
@@ -45,6 +46,7 @@ internal fun isColdLoadTimeoutSignal(failure: Exception): Boolean =
  */
 class OcrManager(context: android.content.Context) : Closeable {
     private val host = OcrPluginHost(context.applicationContext)
+    private val diagnostics by lazy { RunDiagnosticsManager.get(context.applicationContext) }
     private val lock = Any()
     private val activeRequestLock = Any()
     /** Serializes startup preflight and OCR requests so one request cannot invalidate another's state. */
@@ -129,6 +131,7 @@ class OcrManager(context: android.content.Context) : Closeable {
             "模型配置由 OCR 插件自身提供；请在 OCR 插件管理中安装或切换模型配置对应的插件。"
         }
         val requestId = "ocr-${requestSequence.incrementAndGet()}"
+        val diagnosticRunId = runCatching { diagnostics.activeRunId() }.getOrNull()
         val requestStartedAt = SystemClock.elapsedRealtime()
         var attemptsUsed = 0
         var requestOutcome = "FAILED"
@@ -215,8 +218,17 @@ class OcrManager(context: android.content.Context) : Closeable {
                 }
                 // Observe the existing call only: no extra worker, Binder call, cancellation or retry.
                 idleHandler.postDelayed(slowWarning, OcrPerformanceDiagnostics.SLOW_REQUEST_MS)
+                val diagnosticChannel = diagnosticRunId?.let { runId ->
+                    runCatching {
+                        OcrPluginDiagnosticChannel.open(diagnostics, runId, requestId, attempt,
+                            plugin.descriptor.info.capabilities?.getBoolean(OcrPluginContract.CAPABILITY_DIAGNOSTIC_PIPE) == true)
+                    }.getOrNull()
+                }
                 val result = try {
                     requireCurrentRead()
+                    diagnosticChannel?.let {
+                        runCatching { options.extras?.putParcelable(OcrPluginContract.EXTRA_DIAGNOSTIC_WRITE_FD, it.writeEnd) }
+                    }
                     plugin.service.detect(transfer.readEnd, options).also {
                         slowObservation.finish()
                         idleHandler.removeCallbacks(slowWarning)
@@ -245,6 +257,8 @@ class OcrManager(context: android.content.Context) : Closeable {
                 } finally {
                     slowObservation.finish()
                     idleHandler.removeCallbacks(slowWarning)
+                    runCatching { options.extras?.remove(OcrPluginContract.EXTRA_DIAGNOSTIC_WRITE_FD) }
+                    runCatching { diagnosticChannel?.close() }
                     try {
                         transfer.finish()
                     } catch (finishFailure: Throwable) {

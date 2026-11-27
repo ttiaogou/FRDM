@@ -234,6 +234,20 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         )
     }
 
+    /** The plugin pipe is bound to the run that issued the OCR request, never a later run. */
+    @Synchronized
+    internal fun recordOcrPluginDiagnostic(runId: String, requestId: String, attempt: Int, level: RunLogLevel, message: String) {
+        if (activeRun?.takeIf { !it.finishRequested }?.runId != runId) return
+        recordStructured(
+            eventType = "ocr_plugin_diagnostic",
+            category = RunLogCategory.COLLECTION,
+            level = level,
+            component = "OcrPlugin",
+            message = "requestId=$requestId;attempt=$attempt;$message",
+            actionId = "$requestId-attempt-$attempt"
+        )
+    }
+
     /** The caller binds the sink to the original run; late callbacks cannot enter another run. */
     @Synchronized
     override fun recordAiContextDiagnostic(runId: String, jsonLine: String) {

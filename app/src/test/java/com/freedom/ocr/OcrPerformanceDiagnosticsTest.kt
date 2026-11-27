@@ -1,12 +1,25 @@
 package com.freedom.ocr
 
 import org.autojs.plugin.paddle.ocr.api.OcrPerformanceDiagnostics
+import org.autojs.plugin.paddle.ocr.api.OcrPluginDiagnosticWire
 import org.autojs.plugin.paddle.ocr.api.OcrPluginContract
 import org.autojs.plugin.paddle.ocr.api.OcrSlowCallObservation
 import org.junit.Assert.*
 import org.junit.Test
 
 class OcrPerformanceDiagnosticsTest {
+    @Test fun diagnosticPipeFramesAreBoundedAndDoNotExportExceptionMessages() {
+        val bytes = OcrPluginDiagnosticWire.encode("ERROR", 42L,
+            "OCR_STAGE stage=INFERENCE_FAILED;type=IllegalStateException;message=private text\nsecond line")!!
+        val record = OcrPluginDiagnosticWire.decode(bytes.toString(Charsets.UTF_8).trimEnd())!!
+        assertEquals("ERROR", record.level)
+        assertEquals(42L, record.elapsedMs)
+        assertEquals("OCR_STAGE stage=INFERENCE_FAILED;type=IllegalStateException", record.message)
+        assertNull(OcrPluginDiagnosticWire.encode("INFO", 0, "OCR_STAGE " + "x".repeat(2048)))
+        assertNull(OcrPluginDiagnosticWire.decode("INFO|0|unrelated text"))
+        assertNull(OcrPluginDiagnosticWire.decode("INFO|0|OCR_STAGE;message=private"))
+    }
+
     @Test fun missingMetricsAreNotZeroAndOldPluginStillWorks() {
         val text = OcrPerformanceDiagnostics.formatFields(
             { key -> if (key == OcrPluginContract.EXTRA_TOTAL_TIME_MS) 172L else null },

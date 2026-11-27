@@ -2,7 +2,7 @@ package com.freedom.ocr.plugin.model
 
 import android.content.Context
 import android.os.SystemClock
-import android.util.Log
+import com.freedom.ocr.plugin.runtime.OcrPluginDiagnosticRelay as Log
 import com.freedom.ocr.plugin.BuildConfig
 import org.json.JSONArray
 import org.json.JSONObject

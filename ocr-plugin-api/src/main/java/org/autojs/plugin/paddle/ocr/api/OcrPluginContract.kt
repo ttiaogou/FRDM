@@ -35,4 +35,6 @@ object OcrPluginContract {
     const val INFERENCE_TIMEOUT_SIGNAL = "FREEDOM_OCR_INFERENCE_TIMEOUT"
     const val COLD_LOAD_TIMEOUT_SIGNAL = "FREEDOM_OCR_COLD_LOAD_TIMEOUT"
     const val EXTRA_DIAGNOSTIC_REQUEST_ID = "com.freedom.ocr.extra.DIAGNOSTIC_REQUEST_ID"
+    const val CAPABILITY_DIAGNOSTIC_PIPE = "com.freedom.ocr.capability.DIAGNOSTIC_PIPE"
+    const val EXTRA_DIAGNOSTIC_WRITE_FD = "com.freedom.ocr.extra.DIAGNOSTIC_WRITE_FD"
 }
