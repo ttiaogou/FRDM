@@ -21,33 +21,6 @@ internal class MomoImageSendState {
     var directoryRejectedRetries = 0
 }
 
-// The existing Momo adapter owns this short-lived platform navigation transaction.
-// The AI runtime owns scheduling/admission; TaskCoordinator remains the only lease owner.
-internal enum class PrivateFollowUpStage {
-    OPEN_ALBUM, WAIT_ALBUM, WAIT_DIRECTORY, WAIT_FREEDOM, WAIT_SELECTION, WAIT_SEND_RESULT,
-    IMAGE_RETRY_OPEN, IMAGE_RETRY_CONFIRM,
-    INTERCEPTION_OPEN_SETTINGS, INTERCEPTION_OPEN_CONTROL, INTERCEPTION_TAP_SWITCH,
-    INTERCEPTION_DISMISS, INTERCEPTION_BACK, INTERCEPTION_RETURN, TERMINAL
-}
-
-internal class PrivateFollowUpTransaction(
-    val target: ChatDraftInputTarget,
-    val id: String,
-    val owner: () -> Boolean,
-    val interception: Boolean,
-    val beforeStep: (com.freedom.features.aireply.domain.contact.ContactFollowUpStep) -> Boolean
-) {
-    val logPrefix = if (interception) "PRIVATE_INTERCEPTION" else "PRIVATE_IMAGE_SEND"
-    val image = MomoImageSendState()
-    val interceptionState = MomoInterceptionState()
-    @Volatile var succeeded = false
-    @Volatile var stage = if (interception) PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS else PrivateFollowUpStage.OPEN_ALBUM
-    @Volatile var inFlight = false
-    @Volatile var stageStartedAt = SystemClock.uptimeMillis()
-    var lastWaitReason: String? = null
-    var waitObservationCount = 0L
-}
-
 /** Image-only observation and verification; all writes still pass the shared checkpoint/tap gates. */
 internal class MomoImageSendTransactionController(
     private val accessibilityGateway: AccessibilityGateway,

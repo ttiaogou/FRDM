@@ -60,8 +60,11 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
              "if (scanContinuityRecoveryPending) {"),
             (traversal, "unreadBoundaryStabilityCount < UNREAD_BOUNDARY_STABILITY_CONFIRMATIONS",
              "false"),
-            (adapter, "if (!persistPrivateFollowUpStep(child, previous)) {",
+            ("app/src/main/java/com/freedom/adapters/social/momo/MomoPrivateFollowUpController.kt", "if (!persistPrivateFollowUpStep(child, previous)) {",
              "if (false) {"),
+            ("app/src/main/java/com/freedom/adapters/social/momo/MomoPrivateFollowUpController.kt", "!isBoundAiReplyUiOperationOwned(child.target.taskLease)", "false"),
+            ("app/src/main/java/com/freedom/adapters/social/momo/MomoPrivateFollowUpController.kt", "if (child.inFlight)", "if (false)"),
+            (adapter, "privateFollowUpController.submitPrivateFollowUpStep(child, next, action)", "uncheckedSubmission(child, next, action)"),
         ):
             with self.subTest(path=path, old=old):
                 code = dict(self.recovery_code)

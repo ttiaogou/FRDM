@@ -224,6 +224,19 @@ class PpR00FreezeTest(unittest.TestCase):
         self.assertNotIn(path, reviewed_s1)
         self.assertNotIn(path, m["permanent_s0"])
         reviewed_s1[path] = "cdf761e0f4a221fc289d0621bbd309900e84cc9e"
+        # R05-G: consolidate platform child ownership/recovery without changing the original baseline.
+        for path, (previous, replacement) in {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": (
+                "353ffb311dece0e79f6309862fcc8f71df19f076", "d68d98d536a7b54e955c2b150f2fbe79fdbd50e0"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoImageSendTransactionController.kt": (
+                "f6583cfa341c69a1f2e56f3ea827215d16065b23", "4f641191d25d4e1e47b2b9203f38e6a33caaea3c"),
+        }.items():
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = replacement
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoPrivateFollowUpController.kt"
+        self.assertNotIn(path, reviewed_s1)
+        self.assertNotIn(path, m["permanent_s0"])
+        reviewed_s1[path] = "14c07c5bcfc97bbefd617ad68dc1d04a1d7f391d"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

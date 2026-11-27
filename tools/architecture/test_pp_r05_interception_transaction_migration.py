@@ -3,6 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r05_follow_up_boundary_migration import restore_r05f_sources
 
 ROOT = Path(__file__).resolve().parents[2]
 MOMO = ROOT / "app/src/main/java/com/freedom/adapters/social/momo/"
@@ -26,11 +27,12 @@ def region(source, start, end):
 def unqualify(source):
     return re.sub(r"\bchild\.interceptionState\.(" + "|".join(FIELDS) + r")\b", r"child.\1", source)
 
-def restore_r05e_sources(adapter, image=None, owner=None):
+def restore_r05e_sources(adapter, image=None, owner=None, shared_owner=None):
     if image is None:
         image = (MOMO / "MomoImageSendTransactionController.kt").read_text(encoding="utf-8")
     if owner is None:
         owner = (MOMO / "MomoInterceptionTransactionController.kt").read_text(encoding="utf-8")
+    adapter, image = restore_r05f_sources(adapter, image, shared_owner)
     if git_blob(owner.encode("utf-8")) != OWNER:
         raise AssertionError("R05-F interception owner changed")
     state = region(owner, "    @Volatile var switchVerifiedOn", "}\n\n/** Live interception")
@@ -62,7 +64,9 @@ class PpR05InterceptionTransactionMigrationTest(unittest.TestCase):
         self.assertEqual(1, adapter.count("MomoInterceptionTransactionController("))
         self.assertNotIn("private fun reconcileInterception(", adapter)
         self.assertNotIn("private fun observeInterceptionPage(", adapter)
-        self.assertEqual(1, image.count("val interceptionState = MomoInterceptionState()"))
+        shared = (MOMO / "MomoPrivateFollowUpController.kt").read_text(encoding="utf-8")
+        self.assertEqual(1, shared.count("val interceptionState = MomoInterceptionState()"))
+        self.assertNotIn("val interceptionState = MomoInterceptionState()", image)
 
     def test_switch_proof_return_identity_and_checkpoint_gate_cannot_change(self):
         adapter = (MOMO / "MomoSocialAdapter.kt").read_text(encoding="utf-8")
@@ -79,5 +83,6 @@ class PpR05InterceptionTransactionMigrationTest(unittest.TestCase):
                 restore_r05e_sources(adapter, image, owner.replace(old, new, 1))
         with self.assertRaises(AssertionError):
             restore_r05e_sources(adapter.replace("submitInterceptionStep = ::submitInterceptionStep", "submitInterceptionStep = unchecked", 1), image, owner)
+        shared = (MOMO / "MomoPrivateFollowUpController.kt").read_text(encoding="utf-8")
         with self.assertRaises(AssertionError):
-            restore_r05e_sources(adapter, image.replace("val interceptionState = MomoInterceptionState()", "val interceptionState = unsafe()", 1), owner)
+            restore_r05e_sources(adapter, image, owner, shared_owner=shared.replace("val interceptionState = MomoInterceptionState()", "val interceptionState = unsafe()", 1))

@@ -1932,9 +1932,16 @@ def paired_ai_task_boundary_violations(code_by_path: dict[str, str]) -> list[str
                   "port.beginPrivateFollowUp(", "beforeStep =",
                   "!ownsPrivateFollowUp(child)", "!canPerformPrivateMessagesUiAction()",
                   "contactMessageLedger.updateFollowUpCheckpoint(")
-    require_order(adapter, "submitPrivateFollowUpStep", "!followUpCurrent(child)",
+    follow_up_owner = "app/src/main/java/com/freedom/adapters/social/momo/MomoPrivateFollowUpController.kt"
+    require_order(follow_up_owner, "submitPrivateFollowUpStep", "!followUpCurrent(child)",
                   "!isBoundAiReplyUiOperationOwned(child.target.taskLease)",
                   "persistPrivateFollowUpStep(child, previous)", "action { status ->")
+    require_order(follow_up_owner, "observe", "privateFollowUp ?: return",
+                  "!followUpCurrent(child)", "child.inFlight",
+                  "!reconcileInterception(child)", "observeImage(child)", "observeInterception(child)")
+    # The adapter must delegate to the same shared execution owner, not a local gate.
+    if "privateFollowUpController.submitPrivateFollowUpStep(child, next, action)" not in code_by_path.get(adapter, ""):
+        issues.append("Paired task boundary lost shared child submission delegation")
     require_order(runtime, "runPrivateFollowUpObservation", "!ownsPrivateFollowUp(child)",
                   "port.observe()", "scheduleFullInspectionAfter(500L)",
                   "if (activePrivateFollowUp !== child) return",

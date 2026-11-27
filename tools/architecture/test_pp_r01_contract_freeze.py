@@ -105,12 +105,20 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "tools/architecture/test_pp_r00_freeze.py"
                 self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
                 # R04 also pins the reviewed relocation; R03 remains in the R00 gate.
-                expected[path] = "14a365d2bf019c2bf5ae996edea480a9c59afc16"
+                expected[path] = "67b30a6e6a3d12199e2e95854cfe754bdfccfca8"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
                 self.assertEqual("8e0e9acbc33eb5b0c41d57f99e2ac4e02e82088a", expected[path])
                 expected[path] = "f459ec8dd8dfe0d93c6822a4990c3181dc67ec30"
+                # R05-G moves the existing L07 gate to the actual shared owner
+                # and adds owner/recovery/delegation mutation checks.
+                path = "tools/architecture/verify_boundaries.py"
+                self.assertEqual("713a0cfc1ed4617a37a31c66e1a0b056f42db1a3", expected[path])
+                expected[path] = "164cd50cfaf551e489d7faf4bea1e69b806d215d"
+                path = "tools/architecture/test_verify_boundaries.py"
+                self.assertEqual("bec2d575a43477763c2309a04a9e6014ad39967a", expected[path])
+                expected[path] = "248f50be7fcfbf001d5caffd5ac7efc1c0da2304"
             issues.extend(evidence_violations(ROOT, expected))
         # New R04 regression evidence is pinned independently of the historical inventory.
         issues.extend(evidence_violations(ROOT, {
@@ -143,7 +151,8 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         issues.extend(evidence_violations(ROOT, {
             "tools/architecture/test_pp_r05_draft_transaction_migration.py": "624e2df6d11189e26cbde371e413a12287cdb096",
             "tools/architecture/test_pp_r05_image_transaction_migration.py": "368e6b3bd22cc44d28231667e73bd7ca4a7dd2e2",
-            "tools/architecture/test_pp_r05_interception_transaction_migration.py": "790ee522f44b17289c787ed6f8c8e6e9aefee9f9",
+            "tools/architecture/test_pp_r05_interception_transaction_migration.py": "983a9908e70616b0298e48a532c0b8cadb1414d8",
+            "tools/architecture/test_pp_r05_follow_up_boundary_migration.py": "cf1cc27a763d845e4f60a7249f50ee0b6b650105",
         }))
         self.assertEqual([], issues)
 
