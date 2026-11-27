@@ -243,6 +243,9 @@ internal class PrivateMessagesTraversalTaskExecutor {
         recoveringUnfinishedSession = false
         scanContinuityRecoveryPending = checkpoint.scanContinuityRecoveryPending
         if (scanContinuityRecoveryPending) {
+            // Continuity repair and named relocation are distinct obligations. A legacy
+            // checkpoint containing both must not grant early candidate selection.
+            incompleteUnreadRelocationActive = false
             phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
             atTop = false
         }
@@ -340,14 +343,13 @@ internal class PrivateMessagesTraversalTaskExecutor {
         return before.filter { it in common } == after.filter { it in common }
     }
 
-    /** Same round, but the scan must start from a newly verified physical bottom. */
+    /** Same round; require a newly verified READ boundary or physical end, not old coordinates. */
     fun beginScanContinuityRecovery() {
         scanContinuityRecoveryPending = true
         phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
         atTop = false
         incompleteUnreadRelocationActive = false
         clearRecoveryViewportEvidence()
-        resetUnreadBoundaryObservation()
     }
 
     /** Retire transient scroll/boundary evidence, not saved business progress. */
@@ -359,6 +361,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
         boundaryStabilityConfirmationCount = 0
         noProgressScrollCount = 0
         sessionListStabilityRetryCount = 0
+        resetUnreadBoundaryObservation()
     }
 
     private data class IdentityReturn(
@@ -618,7 +621,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
     val lockedUnreadSessionKeys: MutableSet<String> = LinkedHashSet()
     var lockedUnreadSetFinalized: Boolean = false
     /** Legacy checkpoint field: an exceptional same-round search for pending identities.
-     * Stop as soon as an actionable target is rediscovered; physical end is a fallback. */
+     * Stop at a rediscovered target or verified READ boundary; physical end is a fallback. */
     var incompleteUnreadRelocationActive: Boolean = false
         private set
     /** Durable obligation to prove a safe scan origin after a discontinuous return. */
@@ -1361,32 +1364,6 @@ internal class PrivateMessagesTraversalTaskExecutor {
             resetUnreadBoundaryObservation()
             return PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
         }
-        // A continuity repair is not a named-row relocation. Even a clean READ
-        // viewport or a rediscovered pending row cannot terminate this positioning.
-        if (scanContinuityRecoveryPending) {
-            phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-            atTop = false
-            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
-        }
-        // An exceptional same-round search may stop at the first newly actionable
-        // pending identity instead of forcing a full physical-bottom scan.
-        if (incompleteUnreadRelocationActive && lockedUnreadSetFinalized) {
-            val pendingKeys = pendingKnownUnreadKeys()
-            val targets = snapshot.chatListCandidates.filter {
-                (ChatSessionManagementPolicy.stableSessionKey(it) in pendingKeys ||
-                    canRecoverInterruptedRow(snapshot, it)) &&
-                    isUniqueCompletePrivateRow(snapshot, it, ambiguousSessionIdentityKeys)
-            }
-            if (!hasPendingRoundWork() || selectNextCandidate(targets, pendingKeys) != null) {
-                incompleteUnreadRelocationActive = false
-                phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
-                resetUnreadBoundaryObservation()
-                return PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED
-            }
-            phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
-            resetUnreadBoundaryObservation()
-            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
-        }
         val visibleRows = snapshot.chatListCandidates.filter { it.rowVisibleToUser && it.intersectsViewport }
         val privateRows = visibleRows.filter { it.selectionClass == "PRIVATE_CHAT" }
         val completeRows = completeUnreadBoundaryRows(snapshot)
@@ -1412,6 +1389,39 @@ internal class PrivateMessagesTraversalTaskExecutor {
                 (ChatSessionManagementPolicy.privateBoundaryReadStatus(it) == ChatUnreadStatus.READ &&
                     it in completeRows) || isNonContributingClippedEdge(snapshot, it)
             }
+        // Continuity repair cannot expose candidates until a new scan origin is proven.
+        // A complete current READ suffix is that origin, just as in ordinary traversal;
+        // do not let an old rescan flag force further scrolling past it.
+        if (scanContinuityRecoveryPending && !cleanReadViewport) {
+            phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+            atTop = false
+            resetUnreadBoundaryObservation()
+            return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
+        }
+        // Named relocation can finish early at a newly actionable identity. Otherwise
+        // use the same READ-boundary verifier; unresolved offscreen identities remain
+        // pending for the existing deferred-work handoff, never counted as completed.
+        if (!scanContinuityRecoveryPending && incompleteUnreadRelocationActive && lockedUnreadSetFinalized) {
+            val pendingKeys = pendingKnownUnreadKeys()
+            val targets = snapshot.chatListCandidates.filter {
+                (ChatSessionManagementPolicy.stableSessionKey(it) in pendingKeys ||
+                    canRecoverInterruptedRow(snapshot, it)) &&
+                    isUniqueCompletePrivateRow(snapshot, it, ambiguousSessionIdentityKeys)
+            }
+            if (!snapshot.chatListExtractionTruncated && snapshot.windowIdentityKey() != null &&
+                selectNextCandidate(targets, pendingKeys) != null
+            ) {
+                incompleteUnreadRelocationActive = false
+                phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+                resetUnreadBoundaryObservation()
+                return PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED
+            }
+            if (!cleanReadViewport) {
+                phase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
+                resetUnreadBoundaryObservation()
+                return PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING
+            }
+        }
         if (canContinueWithIncompleteUnread(snapshot) && !cleanReadViewport) {
             // Pending named evidence is not an empty inbox or a proven read suffix.
             // Continue only the existing list positioning path; the completion gate
@@ -1453,8 +1463,16 @@ internal class PrivateMessagesTraversalTaskExecutor {
             return PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION
         }
 
-        phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
-        lockedUnreadSetFinalized = true
+        val repairingOrigin = scanContinuityRecoveryPending || incompleteUnreadRelocationActive
+        if (repairingOrigin) {
+            // Same transition as the independently confirmed physical end. Retire only
+            // the positioning obligation, not the round, receipt, cursor or pending rows.
+            confirmPhysicalEndForReturnTraversal()
+            recordVerifiedViewport(snapshot)
+        } else {
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+            lockedUnreadSetFinalized = true
+        }
         resetUnreadBoundaryObservation()
         // A no-work handoff is possible only at the verified top, after the same
         // full-read viewport proof used by a non-empty unread round.

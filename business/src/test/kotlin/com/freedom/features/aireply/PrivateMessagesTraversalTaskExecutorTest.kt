@@ -1497,6 +1497,91 @@ class PrivateMessagesTraversalTaskExecutorTest {
     }
 
     @Test
+    fun l07dRestoredRescanStopsAtFreshReadBoundaryWithoutRetiringMissingWork() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxPositionCheckCompleted = true
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        }
+        val processed = candidate(0, "Processed", ChatUnreadStatus.READ)
+        val nowReadBefore = candidate(1, "Now read", ChatUnreadStatus.UNREAD)
+        val missing = candidate(2, "Offscreen pending", ChatUnreadStatus.UNREAD)
+        val damaged = candidate(3, "Incomplete", ChatUnreadStatus.UNREAD, previewBoundsValid = false)
+        executor.attemptedSessionKeys += key(processed)
+        executor.lockedUnreadSessionKeys += setOf(key(processed), key(nowReadBefore), key(missing))
+        executor.recordVerifiedViewport(snapshot(processed, nowReadBefore))
+        executor.checkpointLastSuccessfulTaskId = "receipt"
+        executor.checkpointNextCursorKey = key(missing)
+        executor.observeIncompleteUnreadEvidence(snapshot(damaged))
+        executor.beginScanContinuityRecovery()
+        val saved = executor.checkpoint()
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(saved) }
+        val read = snapshot(candidate(1, "Now read", ChatUnreadStatus.READ),
+            candidate(4, "System", ChatUnreadStatus.UNREAD, selectionClass = "SYSTEM_ENTRY"))
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+            restored.evaluateListSnapshot(read, false, 2).unreadAdmissionDecision)
+        assertTrue(restored.scanContinuityRecoveryPending)
+        assertEquals(saved.lastStableVisibleKeys, restored.lastStableSessionListVisibleKeys)
+        // Neither an interrupted observation nor a truncated snapshot can finish recovery.
+        restored.clearRecoveryViewportEvidence()
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+            restored.evaluateListSnapshot(read, false, 2).unreadAdmissionDecision)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.CONTINUE_BOTTOM_POSITIONING,
+            restored.evaluateListSnapshot(read.copy(chatListExtractionTruncated = true), false, 2).unreadAdmissionDecision)
+        assertTrue(restored.scanContinuityRecoveryPending)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+            restored.evaluateListSnapshot(read, false, 2).unreadAdmissionDecision)
+        val confirmed = restored.evaluateListSnapshot(read, false, 2)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED, confirmed.unreadAdmissionDecision)
+        assertFalse(restored.scanContinuityRecoveryPending)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, restored.phase)
+        assertEquals(restored.visibleSessionKeys(read), restored.lastStableSessionListVisibleKeys)
+        assertEquals(saved.attemptedSessionKeys, restored.attemptedSessionKeys)
+        assertEquals(setOf(key(missing)), restored.pendingKnownUnreadKeys())
+        assertFalse(key(nowReadBefore) in restored.lockedUnreadSessionKeys)
+        assertEquals(saved.unresolvedIncompleteUnreadKeys, restored.unresolvedIncompleteUnreadKeys)
+        assertEquals(saved.lastSuccessfulTaskId, restored.checkpointLastSuccessfulTaskId)
+        assertEquals(saved.nextCursorKey, restored.checkpointNextCursorKey)
+        assertEquals(null, confirmed.nextCandidate)
+        val secondRestore = PrivateMessagesTraversalTaskExecutor().apply { restore(restored.checkpoint()) }
+        assertFalse(secondRestore.scanContinuityRecoveryPending)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, secondRestore.phase)
+    }
+
+    @Test
+    fun l07dNamedRelocationUsesReadBoundaryButKeepsUnresolvedWork() {
+        val executor = PrivateMessagesTraversalTaskExecutor().apply {
+            initialInboxPositionCheckCompleted = true
+            initialInboxTopPositioningCompleted = true
+            initialUnreadGateSwipeCompleted = true
+            lockedUnreadSetFinalized = true
+            phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+            atTop = true
+        }
+        val damaged = candidate(0, "Incomplete", ChatUnreadStatus.UNREAD, previewBoundsValid = false)
+        val healthy = candidate(1, "Healthy", ChatUnreadStatus.READ)
+        val mixed = snapshot(damaged, healthy)
+        assertTrue(executor.observeIncompleteUnreadEvidence(mixed))
+        assertTrue(executor.beginIncompleteUnreadRelocation(mixed))
+        val saved = executor.checkpoint()
+        val restored = PrivateMessagesTraversalTaskExecutor().apply { restore(saved) }
+        val read = snapshot(healthy)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.WAIT_FOR_UNREAD_BOUNDARY_CONFIRMATION,
+            restored.evaluateListSnapshot(read, false, 2).unreadAdmissionDecision)
+        assertTrue(restored.incompleteUnreadRelocationActive)
+        assertEquals(PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED,
+            restored.evaluateListSnapshot(read, false, 2).unreadAdmissionDecision)
+        assertFalse(restored.incompleteUnreadRelocationActive)
+        assertEquals(saved.unresolvedIncompleteUnreadKeys, restored.unresolvedIncompleteUnreadKeys)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, restored.phase)
+        assertTrue(runCatching { restored.renewExhaustedPrivateSelection() }.isFailure)
+        restored.atTop = true
+        assertTrue(restored.canBeginIncompleteUnreadRelocation(read))
+    }
+
+    @Test
     fun movedSingleRecoveryContactCannotProveContinuityOfDifferentViewport() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val moved = candidate(0, "Moved contact", ChatUnreadStatus.READ)

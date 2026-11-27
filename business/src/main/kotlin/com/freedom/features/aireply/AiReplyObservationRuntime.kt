@@ -1606,7 +1606,7 @@ class AiReplyObservationRuntime(
         val executor = privateMessagesTraversalTaskExecutor
         executor.clearRecoveryViewportEvidence()
         if (executor.scanContinuityRecoveryPending) {
-            onLog("消息列表检查点恢复[RESCAN_RETAINED]：原安全补扫尚未确认底部；继续同轮定位")
+            onLog("消息列表检查点恢复[RESCAN_RETAINED]：原安全起点尚未确认；由最新已读边界或独立物理末端证据决定方向")
         } else if (executor.isRestoredViewportCompatible(inspection) &&
             (executor.lastStableSessionListVisibleKeys.orEmpty().isEmpty() ||
                 executor.hasRestoredViewportContinuity(inspection))
@@ -1628,7 +1628,7 @@ class AiReplyObservationRuntime(
                 onLog("消息列表检查点恢复[REANCHOR]：status=${reanchor.status.name}；邻接身份连续；重新获取当前行，不复用旧坐标")
             } else if (executor.initialInboxTopPositioningCompleted) {
                 executor.beginScanContinuityRecovery()
-                onLog("消息列表检查点恢复[SAFE_RESCAN_REQUIRED]：status=${reanchor.status.name}；原位置未证明；保留原锚点、本轮记录和方向；等待底部独立验证")
+                onLog("消息列表检查点恢复[SAFE_RESCAN_REQUIRED]：status=${reanchor.status.name}；原位置未证明；保留原锚点、本轮记录和方向；等待新鲜已读边界或物理末端独立验证")
             } else {
                 // The startup top gate has not yet admitted a scan. Keep its
                 // original positioning policy; this is not a restored scan origin.
@@ -6605,6 +6605,8 @@ class AiReplyObservationRuntime(
         if (handlePrivateQuotaBoundary(snapshot)) return
 
         val wasWaitingForUnread = sessionManagerState == SessionManagerState.WAITING_FOR_UNREAD
+        val originRecoveryPending = privateMessagesTraversalTaskExecutor.scanContinuityRecoveryPending
+        val relocationPending = privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationActive
         val listEvaluation = privateMessagesTraversalTaskExecutor.evaluateListSnapshot(
             snapshot = snapshot,
             wasWaitingForUnread = wasWaitingForUnread,
@@ -6614,6 +6616,15 @@ class AiReplyObservationRuntime(
             preferredRetryKey = missedPrivateSessionTapKey
         )
         privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
+        if (listEvaluation.unreadAdmissionDecision == PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED &&
+            originRecoveryPending && !privateMessagesTraversalTaskExecutor.scanContinuityRecoveryPending
+        ) {
+            onLog("消息列表检查点恢复[SAFE_READ_ORIGIN_VERIFIED]：新鲜已读边界双快照通过；停止向下搜索；保留原轮次及待处理记录")
+        } else if (listEvaluation.unreadAdmissionDecision == PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED &&
+            relocationPending && !privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationActive
+        ) {
+            onLog("AI 私聊异常会话[RELOCATION_ORIGIN_VERIFIED]：已重新找到目标或确认已读边界；保留未解决身份")
+        }
         if (hadUnknownUnreadBeforeFreshSnapshot &&
             !privateMessagesTraversalTaskExecutor.normalInboxUnreadStateUnknown &&
             listEvaluation.unreadAdmissionDecision != PrivateMessagesUnreadAdmissionDecision.UNKNOWN_BLOCKED
@@ -7121,6 +7132,7 @@ class AiReplyObservationRuntime(
         if (!privateRelocationRetryOwed && receivedGreetingsTaskFlow.supportsWorkflow() &&
             privateMessagesCheckpointRepository != null
         ) {
+            onLog("AI 私聊异常会话[DEFERRED_WORK_HANDOFF]：局部待复核身份不计为完成；保留检查点并安全交接")
             startReceivedGreetingsTask("原异常未读待重新定位；先交接招呼任务", snapshot, AiReplyTaskYieldReason.DEFERRED_WORK)
             return true
         }

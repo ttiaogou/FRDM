@@ -868,6 +868,69 @@ class AiReplyObservationRuntimeTest {
     }
 
     @Test
+    fun l07dRestoredReadBoundaryWaitsWithoutAnotherDownwardSearch() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.attemptedSessionKeys += "processed"
+        executor.lockedUnreadSessionKeys += "offscreen-pending"
+        executor.checkpointLastSuccessfulTaskId = "receipt"
+        executor.beginScanContinuityRecovery()
+        val handle = fixture.runtime.javaClass.getDeclaredMethod(
+            "handleSessionListPage", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        handle.invoke(fixture.runtime, fixture.listPage)
+        assertTrue(fixture.logs.any { it.contains("UNREAD_BOUNDARY_CANDIDATE") })
+        assertTrue(requireNotNull(fixture.checkpoint()).scanContinuityRecoveryPending)
+        assertEquals(0, fixture.dispatchedGestures())
+        handle.invoke(fixture.runtime, fixture.listPage)
+        val saved = requireNotNull(fixture.checkpoint())
+        assertFalse(saved.scanContinuityRecoveryPending)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP.name, saved.phase)
+        assertEquals(setOf("processed"), saved.attemptedSessionKeys)
+        assertEquals(setOf("offscreen-pending"), saved.lockedUnreadSessionKeys)
+        assertEquals("receipt", saved.lastSuccessfulTaskId)
+        assertTrue(fixture.logs.any { it.contains("SAFE_READ_ORIGIN_VERIFIED") })
+        assertFalse(fixture.logs.any { it.contains("UNREAD_LOCKING") })
+    }
+
+    @Test
+    fun l07dNamedPendingRowYieldsWithoutClaimingExhaustion() {
+        val fixture = preScrollPageRecoveryFixture()
+        cancelFixtureStartupObservation(fixture)
+        fixture.port.receivedGreetingsWorkflowEnabled = true
+        val executor = fixture.runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(fixture.runtime) as PrivateMessagesTraversalTaskExecutor
+        val damaged = sessionCandidate(0, "Incomplete A", completeBoundaryEvidence = true, previewBoundsValid = false)
+        val healthy = sessionCandidate(1, "Healthy B", ChatUnreadStatus.READ, true)
+        val mixed = fixture.listPage.copy(chatListCandidates = listOf(damaged, healthy))
+        fixture.port.page = mixed
+        executor.initialInboxPositionCheckCompleted = true
+        executor.initialInboxTopPositioningCompleted = true
+        executor.initialUnreadGateSwipeCompleted = true
+        executor.lockedUnreadSetFinalized = true
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.atTop = true
+        assertTrue(executor.observeIncompleteUnreadEvidence(mixed))
+        val pending = executor.unresolvedIncompleteUnreadKeys.toSet()
+        val continueList = fixture.runtime.javaClass.getDeclaredMethod(
+            "continueSessionListWithoutCandidate", ChatPageSnapshot::class.java
+        ).apply { isAccessible = true }
+        continueList.invoke(fixture.runtime, mixed)
+        assertTrue(fixture.logs.any { it.contains("handoff=DEFERRED_WORK") })
+        assertFalse(fixture.logs.any { it.contains("handoff=TRAVERSAL_EXHAUSTED") })
+        assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
+        assertEquals(pending, requireNotNull(fixture.checkpoint()).unresolvedIncompleteUnreadKeys)
+        assertTrue(requireNotNull(fixture.checkpoint()).attemptedSessionKeys.isEmpty())
+    }
+
+    @Test
     fun p7IncompleteUnreadRowCheckpointsAndBlocksGesturesWithoutPermanentIdentityBlacklist() {
         val fixture = preScrollPageRecoveryFixture()
         // Full-size visible private row, but it lacks a readable identity; a confirmed
