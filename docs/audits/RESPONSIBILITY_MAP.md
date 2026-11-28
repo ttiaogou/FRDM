@@ -43,6 +43,11 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 | OWN-31 | 配置及 UI | [MainActivity](../../app/src/main/java/com/freedom/MainActivity.kt) / [ConfigurationHome](../../app/src/main/java/com/freedom/ui/config/ConfigurationHome.kt) / [EncryptedAiModelConfigurationRepository](../../app/src/main/java/com/freedom/data/ai/EncryptedAiModelConfigurationRepository.kt) / [SharedPreferencesGestureSettingsRepository](../../app/src/main/java/com/freedom/data/SharedPreferencesGestureSettingsRepository.kt) / [OcrPluginSettingsStore](../../app/src/main/java/com/freedom/data/OcrPluginSettingsStore.kt) | 界面与配置持久化分离；配置键及实际 owner 待细化 | [r08_activity_export_presentation_migration](../../tools/architecture/test_pp_r08_activity_export_presentation_migration.py) | C |
 | OWN-32 | 节点检查工具 | [NodeInspectorOperations](../../core/src/main/kotlin/com/freedom/core/accessibility/inspector/NodeInspectorOperations.kt) / [NodeInspectorDialog](../../app/src/main/java/com/freedom/ui/logs/NodeInspectorDialog.kt) | 检查与展示能力；完整接线和寿命待复核 | [r09a_repository_acceptance](../../tools/architecture/test_pp_r09a_repository_acceptance.py) | C |
 
+## D01-B 职责补证
+
+- OWN-31：证据基线 285c3d123d533e26aa68f3d2fab5d5b968329504。MainActivity 保留唯一诊断与采集 ZIP 导出事务；本轮退役独立节点 ZIP 保存事务。原 R08-D 逆向检查通过新增精确迁移继续适用，CI 待验证。
+- OWN-32：悬浮可视化由 GlobalNodeLayoutVisualizationUseCase 持有实时窗口快照，NodeBoundsHighlightOverlay/NodeHierarchyOverlay 展示，NodeLayoutSnapshotExporter 保存布局。LatestAccessibilityNodeDump 仅移除独立 ZIP 打包能力，旧读写者仍保留：S0 Service、AppCompositionRoot、业务节点输出及监控预览。历史节点归档由 MomoChatSampleNodeTreeStore 持有，不与实时可视化缓存合并。完整引用与生命周期复核仍未完成，C 状态保留。
+
 ## 证据及覆盖边界
 
 - [R09-A](FRDM-PP-R09-A-REPOSITORY-ARCHITECTURE-ACCEPTANCE.md)、[R09-C](FRDM-PP-R09-C-ENTRY-STATE-UI-OWNERSHIP-ACCEPTANCE.md)、[R09-D](FRDM-PP-R09-D-RECOVERY-CHECKPOINT-ASYNC-ISOLATION.md)、[R09-G](FRDM-PP-R09-G-FINAL-ENGINEERING-ACCEPTANCE.md) 为验收证据，[历史归档](../archive/README.md) 供追溯。

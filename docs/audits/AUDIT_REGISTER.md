@@ -31,6 +31,25 @@ CANDIDATE 待证实；OPEN 已确认待处理；RETAINED 已分类保留；LIMIT
 
 DOC-001～006 的关闭仅针对文档问题，证据为 G01-C HEAD 的 [架构与资源 gate](https://github.com/ttiaogou/FRDM/actions/runs/46136302512/job/140952260570)：213 Python tests、0 链接异常候选、硬检测通过。G01-C 完整 CI 查询时仍在运行，不作为关闭依据。DOC-007/008 关闭依据为 [G01-E 实际完整 CI](https://github.com/ttiaogou/FRDM/actions/runs/46137618668) 及 G01-F 对该 SHA 的累计差异、原冻结、归档、结构及链接复核；结项记录提交的 CI 仍须实际检查。R09G-G05 的 11 个具体文件及 G03 分类详见 R09-G；不另复制完整历史报告。
 
+## D01 专项事项
+
+证据基线：285c3d123d533e26aa68f3d2fab5d5b968329504（G01-F，完整 CI 46139876328 success）。D01-B 仅完成独立节点 ZIP 退役；原 S0 清单、Service、采集、监控、归档和现有可视化代码不变。新提交 CI 未验证，不关闭待验事项；R09G-G01/G04 保留原编号。
+
+| ID | 分类/等级 | 证据与影响 | 状态 | 后续处置及关闭/复核依据 |
+| --- | --- | --- | --- | --- |
+| D01-001 | 导出/高 | OWN-31/32：MainActivity 节点 ZIP 入口与专属事务、LatestAccessibilityNodeDump.createArchive 已精确移除 | VERIFY_PENDING | 本提交 CI、真机入口检查 |
+| D01-002 | 缓存/高 | OWN-32：LatestAccessibilityNodeDump 与 GlobalNodeLayoutVisualizationUseCase 分别保存节点；前者仍有 S0 Service 高亮接收器读取 | OPEN | 不改 S0；先完成引用审计、冻结范围决议 |
+| D01-003 | 缓存/高 | MomoSocialAdapter.onNodeTreeSnapshot 经 AppCompositionRoot 写入旧自动缓存；仍有 S0 读取者 | OPEN | 与 D01-002 同步收敛，保留正式归档 |
+| D01-004 | 入口/中 | 旧 ACTION_MANUAL_NODE_CAPTURE 接收器仍注册，现行 UI 未发现发送者 | CANDIDATE | 全仓引用及动态入口核验；S0 独立决议 |
+| D01-005 | 接口/中 | NodeInspectorDialog、NodeCapturePresentationPort 等旧检查器关联组件 | CANDIDATE | 全仓引用、测试保护及实际入口核查后处理 |
+| D01-006 | 导出/中 | 独立节点 ZIP SAF 请求码、临时文件及保存回调已精确移除 | VERIFY_PENDING | D01-B CI 及真机回归 |
+| D01-007 | 调度/中 | AndroidMonitorPreviewScheduler 350ms 防抖与监控摘要仍有生产用途 | CANDIDATE | 保留有效调度；后续核查全部摘要消费者 |
+| D01-008 | 导出/高 | 缺少默认综合导出；现有 createExportBundle 已支持组合数据范围 | OPEN | D01-C 复用原聚合、保存和清理事务 |
+| D01-009 | 兼容/高 | includeAllDiagnostics 改变关联诊断目录封存判断，存在旧归档兼容差异 | OPEN | D01-C 验证兼容且不放宽封存保护 |
+| D01-010 | 遗留/中 | SessionSampleArchiveManager.createBatchArchive 仍有测试引用，未证明生产不可达 | CANDIDATE | D01-D 全量引用核验 |
+| D01-011 | 交互/中 | 导出成功可能安全清理源数据，入口提示不充分 | OPEN | D01-C 明确范围及清理提示 |
+| D01-012 | 导出/中 | 原节点 ZIP 默认优先手动缓存而非时间最新，相关方法已移除 | VERIFY_PENDING | 随 D01-001 验收 |
+
 ## 持续扫描范围
 
 代码相似、语义职责、正反调用链、状态/缓存、监听器/回调生命周期、不可达及依赖/资源。当前现有架构检测与 G01-A 文档扫描继续使用；AI 发现的问题必须区分候选与确认。删除生产代码需独立任务授权及行为保护，不因本台账自动执行。

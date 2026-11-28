@@ -28,7 +28,6 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.freedom.accessibility.FreedomAccessibilityService
-import com.freedom.adapters.accessibility.diagnostics.LatestAccessibilityNodeDump
 import com.freedom.adapters.android.MonitorActions
 import com.freedom.application.ports.OcrReviewRepository
 import com.freedom.application.ports.OcrReviewEntry
@@ -80,7 +79,6 @@ class MainActivity : Activity() {
     )
     private var pendingSessionSampleExport: PendingCollectionExport? = null
     private var sessionSampleExportRunning = false
-    private var pendingNodeDumpExportFile: File? = null
     private var pendingReopenConfigPanelAfterSettings = false
     private var pendingReopenConfigPanelAfterNotificationPermission = false
     private var pendingEnableFloatingLogAfterOverlayPermission = false
@@ -1780,10 +1778,6 @@ class MainActivity : Activity() {
                     label = "已封存采集归档 ZIP",
                     description = "查看归档、选择导出或等待当前采集封存"
                 ) { showArchiveExportActions() },
-                CollectionExportDialog.Action(
-                    label = "导出最近节点预览 ZIP",
-                    description = "独立的节点结构快照"
-                ) { launchNodeDumpExport() }
             )
         )
     }
@@ -1984,65 +1978,6 @@ class MainActivity : Activity() {
     private fun launchLogExport() {
         val snapshot = monitorRepository.snapshotDisplayLogsForExport()
         beginSessionSampleExport(emptyList(), includeAllDiagnostics = true, displayLogs = snapshot)
-    }
-
-    /** Exports the latest structural-only node snapshot through the existing SAF path. */
-    private fun launchNodeDumpExport(
-        source: com.freedom.core.accessibility.diagnostics.NodeCaptureSource? = null,
-        windowId: Int? = null
-    ) {
-        val archive = LatestAccessibilityNodeDump.createArchive(this, source, windowId)
-        if (archive == null) {
-            Toast.makeText(this, "暂无可导出的节点快照，请先运行并等待节点预览采集", Toast.LENGTH_LONG).show()
-            return
-        }
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/zip"
-            putExtra(Intent.EXTRA_TITLE, archive.name)
-        }
-        pendingNodeDumpExportFile = archive
-        try {
-            suppressFloatingButtonOnPause = true
-            @Suppress("DEPRECATION")
-            startActivityForResult(intent, REQUEST_EXPORT_NODE_DUMP)
-        } catch (error: Exception) {
-            suppressFloatingButtonOnPause = false
-            pendingNodeDumpExportFile = null
-            runCatching { archive.delete() }
-            monitorRepository.addLog(timestamp() + "  启动节点 Dump 导出失败：${error.javaClass.simpleName}")
-            Toast.makeText(this, "无法打开节点结构保存窗口，请稍后重试", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun exportNodeDumpArchive(resultCode: Int, data: Intent?) {
-        val archive = pendingNodeDumpExportFile
-        pendingNodeDumpExportFile = null
-        if (resultCode != RESULT_OK || data?.data == null) {
-            archive?.let { runCatching { it.delete() } }
-            Toast.makeText(this, "已取消节点结构导出", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (archive == null || !archive.isFile) {
-            Toast.makeText(this, "节点结构临时文件已失效，请重新采集", Toast.LENGTH_LONG).show()
-            return
-        }
-        Thread {
-            val result = runCatching {
-                val output = contentResolver.openOutputStream(data.data!!, "w")
-                    ?: throw java.io.IOException("无法打开所选文件")
-                output.use { stream -> archive.inputStream().use { it.copyTo(stream) } }
-            }
-            runCatching { archive.delete() }
-            runOnUiThread {
-                result.onSuccess {
-                    Toast.makeText(this, "节点结构 JSON/TXT/XML 已导出", Toast.LENGTH_LONG).show()
-                }.onFailure { error ->
-                    monitorRepository.addLog(timestamp() + "  写入节点 Dump ZIP 失败：${error.javaClass.simpleName}")
-                    Toast.makeText(this, "节点结构导出失败：${error.message ?: error.javaClass.simpleName}", Toast.LENGTH_LONG).show()
-                }
-            }
-        }.start()
     }
 
     /** Confirms a single-run or multi-run export before opening the Android document picker. */
@@ -2263,10 +2198,6 @@ class MainActivity : Activity() {
             exportSessionSampleArchive(resultCode, data)
             return
         }
-        if (requestCode == REQUEST_EXPORT_NODE_DUMP) {
-            exportNodeDumpArchive(resultCode, data)
-            return
-        }
 
     }
 
@@ -2292,7 +2223,6 @@ class MainActivity : Activity() {
         private const val REQUEST_OCR_IMAGE_TEST = 2006
         private const val REQUEST_NOTIFICATION_PERMISSION = 2003
         private const val REQUEST_EXPORT_SESSION_SAMPLES = 2004
-        private const val REQUEST_EXPORT_NODE_DUMP = 2005
         private const val ARCHIVE_SEAL_WAIT_TIMEOUT_MS = 45_000L
         private const val ARCHIVE_SEAL_POLL_INTERVAL_MS = 350L
         private const val OCR_PREFLIGHT_COOLDOWN_MS = 10_000L

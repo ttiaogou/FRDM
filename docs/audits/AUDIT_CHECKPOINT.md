@@ -5,18 +5,18 @@
 | 字段 | 当前记录 |
 | --- | --- |
 | repository / branch | ttiaogou/FRDM / PP |
-| reviewedHead | 4ecfc4cab2968b8a34b18bb92873c9c7b26c745d |
-| reviewedTree | 7ae6473a93798aa37474626e3685143e7e267854 |
-| 已验收工程基线 | G01-E 4ecfc4cab2968b8a34b18bb92873c9c7b26c745d；[完整 CI 46137618668](https://github.com/ttiaogou/FRDM/actions/runs/46137618668) completed/success |
-| 当前任务 | G01-F 全量复审及最终工程验收 |
-| 当前状态 | REVIEW_COMPLETE / BASELINE_CI_PASS / CLOSURE_COMMIT_CI_PENDING（本结项提交以实际 CI 为准） |
-| 验证策略 | 本阶段完整 CI；后续依据授权任务选择验证范围，不放宽原门禁 |
+| reviewedHead | 285c3d123d533e26aa68f3d2fab5d5b968329504 |
+| reviewedTree | b3f7bb009e97b801f070a1b1ce95c543cabf4606 |
+| 已验收工程基线 | G01-F 285c3d123d533e26aa68f3d2fab5d5b968329504；[完整 CI 46139876328](https://github.com/ttiaogou/FRDM/actions/runs/46139876328) completed/success |
+| 当前任务 | D01-B 节点采集与可视化职责收敛（独立节点 ZIP 退役子项） |
+| 当前状态 | PARTIAL_IMPLEMENTED / BASELINE_CI_PASS / COMMIT_CI_PENDING；缓存及旧入口受 S0 冻结与引用核查约束 |
+| 验证策略 | 精确 S1 退役及逆向恢复；保留 S0、既有检测及完整 CI；真机待验 |
 | 设备验收 | F01–F12 DEFERRED / NOT_RUN；用户独立执行 |
 | 当前职责建档 | 32 项：A 16、B 12、C 4；证据基线仍按职责表，不虚报逐方法核查 |
-| 台账 | 18 项：CLOSED 8、RETAINED 3、CANDIDATE 4、OPEN 1、LIMITATION 1、DEFERRED 1 |
+| 台账 | 30 项：CLOSED 8、RETAINED 3、CANDIDATE 8、OPEN 6、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 3 |
 | 工作区 | 远端 Git tree/compare；无本地 checkout 验证 |
-| 改动范围 | G01-F 仅更新台账、检查点；职责表无新职责证据不改，生产/测试/规则/CI 不改 |
-| 下一阶段 | 持续治理常态维护；后续专项按用户授权及台账证据执行，不自动进入代码清理 |
+| 改动范围 | MainActivity 与 LatestAccessibilityNodeDump 精确删除 140 行；R00/R01/R08-D 追加精确迁移；新增专项测试及治理记录；S0/采集/归档/可视化不改 |
+| 下一阶段 | 先复核本提交完整 CI；继续 D01-B 缓存与旧入口引用核验及 S0 冻结边界决议；D01-C 综合导出 |
 
 ## 批次进度
 
@@ -27,7 +27,9 @@
 | G01-C | 完成：[历史归档](FRDM-PP-G01-C-HISTORICAL-DOCUMENT-ARCHIVE.md)，46136302512 架构 gate success |
 | G01-D | 完成：三文档已建，46136977140 架构 gate success |
 | G01-E | 完成：导航及精确保护接入，46137618668 完整 CI success |
-| G01-F | 累计差异、规范、归档、结构及已验收基线复核完成；本结项提交的完整 CI 待实际结果 |
+| G01-F | 累计差异、规范、归档、结构及已验收基线复核完成；完整 CI 46139876328 success |
+| D01-A | 只读核心链路审计；遗留引用未穷尽 |
+| D01-B | 独立节点 ZIP 退役子项实施，完整 CI 待查；剩余缓存/旧接收器未收敛 |
 
 ## G01-F 复核及验收证据
 
@@ -38,6 +40,12 @@
 - [G01-E APK job 140956846775](https://github.com/ttiaogou/FRDM/actions/runs/46137618668/job/140956846775) 实际日志三次 BUILD SUCCESSFUL，R09F_APK_SIGNING_PAIR_VERIFIED SHA256=716ffba13bbb5019717d9eecfc21b793353005138a31ea1cdbafe607954b7220。普通、精简、OCR 工件均存在且查询时未过期；为同 run debug 配套，不是长期正式签名合同。
 - 台账 DOC-007/008 依据 G01-E 完整 CI 与 G01-F 实际复审关闭；其余 R09G-G01～09 及 GOV-001 保留原分类。职责表 A/B/C 不改变；尚未穷尽逐方法状态读写、动态调用图及全仓语义去重，不将结构验证当作全部 AI 合规或设备通过。用户延期真机 F01–F12 仍有效。
 - 此为治理工程基础设施验收，不是新增生产架构，不是对任何历史候选代码的删除授权。历史索引见 [归档](../archive/README.md)。
+
+## D01-B 本轮证据
+
+- 基线 S0 Service blob 2ee39d722c21947e1a73305ec8559e1f0226cdc8；其旧高亮接收器仍读取 LatestAccessibilityNodeDump。禁止为清理缓存而擅改 S0。
+- MainActivity 7e4148b1006924f66b11308f394b7752279f0984 → 94a8c122f60d52f24d59b4edb96d212a7d6a295d；LatestAccessibilityNodeDump 0373e7e20e2d921aebb2559fe910a6c7aed22c67 → 2d636faa98ed11fdecae133692ab3b4ff720905e。两文件均仅删 70 行，精确逆向重建原文。新检测 [D01-B](../../tools/architecture/test_pp_d01b_node_zip_retirement.py) 保留原 R08-D 历史逆向，R00/R01 追加准确 S1/证据 pin，未删减原断言。
+- 保留现有运行诊断、归档导出、可视化布局保存、自动监控摘要及缓存读写；D01-C 未施工。无本地 Gradle/真机结果；新提交 CI 状态以后续实际 Actions 为准。
 
 ## 接续维护
 

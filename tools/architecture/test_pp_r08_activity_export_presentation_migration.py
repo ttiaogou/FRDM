@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_d01b_node_zip_retirement import restore_d01b_activity
 
 ROOT = Path(__file__).resolve().parents[2]
 ACTIVITY = "app/src/main/java/com/freedom/MainActivity.kt"
@@ -31,6 +32,7 @@ DIALOG_IMPORT = "import android.widget.CheckBox\n"
 FORMATTER_BLOCK = "    fun buildLogExportContent(records: List<String>): String = buildString {\n        append(\"Freedom 运行日志\\n\")\n        append(\"导出时间：\")\n        append(\n            java.text.SimpleDateFormat(\"yyyy-MM-dd HH:mm:ss\", java.util.Locale.getDefault())\n                .format(java.util.Date())\n        )\n        append(\"\\n记录数量：\").append(records.size)\n        append(\"\\n导出内容：包含完整技术详情\\n\")\n        append(\"=\".repeat(72)).append(\"\\n\\n\")\n        append(LogTextFormatter.formatLogLines(\n            records.map(com.freedom.core.logging.RunLogBudgetPolicy::redactSensitivePayload),\n            includeTechnicalDetails = true\n        ))\n        if (records.isNotEmpty()) append('\\n')\n    }\n\n"
 
 def restore_sources(activity, dialog, formatter):
+    activity = restore_d01b_activity(activity)
     def inverse(source, edits):
         for current, previous in edits:
             if source.count(current) != 1:

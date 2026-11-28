@@ -449,6 +449,13 @@ class PpR00FreezeTest(unittest.TestCase):
         self.assertNotIn(path, reviewed_s1)
         self.assertNotIn(path, m["permanent_s0"])
         reviewed_s1[path] = "4f554b193371269082187a5fc2bf7744c86effeb"
+        # D01-B: authorized exact retirement of the independent node ZIP; S0 unchanged.
+        path = "app/src/main/java/com/freedom/MainActivity.kt"
+        self.assertEqual("7e4148b1006924f66b11308f394b7752279f0984", reviewed_s1[path])
+        reviewed_s1[path] = "94a8c122f60d52f24d59b4edb96d212a7d6a295d"
+        path = "app/src/main/java/com/freedom/adapters/accessibility/diagnostics/LatestAccessibilityNodeDump.kt"
+        self.assertEqual("0373e7e20e2d921aebb2559fe910a6c7aed22c67", reviewed_s1[path])
+        reviewed_s1[path] = "2d636faa98ed11fdecae133692ab3b4ff720905e"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

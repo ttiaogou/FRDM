@@ -250,6 +250,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R09-D exact verified-contact preload isolation.
                 self.assertEqual("8233890fe4ad1f273070e1f10e95ce7c625ffc12", expected[path])
                 expected[path] = "2cdc86e6aea3926b836a937c9e608bc1fdb15e6f"
+                # D01-B: exact reviewed S1 node ZIP retirement; all S0 pins remain.
+                self.assertEqual("2cdc86e6aea3926b836a937c9e608bc1fdb15e6f", expected[path])
+                expected[path] = "82f2d6f342a6dd3e4f89fc385d1958f236700aa3"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -581,6 +584,13 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r09f_apk_delivery.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "0e5244a48297dee14ba617b4c916d5961ab62df0"
+        # D01-B: retain R08-D inverse and pin the exact retirement regression.
+        path = "tools/architecture/test_pp_r08_activity_export_presentation_migration.py"
+        self.assertEqual("d17659994930f521942b574fd0e7dec3b8f5acd8", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "4e9b6e41c6368cc2719b20600ff4a58389a57d17"
+        path = "tools/architecture/test_pp_d01b_node_zip_retirement.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "3fdc82bc0c55b47f47ae544f8fa08c29b9feaa31"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
