@@ -357,7 +357,6 @@ class AiReplyObservationRuntime(
             isObservationActive = isAiReplyActive
         )
     }
-    private var lastRecoveryAndroidReadinessWait: String? = null
     /** Diagnostic-only deduplication; never grants UI authority or consumes a receipt. */
     private var lastIdentityReturnNotConsumedReason: String? = null
     private var serviceInterruptionCheckpointPersisted = false
@@ -651,17 +650,11 @@ class AiReplyObservationRuntime(
     /** Every raw page read must declare its observation entry purpose. */
     private fun readPageSnapshot(purpose: AiReplyPageReadPurpose): ChatPageSnapshot? =
         pageReadCoordinator.read(purpose).snapshot
-    private var snapshotRecoveryStartedAtMs = 0L
     private var receivedGreetingsUserActive = false
     private var userInteractionActive = false
     private var receivedGreetingsQuietTask: ScheduledTask? = null
     private var receivedGreetingsQuietGeneration = 0L
     private val pageRecoveryVerificationGate = PageRecoveryVerificationGate()
-    private var receivedGreetingsRecoveryVerificationPending = false
-    private var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
-    private var receivedGreetingsRecoveryRetryAttempt = 0
-    private var messageRecoveryRetryAttempt = 0
-    private var messageListRecoveryVerificationPending = false
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
@@ -1212,8 +1205,8 @@ class AiReplyObservationRuntime(
                 // A missing fresh snapshot never completes an earlier checkpoint sample.
                 receivedGreetingsCheckpointVerifier.reject(observationDecision.observationGeneration)
             }
-            if (snapshotRecoveryStartedAtMs == 0L) {
-                snapshotRecoveryStartedAtMs = System.currentTimeMillis()
+            if (transientEmptySnapshotRecovery.snapshotRecoveryStartedAtMs == 0L) {
+                transientEmptySnapshotRecovery.snapshotRecoveryStartedAtMs = System.currentTimeMillis()
                 // P6: once a task is running, missing page evidence is an actual
                 // recovery transaction, never only a local verification flag.
                 val activeTask = taskOwnership.activeTaskId()
@@ -1227,7 +1220,7 @@ class AiReplyObservationRuntime(
                 }
                 onLog("AI 页面观察[SNAPSHOT_RECOVERY_HOLD]：快照暂时丢失；保留当前任务租约和会话状态")
             }
-            val elapsedMs = System.currentTimeMillis() - snapshotRecoveryStartedAtMs
+            val elapsedMs = System.currentTimeMillis() - transientEmptySnapshotRecovery.snapshotRecoveryStartedAtMs
             val nextDelayMs = transientEmptySnapshotRecovery.nextDelayMs()
             val phase = if (transientEmptySnapshotRecovery.retryCount <= RecoveryScheduler.fastRetryCount) {
                 "FAST_BACKOFF"
@@ -1249,16 +1242,16 @@ class AiReplyObservationRuntime(
         // Once a business recovery owns the checkpoint, only its route verifier may
         // advance the reducer or acknowledge completion. The legacy empty-snapshot
         // timer is observation bookkeeping, not a second recovery authority.
-        if (recoveryContext.pending && snapshotRecoveryStartedAtMs != 0L) {
+        if (recoveryContext.pending && transientEmptySnapshotRecovery.snapshotRecoveryStartedAtMs != 0L) {
             pageRecoveryVerificationGate.reset(SNAPSHOT_RECOVERY_ROUTE_ID)
-            snapshotRecoveryStartedAtMs = 0L
+            transientEmptySnapshotRecovery.snapshotRecoveryStartedAtMs = 0L
         }
         if (sessionRunStarted &&
-            (snapshotRecoveryStartedAtMs != 0L ||
-                (receivedGreetingsRecoveryVerificationPending && receivedGreetingsCheckpointForUnified == null)) &&
+            (transientEmptySnapshotRecovery.snapshotRecoveryStartedAtMs != 0L ||
+                (pageRecoveryVerificationGate.receivedGreetingsRecoveryVerificationPending && receivedGreetingsCheckpointForUnified == null)) &&
             !ensureAndroidRecoveryReady(recovered, "LEGACY_PAGE_RECOVERY")
         ) return
-        if (snapshotRecoveryStartedAtMs != 0L) {
+        if (transientEmptySnapshotRecovery.snapshotRecoveryStartedAtMs != 0L) {
             if (!pageRecoveryVerificationGate.observe(SNAPSHOT_RECOVERY_ROUTE_ID, recoveryStructuralKey(recovered))) {
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
                 onLog("AI 页面恢复[RECOVERY_VERIFYING]：第${pageRecoveryVerificationGate.stableSamples(SNAPSHOT_RECOVERY_ROUTE_ID)}/2次独立新鲜快照尚未稳定；350ms后复核")
@@ -1272,10 +1265,10 @@ class AiReplyObservationRuntime(
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
             onLog("AI 页面恢复[RECOVERY_VERIFIED]：连续两次新鲜结构快照一致；恢复消息列表任务")
             pageRecoveryVerificationGate.reset(SNAPSHOT_RECOVERY_ROUTE_ID)
-            snapshotRecoveryStartedAtMs = 0L
+            transientEmptySnapshotRecovery.snapshotRecoveryStartedAtMs = 0L
         }
         if (sessionRunStarted && receivedGreetingsTaskActive &&
-            receivedGreetingsRecoveryVerificationPending &&
+            pageRecoveryVerificationGate.receivedGreetingsRecoveryVerificationPending &&
             receivedGreetingsCheckpointForUnified == null
         ) {
             val fingerprint = runCatching {
@@ -1298,9 +1291,8 @@ class AiReplyObservationRuntime(
             recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
-            receivedGreetingsRecoveryVerificationPending = false
-            receivedGreetingsRecoveryVerifiedForNextSnapshot = true
-            receivedGreetingsRecoveryRetryAttempt = 0
+            pageRecoveryVerificationGate.retainGreetingResumeProof()
+            receivedGreetingsCheckpointVerifier.receivedGreetingsRecoveryRetryAttempt = 0
             pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
             onLog("收到的招呼恢复[RECOVERY_VERIFIED]：连续两次新鲜列表指纹一致；恢复收到招呼任务协调器")
         }
@@ -1352,10 +1344,10 @@ class AiReplyObservationRuntime(
             snapshot = snapshot, expectedPackage = targetPackage(), evidence = evidence
         )
         if (admission.allowed) {
-            if (lastRecoveryAndroidReadinessWait != null) {
+            if (pageRecoveryVerificationGate.lastRecoveryAndroidReadinessWait != null) {
                 onLog("统一页面恢复[ANDROID_READINESS_CONFIRMED]：stage=$stage；Android=READY；等待新鲜业务路由复核")
             }
-            lastRecoveryAndroidReadinessWait = null
+            pageRecoveryVerificationGate.lastRecoveryAndroidReadinessWait = null
             return true
         }
         recoveryContext.invalidateFingerprint()
@@ -1371,12 +1363,12 @@ class AiReplyObservationRuntime(
         pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
         pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
         sessionManagerState = SessionManagerState.PAUSED
-        if (lastRecoveryAndroidReadinessWait != admission.reasonCode) {
+        if (pageRecoveryVerificationGate.lastRecoveryAndroidReadinessWait != admission.reasonCode) {
             onLog(
                 "统一页面恢复[ANDROID_READINESS_PENDING]：stage=$stage；status=${evidence?.status ?: "NO_EVIDENCE"}；" +
                     "reason=${admission.reasonCode}；保留检查点并持续只读复核"
             )
-            lastRecoveryAndroidReadinessWait = admission.reasonCode
+            pageRecoveryVerificationGate.lastRecoveryAndroidReadinessWait = admission.reasonCode
         }
         scheduleFullInspectionAfter(500L)
         return false
@@ -1478,7 +1470,7 @@ class AiReplyObservationRuntime(
             }
         }
         val recoveryContextActive = observedPhysicalInterruption || receivedGreetingsTaskActive || taskOwnership.pairWake != null ||
-            messageListRecoveryVerificationPending ||
+            pageRecoveryVerificationGate.messageListRecoveryVerificationPending ||
             recoveryContext.pending || privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait != null || userInteractionActive
         if (!recoveryContextActive) return
         // A touch invalidates a parked relocation intent. Only a new confirmed
@@ -1741,7 +1733,7 @@ class AiReplyObservationRuntime(
         if (handlePrivateStartupDetailOwnership(observation, inspection, matchedRouteId)) return
 
         if (sessionRunStarted && taskOwnership.pairWake != null && !receivedGreetingsTaskActive &&
-            !recoveryContext.pending && !messageListRecoveryVerificationPending &&
+            !recoveryContext.pending && !pageRecoveryVerificationGate.messageListRecoveryVerificationPending &&
             !isSendConfirmationPending() && !isConversationDraftPending()
         ) {
             observePairWake(observation, inspection, matchedRouteId)
@@ -2281,9 +2273,8 @@ class AiReplyObservationRuntime(
                         return
                     }
                     recoveryContext.acknowledgeVerifiedCheckpoint(targetRoute, sharedProof)
-                    receivedGreetingsRecoveryVerificationPending = false
-                    receivedGreetingsRecoveryVerifiedForNextSnapshot = false
-                    receivedGreetingsRecoveryRetryAttempt = 0
+                    pageRecoveryVerificationGate.clearGreetingResumeProof()
+                    receivedGreetingsCheckpointVerifier.receivedGreetingsRecoveryRetryAttempt = 0
                     pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
                 } else {
                     // Page/lease proof does not yet admit a new scan origin.
@@ -2297,7 +2288,7 @@ class AiReplyObservationRuntime(
                         return
                     }
                     recoveryContext.acknowledgeVerifiedCheckpoint(targetRoute, sharedProof)
-                    messageListRecoveryVerificationPending = false
+                    pageRecoveryVerificationGate.messageListRecoveryVerificationPending = false
                     pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
                 }
             }
@@ -2330,7 +2321,7 @@ class AiReplyObservationRuntime(
                 return
             }
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID && targetRoute == messageListRecoveryRoute.routeId) {
-                messageRecoveryRetryAttempt = 0
+                messageListCheckpointVerifier.messageRecoveryRetryAttempt = 0
             }
             if (privateListFaultEvidence != PrivateListRecoveryFaultEvidence.NOT_APPLICABLE) {
                 // Only after two admissible samples and the existing Android/lease gate
@@ -2450,8 +2441,7 @@ class AiReplyObservationRuntime(
                     handleSessionListPage(inspection)
                 }
             } else {
-                receivedGreetingsRecoveryVerificationPending = false
-                receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+                pageRecoveryVerificationGate.clearGreetingResumeProof()
                 pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
                 if (!sharedGreetingsRecovery && !receivedGreetingsTaskFlow.synchronizeRecoveryConfirmation()) {
                     sessionManagerState = SessionManagerState.PAUSED
@@ -2660,7 +2650,7 @@ class AiReplyObservationRuntime(
             ) && previous?.pageKind == ChatPageKind.CHAT_LIST
         ) {
             requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "MESSAGE_LIST_UNKNOWN")
-            messageListRecoveryVerificationPending = true
+            pageRecoveryVerificationGate.messageListRecoveryVerificationPending = true
             scheduleSessionListStabilityRetry("页面结构暂时不可用")
             return
         }
@@ -2791,12 +2781,12 @@ class AiReplyObservationRuntime(
                         "PageRecoveryRequested：收到招呼页面 UNKNOWN；" +
                             "暂停滚动/点击/导航，保留任务检查点，等待新鲜页面指纹复核"
                     )
-                    if (!receivedGreetingsRecoveryVerifiedForNextSnapshot) {
-                        receivedGreetingsRecoveryVerificationPending = true
+                    if (!pageRecoveryVerificationGate.receivedGreetingsRecoveryVerifiedForNextSnapshot) {
+                        pageRecoveryVerificationGate.receivedGreetingsRecoveryVerificationPending = true
                         pageRecoveryVerificationGate.reset(RECEIVED_GREETINGS_RECOVERY_ROUTE_ID)
                     }
-                    val decision = if (receivedGreetingsRecoveryVerifiedForNextSnapshot) {
-                        receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+                    val decision = if (pageRecoveryVerificationGate.receivedGreetingsRecoveryVerifiedForNextSnapshot) {
+                        pageRecoveryVerificationGate.receivedGreetingsRecoveryVerifiedForNextSnapshot = false
                         receivedGreetingsTaskFlow.evaluatePageSnapshot(ChatPageKind.CHAT_LIST)
                     } else {
                         receivedGreetingsTaskFlow.evaluateUnclassifiedPageSnapshot()
@@ -3116,7 +3106,7 @@ class AiReplyObservationRuntime(
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
         receivedGreetingsPageProbePending = false
-        receivedGreetingsRecoveryRetryAttempt = 0
+        receivedGreetingsCheckpointVerifier.receivedGreetingsRecoveryRetryAttempt = 0
         pendingNavigationSourceResult = null
         unmatchedNavigationObservationPending = false
     }
@@ -3363,7 +3353,7 @@ class AiReplyObservationRuntime(
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
         pageObservationCoordinator.reset()
-        lastRecoveryAndroidReadinessWait = null
+        pageRecoveryVerificationGate.lastRecoveryAndroidReadinessWait = null
         lastIdentityReturnNotConsumedReason = null
         serviceInterruptionCheckpointPersisted = false
         sessionTransitionTask?.cancel()
@@ -3384,15 +3374,14 @@ class AiReplyObservationRuntime(
         suspendedPrivateRecovery = null
         privateListRecoveryReasonAfterObservedDetail = null
         if (!preservePendingRecovery || !recoveryContext.pending) recoveryContext.clear()
-        messageListRecoveryVerificationPending = false
+        pageRecoveryVerificationGate.messageListRecoveryVerificationPending = false
         messageListCheckpointRestored = false
         messageListCheckpointForUnified = null
-        messageRecoveryRetryAttempt = 0
+        messageListCheckpointVerifier.messageRecoveryRetryAttempt = 0
         messageReadCoordinator.deferredSendProofRetryAttempt = 0
         transientEmptySnapshotRecovery.reset()
         pageRecoveryVerificationGate.reset()
-        receivedGreetingsRecoveryVerificationPending = false
-        receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+        pageRecoveryVerificationGate.clearGreetingResumeProof()
         pageObservationCoordinator.lastRegionFingerprint = ""
         messageReadCoordinator.lastMessageFingerprint = ""
         loggedOcrDebugFingerprints.clear()
@@ -3433,7 +3422,7 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey = null
         privateMessagesTraversalTaskExecutor.identityCaptureTimeoutTask?.cancel()
         privateMessagesTraversalTaskExecutor.identityCaptureTimeoutTask = null
-        snapshotRecoveryStartedAtMs = 0L
+        transientEmptySnapshotRecovery.snapshotRecoveryStartedAtMs = 0L
         receivedGreetingsQuietTask?.cancel()
         receivedGreetingsQuietTask = null
         receivedGreetingsQuietGeneration++
@@ -3444,7 +3433,7 @@ class AiReplyObservationRuntime(
         // The private contact ledger is durable business state, not run-local traversal state.
         // Resetting the runtime must preserve counts and unresolved follow-up checkpoints.
         receivedGreetingsTaskFlow.reset()
-        receivedGreetingsRecoveryRetryAttempt = 0
+        receivedGreetingsCheckpointVerifier.receivedGreetingsRecoveryRetryAttempt = 0
         receivedGreetingsPageProbePending = false
     }
 
@@ -3483,7 +3472,7 @@ class AiReplyObservationRuntime(
         val eligible = (pendingListRecovery || pageSelectedPrivateStartupVerificationPending || alreadyOwnedIdleList) &&
             sessionRunStarted && isAiReplyActive() && !receivedGreetingsTaskActive &&
             !receivedGreetingsOwnershipRecheckPending && !awaitingNormalInboxAfterGreetingsReturn &&
-            (pendingListRecovery || (!recoveryContext.pending && !messageListRecoveryVerificationPending)) &&
+            (pendingListRecovery || (!recoveryContext.pending && !pageRecoveryVerificationGate.messageListRecoveryVerificationPending)) &&
             taskOwnership.pairWake == null && suspendedPrivateRecovery == null &&
             !privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery && !privateMessagesTraversalTaskExecutor.currentSessionSendConfirmed &&
             currentSessionCandidate == null && currentSessionKey == null &&
@@ -3644,7 +3633,7 @@ class AiReplyObservationRuntime(
         recoveryContext.clear()
         recoveryTransaction.reset()
         messageListCheckpointForUnified = null
-        messageListRecoveryVerificationPending = false
+        pageRecoveryVerificationGate.messageListRecoveryVerificationPending = false
         // A fresh list recovery will revalidate the original fault and the latest
         // ledger. Do not mark the list initialized or advance its scan phase here.
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
@@ -4211,11 +4200,11 @@ class AiReplyObservationRuntime(
      */
     private fun schedulePendingPrivateListObservation() {
         if (messageListCheckpointVerifier.hasRetainedObservationPlan() || pageObservationCoordinator.hasExplicitInspection()) return
-        messageRecoveryRetryAttempt = (messageRecoveryRetryAttempt + 1)
+        messageListCheckpointVerifier.messageRecoveryRetryAttempt = (messageListCheckpointVerifier.messageRecoveryRetryAttempt + 1)
             .coerceAtMost(RecoveryScheduler.fastRetryCount + 1)
-        val delay = RecoveryScheduler.readOnlyRetryDelayMs(messageRecoveryRetryAttempt)
+        val delay = RecoveryScheduler.readOnlyRetryDelayMs(messageListCheckpointVerifier.messageRecoveryRetryAttempt)
         onLog("统一恢复[READ_ONLY_RETRY_RETAINED]：checkpointId=${recoveryContext.checkpointId}；" +
-            "attempt=$messageRecoveryRetryAttempt；delayMs=$delay")
+            "attempt=${messageListCheckpointVerifier.messageRecoveryRetryAttempt}；delayMs=$delay")
         scheduleFullInspectionAfter(delay)
     }
 
@@ -4363,7 +4352,7 @@ class AiReplyObservationRuntime(
         }
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
-        lastRecoveryAndroidReadinessWait = null
+        pageRecoveryVerificationGate.lastRecoveryAndroidReadinessWait = null
         serviceInterruptionCheckpointPersisted = false
         startupReadinessCoordinator.cancelRecovery()
         recoveryContext.clear()
@@ -4445,7 +4434,7 @@ class AiReplyObservationRuntime(
                     "等待首个页面快照确认收到的招呼或私人消息列表"
             )
         }
-        receivedGreetingsRecoveryRetryAttempt = 0
+        receivedGreetingsCheckpointVerifier.receivedGreetingsRecoveryRetryAttempt = 0
         privateMessagesTraversalTaskExecutor.initialInboxPositionCheckCompleted = false
         privateMessagesTraversalTaskExecutor.initialUnreadGateSwipeCompleted = false
         privateMessagesTraversalTaskExecutor.lockedUnreadSessionKeys.clear()
@@ -4465,8 +4454,8 @@ class AiReplyObservationRuntime(
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationKeys = null
         privateMessagesTraversalTaskExecutor.pendingBoundaryConfirmationToTop = false
         privateMessagesTraversalTaskExecutor.boundaryStabilityConfirmationCount = 0
-        messageListRecoveryVerificationPending = false
-        messageRecoveryRetryAttempt = 0
+        pageRecoveryVerificationGate.messageListRecoveryVerificationPending = false
+        messageListCheckpointVerifier.messageRecoveryRetryAttempt = 0
         if (selectedTaskId == null || selectedTaskId == PRIVATE_MESSAGES_TASK_ID) privateMessagesCheckpointRepository?.load()?.let { checkpoint ->
             privateMessagesTraversalTaskExecutor.restore(checkpoint)
             messageListCheckpointRestored = true
@@ -6168,7 +6157,7 @@ class AiReplyObservationRuntime(
     }
 
     private fun handleSessionListPage(snapshot: ChatPageSnapshot) {
-        if (messageListRecoveryVerificationPending && sessionRunStarted && !receivedGreetingsTaskActive) {
+        if (pageRecoveryVerificationGate.messageListRecoveryVerificationPending && sessionRunStarted && !receivedGreetingsTaskActive) {
             if (!ensureAndroidRecoveryReady(snapshot, "MESSAGE_LIST_RECOVERY")) return
             val originalFault = assessPrivateListRecoveryFault(
                 privateMessagesTraversalTaskExecutor.checkpoint(), recoveryContext.reason, snapshot
@@ -6197,8 +6186,8 @@ class AiReplyObservationRuntime(
             }
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeRequested)
             recoveryTransaction.dispatch(RecoveryTransactionEvent.ResumeCompleted)
-            messageListRecoveryVerificationPending = false
-            messageRecoveryRetryAttempt = 0
+            pageRecoveryVerificationGate.messageListRecoveryVerificationPending = false
+            messageListCheckpointVerifier.messageRecoveryRetryAttempt = 0
             pageRecoveryVerificationGate.reset(MESSAGE_LIST_RECOVERY_ROUTE_ID)
             reanchorRestoredMessageList(snapshot)
             onLog("消息列表恢复[RECOVERY_VERIFIED]：连续两次独立页面快照一致；恢复原有遍历算法")
@@ -7341,7 +7330,7 @@ class AiReplyObservationRuntime(
         currentSessionReadCaptured = false
         invalidateMessageReadTransaction()
 
-        receivedGreetingsRecoveryRetryAttempt = 0
+        receivedGreetingsCheckpointVerifier.receivedGreetingsRecoveryRetryAttempt = 0
 
         startupReadinessCoordinator.markReceivedGreetingsWorkAreaConfirmed()
 
@@ -7499,9 +7488,8 @@ class AiReplyObservationRuntime(
         recoveryContext.clear()
         recoveryTransaction.reset()
         receivedGreetingsCheckpointForUnified = null
-        receivedGreetingsRecoveryVerificationPending = false
-        receivedGreetingsRecoveryVerifiedForNextSnapshot = false
-        receivedGreetingsRecoveryRetryAttempt = 0
+        pageRecoveryVerificationGate.clearGreetingResumeProof()
+        receivedGreetingsCheckpointVerifier.receivedGreetingsRecoveryRetryAttempt = 0
         pendingNavigationSourceResult = null
         unmatchedNavigationObservationPending = false
         pageObservationCoordinator.lastPageInspection = inspection
@@ -7563,12 +7551,12 @@ class AiReplyObservationRuntime(
         onInspectionDue: (() -> Unit)? = null
     ) {
         if ((sessionManagerState == SessionManagerState.PAUSED &&
-                !messageListRecoveryVerificationPending) ||
+                !pageRecoveryVerificationGate.messageListRecoveryVerificationPending) ||
             sessionManagerState == SessionManagerState.STOPPED
         ) return
         sessionTransitionTask?.cancel()
-        messageRecoveryRetryAttempt += 1
-        val attempt = messageRecoveryRetryAttempt
+        messageListCheckpointVerifier.messageRecoveryRetryAttempt += 1
+        val attempt = messageListCheckpointVerifier.messageRecoveryRetryAttempt
         val delayMs = RecoveryScheduler.readOnlyRetryDelayMs(attempt)
         recoveryTransaction.dispatch(RecoveryTransactionEvent.RetryScheduled(delayMs))
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
@@ -8875,8 +8863,8 @@ class AiReplyObservationRuntime(
      */
     private fun scheduleReceivedGreetingsRecoveryRetry(reason: String) {
         if (!sessionRunStarted || !receivedGreetingsTaskActive) return
-        receivedGreetingsRecoveryRetryAttempt += 1
-        val retryCount = receivedGreetingsRecoveryRetryAttempt
+        receivedGreetingsCheckpointVerifier.receivedGreetingsRecoveryRetryAttempt += 1
+        val retryCount = receivedGreetingsCheckpointVerifier.receivedGreetingsRecoveryRetryAttempt
         val delayMs = RecoveryScheduler.readOnlyRetryDelayMs(retryCount)
         recoveryTransaction.dispatch(RecoveryTransactionEvent.RetryScheduled(delayMs))
         onLog(

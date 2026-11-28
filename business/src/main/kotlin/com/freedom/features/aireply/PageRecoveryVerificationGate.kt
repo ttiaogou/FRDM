@@ -10,6 +10,22 @@ internal class PageRecoveryVerificationGate(private val requiredStableSamples: I
 
     private val routeStates = LinkedHashMap<String, RouteState>()
 
+    // Route-admission bookkeeping, separate from the shared recovery reducer.
+    var lastRecoveryAndroidReadinessWait: String? = null
+    var receivedGreetingsRecoveryVerificationPending = false
+    var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+    var messageListRecoveryVerificationPending = false
+
+    fun retainGreetingResumeProof() {
+        receivedGreetingsRecoveryVerificationPending = false
+        receivedGreetingsRecoveryVerifiedForNextSnapshot = true
+    }
+
+    fun clearGreetingResumeProof() {
+        receivedGreetingsRecoveryVerificationPending = false
+        receivedGreetingsRecoveryVerifiedForNextSnapshot = false
+    }
+
     /** Observes an independent stability sequence for the supplied route. */
     fun observe(routeId: String, structuralKey: String): Boolean {
         require(routeId.isNotBlank()) { "routeId must not be blank" }

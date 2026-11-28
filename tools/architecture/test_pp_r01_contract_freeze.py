@@ -133,6 +133,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R07-G exact reviewed paired lifecycle relocation.
                 self.assertEqual("f251ece52a0d39a2a450f9ea46d5d15c9154535f", expected[path])
                 expected[path] = "331c0e421a41e17f1dd36a01d7c048784f560d03"
+                # R07-H exact recovery observation relocation.
+                self.assertEqual("331c0e421a41e17f1dd36a01d7c048784f560d03", expected[path])
+                expected[path] = "6bc4ccf5b5b2e810227fb5f40027618fdd1ea6dd"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -329,6 +332,13 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r07_paired_task_lifecycle_migration.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "d9b311939034c99a543e35cd1ff0a2942e327a7d"
+        # R07-H extends the historical inverse chain without changing prior assertions.
+        path = "tools/architecture/test_pp_r07_paired_task_lifecycle_migration.py"
+        self.assertEqual("d9b311939034c99a543e35cd1ff0a2942e327a7d", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "aec54c7b4d1f670d3266991ecbc4eaae1b9da9ac"
+        path = "tools/architecture/test_pp_r07_recovery_lifecycle_migration.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "c0e59b4d2737c36fd5b565a21078d9a9e3950e52"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

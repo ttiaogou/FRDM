@@ -45,6 +45,9 @@ internal class ReceivedGreetingsCheckpointVerification(
     private var binding: Binding? = null
     private var lastObservationGeneration = -1L
 
+    // Route-specific read-only retry debt; the shared plan still owns its own timer.
+    var receivedGreetingsRecoveryRetryAttempt = 0
+
     fun observe(
         checkpoint: MomoSayHiTraversalCheckpointRecord,
         checkpointId: String,

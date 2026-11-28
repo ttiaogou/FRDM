@@ -333,6 +333,22 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyTaskOwnership.kt"
         self.assertEqual("3f303752ae0a61e308fbf8182a9811ad932656fe", reviewed_s1[path])
         reviewed_s1[path] = "85ebbdd6eab50c3085bbc9b2388581c22a531302"
+        # R07-H: exact recovery observation state relocation; S0 unchanged.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("d6871d72fabe6af2af018fdeb709692851260335", reviewed_s1[path])
+        reviewed_s1[path] = "7f5d99bcfccf80e2404880fcdfd5341c73a19014"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplySessionTraversalCoordinator.kt"
+        self.assertEqual("3a44370c00672af7332e0dd660141241bcf4a8d4", reviewed_s1[path])
+        reviewed_s1[path] = "b40194531fa0231cf70a176027b6259cb8e4e2ce"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/PageRecoveryVerificationGate.kt"
+        self.assertEqual("41136af09eb89e74cc7a8ba00add1676b8f27f60", reviewed_s1[path])
+        reviewed_s1[path] = "7404738452eefe21aab1bdb34f3ae60be7d035b5"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/MessageListCheckpointVerification.kt"
+        self.assertEqual("3a58c7dc9690004f184f5c6a7ba0b61cc72a90e5", reviewed_s1[path])
+        reviewed_s1[path] = "fb0f8d7449f6e102c5d9ddc48b1d4a0d5f99a456"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsCheckpointVerification.kt"
+        self.assertEqual("8834d6054710aa10c7dafbbb5b6fe756737b7def", reviewed_s1[path])
+        reviewed_s1[path] = "e313a29018b7a10d25b21e78fb196c24a538fe19"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

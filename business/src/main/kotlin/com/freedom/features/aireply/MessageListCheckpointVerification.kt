@@ -45,6 +45,9 @@ internal class MessageListCheckpointVerification(
     private var binding: Binding? = null
     private var lastObservationGeneration = -1L
 
+    // One-shot observation retry debt before or outside the retained checkpoint plan.
+    var messageRecoveryRetryAttempt = 0
+
     fun observe(
         checkpoint: PrivateMessagesTraversalCheckpoint,
         checkpointId: String,

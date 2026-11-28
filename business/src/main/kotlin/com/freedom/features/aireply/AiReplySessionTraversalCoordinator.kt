@@ -17,6 +17,9 @@ internal class AiReplySessionTraversalCoordinator(retryDelaysMs: LongArray) {
     var retryCount: Int = 0
         private set
 
+    // Empty-root episode survives the retry-counter reset until fresh page proof is accepted.
+    var snapshotRecoveryStartedAtMs = 0L
+
     fun isTransient(snapshot: ChatPageSnapshot?): Boolean =
         pageObservationSemantics.classify(snapshot, previous = null, targetPackage = "").status ==
             ObservationStatus.TEMPORARILY_UNAVAILABLE
