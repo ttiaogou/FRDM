@@ -169,6 +169,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R09-B1 CI rollback preserves original overlay contract.
                 self.assertEqual("ecd3b1ce0ea3dec8ccd5cb787434a397974ce15a", expected[path])
                 expected[path] = "8233890fe4ad1f273070e1f10e95ce7c625ffc12"
+                # R09-D exact verified-contact preload isolation.
+                self.assertEqual("8233890fe4ad1f273070e1f10e95ce7c625ffc12", expected[path])
+                expected[path] = "2cdc86e6aea3926b836a937c9e608bc1fdb15e6f"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -471,6 +474,17 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         for path, replacement in {
             "tools/architecture/test_pp_r09c_authority_acceptance.py": "33bba22ec8750c58b7005ef2c86d18c09f8f8bfa",
             "app/src/test/java/com/freedom/application/runtime/R09cPageWriteAuthorityTest.kt": "0b18cc0940e3a65e09d46b503ebd59d462718141",
+        }.items():
+            self.assertNotIn(path, reviewed_migration_evidence)
+            reviewed_migration_evidence[path] = replacement
+        # R09-D exact historical inverse and new async/recovery test evidence.
+        path = "tools/architecture/test_pp_r08_composition_history_migration.py"
+        self.assertEqual("bed8d6302c2a573fa318bdd3a130a368436b77ec", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "83b0e32117415b1d924c9c418b2a77e956d51fcd"
+        for path, replacement in {
+            "tools/architecture/test_pp_r09d_recovery_acceptance.py": "f348c1c15287c55740e4bb425355e9a97a07791c",
+            "business/src/test/kotlin/com/freedom/features/recovery/R09dRecoveryIsolationTest.kt": "6be49782b3a36b78b384def1b50549287510271e",
+            "business/src/test/kotlin/com/freedom/features/conversation/domain/contact/R09dDraftHistoryIsolationTest.kt": "6cf04b6a45b5bfbd6465246bfe45b1e484383083",
         }.items():
             self.assertNotIn(path, reviewed_migration_evidence)
             reviewed_migration_evidence[path] = replacement

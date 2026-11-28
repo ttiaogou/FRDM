@@ -61,6 +61,11 @@ class ContactHistoryResolver(private val repository: ConversationRepository) {
 
         fun consume(verifiedIdentity: ContactRowIdentity?, chatTitle: String?): VerifiedDraftHistory? =
             if (verifiedIdentity != null) {
+                // OCR can be invalidated before consume; never reuse a previous contact's history.
+                if (preparedDraftHistory?.let { it.contactId != verifiedIdentity.contactId } == true) {
+                    clear()
+                    addLog("AI 草稿历史读取：预加载联系人已变化；丢弃旧历史并重新查询")
+                }
                 preparedDraftHistory?.also {
                     preparedDraftHistory = null
                     addLog("AI 草稿历史读取：复用 OCR 前已完成的历史预加载；不重复查询")

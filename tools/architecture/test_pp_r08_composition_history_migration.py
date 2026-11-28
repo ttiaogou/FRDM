@@ -36,7 +36,15 @@ COMPOSITION_INVERSE = [
 ]
 RESOLVER_BLOCK = "\n    /**\n     * One runtime-local, single-use preload slot. The caller retains task-policy admission\n     * and clears before preparing another visit or generating a greeting draft.\n     * No process-wide cache, repository duplication, scheduling, or task authority.\n     */\n    class DraftHistoryPreload(\n        private val loadHistory: (ContactRowIdentity, String?) -> VerifiedDraftHistory?,\n        private val addLog: (String) -> Unit\n    ) {\n        private var preparedDraftHistory: VerifiedDraftHistory? = null\n\n        fun clear() {\n            preparedDraftHistory = null\n        }\n\n        fun prepare(verifiedIdentity: ContactRowIdentity, chatTitle: String?) {\n            val history = loadHistory(verifiedIdentity, chatTitle)\n            preparedDraftHistory = history\n            addLog(\n                if (history != null) {\n                    \"AI 草稿历史预加载：已验证联系人历史=${history.messages.size}条；OCR 尚未启动\"\n                } else {\n                    \"AI 草稿历史预加载：未找到可用历史；OCR 尚未启动\"\n                }\n            )\n        }\n\n        fun consume(verifiedIdentity: ContactRowIdentity?, chatTitle: String?): VerifiedDraftHistory? =\n            if (verifiedIdentity != null) {\n                preparedDraftHistory?.also {\n                    preparedDraftHistory = null\n                    addLog(\"AI 草稿历史读取：复用 OCR 前已完成的历史预加载；不重复查询\")\n                } ?: runCatching {\n                    loadHistory(verifiedIdentity, chatTitle)\n                }.onFailure {\n                    addLog(\n                        \"AI 草稿历史读取失败：CONTACT_HISTORY_READ_FAILED；\" +\n                            \"contactIdVerified=true；exception=${it.javaClass.simpleName}；\" +\n                            \"降级为仅当前窗口上下文\"\n                    )\n                }.getOrNull()\n            } else {\n                preparedDraftHistory = null\n                addLog(\"AI 草稿上下文：身份未达到 PLATFORM_ID_VERIFIED；不加载联系人历史；仅当前窗口上下文\")\n                null\n            }\n    }\n"
 
+# R09-D: preserve the original R08-F inverse after exactly one contact isolation guard.
+R09D_CONTACT_GUARD = "                // OCR can be invalidated before consume; never reuse a previous contact's history.\n                if (preparedDraftHistory?.let { it.contactId != verifiedIdentity.contactId } == true) {\n                    clear()\n                    addLog(\"AI 草稿历史读取：预加载联系人已变化；丢弃旧历史并重新查询\")\n                }\n"
+
 def restore_sources(composition, resolver):
+    if resolver.count(R09D_CONTACT_GUARD) != 1:
+        raise AssertionError("R09-D preload contact isolation guard changed")
+    resolver = resolver.replace(R09D_CONTACT_GUARD, "", 1)
+    if git_blob(resolver.encode("utf-8")) != "235214217df96e84e291d5a58256365551881275":
+        raise AssertionError("R09-D pre-isolation resolver not reconstructed")
     for current, previous in COMPOSITION_INVERSE:
         if composition.count(current) != 1:
             raise AssertionError("R08-F composition inverse anchor changed: " + current[:100])
