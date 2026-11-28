@@ -2,7 +2,7 @@
 
 ## 基线、方法与证据边界
 - Repository ttiaogou/FRDM, PP, 1644c0f875b4d64a663b721bab86411e8b585840, tree 2437ffc0f99bd1e1e3ffbb01e73994e31bc6cdf0; R08-H CI 46123532211 全部五项成功。
-- 完整递归 Git tree 未截断：435 个 production Kotlin 源码、0 个 production Java 源码、6 个 AIDL 声明。AIDL 与生成源码、Android 资源/manifest 由既有构建/资源门禁核验，不将其冒充为 Kotlin 语义扫描。
+- 完整递归 Git tree 未截断：435 个物理 main Kotlin 文件（434 个按现行源码选择规则纳入编译、1 个有意排除的历史占位文件）、0 个 production Java 源码、6 个 AIDL 声明。AIDL 与生成源码、Android 资源/manifest 由既有构建/资源门禁核验，不将其冒充为 Kotlin 语义扫描。
 - 对全部九模块 Gradle 构建及源码根进行检查；读取核心运行时、业务状态、数据、OCR、装配和手势调用点，结合既有全仓 verify_boundaries.py、R00/R01、R02 及 R04–R08 迁移证据。新增 R09-A 验收测试覆盖物理源码与原扫描范围的一致性、六个显式 Kotlin source set 的包含/排除规则、依赖图无环、20 个附加关键类型唯一声明、31 个文件的 84 个实际装配/状态/调用锚点及反向变异。
 - 不是编译器级完整动态调用图，也不证明任意不同命名状态的语义等价或每一条运行时分支；不以文件大小、类名相似或测试通过推断全部职责已经完美分离。完整 CI 结果另行核验。
 
@@ -47,6 +47,11 @@
 - AI: draft coordinator createGateway(configuration).decide -> EngineBackedAiDecisionGateway -> AiReplyDecisionEngine -> AiModelProvider.generate; model decisions not UI write authorization.
 - Recovery: shared process manager + dispatcher identity/lane gate, existing reducers and persisted checkpoints; distinguish local proof/projection from global task lease. R09-D must verify all generations/route/checkpoint and callbacks.
 - Additional audited type declaration map and actual source tokens live in tools/architecture/test_pp_r09a_repository_acceptance.py; P0/P7 authority declaration/construction rules remain unchanged. R07-I scoped 63-state-declaration proof remains in original test.
+
+## First CI finding and exact classification
+- CI 46124499999: three new tests passed; source-selection coverage failed on `core/src/main/kotlin/com/freedom/core/accessibility/gesture/GesturePolicyPort.kt`. The file is a declaration-free historical comment/package placeholder, explicitly excluded in core/build.gradle.kts, SHA a4a4d6c0cdef3056bfdb5092813bd8a905259bf7. GesturePolicyPort and InterruptibleGesturePolicyPort were consolidated into GestureApi; no active duplicate implementation is present in this file.
+- Keep the file, its exact content and exclusion, and keep it in the full lexical scan. Correct only the new acceptance test to distinguish physically present vs selected files. Exact reviewed-exclusion inventory now rejects unexpected exclusions, changed placeholder content, or removal of its exclusion; add direct negative tests. Do not change Gradle or production sources, old assertions, manifests or existing hard gates.
+- Counts: 435 physical main Kotlin files; 434 selected tracked Kotlin sources, plus build-generated sources where applicable. Core has 58 physical and 57 selected Kotlin files. R09-B may review historical placeholder and old exclusion declarations separately; deletion is not authorized here.
 
 ## Findings and remaining acceptance
 - Existing nullable coordinator / sharedManager fallback paths in TaskExecutionController, RunSessionCoordinator, RecoveryEventDispatcher and other test-compatible contracts: actual inspected composition injects shared process dependencies. Do not assume every fallback path is unreachable without R09-B/C call-site audit.

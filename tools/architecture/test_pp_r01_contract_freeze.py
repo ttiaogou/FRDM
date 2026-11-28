@@ -424,6 +424,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r09a_repository_acceptance.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "3976325d97ac6c1ee70da31a39f5c5fb3f5f6d9a"
+        # R09-A CI audit: pin the exact known excluded, declaration-free history placeholder.
+        self.assertEqual("3976325d97ac6c1ee70da31a39f5c5fb3f5f6d9a", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "ca9b2b6b5d84ef0c2b8d447bfd3a280a66a03f69"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

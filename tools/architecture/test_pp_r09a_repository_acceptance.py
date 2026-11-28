@@ -8,6 +8,7 @@ import fnmatch
 import re
 import unittest
 from pathlib import Path
+from tools.architecture.test_pp_r00_freeze import git_blob
 from tools.architecture.verify_boundaries import (
     ALLOWED_PROJECT_DEPENDENCIES, EXPECTED_MODULES, kotlin_sources,
     mask_kotlin_non_code, project_dependencies, strip_gradle_comments,
@@ -196,9 +197,27 @@ EDGES = {
   ]
 }
 
+# The first R09-A CI exposed one intentional source-history placeholder.
+# Keep it in the lexical scan and require exactly this excluded file and exact content.
+REVIEWED_EXCLUDED_PLACEHOLDERS = {
+    "core/src/main/kotlin/com/freedom/core/accessibility/gesture/GesturePolicyPort.kt": "a4a4d6c0cdef3056bfdb5092813bd8a905259bf7",
+}
+
+def excluded_inventory_violations(actual):
+    issues = []
+    for path, digest in REVIEWED_EXCLUDED_PLACEHOLDERS.items():
+        if path not in actual:
+            issues.append("reviewed historical placeholder no longer explicitly excluded: " + path)
+        elif actual[path] != digest:
+            issues.append("reviewed historical placeholder content changed: " + path)
+    for path in sorted(set(actual) - set(REVIEWED_EXCLUDED_PLACEHOLDERS)):
+        issues.append("unexpected physical source excluded by Gradle: " + path)
+    return issues
+
 def coverage_violations(root):
     issues = []
     physical = set()
+    explicitly_excluded = {}
     for module, directory in MODULES.items():
         main = root / directory / "src/main"
         if not main.is_dir() or main.is_symlink():
@@ -230,9 +249,11 @@ def coverage_violations(root):
                     issues.append("non-local Kotlin source: " + str(file.relative_to(root)))
                     continue
                 relative = file.relative_to(source_root).as_posix()
-                if (not any(fnmatch.fnmatchcase(relative, pattern) for pattern in include)
-                        or any(fnmatch.fnmatchcase(relative, pattern) for pattern in exclude)):
-                    issues.append("physical source outside declared main selection: " + str(file.relative_to(root)))
+                if not any(fnmatch.fnmatchcase(relative, pattern) for pattern in include):
+                    issues.append("physical source outside declared main inclusion: " + str(file.relative_to(root)))
+                if any(fnmatch.fnmatchcase(relative, pattern) for pattern in exclude):
+                    explicitly_excluded[file.relative_to(root).as_posix()] = git_blob(file.read_bytes())
+    issues.extend(excluded_inventory_violations(explicitly_excluded))
     scanned = set(kotlin_sources(root))
     for path in sorted(physical - scanned):
         issues.append("production source omitted by existing scanner: " + str(path.relative_to(root)))
@@ -284,6 +305,15 @@ class PpR09ARepositoryAcceptanceTest(unittest.TestCase):
 
     def test_all_physical_main_sources_are_in_existing_scan_and_module_selection(self):
         self.assertEqual([], coverage_violations(ROOT))
+
+    def test_reviewed_exclusion_is_exact_and_no_additional_source_can_be_hidden(self):
+        self.assertEqual([], excluded_inventory_violations(dict(REVIEWED_EXCLUDED_PLACEHOLDERS)))
+        self.assertTrue(excluded_inventory_violations({}))
+        changed = {path: "0" * 40 for path in REVIEWED_EXCLUDED_PLACEHOLDERS}
+        self.assertTrue(excluded_inventory_violations(changed))
+        added = dict(REVIEWED_EXCLUDED_PLACEHOLDERS)
+        added["core/src/main/kotlin/Unexpected.kt"] = "0" * 40
+        self.assertTrue(excluded_inventory_violations(added))
 
     def test_actual_project_dependency_graph_is_acyclic_and_matches_existing_contract(self):
         graph = {module: project_dependencies(ROOT / directory / "build.gradle.kts")
