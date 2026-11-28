@@ -420,6 +420,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         }.items():
             self.assertNotIn(path, reviewed_migration_evidence)
             reviewed_migration_evidence[path] = replacement
+        # R09-A: additional whole-checkout coverage and domain ownership evidence.
+        path = "tools/architecture/test_pp_r09a_repository_acceptance.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "3976325d97ac6c1ee70da31a39f5c5fb3f5f6d9a"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
