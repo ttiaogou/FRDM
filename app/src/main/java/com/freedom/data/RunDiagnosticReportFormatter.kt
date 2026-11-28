@@ -1,6 +1,7 @@
 package com.freedom.data
 
 import com.freedom.core.logging.RunDiagnosticReport
+import com.freedom.core.logging.RunLogBudgetPolicy
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -36,6 +37,30 @@ internal object RunDiagnosticReportFormatter {
                     .put("suggestedAction", issue.suggestedAction))
             }
         })
+
+    /** The existing JSON size ceiling and compatibility fallback, without file ownership. */
+    fun toBoundedJson(report: RunDiagnosticReport): String {
+        val json = toJson(report).toString(2)
+        return if (RunLogBudgetPolicy.utf8Size(json) <= RunLogBudgetPolicy.MAX_DIAGNOSTIC_REPORT_BYTES) {
+            json
+        } else {
+            JSONObject()
+                .put("schemaVersion", 1)
+                .put("runId", report.runId)
+                .put("result", report.result)
+                .put("conclusion", "诊断 JSON 达到容量上限；请查看同目录的精简 TXT 报告。")
+                .put("issuesOmitted", report.issues.size)
+                .toString(2)
+        }
+    }
+
+    fun toSummaryText(report: RunDiagnosticReport): String = buildString {
+        append("Freedom 任务诊断摘要\n")
+        append("Run ID：").append(report.runId).append('\n')
+        append("任务结果：").append(report.result).append('\n')
+        append("问题数量：").append(report.issues.size).append('\n')
+        append("结论：").append(report.conclusion)
+    }
 
     fun toText(report: RunDiagnosticReport): String = buildString {
         append("Freedom 自主运行诊断报告\n")

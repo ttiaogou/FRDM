@@ -5,6 +5,7 @@ import com.freedom.core.logging.RunDiagnosticCounters
 import com.freedom.core.logging.RunDiagnosticEvent
 import com.freedom.core.logging.RunLogCategory
 import com.freedom.core.logging.RunLogLevel
+import com.freedom.core.logging.RunLogBudgetPolicy
 import org.json.JSONObject
 
 /** Keeps the persisted diagnostic event schema in one place. Field names are compatibility data. */
@@ -71,6 +72,60 @@ internal object RunDiagnosticEventJsonCodec {
         requestGeneration = if (json.has("requestGeneration") && !json.isNull("requestGeneration"))
             json.optLong("requestGeneration") else null
     )
+
+    fun errorDetailLine(event: RunDiagnosticEvent, detail: String): String = JSONObject()
+        .put("sequence", event.sequence)
+        .put("eventId", event.eventId)
+        .put("capturedAtEpochMs", event.timestampEpochMs)
+        .put("errorType", event.errorType ?: "UNKNOWN")
+        .put("detail", detail)
+        .toString()
+
+    fun boundEventFields(event: RunDiagnosticEvent): RunDiagnosticEvent {
+        var bounded = event.copy(
+            runId = event.runId.take(96),
+            taskId = event.taskId.take(96),
+            traceId = event.traceId.take(128),
+            component = event.component.take(80),
+            eventType = event.eventType.take(100),
+            message = RunLogBudgetPolicy.truncateUtf8(
+                event.message,
+                RunLogBudgetPolicy.MAX_RUN_EVENT_RECORD_BYTES - 5 * 1024
+            ),
+            actionId = event.actionId?.take(128),
+            packageName = event.packageName?.take(160),
+            activityClass = event.activityClass?.take(180),
+            inputOrigin = event.inputOrigin?.take(40),
+            inputOriginEvidence = event.inputOriginEvidence?.take(80),
+            viewId = event.viewId?.take(240),
+            previousState = event.previousState?.take(100),
+            currentState = event.currentState?.take(100),
+            result = event.result?.take(100),
+            reason = event.reason?.let { RunLogBudgetPolicy.truncateUtf8(it, 512) },
+            errorType = event.errorType?.take(160)
+        )
+        var messageBudget = RunLogBudgetPolicy.utf8Size(bounded.message)
+        while (RunLogBudgetPolicy.utf8Size(RunDiagnosticEventJsonCodec.encode(bounded)) > RunLogBudgetPolicy.MAX_RUN_EVENT_RECORD_BYTES &&
+            messageBudget > 0
+        ) {
+            messageBudget = (messageBudget * 3 / 4).coerceAtLeast(0)
+            bounded = bounded.copy(message = RunLogBudgetPolicy.truncateUtf8(bounded.message, messageBudget))
+        }
+        if (RunLogBudgetPolicy.utf8Size(RunDiagnosticEventJsonCodec.encode(bounded)) > RunLogBudgetPolicy.MAX_RUN_EVENT_RECORD_BYTES) {
+            bounded = bounded.copy(
+                component = bounded.component.take(32),
+                eventType = bounded.eventType.take(40),
+                actionId = bounded.actionId?.take(48),
+                packageName = bounded.packageName?.take(64),
+                activityClass = bounded.activityClass?.take(64),
+                inputOriginEvidence = bounded.inputOriginEvidence?.take(32),
+                viewId = bounded.viewId?.take(64),
+                reason = bounded.reason?.let { RunLogBudgetPolicy.truncateUtf8(it, 96) },
+                errorType = bounded.errorType?.take(64)
+            )
+        }
+        return bounded
+    }
 
     fun counters(counters: RunDiagnosticCounters) = JSONObject()
         .put("acceptedEvents", counters.acceptedEvents)

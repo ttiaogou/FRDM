@@ -901,13 +901,8 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         }
     }
 
-    private fun errorDetailLine(event: RunDiagnosticEvent, detail: String): String = JSONObject()
-        .put("sequence", event.sequence)
-        .put("eventId", event.eventId)
-        .put("capturedAtEpochMs", event.timestampEpochMs)
-        .put("errorType", event.errorType ?: "UNKNOWN")
-        .put("detail", detail)
-        .toString()
+    private fun errorDetailLine(event: RunDiagnosticEvent, detail: String): String =
+        RunDiagnosticEventJsonCodec.errorDetailLine(event, detail)
 
     private fun appendErrorDetailLine(state: ActiveRun, event: RunDiagnosticEvent, detail: String) {
         val line = errorDetailLine(event, detail) + "\n"
@@ -924,31 +919,14 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
     }
 
     private fun writeReport(directory: File, report: RunDiagnosticReport) {
-        val json = RunDiagnosticReportFormatter.toJson(report).toString(2)
-        val boundedJson = if (RunLogBudgetPolicy.utf8Size(json) <= RunLogBudgetPolicy.MAX_DIAGNOSTIC_REPORT_BYTES) {
-            json
-        } else {
-            JSONObject()
-                .put("schemaVersion", 1)
-                .put("runId", report.runId)
-                .put("result", report.result)
-                .put("conclusion", "诊断 JSON 达到容量上限；请查看同目录的精简 TXT 报告。")
-                .put("issuesOmitted", report.issues.size)
-                .toString(2)
-        }
+        val boundedJson = RunDiagnosticReportFormatter.toBoundedJson(report)
         File(directory, "diagnostic_report.json").writeText(boundedJson, Charsets.UTF_8)
         val text = RunDiagnosticReportFormatter.toText(report)
         File(directory, "diagnostic_report.txt").writeText(
             RunLogBudgetPolicy.truncateUtf8(text, RunLogBudgetPolicy.MAX_DIAGNOSTIC_REPORT_BYTES),
             Charsets.UTF_8
         )
-        val summary = buildString {
-            append("Freedom 任务诊断摘要\n")
-            append("Run ID：").append(report.runId).append('\n')
-            append("任务结果：").append(report.result).append('\n')
-            append("问题数量：").append(report.issues.size).append('\n')
-            append("结论：").append(report.conclusion)
-        }
+        val summary = RunDiagnosticReportFormatter.toSummaryText(report)
         File(directory, "diagnostic_summary.txt").writeText(
             RunLogBudgetPolicy.truncateUtf8(summary, RunLogBudgetPolicy.MAX_DIAGNOSTIC_SUMMARY_BYTES),
             Charsets.UTF_8
@@ -1121,51 +1099,8 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         return result
     }
 
-    private fun boundEventFields(event: RunDiagnosticEvent): RunDiagnosticEvent {
-        var bounded = event.copy(
-            runId = event.runId.take(96),
-            taskId = event.taskId.take(96),
-            traceId = event.traceId.take(128),
-            component = event.component.take(80),
-            eventType = event.eventType.take(100),
-            message = RunLogBudgetPolicy.truncateUtf8(
-                event.message,
-                RunLogBudgetPolicy.MAX_RUN_EVENT_RECORD_BYTES - 5 * 1024
-            ),
-            actionId = event.actionId?.take(128),
-            packageName = event.packageName?.take(160),
-            activityClass = event.activityClass?.take(180),
-            inputOrigin = event.inputOrigin?.take(40),
-            inputOriginEvidence = event.inputOriginEvidence?.take(80),
-            viewId = event.viewId?.take(240),
-            previousState = event.previousState?.take(100),
-            currentState = event.currentState?.take(100),
-            result = event.result?.take(100),
-            reason = event.reason?.let { RunLogBudgetPolicy.truncateUtf8(it, 512) },
-            errorType = event.errorType?.take(160)
-        )
-        var messageBudget = RunLogBudgetPolicy.utf8Size(bounded.message)
-        while (RunLogBudgetPolicy.utf8Size(RunDiagnosticEventJsonCodec.encode(bounded)) > RunLogBudgetPolicy.MAX_RUN_EVENT_RECORD_BYTES &&
-            messageBudget > 0
-        ) {
-            messageBudget = (messageBudget * 3 / 4).coerceAtLeast(0)
-            bounded = bounded.copy(message = RunLogBudgetPolicy.truncateUtf8(bounded.message, messageBudget))
-        }
-        if (RunLogBudgetPolicy.utf8Size(RunDiagnosticEventJsonCodec.encode(bounded)) > RunLogBudgetPolicy.MAX_RUN_EVENT_RECORD_BYTES) {
-            bounded = bounded.copy(
-                component = bounded.component.take(32),
-                eventType = bounded.eventType.take(40),
-                actionId = bounded.actionId?.take(48),
-                packageName = bounded.packageName?.take(64),
-                activityClass = bounded.activityClass?.take(64),
-                inputOriginEvidence = bounded.inputOriginEvidence?.take(32),
-                viewId = bounded.viewId?.take(64),
-                reason = bounded.reason?.let { RunLogBudgetPolicy.truncateUtf8(it, 96) },
-                errorType = bounded.errorType?.take(64)
-            )
-        }
-        return bounded
-    }
+    private fun boundEventFields(event: RunDiagnosticEvent): RunDiagnosticEvent =
+        RunDiagnosticEventJsonCodec.boundEventFields(event)
 
     private fun appendRecoveryEvent(directory: File, runId: String, finishedAt: Long) {
         val event = RunDiagnosticEvent(

@@ -380,6 +380,16 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "app/src/main/java/com/freedom/ui/logs/LogTextFormatter.kt"
         self.assertEqual("0e61d27a625a3b71bae1d29a3f78d5cc4c6660d0", reviewed_s1[path])
         reviewed_s1[path] = "de38ba4bb7b4c1219fcf1e7b988bb84036507c92"
+        # R08-E: exact relocation of diagnostic serialization; S0 unchanged.
+        path = "app/src/main/java/com/freedom/data/RunDiagnosticsManager.kt"
+        self.assertEqual("d44a787d7f8b9195a8e226086167573b31129b3b", reviewed_s1[path])
+        reviewed_s1[path] = "8964b04c99e4bc3f0b3fe5f80108448183b4fccc"
+        path = "app/src/main/java/com/freedom/data/RunDiagnosticEventJsonCodec.kt"
+        self.assertEqual("4e6a6e034886e073c33e9ade293138dc5c7d52ff", reviewed_s1[path])
+        reviewed_s1[path] = "62c4d85a7afc2a4e818cd6477ba4405c76315d88"
+        path = "app/src/main/java/com/freedom/data/RunDiagnosticReportFormatter.kt"
+        self.assertEqual("1cc1720451ebb4523a8d6d3eae1cf76e8e4b5733", reviewed_s1[path])
+        reviewed_s1[path] = "9c16ec9e6c76b8ec87a2d3a470887a416f9920c3"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 
