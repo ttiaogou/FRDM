@@ -14,6 +14,16 @@ import org.junit.Test
 
 class ChatMessageReadCoordinatorTest {
     @Test
+    fun ordinaryReadRetryCleanupDoesNotErasePendingSendProofBackoff() {
+        val coordinator = coordinator(FakeScheduler(), TestMessagePort(), inspect = { snapshot("chat") })
+        coordinator.deferredSendProofRetryAttempt = 3
+        coordinator.renewVisit()
+        coordinator.invalidateMessageReadTransaction()
+        coordinator.cancelMessageReadRetry()
+        assertEquals(3, coordinator.deferredSendProofRetryAttempt)
+    }
+
+    @Test
     fun newVisitAndReadInvalidationRejectPreviousWorkerEvenInSameWindow() {
         val scheduler = FakeScheduler()
         val page = snapshot("same-chat")

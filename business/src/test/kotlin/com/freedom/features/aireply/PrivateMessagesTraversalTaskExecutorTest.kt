@@ -19,6 +19,51 @@ import org.junit.Test
 
 class PrivateMessagesTraversalTaskExecutorTest {
     @Test
+    fun completionReceiptIsVisitLocalAndClearsOnlyWhenConfirmationRetires() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        executor.currentSessionKey = "session"
+        executor.checkpointLastSuccessfulTaskId = "durable-prior-receipt"
+        executor.currentSessionSendConfirmed = true
+        executor.retainPrivateCompletionReceipt("confirmed-send")
+        assertEquals("confirmed-send", executor.confirmedPrivateCompletionReceipt)
+        executor.currentSessionSendConfirmed = true
+        assertEquals("confirmed-send", executor.confirmedPrivateCompletionReceipt)
+        executor.currentSessionSendConfirmed = false
+        assertNull(executor.confirmedPrivateCompletionReceipt)
+        assertEquals("session", executor.currentSessionKey)
+        assertEquals("durable-prior-receipt", executor.checkpointLastSuccessfulTaskId)
+    }
+
+    @Test
+    fun clearingChildBindingDoesNotRetireParentReceiptOrAlterCheckpointEvidence() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val row = candidate(1, "Alice", ChatUnreadStatus.UNREAD)
+        val target = com.freedom.features.aireply.ports.ChatDraftInputTarget(
+            "com.immomo.momo", "MaintabActivity", "window", "chat", "window",
+            row.rowTarget, "Alice", null
+        )
+        val checkpoint = com.freedom.features.aireply.domain.contact.ContactFollowUpCheckpoint(
+            "a".repeat(64),
+            com.freedom.features.aireply.domain.contact.ContactFollowUpStep.IMAGE_OPEN_ALBUM
+        )
+        executor.currentSessionSendConfirmed = true
+        executor.retainPrivateCompletionReceipt("confirmed-send")
+        val old = executor.beginPrivateFollowUpBinding("contact", "confirmed-send", target, checkpoint)
+        assertTrue(executor.activePrivateFollowUp === old)
+        assertEquals(checkpoint, old.checkpoint)
+        executor.clearPrivateFollowUpBinding()
+        assertNull(executor.activePrivateFollowUp)
+        assertTrue(executor.currentSessionSendConfirmed)
+        assertEquals("confirmed-send", executor.confirmedPrivateCompletionReceipt)
+        val replacement = executor.beginPrivateFollowUpBinding("contact", "confirmed-send", target, checkpoint)
+        assertTrue(executor.activePrivateFollowUp === replacement)
+        assertFalse(old === replacement)
+        assertEquals(0L, replacement.observationCount)
+        assertFalse(replacement.unconfirmedReported)
+        assertEquals(checkpoint, old.checkpoint)
+    }
+
+    @Test
     fun provisionalVisitRollbackPreservesOtherAttemptsAndTraversalEvidence() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val selected = candidate(1, "Alice", ChatUnreadStatus.UNREAD)

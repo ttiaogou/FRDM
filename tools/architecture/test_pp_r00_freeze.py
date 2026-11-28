@@ -316,6 +316,16 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
         self.assertEqual("26846bb806159f33ddffad506fd9ecfc9de2a2cc", reviewed_s1[path])
         reviewed_s1[path] = "ef2c4f6218f4ccfde40a1ebcef26ee5860562b06"
+        # R07-F exact private completion/child and send-proof observation state relocation.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("ef2c4f6218f4ccfde40a1ebcef26ee5860562b06", reviewed_s1[path])
+        reviewed_s1[path] = "87fc911f604f2f8fbfdd7516b161ff715fb6f2d3"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/PrivateMessagesTraversalTaskExecutor.kt"
+        self.assertEqual("04f11c0f5b1ac69891478a053d6b05f60bb38d6b", reviewed_s1[path])
+        reviewed_s1[path] = "1d12a483673719255862b5c512c8db9fd9219fad"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ChatMessageReadCoordinator.kt"
+        self.assertEqual("8d00203bdb93c2e7cfb046ab8ebabf9002373058", reviewed_s1[path])
+        reviewed_s1[path] = "0f8ba84a23f83d0f62c7a757d82183c5a8b88fa7"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

@@ -1956,13 +1956,13 @@ def paired_ai_task_boundary_violations(code_by_path: dict[str, str]) -> list[str
         issues.append("Paired task boundary lost shared image retry submission delegation")
     require_order(runtime, "runPrivateFollowUpObservation", "!ownsPrivateFollowUp(child)",
                   "port.observe()", "scheduleFullInspectionAfter(500L)",
-                  "if (activePrivateFollowUp !== child) return",
+                  "if (privateMessagesTraversalTaskExecutor.activePrivateFollowUp !== child) return",
                   "if (!port.privateFollowUpSucceeded())",
                   "val fresh = if (interception) privateFollowUpReturnedSnapshot(child) else null",
                   "contactMessageLedger.followUpCheckpoint(child.contactKey) == child.checkpoint",
                   "val fresh = privateFollowUpReturnedSnapshot(child)",
                   "contactMessageLedger.confirmImageSent(", "if (!confirmed)",
-                  "activePrivateFollowUp = null", "pendingPrivateFollowUpEnabled(child.contactKey)",
+                  "privateMessagesTraversalTaskExecutor.clearPrivateFollowUpBinding()", "pendingPrivateFollowUpEnabled(child.contactKey)",
                   "finishConfirmedPrivateSend(")
     admission = require_order(
         traversal, "evaluateUnreadAdmission", "reconcileAdmittedUnread(snapshot)",
@@ -2218,7 +2218,7 @@ def ocr_recovery_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
           "if (batch.status == MessageReadStatus.WINDOW_STALE) return false")
     order(runtime, "fun scheduleDeferredSendProofRecheck(", "fun requestPendingSendConfirmationOcr(",
           "isSendConfirmationPending()", "recoveryContext.pending", "if (hasProtectedSendInspection()) return",
-          "++deferredSendProofRetryAttempt", "RecoveryScheduler.readOnlyRetryDelayMs(attempt)",
+          "++messageReadCoordinator.deferredSendProofRetryAttempt", "RecoveryScheduler.readOnlyRetryDelayMs(attempt)",
           "scheduleFullInspectionAfter(delayMs, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)")
     order(runtime, "fun requestPendingSendConfirmationOcr(", "fun followUpEnabled(",
           "sendConfirmation = true", "visit != messageReadCoordinator.draftVisitToken", "runGeneration != currentRunGeneration()",
@@ -2237,7 +2237,7 @@ def ocr_recovery_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
     order(runtime, "fun handleSendConfirmationResult(", "fun handleMessageReadBatch(",
           "val sendConfirmationId = transaction.finalSendConfirmationId", "sendConfirmationId.isNullOrBlank()",
           "recordSuccessfulSend(sendConfirmationId)", "countUpdate.status == ContactSendRecordStatus.PERSISTENCE_FAILED",
-          "return true", "confirmedPrivateCompletionReceipt = sendConfirmationId",
+          "return true", "privateMessagesTraversalTaskExecutor.retainPrivateCompletionReceipt(sendConfirmationId)",
           "finishConfirmedPrivateSend(sendConfirmationId, snapshot)")
     order(runtime, "fun finishConfirmedPrivateSend(", "fun handleSendConfirmationResult(",
           "checkpointNextCursorKey = currentSessionKey", "completeCurrentUnfinishedSession()",

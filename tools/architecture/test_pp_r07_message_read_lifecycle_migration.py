@@ -3,6 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r07_send_follow_up_lifecycle_migration import restore_r07e_runtime, restore_r07e_read_owner
 
 ROOT = Path(__file__).resolve().parents[2]
 AI = ROOT / "business/src/main/kotlin/com/freedom/features/aireply/"
@@ -198,8 +199,10 @@ INVERSE = [
 ]
 
 def restore_r07d_runtime(runtime, owner=None):
+    runtime = restore_r07e_runtime(runtime)
     if owner is None:
         owner = (AI / "ChatMessageReadCoordinator.kt").read_text(encoding="utf-8")
+    owner = restore_r07e_read_owner(owner)
     if git_blob(owner.encode("utf-8")) != OWNER:
         raise AssertionError("R07-E message read lifecycle owner changed")
     for current, previous in TYPE_ANNOTATION_REPAIR:

@@ -109,7 +109,7 @@ def integration_violations(sources):
             owner = sources.get(GREETING_OWNER, "")
             if re.search(declaration, runtime) or len(re.findall(declaration, owner)) != 1:
                 issues.append("Greeting visit binding state ownership changed: " + state)
-        elif state == "currentSessionBinding":
+        elif state in {"currentSessionBinding", "activePrivateFollowUp"}:
             owner = sources.get(PRIVATE_OWNER, "")
             if re.search(declaration, runtime) or len(re.findall(declaration, owner)) != 1:
                 issues.append("Private visit binding state ownership changed: " + state)

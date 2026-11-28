@@ -56,6 +56,8 @@ internal class ChatMessageReadCoordinator(
     // requestGeneration only. Runtime continues to supply task, lease and send-proof policy.
     var messageReadRetryTask: ScheduledTask? = null
     var messageReadRetryCount = 0
+    /** Read-only send-proof admission failures use the existing unbounded recovery backoff. */
+    var deferredSendProofRetryAttempt = 0
     var lastMessageFingerprint = ""
     /** Latest verified greeting-detail message observation used to build a pre-send diff baseline. */
     var latestGreetingMessageBatch: ChatMessageBatch? = null

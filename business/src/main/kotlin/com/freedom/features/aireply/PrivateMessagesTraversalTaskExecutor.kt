@@ -1,5 +1,7 @@
 package com.freedom.features.aireply
 
+import com.freedom.features.aireply.domain.contact.ContactFollowUpCheckpoint
+import com.freedom.features.aireply.ports.ChatDraftInputTarget
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.runtime.ScheduledTask
@@ -14,6 +16,17 @@ import com.freedom.features.conversation.domain.contact.ContactIdentityConfidenc
 import com.freedom.features.aireply.ports.UnfinishedPrivateSession
 import com.freedom.features.aireply.ports.UnfinishedPrivateSessionDisposition
 import com.freedom.features.aireply.ports.PrivateMessagesTraversalCheckpoint
+
+// Ephemeral binding for the existing adapter execution; the ledger remains the durable owner.
+internal class PrivateFollowUp(
+    val contactKey: String,
+    val sendConfirmationId: String?,
+    val target: ChatDraftInputTarget,
+    @Volatile var checkpoint: ContactFollowUpCheckpoint
+) {
+    var observationCount = 0L
+    var unconfirmedReported = false
+}
 
 /**
  * Owns the private-message list traversal state and pure list decisions.
@@ -486,6 +499,36 @@ internal class PrivateMessagesTraversalTaskExecutor {
     var currentSessionCandidate: ChatListCandidateSnapshot? = null
     var currentSessionReadCaptured: Boolean = false
     var currentSessionWindowKey: String? = null
+    // R07-F: run-local completion and child binding; durable facts remain in the ledger.
+    // Run-local receipt for the current confirmed visit only. Durable send/follow-up
+    // facts remain in their existing journals and ledger.
+    var confirmedPrivateCompletionReceipt: String? = null
+        private set
+    var currentSessionSendConfirmed = false
+        set(value) {
+            field = value
+            if (!value) confirmedPrivateCompletionReceipt = null
+        }
+
+    @Volatile var activePrivateFollowUp: PrivateFollowUp? = null
+        private set
+
+    fun beginPrivateFollowUpBinding(
+        contactKey: String, sendId: String?, target: ChatDraftInputTarget, checkpoint: ContactFollowUpCheckpoint
+    ): PrivateFollowUp {
+        val child = PrivateFollowUp(contactKey, sendId, target, checkpoint)
+        activePrivateFollowUp = child
+        return child
+    }
+
+    fun clearPrivateFollowUpBinding() {
+        activePrivateFollowUp = null
+    }
+
+    fun retainPrivateCompletionReceipt(sendConfirmationId: String) {
+        confirmedPrivateCompletionReceipt = sendConfirmationId
+    }
+
     val headerMismatchGuard = Any()
     var headerMismatchRecordedForCurrentAttempt: Boolean = false
 

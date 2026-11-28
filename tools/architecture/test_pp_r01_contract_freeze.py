@@ -127,6 +127,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R07-E compile-only repair retains prior exact pin.
                 self.assertEqual("41c70c7a33d37b233318eef9fc04c6a3417b5de5", expected[path])
                 expected[path] = "0baa28ac95b8645e1528e7cb41bb8fd4bdf19869"
+                # R07-F exact reviewed send and child binding relocation.
+                self.assertEqual("0baa28ac95b8645e1528e7cb41bb8fd4bdf19869", expected[path])
+                expected[path] = "f251ece52a0d39a2a450f9ea46d5d15c9154535f"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -143,6 +146,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R07-E exact reviewed read lifecycle relocation.
                 self.assertEqual("d38ca403c504f37db495383cbfd8c5ee60d8d942", expected[path])
                 expected[path] = "89f4d091c964ff88d59a52d79aadd2721f883a4d"
+                # R07-F exact reviewed send and child binding relocation.
+                self.assertEqual("89f4d091c964ff88d59a52d79aadd2721f883a4d", expected[path])
+                expected[path] = "f8c5b40f2dbf9ed8feac6985df441532998b7ef5"
                 path = "tools/architecture/test_verify_boundaries.py"
                 self.assertEqual("bec2d575a43477763c2309a04a9e6014ad39967a", expected[path])
                 expected[path] = "06485947b2fda4007b4ef09d1371c06b2f745fb2"
@@ -178,6 +184,14 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 for path, (previous, replacement) in {
                     "business/src/test/kotlin/com/freedom/features/aireply/AiReplyObservationRuntimeTest.kt": ("26bb2a5e7c6c89de865189270761b2986c2e7475", "e42a0caa2871b9661ace38bef5019bfd32397fe5"),
                     "business/src/test/kotlin/com/freedom/features/aireply/ChatMessageReadCoordinatorTest.kt": ("57ddd2f422245ec764ffede6e9ec347bcad1bcd8", "8c979b47f8638e8579b17dff8633434209665b98"),
+                }.items():
+                    self.assertEqual(previous, expected[path])
+                    expected[path] = replacement
+            if field == "protected_test_files":
+                # R07-F adds receipt/child retirement and send-proof retry isolation tests.
+                for path, (previous, replacement) in {
+                    "business/src/test/kotlin/com/freedom/features/aireply/PrivateMessagesTraversalTaskExecutorTest.kt": ("1434666f844bcbc6226cab2a44e439da68c59ed2", "b65455085622625628eca5015ab53fbb0a5836ac"),
+                    "business/src/test/kotlin/com/freedom/features/aireply/ChatMessageReadCoordinatorTest.kt": ("8c979b47f8638e8579b17dff8633434209665b98", "e89d9b105fbbd516a8346b639cf3e0eb6ad82ec5"),
                 }.items():
                     self.assertEqual(previous, expected[path])
                     expected[path] = replacement
@@ -286,6 +300,17 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r07_message_read_lifecycle_migration.py"
         self.assertEqual("7c1c21b4643d7e32b1b5a4b622c9bd0bfda0bc6d", reviewed_migration_evidence[path])
         reviewed_migration_evidence[path] = "019f92291a5d403f4f13cc5c11c6933dbf265628"
+        # R07-F exact inverse of Runtime and both existing owners preserves all prior gates.
+        for path, (previous, replacement) in {
+            "tools/architecture/test_pp_r07_message_read_lifecycle_migration.py": ("019f92291a5d403f4f13cc5c11c6933dbf265628", "8786781e3e7e012d97fbe2185bebc6e524fe5568"),
+            "tools/architecture/test_pp_r07_private_visit_migration.py": ("c5064427432b478d91fc4d0a90e4a3c029e251bd", "84960e17041e918580fbf9720343d236e72c3e00"),
+            "tools/architecture/test_pp_r06_integration_acceptance.py": ("0b49878a13d91daa5141dd19ff71b3a9d1f57e0a", "cb56d2aa25ddcf787ce349a217936534a6b45fa0"),
+        }.items():
+            self.assertEqual(previous, reviewed_migration_evidence[path])
+            reviewed_migration_evidence[path] = replacement
+        path = "tools/architecture/test_pp_r07_send_follow_up_lifecycle_migration.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "9e4dc213fa52a4e7a7d5747523ba7922562e7aa8"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
