@@ -14,6 +14,91 @@ import org.junit.Test
 
 class ChatMessageReadCoordinatorTest {
     @Test
+    fun newVisitAndReadInvalidationRejectPreviousWorkerEvenInSameWindow() {
+        val scheduler = FakeScheduler()
+        val page = snapshot("same-chat")
+        val port = TestMessagePort()
+        val coordinator = coordinator(scheduler, port, inspect = { page })
+        val originalVisit = coordinator.draftVisitToken
+        coordinator.deferredPrivateReadReturnVisit = originalVisit
+        var oldDeliveries = 0
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {}) { _, _ ->
+            oldDeliveries++
+        })
+        val oldAdmission = requireNotNull(port.workerAdmission)
+        val oldCallback = requireNotNull(port.pendingCallback)
+        var admissionCancelled = false
+        val admissionGeneration = coordinator.ocrAdmissionRetryGeneration
+        coordinator.ocrAdmissionRetryTask = ScheduledTask { admissionCancelled = true }
+        coordinator.ocrAdmissionRetryAttempt = 2
+
+        coordinator.renewVisit()
+        coordinator.invalidateMessageReadTransaction()
+        assertTrue(coordinator.draftVisitToken != originalVisit)
+        assertEquals(null, coordinator.deferredPrivateReadReturnVisit)
+        assertTrue(admissionCancelled)
+        assertEquals(admissionGeneration + 1L, coordinator.ocrAdmissionRetryGeneration)
+        assertEquals(0, coordinator.ocrAdmissionRetryAttempt)
+        assertEquals(null, coordinator.ocrAdmissionRetryTask)
+        assertFalse(oldAdmission())
+        assertTrue(coordinator.requestOcr(page, 10, onTimeout = {}, onFailure = {}) { _, _ -> })
+        val replacement = requireNotNull(port.workerAdmission)
+        oldCallback(batch())
+        scheduler.runNext(0L)
+        assertEquals(0, oldDeliveries)
+        assertTrue(replacement())
+        assertTrue(coordinator.isInFlight)
+    }
+
+    @Test
+    fun retryCleanupCancelsOriginalHandlesAndResetsOnlyTheirBudgets() {
+        val page = snapshot("same-chat")
+        val coordinator = coordinator(FakeScheduler(), TestMessagePort(), inspect = { page })
+        val failure = com.freedom.features.aireply.ai.AiReplyPreSendModelFailure(
+            requestId = "failed-request",
+            requestKey = "failed-key",
+            conversationKey = "conversation",
+            windowSessionKey = "window",
+            visitToken = coordinator.draftVisitToken,
+            taskLease = null,
+            reasonCode = "MODEL_DECISION_MODEL_CALL_FAILED",
+            attempts = 1,
+            retryDelayMs = 30_000L,
+            readyToDefer = false
+        )
+        val cancelled = mutableListOf<String>()
+        coordinator.greetingModelFailureRecovery = failure
+        coordinator.greetingModelFailureRecoveryTask = ScheduledTask { cancelled += "greeting" }
+        coordinator.privateModelFailureRecovery = failure
+        coordinator.privateModelFailureRecoveryTask = ScheduledTask { cancelled += "private" }
+        coordinator.draftRetryTask = ScheduledTask { cancelled += "draft" }
+        coordinator.draftReadRetries = 2
+        coordinator.privateOcrRecoveryAttempt = 3
+        coordinator.privateModelRetryAwaitingDraft = true
+        coordinator.messageReadRetryTask = ScheduledTask { cancelled += "list" }
+        coordinator.messageReadRetryCount = 2
+
+        coordinator.clearGreetingModelFailureRetry()
+        assertEquals(listOf("greeting"), cancelled)
+        assertEquals(null, coordinator.greetingModelFailureRecovery)
+        assertEquals(null, coordinator.greetingModelFailureRecoveryTask)
+        assertTrue(coordinator.privateModelFailureRecovery === failure)
+        coordinator.clearPrivateReadAndModelRetry()
+        assertEquals(listOf("greeting", "draft", "private"), cancelled)
+        assertEquals(null, coordinator.privateModelFailureRecovery)
+        assertEquals(null, coordinator.privateModelFailureRecoveryTask)
+        assertEquals(null, coordinator.draftRetryTask)
+        assertEquals(0, coordinator.draftReadRetries)
+        assertEquals(0, coordinator.privateOcrRecoveryAttempt)
+        assertFalse(coordinator.privateModelRetryAwaitingDraft)
+        assertEquals(2, coordinator.messageReadRetryCount)
+        coordinator.cancelMessageReadRetry()
+        assertEquals(listOf("greeting", "draft", "private", "list"), cancelled)
+        assertEquals(null, coordinator.messageReadRetryTask)
+        assertEquals(0, coordinator.messageReadRetryCount)
+    }
+
+    @Test
     fun invalidationRevokesWorkerAdmissionForBothOcrPurposesAndNeverRevivesOldRead() {
         val scheduler = FakeScheduler()
         val page = snapshot("same-chat")

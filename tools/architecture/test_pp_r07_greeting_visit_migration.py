@@ -3,6 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r07_message_read_lifecycle_migration import restore_r07d_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 AI = ROOT / "business/src/main/kotlin/com/freedom/features/aireply/"
@@ -47,6 +48,7 @@ INVERSE = [
 ]
 
 def restore_r07c_runtime(runtime, owner=None):
+    runtime = restore_r07d_runtime(runtime)
     if owner is None:
         owner = (AI / "ReceivedGreetingsTaskFlowController.kt").read_text(encoding="utf-8")
     if git_blob(owner.encode("utf-8")) != OWNER:
@@ -72,12 +74,16 @@ class PpR07GreetingVisitMigrationTest(unittest.TestCase):
         for method in ("replaceGreetingVisit", "retainConfirmedGreetingSend", "clearGreetingVisit"):
             self.assertIn("receivedGreetingsTaskFlow." + method, runtime)
             self.assertEqual(1, owner.count("fun " + method + "("))
-        self.assertIn("binding !== receivedGreetingsTaskFlow.greetingChatBinding || binding.visitToken != draftVisitToken", runtime)
+        self.assertIn("binding !== receivedGreetingsTaskFlow.greetingChatBinding || binding.visitToken != messageReadCoordinator.draftVisitToken", runtime)
         self.assertIn("greetingBindingRejectReason(snapshot, confirmed.binding)", runtime)
         self.assertIn("persistReceivedGreetingConfirmedSend(confirmed.confirmationId)", runtime)
         self.assertIn("receivedGreetingsTaskFlow.completeDetailInspection(true)", runtime)
-        self.assertIn("private var latestGreetingMessageBatch", runtime)
-        self.assertIn("private var greetingModelFailureRecovery:", runtime)
+        # R07-E moves these two deferred R07-D states to the actual read owner.
+        read_owner = (AI / "ChatMessageReadCoordinator.kt").read_text(encoding="utf-8")
+        self.assertIn("var latestGreetingMessageBatch", read_owner)
+        self.assertIn("var greetingModelFailureRecovery:", read_owner)
+        self.assertNotRegex(runtime, r"\bvar\s+latestGreetingMessageBatch\b")
+        self.assertNotRegex(runtime, r"\bvar\s+greetingModelFailureRecovery\b")
 
     def test_mutations_reject_stale_visit_and_send_receipt_loss(self):
         runtime = (AI / "AiReplyObservationRuntime.kt").read_text(encoding="utf-8")
@@ -91,7 +97,7 @@ class PpR07GreetingVisitMigrationTest(unittest.TestCase):
             with self.subTest(old=old), self.assertRaises(AssertionError):
                 restore_r07c_runtime(runtime, owner.replace(old, new, 1))
         for old, new in (
-            ("binding !== receivedGreetingsTaskFlow.greetingChatBinding || binding.visitToken != draftVisitToken", "false"),
+            ("binding !== receivedGreetingsTaskFlow.greetingChatBinding || binding.visitToken != messageReadCoordinator.draftVisitToken", "false"),
             ("receivedGreetingsTaskFlow.clearGreetingVisit()", "Unit"),
             ("confirmed.sendJournalSaved = true", "Unit"),
             ("confirmed.finalSampleSaved = true", "Unit"),

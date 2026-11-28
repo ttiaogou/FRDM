@@ -2221,7 +2221,7 @@ def ocr_recovery_boundary_violations(code_by_path: dict[str, str]) -> list[str]:
           "++deferredSendProofRetryAttempt", "RecoveryScheduler.readOnlyRetryDelayMs(attempt)",
           "scheduleFullInspectionAfter(delayMs, AiReplyPageReadPurpose.MESSAGE_READ_RETRY)")
     order(runtime, "fun requestPendingSendConfirmationOcr(", "fun followUpEnabled(",
-          "sendConfirmation = true", "visit != draftVisitToken", "runGeneration != currentRunGeneration()",
+          "sendConfirmation = true", "visit != messageReadCoordinator.draftVisitToken", "runGeneration != currentRunGeneration()",
           "readPageSnapshot(AiReplyPageReadPurpose.MESSAGE_READ_RETRY)", "ownsTask(RECEIVED_GREETINGS_TASK_ID)",
           "!isMessageReadResultCurrent(snapshot, ocrBatch, fresh)", "scheduleDeferredSendProofRecheck(reason)",
           "return@sendOcr", "if (deferBusyOcrResult(ocrBatch)) return@sendOcr",

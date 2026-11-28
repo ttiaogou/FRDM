@@ -305,6 +305,13 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsTaskFlowController.kt"
         self.assertEqual("8cad84feb4c91d096e28e105fe6c730fe92ab228", reviewed_s1[path])
         reviewed_s1[path] = "7557397096bf6063b447f39a62a17659bd81c168"
+        # R07-E exact shared read and visit retry lifecycle relocation.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("f605c1eb88f1eb97929db49a87459e2bca9530f5", reviewed_s1[path])
+        reviewed_s1[path] = "26846bb806159f33ddffad506fd9ecfc9de2a2cc"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ChatMessageReadCoordinator.kt"
+        self.assertEqual("ac219e52e7439bde82f7c38641736c001bf6e1ba", reviewed_s1[path])
+        reviewed_s1[path] = "8d00203bdb93c2e7cfb046ab8ebabf9002373058"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

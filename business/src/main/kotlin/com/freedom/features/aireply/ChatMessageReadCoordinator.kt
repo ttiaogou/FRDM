@@ -2,6 +2,7 @@ package com.freedom.features.aireply
 
 import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskScheduler
+import com.freedom.features.aireply.ai.VisibleDraftContext
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
 import com.freedom.features.aireply.domain.message.MessageReadStatus
 import com.freedom.features.aireply.ports.ChatMessagePort
@@ -50,6 +51,102 @@ internal class ChatMessageReadCoordinator(
     private var ocrInFlight = false
     private var timeoutTask: ScheduledTask? = null
     private var pendingSnapshot: ChatPageSnapshot? = null
+
+    // R07-E: scheduler-owned visit evidence and retry lifetime. Worker admission still uses
+    // requestGeneration only. Runtime continues to supply task, lease and send-proof policy.
+    var messageReadRetryTask: ScheduledTask? = null
+    var messageReadRetryCount = 0
+    var lastMessageFingerprint = ""
+    /** Latest verified greeting-detail message observation used to build a pre-send diff baseline. */
+    var latestGreetingMessageBatch: ChatMessageBatch? = null
+    /** Latest verified private-detail message observation used to build a pre-send diff baseline. */
+    var latestPrivateMessageBatch: ChatMessageBatch? = null
+
+    var greetingModelFailureRecovery:
+        com.freedom.features.aireply.ai.AiReplyPreSendModelFailure? = null
+    var greetingModelFailureRecoveryTask: ScheduledTask? = null
+
+
+    private data class StableVisualReadFailure(
+        val visit: String, val key: List<String>, val observationId: String,
+        val capturedAtMillis: Long, val count: Int
+    )
+    private var stableVisualReadFailure: StableVisualReadFailure? = null
+    var deferredPrivateReadReturnVisit: String? = null
+
+    var ocrAdmissionRetryTask: ScheduledTask? = null
+    var ocrAdmissionRetryAttempt = 0
+    var ocrAdmissionRetryGeneration = 0L
+
+    var draftVisitToken = java.util.UUID.randomUUID().toString()
+        private set
+    var draftReadRetries = 0
+    var draftRetryTask: ScheduledTask? = null
+    /** Private retry state never grants UI permission or counts as a send receipt. */
+    var privateOcrRecoveryAttempt = 0
+    var privateModelFailureRecovery: com.freedom.features.aireply.ai.AiReplyPreSendModelFailure? = null
+    var privateModelFailureRecoveryTask: ScheduledTask? = null
+    var privateModelRetryAwaitingDraft = false
+
+
+    fun clearGreetingModelFailureRetry() {
+        greetingModelFailureRecoveryTask?.cancel()
+        greetingModelFailureRecoveryTask = null
+        greetingModelFailureRecovery = null
+    }
+
+    fun renewVisit() {
+        draftVisitToken = java.util.UUID.randomUUID().toString()
+        stableVisualReadFailure = null
+        deferredPrivateReadReturnVisit = null
+    }
+
+    fun clearPrivateReadAndModelRetry() {
+        draftReadRetries = 0
+        draftRetryTask?.cancel()
+        draftRetryTask = null
+        privateOcrRecoveryAttempt = 0
+        privateModelFailureRecoveryTask?.cancel()
+        privateModelFailureRecoveryTask = null
+        privateModelFailureRecovery = null
+        privateModelRetryAwaitingDraft = false
+    }
+
+    fun clearStableVisualReadFailure() {
+        stableVisualReadFailure = null
+    }
+
+    fun observeStableVisualReadFailure(
+        batch: ChatMessageBatch, admission: VisibleDraftContext.Admission
+    ): Boolean {
+        val key = VisibleDraftContext.stableVisualDeferralKey(batch, admission)
+        if (key == null) {
+            stableVisualReadFailure = null
+            return false
+        }
+        val old = stableVisualReadFailure
+        val same = old != null && old.visit == draftVisitToken && old.key == key
+        if (same && old != null && (old.observationId == batch.effectiveObservationBatchId ||
+                batch.capturedAtMillis <= old.capturedAtMillis)) return false
+        val count = if (same && old != null) (old.count + 1).coerceAtMost(2) else 1
+        stableVisualReadFailure = StableVisualReadFailure(draftVisitToken, key,
+            batch.effectiveObservationBatchId, batch.capturedAtMillis, count)
+        return count >= 2
+    }
+
+    fun invalidateMessageReadTransaction() {
+        ocrAdmissionRetryGeneration++
+        ocrAdmissionRetryTask?.cancel()
+        ocrAdmissionRetryTask = null
+        ocrAdmissionRetryAttempt = 0
+        invalidatePending()
+    }
+
+    fun cancelMessageReadRetry() {
+        messageReadRetryTask?.cancel()
+        messageReadRetryTask = null
+        messageReadRetryCount = 0
+    }
 
     init {
         require(timeoutMs > 0L) { "timeoutMs must be positive" }

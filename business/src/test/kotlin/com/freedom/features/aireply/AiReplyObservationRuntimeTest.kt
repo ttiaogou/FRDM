@@ -10243,8 +10243,9 @@ class AiReplyObservationRuntimeTest {
         val window = requireNotNull(originalChat.inputFieldTarget).window
         val conversation = requireNotNull(originalChat.conversationIdentityKey())
         val sessionKey = "${window.packageName}|${window.windowId}|${window.generation}|conversation=$conversation"
-        val visit = AiReplyObservationRuntime::class.java.getDeclaredField("draftVisitToken")
-            .apply { isAccessible = true }.get(runtime) as String
+        val readOwner = AiReplyObservationRuntime::class.java.getDeclaredField("messageReadCoordinator\$delegate")
+            .apply { isAccessible = true }.get(runtime) as Lazy<*>
+        val visit = (readOwner.value as ChatMessageReadCoordinator).draftVisitToken
         runtime.onPreSendModelFailure(com.freedom.features.aireply.ai.AiReplyPreSendModelFailure(
             requestId = "private-technical-failure",
             requestKey = "private-failed-request-key",
