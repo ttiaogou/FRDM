@@ -375,6 +375,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         }.items():
             self.assertNotIn(path, reviewed_migration_evidence)
             reviewed_migration_evidence[path] = replacement
+        # R08-C test-only correction: existing decoder retains its marker prefix.
+        path = "business/src/test/kotlin/com/freedom/features/aireply/ports/R08PrivateViewportPolicyTest.kt"
+        self.assertEqual("7782eff5c10d273eaa61706da7c5c5b9d585d961", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "b2749e4b4739c6f6c9f8c155751117d8d29789cd"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

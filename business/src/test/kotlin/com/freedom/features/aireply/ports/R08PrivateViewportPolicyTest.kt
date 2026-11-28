@@ -8,7 +8,7 @@ class R08PrivateViewportPolicyTest {
     @Test
     fun collectionPositionDecoderPreservesWindowAndRejectsInvalidRanges() {
         val window = "test:window|generation=4"
-        assertEquals("$window" to (3..7),
+        assertEquals("collection-position:$window" to (3..7),
             ChatSessionManagementPolicy.collectionPositionFromKey("collection-position:$window:3:7"))
         for (key in listOf(null, "", "identity@0,0,10,10",
             "collection-position:$window:-1:7",
