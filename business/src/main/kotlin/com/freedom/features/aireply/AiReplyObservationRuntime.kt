@@ -704,35 +704,11 @@ class AiReplyObservationRuntime(
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
-    /**
-     * Source-anchored greeting chat binding. This is evidence, not a UI-operation lease:
-     * every OCR callback must still revalidate its live window and the exact task lease.
-     * Contact IDs and titles remain ephemeral and must never be written to diagnostics.
-     */
-    private data class GreetingChatBinding(
-        val rowKeyHash: String,
-        val contactId: String,
-        val normalizedDisplayName: String,
-        val chatTitleKey: String,
-        val windowSessionKey: String,
-        val runGeneration: Long,
-        val visitToken: String,
-        val taskLease: TaskLease?
-    )
-    private var greetingChatBinding: GreetingChatBinding? = null
     /** Latest verified greeting-detail message observation used to build a pre-send diff baseline. */
     private var latestGreetingMessageBatch: ChatMessageBatch? = null
     /** Latest verified private-detail message observation used to build a pre-send diff baseline. */
     private var latestPrivateMessageBatch: ChatMessageBatch? = null
 
-    /** A complete greeting send is not a completed row until its final chat sample and safe BACK. */
-    private data class ConfirmedGreetingSend(
-        val binding: GreetingChatBinding,
-        val confirmationId: String,
-        var finalSampleSaved: Boolean = false,
-        var sendJournalSaved: Boolean = false
-    )
-    private var confirmedGreetingSend: ConfirmedGreetingSend? = null
     private var greetingModelFailureRecovery:
         com.freedom.features.aireply.ai.AiReplyPreSendModelFailure? = null
     private var greetingModelFailureRecoveryTask: ScheduledTask? = null
@@ -750,10 +726,10 @@ class AiReplyObservationRuntime(
                     onPrivatePreSendModelFailure(failure)
                     return@schedule
                 }
-                val binding = greetingChatBinding
+                val binding = receivedGreetingsTaskFlow.greetingChatBinding
                 if (binding == null || !receivedGreetingsTaskActive || !sessionRunStarted ||
                     !ownsTask(RECEIVED_GREETINGS_TASK_ID) || !isAiReplyActive() ||
-                    recoveryContext.pending || confirmedGreetingSend != null ||
+                    recoveryContext.pending || receivedGreetingsTaskFlow.confirmedGreetingSend != null ||
                     failure.visitToken != binding.visitToken ||
                     failure.windowSessionKey != binding.windowSessionKey ||
                     failure.conversationKey != binding.chatTitleKey ||
@@ -845,10 +821,10 @@ class AiReplyObservationRuntime(
             scheduler.schedule(delayMs) {
                 greetingModelFailureRecoveryTask = null
                 if (greetingModelFailureRecovery !== failure) return@schedule
-                val binding = greetingChatBinding
+                val binding = receivedGreetingsTaskFlow.greetingChatBinding
                 if (binding == null || !sessionRunStarted || !receivedGreetingsTaskActive ||
                     !isAiReplyActive() || !ownsTask(RECEIVED_GREETINGS_TASK_ID) ||
-                    recoveryContext.pending || confirmedGreetingSend != null ||
+                    recoveryContext.pending || receivedGreetingsTaskFlow.confirmedGreetingSend != null ||
                     failure.visitToken != binding.visitToken ||
                     failure.windowSessionKey != binding.windowSessionKey ||
                     failure.conversationKey != binding.chatTitleKey ||
@@ -906,7 +882,7 @@ class AiReplyObservationRuntime(
      * No additional model request or send is dispatched while the proof is retained.
      */
     private fun completeConfirmedGreetingSend(batch: ChatMessageBatch, snapshot: ChatPageSnapshot) {
-        val confirmed = confirmedGreetingSend ?: return
+        val confirmed = receivedGreetingsTaskFlow.confirmedGreetingSend ?: return
         val reason = greetingBindingRejectReason(snapshot, confirmed.binding)
         if (reason != null || batch.windowSessionKey != confirmed.binding.windowSessionKey) {
             onLog("GREETING_SEND_RETURN_BLOCKED reason=${reason ?: "MESSAGE_WINDOW_MISMATCH"}")
@@ -1030,13 +1006,13 @@ class AiReplyObservationRuntime(
      */
     private fun greetingBindingRejectReason(
         snapshot: ChatPageSnapshot,
-        expected: GreetingChatBinding? = greetingChatBinding
+        expected: GreetingChatBinding? = receivedGreetingsTaskFlow.greetingChatBinding
     ): String? {
         val binding = expected ?: return "BINDING_MISSING"
         if (!sessionRunStarted || !isAiReplyActive()) return "RUN_NOT_ACTIVE"
         if (!receivedGreetingsTaskActive || !ownsTask(RECEIVED_GREETINGS_TASK_ID)) return "TASK_NOT_OWNED"
         if (recoveryContext.pending) return "RECOVERY_PENDING"
-        if (binding !== greetingChatBinding || binding.visitToken != draftVisitToken) return "READ_GENERATION_CHANGED"
+        if (binding !== receivedGreetingsTaskFlow.greetingChatBinding || binding.visitToken != draftVisitToken) return "READ_GENERATION_CHANGED"
         if (binding.runGeneration != currentRunGeneration()) return "RUN_GENERATION_CHANGED"
 
         return when (val admission = inspectGreetingChatAdmission(snapshot, requireDetailReady = false)) {
@@ -1077,18 +1053,19 @@ class AiReplyObservationRuntime(
         }
         val evidence = (admission as GreetingChatAdmission.Ready).evidence
         // A new row, identity, window or task lease invalidates old asynchronous reads.
-        if (greetingChatBinding != null) invalidatePendingMessageRead()
-        confirmedGreetingSend = null
-        greetingChatBinding = GreetingChatBinding(
-            rowKeyHash = evidence.rowKeyHash,
-            contactId = evidence.contactId,
-            normalizedDisplayName = evidence.normalizedDisplayName,
-            chatTitleKey = evidence.chatTitleKey,
-            windowSessionKey = evidence.windowSessionKey,
-            runGeneration = currentRunGeneration(),
-            visitToken = draftVisitToken,
-            taskLease = evidence.taskLease
-        )
+        if (receivedGreetingsTaskFlow.greetingChatBinding != null) invalidatePendingMessageRead()
+        receivedGreetingsTaskFlow.replaceGreetingVisit {
+            GreetingChatBinding(
+                rowKeyHash = evidence.rowKeyHash,
+                contactId = evidence.contactId,
+                normalizedDisplayName = evidence.normalizedDisplayName,
+                chatTitleKey = evidence.chatTitleKey,
+                windowSessionKey = evidence.windowSessionKey,
+                runGeneration = currentRunGeneration(),
+                visitToken = draftVisitToken,
+                taskLease = evidence.taskLease
+            )
+        }
         onLog("GREETING_CHAT_BINDING_CREATED rowHash=${evidence.rowKeyHash.take(12)}; idVerified=true; " +
             "windowBound=true; taskLeaseBound=${evidence.taskLease != null}; historyLookup=false")
         return true
@@ -1393,7 +1370,7 @@ class AiReplyObservationRuntime(
                 // A new chat surface can appear before the row tap callback and Activity
                 // clue. Never apply this grace to an already bound conversation or an
                 // explicitly different chat header. The adapter owns the tap deadline.
-                if (greetingChatBinding != null) return false
+                if (receivedGreetingsTaskFlow.greetingChatBinding != null) return false
                 val title = snapshot.chatTitleText
                 if (!title.isNullOrBlank() && ChatSessionManagementPolicy.matchChatHeader(
                         receivedGreetingsTaskFlow.currentDisplayName(), title
@@ -1975,7 +1952,7 @@ class AiReplyObservationRuntime(
                 previous != null && previous.packageName == targetPackage() &&
                 (previous.pageKind == ChatPageKind.NON_CHAT ||
                     (previous.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
-                        greetingChatBinding == null &&
+                        receivedGreetingsTaskFlow.greetingChatBinding == null &&
                         hasOffscreenGreetingChatLocators(previous) &&
                         previous.conversationIdentityKey() == inspection.conversationIdentityKey())) &&
                 inspection.packageName == targetPackage() &&
@@ -4857,7 +4834,7 @@ class AiReplyObservationRuntime(
                 // The region-refresh path reaches this entry too. Apply the same draft hold
                 // as full observation, while preserving pending-send and confirmed-return proof.
                 if (isConversationDraftPending() && !isSendConfirmationPending() &&
-                    confirmedGreetingSend == null
+                    receivedGreetingsTaskFlow.confirmedGreetingSend == null
                 ) return
                 // The authoritative entry includes task ownership, profile identity, header,
                 // window and the one-time adapter DETAIL_READY proof before any OCR starts.
@@ -4873,7 +4850,7 @@ class AiReplyObservationRuntime(
                     onLog("消息详情读取被阻止：当前任务未持有 UI 操作权；task=$PRIVATE_MESSAGES_TASK_ID")
                     return
                 }
-                if (greetingChatBinding != null) {
+                if (receivedGreetingsTaskFlow.greetingChatBinding != null) {
                     // Private-message reads must not inherit a previous greeting OCR transaction.
                     invalidatePendingMessageRead()
                 }
@@ -4899,7 +4876,7 @@ class AiReplyObservationRuntime(
             return observedPrivateDetailVerified(snapshot) && observedPrivateDetailVerified(active) &&
                 matchesMessageReadWindowEvidence(snapshot, batch, active, expectedWindowSessionKey)
         }
-        if (receivedGreetingsTaskActive || greetingChatBinding != null) {
+        if (receivedGreetingsTaskActive || receivedGreetingsTaskFlow.greetingChatBinding != null) {
             val reason = greetingBindingRejectReason(active)
             if (reason != null) {
                 onLog("GREETING_CHAT_READ_REJECTED reason=$reason")
@@ -4976,7 +4953,7 @@ class AiReplyObservationRuntime(
     ): String {
         sendConfirmationPageEvidenceRejectionReason(source, fresh)?.let { return it }
         val sourceWindowKey = windowSessionKey(source) ?: return "SOURCE_WINDOW_SESSION_UNAVAILABLE"
-        if (!receivedGreetingsTaskActive && greetingChatBinding == null &&
+        if (!receivedGreetingsTaskActive && receivedGreetingsTaskFlow.greetingChatBinding == null &&
             currentSessionWindowKey != null && currentSessionWindowKey != sourceWindowKey
         ) return "ACTIVE_WINDOW_BINDING_MISMATCH"
         return sendConfirmationBatchEvidenceRejectionReason(batch, sourceWindowKey)
@@ -5008,7 +4985,7 @@ class AiReplyObservationRuntime(
         val confirmedBaselineId = nextSegmentConfirmedObservationId()
         val visit = draftVisitToken
         val runGeneration = currentRunGeneration()
-        val greetingBinding = greetingChatBinding.takeIf { receivedGreetingsTaskActive }
+        val greetingBinding = receivedGreetingsTaskFlow.greetingChatBinding.takeIf { receivedGreetingsTaskActive }
         val recoveredVisit = if (!receivedGreetingsTaskActive &&
             privateMessagesTraversalTaskExecutor.recoveringUnfinishedSession
         ) privateMessagesTraversalTaskExecutor.currentUnfinishedSession() else null
@@ -5380,7 +5357,7 @@ class AiReplyObservationRuntime(
             com.freedom.features.aireply.ai.SendConfirmationResult.CONFIRMED -> {
                 deferredSendProofRetryAttempt = 0
                 if (receivedGreetingsTaskActive) {
-                    val bound = greetingChatBinding ?: run {
+                    val bound = receivedGreetingsTaskFlow.greetingChatBinding ?: run {
                         onLog("GREETING_SEND_RETURN_BLOCKED reason=BINDING_MISSING")
                         return true
                     }
@@ -5389,7 +5366,7 @@ class AiReplyObservationRuntime(
                         onLog("GREETING_SEND_RETURN_BLOCKED reason=CONFIRMATION_ID_MISSING")
                         return true
                     }
-                    confirmedGreetingSend = ConfirmedGreetingSend(bound, sendId)
+                    receivedGreetingsTaskFlow.retainConfirmedGreetingSend(bound, sendId)
                     onLog("GREETING_SEND_CONFIRMED：最终消息段已核验；先持久化发送事实再申请安全 BACK")
                     completeConfirmedGreetingSend(batch, snapshot)
                     return true
@@ -5518,7 +5495,7 @@ class AiReplyObservationRuntime(
         }
         if (sessionRunStarted && receivedGreetingsTaskActive) {
             val reason = greetingBindingRejectReason(snapshot)
-            if (reason != null || batch.windowSessionKey != greetingChatBinding?.windowSessionKey) {
+            if (reason != null || batch.windowSessionKey != receivedGreetingsTaskFlow.greetingChatBinding?.windowSessionKey) {
                 onLog("GREETING_CHAT_BATCH_REJECTED reason=${reason ?: "MESSAGE_WINDOW_MISMATCH"}")
                 return
             }
@@ -5539,7 +5516,7 @@ class AiReplyObservationRuntime(
         }
         if (observedDetail && isConversationDraftPending() && !isSendConfirmationPending() &&
             !isSendControlRecoveryPending()) return
-        if (receivedGreetingsTaskActive && confirmedGreetingSend != null) {
+        if (receivedGreetingsTaskActive && receivedGreetingsTaskFlow.confirmedGreetingSend != null) {
             completeConfirmedGreetingSend(batch, snapshot)
             return
         }
@@ -5831,7 +5808,7 @@ class AiReplyObservationRuntime(
             }
             val ocrSnapshot = snapshot
             val ocrVisit = draftVisitToken
-            val ocrGreetingBinding = greetingChatBinding.takeIf { greetingDetail }
+            val ocrGreetingBinding = receivedGreetingsTaskFlow.greetingChatBinding.takeIf { greetingDetail }
             val ocrRun = currentRunGeneration()
             val started = messageReadCoordinator.requestOcr(
                 snapshot = ocrSnapshot,
@@ -6033,7 +6010,7 @@ class AiReplyObservationRuntime(
             if (greetingDetail && taskCoordinator != null) {
                 // The greeting model request must start under the *same* lease that was
                 // bound before OCR, not a newly transferred private-message capability.
-                val lease = greetingChatBinding?.taskLease
+                val lease = receivedGreetingsTaskFlow.greetingChatBinding?.taskLease
                 if (lease == null) {
                     onLog("GREETING_CHAT_DRAFT_REJECTED reason=TASK_LEASE_MISSING")
                     false
@@ -9100,7 +9077,7 @@ class AiReplyObservationRuntime(
             activeSessionGestureRequestId == null && !isPrivateFollowUpActive() &&
             !isSendConfirmationPending() && !isSendControlRecoveryPending() &&
             !isConversationDraftPending() && !currentSessionSendConfirmed &&
-            confirmedGreetingSend == null && privateModelFailureRecovery == null &&
+            receivedGreetingsTaskFlow.confirmedGreetingSend == null && privateModelFailureRecovery == null &&
             !privateModelRetryAwaitingDraft && greetingModelFailureRecovery == null
 
     private fun privateReadDeferralPageReady(snapshot: ChatPageSnapshot, returning: Boolean = false): Boolean =
@@ -9256,8 +9233,7 @@ class AiReplyObservationRuntime(
         draftVisitToken = java.util.UUID.randomUUID().toString()
         stableVisualReadFailure = null
         deferredPrivateReadReturnVisit = null
-        greetingChatBinding = null
-        confirmedGreetingSend = null
+        receivedGreetingsTaskFlow.clearGreetingVisit()
         draftReadRetries = 0
         draftRetryTask?.cancel()
         draftRetryTask = null

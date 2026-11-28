@@ -1,11 +1,36 @@
 package com.freedom.features.aireply
 
+import com.freedom.core.runtime.TaskLease
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatPagePort
 import com.freedom.features.aireply.ports.ReceivedGreetingsPageArrivalStatus
 import com.freedom.features.aireply.ports.ReceivedGreetingsBackResult
 import com.freedom.features.aireply.ports.ReceivedGreetingsTraversalStatus
 import com.freedom.features.conversation.domain.contact.ContactRowIdentity
+
+/**
+ * Source-anchored greeting chat binding. This is evidence, not a UI-operation lease:
+ * every OCR callback must still revalidate its live window and the exact task lease.
+ * Contact IDs and titles remain ephemeral and must never be written to diagnostics.
+ */
+internal data class GreetingChatBinding(
+    val rowKeyHash: String,
+    val contactId: String,
+    val normalizedDisplayName: String,
+    val chatTitleKey: String,
+    val windowSessionKey: String,
+    val runGeneration: Long,
+    val visitToken: String,
+    val taskLease: TaskLease?
+)
+
+/** A complete greeting send is not a completed row until its final chat sample and safe BACK. */
+internal data class ConfirmedGreetingSend(
+    val binding: GreetingChatBinding,
+    val confirmationId: String,
+    var finalSampleSaved: Boolean = false,
+    var sendJournalSaved: Boolean = false
+)
 
 /**
  * 收到招呼业务流程控制器。
@@ -45,6 +70,27 @@ internal class ReceivedGreetingsTaskFlowController(
 
     private val lifecycle = ReceivedGreetingsTaskController(ownership)
     private val executor = ReceivedGreetingsTaskExecutor(pagePort) { lifecycle.ownsTask() }
+
+    // The Runtime supplies freshly verified evidence; this owner holds only the visit and
+    // its send receipt. The existing shared invalidation boundary controls when to clear them.
+    var greetingChatBinding: GreetingChatBinding? = null
+        private set
+    var confirmedGreetingSend: ConfirmedGreetingSend? = null
+        private set
+
+    fun replaceGreetingVisit(createBinding: () -> GreetingChatBinding) {
+        confirmedGreetingSend = null
+        greetingChatBinding = createBinding()
+    }
+
+    fun retainConfirmedGreetingSend(binding: GreetingChatBinding, confirmationId: String) {
+        confirmedGreetingSend = ConfirmedGreetingSend(binding, confirmationId)
+    }
+
+    fun clearGreetingVisit() {
+        greetingChatBinding = null
+        confirmedGreetingSend = null
+    }
 
     val isActive: Boolean
         get() = lifecycle.isActive

@@ -3,6 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r07_greeting_visit_migration import restore_r07c_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 AI = ROOT / "business/src/main/kotlin/com/freedom/features/aireply/"
@@ -159,6 +160,7 @@ INVERSE = [
 ]
 
 def restore_r07b_runtime(runtime, owner=None):
+    runtime = restore_r07c_runtime(runtime)
     if owner is None:
         owner = (AI / "PrivateMessagesTraversalTaskExecutor.kt").read_text(encoding="utf-8")
     if git_blob(owner.encode("utf-8")) != OWNER:

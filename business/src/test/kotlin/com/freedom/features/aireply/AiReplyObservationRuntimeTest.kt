@@ -8283,9 +8283,9 @@ class AiReplyObservationRuntimeTest {
     private fun greetingModelFailureEvent(
         runtime: AiReplyObservationRuntime, attempts: Int = 2
     ): com.freedom.features.aireply.ai.AiReplyPreSendModelFailure {
-        val binding = AiReplyObservationRuntime::class.java.getDeclaredField("greetingChatBinding")
-            .apply { isAccessible = true }.get(runtime)
-            ?: error("Greeting binding was not established")
+        val flow = AiReplyObservationRuntime::class.java.getDeclaredField("receivedGreetingsTaskFlow")
+            .apply { isAccessible = true }.get(runtime) as ReceivedGreetingsTaskFlowController
+        val binding = flow.greetingChatBinding ?: error("Greeting binding was not established")
         fun bindingField(name: String): Any? =
             binding.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(binding)
         return com.freedom.features.aireply.ai.AiReplyPreSendModelFailure(

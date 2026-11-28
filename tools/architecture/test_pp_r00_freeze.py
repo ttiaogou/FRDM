@@ -298,6 +298,13 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/PrivateMessagesTraversalTaskExecutor.kt"
         self.assertEqual("a38408df5c2779a0efc632f238bfb8c18e44f8f2", reviewed_s1[path])
         reviewed_s1[path] = "04f11c0f5b1ac69891478a053d6b05f60bb38d6b"
+        # R07-D exact greeting visit and send receipt relocation.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("ec018569ae4dc4f7a446380cb1e2f651686b25b0", reviewed_s1[path])
+        reviewed_s1[path] = "f605c1eb88f1eb97929db49a87459e2bca9530f5"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsTaskFlowController.kt"
+        self.assertEqual("8cad84feb4c91d096e28e105fe6c730fe92ab228", reviewed_s1[path])
+        reviewed_s1[path] = "7557397096bf6063b447f39a62a17659bd81c168"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

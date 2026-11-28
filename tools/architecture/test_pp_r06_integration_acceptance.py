@@ -11,6 +11,7 @@ AI = "business/src/main/kotlin/com/freedom/features/aireply/"
 RUNTIME = AI + "AiReplyObservationRuntime.kt"
 PAGE_OWNER = AI + "MomoPageObservationCoordinator.kt"
 PRIVATE_OWNER = AI + "PrivateMessagesTraversalTaskExecutor.kt"
+GREETING_OWNER = AI + "ReceivedGreetingsTaskFlowController.kt"
 PAGE_STATE = {"pageInspectionTask", "fullInspectionCallbackToken", "pendingPageReadPurpose",
               "regionRefreshTask", "lastPageInspection", "lastConfirmedChatListInspection", "lastRegionFingerprint"}
 BASELINE = "1c0c3bc1669f0cdc56e3abbb36c2f8c0be064f8a"
@@ -99,6 +100,10 @@ def integration_violations(sources):
             owner = sources.get(PAGE_OWNER, "")
             if re.search(declaration, runtime) or len(re.findall(declaration, owner)) != 1:
                 issues.append("Page observation state ownership changed: " + state)
+        elif state == "greetingChatBinding":
+            owner = sources.get(GREETING_OWNER, "")
+            if re.search(declaration, runtime) or len(re.findall(declaration, owner)) != 1:
+                issues.append("Greeting visit binding state ownership changed: " + state)
         elif state == "currentSessionBinding":
             owner = sources.get(PRIVATE_OWNER, "")
             if re.search(declaration, runtime) or len(re.findall(declaration, owner)) != 1:
@@ -117,7 +122,7 @@ def integration_violations(sources):
 class PpR06IntegrationAcceptanceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        paths = set(WIRING) | {AI + name for name in OWNERS} | {PAGE_OWNER, PRIVATE_OWNER}
+        paths = set(WIRING) | {AI + name for name in OWNERS} | {PAGE_OWNER, PRIVATE_OWNER, GREETING_OWNER}
         cls.sources = {path: (ROOT / path).read_text(encoding="utf-8") for path in paths}
 
     def test_all_five_stages_reconstruct_frozen_r06a_runtime(self):

@@ -16,6 +16,45 @@ import org.junit.Test
 
 class ReceivedGreetingsTaskFlowControllerTest {
     @Test
+    fun replacingVisitRetiresOnlyPriorReceiptBeforeCreatingNewBinding() {
+        val flow = createFlow(FakePagePort())
+        val first = GreetingChatBinding("row-a", "id-a", "Alice", "chat-a", "window-a", 1L, "visit-a", null)
+        val second = first.copy(rowKeyHash = "row-b", contactId = "id-b", visitToken = "visit-b")
+        flow.replaceGreetingVisit { first }
+        flow.retainConfirmedGreetingSend(first, "receipt-a")
+        val receipt = requireNotNull(flow.confirmedGreetingSend)
+        receipt.sendJournalSaved = true
+        receipt.finalSampleSaved = true
+        flow.replaceGreetingVisit {
+            assertTrue(flow.confirmedGreetingSend == null)
+            assertTrue(flow.greetingChatBinding === first)
+            second
+        }
+        assertTrue(flow.greetingChatBinding === second)
+        assertTrue(flow.confirmedGreetingSend == null)
+        flow.retainConfirmedGreetingSend(second, "receipt-b")
+        val next = requireNotNull(flow.confirmedGreetingSend)
+        assertTrue(next.binding === second)
+        assertEquals("receipt-b", next.confirmationId)
+        assertFalse(next.sendJournalSaved)
+        assertFalse(next.finalSampleSaved)
+    }
+
+    @Test
+    fun clearingVisitDropsInMemoryReceiptWithoutCompletingAdapterRow() {
+        val port = FakePagePort()
+        val flow = createFlow(port)
+        val binding = GreetingChatBinding("row", "id", "Alice", "chat", "window", 1L, "visit", null)
+        flow.replaceGreetingVisit { binding }
+        flow.retainConfirmedGreetingSend(binding, "receipt")
+        flow.clearGreetingVisit()
+        assertTrue(flow.greetingChatBinding == null)
+        assertTrue(flow.confirmedGreetingSend == null)
+        assertFalse(flow.isActive)
+        assertEquals(0, port.idleSteps)
+    }
+
+    @Test
     fun navigationStartAndConfirmedListStartKeepLifecycleTransitionsInOneOwner() {
         val port = FakePagePort()
         val flow = createFlow(port)
