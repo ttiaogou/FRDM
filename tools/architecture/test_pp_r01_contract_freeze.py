@@ -115,6 +115,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R07-C exact reviewed private visit relocation.
                 self.assertEqual("69fed894d80b28862f552d5584500b25553c543a", expected[path])
                 expected[path] = "5aa6a516787c9bb4503c36dac3ed130b8fc36cc7"
+                # R07-C compile-only repair retains the prior exact pin.
+                self.assertEqual("5aa6a516787c9bb4503c36dac3ed130b8fc36cc7", expected[path])
+                expected[path] = "853a4a0e1662fee09328331d8b1bd5bdfe17f449"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -227,6 +230,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r06_page_evidence_migration.py"
         self.assertEqual("75bb710a68fffd979258b4b7f453694cc86cfa40", reviewed_migration_evidence[path])
         reviewed_migration_evidence[path] = "1505d976cf8940d96a936b1bdda5d05ef216199d"
+        # R07-C compile-only repair extends the inverse and rejected-call mutation coverage.
+        path = "tools/architecture/test_pp_r07_private_visit_migration.py"
+        self.assertEqual("b8f63983f68c2949c2145234c2225ac8e4bfbfe6", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "eaf74669222604021c1b940c371a7db516a8cda6"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

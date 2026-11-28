@@ -7,7 +7,12 @@ from tools.architecture.test_pp_r00_freeze import git_blob
 ROOT = Path(__file__).resolve().parents[2]
 AI = ROOT / "business/src/main/kotlin/com/freedom/features/aireply/"
 PREVIOUS = "046026a655768a091e5ce70e1b8cdc37f9291539"
-OWNER = "a38408df5c2779a0efc632f238bfb8c18e44f8f2"
+PRE_FIX_OWNER = "a38408df5c2779a0efc632f238bfb8c18e44f8f2"
+OWNER = "04f11c0f5b1ac69891478a053d6b05f60bb38d6b"
+REJECTED_TAP_CALL = "privateMessagesTraversalTaskExecutor.rememberUnverifiedPrivateTap(attempt.selectedKey)"
+OLD_REJECTED_TAP_CALL = "rememberUnverifiedPrivateTap(attempt.selectedKey)"
+RETRY_DECLARATION = "internal fun rememberUnverifiedPrivateTap(selectedKey: String) {"
+OLD_RETRY_DECLARATION = "private fun rememberUnverifiedPrivateTap(selectedKey: String) {"
 FIELDS = [
   "currentSessionBinding",
   "expectedPrivateSessionDetailNavigation",
@@ -158,6 +163,12 @@ def restore_r07b_runtime(runtime, owner=None):
         owner = (AI / "PrivateMessagesTraversalTaskExecutor.kt").read_text(encoding="utf-8")
     if git_blob(owner.encode("utf-8")) != OWNER:
         raise AssertionError("R07-C private visit owner changed")
+    # Reverse the exact compile-only repair before the historical R07-C inverse.
+    if owner.count(RETRY_DECLARATION) != 1 or runtime.count(REJECTED_TAP_CALL) != 1:
+        raise AssertionError("R07-C rejected tap call or owner declaration changed")
+    if git_blob(owner.replace(RETRY_DECLARATION, OLD_RETRY_DECLARATION, 1).encode("utf-8")) != PRE_FIX_OWNER:
+        raise AssertionError("R07-C owner did not reconstruct the pre-fix source")
+    runtime = runtime.replace(REJECTED_TAP_CALL, OLD_REJECTED_TAP_CALL, 1)
     for current, previous, count in INVERSE:
         if runtime.count(current) != count:
             raise AssertionError("R07-C inverse anchor changed: " + current[:100])
@@ -183,6 +194,9 @@ class PpR07PrivateVisitMigrationTest(unittest.TestCase):
         self.assertIn("private var sessionTransitionTask: ScheduledTask?", runtime)
         self.assertNotIn("scheduler.schedule(", owner)
         self.assertNotIn("dispatchGesture(", owner)
+        self.assertEqual(1, runtime.count(REJECTED_TAP_CALL))
+        self.assertEqual(1, owner.count(RETRY_DECLARATION))
+        self.assertNotRegex(runtime, r"(?<!\.)\brememberUnverifiedPrivateTap\s*\(")
 
     def test_visit_rollback_and_identity_mutations_rejected(self):
         runtime = (AI / "AiReplyObservationRuntime.kt").read_text(encoding="utf-8")
@@ -197,6 +211,7 @@ class PpR07PrivateVisitMigrationTest(unittest.TestCase):
             with self.subTest(old=old), self.assertRaises(AssertionError):
                 restore_r07b_runtime(runtime, owner.replace(old, new, 1))
         for old, new in (
+            (REJECTED_TAP_CALL, OLD_REJECTED_TAP_CALL),
             ("privateMessagesTraversalTaskExecutor.rollbackProvisionalVisit(selectedKey)", "Unit"),
             ("privateMessagesTraversalTaskExecutor.identityCaptureTimeoutTask?.cancel()", "Unit"),
         ):

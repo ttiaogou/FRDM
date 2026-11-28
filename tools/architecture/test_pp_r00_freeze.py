@@ -291,6 +291,13 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/PrivateMessagesTraversalTaskExecutor.kt"
         self.assertEqual("22a7a66feb6a52d53b84681dab7b6c70cd822e9c", reviewed_s1[path])
         reviewed_s1[path] = "a38408df5c2779a0efc632f238bfb8c18e44f8f2"
+        # R07-C compile-only repair: one call and one internal visibility adjustment.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("770092f451d8516b8aaac251135cf9ec7a65b1a6", reviewed_s1[path])
+        reviewed_s1[path] = "ec018569ae4dc4f7a446380cb1e2f651686b25b0"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/PrivateMessagesTraversalTaskExecutor.kt"
+        self.assertEqual("a38408df5c2779a0efc632f238bfb8c18e44f8f2", reviewed_s1[path])
+        reviewed_s1[path] = "04f11c0f5b1ac69891478a053d6b05f60bb38d6b"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

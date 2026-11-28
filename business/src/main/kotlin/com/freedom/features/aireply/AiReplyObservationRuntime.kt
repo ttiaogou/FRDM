@@ -7856,7 +7856,7 @@ class AiReplyObservationRuntime(
                         currentSessionKey = null
                         currentSessionName = null
                         currentSessionCandidate = null
-                        rememberUnverifiedPrivateTap(attempt.selectedKey)
+                        privateMessagesTraversalTaskExecutor.rememberUnverifiedPrivateTap(attempt.selectedKey)
                         onLog("AI 会话管理：系统拒绝会话点击派发；未确认目标聊天已打开，转入安全恢复")
                         recoverTransientPrivateGesture("GESTURE_TAP_SUBMISSION_REJECTED")
                         return

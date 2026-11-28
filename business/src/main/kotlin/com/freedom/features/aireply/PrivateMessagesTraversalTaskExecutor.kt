@@ -546,7 +546,7 @@ internal class PrivateMessagesTraversalTaskExecutor {
      * existing traversal checkpoint; only the attempted marker and tentative detail
      * binding are rolled back, before the unified read-only recovery is saved.
      */
-    private fun rememberUnverifiedPrivateTap(selectedKey: String) {
+    internal fun rememberUnverifiedPrivateTap(selectedKey: String) {
         missedPrivateSessionTapCount = if (missedPrivateSessionTapKey == selectedKey) {
             missedPrivateSessionTapCount + 1
         } else {
