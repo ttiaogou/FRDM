@@ -419,6 +419,13 @@ class PpR00FreezeTest(unittest.TestCase):
         self.assertNotIn(path, reviewed_s1)
         self.assertNotIn(path, m["permanent_s0"])
         reviewed_s1[path] = "df39945103fb16e193cefcdac85a5bf84162b382"
+        # R09-B exact removal of the always-null legacy region refresh handle and callers.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("7f5d99bcfccf80e2404880fcdfd5341c73a19014", reviewed_s1[path])
+        reviewed_s1[path] = "6f48cd1414f94402bc5332ab81895ea565865eac"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt"
+        self.assertEqual("26ee9be133eb554f0b08bd000dd055f0164a95b8", reviewed_s1[path])
+        reviewed_s1[path] = "d6e9a30f6c4094172d271dc066cf158e0d201cb0"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

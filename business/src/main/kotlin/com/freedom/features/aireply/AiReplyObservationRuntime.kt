@@ -3238,7 +3238,6 @@ class AiReplyObservationRuntime(
     }
 
     private fun runRegionRefresh() {
-        pageObservationCoordinator.clearLegacyRegionRefreshHandle()
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
         val previous = pageObservationCoordinator.lastPageInspection
             ?.takeIf { it.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE }
@@ -3348,7 +3347,6 @@ class AiReplyObservationRuntime(
             )
         }
         pageObservationCoordinator.cancelExplicitInspectionHandle()
-        pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
         taskOwnership.resetCrossTaskGreetingsHandoffRetry()
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
@@ -3359,7 +3357,6 @@ class AiReplyObservationRuntime(
         sessionTransitionTask?.cancel()
         cancelMessageReadRetry()
         pageObservationCoordinator.clearExplicitInspectionHandle()
-        pageObservationCoordinator.clearLegacyRegionRefreshHandle()
         sessionTransitionTask = null
         privateMessagesTraversalTaskExecutor.missedPrivateSessionTapKey = null
         privateMessagesTraversalTaskExecutor.missedPrivateSessionTapCount = 0
@@ -4673,8 +4670,6 @@ class AiReplyObservationRuntime(
             // Invalidate before scheduling a debounced inspection. An OCR callback that returns
             // during the debounce window must not be delivered to a different chat/session.
             invalidatePendingMessageRead()
-            pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
-            pageObservationCoordinator.clearLegacyRegionRefreshHandle()
             pageObservationCoordinator.cancelRegionRefresh()
             pageObservationCoordinator.lastRegionFingerprint = ""
         }
@@ -4689,8 +4684,6 @@ class AiReplyObservationRuntime(
             hasChatNavigationEvidence = hasChatNavigationEvidence
         )
         if (requiresFullInspection || receivedGreetingsPageProbePending) {
-            pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
-            pageObservationCoordinator.clearLegacyRegionRefreshHandle()
             pageObservationCoordinator.cancelRegionRefresh()
             if (hasProtectedSendInspection()) {
                 // Window/route invalidation above is still mandatory. Only the
@@ -4719,7 +4712,6 @@ class AiReplyObservationRuntime(
             // stronger recovery request; a subsequent scroll event must not replace it with a
             // weaker region refresh that could reuse the invalidated locators.
             if (pageObservationCoordinator.hasExplicitInspection()) return
-            pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
             pageObservationCoordinator.cancelFullInspection()
             pageObservationCoordinator.signalRegionRefresh()
         }
@@ -5070,8 +5062,6 @@ class AiReplyObservationRuntime(
         val child = privateMessagesTraversalTaskExecutor.beginPrivateFollowUpBinding(contactKey, sendId, target, checkpoint)
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
-        pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
-        pageObservationCoordinator.clearLegacyRegionRefreshHandle()
         invalidatePendingMessageRead()
         port.reset("PRIVATE_FOLLOW_UP_BEGIN")
         val started = port.beginPrivateFollowUp(

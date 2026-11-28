@@ -160,6 +160,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R08-H exact reviewed node-read fallback convergence.
                 self.assertEqual("b1f1ff7d6322412d1b129c74509e4fd21128300a", expected[path])
                 expected[path] = "88822eb6021711bc55ee6396bd7e536f33838f78"
+                # R09-B exact retired-handle cleanup; original manifest and S0 unchanged.
+                self.assertEqual("88822eb6021711bc55ee6396bd7e536f33838f78", expected[path])
+                expected[path] = "009a91302db56eb8faa4767e9835c65b321c05d8"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -238,6 +241,11 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "app/src/test/java/com/freedom/architecture/AccountBrowseManualHandoffBoundaryTest.kt"
                 self.assertEqual("3ae02f95b291a0bf127794d4ffdb1f9fd9d57f84", expected[path])
                 expected[path] = "3b0f76367242cf64aa4f4e498e17b4252971e61d"
+            if field == "protected_test_files":
+                # R09-B adds live region refresh reset/cancel regression without deleting any test.
+                path = "business/src/test/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinatorTest.kt"
+                self.assertEqual("690d0330efb0dfce042ebae573f6b6fc41a186c9", expected[path])
+                expected[path] = "2196239ec6feb94c51eb6bc6a70e87e2c51b977b"
             issues.extend(evidence_violations(ROOT, expected))
         # New R04 regression evidence is pinned independently of the historical inventory.
         issues.extend(evidence_violations(ROOT, {
@@ -427,6 +435,21 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         # R09-A CI audit: pin the exact known excluded, declaration-free history placeholder.
         self.assertEqual("3976325d97ac6c1ee70da31a39f5c5fb3f5f6d9a", reviewed_migration_evidence[path])
         reviewed_migration_evidence[path] = "ca9b2b6b5d84ef0c2b8d447bfd3a280a66a03f69"
+        # R09-B extends historical reconstruction by one exact inverse and prohibits the retired field.
+        for path, (previous, replacement) in {
+            "tools/architecture/test_pp_r07_page_observation_migration.py": ("7926398e95b7f7ededa760b3d0ba93b2e9222e9f", "26bf86bf75b6038197b7c25daa6dc6b3c4933bfe"),
+            "tools/architecture/test_pp_r07_integration_acceptance.py": ("b3afef44df7cc76510d23862e4849d0db93a6697", "49cef760108aa85a1f5cdc9950ea6a45a87282b9"),
+            "tools/architecture/test_pp_r06_integration_acceptance.py": ("cb56d2aa25ddcf787ce349a217936534a6b45fa0", "2229644b6a27918cf80832353cf0b9427b9c2b95"),
+            "tools/architecture/test_pp_r07_recovery_lifecycle_migration.py": ("c0e59b4d2737c36fd5b565a21078d9a9e3950e52", "bfd4780e475a99c717e595d6c9f3d6855f9cb2ed"),
+        }.items():
+            self.assertEqual(previous, reviewed_migration_evidence[path])
+            reviewed_migration_evidence[path] = replacement
+        path = "tools/architecture/test_pp_r09b_legacy_cleanup.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "4822d269aa6e799b72111f6ac386858e853c5ae5"
+        path = "tools/architecture/test_pp_r09b_legacy_inventory.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "3e5c5d0e7f913113749e72133e101cb28091ccea"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

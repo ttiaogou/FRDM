@@ -31,7 +31,6 @@ internal class MomoPageObservationCoordinator(
     private var fullInspectionCallbackToken = 0L
     /** Purpose carried with the next scheduled full observation. */
     var pendingPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
-    private var regionRefreshTask: ScheduledTask? = null
     /** Startup navigation is page-structure verified and remains bounded. */
     var lastPageInspection: ChatPageSnapshot? = null
     /** Last positively confirmed inbox anchor; survives only same-window transient UNKNOWN samples. */
@@ -67,10 +66,7 @@ internal class MomoPageObservationCoordinator(
 
     fun clearExplicitInspectionHandle() { pageInspectionTask = null }
 
-    // R07-A flagged this unassigned legacy handle; retain it pending authorized cleanup.
-    fun cancelLegacyRegionRefreshHandle() { regionRefreshTask?.cancel() }
 
-    fun clearLegacyRegionRefreshHandle() { regionRefreshTask = null }
 
     fun consumeFullInspectionPurpose(): AiReplyPageReadPurpose {
         // An event/watcher can satisfy an ordinary pending full observation before

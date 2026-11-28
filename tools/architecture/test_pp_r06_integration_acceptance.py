@@ -97,7 +97,10 @@ def integration_violations(sources):
                 issues.append(name + ": forbidden dependency " + token)
     for state in STATE:
         declaration = r"\b(?:val|var)\s+" + re.escape(state) + r"\b"
-        if state in PAGE_STATE:
+        if state == "regionRefreshTask":
+            if any(re.search(declaration, source) for source in sources.values()):
+                issues.append("Retired region refresh handle reintroduced")
+        elif state in PAGE_STATE:
             owner = sources.get(PAGE_OWNER, "")
             if re.search(declaration, runtime) or len(re.findall(declaration, owner)) != 1:
                 issues.append("Page observation state ownership changed: " + state)

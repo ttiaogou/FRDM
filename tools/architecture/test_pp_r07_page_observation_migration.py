@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r09b_legacy_cleanup import restore_r09a_page_owner
 from tools.architecture.test_pp_r07_private_visit_migration import restore_r07b_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -91,6 +92,7 @@ def restore_r06f_runtime(runtime, owner=None):
     runtime = restore_r07b_runtime(runtime)
     if owner is None:
         owner = (AI / "MomoPageObservationCoordinator.kt").read_text(encoding="utf-8")
+    owner = restore_r09a_page_owner(owner)
     if git_blob(owner.encode("utf-8")) != OWNER:
         raise AssertionError("R07-B page observation owner changed")
     for current, previous, count in INVERSE:
@@ -110,7 +112,11 @@ class PpR07PageObservationMigrationTest(unittest.TestCase):
                       "regionRefreshTask", "lastPageInspection", "lastConfirmedChatListInspection",
                       "lastRegionFingerprint"):
             self.assertNotRegex(runtime, r"\b(?:val|var)\s+" + field + r"\b")
-            self.assertRegex(owner, r"\bvar\s+" + field + r"\b")
+            if field == "regionRefreshTask":
+                # R09-B retired the always-null historical field; prohibit its return.
+                self.assertNotRegex(owner, r"\b(?:val|var)\s+" + field + r"\b")
+            else:
+                self.assertRegex(owner, r"\bvar\s+" + field + r"\b")
         self.assertIn("pageObservationCoordinator.scheduleExplicitFullInspection(delayMs, purpose, ::runFullInspection)", runtime)
         self.assertIn("pageObservationCoordinator.consumeFullInspectionPurpose()", runtime)
         self.assertIn("pageInspectionTask = observationCoordinator.scheduleReadOnlyObservation", owner)

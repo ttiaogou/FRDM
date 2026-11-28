@@ -169,6 +169,10 @@ def ownership_violations(sources):
                 name for name, source in sources.items()
                 for _ in re.finditer(declaration, source)
             ]
+            if field == "regionRefreshTask":
+                if locations:
+                    issues.append(f"{field}: retired declaration reintroduced in {locations}")
+                continue
             if locations != [owner]:
                 issues.append(f"{field}: expected one declaration in {owner}, found {locations}")
     return issues
@@ -217,6 +221,11 @@ class PpR07IntegrationAcceptanceTest(unittest.TestCase):
         self.assertEqual(9, len(FIELDS))
         self.assertEqual(63, sum(len(fields) for fields in FIELDS.values()))
         self.assertEqual([], ownership_violations(self.sources))
+        # The original 63-field inventory includes 62 live fields and one retired field.
+        for name in self.sources:
+            changed = dict(self.sources)
+            changed[name] += "\nprivate var regionRefreshTask = null\n"
+            self.assertTrue(ownership_violations(changed), name)
 
     def test_cross_owner_reset_reconnect_and_live_wiring(self):
         self.assertEqual([], lifecycle_violations(self.sources[RUNTIME], self.adapter))

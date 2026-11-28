@@ -3,6 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r09b_legacy_cleanup import restore_r09a_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 AI = ROOT / "business/src/main/kotlin/com/freedom/features/aireply/"
@@ -125,6 +126,7 @@ FIELDS = {
 }
 
 def restore_r07g_runtime(runtime, owners=None):
+    runtime = restore_r09a_runtime(runtime)
     if owners is None:
         owners = {name: (AI / name).read_text(encoding="utf-8") for name in OWNERS}
     for name, (prior, live, block) in OWNERS.items():

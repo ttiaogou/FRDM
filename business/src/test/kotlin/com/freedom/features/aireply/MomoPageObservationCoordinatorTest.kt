@@ -149,6 +149,27 @@ class MomoPageObservationCoordinatorTest {
     }
 
     @Test
+    fun resetCancelsLiveRegionRefreshAndNewRequestStillRuns() {
+        val scheduler = FakeScheduler()
+        var refreshes = 0
+        val coordinator = createCoordinator(
+            scheduler = scheduler,
+            statuses = ArrayDeque(),
+            runRegionRefresh = { refreshes++ }
+        )
+        coordinator.signalRegionRefresh()
+        assertEquals(1, scheduler.pendingCount())
+        coordinator.reset()
+        assertEquals(0, scheduler.pendingCount())
+        scheduler.runCancelledWithDelay(450L)
+        assertEquals(0, refreshes)
+        coordinator.signalRegionRefresh()
+        assertEquals(1, scheduler.pendingCount())
+        scheduler.runNextWithDelay(450L)
+        assertEquals(1, refreshes)
+    }
+
+    @Test
     fun explicitReplacementAndCancelledCallbackRetainCurrentPurpose() {
         val scheduler = FakeScheduler()
         val coordinator = createCoordinator(scheduler, ArrayDeque())
