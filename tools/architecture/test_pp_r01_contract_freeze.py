@@ -106,6 +106,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
                 # R04 also pins the reviewed relocation; R03 remains in the R00 gate.
                 expected[path] = "f3b31960b6a7240c1dac532d3a9d4ec618d86532"
+                # R06-F appends the exact reviewed R00 source/owner pins.
+                self.assertEqual("f3b31960b6a7240c1dac532d3a9d4ec618d86532", expected[path])
+                expected[path] = "e693f9d3f699bc2d973500484327ab964d54eac1"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -148,7 +151,7 @@ class PpR01ContractFreezeTest(unittest.TestCase):
             "app/src/test/java/com/freedom/adapters/social/momo/R05AvatarTransactionMigrationTest.kt": "79598dad5eb51d53187a91dbf97d48dc89b0d8fa",
         }))
         # R05-D adds an exact inverse reconstruction of the prior R05-C source.
-        issues.extend(evidence_violations(ROOT, {
+        reviewed_migration_evidence = {
             "tools/architecture/test_pp_r05_draft_transaction_migration.py": "624e2df6d11189e26cbde371e413a12287cdb096",
             "tools/architecture/test_pp_r05_image_transaction_migration.py": "b6c9382900c53b460de1bd403f98373dffde004b",
             "tools/architecture/test_pp_r05_interception_transaction_migration.py": "983a9908e70616b0298e48a532c0b8cadb1414d8",
@@ -160,7 +163,15 @@ class PpR01ContractFreezeTest(unittest.TestCase):
             "tools/architecture/test_pp_r06_greeting_evidence_migration.py": "00f7dec146b9c7ce7eced4b146c94fe7443c7d0b",
             "tools/architecture/test_pp_r06_message_read_evidence_migration.py": "8f650cc1b7ffe73c9ed03f3d848ae97c97821a16",
             "business/src/test/kotlin/com/freedom/features/aireply/ReceivedGreetingsChatEvidenceTest.kt": "f2621a1c7cd67e765b593b417bdba550e082e78d",
-        }))
+        }
+        # R06-F prepends the exact inverse to R06-E; retain its historical pin.
+        path = "tools/architecture/test_pp_r06_message_read_evidence_migration.py"
+        self.assertEqual("8f650cc1b7ffe73c9ed03f3d848ae97c97821a16", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "182f702579c5d26c5b592935e3abf5660da6882d"
+        path = "tools/architecture/test_pp_r06_diagnostics_migration.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "b8aa9ab9b90a3b9549efcf69545977b129a8cf29"
+        issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
     def test_contracts_map_to_real_frozen_sources_and_existing_regressions(self):
