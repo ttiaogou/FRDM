@@ -467,6 +467,13 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r09b_followup_cleanup.py"
         self.assertEqual("1a07053392e4699bc752edf40ddc47c0ad81090d", reviewed_migration_evidence[path])
         reviewed_migration_evidence[path] = "3838580c5e544cd360a2503f78113f423008443a"
+        # R09-C additional whole-source and combined runtime authority regression evidence.
+        for path, replacement in {
+            "tools/architecture/test_pp_r09c_authority_acceptance.py": "33bba22ec8750c58b7005ef2c86d18c09f8f8bfa",
+            "app/src/test/java/com/freedom/application/runtime/R09cPageWriteAuthorityTest.kt": "0b18cc0940e3a65e09d46b503ebd59d462718141",
+        }.items():
+            self.assertNotIn(path, reviewed_migration_evidence)
+            reviewed_migration_evidence[path] = replacement
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
