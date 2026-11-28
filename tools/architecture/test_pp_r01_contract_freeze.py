@@ -100,6 +100,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         for field in EVIDENCE_COUNTS:
             expected = dict(self.manifest[field])
             if field == "protected_gate_files":
+                # R09-F: keep independent OCR test/build and pair delivery APKs on one runner.
+                path = ".github/workflows/android-build.yml"
+                self.assertEqual("89791661110e58988564a17fcb219ecc35f7ebc8", expected[path])
+                expected[path] = "85129fe78eb39ebd36e3c042a397c1b01a7316f4"
                 # R03 reviewed exact R00 gate update; keep every historical assertion
                 # and protect the revised gate by its exact blob, not an exemption.
                 path = "tools/architecture/test_pp_r00_freeze.py"
@@ -488,6 +492,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         }.items():
             self.assertNotIn(path, reviewed_migration_evidence)
             reviewed_migration_evidence[path] = replacement
+        # R09-F: exact additional APK delivery guard evidence.
+        path = "tools/architecture/test_pp_r09f_apk_delivery.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "0e5244a48297dee14ba617b4c916d5961ab62df0"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

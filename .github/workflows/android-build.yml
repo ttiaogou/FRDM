@@ -154,21 +154,21 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Restore PaddleOCR SDK and ONNX model cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/freedom-ocr
+          key: freedom-ocr-${{ runner.os }}-${{ hashFiles('ocr-plugin/build.gradle.kts', 'ocr-plugin/src/main/assets/ocr-model-catalog.json') }}
+          restore-keys: |
+            freedom-ocr-${{ runner.os }}-
+
       - name: Build Freedom debug APK
         run: |
           gradle --no-daemon --build-cache :app:assembleDebug
 
-      - name: Upload Freedom debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Freedom-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-          retention-days: 14
-
       - name: Build and compare shrink-only Freedom debug APK
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/freedom-baseline.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/app-debug.apk"
           gradle --no-daemon --build-cache -PfreedomShrinkDebug=true :app:assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/freedom-slim-debug.apk"
           python3 - <<'PY'
@@ -182,7 +182,7 @@ jobs:
                   return path.stat().st_size, sum(entry.compress_size for entry in dex), len(dex)
 
           root = Path(os.environ["RUNNER_TEMP"])
-          baseline = report(root / "freedom-baseline.apk")
+          baseline = report(root / "app-debug.apk")
           slim = report(root / "freedom-slim-debug.apk")
           print("Variant | APK bytes | Compressed DEX bytes | DEX count")
           print(f"Baseline | {baseline[0]} | {baseline[1]} | {baseline[2]}")
@@ -190,11 +190,59 @@ jobs:
           print(f"Saved bytes: {baseline[0] - slim[0]}")
           PY
 
+      - name: Build matching OCR delivery APK on this runner
+        run: |
+          mkdir -p "$HOME/.cache/freedom-ocr"
+          gradle --no-daemon --build-cache \
+            -PfreedomOcrCacheDir="$HOME/.cache/freedom-ocr" \
+            :ocr-plugin:assembleDebug
+
+      - name: Verify all delivery APK signatures before upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          apksigner="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?Android SDK unavailable}}/build-tools/35.0.0/apksigner"
+          signer_digest() {
+            local apk="$1" result digest
+            result="$("$apksigner" verify --verbose --print-certs "$apk")" || return 1
+            printf '%s\n' "$result" >&2
+            digest="$(printf '%s\n' "$result" | sed -nE 's/^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$/\1/p')"
+            if [[ ! "$digest" =~ ^[0-9a-fA-F]{64}$ ]]; then
+              echo "Expected exactly one signer SHA-256 digest: $apk" >&2
+              return 1
+            fi
+            printf '%s\n' "$digest"
+          }
+          ordinary="$(signer_digest "$RUNNER_TEMP/app-debug.apk")"
+          slim="$(signer_digest "$RUNNER_TEMP/freedom-slim-debug.apk")"
+          ocr="$(signer_digest "ocr-plugin/build/outputs/apk/debug/ocr-plugin-debug.apk")"
+          if [[ "$ordinary" != "$slim" || "$ordinary" != "$ocr" ]]; then
+            echo "Delivery APK signing mismatch; refusing to upload incompatible artifacts" >&2
+            exit 1
+          fi
+          echo "R09F_APK_SIGNING_PAIR_VERIFIED SHA256=$ordinary"
+
+      - name: Upload Freedom debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Freedom-debug-apk
+          path: ${{ runner.temp }}/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload shrink-only Freedom debug APK
         uses: actions/upload-artifact@v4
         with:
           name: Freedom-slim-debug-apk
           path: ${{ runner.temp }}/freedom-slim-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload OCR plugin debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Freedom-OCR-plugin-debug-apk
+          path: ocr-plugin/build/outputs/apk/debug/ocr-plugin-debug.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -239,14 +287,6 @@ jobs:
           gradle --no-daemon --build-cache \
             -PfreedomOcrCacheDir="$HOME/.cache/freedom-ocr" \
             :ocr-plugin:testDebugUnitTest :ocr-plugin:assembleDebug
-
-      - name: Upload OCR plugin debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Freedom-OCR-plugin-debug-apk
-          path: ocr-plugin/build/outputs/apk/debug/ocr-plugin-debug.apk
-          if-no-files-found: error
-          retention-days: 14
 
   codeql:
     name: Java and Kotlin CodeQL analysis
