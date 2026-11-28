@@ -497,6 +497,15 @@ class PpR00FreezeTest(unittest.TestCase):
         self.assertEqual("2d636faa98ed11fdecae133692ab3b4ff720905e", reviewed_s1[path])
         self.assertNotIn(path, actual)
         del reviewed_s1[path]
+        # R10-A: exact authorized component-driven child evidence migration.
+        for path, (previous, current) in {
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": ("8af64ca8d467e4d1eea9e8b2a7cdd411b2cee95f", "5341a89da104101fe1430c0f6ba5477d94c048c7"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoInterceptionTransactionController.kt": ("cdf761e0f4a221fc289d0621bbd309900e84cc9e", "5ff5a8e2e2dc52f9ed2d0572e6a9b01fdda152d4"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoInterceptionRecoveryPolicy.kt": ("1dea6b1c70463992922a6b76b3e9934bb12299e5", "90bbedf6e20a77756a9eb40518c35744aa27c137"),
+        }.items():
+            self.assertNotIn(path, reviewed_s0)
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = current
         self.assertEqual([], freeze_violations(
             reviewed_s0, reviewed_s1, actual))
 

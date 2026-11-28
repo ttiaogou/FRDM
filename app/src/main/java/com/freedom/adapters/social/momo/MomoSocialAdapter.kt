@@ -483,10 +483,12 @@ internal class MomoSocialAdapter(
                         }
                         if (privateFollowUp != null) {
                             // During the child, another chat is not a continuation of this transaction.
-                            if (chat.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE) {
-                                originalPrivateFollowUpChat(privateFollowUp) &&
-                                    chat.chatTitleText == privateFollowUp.target.expectedChatTitle
-                            } else inspectPrivateFollowUpOwnedPage(root, window)
+                            // A child popup can coexist with the underlying chat structure.
+                            // Reuse its exact active-transaction evidence before classifying a chat.
+                            inspectPrivateFollowUpOwnedPage(root, window) ||
+                                (chat.pageType == MomoChatPageType.CHAT_DETAIL_CANDIDATE &&
+                                    originalPrivateFollowUpChat(privateFollowUp) &&
+                                    chat.chatTitleText == privateFollowUp.target.expectedChatTitle)
                         } else chatConfirmed || cardConfirmed || (profileTransaction && isSayHiProfileSurfacePresent())
                     }
                     else -> false
@@ -5668,6 +5670,14 @@ internal class MomoSocialAdapter(
                 val albumPage = MomoAlbumArrivalInspector.isConfirmed(root, targetPackage) ||
                     MomoAlbumSelectorInspector.inspect(root, targetPackage) != null
                 albumPage ||
+                    (child.stage == PrivateFollowUpStage.WAIT_FREEDOM && freshMediaSnapshot(live)?.let {
+                        MomoFreedomAlbumInspector.ownedSelectionTarget(it, targetPackage) != null
+                    } == true) ||
+                    (child.stage == PrivateFollowUpStage.WAIT_SELECTION && album != null &&
+                        live.packageName == album.packageName && live.windowId == album.windowId &&
+                        live.generation >= album.generation && freshMediaSnapshot(live)?.let {
+                            MomoFreedomAlbumInspector.ownedSendTarget(it, targetPackage) != null
+                        } == true) ||
                     (child.stage == PrivateFollowUpStage.WAIT_DIRECTORY && album != null &&
                         freshMediaSnapshot(live)?.let {
                             isAlbumDirectoryArrival(album, it) &&
@@ -5817,10 +5827,13 @@ internal class MomoSocialAdapter(
                             liveWindow.activityClass == child.target.nodeTarget.window.activityClass &&
                             interceptionNodeBounds(root, "chat_user_name", "android.widget.TextView",
                                 text = child.target.expectedChatTitle) != null
-                        "interception-layout" -> interceptionTransaction.interceptionSettingsChecked(root, child) == false
+                        "interception-layout" -> interceptionTransaction.interceptionSettingsPage(root, child) &&
+                            interceptionTransaction.interceptionSettingsChecked(root, child) != true
                         "interception-switch" -> interceptionTransaction.interceptionChecked(root) == false
                         "interception-dismiss" -> interceptionTransaction.interceptionChecked(root) == true
-                        "interception-back" -> interceptionTransaction.interceptionSettingsChecked(root, child) == true
+                        "interception-back" -> interceptionTransaction.interceptionSettingsPage(root, child) &&
+                            (interceptionTransaction.interceptionSettingsChecked(root, child)
+                                ?: child.interceptionState.switchVerifiedOn)
                         else -> true
                     }
                     (if (safe) resolve(root, liveWindow) else null)?.also { bounds ->

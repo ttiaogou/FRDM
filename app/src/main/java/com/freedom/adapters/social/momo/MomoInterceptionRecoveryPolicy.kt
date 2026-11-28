@@ -23,7 +23,10 @@ internal object MomoInterceptionRecoveryPolicy {
         Page.SETTINGS_ON -> Decision(Action.BACK, true)
         Page.POPUP_OFF -> Decision(Action.ENABLE, false)
         Page.POPUP_ON -> Decision(Action.DISMISS, true)
-        Page.SETTINGS_IDENTITY_UNCONFIRMED, Page.SETTINGS_STATE_UNKNOWN,
+        // A confirmed row can open the popup even without a status label. After a
+        // positive switch read, a missing status label does not invalidate that proof.
+        Page.SETTINGS_STATE_UNKNOWN -> Decision(if (verifiedOn) Action.BACK else Action.OPEN_CONTROL, verifiedOn)
+        Page.SETTINGS_IDENTITY_UNCONFIRMED,
         Page.POPUP_SOURCE_UNCONFIRMED, Page.POPUP_STATE_UNKNOWN,
         Page.UNKNOWN -> Decision(Action.WAIT, verifiedOn)
     }

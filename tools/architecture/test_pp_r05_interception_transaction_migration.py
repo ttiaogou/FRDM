@@ -34,6 +34,9 @@ def restore_r05e_sources(adapter, image=None, owner=None, shared_owner=None):
         owner = (MOMO / "MomoInterceptionTransactionController.kt").read_text(encoding="utf-8")
     adapter, image = restore_r05f_sources(adapter, image, shared_owner)
     if git_blob(owner.encode("utf-8")) != OWNER:
+        from tools.architecture.test_pp_r10a_child_component_evidence import CONTROLLER, restore_r10a_source
+        owner = restore_r10a_source(CONTROLLER, owner)
+    if git_blob(owner.encode("utf-8")) != OWNER:
         raise AssertionError("R05-F interception owner changed")
     state = region(owner, "    @Volatile var switchVerifiedOn", "}\n\n/** Live interception")
     switch = region(state, "    @Volatile var switchVerifiedOn", "    var interceptionSettingsObserved")

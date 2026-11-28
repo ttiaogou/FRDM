@@ -30,6 +30,9 @@ RETIRED_CACHE = "package com.freedom.adapters.accessibility.diagnostics\n\nimpor
 
 
 def restore_d01d3_source(path, source):
+    from tools.architecture.test_pp_r10a_child_component_evidence import ADAPTER as R10A_ADAPTER, restore_r10a_source
+    if path == R10A_ADAPTER and git_blob(source.encode("utf-8")) != CURRENT[path]:
+        source = restore_r10a_source(path, source)
     for index, current, previous in EDITS[path]:
         if source[index:index + len(current)] != current:
             raise AssertionError("D01-D3 inverse anchor changed: " + path)
@@ -51,7 +54,8 @@ class D01d3LegacyNodeCacheRetirementTest(unittest.TestCase):
     def test_exact_authorized_migration_and_cache_retirement(self):
         for path in EDITS:
             source = (ROOT / path).read_text(encoding="utf-8")
-            self.assertEqual(CURRENT[path], git_blob(source.encode("utf-8")))
+            from tools.architecture.test_pp_r10a_child_component_evidence import AFTER as R10A_AFTER
+            self.assertEqual(R10A_AFTER.get(path, CURRENT[path]), git_blob(source.encode("utf-8")))
             self.assertEqual(PREVIOUS[path], git_blob(restore_d01d3_source(path, source).encode("utf-8")))
         self.assertEqual(PREVIOUS[CACHE], git_blob(retired_cache_evidence().encode("utf-8")))
 

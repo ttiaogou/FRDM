@@ -41,7 +41,7 @@ class MomoInterceptionRecoveryPolicyTest {
     }
 
     @Test fun partialSettingsAndPopupEvidenceNeverAuthorizeMutation() {
-        for (page in listOf(Page.SETTINGS_IDENTITY_UNCONFIRMED, Page.SETTINGS_STATE_UNKNOWN,
+        for (page in listOf(Page.SETTINGS_IDENTITY_UNCONFIRMED,
             Page.POPUP_SOURCE_UNCONFIRMED, Page.POPUP_STATE_UNKNOWN)) {
             assertEquals(Action.WAIT, policy.reconcile(page, false).action)
             assertFalse(policy.reconcile(page, false).verifiedOn)
@@ -56,7 +56,7 @@ class MomoInterceptionRecoveryPolicyTest {
             Page.ORIGINAL_CHAT to Action.OPEN_SETTINGS,
             Page.UNKNOWN to Action.WAIT,
             Page.SETTINGS_IDENTITY_UNCONFIRMED to Action.WAIT,
-            Page.SETTINGS_STATE_UNKNOWN to Action.WAIT,
+            Page.SETTINGS_STATE_UNKNOWN to Action.OPEN_CONTROL,
             Page.SETTINGS_OFF to Action.OPEN_CONTROL,
             Page.POPUP_SOURCE_UNCONFIRMED to Action.WAIT,
             Page.POPUP_OFF to Action.ENABLE,
@@ -73,6 +73,22 @@ class MomoInterceptionRecoveryPolicyTest {
             verifiedOn = decision.verifiedOn
             if (expected == Action.COMPLETE) assertTrue(verifiedOn)
         }
+    }
+
+    @Test fun missingSettingsStatusOpensControlButNeverEnablesWithoutPopupProof() {
+        val available = policy.reconcile(Page.SETTINGS_STATE_UNKNOWN, false)
+        assertEquals(Action.OPEN_CONTROL, available.action)
+        assertFalse(available.verifiedOn)
+        assertEquals(Action.WAIT, policy.reconcile(Page.POPUP_SOURCE_UNCONFIRMED, available.verifiedOn).action)
+        assertEquals(Action.WAIT, policy.reconcile(Page.POPUP_STATE_UNKNOWN, available.verifiedOn).action)
+        val enabled = policy.reconcile(Page.POPUP_ON, available.verifiedOn)
+        assertTrue(enabled.verifiedOn)
+        assertEquals(Action.DISMISS, enabled.action)
+        val back = policy.reconcile(Page.SETTINGS_STATE_UNKNOWN, enabled.verifiedOn)
+        assertEquals(Action.BACK, back.action)
+        assertTrue(back.verifiedOn)
+        assertEquals(Action.COMPLETE, policy.reconcile(Page.ORIGINAL_CHAT, back.verifiedOn).action)
+        assertFalse(policy.reconcile(Page.SETTINGS_OFF, back.verifiedOn).verifiedOn)
     }
 
     @Test fun unknownHoldsProofWithoutAuthorizingAnyGesture() {

@@ -65,6 +65,16 @@ D01-D4 基线 8b51829fd256af52559bfba5c0549dc80a05c028，完整 CI 46147357411 s
 
 D01-E 工程验收基线 de167db5ca40c4b12dd12b541229b88434a52586；[CI 46148339153](https://github.com/ttiaogou/FRDM/actions/runs/46148339153) 五项全部 success，237 Python tests，20 项 D01 专项全部通过，Git tracked 938、runtime/config 476、test-source 279。原冻结清单与规则不改，R00/R01 实际通过；普通/精简/配套 OCR APK 成功，签名配对门禁 R09F_APK_SIGNING_PAIR_VERIFIED。D01-001～012 工程检测通过、仍 VERIFY_PENDING（真机）；D01-013/014 CANDIDATE，不宣称全部动态可达性、设备或性能验收完成。D01-E 仅更新治理记录，不修改生产、测试或构建配置。
 
+## R10-A 真机故障与子事务审计
+
+| ID | 分类/等级 | 证据与影响 | 状态 | 后续处置及关闭/复核依据 |
+| --- | --- | --- | --- | --- |
+| R10-001 | 拦截/高 | 2026-11-28 用户诊断：进入 ChatSettingActivity 后持续 INTERCEPTION_SETTINGS_IDENTITY_UNCONFIRMED，UNCLASSIFIED；OWN-20/04/07。基线 c0d3f2cb8f98160fe5d394a131025936fa53b8c5，控制器在 setting_layout_harass 已匹配后仍要求 tv_user_name 与原标题一致 | VERIFY_PENDING | R10-A 移除设置页用户名要求；现有行/开关证据复用到父路由，开关确认和返回原会话保留；新 CI、F08/F09 真机验证后关闭 |
+| R10-002 | 图片/高 | OWN-19/04：基线 c0d3f2cb8f98160fe5d394a131025936fa53b8c5，选图/发送已经使用 ownedSelectionTarget/ownedSendTarget，子页面归属却可能只接受完整相册壳/selector；遮挡后的 chat detail 分类可先于子证据 | VERIFY_PENDING | 复用原有按阶段目标证据及当前窗口检查；无真机复现证据，属于源码确认的潜在阻塞路径，不改图片选择、发送、失败重试或计数算法 |
+| R10-003 | 诊断/中 | 用户故障采集没有设置页节点证据，现有 KEY_PAGE/STANDARD 预算；OWN-30/32 | OPEN | 用户明确授权的第二次提交：异常现场优先、去重、容量保护；本次不修改采集链 |
+
+本次前置 CI 46149485099 的主 APK job 下载 OpenCV/ONNX Runtime 时 Maven Central 返回 HTTP 429，架构、单测、独立 OCR 和 CodeQL 均成功；外部依赖限流，不在 R10-A 修改构建配置。
+
 ## 持续扫描范围
 
 代码相似、语义职责、正反调用链、状态/缓存、监听器/回调生命周期、不可达及依赖/资源。当前现有架构检测与 G01-A 文档扫描继续使用；AI 发现的问题必须区分候选与确认。删除生产代码需独立任务授权及行为保护，不因本台账自动执行。

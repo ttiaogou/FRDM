@@ -63,17 +63,14 @@ internal class MomoInterceptionTransactionController(
         }
 
 
-    /** Settings-page identity does not depend on the switch/status text being readable yet. */
-    fun interceptionSettingsPage(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean {
-        val title = child.target.expectedChatTitle ?: return false
-        return interceptionNodeBounds(root, "tv_user_name", "android.widget.TextView", text = title) != null &&
+    /** The admitted parent owns the contact; the child settings row is sufficient live page evidence. */
+    fun interceptionSettingsPage(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean =
+        child.stage != PrivateFollowUpStage.INTERCEPTION_OPEN_SETTINGS &&
             interceptionNodeBounds(root, "setting_layout_harass", "android.widget.LinearLayout", clickable = true) != null
-    }
 
     /** Status is scoped to the unique interception row, not any "已开启" on the page. */
     fun interceptionSettingsChecked(root: AccessibilityNodeInfo, child: PrivateFollowUpTransaction): Boolean? = runCatching {
-        val title = child.target.expectedChatTitle ?: return null
-        if (interceptionNodeBounds(root, "tv_user_name", "android.widget.TextView", text = title) == null) return null
+        if (!interceptionSettingsPage(root, child)) return null
         val rows = root.findAccessibilityNodeInfosByViewId("$targetPackage:id/setting_layout_harass").orEmpty()
         try {
             val row = rows.singleOrNull {
@@ -132,7 +129,8 @@ internal class MomoInterceptionTransactionController(
         child.interceptionState.switchVerifiedOn = decision.verifiedOn
         when (page) {
             MomoInterceptionRecoveryPolicy.Page.SETTINGS_ON,
-            MomoInterceptionRecoveryPolicy.Page.SETTINGS_OFF -> child.interceptionState.interceptionSettingsObserved = true
+            MomoInterceptionRecoveryPolicy.Page.SETTINGS_OFF,
+            MomoInterceptionRecoveryPolicy.Page.SETTINGS_STATE_UNKNOWN -> child.interceptionState.interceptionSettingsObserved = true
             MomoInterceptionRecoveryPolicy.Page.ORIGINAL_CHAT -> child.interceptionState.interceptionSettingsObserved = false
             else -> Unit
         }

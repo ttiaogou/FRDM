@@ -79,3 +79,8 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 - G01-D 重点重核页面观察/指纹、身份解析、图片与拦截状态、配对配额、联系人账本、图片资源、OCR、诊断、配置及动态 session 的相关源码。G01-B/C 的入口、共享对象、发送及恢复等源码证据沿用相同生产 blob。
 - OWN-13/21/31/32 的完整读写者及状态字段、其他边缘能力、全仓动态调用图尚未验证；见 GOV-001。不得由类存在推断职责已全部分离，也不得把缺少映射作为删除依据。
 - 实际职责冲突登记至 [AUDIT_REGISTER.md](AUDIT_REGISTER.md)；进度见 [AUDIT_CHECKPOINT.md](AUDIT_CHECKPOINT.md)。G01-E 已接入 AGENTS 维护导航，职责证据仍按本表原基线记录。
+
+## R10-A 子事务补证
+
+- OWN-20/04/07：基线 c0d3f2cb8f98160fe5d394a131025936fa53b8c5，真机拦截故障根因为设置页重复身份校验导致现有父路由证据不足。MomoInterceptionTransactionController 以已准入子事务和唯一设置行为页面证据，状态标签可选、弹窗实际开关证明保留；MomoSocialAdapter 复用同一组件证据。父任务和最终 UI 写权仍分别归原 TaskCoordinator/UiWriteAuthorization；不增租约、状态 owner 或入口。
+- OWN-19：复用现有 Freedom 相册选图及发送目标检查器补齐 WAIT_FREEDOM/WAIT_SELECTION 路由证据，保留窗口、选择数量、发送证明和禁止盲重放约束；源代码同类风险，非已复现设备故障。检查证据见 test_pp_r10a_child_component_evidence.py，完整新 CI 与真机仍待核验。

@@ -265,6 +265,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # D01-D3: one exact authorized S0 node-only migration; original manifest preserved.
                 self.assertEqual("aed81c353771212cff21424a8c9e3d3ad75dd6ab", expected[path])
                 expected[path] = "6f80d78495bb6d21fcc7bfb095795248e68d64c7"
+                # R10-A preserves the original manifests and registers the exact source change.
+                self.assertEqual("6f80d78495bb6d21fcc7bfb095795248e68d64c7", expected[path])
+                expected[path] = "b8a440786d9809c732a98dbf4d111781a80ec0a3"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -293,6 +296,11 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R07-B reviewed relocation to the existing observation owner.
                 self.assertEqual("06485947b2fda4007b4ef09d1371c06b2f745fb2", expected[path])
                 expected[path] = "92633e6fdc095e6780325ec923712a249821194b"
+            if field == "protected_test_files":
+                # R10-A explicitly changes only the confirmed-row/unknown-status behavior.
+                path = "app/src/test/java/com/freedom/adapters/social/momo/MomoInterceptionRecoveryPolicyTest.kt"
+                self.assertEqual("cceade363e6d5f10a245154fccc3cbe09cdbc111", expected[path])
+                expected[path] = "8f5ce67a1ca6715f0364ce394bc22cbc49ce54f9"
             if field == "protected_test_files":
                 # R09-F CI: relocate the OCR artifact assertion to its verified delivery job.
                 path = "app/src/test/java/com/freedom/architecture/ArchitectureBoundaryTest.kt"
@@ -666,6 +674,16 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_d01d4_node_export_reference_regression.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "d069e1b60408b2cb4789286d4b62be93bc091cc2"
+        # R10-A exact inverse chain; no exemptions from prior proofs.
+        path = "tools/architecture/test_pp_d01d3_legacy_node_cache_retirement.py"
+        self.assertEqual("fed2bc5b09ee2e2afceb9f8c5a425ce5687bbe62", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "01dba43f13ccde5ac9dc4cbe1329a3b64c8ebfc4"
+        path = "tools/architecture/test_pp_r05_interception_transaction_migration.py"
+        self.assertEqual("983a9908e70616b0298e48a532c0b8cadb1414d8", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "99c84268d3aabfe5e2d0f706a04e190069df42b8"
+        path = "tools/architecture/test_pp_r10a_child_component_evidence.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "b7d7dbdcfcc577811a7afebac7ffb4848c41fe08"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

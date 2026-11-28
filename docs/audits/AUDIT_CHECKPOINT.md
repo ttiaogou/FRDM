@@ -5,18 +5,26 @@
 | 字段 | 当前记录 |
 | --- | --- |
 | repository / branch | ttiaogou/FRDM / PP |
-| reviewedHead | de167db5ca40c4b12dd12b541229b88434a52586 |
-| reviewedTree | a66945fd22bbec8aba7f437e7b324bc006c744ed |
+| reviewedHead | c0d3f2cb8f98160fe5d394a131025936fa53b8c5 |
+| reviewedTree | 6c3ad8876c640bc0949d3d7c8364f456fa248476 |
 | 已验收工程基线 | D01-D4 de167db5ca40c4b12dd12b541229b88434a52586；[完整 CI 46148339153](https://github.com/ttiaogou/FRDM/actions/runs/46148339153) completed/success |
-| 当前任务 | D01-E 最终集成工程验收及真机清单 |
-| 当前状态 | ENGINEERING_ACCEPTED / DEVICE_NOT_RUN；D01-013/014 独立候选保留；本次记录提交 CI 以 Actions 实际结果为准 |
-| 验证策略 | 237 Python tests、20 D01 专项、全模块单测、APK、签名配对及 CodeQL 已通过；累计 Git Tree 差异核验；真机逐项记录 |
-| 设备验收 | F01–F12 DEFERRED / NOT_RUN；用户独立执行 |
+| 当前任务 | R10-A 简化消息拦截、父子事务页面归属、图片发送同类风险 |
+| 当前状态 | IMPLEMENTED / VERIFY_PENDING；前置 CI 46149485099 因 Maven 429 下载失败，其他四项通过；新提交完整 CI 待核验 |
+| 验证策略 | R10-A 新精确逆向及正负向源码门禁、拦截状态策略测试、原 M04/R00/R01/R05/D01 历史保护及全 CI；真机未复测 |
+| 设备验收 | 用户独立执行；F08 拦截进入设置页后卡住（FAIL），图片发送部分仍待测，其他设备场景不推断 PASS；F08/F09 修复后待复测 |
 | 当前职责建档 | 32 项：A 16、B 12、C 4；证据基线仍按职责表，不虚报逐方法核查 |
-| 台账 | 32 项：CLOSED 8、RETAINED 3、CANDIDATE 6、OPEN 1、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 12 |
+| 台账 | 35 项：CLOSED 8、RETAINED 3、CANDIDATE 6、OPEN 2、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 14 |
 | 工作区 | 远端 Git tree/compare；无本地 checkout 验证 |
-| 改动范围 | 仅治理三份文档；生产、测试、CI 配置、原冻结清单及规则正文不变 |
-| 下一阶段 | D01 真机专项回归（E01–E10）；D01-013/014 独立评估及授权，原 R09-F F01–F12 真机延期状态不变 |
+| 改动范围 | MomoSocialAdapter、MomoInterceptionTransactionController、MomoInterceptionRecoveryPolicy；一项现有策略测试、精确逆向证据和冻结 pin；治理记录；CI 配置、S0、原清单和规则不变 |
+| 下一阶段 | 核验 R10-A CI 及真机拦截/图片发送；第二次提交处理 R10-003 异常节点优先采集；D01 候选及其他真机事项保留 |
+
+## R10-A 本轮证据
+
+- 拦截设置页行已确认时不再读取 tv_user_name/原聊天标题；缺少状态标签可打开弹窗，不视为 OFF 或成功；实际 switch OFF 才切换，ON 才确认，之后允许已验证开关的返回路径。状态明确 OFF 则仍重新核验，不盲目切换。
+- 统一入口对非独立业务页面优先复用当前子事务的实际组件证据；独立页面匹配优先、原聊天身份返回确认、父租约/运行代次、窗口、实际命令 permit、检查点、用户触摸及 UNKNOWN 门禁全部保留。MomoPrivateFollowUpController 和 RunSessionCoordinator 不新增或改变权威状态。
+- 图片发送审计：WAIT_FREEDOM/WAIT_SELECTION 补用原 ownedSelectionTarget/ownedSendTarget（后者保持原相册 windowId 和代次条件）；保留原相册/目录/重试弹窗证据及具体发送防重复门禁。图片发送没有本次真机复现证据。
+- R10-A 精确修改指纹及逆向可恢复全部四个前置源码/测试 blob，D01-D3 与 R05-F 历史重建保持；M04 冻结动作解析器不改。原 SETTING_STATE_UNKNOWN 等待断言仅按已授权的确认行可打开/已验证可返回规则更新；未知页面和弹窗证据不足仍 WAIT。
+- 无本地 Gradle 或真机执行结果；本次报告不宣称通过。异常节点采集另一个已约定提交，不扩大本次。
 
 ## 批次进度
 
