@@ -1111,22 +1111,24 @@ class AiReplyObservationRuntimeTest {
         val fixture = preScrollPageRecoveryFixture()
         cancelFixtureStartupObservation(fixture)
         fixture.port.receivedGreetingsWorkflowEnabled = true
-        val pending = fixture.runtime.javaClass.getDeclaredField("pendingPrivateQuotaReceipt").apply { isAccessible = true }
-        val ready = fixture.runtime.javaClass.getDeclaredField("privateQuotaReturnReady").apply { isAccessible = true }
+        val pairedOwner = fixture.runtime.javaClass.getDeclaredField("taskOwnership").apply { isAccessible = true }
+            .get(fixture.runtime)
+        val pending = pairedOwner.javaClass.getDeclaredField("pendingPrivateQuotaReceipt").apply { isAccessible = true }
+        val ready = pairedOwner.javaClass.getDeclaredField("privateQuotaReturnReady").apply { isAccessible = true }
         val boundary = fixture.runtime.javaClass.getDeclaredMethod("handlePrivateQuotaBoundary", ChatPageSnapshot::class.java)
             .apply { isAccessible = true }
-        pending.set(fixture.runtime, "first")
-        ready.setBoolean(fixture.runtime, false)
+        pending.set(pairedOwner, "first")
+        ready.setBoolean(pairedOwner, false)
         assertEquals(false, boundary.invoke(fixture.runtime, fixture.listPage))
         assertFalse(fixture.logs.any { it.contains("PAIRED_QUOTA[COUNT] task=PRIVATE") })
-        ready.setBoolean(fixture.runtime, true)
+        ready.setBoolean(pairedOwner, true)
         assertEquals(false, boundary.invoke(fixture.runtime, fixture.listPage))
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
-        pending.set(fixture.runtime, "first")
-        ready.setBoolean(fixture.runtime, true)
+        pending.set(pairedOwner, "first")
+        ready.setBoolean(pairedOwner, true)
         assertEquals(false, boundary.invoke(fixture.runtime, fixture.listPage))
-        pending.set(fixture.runtime, "second")
-        ready.setBoolean(fixture.runtime, true)
+        pending.set(pairedOwner, "second")
+        ready.setBoolean(pairedOwner, true)
         assertEquals(true, boundary.invoke(fixture.runtime, fixture.listPage))
         assertEquals("AI_REPLY_RECEIVED_GREETINGS", fixture.ownership.activeTaskId())
         assertEquals(1, fixture.port.receivedGreetingsNavigationTaskStarts)
@@ -1491,7 +1493,7 @@ class AiReplyObservationRuntimeTest {
     @Test
     fun p6TimedPollingWakeupSchedulesReadOnlyInspectionWithoutNewMessages() {
         val fixture = preScrollPageRecoveryFixture()
-        val modeType = fixture.runtime.javaClass.declaredClasses.single { it.simpleName == "PairWakeMode" }
+        val modeType = AiReplyTaskOwnership.PairWakeMode::class.java
         val mode = modeType.enumConstants.single { (it as Enum<*>).name == "REFRESH_PRIVATE" }
         val enterWait = fixture.runtime.javaClass.getDeclaredMethod(
             "enterPairIdle", String::class.java, modeType

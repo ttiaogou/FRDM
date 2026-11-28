@@ -1,0 +1,10 @@
+# FRDM PP R07-G — 双任务配额、唤醒、任务交接及安全切换生命周期收敛
+
+- Repository: ttiaogou/FRDM; branch PP; baseline 62d2914635a2b0ca08e909667869d6d69d17a54b; R07-F CI 46113614482 success.
+- Entry: FreedomAccessibilityService -> unified event pipeline -> RunSessionCoordinator -> AiReplyModeRuntimeAdapter -> AiReplyObservationRuntime. No entry change.
+- Move both existing slice quotas, pending private receipt/readiness, independent task yield, pair wake identity/retry, relocation retry debt and cross-task retry handle/gate to existing AiReplyTaskOwnership. Its TaskExecutionController delegate remains the lease facade; these are run-local business facts, not new leases or durable ledger facts.
+- Keep existing shared sessionTransitionTask, page gate, gesture/Android readiness, task ownership admission/rollback, checkpoint persistence and recovery in their current owners. No new timer or changed delay, quota, priority, fingerprint, business algorithm or recovery flow.
+- Private credit is retained only at the original verified-send admission, marked ready only after existing checkpoint write, counted only at existing verified safe return; ready receipt retirement is coupled. Pair wake creation/clear retains original object identity guard. Reset both counters, debt and handoff intent at original run boundaries; cancel cross-task retry using original gate/cadence.
+- Preserve frozen regression assertions; reflection fixture now uses actual state owner. R07-G exact inverse reconstructs R07-F Runtime and original lease facade, pins new live owner and mutation checks, then runs the full historical inverse chain. No manifest rewrite, test deletion or relaxed assertion.
+- Retained for later recovery/dispatch audit: shared sessionTransitionTask handles multiple distinct actions; cross-task retry callback scheduling and recovery source proof remain Runtime responsibilities. No speculative duplicate owner or file deletion.
+- Validation: exact inverse and Git object identity checked before commit; Android CI and device behavior require actual workflow/device results, not inferred from the inverse.

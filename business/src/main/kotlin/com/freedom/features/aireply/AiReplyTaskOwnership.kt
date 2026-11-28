@@ -1,5 +1,6 @@
 package com.freedom.features.aireply
 
+import com.freedom.core.runtime.ScheduledTask
 import com.freedom.core.runtime.TaskCoordinator
 import com.freedom.core.runtime.TaskExecutionController
 
@@ -46,6 +47,69 @@ internal class AiReplyTaskOwnership(
     currentRunGeneration: () -> Long,
     onLog: (String) -> Unit
 ) {
+    // R07-G: run-local paired-task scheduling facts; the delegate alone owns leases.
+    // Task-local yield and pair wake are independent facts.
+    var privateToGreetingsHandoff: AiReplyTaskYieldReason? = null
+    val privateSliceQuota = AiReplyTaskSliceQuota()
+    val greetingSliceQuota = AiReplyTaskSliceQuota()
+    var pendingPrivateQuotaReceipt: String? = null
+        private set
+    var privateQuotaReturnReady = false
+        private set
+    enum class PairWakeMode { REFRESH_PRIVATE, RESUME_PRIVATE }
+    data class PairWake(val mode: PairWakeMode, var due: Boolean, var retryAttempt: Int = 0)
+    var pairWake: PairWake? = null
+        private set
+    // A deferred yield owes the original relocation a retry before yielding again.
+    var privateRelocationRetryOwed = false
+    /** Limits repeated handoff lease churn while the original private checkpoint stays pending. */
+    val crossTaskGreetingsHandoffRetryGate = CrossTaskGreetingsHandoffRetryGate()
+    var crossTaskGreetingsHandoffRetryTask: ScheduledTask? = null
+
+    fun retainPrivateQuotaReceipt(sendConfirmationId: String) {
+        pendingPrivateQuotaReceipt = sendConfirmationId
+        privateQuotaReturnReady = false
+    }
+
+    fun markPrivateQuotaReturnReady(sendConfirmationId: String?) {
+        if (sendConfirmationId != null && pendingPrivateQuotaReceipt == sendConfirmationId) {
+            privateQuotaReturnReady = true
+        }
+    }
+
+    fun discardUnreadyPrivateQuotaReceipt() {
+        if (!privateQuotaReturnReady) pendingPrivateQuotaReceipt = null
+    }
+
+    fun clearPrivateQuotaReceipt() {
+        pendingPrivateQuotaReceipt = null
+        privateQuotaReturnReady = false
+    }
+
+    fun requestPairWake(mode: PairWakeMode, due: Boolean): PairWake {
+        val wake = PairWake(mode, due)
+        pairWake = wake
+        return wake
+    }
+
+    fun clearPairWake() {
+        pairWake = null
+    }
+
+    fun resetPairedRun() {
+        privateToGreetingsHandoff = null
+        privateRelocationRetryOwed = false
+        privateSliceQuota.resetRun()
+        greetingSliceQuota.resetRun()
+        clearPrivateQuotaReceipt()
+    }
+
+    fun resetCrossTaskGreetingsHandoffRetry() {
+        crossTaskGreetingsHandoffRetryTask?.cancel()
+        crossTaskGreetingsHandoffRetryTask = null
+        crossTaskGreetingsHandoffRetryGate.reset()
+    }
+
     private val delegate = TaskExecutionController(
         coordinator = coordinator,
         currentRunGeneration = currentRunGeneration,

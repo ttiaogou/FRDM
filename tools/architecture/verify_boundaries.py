@@ -1981,7 +1981,7 @@ def paired_ai_task_boundary_violations(code_by_path: dict[str, str]) -> list[str
     require_order(runtime, "finishConfirmedPrivateSend", "isPrivateFollowUpActive()",
                   "pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())",
                   "privateMessagesCheckpointRepository?.save(",
-                  "if (!checkpointWritten)", "privateQuotaReturnReady = true", "scheduleReturnToSessionList(")
+                  "if (!checkpointWritten)", "taskOwnership.markPrivateQuotaReturnReady(sendConfirmationId)", "scheduleReturnToSessionList(")
     back = require_order(runtime, "scheduleReturnToSessionList",
                          "isPrivateFollowUpActive()", "pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())",
                          "isPrivateFollowUpActive()", "pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey())",
@@ -1993,8 +1993,8 @@ def paired_ai_task_boundary_violations(code_by_path: dict[str, str]) -> list[str
         issues.append("L07 BACK must recheck pending child immediately before dispatch")
     require_order(runtime, "handlePrivateQuotaBoundary", "isPrivateFollowUpActive()",
                   "snapshot.pageKind != ChatPageKind.CHAT_LIST",
-                  "if (privateQuotaReturnReady)", "ensureAndroidRecoveryReady(",
-                  "privateSliceQuota.record(receipt)", "startReceivedGreetingsTask(")
+                  "if (taskOwnership.privateQuotaReturnReady)", "ensureAndroidRecoveryReady(",
+                  "taskOwnership.privateSliceQuota.record(receipt)", "startReceivedGreetingsTask(")
 
     # L09: one run-local position owner; task handoffs retire search progress only.
     momo = "app/src/main/java/com/freedom/adapters/social/momo/"

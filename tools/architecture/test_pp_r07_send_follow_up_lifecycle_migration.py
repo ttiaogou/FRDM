@@ -3,6 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r07_paired_task_lifecycle_migration import restore_r07f_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 AI = ROOT / "business/src/main/kotlin/com/freedom/features/aireply/"
@@ -102,6 +103,7 @@ def restore_r07e_read_owner(owner):
     return _restore_owner(owner, READ_OWNER, READ_PREVIOUS, READ_INVERSE)
 
 def restore_r07e_runtime(runtime, private_owner=None, read_owner=None):
+    runtime = restore_r07f_runtime(runtime)
     if private_owner is None:
         private_owner = (AI / "PrivateMessagesTraversalTaskExecutor.kt").read_text(encoding="utf-8")
     if read_owner is None:
@@ -139,7 +141,7 @@ class PpR07SendFollowUpLifecycleMigrationTest(unittest.TestCase):
         self.assertIn("contactMessageLedger.updateFollowUpCheckpoint(contactKey, expected, step, true)", runtime)
         self.assertIn("child.target.taskLease?.let { taskCoordinator?.isCurrent(it) } == true", runtime)
         self.assertIn("checkpoint.reconciliationRequired || checkpoint.revision != 0L || sendId == null", runtime)
-        self.assertIn("private var pendingPrivateQuotaReceipt", runtime)
+        self.assertIn("private var pendingPrivateQuotaReceipt", restore_r07f_runtime(runtime))
         self.assertNotIn("scheduler.schedule(", private)
         self.assertNotIn("dispatchGesture(", private)
 

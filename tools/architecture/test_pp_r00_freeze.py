@@ -326,6 +326,13 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/ChatMessageReadCoordinator.kt"
         self.assertEqual("8d00203bdb93c2e7cfb046ab8ebabf9002373058", reviewed_s1[path])
         reviewed_s1[path] = "0f8ba84a23f83d0f62c7a757d82183c5a8b88fa7"
+        # R07-G: exact paired state relocation into existing AI task ownership.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("87fc911f604f2f8fbfdd7516b161ff715fb6f2d3", reviewed_s1[path])
+        reviewed_s1[path] = "d6871d72fabe6af2af018fdeb709692851260335"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyTaskOwnership.kt"
+        self.assertEqual("3f303752ae0a61e308fbf8182a9811ad932656fe", reviewed_s1[path])
+        reviewed_s1[path] = "85ebbdd6eab50c3085bbc9b2388581c22a531302"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

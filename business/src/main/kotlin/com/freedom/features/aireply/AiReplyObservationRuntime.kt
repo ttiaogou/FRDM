@@ -205,7 +205,7 @@ class AiReplyObservationRuntime(
         privateChatFollowUpPort?.reset("PRIVATE_FOLLOW_UP_LEFT_CHILD")
         privateMessagesTraversalTaskExecutor.clearPrivateFollowUpBinding()
         privateMessagesTraversalTaskExecutor.currentSessionSendConfirmed = false
-        if (!privateQuotaReturnReady) pendingPrivateQuotaReceipt = null
+        taskOwnership.discardUnreadyPrivateQuotaReceipt()
         onLog("PRIVATE_FOLLOW_UP LEFT_CHILD;checkpointRetained=true")
     }
 
@@ -533,17 +533,6 @@ class AiReplyObservationRuntime(
     /** Archive lifecycle is independent from the optional automatic session traversal state. */
     private var sampleCaptureActive = false
     private var sessionRunStarted = false
-    // Task-local yield and pair wake are independent facts.
-    private var privateToGreetingsHandoff: AiReplyTaskYieldReason? = null
-    private val privateSliceQuota = AiReplyTaskSliceQuota()
-    private val greetingSliceQuota = AiReplyTaskSliceQuota()
-    private var pendingPrivateQuotaReceipt: String? = null
-    private var privateQuotaReturnReady = false
-    private enum class PairWakeMode { REFRESH_PRIVATE, RESUME_PRIVATE }
-    private data class PairWake(val mode: PairWakeMode, var due: Boolean, var retryAttempt: Int = 0)
-    private var pairWake: PairWake? = null
-    // A deferred yield owes the original relocation a retry before yielding again.
-    private var privateRelocationRetryOwed = false
     /** Startup stays provisional until the first autonomous gesture is accepted by Android. */
     // Compatibility accessors keep this large coordinator readable while the executor owns the
     // actual traversal/session state. All writes still cross the same single owner.
@@ -668,9 +657,6 @@ class AiReplyObservationRuntime(
     private var receivedGreetingsQuietTask: ScheduledTask? = null
     private var receivedGreetingsQuietGeneration = 0L
     private val pageRecoveryVerificationGate = PageRecoveryVerificationGate()
-    /** Limits repeated handoff lease churn while the original private checkpoint stays pending. */
-    private val crossTaskGreetingsHandoffRetryGate = CrossTaskGreetingsHandoffRetryGate()
-    private var crossTaskGreetingsHandoffRetryTask: ScheduledTask? = null
     private var receivedGreetingsRecoveryVerificationPending = false
     private var receivedGreetingsRecoveryVerifiedForNextSnapshot = false
     private var receivedGreetingsRecoveryRetryAttempt = 0
@@ -1151,7 +1137,7 @@ class AiReplyObservationRuntime(
                 holdGreetingsCompletionReturn("EXTERNAL_PAGE")
                 return
             }
-            if (sessionRunStarted && pairWake != null && !receivedGreetingsTaskActive &&
+            if (sessionRunStarted && taskOwnership.pairWake != null && !receivedGreetingsTaskActive &&
                 !recoveryContext.pending
             ) {
                 invalidatePairWakeEvidence()
@@ -1204,7 +1190,7 @@ class AiReplyObservationRuntime(
             // original navigation is still awaiting its destination. No snapshot or a
             // foreign package still follows the existing recovery path.
             if (inspection != null && waitForPendingGreetingsNavigationEvidence(inspection)) return
-            if (pairWake != null) invalidatePairWakeEvidence()
+            if (taskOwnership.pairWake != null) invalidatePairWakeEvidence()
             if (sessionRunStarted && awaitingNormalInboxAfterGreetingsReturn) {
                 holdGreetingsCompletionReturn("EMPTY_SNAPSHOT")
                 return
@@ -1491,7 +1477,7 @@ class AiReplyObservationRuntime(
                 retireObservedPrivateDetail("PHYSICAL_INTERACTION")
             }
         }
-        val recoveryContextActive = observedPhysicalInterruption || receivedGreetingsTaskActive || pairWake != null ||
+        val recoveryContextActive = observedPhysicalInterruption || receivedGreetingsTaskActive || taskOwnership.pairWake != null ||
             messageListRecoveryVerificationPending ||
             recoveryContext.pending || privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait != null || userInteractionActive
         if (!recoveryContextActive) return
@@ -1503,7 +1489,7 @@ class AiReplyObservationRuntime(
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionStarted)
         // A user touch breaks the continuity of the private-to-greetings two-snapshot handoff.
         pageRecoveryVerificationGate.reset(CROSS_TASK_GREETING_HANDOFF_GATE)
-        if (pairWake != null) pageRecoveryVerificationGate.reset(NEXT_PAIR_WAKE_GATE)
+        if (taskOwnership.pairWake != null) pageRecoveryVerificationGate.reset(NEXT_PAIR_WAKE_GATE)
         if (awaitingNormalInboxAfterGreetingsReturn) {
             holdGreetingsCompletionReturn("USER_INTERACTION")
         }
@@ -1754,7 +1740,7 @@ class AiReplyObservationRuntime(
         // initialization, selected row, contact binding or unfinished transaction exists.
         if (handlePrivateStartupDetailOwnership(observation, inspection, matchedRouteId)) return
 
-        if (sessionRunStarted && pairWake != null && !receivedGreetingsTaskActive &&
+        if (sessionRunStarted && taskOwnership.pairWake != null && !receivedGreetingsTaskActive &&
             !recoveryContext.pending && !messageListRecoveryVerificationPending &&
             !isSendConfirmationPending() && !isConversationDraftPending()
         ) {
@@ -2523,7 +2509,7 @@ class AiReplyObservationRuntime(
             pageObservationCoordinator.lastPageInspection = inspection
             // The idle timer may already have fired. Preserve the due round without
             // starting traversal or requiring another accessibility event to wake it.
-            if (pairWake != null && pairWake?.due == true && !receivedGreetingsTaskActive) {
+            if (taskOwnership.pairWake != null && taskOwnership.pairWake?.due == true && !receivedGreetingsTaskActive) {
                 waitForPairWakeEvidence("DRAFT_PENDING")
             }
             return
@@ -2708,7 +2694,7 @@ class AiReplyObservationRuntime(
                             scheduleReceivedGreetingsRecoveryRetry("返回已确认，等待原有跨任务租约交接")
                             return
                         }
-                        val privateYield = privateToGreetingsHandoff
+                        val privateYield = taskOwnership.privateToGreetingsHandoff
                         val greetingYield = receivedGreetingsTaskFlow.returnReason
                         finishGreetingsToPrivateHandoff()
                         // The greeting branch returned to the already-established inbox context.
@@ -2923,14 +2909,14 @@ class AiReplyObservationRuntime(
             recoveryContext.runGeneration.toString(),
             observedGreetingFingerprint
         ).joinToString("|")
-        if (crossTaskGreetingsHandoffRetryGate.evidenceChanged(handoffEvidenceKey)) {
-            crossTaskGreetingsHandoffRetryTask?.cancel()
-            crossTaskGreetingsHandoffRetryTask = null
-            crossTaskGreetingsHandoffRetryGate.reset()
+        if (taskOwnership.crossTaskGreetingsHandoffRetryGate.evidenceChanged(handoffEvidenceKey)) {
+            taskOwnership.crossTaskGreetingsHandoffRetryTask?.cancel()
+            taskOwnership.crossTaskGreetingsHandoffRetryTask = null
+            taskOwnership.crossTaskGreetingsHandoffRetryGate.reset()
             pageRecoveryVerificationGate.reset(gate)
             onLog("跨任务恢复[PRIVATE_TO_GREETINGS_EVIDENCE_CHANGED]：目标页面或检查点身份已变化；重新从第一份稳定快照验证")
         }
-        if (crossTaskGreetingsHandoffRetryGate.isWaitingOn(handoffEvidenceKey)) {
+        if (taskOwnership.crossTaskGreetingsHandoffRetryGate.isWaitingOn(handoffEvidenceKey)) {
             pageObservationCoordinator.lastPageInspection = inspection
             return true
         }
@@ -3019,7 +3005,7 @@ class AiReplyObservationRuntime(
         )
         if (receivedGreetingsTaskActive && ownsTask(RECEIVED_GREETINGS_TASK_ID)) {
             suspendedPrivateRecovery = pending
-            resetCrossTaskGreetingsHandoffRetry()
+            taskOwnership.resetCrossTaskGreetingsHandoffRetry()
             receivedGreetingsPageProbePending = false
             unmatchedNavigationObservationPending = false
             pageObservationCoordinator.lastPageInspection = inspection
@@ -3058,12 +3044,12 @@ class AiReplyObservationRuntime(
      * only request a new read-only page sample, never re-claim an operation lease.
      */
     private fun scheduleCrossTaskGreetingsHandoffReadOnlyRetry(evidenceKey: String, reason: String) {
-        val retry = crossTaskGreetingsHandoffRetryGate.onAdmissionBlocked(evidenceKey)
-        crossTaskGreetingsHandoffRetryTask?.cancel()
+        val retry = taskOwnership.crossTaskGreetingsHandoffRetryGate.onAdmissionBlocked(evidenceKey)
+        taskOwnership.crossTaskGreetingsHandoffRetryTask?.cancel()
         val generation = currentRunGeneration()
-        crossTaskGreetingsHandoffRetryTask = scheduler.schedule(retry.delayMs) {
-            crossTaskGreetingsHandoffRetryTask = null
-            if (!crossTaskGreetingsHandoffRetryGate.onReadOnlyRetryDue(evidenceKey)) return@schedule
+        taskOwnership.crossTaskGreetingsHandoffRetryTask = scheduler.schedule(retry.delayMs) {
+            taskOwnership.crossTaskGreetingsHandoffRetryTask = null
+            if (!taskOwnership.crossTaskGreetingsHandoffRetryGate.onReadOnlyRetryDue(evidenceKey)) return@schedule
             if (generation != currentRunGeneration() || !isAiReplyActive() || !sessionRunStarted ||
                 !recoveryContext.pending ||
                 recoveryContext.sourceTaskId != PRIVATE_MESSAGES_TASK_ID ||
@@ -3076,12 +3062,6 @@ class AiReplyObservationRuntime(
                 "reason=$reason;attempt=${retry.attempt};delayMs=${retry.delayMs}；" +
                 "保留原私人消息检查点与操作权；同一页面证据未变化前不重复执行交接"
         )
-    }
-
-    private fun resetCrossTaskGreetingsHandoffRetry() {
-        crossTaskGreetingsHandoffRetryTask?.cancel()
-        crossTaskGreetingsHandoffRetryTask = null
-        crossTaskGreetingsHandoffRetryGate.reset()
     }
 
     /**
@@ -3128,8 +3108,8 @@ class AiReplyObservationRuntime(
     /** Retire only old task callbacks and transient page evidence; never discard private cursor. */
     private fun finishGreetingsToPrivateHandoff() {
         receivedGreetingsTaskFlow.finishVerifiedHandoff()
-        greetingSliceQuota.finishSlice()
-        privateToGreetingsHandoff = null
+        taskOwnership.greetingSliceQuota.finishSlice()
+        taskOwnership.privateToGreetingsHandoff = null
         pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
         sessionActionGeneration += 1L
         invalidatePendingMessageRead()
@@ -3379,7 +3359,7 @@ class AiReplyObservationRuntime(
         }
         pageObservationCoordinator.cancelExplicitInspectionHandle()
         pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
-        resetCrossTaskGreetingsHandoffRetry()
+        taskOwnership.resetCrossTaskGreetingsHandoffRetry()
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
         pageObservationCoordinator.reset()
@@ -3432,9 +3412,7 @@ class AiReplyObservationRuntime(
         sessionRunStarted = false
         pageSelectedPrivateStartupVerificationPending = false
         resetPairWake()
-        privateToGreetingsHandoff = null
-        privateRelocationRetryOwed = false
-        resetPairedQuotaRun()
+        taskOwnership.resetPairedRun()
         startupReadinessCoordinator.resetState(sessionStarted = false)
         sessionManagerState = SessionManagerState.STOPPED
         taskOwnership.reset("运行时重置：$reason")
@@ -3506,7 +3484,7 @@ class AiReplyObservationRuntime(
             sessionRunStarted && isAiReplyActive() && !receivedGreetingsTaskActive &&
             !receivedGreetingsOwnershipRecheckPending && !awaitingNormalInboxAfterGreetingsReturn &&
             (pendingListRecovery || (!recoveryContext.pending && !messageListRecoveryVerificationPending)) &&
-            pairWake == null && suspendedPrivateRecovery == null &&
+            taskOwnership.pairWake == null && suspendedPrivateRecovery == null &&
             !privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery && !privateMessagesTraversalTaskExecutor.currentSessionSendConfirmed &&
             currentSessionCandidate == null && currentSessionKey == null &&
             privateMessagesTraversalTaskExecutor.currentSessionBinding == null && privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation == null &&
@@ -4344,7 +4322,7 @@ class AiReplyObservationRuntime(
                 !isSendConfirmationPending() && !recoveryContext.pending) ||
                 // NAVIGATING also includes avatar/profile/chat transitions. It is not
                 // proof that a newly visible ordinary inbox belongs to greetings.
-                (privateToGreetingsHandoff != null && !recoveryContext.pending &&
+                (taskOwnership.privateToGreetingsHandoff != null && !recoveryContext.pending &&
                     !awaitingNormalInboxAfterGreetingsReturn &&
                     pageObservationCoordinator.lastPageInspection?.pageKind == ChatPageKind.CHAT_LIST &&
                     receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING))
@@ -4374,7 +4352,7 @@ class AiReplyObservationRuntime(
     private fun scheduleInitialObservation(selectedTaskId: String?) {
         pageSelectedPrivateStartupVerificationPending = false
         pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
-        resetCrossTaskGreetingsHandoffRetry()
+        taskOwnership.resetCrossTaskGreetingsHandoffRetry()
         val failure = runCatching { draftStartupFailure() }.getOrDefault("MODEL_CONFIGURATION_LOAD_FAILED")
         if (failure != null) {
             sessionRunStarted = false
@@ -4451,9 +4429,7 @@ class AiReplyObservationRuntime(
             (receivedGreetingsTaskFlow.supportsWorkflow() && pageSelectedStartup)
         startupReadinessCoordinator.resetState(sessionStarted = sessionRunStarted)
         resetPairWake()
-        privateToGreetingsHandoff = null
-        privateRelocationRetryOwed = false
-        resetPairedQuotaRun()
+        taskOwnership.resetPairedRun()
         receivedGreetingsTaskFlow.reset()
         // Keep the existing lease lifecycle for compatibility, but do not perform any UI action
         // until the first fresh page event has classified the visible business route.
@@ -4682,7 +4658,7 @@ class AiReplyObservationRuntime(
             // Do not run its old callback or replay its old coordinates after the window changes.
             recoverTransientPrivateGesture("GESTURE_WINDOW_CHANGED")
         }
-        if (windowTransition && pairWake != null) {
+        if (windowTransition && taskOwnership.pairWake != null) {
             pageRecoveryVerificationGate.reset(NEXT_PAIR_WAKE_GATE)
         }
         if (windowTransition && awaitingNormalInboxAfterGreetingsReturn) {
@@ -5300,9 +5276,7 @@ class AiReplyObservationRuntime(
             scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return true
         }
-        if (sendConfirmationId != null && pendingPrivateQuotaReceipt == sendConfirmationId) {
-            privateQuotaReturnReady = true
-        }
+        taskOwnership.markPrivateQuotaReturnReady(sendConfirmationId)
         onLog("AI 发送成功记录：已确认发送并更新实际发送账本")
         if (!currentSessionReadCaptured) {
             onLog("AI 会话返回门禁[CHAT_SAMPLE_NOT_PERSISTED]：发送已确认；样本归档失败不阻止安全返回")
@@ -5359,8 +5333,7 @@ class AiReplyObservationRuntime(
                     if (currentSessionCandidate?.unreadStatus == ChatUnreadStatus.UNREAD &&
                         privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted != true
                     ) {
-                        pendingPrivateQuotaReceipt = sendConfirmationId
-                        privateQuotaReturnReady = false
+                        taskOwnership.retainPrivateQuotaReceipt(sendConfirmationId)
                     }
                     val contactKey = verifiedPrivateLedgerContactKey()
                     if (pendingPrivateFollowUpEnabled(contactKey)) {
@@ -6232,8 +6205,8 @@ class AiReplyObservationRuntime(
         }
         // A recovery handoff may invoke the list handler directly. The pending paired
         // wake must be consumed by the next verified observation, not this callback.
-        if (pairWake != null && !receivedGreetingsTaskActive) {
-            pairWake?.due = true
+        if (taskOwnership.pairWake != null && !receivedGreetingsTaskActive) {
+            taskOwnership.pairWake?.due = true
             scheduleFullInspectionAfter(0L)
             return
         }
@@ -6879,7 +6852,7 @@ class AiReplyObservationRuntime(
             scheduleSessionListStabilityRetry("异常会话重新定位等待安全页面与空闲任务")
             return true
         }
-        if (!privateRelocationRetryOwed && receivedGreetingsTaskFlow.supportsWorkflow() &&
+        if (!taskOwnership.privateRelocationRetryOwed && receivedGreetingsTaskFlow.supportsWorkflow() &&
             privateMessagesCheckpointRepository != null
         ) {
             recordPrivateUnreadDiagnostic("DEFERRED_WORK_HANDOFF", RunLogLevel.INFO, "DEFERRED", "AI 私聊异常会话[DEFERRED_WORK_HANDOFF]：局部待复核身份不计为完成；保留检查点并安全交接")
@@ -6903,7 +6876,7 @@ class AiReplyObservationRuntime(
                 scheduleSessionListStabilityRetry("异常会话重新定位准入已变化")
                 return true
             }
-            privateRelocationRetryOwed = false
+            taskOwnership.privateRelocationRetryOwed = false
             privateMessagesCheckpointRepository?.save(executor.checkpoint())
             recordPrivateUnreadDiagnostic("RELOCATION_STARTED", RunLogLevel.INFO, "RECOVERING", "AI 私聊异常会话[RELOCATION_STARTED]：保留原轮次、已处理记录与未决身份；重新寻找待处理目标，找到后立即反向处理")
             scrollSessionList(snapshot, toTop = false)
@@ -6926,16 +6899,9 @@ class AiReplyObservationRuntime(
         return true
     }
 
-    private fun resetPairedQuotaRun() {
-        privateSliceQuota.resetRun()
-        greetingSliceQuota.resetRun()
-        pendingPrivateQuotaReceipt = null
-        privateQuotaReturnReady = false
-    }
-
     private fun handlePrivateQuotaBoundary(snapshot: ChatPageSnapshot): Boolean {
         if (receivedGreetingsTaskActive) return false
-        if (!privateQuotaReturnReady && !privateSliceQuota.reached) return false
+        if (!taskOwnership.privateQuotaReturnReady && !taskOwnership.privateSliceQuota.reached) return false
         if (!canPerformPrivateMessagesUiAction() ||
             currentSessionKey != null || privateMessagesTraversalTaskExecutor.currentSessionSendConfirmed || isPrivateFollowUpActive() ||
             isSendConfirmationPending() || isConversationDraftPending() || userInteractionActive ||
@@ -6946,19 +6912,18 @@ class AiReplyObservationRuntime(
             scheduleSessionListStabilityRetry("私聊配额返回边界尚未安全确认")
             return true
         }
-        if (privateQuotaReturnReady) {
+        if (taskOwnership.privateQuotaReturnReady) {
             if (!ensureAndroidRecoveryReady(snapshot, "PRIVATE_QUOTA_RETURN")) {
                 recoverRetryablePrivateList("PRIVATE_QUOTA_RETURN_NOT_READY")
                 return true
             }
-            val receipt = pendingPrivateQuotaReceipt
-            if (receipt != null && privateSliceQuota.record(receipt)) {
-                onLog("PAIRED_QUOTA[COUNT] task=PRIVATE;completed=${privateSliceQuota.completed}/${AiReplyTaskSliceQuota.LIMIT}")
+            val receipt = taskOwnership.pendingPrivateQuotaReceipt
+            if (receipt != null && taskOwnership.privateSliceQuota.record(receipt)) {
+                onLog("PAIRED_QUOTA[COUNT] task=PRIVATE;completed=${taskOwnership.privateSliceQuota.completed}/${AiReplyTaskSliceQuota.LIMIT}")
             }
-            pendingPrivateQuotaReceipt = null
-            privateQuotaReturnReady = false
+            taskOwnership.clearPrivateQuotaReceipt()
         }
-        if (!privateSliceQuota.reached || !receivedGreetingsTaskFlow.supportsWorkflow()) return false
+        if (!taskOwnership.privateSliceQuota.reached || !receivedGreetingsTaskFlow.supportsWorkflow()) return false
         onLog("PAIRED_QUOTA[YIELD] task=PRIVATE;reason=SAFE_SESSION_BOUNDARY")
         startReceivedGreetingsTask("私人消息已处理两次未读会话", snapshot, AiReplyTaskYieldReason.SAFE_SESSION_BOUNDARY)
         return true
@@ -6980,11 +6945,11 @@ class AiReplyObservationRuntime(
                 return true
             }
         for (receipt in receipts) {
-            if (greetingSliceQuota.record(receipt)) {
-                onLog("PAIRED_QUOTA[COUNT] task=GREETINGS;completed=${greetingSliceQuota.completed}/${AiReplyTaskSliceQuota.LIMIT}")
+            if (taskOwnership.greetingSliceQuota.record(receipt)) {
+                onLog("PAIRED_QUOTA[COUNT] task=GREETINGS;completed=${taskOwnership.greetingSliceQuota.completed}/${AiReplyTaskSliceQuota.LIMIT}")
             }
         }
-        if (!greetingSliceQuota.reached) return false
+        if (!taskOwnership.greetingSliceQuota.reached) return false
         if (!ensureAndroidRecoveryReady(inspection, "GREETING_QUOTA_RETURN") ||
             !receivedGreetingsTaskFlow.requestSafeHandoffReturn()
         ) {
@@ -7008,9 +6973,9 @@ class AiReplyObservationRuntime(
         onLog("跨任务循环[CONTINUATION]：private=$privateYield；greetings=$greetingYield；visibleWork=$visibleWork")
         if (privateNoRunnable && greetingNoRunnable && !visibleWork) {
             enterPairIdle("当前两侧无可立即执行工作；保留未决记录",
-                if (refreshPrivate) PairWakeMode.REFRESH_PRIVATE else PairWakeMode.RESUME_PRIVATE)
+                if (refreshPrivate) AiReplyTaskOwnership.PairWakeMode.REFRESH_PRIVATE else AiReplyTaskOwnership.PairWakeMode.RESUME_PRIVATE)
         } else if (refreshPrivate) {
-            requestPairWake(PairWakeMode.REFRESH_PRIVATE, due = true)
+            requestPairWake(AiReplyTaskOwnership.PairWakeMode.REFRESH_PRIVATE, due = true)
             scheduleFullInspectionAfter(0L)
         } else {
             recoverRetryablePrivateList("PRIVATE_RESUME_AFTER_GREETINGS")
@@ -7034,16 +6999,15 @@ class AiReplyObservationRuntime(
         scheduleFullInspectionAfter(if (evidenceOnly) 30_000L else RECEIVED_GREETINGS_RECHECK_DELAY_MS)
     }
 
-    private fun requestPairWake(mode: PairWakeMode, due: Boolean): PairWake {
+    private fun requestPairWake(mode: AiReplyTaskOwnership.PairWakeMode, due: Boolean): AiReplyTaskOwnership.PairWake {
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
-        val wake = PairWake(mode, due)
-        pairWake = wake
+        val wake = taskOwnership.requestPairWake(mode, due)
         pageRecoveryVerificationGate.reset(NEXT_PAIR_WAKE_GATE)
         return wake
     }
 
-    private fun enterPairIdle(message: String, mode: PairWakeMode) {
+    private fun enterPairIdle(message: String, mode: AiReplyTaskOwnership.PairWakeMode) {
         val wake = requestPairWake(mode, due = false)
         sessionManagerState = SessionManagerState.WAITING_FOR_UNREAD
         onLog(message)
@@ -7053,7 +7017,7 @@ class AiReplyObservationRuntime(
         val actionGeneration = sessionActionGeneration
         onLog("AI Reply 低频待机：$seconds 秒后自主复查双任务；mode=$mode")
         sessionTransitionTask = scheduler.schedule(seconds * 1_000L) {
-            if (!isAiReplyActive() || !sessionRunStarted || pairWake !== wake ||
+            if (!isAiReplyActive() || !sessionRunStarted || taskOwnership.pairWake !== wake ||
                 runGeneration != currentRunGeneration() || actionGeneration != sessionActionGeneration
             ) return@schedule
             sessionTransitionTask = null
@@ -7065,16 +7029,16 @@ class AiReplyObservationRuntime(
 
     private fun invalidatePairWakeEvidence() {
         pageRecoveryVerificationGate.reset(NEXT_PAIR_WAKE_GATE)
-        pairWake?.due = true
+        taskOwnership.pairWake?.due = true
     }
 
     private fun resetPairWake() {
-        pairWake = null
+        taskOwnership.clearPairWake()
         pageRecoveryVerificationGate.reset(NEXT_PAIR_WAKE_GATE)
     }
 
     private fun waitForPairWakeEvidence(reason: String) {
-        val wake = pairWake ?: return
+        val wake = taskOwnership.pairWake ?: return
         pageRecoveryVerificationGate.reset(NEXT_PAIR_WAKE_GATE)
         wake.due = true
         wake.retryAttempt += 1
@@ -7089,7 +7053,7 @@ class AiReplyObservationRuntime(
         snapshot: ChatPageSnapshot,
         matchedRouteId: String?
     ) {
-        val wake = pairWake ?: return
+        val wake = taskOwnership.pairWake ?: return
         if (!sessionRunStarted || !isAiReplyActive()) return
         if (observation.status != ObservationStatus.CONFIRMED_PAGE ||
             snapshot.packageName != targetPackage() || snapshot.pageKind != ChatPageKind.CHAT_LIST ||
@@ -7116,7 +7080,7 @@ class AiReplyObservationRuntime(
             incompleteUnreadBlocked
         ) {
             privateMessagesCheckpointRepository?.save(executor.checkpoint())
-            if (wake.mode == PairWakeMode.REFRESH_PRIVATE) {
+            if (wake.mode == AiReplyTaskOwnership.PairWakeMode.REFRESH_PRIVATE) {
                 waitForPairWakeEvidence(
                     if (incompleteUnreadBlocked) "INCOMPLETE_PRIVATE_UNREAD_EVIDENCE" else "UNREAD_UNKNOWN"
                 )
@@ -7147,7 +7111,7 @@ class AiReplyObservationRuntime(
         sessionTransitionTask = null
         sessionActionGeneration += 1L
         invalidatePendingMessageRead()
-        if (wake.mode == PairWakeMode.RESUME_PRIVATE || executor.scanContinuityRecoveryPending) {
+        if (wake.mode == AiReplyTaskOwnership.PairWakeMode.RESUME_PRIVATE || executor.scanContinuityRecoveryPending) {
             resetPairWake()
             onLog("跨任务循环[CURSOR_RESUME]：保留原私聊候选、延期记录及游标")
             recoverRetryablePrivateList("PRIVATE_RESUME_AFTER_PAIR_IDLE")
@@ -7160,7 +7124,7 @@ class AiReplyObservationRuntime(
         // Rebuild first. Only a successfully admitted new round can retire the parked
         // round's intent; a same-round checkpoint resume must never use this path.
         executor.renewExhaustedPrivateSelection()
-        privateRelocationRetryOwed = false
+        taskOwnership.privateRelocationRetryOwed = false
         resetPairWake()
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         privateMessagesCheckpointRepository?.save(executor.checkpoint())
@@ -7262,9 +7226,9 @@ class AiReplyObservationRuntime(
             recoverRetryablePrivateList("GREETING_HANDOFF_${start.name}")
             return
         }
-        privateToGreetingsHandoff = handoff
-        privateSliceQuota.finishSlice()
-        if (handoff == AiReplyTaskYieldReason.DEFERRED_WORK) privateRelocationRetryOwed = true
+        taskOwnership.privateToGreetingsHandoff = handoff
+        taskOwnership.privateSliceQuota.finishSlice()
+        if (handoff == AiReplyTaskYieldReason.DEFERRED_WORK) taskOwnership.privateRelocationRetryOwed = true
         privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait = null
         sessionActionGeneration += 1L
         pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
@@ -7359,8 +7323,8 @@ class AiReplyObservationRuntime(
             "source=$evidenceSource")
         // Manual takeover can interrupt an idle wake; keep its private intent, not
         // its old timer. On return the paired scheduler makes a fresh decision.
-        pairWake?.let { wake ->
-            privateToGreetingsHandoff = if (wake.mode == PairWakeMode.REFRESH_PRIVATE) {
+        taskOwnership.pairWake?.let { wake ->
+            taskOwnership.privateToGreetingsHandoff = if (wake.mode == AiReplyTaskOwnership.PairWakeMode.REFRESH_PRIVATE) {
                 AiReplyTaskYieldReason.TRAVERSAL_EXHAUSTED
             } else AiReplyTaskYieldReason.DEFERRED_WORK
             resetPairWake()
@@ -7656,7 +7620,7 @@ class AiReplyObservationRuntime(
         ) return
         if (waitForPrivateForegroundQuiet("会话行点击等待目标页面就绪")) return
         // An interrupted visit cannot lend an unearned slice receipt to a new row.
-        if (!privateQuotaReturnReady) pendingPrivateQuotaReceipt = null
+        taskOwnership.discardUnreadyPrivateQuotaReceipt()
         privateMessagesTraversalTaskExecutor.currentSessionSendConfirmed = false
         privateMessagesTraversalTaskExecutor.confirmedPrivateReturnBackRetryCount = 0
         privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery = false
@@ -9030,7 +8994,7 @@ class AiReplyObservationRuntime(
             ChatSessionManagementPolicy.matchChatHeader(currentSessionName, snapshot.chatTitleText) != null &&
             !isSemanticallyUnconfirmed(snapshot) &&
             !pendingPrivateFollowUpEnabled(verifiedPrivateLedgerContactKey()) &&
-            pendingPrivateQuotaReceipt == null && !privateQuotaReturnReady &&
+            taskOwnership.pendingPrivateQuotaReceipt == null && !taskOwnership.privateQuotaReturnReady &&
             AndroidRecoveryExecutionGate.assess(snapshot, targetPackage(),
                 runCatching { inspectAndroidRecoveryReadiness(snapshot) }.getOrNull()).allowed
 
