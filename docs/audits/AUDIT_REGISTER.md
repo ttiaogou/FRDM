@@ -25,11 +25,11 @@ CANDIDATE 待证实；OPEN 已确认待处理；RETAINED 已分类保留；LIMIT
 | DOC-004 | 文档/中 | 历史报告混杂现行目录；53 份历史资料已归档 | CLOSED | G01-C gate，原 blob/历史链接及索引核查 |
 | DOC-005 | 文档/中 | OCR 说明重复、旧下载描述与异常文件名；G01-B 整合、C 移除重复入口 | CLOSED | G01-C gate；现行 OCR 说明与原文归档；设备离线仍待验收 |
 | DOC-006 | 文档/中 | README 缺少导航；G01-B/C 补全 | CLOSED | G01-C gate，现行 README 链接 |
-| DOC-007 | 治理/高 | 三份文档已建，G01-D gate success（46136977140）；G01-E 已接入维护导航 | VERIFY_PENDING | G01-E 实际 gate、G01-F 最终复验后关闭；证据基线 b3f8f0d39503ef36f03a13f7718b7bb39a0af5a5 |
-| DOC-008 | 冻结保护/高 | G01-E 仅追加经授权的 AGENTS 导航；旧全文及精确新 blob 验证接入原 R01 | VERIFY_PENDING | 本提交 gate 及逆向测试通过后核验关闭；旧清单与十份正文保留，精确指纹见检查点 |
+| DOC-007 | 治理/高 | 三份治理文档已建、AGENTS 接入维护流程；G01-F 复核 32 个职责、18 个台账编号、检查点及链接 | CLOSED | G01-E 完整 CI 46137618668 success，216 Python tests；G01-F 对 4ecfc4cab2968b8a34b18bb92873c9c7b26c745d 实际复审通过；仅关闭治理基础设施建设，不代表语义覆盖或 AI 合规已穷尽 |
+| DOC-008 | 冻结保护/高 | G01-E 仅追加经授权的 AGENTS 导航；旧全文及精确新 blob 验证接入原 R01 | CLOSED | G01-E 架构 job 140956354191 三项新增测试及原检测全部通过；G01-F 复核十份正文、原清单与精确迁移，证据 SHA 4ecfc4cab2968b8a34b18bb92873c9c7b26c745d |
 | GOV-001 | 职责覆盖/中 | OWN-13/21/31/32 部分建档；全仓方法、状态字段及语义重复未穷尽 | CANDIDATE | 后续按职责、调用链、读写者与生命周期补证，禁止把未核查标已验证 |
 
-DOC-001～006 的关闭仅针对文档问题，证据为 G01-C HEAD 的 [架构与资源 gate](https://github.com/ttiaogou/FRDM/actions/runs/46136302512/job/140952260570)：213 Python tests、0 链接异常候选、硬检测通过。G01-C 完整 CI 查询时仍在运行，不作为关闭依据。R09G-G05 的 11 个具体文件及 G03 分类详见 R09-G；不另复制完整历史报告。
+DOC-001～006 的关闭仅针对文档问题，证据为 G01-C HEAD 的 [架构与资源 gate](https://github.com/ttiaogou/FRDM/actions/runs/46136302512/job/140952260570)：213 Python tests、0 链接异常候选、硬检测通过。G01-C 完整 CI 查询时仍在运行，不作为关闭依据。DOC-007/008 关闭依据为 [G01-E 实际完整 CI](https://github.com/ttiaogou/FRDM/actions/runs/46137618668) 及 G01-F 对该 SHA 的累计差异、原冻结、归档、结构及链接复核；结项记录提交的 CI 仍须实际检查。R09G-G05 的 11 个具体文件及 G03 分类详见 R09-G；不另复制完整历史报告。
 
 ## 持续扫描范围
 
