@@ -5,18 +5,18 @@
 | 字段 | 当前记录 |
 | --- | --- |
 | repository / branch | ttiaogou/FRDM / PP |
-| reviewedHead | 8b51829fd256af52559bfba5c0549dc80a05c028 |
-| reviewedTree | 4118ecc03db6997e26e4c5078ac39461236ad19e |
-| 已验收工程基线 | D01-D3 8b51829fd256af52559bfba5c0549dc80a05c028；[完整 CI 46147357411](https://github.com/ttiaogou/FRDM/actions/runs/46147357411) completed/success |
-| 当前任务 | D01-D4 全仓引用复核及专项回归 |
-| 当前状态 | BASELINE_CI_PASS / EXTENDED_REFERENCE_GATE_ADDED / COMMIT_CI_PENDING；真机未验 |
-| 验证策略 | 现有 233 项 Python 测试及完整 CI 基线通过；新增 Git tracked 运行源码/配置、原始广播字符串、测试 import 与三范围事务、节点职责回归；新 CI 待验 |
+| reviewedHead | de167db5ca40c4b12dd12b541229b88434a52586 |
+| reviewedTree | a66945fd22bbec8aba7f437e7b324bc006c744ed |
+| 已验收工程基线 | D01-D4 de167db5ca40c4b12dd12b541229b88434a52586；[完整 CI 46148339153](https://github.com/ttiaogou/FRDM/actions/runs/46148339153) completed/success |
+| 当前任务 | D01-E 最终集成工程验收及真机清单 |
+| 当前状态 | ENGINEERING_ACCEPTED / DEVICE_NOT_RUN；D01-013/014 独立候选保留；本次记录提交 CI 以 Actions 实际结果为准 |
+| 验证策略 | 237 Python tests、20 D01 专项、全模块单测、APK、签名配对及 CodeQL 已通过；累计 Git Tree 差异核验；真机逐项记录 |
 | 设备验收 | F01–F12 DEFERRED / NOT_RUN；用户独立执行 |
 | 当前职责建档 | 32 项：A 16、B 12、C 4；证据基线仍按职责表，不虚报逐方法核查 |
 | 台账 | 32 项：CLOSED 8、RETAINED 3、CANDIDATE 6、OPEN 1、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 12 |
 | 工作区 | 远端 Git tree/compare；无本地 checkout 验证 |
-| 改动范围 | 仅新增 D01-D4 复核测试、R01 新证据 pin 及治理记录；生产、冻结清单、旧断言和 CI 配置不改 |
-| 下一阶段 | 核查 D01-D4 新 CI 与共享候选引用输出；D01-E 专项集成与真机验收；候选问题独立决议 |
+| 改动范围 | 仅治理三份文档；生产、测试、CI 配置、原冻结清单及规则正文不变 |
+| 下一阶段 | D01 真机专项回归（E01–E10）；D01-013/014 独立评估及授权，原 R09-F F01–F12 真机延期状态不变 |
 
 ## 批次进度
 
@@ -34,7 +34,8 @@
 | D01-D1 | 旧批量 ZIP 打包器退役；完整 CI 46144656958 success |
 | D01-D2 | 旧节点检查器四个专属组件退役；完整 CI 46145903809 success |
 | D01-D3 | 用户专项授权 S0 节点旧广播及重复缓存退役；完整 CI 46147357411 success |
-| D01-D4 | 扩展全仓引用及专项回归；新提交完整 CI 待查 |
+| D01-D4 | 扩展全仓引用及专项回归；完整 CI 46148339153 success |
+| D01-E | 工程验收通过；真机未执行；候选问题保留 |
 
 ## G01-F 复核及验收证据
 
@@ -87,6 +88,32 @@
 - 8b51829fd256af52559bfba5c0549dc80a05c028 对应 CI 46147357411，五个 job 全部 success，233 项 Python 测试，D01-B/C/D1/D2/D3 16 项专项及 R00/R01 冻结门禁全部通过。Git Tree 937 个 tracked 文件，459 个 main 源码及文本资源（app 234、business 118、core 58、gesture 21、ocr-plugin-api 11、ocr-plugin 17）。已有门禁覆盖各自范围，不将全部 tracked 文件宣称为已逐个读取。
 - 新增 [D01-D4 全仓引用及专项回归](../../tools/architecture/test_pp_d01d4_node_export_reference_regression.py)，基于 git ls-files 检查运行源码、构建配置、旧广播字面量/参数、旧组件测试 import；保留历史证据及合法负向断言。检查三范围唯一打包、回读再清理、源数据保护、节点职责、窗口变化及生命周期；输出共享候选引用，不禁止合理使用。新 CI 待验，无本地 Gradle 或真机结果。
 - D01-013/014 新增候选：可视化失败分支保留当前快照的契约需决议；共享类型/工具引用待新门禁输出及语义核验。生产源码未改。D01-001～012 仍待真机，历史状态原样保留。
+
+## D01-E 最终集成验收证据
+
+- PP de167db5ca40c4b12dd12b541229b88434a52586 对应 [CI 46148339153](https://github.com/ttiaogou/FRDM/actions/runs/46148339153) completed/success，Architecture 140989188803、Unit 140989567134、Freedom APK 140989567094、OCR APK 140989567207、CodeQL 140989567126 全部成功。实际日志：237 Python tests（D01 专项 20 项），R00/R01 通过；新增扫描 runtime/config=476、test-source=279、tracked=938，通过其限定词法覆盖及负向检测。并非全仓动态调用穷尽。
+- 与 D01-A 基线 285c3d123d533e26aa68f3d2fab5d5b968329504 比较，两棵完整 Git Tree 未截断，7 commits ahead/0 behind，32 个文件变化（新增7、删除5、修改20）；生产涉及12文件，新增97行、删除1684行、净减1587行，含 D01-C 新功能；不是前述仅清理阶段的累计净减数。原 R00/R01 manifest、AGENTS、android-build workflow 原 blob 不变；S0 唯一获授权 Service 迁移受精确 pin 及逆向保护。
+- 三范围入口共享 MainActivity 唯一导出事务，SessionSampleArchiveManager 唯一打包/回读校验/保护性清理；GlobalNodeLayoutVisualizationUseCase 实时快照、自动 MonitorStore 结构摘要、MomoChatSampleNodeTreeStore 历史证据各自独立。D01-001～012 工程通过但 VERIFY_PENDING；D01-013 可视化失败仍保留快照待契约/设备复核；D01-014 NodeCaptureSource 仍供 NodeInspectorValidationReport 使用，planner 仅见定义/单测，独立审计；NodeTargetResolver/NodeTreeIndex 有有效生产引用，保留。
+- CI APK 工件：[普通版](https://github.com/ttiaogou/FRDM/actions/runs/46148339153/artifacts/15264847619)、[精简版](https://github.com/ttiaogou/FRDM/actions/runs/46148339153/artifacts/15264986392)、[配套 OCR](https://github.com/ttiaogou/FRDM/actions/runs/46148339153/artifacts/15264877229)、[测试报告](https://github.com/ttiaogou/FRDM/actions/runs/46148339153/artifacts/15265175016)，复核时均未过期；构建日志签名配对验证通过。未实际下载/安装工件或执行本地 Gradle/adb；不得把 CI 签名门禁等同设备验签。
+
+### D01-E 真机专项清单（全部 NOT_RUN）
+
+使用同一 CI 的配套 APK、授权测试设备/账号及脱敏样本。先备份需要保留的数据：导出成功回读后会清理符合条件的源数据。记录 APK/系统/目标应用版本、设备/时间、runId、实际操作、脱敏 ZIP 清单及日志；不要上传原始会话正文。
+
+| 编号 | 场景 | 预期 | 状态 |
+|---|---|---|---|
+| E01 | 普通版及配套 OCR 安装、授权、绑定；精简版单独复测 | 服务/悬浮窗、OCR 正常 | NOT_RUN |
+| E02 | 主界面及悬浮采集与导出 | 三范围一致，综合默认，独立节点 ZIP 不再出现 | NOT_RUN |
+| E03 | 实时节点边界、层级、多窗口、搜索与布局保存 | 只读当前目标，JSON 不含文本/描述；检查同步搜索响应 | NOT_RUN |
+| E04 | 页面/目标切换、清除、中断/断连；无可见边界及浮层附加失败 | 正常生命周期清空旧快照；失败后层级留存行为记录供 D01-013 决议 | NOT_RUN |
+| E05 | 动态浏览与停止 | 自动预览摘要、调度停止及业务隔离，无旧缓存入口 | NOT_RUN |
+| E06 | 正常采集封存、完整采集归档 ZIP | 历史节点、样本、截图/OCR及关联诊断按实际采集存在，运行 ID 隔离 | NOT_RUN |
+| E07 | 仅运行诊断 ZIP | 日志、已封存诊断和异常证据，不复制活动目录或停止任务 | NOT_RUN |
+| E08 | 综合 ZIP（空样本、多样本、活动采集） | 已封存全量、关联历史兼容、证据去重；当前采集需明确停止并完成封存或仅导出已有封存 | NOT_RUN |
+| E09 | SAF 取消、保存失败、回读失败 | 原始数据保留，失败提示明确 | NOT_RUN |
+| E10 | 成功回读及清理 | 只清理校验且符合资格的已导出源；保留活动、变化、被引用数据及新日志，业务运行不受意外影响 | NOT_RUN |
+
+真机状态需由实际设备证据更新；原 R09-F F01–F12 不被此专项替代。当前记录提交不自引用 SHA/CI，也不为记录其成功反复制造提交。
 
 ## 接续维护
 

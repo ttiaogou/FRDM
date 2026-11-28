@@ -69,6 +69,10 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 
 - OWN-30/31/32：基线 8b51829fd256af52559bfba5c0549dc80a05c028，完整 CI 46147357411 success。R00/R01 及 D01 系列 16 项专项检测通过；生产职责不变。新增跨模块引用和现行节点/导出生命周期回归；新 CI 待验，真机未验。可视化失败时快照留存及共享候选见 D01-013/014，C 状态不提前升级。
 
+## D01-E 集成验收补证
+
+- OWN-30/31/32：de167db5ca40c4b12dd12b541229b88434a52586；完整 CI 46148339153 success，237 Python、20 D01 专项，476 runtime/config 与279 test-source 引用复核通过；累计 Tree 对照确认无额外生产变更。三种数据用途及唯一 ZIP 事务职责工程验收通过。OWN-31/32 的整体 C 状态保留（配置及全局生命周期未穷尽、真机未验）；D01-013/014 独立候选保留，不宣称所有功能真机验收通过。NodeTargetResolver、NodeTreeIndex 现行生产调用确认保留。
+
 ## 证据及覆盖边界
 
 - [R09-A](FRDM-PP-R09-A-REPOSITORY-ARCHITECTURE-ACCEPTANCE.md)、[R09-C](FRDM-PP-R09-C-ENTRY-STATE-UI-OWNERSHIP-ACCEPTANCE.md)、[R09-D](FRDM-PP-R09-D-RECOVERY-CHECKPOINT-ASYNC-ISOLATION.md)、[R09-G](FRDM-PP-R09-G-FINAL-ENGINEERING-ACCEPTANCE.md) 为验收证据，[历史归档](../archive/README.md) 供追溯。

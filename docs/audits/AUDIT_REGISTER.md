@@ -61,7 +61,9 @@ D01-D3 证据基线 880aed8170612c9947caeca18e94301c9c8c089f；D01-D2 完整 CI 
 D01-D4 基线 8b51829fd256af52559bfba5c0549dc80a05c028，完整 CI 46147357411 success：233 项 Python 测试（D01-B/C/D1/D2/D3 专项 16 项）及全模块单元测试、Freedom/OCR APK、CodeQL 全部通过。459 个 main 源码及文本资源纳入现有全模块门禁；新增全仓 Git tracked 运行源码/配置、原始广播字面量及测试 import 复核，结果待新 CI。D01-001～012 保持 VERIFY_PENDING，真机尚未验收。
 
 | D01-013 | 生命周期/中 | GlobalNodeLayoutVisualizationUseCase.show 在 visibleNodeCount == 0 或 overlay attach 失败时 latestSnapshots 已赋值；层级入口仍可读取。可能是允许独立查看层级的有意行为，需明确契约及真机复核 | CANDIDATE | 独立评估失败后层级可用性、窗口及临时文本生命周期；不在 D01-D4 改生产行为 |
-| D01-014 | 遗留/低 | core NodeCaptureSource 原独立缓存来源枚举，以及旧高亮共享 planner 等；新增复核输出实际引用文件供判断 | CANDIDATE | 新 CI 日志及逐方法依赖核验，独立授权后才可删除；不能凭词法结果删除共享能力 |
+| D01-014 | 遗留/低 | D01-D4 CI 46148339153：NodeCaptureSource 仍供 NodeInspectorValidationReport 使用并有测试；NodeBoundsHighlightPlanner 仅见自身及单测。Gateway 实际调用 NodeTargetResolver.resolve；NodeTreeIndex 有 Momo、归档、定位等生产引用，后二者保留 | CANDIDATE | 前两组需独立语义、API 契约审计及删除授权；不扩大 D01-E 范围 |
+
+D01-E 工程验收基线 de167db5ca40c4b12dd12b541229b88434a52586；[CI 46148339153](https://github.com/ttiaogou/FRDM/actions/runs/46148339153) 五项全部 success，237 Python tests，20 项 D01 专项全部通过，Git tracked 938、runtime/config 476、test-source 279。原冻结清单与规则不改，R00/R01 实际通过；普通/精简/配套 OCR APK 成功，签名配对门禁 R09F_APK_SIGNING_PAIR_VERIFIED。D01-001～012 工程检测通过、仍 VERIFY_PENDING（真机）；D01-013/014 CANDIDATE，不宣称全部动态可达性、设备或性能验收完成。D01-E 仅更新治理记录，不修改生产、测试或构建配置。
 
 ## 持续扫描范围
 
