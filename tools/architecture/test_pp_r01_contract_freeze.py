@@ -339,6 +339,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r07_recovery_lifecycle_migration.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "c0e59b4d2737c36fd5b565a21078d9a9e3950e52"
+        # R07-I integrated acceptance: preserve all historical evidence and pin the new test.
+        path = "tools/architecture/test_pp_r07_integration_acceptance.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "b3afef44df7cc76510d23862e4849d0db93a6697"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
