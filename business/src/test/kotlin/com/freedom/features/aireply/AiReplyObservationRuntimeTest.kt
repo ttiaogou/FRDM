@@ -1334,6 +1334,10 @@ class AiReplyObservationRuntimeTest {
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
     }
 
+    private fun privateVisitOwner(runtime: AiReplyObservationRuntime): PrivateMessagesTraversalTaskExecutor =
+        runtime.javaClass.getDeclaredField("privateMessagesTraversalTaskExecutor")
+            .apply { isAccessible = true }.get(runtime) as PrivateMessagesTraversalTaskExecutor
+
     private fun pageObservationOwner(runtime: AiReplyObservationRuntime): MomoPageObservationCoordinator {
         val field = runtime.javaClass.getDeclaredField("pageObservationCoordinator\$delegate")
             .apply { isAccessible = true }
@@ -5857,10 +5861,8 @@ class AiReplyObservationRuntimeTest {
         runUntil(scheduler, 180) {
             logs.any { it.contains("AI 会话绑定：已建立来源行/聊天窗口/聊天表面绑定") }
         }
-        val bindingField = runtime.javaClass.getDeclaredField("currentSessionBinding").apply {
-            isAccessible = true
-        }
-        val originalBinding = requireNotNull(bindingField.get(runtime))
+        val bindingOwner = privateVisitOwner(runtime)
+        val originalBinding = requireNotNull(bindingOwner.currentSessionBinding)
         val inspect = runtime.javaClass.getDeclaredMethod("runFullInspection").apply {
             isAccessible = true
         }
@@ -5868,7 +5870,7 @@ class AiReplyObservationRuntimeTest {
         // Simulate the previously observed temporary source-binding admission failure.
         // Pending is the already-submitted send: only read-only inspection is permitted.
         pendingSend = true
-        bindingField.set(runtime, null)
+        bindingOwner.currentSessionBinding = null
         val gesturesBefore = gestureCalls
         runtime.onSendConfirmationObservationRequested()
         assertTrue(logs.any { it.contains("ACTIVE_RECHECK_REQUESTED") })
@@ -5899,7 +5901,7 @@ class AiReplyObservationRuntimeTest {
 
         // An independently restored original binding is allowed to resume the
         // unchanged OCR/send matcher on the next timer, without input or a new gesture.
-        bindingField.set(runtime, originalBinding)
+        bindingOwner.currentSessionBinding = originalBinding
         port.invalidateNextOcrRead = true
         scheduler.runNextWithDelay(1_000L)
         runUntil(scheduler, 50) {
@@ -6632,8 +6634,7 @@ class AiReplyObservationRuntimeTest {
                     logs.add(line)
                     if (mode != "FAILED" && line.contains("AI 会话绑定：已建立")) {
                         // Simulate the missing binding while keeping the verified row/navigation.
-                        AiReplyObservationRuntime::class.java.getDeclaredField("currentSessionBinding")
-                            .apply { isAccessible = true }.set(runtime, null)
+                        privateVisitOwner(runtime).currentSessionBinding = null
                     }
                     if (mode == "UNSAFE_FRESH_PAGE" &&
                         line.contains("已采集平台ID但当前会话绑定未就绪")

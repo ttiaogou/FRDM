@@ -19,6 +19,52 @@ import org.junit.Test
 
 class PrivateMessagesTraversalTaskExecutorTest {
     @Test
+    fun provisionalVisitRollbackPreservesOtherAttemptsAndTraversalEvidence() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val selected = candidate(1, "Alice", ChatUnreadStatus.UNREAD)
+        val other = candidate(0, "Bob", ChatUnreadStatus.UNREAD)
+        val selectedKey = key(selected)
+        val otherKey = key(other)
+        executor.phase = SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP
+        executor.lockedUnreadSessionKeys += selectedKey
+        executor.lockedUnreadSessionKeys += otherKey
+        executor.attemptedSessionKeys += selectedKey
+        executor.attemptedSessionKeys += otherKey
+        executor.sessionActionCount = 2
+        executor.beginSession(selected, selectedKey, "source")
+        executor.expectedPrivateSessionDetailNavigation =
+            ExpectedPrivateSessionDetailNavigation(selectedKey, "Alice", "source", 1L)
+        executor.currentSessionBinding = CurrentSessionBinding("source", null, null, null, "chat", "surface")
+        executor.rollbackProvisionalVisit(selectedKey)
+        assertEquals(setOf(otherKey), executor.attemptedSessionKeys)
+        assertEquals(setOf(selectedKey, otherKey), executor.lockedUnreadSessionKeys)
+        assertEquals(SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP, executor.phase)
+        assertEquals(1, executor.sessionActionCount)
+        assertEquals(selectedKey, executor.missedPrivateSessionTapKey)
+        assertEquals(1, executor.missedPrivateSessionTapCount)
+        assertNull(executor.currentSessionKey)
+        assertNull(executor.currentSessionBinding)
+        assertNull(executor.expectedPrivateSessionDetailNavigation)
+        executor.rollbackProvisionalVisit(selectedKey)
+        assertEquals(1, executor.sessionActionCount)
+        assertEquals(2, executor.missedPrivateSessionTapCount)
+    }
+
+    @Test
+    fun verifiedDetailRebindPreservesSourceAnchorAndNavigationIntent() {
+        val executor = PrivateMessagesTraversalTaskExecutor()
+        val navigation = ExpectedPrivateSessionDetailNavigation("key", "Alice", "source", 1L)
+        val original = CurrentSessionBinding("source", "1.2", null, null, "old-chat", "old-surface")
+        executor.expectedPrivateSessionDetailNavigation = navigation
+        executor.currentSessionBinding = original
+        executor.rebindVerifiedDetail(original, "new-chat", "new-surface")
+        assertEquals(original.copy(chatWindowKey = "new-chat", chatSurfaceKey = "new-surface"),
+            executor.currentSessionBinding)
+        assertEquals("new-chat", executor.currentSessionWindowKey)
+        assertEquals(navigation, executor.expectedPrivateSessionDetailNavigation)
+    }
+
+    @Test
     fun identityReturnMigratesFrozenUnreadAndPreservesViewport() {
         val executor = PrivateMessagesTraversalTaskExecutor()
         val original = candidate(1, "Alice", ChatUnreadStatus.UNREAD)

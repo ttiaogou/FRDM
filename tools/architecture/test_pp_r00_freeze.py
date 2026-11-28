@@ -284,6 +284,13 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt"
         self.assertEqual("564440b87ad96fd78d5e8a46cc5545e0fa8188be", reviewed_s1[path])
         reviewed_s1[path] = "26ee9be133eb554f0b08bd000dd055f0164a95b8"
+        # R07-C exact private visit state relocation; preserve previous pins.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("046026a655768a091e5ce70e1b8cdc37f9291539", reviewed_s1[path])
+        reviewed_s1[path] = "770092f451d8516b8aaac251135cf9ec7a65b1a6"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/PrivateMessagesTraversalTaskExecutor.kt"
+        self.assertEqual("22a7a66feb6a52d53b84681dab7b6c70cd822e9c", reviewed_s1[path])
+        reviewed_s1[path] = "a38408df5c2779a0efc632f238bfb8c18e44f8f2"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

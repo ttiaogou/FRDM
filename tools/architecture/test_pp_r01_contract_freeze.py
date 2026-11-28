@@ -112,6 +112,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R07-B reviewed relocation to the existing observation owner.
                 self.assertEqual("e693f9d3f699bc2d973500484327ab964d54eac1", expected[path])
                 expected[path] = "69fed894d80b28862f552d5584500b25553c543a"
+                # R07-C exact reviewed private visit relocation.
+                self.assertEqual("69fed894d80b28862f552d5584500b25553c543a", expected[path])
+                expected[path] = "5aa6a516787c9bb4503c36dac3ed130b8fc36cc7"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -136,6 +139,14 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 for path, (previous, replacement) in {
                     "business/src/test/kotlin/com/freedom/features/aireply/AiReplyObservationRuntimeTest.kt": ("ebca85f52082cb8954bba1ce780e815f2f46a2e4", "2ac15e03b5ecc30548dc492f0c0a01ea9403d077"),
                     "business/src/test/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinatorTest.kt": ("2ce47f253365ea3841b53eff4e0d30a073eca23a", "690d0330efb0dfce042ebae573f6b6fc41a186c9"),
+                }.items():
+                    self.assertEqual(previous, expected[path])
+                    expected[path] = replacement
+            if field == "protected_test_files":
+                # R07-C keeps existing tests; binding fixtures target the true owner.
+                for path, (previous, replacement) in {
+                    "business/src/test/kotlin/com/freedom/features/aireply/AiReplyObservationRuntimeTest.kt": ("2ac15e03b5ecc30548dc492f0c0a01ea9403d077", "8751283ecb1586a67c4cd106387118f136019259"),
+                    "business/src/test/kotlin/com/freedom/features/aireply/PrivateMessagesTraversalTaskExecutorTest.kt": ("1e274631f878868e244326214bacf091e289f4cf", "1434666f844bcbc6226cab2a44e439da68c59ed2"),
                 }.items():
                     self.assertEqual(previous, expected[path])
                     expected[path] = replacement
@@ -202,6 +213,16 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r07_page_observation_migration.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "f2620e02c77dea679f3a44f8ab71215d5d67be51"
+        # R07-C preserves the complete historical inverse chain and true state ownership.
+        for path, (previous, replacement) in {
+            "tools/architecture/test_pp_r07_page_observation_migration.py": ("f2620e02c77dea679f3a44f8ab71215d5d67be51", "7926398e95b7f7ededa760b3d0ba93b2e9222e9f"),
+            "tools/architecture/test_pp_r06_integration_acceptance.py": ("9b6be1181f0d057c56037853c004b5bd6f32c6fa", "0c1322687be5cb454b8d65d0a98a1113611abd25"),
+        }.items():
+            self.assertEqual(previous, reviewed_migration_evidence[path])
+            reviewed_migration_evidence[path] = replacement
+        path = "tools/architecture/test_pp_r07_private_visit_migration.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "b8f63983f68c2949c2145234c2225ac8e4bfbfe6"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

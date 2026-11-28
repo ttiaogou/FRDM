@@ -1,6 +1,11 @@
 package com.freedom.features.aireply
 
 import com.freedom.features.aireply.ports.ChatListCandidateSnapshot
+import com.freedom.core.accessibility.api.ScreenRect
+import com.freedom.core.runtime.ScheduledTask
+import com.freedom.core.runtime.TaskLease
+import com.freedom.features.aireply.ports.ObservedPrivateChatIdentityTarget
+import com.freedom.features.conversation.domain.contact.ContactRowIdentity
 import com.freedom.features.aireply.ports.ChatPageSnapshot
 import com.freedom.features.aireply.ports.ChatPageKind
 import com.freedom.features.aireply.ports.ChatSessionManagementPolicy
@@ -142,6 +147,51 @@ internal data class PrivateMessagesListSnapshotEvaluation(
     val nextCandidate: ChatListCandidateSnapshot?,
     val structuralFingerprint: String
 )
+
+/** Captures the self-initiated list-to-detail navigation awaiting page verification. */
+internal data class ExpectedPrivateSessionDetailNavigation(
+    val sessionKey: String,
+    val sessionName: String?,
+    val sourceWindowKey: String,
+    val startedAtUptimeMs: Long
+)
+
+/** Intent only: the timer never authorizes a gesture or stores a row locator. */
+internal data class IncompleteUnreadRelocationWait(
+    val runGeneration: Long,
+    val actionGeneration: Long,
+    val windowIdentity: String,
+    val visibleKeys: List<String>,
+    var due: Boolean = false
+)
+
+internal data class CurrentSessionBinding(
+    val sourceWindowKey: String,
+    val sourceRowPath: String?,
+    val sourceRowBounds: ScreenRect?,
+    val sourceAvatarBounds: ScreenRect?,
+    val chatWindowKey: String,
+    val chatSurfaceKey: String,
+    val observedDetailTarget: ObservedPrivateChatIdentityTarget? = null,
+    val observedVerifiedIdentity: ContactRowIdentity? = null,
+    val observedTaskLease: TaskLease? = null,
+    val observedBusinessAdmitted: Boolean = false
+) {
+    fun matches(snapshot: ChatPageSnapshot, currentChatWindowKey: String?): Boolean =
+        currentChatWindowKey == chatWindowKey &&
+            com.freedom.features.aireply.chatSurfaceKey(snapshot) == chatSurfaceKey
+
+    /**
+     * Profile navigation may recreate the chat window and rebuild both child paths.
+     * Once a platform ID is verified, use the restored chat surface plus the caller's
+     * auxiliary header check; do not require the old window generation or node paths.
+     */
+    fun matchesRestoredChatSurface(snapshot: ChatPageSnapshot): Boolean =
+        snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
+            snapshot.packageName.isNotBlank() &&
+            snapshot.inputFieldTarget != null
+
+}
 
 internal class PrivateMessagesTraversalTaskExecutor {
     var checkpointRunGeneration: Long = 0L
@@ -438,6 +488,83 @@ internal class PrivateMessagesTraversalTaskExecutor {
     var currentSessionWindowKey: String? = null
     val headerMismatchGuard = Any()
     var headerMismatchRecordedForCurrentAttempt: Boolean = false
+
+    // R07-C: visit-local evidence and retry state. Runtime still owns external scheduling,
+    // checkpoint persistence, admission, recovery transitions and UI operation authorization.
+    var expectedPrivateSessionDetailNavigation: ExpectedPrivateSessionDetailNavigation? = null
+    var incompleteUnreadRelocationWait: IncompleteUnreadRelocationWait? = null
+    /** A submitted session tap is not a completed visit until the intended detail is verified. */
+    var missedPrivateSessionTapKey: String? = null
+    var missedPrivateSessionTapCount = 0
+    /** Count only re-dispatched BACK actions, never the read-only verification samples. */
+    var confirmedPrivateReturnBackRetryCount = 0
+    /** A unified list recovery after confirmed send must finish the old return before traversal. */
+    var confirmedPrivateReturnAwaitingRecovery = false
+    /** Retains the scroll direction while the live mf_view exclusion leaves no safe rectangle. */
+    var sessionSafeViewportRetryTask: ScheduledTask? = null
+    var sessionSafeViewportRetryCount = 0
+    var sessionSafeViewportRetryGeneration = 0L
+    var currentSessionBinding: CurrentSessionBinding? = null
+    var identityCaptureSessionKey: String? = null
+    var identityCaptureStartedAtMs = 0L
+    var identityCaptureRetryCount = 0
+    var identityCaptureTerminalSessionKey: String? = null
+    var identityCaptureTimeoutTask: ScheduledTask? = null
+
+
+    fun bindVerifiedDetail(selected: ChatListCandidateSnapshot, chatWindowKey: String, snapshot: ChatPageSnapshot) {
+        currentSessionBinding = CurrentSessionBinding(
+            sourceWindowKey = listOf(
+                selected.rowTarget.window.packageName,
+                selected.rowTarget.window.windowId,
+                selected.rowTarget.window.generation
+            ).joinToString("|"),
+            sourceRowPath = selected.rowTarget.path.childIndices.joinToString("."),
+            sourceRowBounds = selected.rowBounds,
+            sourceAvatarBounds = selected.avatarBounds,
+            chatWindowKey = chatWindowKey,
+            chatSurfaceKey = chatSurfaceKey(snapshot).orEmpty()
+        )
+        // Only a verified detail binding retires a no-navigation retry sequence.
+        if (missedPrivateSessionTapKey == currentSessionKey) {
+            missedPrivateSessionTapKey = null
+            missedPrivateSessionTapCount = 0
+        }
+    }
+
+    fun rebindVerifiedDetail(original: CurrentSessionBinding, freshWindowKey: String, freshSurfaceKey: String) {
+        currentSessionBinding = original.copy(
+            chatWindowKey = freshWindowKey,
+            chatSurfaceKey = freshSurfaceKey
+        )
+        currentSessionWindowKey = freshWindowKey
+    }
+
+    /**
+     * A submitted tap is provisional. No-op navigation and page-route recovery must
+     * not persist its selected key as a completed/attempted session. Preserve the
+     * existing traversal checkpoint; only the attempted marker and tentative detail
+     * binding are rolled back, before the unified read-only recovery is saved.
+     */
+    private fun rememberUnverifiedPrivateTap(selectedKey: String) {
+        missedPrivateSessionTapCount = if (missedPrivateSessionTapKey == selectedKey) {
+            missedPrivateSessionTapCount + 1
+        } else {
+            missedPrivateSessionTapKey = selectedKey
+            1
+        }
+    }
+
+    fun rollbackProvisionalVisit(selectedKey: String) {
+        if (attemptedSessionKeys.remove(selectedKey)) {
+            sessionActionCount =
+                (sessionActionCount - 1).coerceAtLeast(0)
+        }
+        rememberUnverifiedPrivateTap(selectedKey)
+        clearCurrentSession()
+        expectedPrivateSessionDetailNavigation = null
+        currentSessionBinding = null
+    }
 
     var phase: SessionListTraversalPhase = SessionListTraversalPhase.POSITIONING_AT_BOTTOM
     var atTop: Boolean = false

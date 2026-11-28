@@ -585,18 +585,10 @@ class AiReplyObservationRuntime(
     private var currentSessionWindowKey: String?
         get() = privateMessagesTraversalTaskExecutor.currentSessionWindowKey
         set(value) { privateMessagesTraversalTaskExecutor.currentSessionWindowKey = value }
-    /** Captures the self-initiated list-to-detail navigation awaiting page verification. */
-    private data class ExpectedPrivateSessionDetailNavigation(
-        val sessionKey: String,
-        val sessionName: String?,
-        val sourceWindowKey: String,
-        val startedAtUptimeMs: Long
-    )
-    private var expectedPrivateSessionDetailNavigation: ExpectedPrivateSessionDetailNavigation? = null
     /**
      * Business-neutral navigation provenance consumed by route recovery.
      *
-     * This is deliberately separate from expectedPrivateSessionDetailNavigation: the
+     * This is deliberately separate from privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation: the
      * route layer may trust only the generic unified input result, never a message
      * session's expected target registration.
      */
@@ -638,26 +630,6 @@ class AiReplyObservationRuntime(
         get() = privateMessagesTraversalTaskExecutor.headerMismatchRecordedForCurrentAttempt
         set(value) { privateMessagesTraversalTaskExecutor.headerMismatchRecordedForCurrentAttempt = value }
     private var sessionTransitionTask: ScheduledTask? = null
-    /** Intent only: the timer never authorizes a gesture or stores a row locator. */
-    private data class IncompleteUnreadRelocationWait(
-        val runGeneration: Long,
-        val actionGeneration: Long,
-        val windowIdentity: String,
-        val visibleKeys: List<String>,
-        var due: Boolean = false
-    )
-    private var incompleteUnreadRelocationWait: IncompleteUnreadRelocationWait? = null
-    /** A submitted session tap is not a completed visit until the intended detail is verified. */
-    private var missedPrivateSessionTapKey: String? = null
-    private var missedPrivateSessionTapCount = 0
-    /** Count only re-dispatched BACK actions, never the read-only verification samples. */
-    private var confirmedPrivateReturnBackRetryCount = 0
-    /** A unified list recovery after confirmed send must finish the old return before traversal. */
-    private var confirmedPrivateReturnAwaitingRecovery = false
-    /** Retains the scroll direction while the live mf_view exclusion leaves no safe rectangle. */
-    private var sessionSafeViewportRetryTask: ScheduledTask? = null
-    private var sessionSafeViewportRetryCount = 0
-    private var sessionSafeViewportRetryGeneration = 0L
     /** Set by relevant target-app page-change events; probe admission never consults InputOrigin. */
     private var receivedGreetingsPageProbePending = false
     // Only a cold, page-selected private startup needs to connect the original
@@ -732,34 +704,6 @@ class AiReplyObservationRuntime(
     /** Generation invalidates callbacks submitted for a page/task context that is no longer current. */
     private var sessionActionGeneration = 0L
     private var activeSessionGestureRequestId: String? = null
-    private data class CurrentSessionBinding(
-        val sourceWindowKey: String,
-        val sourceRowPath: String?,
-        val sourceRowBounds: ScreenRect?,
-        val sourceAvatarBounds: ScreenRect?,
-        val chatWindowKey: String,
-        val chatSurfaceKey: String,
-        val observedDetailTarget: ObservedPrivateChatIdentityTarget? = null,
-        val observedVerifiedIdentity: ContactRowIdentity? = null,
-        val observedTaskLease: TaskLease? = null,
-        val observedBusinessAdmitted: Boolean = false
-    ) {
-        fun matches(snapshot: ChatPageSnapshot, currentChatWindowKey: String?): Boolean =
-            currentChatWindowKey == chatWindowKey &&
-                com.freedom.features.aireply.chatSurfaceKey(snapshot) == chatSurfaceKey
-
-        /**
-         * Profile navigation may recreate the chat window and rebuild both child paths.
-         * Once a platform ID is verified, use the restored chat surface plus the caller's
-         * auxiliary header check; do not require the old window generation or node paths.
-         */
-        fun matchesRestoredChatSurface(snapshot: ChatPageSnapshot): Boolean =
-            snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
-                snapshot.packageName.isNotBlank() &&
-                snapshot.inputFieldTarget != null
-
-    }
-
     /**
      * Source-anchored greeting chat binding. This is evidence, not a UI-operation lease:
      * every OCR callback must still revalidate its live window and the exact task lease.
@@ -1150,28 +1094,11 @@ class AiReplyObservationRuntime(
         return true
     }
 
-    private var currentSessionBinding: CurrentSessionBinding? = null
     private fun establishCurrentSessionBinding(snapshot: ChatPageSnapshot) {
         val selected = currentSessionCandidate
         val chatWindowKey = currentSessionWindowKey
         if (selected != null && chatWindowKey != null) {
-            currentSessionBinding = CurrentSessionBinding(
-                sourceWindowKey = listOf(
-                    selected.rowTarget.window.packageName,
-                    selected.rowTarget.window.windowId,
-                    selected.rowTarget.window.generation
-                ).joinToString("|"),
-                sourceRowPath = selected.rowTarget.path.childIndices.joinToString("."),
-                sourceRowBounds = selected.rowBounds,
-                sourceAvatarBounds = selected.avatarBounds,
-                chatWindowKey = chatWindowKey,
-                chatSurfaceKey = chatSurfaceKey(snapshot).orEmpty()
-            )
-            // Only a verified detail binding retires a no-navigation retry sequence.
-            if (missedPrivateSessionTapKey == currentSessionKey) {
-                missedPrivateSessionTapKey = null
-                missedPrivateSessionTapCount = 0
-            }
+            privateMessagesTraversalTaskExecutor.bindVerifiedDetail(selected, chatWindowKey, snapshot)
             if (privateMessagesTraversalTaskExecutor.recordVerifiedDetailEntry(snapshot, System.currentTimeMillis())) {
                 privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
                 onLog("AI 私聊业务[UNFINISHED_RETAINED]：已验证进入会话；尚未确认业务终态")
@@ -1186,23 +1113,13 @@ class AiReplyObservationRuntime(
      */
     private fun rebindVerifiedPrivateChat(snapshot: ChatPageSnapshot): Boolean {
         if (!isVerifiedRecoveredPrivateDetail(snapshot)) return false
-        val original = currentSessionBinding ?: return false
+        val original = privateMessagesTraversalTaskExecutor.currentSessionBinding ?: return false
         val freshWindowKey = windowSessionKey(snapshot) ?: return false
         val freshSurfaceKey = chatSurfaceKey(snapshot) ?: return false
-        currentSessionBinding = original.copy(
-            chatWindowKey = freshWindowKey,
-            chatSurfaceKey = freshSurfaceKey
-        )
-        currentSessionWindowKey = freshWindowKey
+        privateMessagesTraversalTaskExecutor.rebindVerifiedDetail(original, freshWindowKey, freshSurfaceKey)
         onLog("AI 会话绑定[VERIFIED_CHAT_REBOUND]：原会话及任务租约已验证；聊天窗口与表面绑定已同步；保留来源行锚点")
         return true
     }
-    private var identityCaptureSessionKey: String? = null
-    private var identityCaptureStartedAtMs = 0L
-    private var identityCaptureRetryCount = 0
-    private var identityCaptureTerminalSessionKey: String? = null
-    private var identityCaptureTimeoutTask: ScheduledTask? = null
-
     /**
      * Identity capture may fail without invalidating the selected current chat. Before using
      * only its visible messages, independently re-check the navigation source, task lease,
@@ -1215,7 +1132,7 @@ class AiReplyObservationRuntime(
         ) return false
         val candidate = currentSessionCandidate ?: return false
         val selectedKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
-        val expected = expectedPrivateSessionDetailNavigation ?: return false
+        val expected = privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation ?: return false
         val sourceWindow = candidate.rowTarget.window
         val sourceKey = listOf(
             sourceWindow.packageName, sourceWindow.windowId, sourceWindow.generation
@@ -1326,7 +1243,7 @@ class AiReplyObservationRuntime(
         )
         diagnosePendingIdentityReturn(observationDecision, inspection)
         if (observationDecision.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) {
-            currentSessionBinding?.observedDetailTarget?.let { target ->
+            privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedDetailTarget?.let { target ->
                 if (sessionRunStarted && ownsTask(PRIVATE_MESSAGES_TASK_ID) && !recoveryContext.pending &&
                     chatSessionManagementPort.hasPendingObservedPrivateChatIdentityCapture(target)
                 ) {
@@ -1336,7 +1253,7 @@ class AiReplyObservationRuntime(
                 }
                 // Once business is admitted, the existing durable recovery owns its
                 // checkpoint. Never discard an in-flight send or its verified identity here.
-                if (currentSessionBinding?.observedBusinessAdmitted != true) {
+                if (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted != true) {
                     retireObservedPrivateDetail("SNAPSHOT_UNAVAILABLE")
                 }
             }
@@ -1624,9 +1541,9 @@ class AiReplyObservationRuntime(
         }
         pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
         val observedPhysicalInterruption = event.inputOriginDecision?.origin == InputOrigin.PHYSICAL_USER &&
-            currentSessionBinding?.observedDetailTarget != null
+            privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedDetailTarget != null
         if (observedPhysicalInterruption) {
-            if (currentSessionBinding?.observedBusinessAdmitted == true) {
+            if (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted == true) {
                 requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "PRIVATE_DETAIL_USER_INTERACTION")
             } else {
                 retireObservedPrivateDetail("PHYSICAL_INTERACTION")
@@ -1634,11 +1551,11 @@ class AiReplyObservationRuntime(
         }
         val recoveryContextActive = observedPhysicalInterruption || receivedGreetingsTaskActive || pairWake != null ||
             messageListRecoveryVerificationPending ||
-            recoveryContext.pending || incompleteUnreadRelocationWait != null || userInteractionActive
+            recoveryContext.pending || privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait != null || userInteractionActive
         if (!recoveryContextActive) return
         // A touch invalidates a parked relocation intent. Only a new confirmed
         // observation after the existing quiet gate may schedule another one.
-        incompleteUnreadRelocationWait = null
+        privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait = null
         receivedGreetingsUserActive = true
         userInteractionActive = true
         recoveryTransaction.dispatch(RecoveryTransactionEvent.UserInteractionStarted)
@@ -1745,7 +1662,7 @@ class AiReplyObservationRuntime(
         } else null
 
         // The observed detail is a source of the same session binding, not another task.
-        if (currentSessionBinding?.observedDetailTarget != null) {
+        if (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedDetailTarget != null) {
             if (handleObservedPrivateDetail(observation, inspection, matchedRouteId)) return
         }
 
@@ -1767,7 +1684,7 @@ class AiReplyObservationRuntime(
         // deferred list recovery must still earn independent list proof on return.
         if (privateListRecoveryReasonAfterObservedDetail != null &&
             !recoveryContext.pending && sessionRunStarted && !receivedGreetingsTaskActive &&
-            currentSessionBinding == null && currentSessionKey == null &&
+            privateMessagesTraversalTaskExecutor.currentSessionBinding == null && currentSessionKey == null &&
             matchedRouteId == messageListRecoveryRoute.routeId &&
             observation.status == ObservationStatus.CONFIRMED_PAGE
         ) {
@@ -1969,7 +1886,7 @@ class AiReplyObservationRuntime(
         val activeRouteId = recoveryRouteIdForTask(activeTaskId)
         // Route recovery is allowed to suppress PAGE_ROUTE_CHANGED only when the
         // unified accessibility layer supplied a matching generic source result.
-        // It must not consult expectedPrivateSessionDetailNavigation here.
+        // It must not consult privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation here.
         val selfInitiatedTransition = pendingNavigationSourceResult?.takeIf {
             selfNavigationMatchesInspection(it, inspection)
         }
@@ -2008,7 +1925,7 @@ class AiReplyObservationRuntime(
             // The unbound startup detail never opened a visit or advanced the list cursor.
             // Returning from it must still run the original list startup verification.
             !(pageSelectedPrivateStartupVerificationPending && currentSessionCandidate == null &&
-                currentSessionBinding == null && matchedRouteId == messageListRecoveryRoute.routeId) &&
+                privateMessagesTraversalTaskExecutor.currentSessionBinding == null && matchedRouteId == messageListRecoveryRoute.routeId) &&
             matchedRouteId == activeRouteId
         // A private-message row tap moves from the owned inbox route into its chat-detail
         // subpage. That subpage is part of the active task's normal workflow, not an UNKNOWN
@@ -2567,14 +2484,14 @@ class AiReplyObservationRuntime(
                 readVisibleMessages(inspection)
             } else if (targetTaskId == PRIVATE_MESSAGES_TASK_ID) {
                 privateListRecoveryReasonAfterObservedDetail = null
-                sessionManagerState = if (confirmedPrivateReturnAwaitingRecovery &&
+                sessionManagerState = if (privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery &&
                     currentSessionSendConfirmed
                 ) {
                     onLog("AI 私聊发送返回[INBOX_RECOVERY_VERIFIED]：列表检查点与操作权已复核；完成原会话返回，不重复发送")
                     SessionManagerState.RETURNING_TO_SESSION_LIST
                 } else SessionManagerState.WAITING_FOR_SESSION_LIST
-                confirmedPrivateReturnAwaitingRecovery = false
-                val observedReturn = currentSessionBinding?.observedBusinessAdmitted == true
+                privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery = false
+                val observedReturn = privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted == true
                 if ((sessionManagerState == SessionManagerState.WAITING_FOR_SESSION_LIST || observedReturn) &&
                     currentSessionKey != null && !isSendConfirmationPending() && !isSendControlRecoveryPending()
                 ) {
@@ -2583,8 +2500,8 @@ class AiReplyObservationRuntime(
                     invalidatePendingMessageRead()
                     retireObservedPrivateDetail("LIST_RECOVERY_VERIFIED")
                     privateMessagesTraversalTaskExecutor.clearCurrentSession()
-                    currentSessionBinding = null
-                    expectedPrivateSessionDetailNavigation = null
+                    privateMessagesTraversalTaskExecutor.currentSessionBinding = null
+                    privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation = null
                     currentSessionSendConfirmed = false
                     if (observedReturn) sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
                     onLog("AI 私聊业务[INTERRUPTED_VISIT_RETAINED]：旧详情执行资格失效；原未完成记录保留")
@@ -3504,7 +3421,7 @@ class AiReplyObservationRuntime(
         }
         runCatching { onDraftRuntimeReset() }
         sessionActionGeneration += 1L
-        incompleteUnreadRelocationWait = null
+        privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait = null
         startupReadinessCoordinator.cancelRecovery()
         val interruptedGestureRequestId = activeSessionGestureRequestId
         activeSessionGestureRequestId = null
@@ -3532,10 +3449,10 @@ class AiReplyObservationRuntime(
         pageObservationCoordinator.clearExplicitInspectionHandle()
         pageObservationCoordinator.clearLegacyRegionRefreshHandle()
         sessionTransitionTask = null
-        missedPrivateSessionTapKey = null
-        missedPrivateSessionTapCount = 0
-        confirmedPrivateReturnBackRetryCount = 0
-        confirmedPrivateReturnAwaitingRecovery = false
+        privateMessagesTraversalTaskExecutor.missedPrivateSessionTapKey = null
+        privateMessagesTraversalTaskExecutor.missedPrivateSessionTapCount = 0
+        privateMessagesTraversalTaskExecutor.confirmedPrivateReturnBackRetryCount = 0
+        privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery = false
         pageObservationCoordinator.lastPageInspection = null
         pageObservationCoordinator.lastConfirmedChatListInspection = null
         recoveryTransaction.reset()
@@ -3586,16 +3503,16 @@ class AiReplyObservationRuntime(
         currentSessionSendConfirmed = false
         currentSessionWindowKey = null
         retireObservedPrivateDetail("RUN_RESET")
-        currentSessionBinding = null
-        expectedPrivateSessionDetailNavigation = null
+        privateMessagesTraversalTaskExecutor.currentSessionBinding = null
+        privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation = null
         pendingNavigationSourceResult = null
         unmatchedNavigationObservationPending = false
-        identityCaptureSessionKey = null
-        identityCaptureStartedAtMs = 0L
-        identityCaptureRetryCount = 0
-        identityCaptureTerminalSessionKey = null
-        identityCaptureTimeoutTask?.cancel()
-        identityCaptureTimeoutTask = null
+        privateMessagesTraversalTaskExecutor.identityCaptureSessionKey = null
+        privateMessagesTraversalTaskExecutor.identityCaptureStartedAtMs = 0L
+        privateMessagesTraversalTaskExecutor.identityCaptureRetryCount = 0
+        privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey = null
+        privateMessagesTraversalTaskExecutor.identityCaptureTimeoutTask?.cancel()
+        privateMessagesTraversalTaskExecutor.identityCaptureTimeoutTask = null
         snapshotRecoveryStartedAtMs = 0L
         receivedGreetingsQuietTask?.cancel()
         receivedGreetingsQuietTask = null
@@ -3648,9 +3565,9 @@ class AiReplyObservationRuntime(
             !receivedGreetingsOwnershipRecheckPending && !awaitingNormalInboxAfterGreetingsReturn &&
             (pendingListRecovery || (!recoveryContext.pending && !messageListRecoveryVerificationPending)) &&
             pairWake == null && suspendedPrivateRecovery == null &&
-            !confirmedPrivateReturnAwaitingRecovery && !currentSessionSendConfirmed &&
+            !privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery && !currentSessionSendConfirmed &&
             currentSessionCandidate == null && currentSessionKey == null &&
-            currentSessionBinding == null && expectedPrivateSessionDetailNavigation == null &&
+            privateMessagesTraversalTaskExecutor.currentSessionBinding == null && privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation == null &&
             privateMessagesTraversalTaskExecutor.currentUnfinishedSession() == null &&
             !privateMessagesTraversalTaskExecutor.recoveringUnfinishedSession &&
             activeSessionGestureRequestId == null && !isConversationDraftPending() &&
@@ -3737,7 +3654,7 @@ class AiReplyObservationRuntime(
             val sourceWindowKey = snapshot.windowIdentityKey()
             if (target.sourceWindow() != null && sourceWindowKey != null && windowKey != null && surfaceKey != null) {
                 invalidatePendingMessageRead()
-                currentSessionBinding = CurrentSessionBinding(
+                privateMessagesTraversalTaskExecutor.currentSessionBinding = CurrentSessionBinding(
                     sourceWindowKey, null, null, null, windowKey, surfaceKey, observedDetailTarget = target,
                     observedTaskLease = taskCoordinator?.currentLease()
                 )
@@ -3816,8 +3733,8 @@ class AiReplyObservationRuntime(
     }
 
     private fun retireObservedPrivateDetail(reason: String) {
-        val target = currentSessionBinding?.observedDetailTarget ?: return
-        currentSessionBinding = null
+        val target = privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedDetailTarget ?: return
+        privateMessagesTraversalTaskExecutor.currentSessionBinding = null
         runCatching { chatSessionManagementPort.cancelObservedPrivateChatIdentityCapture(target) }
         invalidatePendingMessageRead()
         pageRecoveryVerificationGate.reset(PRIVATE_STARTUP_DETAIL_OWNERSHIP_GATE)
@@ -3829,7 +3746,7 @@ class AiReplyObservationRuntime(
         else binding.observedTaskLease?.let { taskCoordinator.isCurrent(it) } == true
 
     private fun observedPrivateBindingMatches(snapshot: ChatPageSnapshot): Boolean {
-        val binding = currentSessionBinding ?: return false
+        val binding = privateMessagesTraversalTaskExecutor.currentSessionBinding ?: return false
         val target = binding.observedDetailTarget ?: return false
         val identity = binding.observedVerifiedIdentity ?: return false
         return sessionRunStarted && isAiReplyActive() && !receivedGreetingsTaskActive &&
@@ -3848,7 +3765,7 @@ class AiReplyObservationRuntime(
         observedPrivateBindingMatches(snapshot) && canPerformPrivateMessagesUiAction() && !userInteractionActive
 
     private fun admitObservedPrivateBusiness(snapshot: ChatPageSnapshot): Boolean {
-        val binding = currentSessionBinding ?: return false
+        val binding = privateMessagesTraversalTaskExecutor.currentSessionBinding ?: return false
         if (binding.observedBusinessAdmitted) return observedPrivateDetailVerified(snapshot)
         val identity = binding.observedVerifiedIdentity ?: return false
         val key = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId)
@@ -3874,7 +3791,7 @@ class AiReplyObservationRuntime(
         }
         sessionManagerState = SessionManagerState.READING_SESSION
         currentSessionSendConfirmed = false
-        currentSessionBinding = binding.copy(observedBusinessAdmitted = true)
+        privateMessagesTraversalTaskExecutor.currentSessionBinding = binding.copy(observedBusinessAdmitted = true)
         onLog("OBSERVED_PRIVATE_BUSINESS_ADMITTED recovered=${executor.recoveringUnfinishedSession};listCursorPreserved=true")
         return true
     }
@@ -3884,7 +3801,7 @@ class AiReplyObservationRuntime(
         snapshot: ChatPageSnapshot,
         matchedRouteId: String?
     ): Boolean {
-        val binding = currentSessionBinding ?: return false
+        val binding = privateMessagesTraversalTaskExecutor.currentSessionBinding ?: return false
         val target = binding.observedDetailTarget ?: return false
         // The unified recovery transaction has precedence over this ordinary observer.
         if (recoveryContext.pending) return false
@@ -3972,7 +3889,7 @@ class AiReplyObservationRuntime(
             !identity.contactId.isNullOrBlank() && returned &&
             chatSessionManagementPort.consumeObservedPrivateChatIdentityReturn(target)
         ) {
-            currentSessionBinding = binding.copy(chatWindowKey = windowKey, chatSurfaceKey = surfaceKey,
+            privateMessagesTraversalTaskExecutor.currentSessionBinding = binding.copy(chatWindowKey = windowKey, chatSurfaceKey = surfaceKey,
                 observedVerifiedIdentity = identity)
             onLog("OBSERVED_PRIVATE_CHAT_IDENTITY_VERIFIED source=PROFILE_RETURN;listCursorPreserved=true")
             if (admitObservedPrivateBusiness(snapshot)) readVisibleMessages(snapshot)
@@ -4054,7 +3971,7 @@ class AiReplyObservationRuntime(
         if (!sessionRunStarted || receivedGreetingsTaskActive || !isAiReplyActive() ||
             !ownsTask(PRIVATE_MESSAGES_TASK_ID)
         ) return false
-        val binding = currentSessionBinding ?: return false
+        val binding = privateMessagesTraversalTaskExecutor.currentSessionBinding ?: return false
         if (binding.observedBusinessAdmitted) {
             val identity = binding.observedVerifiedIdentity ?: return false
             val key = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(identity.contactId)
@@ -4065,7 +3982,7 @@ class AiReplyObservationRuntime(
                 !chatSessionManagementPort.isSessionIdentityBlocked(key)
         }
         val candidate = currentSessionCandidate ?: return false
-        val expected = expectedPrivateSessionDetailNavigation ?: return false
+        val expected = privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation ?: return false
         val chatWindowKey = currentSessionWindowKey ?: return false
         val selectedKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
         val sourceWindow = candidate.rowTarget.window
@@ -4082,7 +3999,7 @@ class AiReplyObservationRuntime(
 
     /** Recheck the actual detail surface independently of the saved source-row evidence. */
     private fun isVerifiedRecoveredPrivateDetail(snapshot: ChatPageSnapshot): Boolean =
-        if (currentSessionBinding?.observedBusinessAdmitted == true) {
+        if (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted == true) {
             hasBoundPrivateDetailRecoverySession() && observedPrivateBindingMatches(snapshot)
         } else hasBoundPrivateDetailRecoverySession() &&
             snapshot.packageName == targetPackage() &&
@@ -4192,9 +4109,9 @@ class AiReplyObservationRuntime(
         sessionActionGeneration += 1L
         invalidatePendingMessageRead()
         latestPrivateMessageBatch = null
-        expectedPrivateSessionDetailNavigation = null
+        privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation = null
         retireObservedPrivateDetail("DETAIL_TO_LIST_RECOVERY")
-        currentSessionBinding = null
+        privateMessagesTraversalTaskExecutor.currentSessionBinding = null
         privateMessagesTraversalTaskExecutor.clearCurrentSession()
         // Retire the obsolete one-shot signal; this is not detail-return proof.
         if (chatSessionManagementPort.consumeIdentityReturnReinspectionRequest()) {
@@ -4209,7 +4126,7 @@ class AiReplyObservationRuntime(
 
     /** Single pause/checkpoint entry used by page-route changes and UNKNOWN observations. */
     private fun requestUnifiedPauseAndCheckpoint(taskId: String, reason: String): Boolean {
-        if (currentSessionBinding?.observedBusinessAdmitted != true) {
+        if (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted != true) {
             retireObservedPrivateDetail("UNIFIED_RECOVERY")
         }
         if (recoveryContext.pending) {
@@ -4233,7 +4150,7 @@ class AiReplyObservationRuntime(
             // An uncertain post-BACK page must resume through the saved list checkpoint.
             // The confirmed send is not retried; its old session is cleared only on a
             // subsequently verified inbox, using the existing return-to-list handler.
-            confirmedPrivateReturnAwaitingRecovery = true
+            privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery = true
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
         }
         // Initially keep a submitted send on its detail recovery route. Only a
@@ -4301,7 +4218,7 @@ class AiReplyObservationRuntime(
         if (taskId == PRIVATE_MESSAGES_TASK_ID) {
             startupReadinessCoordinator.suspendForPageRecovery()
         }
-        incompleteUnreadRelocationWait = null
+        privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait = null
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
         sessionTransitionTask?.cancel()
@@ -4415,7 +4332,7 @@ class AiReplyObservationRuntime(
 
     /** Read-only veto for an admitted detail-origin private visit during recovery/user touch. */
     fun isObservedPrivateRecoveryPending(): Boolean =
-        currentSessionBinding?.observedBusinessAdmitted == true &&
+        privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted == true &&
             (recoveryContext.pending || userInteractionActive)
 
     /** The lease is a reserved task slot; the recovery context gates actual UI actions. */
@@ -4434,7 +4351,7 @@ class AiReplyObservationRuntime(
     /** A title-only traversal key is never a durable contact identity. */
     private fun verifiedPrivateLedgerContactKey(): String? {
         if (receivedGreetingsTaskActive || sessionManagerState != SessionManagerState.READING_SESSION) return null
-        val binding = currentSessionBinding ?: return null
+        val binding = privateMessagesTraversalTaskExecutor.currentSessionBinding ?: return null
         val identity = if (binding.observedBusinessAdmitted) binding.observedVerifiedIdentity
             else currentSessionCandidate?.contactIdentity
         if (identity?.confidence != ContactIdentityConfidence.PLATFORM_ID_VERIFIED) return null
@@ -4920,8 +4837,8 @@ class AiReplyObservationRuntime(
                 continueConfirmedPrivateCompletion(snapshot)
                 return
             }
-            if (currentSessionBinding?.observedDetailTarget != null) {
-                if (currentSessionBinding?.observedBusinessAdmitted == true &&
+            if (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedDetailTarget != null) {
+                if (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted == true &&
                     observedPrivateDetailVerified(snapshot) &&
                     sessionManagerState == SessionManagerState.READING_SESSION &&
                     !currentSessionSendConfirmed && ocrAdmissionRetryTask == null &&
@@ -4930,7 +4847,7 @@ class AiReplyObservationRuntime(
                 return
             }
             if (pageSelectedPrivateStartupVerificationPending && !receivedGreetingsTaskActive &&
-                currentSessionCandidate == null && currentSessionBinding == null
+                currentSessionCandidate == null && privateMessagesTraversalTaskExecutor.currentSessionBinding == null
             ) {
                 // A startup detail lease is not a conversation binding. The same guard
                 // covers known-region refreshes while the original list startup is pending.
@@ -4978,7 +4895,7 @@ class AiReplyObservationRuntime(
     ): Boolean {
         if (batch.status == MessageReadStatus.WINDOW_STALE) return false
         val expectedWindowSessionKey = windowSessionKey(snapshot)
-        if (currentSessionBinding?.observedDetailTarget != null) {
+        if (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedDetailTarget != null) {
             return observedPrivateDetailVerified(snapshot) && observedPrivateDetailVerified(active) &&
                 matchesMessageReadWindowEvidence(snapshot, batch, active, expectedWindowSessionKey)
         }
@@ -5153,7 +5070,7 @@ class AiReplyObservationRuntime(
             } else {
                 onLog("AI 消息段基线[REVALIDATED]：新鲜聊天与任务租约已验证；仅准备下一段，不确认新发送")
             }
-            val observedBinding = currentSessionBinding?.takeIf { it.observedBusinessAdmitted }
+            val observedBinding = privateMessagesTraversalTaskExecutor.currentSessionBinding?.takeIf { it.observedBusinessAdmitted }
             val transaction = if (observedBinding != null) {
                 val entry = privateMessagesTraversalTaskExecutor.currentUnfinishedSession()
                 val key = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(observedBinding.observedVerifiedIdentity?.contactId)
@@ -5170,7 +5087,7 @@ class AiReplyObservationRuntime(
                 val candidate = currentSessionCandidate
                 if (traversal.currentUnfinishedSession() != recoveredVisit || candidate == null ||
                     recoveredVisit.conversationKey != fresh.conversationIdentityKey() ||
-                    currentSessionBinding?.matchesRestoredChatSurface(fresh) != true ||
+                    privateMessagesTraversalTaskExecutor.currentSessionBinding?.matchesRestoredChatSurface(fresh) != true ||
                     !traversal.verifyUnfinishedIdentity(candidate)
                 ) {
                     onLog("AI 私聊历史发送[STALE_REVISIT_IGNORED]：原访问或平台身份未重新确认；不补登记")
@@ -5287,7 +5204,7 @@ class AiReplyObservationRuntime(
         val original = child.target.nodeTarget.window
         val windowKey = windowSessionKey(fresh) ?: return null
         val surfaceKey = chatSurfaceKey(fresh) ?: return null
-        val binding = currentSessionBinding ?: return null
+        val binding = privateMessagesTraversalTaskExecutor.currentSessionBinding ?: return null
         if (!ownsPrivateFollowUp(child) || !canPerformPrivateMessagesUiAction() ||
             userInteractionActive || isPrivateFollowUpTouchActive() ||
             fresh.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE || isSemanticallyUnconfirmed(fresh) ||
@@ -5297,10 +5214,10 @@ class AiReplyObservationRuntime(
             fresh.conversationIdentityKey() != child.target.conversationIdentityKey ||
             currentSessionHeaderMatchMode(fresh) == null) return null
         currentSessionWindowKey = windowKey
-        currentSessionBinding = binding.copy(chatWindowKey = windowKey, chatSurfaceKey = surfaceKey)
+        privateMessagesTraversalTaskExecutor.currentSessionBinding = binding.copy(chatWindowKey = windowKey, chatSurfaceKey = surfaceKey)
         if (!isExpectedPrivateSessionDetail(fresh)) {
             currentSessionWindowKey = binding.chatWindowKey
-            currentSessionBinding = binding
+            privateMessagesTraversalTaskExecutor.currentSessionBinding = binding
             return null
         }
         return fresh
@@ -5420,7 +5337,7 @@ class AiReplyObservationRuntime(
         }
         privateMessagesTraversalTaskExecutor.checkpointRunGeneration = currentRunGeneration()
         if (sendConfirmationId != null) privateMessagesTraversalTaskExecutor.checkpointLastSuccessfulTaskId = sendConfirmationId
-        val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
+        val observedVisit = privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted == true
         if (!observedVisit) {
             privateMessagesTraversalTaskExecutor.checkpointNextCursorKey = currentSessionKey
             privateMessagesTraversalTaskExecutor.checkpointTraversalDirection = "BOTTOM_TO_TOP"
@@ -5499,7 +5416,7 @@ class AiReplyObservationRuntime(
                     // Only an actual verified send from an admitted unread list row earns
                     // credit. A restored follow-up alone, manual visit or OCR does not.
                     if (currentSessionCandidate?.unreadStatus == ChatUnreadStatus.UNREAD &&
-                        currentSessionBinding?.observedBusinessAdmitted != true
+                        privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted != true
                     ) {
                         pendingPrivateQuotaReceipt = sendConfirmationId
                         privateQuotaReturnReady = false
@@ -5609,12 +5526,12 @@ class AiReplyObservationRuntime(
         } else if (sessionRunStarted && !receivedGreetingsTaskActive &&
             snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
             currentSessionWindowKey == windowSessionKey(snapshot) &&
-            (currentSessionCandidate != null || currentSessionBinding?.observedBusinessAdmitted == true)
+            (currentSessionCandidate != null || privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted == true)
         ) {
             if (batch.ocrAttempted || batch.ocrTargets.isEmpty()) latestPrivateMessageBatch = batch
         }
-        val observedDetail = currentSessionBinding?.observedDetailTarget != null
-        if (observedDetail && (currentSessionBinding?.observedBusinessAdmitted != true ||
+        val observedDetail = privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedDetailTarget != null
+        if (observedDetail && (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted != true ||
                 !observedPrivateDetailVerified(snapshot) || batch.windowSessionKey != windowSessionKey(snapshot))) return
         if (!receivedGreetingsTaskActive && currentSessionSendConfirmed) {
             continueConfirmedPrivateCompletion(snapshot)
@@ -5667,22 +5584,22 @@ class AiReplyObservationRuntime(
         var identityJustVerified = false
         if (privateDetail && !observedDetail) {
             val identitySessionKey = currentSessionWindowKey
-            if (identityCaptureSessionKey != identitySessionKey) {
-                identityCaptureSessionKey = identitySessionKey
-                identityCaptureStartedAtMs = System.currentTimeMillis()
-                identityCaptureRetryCount = 0
-                identityCaptureTerminalSessionKey = null
-                identityCaptureTimeoutTask?.cancel()
+            if (privateMessagesTraversalTaskExecutor.identityCaptureSessionKey != identitySessionKey) {
+                privateMessagesTraversalTaskExecutor.identityCaptureSessionKey = identitySessionKey
+                privateMessagesTraversalTaskExecutor.identityCaptureStartedAtMs = System.currentTimeMillis()
+                privateMessagesTraversalTaskExecutor.identityCaptureRetryCount = 0
+                privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey = null
+                privateMessagesTraversalTaskExecutor.identityCaptureTimeoutTask?.cancel()
                 // The existing 15-second identity timeout must be observable even when the
                 // accessibility service receives no more events while capture is pending.
                 val timeoutSessionKey = identitySessionKey
                 val timeoutGeneration = sessionActionGeneration
-                identityCaptureTimeoutTask = scheduler.schedule(IDENTITY_CAPTURE_TIMEOUT_MS) {
-                    identityCaptureTimeoutTask = null
+                privateMessagesTraversalTaskExecutor.identityCaptureTimeoutTask = scheduler.schedule(IDENTITY_CAPTURE_TIMEOUT_MS) {
+                    privateMessagesTraversalTaskExecutor.identityCaptureTimeoutTask = null
                     if (sessionActionGeneration != timeoutGeneration || !isAiReplyActive() ||
                         !sessionRunStarted || sessionManagerState != SessionManagerState.READING_SESSION ||
                         currentSessionWindowKey != timeoutSessionKey ||
-                        identityCaptureTerminalSessionKey == timeoutSessionKey ||
+                        privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey == timeoutSessionKey ||
                         currentSessionCandidate?.contactIdentity?.let {
                             it.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
                                 !it.contactId.isNullOrBlank()
@@ -5693,7 +5610,7 @@ class AiReplyObservationRuntime(
                         onLog("AI 身份降级计时：当前页面不属于已复核目标聊天；不处理历史或草稿，等待安全恢复")
                         return@schedule
                     }
-                    identityCaptureTerminalSessionKey = timeoutSessionKey
+                    privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey = timeoutSessionKey
                     onLog("AI 联系人身份采集终态：IDENTITY_CAPTURE_TIMEOUT；定时检查已独立复核目标会话；仅当前窗口消息")
                     readVisibleMessages(fresh)
                 }
@@ -5702,23 +5619,23 @@ class AiReplyObservationRuntime(
             val currentIdentity = currentSessionCandidate?.contactIdentity
             val identityVerified = currentIdentity?.confidence == ContactIdentityConfidence.PLATFORM_ID_VERIFIED &&
                 !currentIdentity.contactId.isNullOrBlank()
-            if (identityVerified && currentSessionBinding?.matchesRestoredChatSurface(snapshot) != true &&
-                identityCaptureTerminalSessionKey != identitySessionKey
+            if (identityVerified && privateMessagesTraversalTaskExecutor.currentSessionBinding?.matchesRestoredChatSurface(snapshot) != true &&
+                privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey != identitySessionKey
             ) {
-                identityCaptureTerminalSessionKey = identitySessionKey
+                privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey = identitySessionKey
                 onLog("AI 联系人身份降级[CURRENT_SESSION_BINDING_NOT_READY]：已有平台ID但聊天表面绑定未就绪；" +
                     "不使用该ID关联历史，仅在当前目标会话独立复核通过后处理当前窗口消息")
             }
-            if (!identityVerified && identityCaptureTerminalSessionKey != identitySessionKey) {
-                identityCaptureRetryCount++
-                val identityElapsedMs = System.currentTimeMillis() - identityCaptureStartedAtMs
+            if (!identityVerified && privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey != identitySessionKey) {
+                privateMessagesTraversalTaskExecutor.identityCaptureRetryCount++
+                val identityElapsedMs = System.currentTimeMillis() - privateMessagesTraversalTaskExecutor.identityCaptureStartedAtMs
                 if (identityElapsedMs >= IDENTITY_CAPTURE_TIMEOUT_MS ||
-                    identityCaptureRetryCount > MAX_IDENTITY_CAPTURE_RETRIES
+                    privateMessagesTraversalTaskExecutor.identityCaptureRetryCount > MAX_IDENTITY_CAPTURE_RETRIES
                 ) {
-                    identityCaptureTerminalSessionKey = identitySessionKey
+                    privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey = identitySessionKey
                     onLog(
                         "AI 联系人身份采集终态：IDENTITY_CAPTURE_TIMEOUT；" +
-                            "已停止继续 RETRY_LATER；重试=${identityCaptureRetryCount - 1}；" +
+                            "已停止继续 RETRY_LATER；重试=${privateMessagesTraversalTaskExecutor.identityCaptureRetryCount - 1}；" +
                             "耗时=${identityElapsedMs.coerceAtLeast(0L)}ms；仅当前窗口上下文"
                     )
                 } else {
@@ -5741,7 +5658,7 @@ class AiReplyObservationRuntime(
                     if (identityOutcome.verifiedIdentity != null) {
                         val verifiedIdentity = identityOutcome.verifiedIdentity
                         val candidate = currentSessionCandidate
-                        val restoredSurfaceMatches = currentSessionBinding
+                        val restoredSurfaceMatches = privateMessagesTraversalTaskExecutor.currentSessionBinding
                             ?.matchesRestoredChatSurface(snapshot) == true
                         val restoredPageKind = snapshot.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE
                         val restoredPackagePresent = snapshot.packageName.isNotBlank()
@@ -5773,7 +5690,7 @@ class AiReplyObservationRuntime(
                             if (candidate != null && !restoredSurfaceMatches &&
                                 auxiliaryHeaderMatches && verifiedPlatformId
                             ) {
-                                identityCaptureTerminalSessionKey = identitySessionKey
+                                privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey = identitySessionKey
                                 onLog(
                                     "AI 联系人身份降级[CURRENT_SESSION_BINDING_NOT_READY]：" +
                                         "已采集平台ID但当前会话绑定未就绪；不写回联系人、不加载历史；" +
@@ -5789,7 +5706,7 @@ class AiReplyObservationRuntime(
                             }
                         } else {
                             val before = ChatSessionManagementPolicy.stableSessionKey(candidate!!)
-                            val expected = expectedPrivateSessionDetailNavigation
+                            val expected = privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation
                             val boundBefore = hasBoundPrivateDetailRecoverySession()
                             val previousIdentity = candidate.contactIdentity
                             candidate.contactIdentity = verifiedIdentity
@@ -5803,12 +5720,12 @@ class AiReplyObservationRuntime(
                             if (before != after && boundBefore && expected != null) {
                                 privateMessagesTraversalTaskExecutor.preserveAttemptAfterVerifiedIdentityUpgrade(before, after)
                                 currentSessionKey = after
-                                expectedPrivateSessionDetailNavigation = expected.copy(sessionKey = after)
+                                privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation = expected.copy(sessionKey = after)
                             }
                             privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
                             onLog("AI 身份升级：keyChanged=${before != after}；boundBefore=$boundBefore；" +
                                 "currentKeyMatches=${currentSessionKey == after}；" +
-                                "expectedKeyMatches=${expectedPrivateSessionDetailNavigation?.sessionKey == after}")
+                                "expectedKeyMatches=${privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation?.sessionKey == after}")
                             identityJustVerified = true
                             onLog(
                                 "AI 联系人身份绑定完成：已写回当前私人会话候选；" +
@@ -5817,7 +5734,7 @@ class AiReplyObservationRuntime(
                             )
                         }
                     } else if (identityOutcome.awaiting) {
-                        val elapsed = System.currentTimeMillis() - identityCaptureStartedAtMs
+                        val elapsed = System.currentTimeMillis() - privateMessagesTraversalTaskExecutor.identityCaptureStartedAtMs
                         if (elapsed < IDENTITY_CAPTURE_TIMEOUT_MS) {
                             onLog(
                                 "AI 联系人身份采集中：等待资料页/身份回传；" +
@@ -5826,7 +5743,7 @@ class AiReplyObservationRuntime(
                             )
                             return
                         }
-                        identityCaptureTerminalSessionKey = identitySessionKey
+                        privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey = identitySessionKey
                         onLog(
                             "AI 联系人身份采集终态：IDENTITY_CAPTURE_TIMEOUT；" +
                                 "request=${identityOutcome.request.name}；" +
@@ -5841,7 +5758,7 @@ class AiReplyObservationRuntime(
                                 "保留原安全门禁，不允许仅凭昵称生成草稿")
                             return
                         }
-                        identityCaptureTerminalSessionKey = identitySessionKey
+                        privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey = identitySessionKey
                         onLog("AI 联系人身份采集终态：${identityOutcome.failureReason}；" +
                             "待独立复核当前目标会话后降级当前窗口消息，不关联历史联系人")
                     }
@@ -5850,15 +5767,15 @@ class AiReplyObservationRuntime(
             }
         }
         if (privateDetail && identityJustVerified) {
-            identityCaptureTimeoutTask?.cancel()
-            identityCaptureTimeoutTask = null
+            privateMessagesTraversalTaskExecutor.identityCaptureTimeoutTask?.cancel()
+            privateMessagesTraversalTaskExecutor.identityCaptureTimeoutTask = null
             onLog("AI OCR 消息读取：身份已确认并返回原聊天页；丢弃旧批次，重新触发当前会话 OCR")
             readVisibleMessages(snapshot)
             return
         }
         val currentWindowOnlyFallback = privateDetail && !observedDetail &&
             currentSessionWindowKey != null &&
-            identityCaptureTerminalSessionKey == currentSessionWindowKey
+            privateMessagesTraversalTaskExecutor.identityCaptureTerminalSessionKey == currentSessionWindowKey
         if (currentWindowOnlyFallback && !isFreshCurrentTargetForIdentityFallback(snapshot)) {
             onLog("AI 身份降级门禁[CURRENT_TARGET_NOT_CONFIRMED]：当前目标会话或新鲜窗口校验不足；" +
                 "不加载历史、不启动草稿；等待重新观察")
@@ -5870,7 +5787,7 @@ class AiReplyObservationRuntime(
             val candidate = currentSessionCandidate
             if (!privateDetail || entry == null || candidate == null ||
                 entry.conversationKey != snapshot.conversationIdentityKey() ||
-                currentWindowOnlyFallback || currentSessionBinding?.matchesRestoredChatSurface(snapshot) != true ||
+                currentWindowOnlyFallback || privateMessagesTraversalTaskExecutor.currentSessionBinding?.matchesRestoredChatSurface(snapshot) != true ||
                 !privateMessagesTraversalTaskExecutor.verifyUnfinishedIdentity(candidate)
             ) {
                 onLog("AI 私聊业务[RECOVERY_IDENTITY_WAIT]：尚未重新确认原会话及平台身份；禁止草稿和发送核验")
@@ -5975,7 +5892,7 @@ class AiReplyObservationRuntime(
             val executor = privateMessagesTraversalTaskExecutor
             val entry = executor.currentUnfinishedSession()
             val identityKey = ChatSessionManagementPolicy.stableSessionKeyForVerifiedContact(
-                currentSessionBinding?.observedVerifiedIdentity?.contactId
+                privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedVerifiedIdentity?.contactId
             )
             if (entry == null) {
                 // A previously completed/no-reply visit may still be awaiting BACK.
@@ -6041,7 +5958,7 @@ class AiReplyObservationRuntime(
         }
         val rowIdentity = when {
             receivedGreetingsTaskActive -> receivedGreetingsTaskFlow.currentContactIdentity()
-            observedDetail -> currentSessionBinding?.observedVerifiedIdentity
+            observedDetail -> privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedVerifiedIdentity
             else -> currentSessionCandidate?.contactIdentity
         }
         // Received greetings uses only the identity collected from the current avatar/profile.
@@ -6127,7 +6044,7 @@ class AiReplyObservationRuntime(
                     }
                 }
             } else if (observedDetail && taskCoordinator != null) {
-                val lease = currentSessionBinding?.observedTaskLease
+                val lease = privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedTaskLease
                 if (lease == null || !observedPrivateDetailVerified(snapshot)) false
                 else taskCoordinator.withCurrentLease(lease, invokeDraft) ?: false
             } else {
@@ -6462,8 +6379,8 @@ class AiReplyObservationRuntime(
             sessionTransitionTask?.cancel()
             sessionTransitionTask = null
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
-            confirmedPrivateReturnBackRetryCount = 0
-            confirmedPrivateReturnAwaitingRecovery = false
+            privateMessagesTraversalTaskExecutor.confirmedPrivateReturnBackRetryCount = 0
+            privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery = false
             val observationCompleted = currentSessionReadCaptured
             val sendAlreadyRecorded = currentSessionSendConfirmed
             onLog(
@@ -6500,7 +6417,7 @@ class AiReplyObservationRuntime(
             maxNoProgressScrolls = MAX_NO_PROGRESS_SCROLLS,
             allowExpectedSessionReturnViewportChange = allowExpectedSessionReturnViewportChange,
             allowCollectionTopConfirmation = !receivedGreetingsTaskActive,
-            preferredRetryKey = missedPrivateSessionTapKey
+            preferredRetryKey = privateMessagesTraversalTaskExecutor.missedPrivateSessionTapKey
         )
         privateMessagesCheckpointRepository?.save(privateMessagesTraversalTaskExecutor.checkpoint())
         if (listEvaluation.unreadAdmissionDecision == PrivateMessagesUnreadAdmissionDecision.UNREAD_BOUNDARY_CONFIRMED &&
@@ -6697,7 +6614,7 @@ class AiReplyObservationRuntime(
         ) {
             // A normal candidate, resolved evidence or a changed position supersedes
             // the parked relocation intent. Existing state/generation checks own callbacks.
-            incompleteUnreadRelocationWait = null
+            privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait = null
         }
         val structuralFingerprint = listEvaluation.structuralFingerprint
         if (next == null) {
@@ -7008,7 +6925,7 @@ class AiReplyObservationRuntime(
     private fun observeIncompleteUnreadRelocation(snapshot: ChatPageSnapshot): Boolean {
         val executor = privateMessagesTraversalTaskExecutor
         if (!executor.canBeginIncompleteUnreadRelocation(snapshot)) {
-            incompleteUnreadRelocationWait = null
+            privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait = null
             return false
         }
         if (!isAiReplyActive() || !sessionRunStarted || receivedGreetingsTaskActive ||
@@ -7017,7 +6934,7 @@ class AiReplyObservationRuntime(
             isConversationDraftPending() || snapshot.packageName != targetPackage() ||
             isSemanticallyUnconfirmed(snapshot)
         ) {
-            incompleteUnreadRelocationWait = null
+            privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait = null
             scheduleSessionListStabilityRetry("异常会话重新定位等待安全页面与空闲任务")
             return true
         }
@@ -7030,13 +6947,13 @@ class AiReplyObservationRuntime(
         }
         val window = snapshot.windowIdentityKey() ?: return false
         val visibleKeys = executor.visibleSessionKeys(snapshot)
-        val wait = incompleteUnreadRelocationWait?.takeIf {
+        val wait = privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait?.takeIf {
             it.runGeneration == currentRunGeneration() &&
                 it.actionGeneration == sessionActionGeneration && it.windowIdentity == window &&
                 it.visibleKeys == visibleKeys
         }
         if (wait?.due == true) {
-            incompleteUnreadRelocationWait = null
+            privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait = null
             if (!ensureAndroidRecoveryReady(snapshot, "PRIVATE_INCOMPLETE_RELOCATION")) {
                 recoverRetryablePrivateList("PRIVATE_INCOMPLETE_RELOCATION_ANDROID_NOT_READY")
                 return true
@@ -7056,11 +6973,11 @@ class AiReplyObservationRuntime(
         val ticket = IncompleteUnreadRelocationWait(
             currentRunGeneration(), sessionActionGeneration, window, visibleKeys
         )
-        incompleteUnreadRelocationWait = ticket
+        privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait = ticket
         privateMessagesCheckpointRepository?.save(executor.checkpoint())
         recordPrivateUnreadDiagnostic("RELOCATION_WAIT", RunLogLevel.WARN, "RETRYABLE", "AI 私聊异常会话[RELOCATION_WAIT]：已确认顶部但原异常未解决；按现有退避等待下一次新鲜列表观察")
         scheduleSessionListStabilityRetry("原异常未读会话受控重新定位") {
-            if (incompleteUnreadRelocationWait === ticket &&
+            if (privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait === ticket &&
                 ticket.runGeneration == currentRunGeneration() &&
                 ticket.actionGeneration == sessionActionGeneration
             ) ticket.due = true
@@ -7368,7 +7285,7 @@ class AiReplyObservationRuntime(
         if (!canPerformPrivateMessagesUiAction() || userInteractionActive ||
             executor.pendingScrollBaseline != null || executor.pendingBoundaryConfirmationKeys != null ||
             executor.identityReturnPending || currentSessionKey != null || currentSessionSendConfirmed ||
-            confirmedPrivateReturnAwaitingRecovery || isPrivateFollowUpActive() ||
+            privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery || isPrivateFollowUpActive() ||
             isSendConfirmationPending() || isConversationDraftPending() || activeSessionGestureRequestId != null
         ) {
             recordPrivateUnreadDiagnostic("HANDOFF_BLOCKED", RunLogLevel.WARN, "BLOCKED", "AI 私聊异常会话[HANDOFF_BLOCKED]：当前事务、手势、恢复或操作权尚未安全交接；保留本轮检查点")
@@ -7407,7 +7324,7 @@ class AiReplyObservationRuntime(
         privateToGreetingsHandoff = handoff
         privateSliceQuota.finishSlice()
         if (handoff == AiReplyTaskYieldReason.DEFERRED_WORK) privateRelocationRetryOwed = true
-        incompleteUnreadRelocationWait = null
+        privateMessagesTraversalTaskExecutor.incompleteUnreadRelocationWait = null
         sessionActionGeneration += 1L
         pageRecoveryVerificationGate.reset(GREETINGS_TO_PRIVATE_HANDOFF_GATE)
         sessionTransitionTask?.cancel()
@@ -7775,36 +7692,14 @@ class AiReplyObservationRuntime(
         }
     }
 
-    /**
-     * A submitted tap is provisional. No-op navigation and page-route recovery must
-     * not persist its selected key as a completed/attempted session. Preserve the
-     * existing traversal checkpoint; only the attempted marker and tentative detail
-     * binding are rolled back, before the unified read-only recovery is saved.
-     */
-    private fun rememberUnverifiedPrivateTap(selectedKey: String) {
-        missedPrivateSessionTapCount = if (missedPrivateSessionTapKey == selectedKey) {
-            missedPrivateSessionTapCount + 1
-        } else {
-            missedPrivateSessionTapKey = selectedKey
-            1
-        }
-    }
-
     private fun rollbackUnverifiedPrivateSessionTap(reason: String): Int {
         if (sessionManagerState != SessionManagerState.OPENING_SESSION) return 0
         val selectedKey = currentSessionKey ?: return 0
-        if (privateMessagesTraversalTaskExecutor.attemptedSessionKeys.remove(selectedKey)) {
-            privateMessagesTraversalTaskExecutor.sessionActionCount =
-                (privateMessagesTraversalTaskExecutor.sessionActionCount - 1).coerceAtLeast(0)
-        }
-        rememberUnverifiedPrivateTap(selectedKey)
-        privateMessagesTraversalTaskExecutor.clearCurrentSession()
-        expectedPrivateSessionDetailNavigation = null
-        currentSessionBinding = null
+        privateMessagesTraversalTaskExecutor.rollbackProvisionalVisit(selectedKey)
         onLog("AI 会话点击[UNVERIFIED_TAP_ROLLBACK]：reason=$reason；" +
-            "attempt=$missedPrivateSessionTapCount；cacheWrite=false；" +
+            "attempt=${privateMessagesTraversalTaskExecutor.missedPrivateSessionTapCount}；cacheWrite=false；" +
             "action=RECOVER_FRESH_LIST_AND_REACQUIRE_ROW；已撤销未成功打开会话的尝试记录")
-        return missedPrivateSessionTapCount
+        return privateMessagesTraversalTaskExecutor.missedPrivateSessionTapCount
     }
 
     private fun attemptOpenSession(candidate: ChatListCandidateSnapshot) =
@@ -7822,8 +7717,8 @@ class AiReplyObservationRuntime(
         // An interrupted visit cannot lend an unearned slice receipt to a new row.
         if (!privateQuotaReturnReady) pendingPrivateQuotaReceipt = null
         currentSessionSendConfirmed = false
-        confirmedPrivateReturnBackRetryCount = 0
-        confirmedPrivateReturnAwaitingRecovery = false
+        privateMessagesTraversalTaskExecutor.confirmedPrivateReturnBackRetryCount = 0
+        privateMessagesTraversalTaskExecutor.confirmedPrivateReturnAwaitingRecovery = false
         pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
 
         // Persist only the business identity used for recovery re-anchoring. The next recovery
@@ -7847,7 +7742,7 @@ class AiReplyObservationRuntime(
                     (!traversal.lockedUnreadSetFinalized ||
                         traversal.phase != SessionListTraversalPhase.SCANNING_BOTTOM_TO_TOP ||
                         traversal.nextFreshReturnCandidate(
-                            fresh, preferredRetryKey = missedPrivateSessionTapKey,
+                            fresh, preferredRetryKey = privateMessagesTraversalTaskExecutor.missedPrivateSessionTapKey,
                             provisionalAttemptKey = key.takeIf {
                                 sessionManagerState == SessionManagerState.OPENING_SESSION && currentSessionKey == it
                             }
@@ -7866,7 +7761,7 @@ class AiReplyObservationRuntime(
                         activeSessionGestureRequestId != requestId ||
                         sessionManagerState != SessionManagerState.OPENING_SESSION
                     ) return@schedule
-                    expectedPrivateSessionDetailNavigation = expectedPrivateSessionDetailNavigation?.copy(
+                    privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation = privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation?.copy(
                         startedAtUptimeMs = uptime
                     )
                     scheduleOpenedSessionVerification()
@@ -7973,7 +7868,7 @@ class AiReplyObservationRuntime(
                             sessionKey = attempt.selectedKey,
                             windowKey = null
                         )
-                        expectedPrivateSessionDetailNavigation = ExpectedPrivateSessionDetailNavigation(
+                        privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation = ExpectedPrivateSessionDetailNavigation(
                             sessionKey = attempt.selectedKey,
                             sessionName = attempt.candidate.nameText,
                             sourceWindowKey = listOf(
@@ -8266,13 +8161,13 @@ class AiReplyObservationRuntime(
      * to the selected conversation. Keep that decision entirely in the message layer.
      */
     private fun isExpectedPrivateSessionDetail(snapshot: ChatPageSnapshot): Boolean {
-        if (currentSessionBinding?.observedBusinessAdmitted == true) {
+        if (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted == true) {
             return observedPrivateBindingMatches(snapshot)
         }
         val selected = currentSessionCandidate ?: return false
         val selectedKey = ChatSessionManagementPolicy.stableSessionKey(selected)
         val currentKey = currentSessionKey ?: return false
-        val expected = expectedPrivateSessionDetailNavigation
+        val expected = privateMessagesTraversalTaskExecutor.expectedPrivateSessionDetailNavigation
         // The business identity gate remains valid for restored/test-created business state
         // where no navigation ticket exists. When a ticket is present, its session key is an
         // additional consistency check, not the identity proof itself.
@@ -8330,7 +8225,7 @@ class AiReplyObservationRuntime(
         ) {
             pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
             onLog("$returnLog[INBOX_VERIFIED]：Back 后重新获取到私聊列表；恢复原遍历游标")
-            if (currentSessionBinding?.observedBusinessAdmitted == true) {
+            if (privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted == true) {
                 requestUnifiedPauseAndCheckpoint(PRIVATE_MESSAGES_TASK_ID, "OBSERVED_DETAIL_RETURN")
                 scheduleFullInspectionAfter(0L)
             } else handleSessionListPage(observed)
@@ -8395,7 +8290,7 @@ class AiReplyObservationRuntime(
         // No old coordinates or node paths are reused. The adapter keeps ownership of
         // the same global BACK operation, including its existing platform safety gates.
         pageRecoveryVerificationGate.reset(CONFIRMED_PRIVATE_RETURN_DETAIL_GATE)
-        confirmedPrivateReturnBackRetryCount += 1
+        privateMessagesTraversalTaskExecutor.confirmedPrivateReturnBackRetryCount += 1
         val accepted = runCatching {
             chatSessionManagementPort.navigateBackToSessionList()
         }.getOrDefault(false)
@@ -8407,7 +8302,7 @@ class AiReplyObservationRuntime(
         // backoff after repeated failures instead of rapidly dispatching global BACK.
         val delayMs = maxOf(
             SESSION_RETURN_VERIFY_DELAY_MS,
-            RecoveryScheduler.readOnlyRetryDelayMs(confirmedPrivateReturnBackRetryCount)
+            RecoveryScheduler.readOnlyRetryDelayMs(privateMessagesTraversalTaskExecutor.confirmedPrivateReturnBackRetryCount)
         )
         scheduleConfirmedPrivateReturnVerification("BACK_RETRY", delayMs)
     }
@@ -8503,7 +8398,7 @@ class AiReplyObservationRuntime(
                 return@schedule
             }
             val current = runCatching { readPageSnapshot(AiReplyPageReadPurpose.RETURN_NAVIGATION_VERIFY) }.getOrNull()
-            val observedVisit = currentSessionBinding?.observedBusinessAdmitted == true
+            val observedVisit = privateMessagesTraversalTaskExecutor.currentSessionBinding?.observedBusinessAdmitted == true
             if (observedVisit && (current == null || !observedPrivateDetailVerified(current) ||
                     !AndroidRecoveryExecutionGate.assess(current, targetPackage(),
                         runCatching { inspectAndroidRecoveryReadiness(current) }.getOrNull()).allowed ||
@@ -8912,28 +8807,28 @@ class AiReplyObservationRuntime(
         reason: String
     ) {
         if (!isAiReplyActive() || !sessionRunStarted) return
-        if (sessionSafeViewportRetryTask != null) return
+        if (privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryTask != null) return
 
         privateMessagesTraversalTaskExecutor.pendingScrollBaseline = null
         privateMessagesTraversalTaskExecutor.pendingScrollToTop = false
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
 
-        val delayMs = if (sessionSafeViewportRetryCount < SESSION_SAFE_VIEWPORT_FAST_RETRIES) {
+        val delayMs = if (privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryCount < SESSION_SAFE_VIEWPORT_FAST_RETRIES) {
             SESSION_SAFE_VIEWPORT_RETRY_DELAY_MS
         } else {
             SESSION_SAFE_VIEWPORT_RETRY_BACKOFF_MS
         }
-        sessionSafeViewportRetryCount += 1
-        val attempt = sessionSafeViewportRetryCount
-        val retryGeneration = sessionSafeViewportRetryGeneration
+        privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryCount += 1
+        val attempt = privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryCount
+        val retryGeneration = privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryGeneration
         val actionGeneration = sessionActionGeneration
         onLog(
             "AI 会话管理[SAFE_VIEWPORT_RETRY]：$reason；保留滚动方向=${if (toTop) "向上审视" else "定位底部"}；" +
                 "第 $attempt 次重新采集；${delayMs}ms 后重新计算，不使用旧坐标、不暂停遍历"
         )
-        sessionSafeViewportRetryTask = scheduler.schedule(delayMs) retry@{
-            sessionSafeViewportRetryTask = null
-            if (retryGeneration != sessionSafeViewportRetryGeneration ||
+        privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryTask = scheduler.schedule(delayMs) retry@{
+            privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryTask = null
+            if (retryGeneration != privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryGeneration ||
                 actionGeneration != sessionActionGeneration ||
                 !isAiReplyActive() || !sessionRunStarted ||
                 sessionManagerState != SessionManagerState.WAITING_FOR_SESSION_LIST
@@ -8979,10 +8874,10 @@ class AiReplyObservationRuntime(
     }
 
     private fun cancelSessionSafeViewportRetry(resetCount: Boolean) {
-        sessionSafeViewportRetryTask?.cancel()
-        sessionSafeViewportRetryTask = null
-        sessionSafeViewportRetryGeneration += 1L
-        if (resetCount) sessionSafeViewportRetryCount = 0
+        privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryTask?.cancel()
+        privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryTask = null
+        privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryGeneration += 1L
+        if (resetCount) privateMessagesTraversalTaskExecutor.sessionSafeViewportRetryCount = 0
     }
 
     /** Acquires the newest page tree and validates it against the last confirmed inbox identity. */
