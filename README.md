@@ -11,7 +11,7 @@ Freedom 是 Android 无障碍辅助交互项目，包含独立的业务 Feature�
 - [OCR 插件架构与安装](docs/ocr/OCR-PLUGIN-ARCHITECTURE.md) · [OCR 设备验收](docs/ocr/OCR-PLUGIN-DEVICE-ACCEPTANCE.md)。
 - [R09-G 工程验收](docs/audits/FRDM-PP-R09-G-FINAL-ENGINEERING-ACCEPTANCE.md) · [G01-A 文档引用审计](docs/audits/FRDM-PP-G01-A-DOCUMENT-INTEGRITY-AUDIT.md)。
 
-历史修复与审计记录不是当前施工任务。当前规范与代码不一致时，按照 AGENTS.md 记录冲突，不以旧设计重建架构。
+历史修复与审计记录不是当前施工任务。需要追溯时查阅 [历史文档归档索引](docs/archive/README.md)。当前规范与代码不一致时，按照 AGENTS.md 记录冲突，不以旧设计重建架构。
 
 ## 构建与交付
 
