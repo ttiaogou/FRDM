@@ -3,6 +3,7 @@ package com.freedom.features.accountbrowse
 import com.freedom.core.runtime.TaskScheduler
 import com.freedom.features.accountbrowse.ports.BrowsePageEvidence
 import com.freedom.features.accountbrowse.ports.BrowsePageKind
+import com.freedom.features.accountbrowse.ports.ImageIndexReadResult
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpoint
 import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepository
 import com.freedom.features.recovery.RecoveryTransactionState
@@ -60,6 +61,72 @@ class AccountBrowseRuntime(
         onReadOnlyObservation = onReadOnlyRecoveryObservation,
         scheduleRepository = recoveryScheduleRepository,
         sharedManager = recoveryTransactionManager
+    )
+
+    /** Read-only image evidence initializes the Feature-owned visit cursor; no gesture admission. */
+    fun initializeImagePaging(
+        page: BrowsePageEvidence,
+        readImagePosition: (BrowsePageEvidence) -> ImageIndexReadResult,
+        navigationActionVerifyTimeoutMs: Long,
+        addLog: (String) -> Unit
+    ) {
+        session.imagePagingProgress = null
+        if (page.pageKind != BrowsePageKind.IMAGE_VIEWER) return
+        val evidence = readImagePosition(page) as? ImageIndexReadResult.Confirmed
+        val plan = evidence?.let { ImageBrowsePlanningPolicy.plan(it.position) }
+        session.imagePagingProgress = ImagePagingProgress(
+            fingerprint = page.fingerprint, plan = plan,
+            deadlineAt = session.detailDwellDueAt + navigationActionVerifyTimeoutMs,
+            finished = evidence?.position?.total == 1
+        )
+        addLog("图片翻阅计划[INIT]：direction=${plan?.direction}；count=${plan?.swipeCount}；保留原详情停留")
+    }
+
+    /** The Feature owner updates return samples before applying the unchanged verification policy. */
+    fun observeFeedReturn(
+        currentSnapshot: String,
+        isFeedList: Boolean,
+        positionMatches: Boolean,
+        requiredSamples: Int
+    ): FeedReturnVerificationPolicy.Decision {
+        val stability = FeedReturnStability.update(
+            previousSnapshot = session.lastReturnedSnapshot,
+            previousSamples = session.returnedStableSamples,
+            currentSnapshot = currentSnapshot,
+            isFeedPage = isFeedList,
+            positionMatches = positionMatches,
+            requiredSamples = requiredSamples
+        )
+        session.lastReturnedSnapshot = stability.lastSnapshot
+        session.returnedStableSamples = stability.stableSamples
+        return FeedReturnVerificationPolicy.decide(
+            rootAvailable = true,
+            isFeedPage = isFeedList,
+            positionMatches = positionMatches,
+            positionStable = stability.isStable,
+            deadlineReached = System.currentTimeMillis() >= session.deadlineAt
+        )
+    }
+
+    /** Project the existing session facts for the interaction classifiers. */
+    fun interactionContext(
+        isMainActivity: (String) -> Boolean,
+        isDetailActivity: (String) -> Boolean
+    ): AccountBrowseInteractionContext = AccountBrowseInteractionContext(
+        phase = phase,
+        isMainActivity = isMainActivity(session.currentActivityClass),
+        isDetailActivity = isDetailActivity(session.currentActivityClass),
+        touchActive = session.touchActive,
+        lastGlobalTouchEventAt = session.lastGlobalTouchEventAt,
+        lastGlobalTouchEventName = session.lastGlobalTouchEventName,
+        lastGlobalTouchEventOrigin = session.lastGlobalTouchEventOrigin,
+        gestureInFlight = session.gestureInFlight,
+        ignoreManualEventsUntil = session.ignoreManualEventsUntil,
+        programmaticActionLabel = session.programmaticActionLabel,
+        dynamicTabWaitStartedAt = session.dynamicTabWaitStartedAt,
+        feedRefreshRecoveryActive = session.feedRefreshRecoveryActive,
+        detailDwellStartedAt = session.detailDwellStartedAt,
+        feedRefreshActionAt = session.feedRefreshActionAt
     )
 
     fun scheduleStep(delayMs: Long) = stepScheduler.schedule(delayMs)

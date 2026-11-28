@@ -356,6 +356,13 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/ai/AiModelCallDiagnostics.kt"
         self.assertEqual("c5f87169bd3e1550109eacb0474aa98d6e026ff2", reviewed_s1[path])
         reviewed_s1[path] = "08280b83bb964694feb8b40244b318d836bc8244"
+        # R08-B: exact relocation into the existing AccountBrowse Runtime; S0 unchanged.
+        path = "app/src/main/java/com/freedom/adapters/accessibility/android/AndroidAccountBrowseWorkflow.kt"
+        self.assertEqual("2c35e3d96bbb595e0bf08d3c1c1257f9ef7b0da6", reviewed_s1[path])
+        reviewed_s1[path] = "329e0f9abe9827248d55ef24dd2541079ca5405a"
+        path = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
+        self.assertEqual("d0fa5ac24dcd1d06981853c058b3b7bd3500d8de", reviewed_s1[path])
+        reviewed_s1[path] = "ce9c2c2e4efd21b72e4c450a3cbaaa316b18cc99"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

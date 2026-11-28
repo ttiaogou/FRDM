@@ -139,6 +139,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R08-A exact reviewed diagnostic lifecycle relocation.
                 self.assertEqual("6bc4ccf5b5b2e810227fb5f40027618fdd1ea6dd", expected[path])
                 expected[path] = "be349c8ace2514cb4e75597f513048d493c320f2"
+                # R08-B exact reviewed browse evidence relocation.
+                self.assertEqual("be349c8ace2514cb4e75597f513048d493c320f2", expected[path])
+                expected[path] = "67fce22dc06c5840f164aa58f76bd10e9741805c"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -212,6 +215,11 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "business/src/test/kotlin/com/freedom/features/aireply/AiReplyObservationRuntimeTest.kt"
                 self.assertEqual("e42a0caa2871b9661ace38bef5019bfd32397fe5", expected[path])
                 expected[path] = "141287073659ea627d52443d2f8c9310c065dd21"
+            if field == "protected_test_files":
+                # R08-B: source assertions follow the actual Feature owner; all platform gates remain.
+                path = "app/src/test/java/com/freedom/architecture/AccountBrowseManualHandoffBoundaryTest.kt"
+                self.assertEqual("3ae02f95b291a0bf127794d4ffdb1f9fd9d57f84", expected[path])
+                expected[path] = "3b0f76367242cf64aa4f4e498e17b4252971e61d"
             issues.extend(evidence_violations(ROOT, expected))
         # New R04 regression evidence is pinned independently of the historical inventory.
         issues.extend(evidence_violations(ROOT, {
@@ -350,6 +358,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r08_draft_diagnostics_migration.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "630af8b38c711dfc3660d350296ef28447e7c5ba"
+        # R08-B preserves prior evidence and pins exact migration of source assertions.
+        path = "tools/architecture/test_pp_r08_browse_runtime_migration.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "e618aa641cc85c401cba9656b1ca29c70e0b8481"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

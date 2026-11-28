@@ -35,7 +35,6 @@ import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepositor
 import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.accountbrowse.AccountBrowseSessionStatePort
 import com.freedom.features.accountbrowse.FeedRefreshVerificationPolicy
-import com.freedom.features.accountbrowse.FeedReturnStability
 import com.freedom.features.accountbrowse.FeedReturnVerificationPolicy
 import com.freedom.features.accountbrowse.ImageBrowsePlanningPolicy
 import com.freedom.features.accountbrowse.ImagePagingProgress
@@ -2406,16 +2405,7 @@ internal class AndroidAccountBrowseWorkflow(
             .getOrElse { ImageIndexReadResult.Unavailable(ImageIndexUnavailableReason.NODE_READ_FAILED) }
 
     private fun initializeImagePaging(page: BrowsePageEvidence) {
-        accountBrowseSession.imagePagingProgress = null
-        if (page.pageKind != BrowsePageKind.IMAGE_VIEWER) return
-        val evidence = readImagePosition(page) as? ImageIndexReadResult.Confirmed
-        val plan = evidence?.let { ImageBrowsePlanningPolicy.plan(it.position) }
-        accountBrowseSession.imagePagingProgress = ImagePagingProgress(
-            fingerprint = page.fingerprint, plan = plan,
-            deadlineAt = accountBrowseSession.detailDwellDueAt + NAVIGATION_ACTION_VERIFY_TIMEOUT_MS,
-            finished = evidence?.position?.total == 1
-        )
-        addLog("图片翻阅计划[INIT]：direction=${plan?.direction}；count=${plan?.swipeCount}；保留原详情停留")
+        accountBrowseRuntime.initializeImagePaging(page, ::readImagePosition, NAVIGATION_ACTION_VERIFY_TIMEOUT_MS, ::addLog)
     }
 
     /** True means this detail step is waiting for fresh evidence or one gesture result.
@@ -2785,21 +2775,9 @@ internal class AndroidAccountBrowseWorkflow(
      */
     internal fun currentMonitorPageContext(): String = monitorPageContext()
 
-    private fun interactionContext(): AccountBrowseInteractionContext = AccountBrowseInteractionContext(
-        phase = accountBrowsePhase,
-        isMainActivity = socialBrowsePort.isMainActivity(accountBrowseSession.currentActivityClass),
-        isDetailActivity = socialBrowsePort.isDetailActivity(accountBrowseSession.currentActivityClass),
-        touchActive = accountBrowseSession.touchActive,
-        lastGlobalTouchEventAt = accountBrowseSession.lastGlobalTouchEventAt,
-        lastGlobalTouchEventName = accountBrowseSession.lastGlobalTouchEventName,
-        lastGlobalTouchEventOrigin = accountBrowseSession.lastGlobalTouchEventOrigin,
-        gestureInFlight = accountBrowseSession.gestureInFlight,
-        ignoreManualEventsUntil = accountBrowseSession.ignoreManualEventsUntil,
-        programmaticActionLabel = accountBrowseSession.programmaticActionLabel,
-        dynamicTabWaitStartedAt = accountBrowseSession.dynamicTabWaitStartedAt,
-        feedRefreshRecoveryActive = accountBrowseSession.feedRefreshRecoveryActive,
-        detailDwellStartedAt = accountBrowseSession.detailDwellStartedAt,
-        feedRefreshActionAt = accountBrowseSession.feedRefreshActionAt
+    private fun interactionContext(): AccountBrowseInteractionContext = accountBrowseRuntime.interactionContext(
+        isMainActivity = socialBrowsePort::isMainActivity,
+        isDetailActivity = socialBrowsePort::isDetailActivity
     )
 
     internal fun isTrackedInteractionEvent(eventType: AccessibilityEventType): Boolean =
@@ -2943,22 +2921,8 @@ internal class AndroidAccountBrowseWorkflow(
             socialBrowsePort.captureVisibleFeedSnapshot(listOnly = true)
         } else ""
         val positionMatches = isFeedList && scrollExecutor.isFeedPositionRestored(accountBrowseSession.sourceSnapshot, currentSnapshot)
-        val stability = FeedReturnStability.update(
-            previousSnapshot = accountBrowseSession.lastReturnedSnapshot,
-            previousSamples = accountBrowseSession.returnedStableSamples,
-            currentSnapshot = currentSnapshot,
-            isFeedPage = isFeedList,
-            positionMatches = positionMatches,
-            requiredSamples = REQUIRED_STABLE_PAGE_SAMPLES
-        )
-        accountBrowseSession.lastReturnedSnapshot = stability.lastSnapshot
-        accountBrowseSession.returnedStableSamples = stability.stableSamples
-        val decision = FeedReturnVerificationPolicy.decide(
-            rootAvailable = true,
-            isFeedPage = isFeedList,
-            positionMatches = positionMatches,
-            positionStable = stability.isStable,
-            deadlineReached = System.currentTimeMillis() >= accountBrowseSession.deadlineAt
+        val decision = accountBrowseRuntime.observeFeedReturn(
+            currentSnapshot, isFeedList, positionMatches, REQUIRED_STABLE_PAGE_SAMPLES
         )
         when (decision) {
             FeedReturnVerificationPolicy.Decision.RESTORED -> {
