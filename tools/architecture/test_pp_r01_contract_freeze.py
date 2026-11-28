@@ -223,6 +223,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r07_private_visit_migration.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "b8f63983f68c2949c2145234c2225ac8e4bfbfe6"
+        # R07-C CI fix: preserve R06-B mutation coverage at its relocated live binding owner.
+        path = "tools/architecture/test_pp_r06_page_evidence_migration.py"
+        self.assertEqual("75bb710a68fffd979258b4b7f453694cc86cfa40", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "1505d976cf8940d96a936b1bdda5d05ef216199d"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

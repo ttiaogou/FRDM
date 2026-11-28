@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
 from tools.architecture.test_pp_r06_private_candidate_migration import restore_r06b_runtime
+from tools.architecture.test_pp_r07_private_visit_migration import restore_r07b_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 AI = ROOT / "business/src/main/kotlin/com/freedom/features/aireply/"
@@ -75,5 +76,11 @@ class PpR06PageEvidenceMigrationTest(unittest.TestCase):
             self.assertIn(old, owner)
             with self.subTest(old=old), self.assertRaises(AssertionError):
                 restore_r06a_runtime(runtime, owner.replace(old, new, 1))
+        # R07-C relocated CurrentSessionBinding to the private traversal owner.
+        # Mutate the live expression, not a historical Runtime location where replace is a no-op.
+        binding_owner = (AI / "PrivateMessagesTraversalTaskExecutor.kt").read_text(encoding="utf-8")
+        self.assertNotIn(NESTED_CALL, runtime)
+        self.assertEqual(1, binding_owner.count(NESTED_CALL))
+        restore_r07b_runtime(runtime, binding_owner)
         with self.assertRaises(AssertionError):
-            restore_r06a_runtime(runtime.replace(NESTED_CALL, "true", 1), owner)
+            restore_r07b_runtime(runtime, binding_owner.replace(NESTED_CALL, "true", 1))
