@@ -3,6 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r08_private_viewport_policy_migration import restore_r08b_private_owner
 from tools.architecture.test_pp_r07_paired_task_lifecycle_migration import restore_r07f_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -97,6 +98,7 @@ def _restore_owner(source, expected, previous, inverse):
     return source
 
 def restore_r07e_private_owner(owner):
+    owner = restore_r08b_private_owner(owner)
     return _restore_owner(owner, PRIVATE_OWNER, PRIVATE_PREVIOUS, PRIVATE_INVERSE)
 
 def restore_r07e_read_owner(owner):

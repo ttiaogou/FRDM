@@ -44,6 +44,57 @@ enum class ChatHeaderMatchMode {
 
 /** Pure rules for selecting stable, geometrically safe session-row candidates. */
 object ChatSessionManagementPolicy {
+    internal const val COLLECTION_POSITION_PREFIX = "collection-position:"
+
+    internal fun visibleSessionKeys(snapshot: ChatPageSnapshot): List<String> =
+        ChatSessionManagementPolicy.orderBottomToTop(
+            snapshot.chatListCandidates.filter {
+                ChatSessionManagementPolicy.isCompleteBoundaryEvidence(it, snapshot.chatListViewport)
+            }
+        ).mapNotNull { candidate ->
+            val identityKey = ChatSessionManagementPolicy.stableSessionKey(candidate)
+            if (identityKey.isBlank()) return@mapNotNull null
+            // Keep exact geometry for boundary, identity-return and checkpoint proof.
+            // Position continuity is evaluated separately; row indexes are not identities.
+            "$identityKey@${candidate.rowBounds.left},${candidate.rowBounds.top}," +
+                "${candidate.rowBounds.right},${candidate.rowBounds.bottom}"
+        }
+
+    private fun collectionPositionKey(snapshot: ChatPageSnapshot): String? =
+        validatedCollectionRows(snapshot)?.let { rows ->
+            "$COLLECTION_POSITION_PREFIX${snapshot.windowIdentityKey()}:${rows.first()}:${rows.last()}"
+        }
+
+    internal fun collectionPositionFromKey(key: String?): Pair<String, IntRange>? {
+        if (key == null || !key.startsWith(COLLECTION_POSITION_PREFIX)) return null
+        val last = key.substringAfterLast(':').toIntOrNull() ?: return null
+        val prefix = key.substringBeforeLast(':')
+        val first = prefix.substringAfterLast(':').toIntOrNull() ?: return null
+        if (first < 0 || last < first) return null
+        return prefix.substringBeforeLast(':') to (first..last)
+    }
+
+    internal fun orderedIdentityKeys(keys: List<String>): List<String> =
+        keys.filterNot { it.startsWith(COLLECTION_POSITION_PREFIX) }
+            .map { it.substringBefore('@') }.filter(String::isNotBlank)
+
+    /** Transient scroll baseline: compare row range first; retain old evidence as fallback. */
+    internal fun scrollPositionKeys(snapshot: ChatPageSnapshot): List<String> {
+        val legacy = visibleSessionKeys(snapshot)
+        if (legacy.isEmpty()) return legacy
+        return collectionPositionKey(snapshot)?.let { listOf(it) + legacy } ?: legacy
+    }
+
+    /** Keep the independent, complete-row boundary stability check; never downgrade a
+     * collection-proven boundary to an identity-only observation when evidence disappears. */
+    internal fun boundaryConfirmationKeys(snapshot: ChatPageSnapshot): List<String> {
+        val legacy = visibleSessionKeys(snapshot)
+        if (legacy.isEmpty()) return legacy
+        val position = collectionPositionKey(snapshot) ?: return legacy
+        return listOf("$position:${snapshot.chatListCollectionRowCount}:" +
+            "${snapshot.chatListCanScrollForward}:${snapshot.chatListCanScrollBackward}") + legacy
+    }
+
     /** Live contiguous collection positions, never recycled child indexes. */
     fun validatedCollectionRows(snapshot: ChatPageSnapshot): List<Int>? {
         if (snapshot.pageKind != ChatPageKind.CHAT_LIST || snapshot.chatListExtractionTruncated ||

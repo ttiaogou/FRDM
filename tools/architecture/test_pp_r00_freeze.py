@@ -363,6 +363,13 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/accountbrowse/AccountBrowseRuntime.kt"
         self.assertEqual("d0fa5ac24dcd1d06981853c058b3b7bd3500d8de", reviewed_s1[path])
         reviewed_s1[path] = "ce9c2c2e4efd21b72e4c450a3cbaaa316b18cc99"
+        # R08-C: pure viewport evidence moves to the existing session policy; S0 unchanged.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/PrivateMessagesTraversalTaskExecutor.kt"
+        self.assertEqual("1d12a483673719255862b5c512c8db9fd9219fad", reviewed_s1[path])
+        reviewed_s1[path] = "a1fd5cff7c8ea79204658ea942b2e8e2a5048cb4"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ports/ChatSessionManagementPolicy.kt"
+        self.assertEqual("fb8d97a3a33e6c576cc636f7eb95b00f838d6167", reviewed_s1[path])
+        reviewed_s1[path] = "bd4a945fd3c7835704e7731f7f1c862f18ff4b7f"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

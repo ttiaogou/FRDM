@@ -142,6 +142,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R08-B exact reviewed browse evidence relocation.
                 self.assertEqual("be349c8ace2514cb4e75597f513048d493c320f2", expected[path])
                 expected[path] = "67fce22dc06c5840f164aa58f76bd10e9741805c"
+                # R08-C exact reviewed private viewport policy relocation.
+                self.assertEqual("67fce22dc06c5840f164aa58f76bd10e9741805c", expected[path])
+                expected[path] = "2b233aeab2e7c5183d9c47c633276bb141ddd165"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -362,6 +365,16 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r08_browse_runtime_migration.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "e618aa641cc85c401cba9656b1ca29c70e0b8481"
+        # R08-C preserves all historical inverse checks and pins the new direct tests.
+        path = "tools/architecture/test_pp_r07_send_follow_up_lifecycle_migration.py"
+        self.assertEqual("edbd28d0d71fd21cb159de419b64c345af7076ce", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "9aeb3c8b2a21a49276e1d330dec8faf102fd5e7e"
+        for path, replacement in {
+            "tools/architecture/test_pp_r08_private_viewport_policy_migration.py": "5fbe0ee152b30e1f05e67d3bb07c6e21f8ed1347",
+            "business/src/test/kotlin/com/freedom/features/aireply/ports/R08PrivateViewportPolicyTest.kt": "7782eff5c10d273eaa61706da7c5c5b9d585d961",
+        }.items():
+            self.assertNotIn(path, reviewed_migration_evidence)
+            reviewed_migration_evidence[path] = replacement
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
