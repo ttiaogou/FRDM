@@ -3,6 +3,7 @@ import unittest
 import re
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_d01c_combined_export_migration import restore_d01c_source
 
 ROOT = Path(__file__).resolve().parents[2]
 ACTIVITY = "app/src/main/java/com/freedom/MainActivity.kt"
@@ -24,6 +25,7 @@ def restore_exact(source, removals, expected):
 
 
 def restore_d01b_activity(source):
+    source = restore_d01c_source(ACTIVITY, source)
     return restore_exact(source, ACTIVITY_REMOVALS, PREVIOUS[ACTIVITY])
 
 
@@ -31,6 +33,8 @@ class D01bNodeZipRetirementTest(unittest.TestCase):
     def test_exact_removals_only_and_retained_cache_contract(self):
         for path, removals in ((ACTIVITY, ACTIVITY_REMOVALS), (CACHE, CACHE_REMOVALS)):
             source = (ROOT / path).read_text(encoding="utf-8")
+            if path == ACTIVITY:
+                source = restore_d01c_source(path, source)
             self.assertEqual(CURRENT[path], git_blob(source.encode("utf-8")))
             self.assertEqual(PREVIOUS[path], git_blob(restore_exact(source, removals, PREVIOUS[path]).encode("utf-8")))
         activity = (ROOT / ACTIVITY).read_text(encoding="utf-8")

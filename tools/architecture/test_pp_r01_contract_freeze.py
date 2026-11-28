@@ -253,6 +253,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # D01-B: exact reviewed S1 node ZIP retirement; all S0 pins remain.
                 self.assertEqual("2cdc86e6aea3926b836a937c9e608bc1fdb15e6f", expected[path])
                 expected[path] = "82f2d6f342a6dd3e4f89fc385d1958f236700aa3"
+                # D01-C exact approved export-range changes.
+                self.assertEqual("82f2d6f342a6dd3e4f89fc385d1958f236700aa3", expected[path])
+                expected[path] = "35228cb4bc9cd4a72b81bfb014550b9891070d05"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -346,6 +349,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "app/src/test/java/com/freedom/architecture/FloatingWindowLifecycleBoundaryTest.kt"
                 self.assertEqual("b7e725a22c349128aa720bf32fa8e13f95336ca9", expected[path])
                 expected[path] = "9dc38c8285e88d2d30f033f414f46b7111e6eab2"
+                # D01-C: preserve historical floating checks and update only authorized menu expectations.
+                self.assertEqual("9dc38c8285e88d2d30f033f414f46b7111e6eab2", expected[path])
+                expected[path] = "0d3ac1e093e9a90f10290a2d11c463a94bcfe160"
             if field == "protected_rule_files":
                 # G01-E: only the explicitly approved append-only AGENTS governance navigation.
                 # Preserve the original manifest pin and verify the exact new full blob.
@@ -596,12 +602,23 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_d01b_node_zip_retirement.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "3fdc82bc0c55b47f47ae544f8fa08c29b9feaa31"
+        # D01-C preserves the D01-B inverse, extending it by an exact reviewed change.
+        self.assertEqual("3fdc82bc0c55b47f47ae544f8fa08c29b9feaa31", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "37b9ed6d70d625b1412b6496e3ca89920ec93db2"
+        for path, replacement in {
+            "tools/architecture/test_pp_d01c_combined_export_migration.py": "57e04ae8b0de0f182ee7c31417c1e76b7404875f",
+            "app/src/test/java/com/freedom/ui/logs/D01cCombinedExportTest.kt": "73bd68e842bf5c010f56aa0b0047d1bd34cf3db1",
+        }.items():
+            self.assertNotIn(path, reviewed_migration_evidence)
+            reviewed_migration_evidence[path] = replacement
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
     def test_d01b_floating_export_contract_exact_migration(self):
         path = ROOT / "app/src/test/java/com/freedom/architecture/FloatingWindowLifecycleBoundaryTest.kt"
         source = path.read_text(encoding="utf-8")
+        from tools.architecture.test_pp_d01c_combined_export_migration import FLOATING_TEST, restore_d01c_source
+        source = restore_d01c_source(FLOATING_TEST, source)
         self.assertEqual("9dc38c8285e88d2d30f033f414f46b7111e6eab2", git_blob(source.encode("utf-8")))
         for current, previous in [["            .substringBefore(\"private fun confirmSessionSampleExport(\")\n","            .substringBefore(\"private fun launchNodeDumpExport(\")\n"],["        assertFalse(recordsEntry.contains(\"launchNodeDumpExport()\"))\n        assertFalse(activity.contains(\"private fun launchNodeDumpExport(\"))\n","        assertTrue(recordsEntry.contains(\"launchNodeDumpExport()\"))\n"]]:
             self.assertEqual(1, source.count(current))

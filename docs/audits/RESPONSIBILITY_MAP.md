@@ -48,6 +48,11 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 - OWN-31：证据基线 285c3d123d533e26aa68f3d2fab5d5b968329504。MainActivity 保留唯一诊断与采集 ZIP 导出事务；本轮退役独立节点 ZIP 保存事务。原 R08-D 逆向检查通过新增精确迁移继续适用，CI 待验证。
 - OWN-32：悬浮可视化由 GlobalNodeLayoutVisualizationUseCase 持有实时窗口快照，NodeBoundsHighlightOverlay/NodeHierarchyOverlay 展示，NodeLayoutSnapshotExporter 保存布局。LatestAccessibilityNodeDump 仅移除独立 ZIP 打包能力，旧读写者仍保留：S0 Service、AppCompositionRoot、业务节点输出及监控预览。历史节点归档由 MomoChatSampleNodeTreeStore 持有，不与实时可视化缓存合并。完整引用与生命周期复核仍未完成，C 状态保留。
 
+## D01-C 职责补证
+
+- OWN-31：基线 c8859f33eef335a523401aa586d6d6ca48716107，完整 CI 46142186044 success。MainActivity 仍唯一持有导出和封存等待事务；CollectionExportDialog 仅展示，SessionSampleArchiveManager 唯一执行 ZIP 组合、校验及保护性清理；三种范围仅改变输入集合，不新建状态所有者。D01-C 新 CI 待验。
+- OWN-30：RunDiagnosticsManager 仍持有诊断历史锁及 active/finalizing 排除集合；综合范围保留已有关联诊断报告兼容且不放宽未关联诊断或删除授权。诊断记录写入、归档格式及 S0 未改。
+
 ## 证据及覆盖边界
 
 - [R09-A](FRDM-PP-R09-A-REPOSITORY-ARCHITECTURE-ACCEPTANCE.md)、[R09-C](FRDM-PP-R09-C-ENTRY-STATE-UI-OWNERSHIP-ACCEPTANCE.md)、[R09-D](FRDM-PP-R09-D-RECOVERY-CHECKPOINT-ASYNC-ISOLATION.md)、[R09-G](FRDM-PP-R09-G-FINAL-ENGINEERING-ACCEPTANCE.md) 为验收证据，[历史归档](../archive/README.md) 供追溯。

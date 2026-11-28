@@ -33,22 +33,24 @@ DOC-001～006 的关闭仅针对文档问题，证据为 G01-C HEAD 的 [架构�
 
 ## D01 专项事项
 
-证据基线：285c3d123d533e26aa68f3d2fab5d5b968329504（G01-F，完整 CI 46139876328 success）。D01-B 仅完成独立节点 ZIP 退役；原 S0 清单、Service、采集、监控、归档和现有可视化代码不变。D01-B 首次 CI 46140766984：架构、APK、OCR、CodeQL 通过，App 单测 961 项中 1 项失败；旧 FloatingWindowLifecycleBoundaryTest 仍要求已退役入口存在。修复只迁移该过期断言及截取边界，R01 保留原证据及新增精确逆向，修复提交 CI 待验证；不关闭待验事项。R09G-G01/G04 保留原编号。
+证据基线：285c3d123d533e26aa68f3d2fab5d5b968329504（G01-F，完整 CI 46139876328 success）。D01-B 仅完成独立节点 ZIP 退役；原 S0 清单、Service、采集、监控、归档和现有可视化代码不变。D01-B 首次 CI 46140766984：架构、APK、OCR、CodeQL 通过，App 单测 961 项中 1 项失败；旧 FloatingWindowLifecycleBoundaryTest 仍要求已退役入口存在。修复只迁移该过期断言及截取边界，R01 保留原证据及新增精确逆向，修复提交 c8859f33eef335a523401aa586d6d6ca48716107 完整 CI 46142186044 success；真机仍待验，不关闭待验事项。R09G-G01/G04 保留原编号。
 
 | ID | 分类/等级 | 证据与影响 | 状态 | 后续处置及关闭/复核依据 |
 | --- | --- | --- | --- | --- |
-| D01-001 | 导出/高 | OWN-31/32：MainActivity 节点 ZIP 入口与专属事务、LatestAccessibilityNodeDump.createArchive 已精确移除 | VERIFY_PENDING | 本提交 CI、真机入口检查 |
+| D01-001 | 导出/高 | OWN-31/32：独立节点 ZIP 入口与专属事务、createArchive 已退役；D01-B 修复提交 CI 46142186044 success | VERIFY_PENDING | 真机入口检查 |
 | D01-002 | 缓存/高 | OWN-32：LatestAccessibilityNodeDump 与 GlobalNodeLayoutVisualizationUseCase 分别保存节点；前者仍有 S0 Service 高亮接收器读取 | OPEN | 不改 S0；先完成引用审计、冻结范围决议 |
 | D01-003 | 缓存/高 | MomoSocialAdapter.onNodeTreeSnapshot 经 AppCompositionRoot 写入旧自动缓存；仍有 S0 读取者 | OPEN | 与 D01-002 同步收敛，保留正式归档 |
 | D01-004 | 入口/中 | 旧 ACTION_MANUAL_NODE_CAPTURE 接收器仍注册，现行 UI 未发现发送者 | CANDIDATE | 全仓引用及动态入口核验；S0 独立决议 |
 | D01-005 | 接口/中 | NodeInspectorDialog、NodeCapturePresentationPort 等旧检查器关联组件 | CANDIDATE | 全仓引用、测试保护及实际入口核查后处理 |
-| D01-006 | 导出/中 | 独立节点 ZIP SAF 请求码、临时文件及保存回调已精确移除 | VERIFY_PENDING | D01-B CI 及真机回归 |
+| D01-006 | 导出/中 | 独立节点 ZIP SAF 请求码、临时文件及保存回调已精确移除；CI 46142186044 success | VERIFY_PENDING | 真机回归 |
 | D01-007 | 调度/中 | AndroidMonitorPreviewScheduler 350ms 防抖与监控摘要仍有生产用途 | CANDIDATE | 保留有效调度；后续核查全部摘要消费者 |
-| D01-008 | 导出/高 | 缺少默认综合导出；现有 createExportBundle 已支持组合数据范围 | OPEN | D01-C 复用原聚合、保存和清理事务 |
-| D01-009 | 兼容/高 | includeAllDiagnostics 改变关联诊断目录封存判断，存在旧归档兼容差异 | OPEN | D01-C 验证兼容且不放宽封存保护 |
+| D01-008 | 导出/高 | D01-C：主界面及悬浮入口共用三范围菜单，综合导出默认，全部已封存样本和全量诊断使用原事务 | VERIFY_PENDING | 新提交 CI 及真机三范围验证 |
+| D01-009 | 兼容/高 | D01-C：组合范围保留旧关联诊断报告兼容；未关联历史仍要求 diagnostic_manifest，active/finalizing 排除和删除保护不变 | VERIFY_PENDING | 新组合范围测试及完整 CI |
 | D01-010 | 遗留/中 | SessionSampleArchiveManager.createBatchArchive 仍有测试引用，未证明生产不可达 | CANDIDATE | D01-D 全量引用核验 |
-| D01-011 | 交互/中 | 导出成功可能安全清理源数据，入口提示不充分 | OPEN | D01-C 明确范围及清理提示 |
-| D01-012 | 导出/中 | 原节点 ZIP 默认优先手动缓存而非时间最新，相关方法已移除 | VERIFY_PENDING | 随 D01-001 验收 |
+| D01-011 | 交互/中 | D01-C：统一菜单提示校验成功后保护性清理，综合确认再次提示隐私及取消/失败保留 | VERIFY_PENDING | 真机导出、取消与失败验证 |
+| D01-012 | 导出/中 | 原节点 ZIP 默认优先手动缓存而非时间最新；相关方法已移除，CI 46142186044 success | VERIFY_PENDING | 随 D01-001 真机验收 |
+
+D01-C 证据基线 c8859f33eef335a523401aa586d6d6ca48716107（完整 CI 46142186044 success）。本阶段不修改节点缓存、旧广播、S0 或持久化归档格式。新提交 CI 未验证。活动目录最终复制校验仍严格执行；旧关联诊断无删除清单时仍保留源目录。
 
 ## 持续扫描范围
 

@@ -456,6 +456,13 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "app/src/main/java/com/freedom/adapters/accessibility/diagnostics/LatestAccessibilityNodeDump.kt"
         self.assertEqual("0373e7e20e2d921aebb2559fe910a6c7aed22c67", reviewed_s1[path])
         reviewed_s1[path] = "2d636faa98ed11fdecae133692ab3b4ff720905e"
+        # D01-C: exact approved export-range changes; original S0 and manifests unchanged.
+        path = "app/src/main/java/com/freedom/MainActivity.kt"
+        self.assertEqual("94a8c122f60d52f24d59b4edb96d212a7d6a295d", reviewed_s1[path])
+        reviewed_s1[path] = "099ca52fb0d6dcf1ae9d394fa624725f5d233a3c"
+        path = "app/src/main/java/com/freedom/ui/logs/SessionSampleArchiveManager.kt"
+        self.assertEqual("7840a6f0f279bd4b6f33bc6814c6e053eed059ae", reviewed_s1[path])
+        reviewed_s1[path] = "c1527cfb178dffd2b429924f0a245cb6327edde3"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

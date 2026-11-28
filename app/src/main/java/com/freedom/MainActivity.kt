@@ -1770,16 +1770,67 @@ class MainActivity : Activity() {
             title = "采集与导出",
             actions = listOf(
                 CollectionExportDialog.Action(
-                    label = "采集 ZIP 运行日志",
-                    description = "运行日志、诊断报告及已封存的异常证据",
+                    label = "综合导出 ZIP",
+                    description = "默认打包全部可用已封存采集归档、运行诊断及最近展示日志",
                     primary = true
+                ) { showCombinedExportActions() },
+                CollectionExportDialog.Action(
+                    label = "导出运行诊断 ZIP",
+                    description = "运行日志、诊断报告、已封存异常证据"
                 ) { launchLogExport() },
                 CollectionExportDialog.Action(
-                    label = "已封存采集归档 ZIP",
-                    description = "查看归档、选择导出或等待当前采集封存"
+                    label = "导出完整采集归档 ZIP",
+                    description = "会话样本、截图、OCR、节点树及关联运行诊断；可选择归档或等待封存"
                 ) { showArchiveExportActions() },
-            )
+            ),
+            message = "导出可能包含个人信息。保存并回读校验成功后，符合保护条件的源数据及已导出的展示日志将被清理；取消或保存失败保留原始数据。"
         )
+    }
+
+    private fun showCombinedExportActions() {
+        val archives = listSessionSampleArchives()
+        val activeRunIds = SessionSampleArchiveManager.listActiveRunIds(sessionSampleRunsDirectory())
+        if (activeRunIds.isEmpty()) {
+            confirmCombinedExport(archives)
+            return
+        }
+        val actions = listOf(
+            CollectionExportDialog.Action(
+                label = "导出当前全部已封存数据",
+                description = "不停止当前运行；活动或尚未封存的数据不参与导出",
+                primary = true
+            ) { confirmCombinedExport(archives) },
+            CollectionExportDialog.Action(
+                label = if (monitorRepository.isRunRequested()) "停止当前采集、封存后综合导出" else "等待当前采集封存后综合导出"
+            ) {
+                confirmStopCurrentRunAndExport(activeRunIds) {
+                    confirmCombinedExport(listSessionSampleArchives())
+                }
+            }
+        )
+        CollectionExportDialog.show(
+            activity = this,
+            dp = ::dp,
+            title = "综合导出 ZIP",
+            actions = actions,
+            message = "已有 ${archives.size} 条已封存采集归档；另有 ${activeRunIds.size} 条采集尚未封存。"
+        )
+    }
+
+    private fun confirmCombinedExport(archives: List<SessionSampleArchive>) {
+        AlertDialog.Builder(this)
+            .setTitle("综合导出 ZIP")
+            .setMessage(
+                "全部可用已封存采集归档（${archives.size} 条）、运行诊断、异常证据和最近展示日志将合并为一个 ZIP。\n\n" +
+                    "正在运行或尚未封存的目录不会打包；没有采集归档时仍可导出运行诊断。\n\n" +
+                    "内容可能包含聊天文本、截图及其他个人信息。保存并回读校验成功后，仅清理符合保护条件的源数据及已导出的展示日志；取消或保存失败保留原始数据。"
+            )
+            .setNegativeButton("取消", null)
+            .setPositiveButton("导出 ZIP") { _, _ ->
+                val snapshot = monitorRepository.snapshotDisplayLogsForExport()
+                beginSessionSampleExport(archives, includeAllDiagnostics = true, displayLogs = snapshot)
+            }
+            .show()
     }
 
     private fun showArchiveExportActions() {
@@ -1850,7 +1901,10 @@ class MainActivity : Activity() {
     }
 
     /** Stopping the run is explicit and confirmed; sealing is observed before opening the picker. */
-    private fun confirmStopCurrentRunAndExport(activeRunIds: Set<String>) {
+    private fun confirmStopCurrentRunAndExport(
+        activeRunIds: Set<String>,
+        onSealed: (Set<String>) -> Unit = { showSessionSampleArchiveExportPicker(it) }
+    ) {
         val runRequested = monitorRepository.isRunRequested()
         val message = buildString {
             if (runRequested) {
@@ -1887,7 +1941,8 @@ class MainActivity : Activity() {
                 beginWaitingForSessionArchiveSeal(
                     targetRunIds = activeRunIds,
                     baselineZipNames = baselineZipNames,
-                    requestedAtMillis = requestedAtMillis
+                    requestedAtMillis = requestedAtMillis,
+                    onSealed = onSealed
                 )
             }
             .show()
@@ -1900,7 +1955,8 @@ class MainActivity : Activity() {
             ?.map { it.name }
             ?.toSet()
             .orEmpty(),
-        requestedAtMillis: Long = System.currentTimeMillis()
+        requestedAtMillis: Long = System.currentTimeMillis(),
+        onSealed: (Set<String>) -> Unit = { showSessionSampleArchiveExportPicker(it) }
     ) {
         archiveSealWaitRunnable?.let { archiveSealHandler.removeCallbacks(it) }
         val startedAtMillis = System.currentTimeMillis()
@@ -1941,7 +1997,7 @@ class MainActivity : Activity() {
                     timestamp() + "  采集导出：本轮 ZIP 已完成封存；runIds=${sealedIds.joinToString(",")}"
                 )
                 Toast.makeText(this, "采集 ZIP 已封存，请选择要导出的归档", Toast.LENGTH_LONG).show()
-                showSessionSampleArchiveExportPicker(sealedIds)
+                onSealed(sealedIds)
                 return@Runnable
             }
 
@@ -1955,7 +2011,7 @@ class MainActivity : Activity() {
                     }
                 if (newlySealed.isNotEmpty()) {
                     Toast.makeText(this, "已发现封存归档，请选择导出", Toast.LENGTH_LONG).show()
-                    showSessionSampleArchiveExportPicker(newlySealed.map { it.runId }.toSet())
+                    onSealed(newlySealed.map { it.runId }.toSet())
                 } else {
                     monitorRepository.addLog(
                         timestamp() + "  采集导出：等待 ZIP 封存超时；targetRunIds=${targetRunIds.joinToString(",")}"
@@ -1965,7 +2021,7 @@ class MainActivity : Activity() {
                         "尚未发现本轮已封存 ZIP。请检查运行记录中的“样本包已封存”或封存失败信息；不会访问 Android/data 私有目录。",
                         Toast.LENGTH_LONG
                     ).show()
-                    showSessionSampleArchiveExportPicker()
+                    onSealed(emptySet())
                 }
                 return@Runnable
             }

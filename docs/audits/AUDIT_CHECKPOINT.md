@@ -5,18 +5,18 @@
 | 字段 | 当前记录 |
 | --- | --- |
 | repository / branch | ttiaogou/FRDM / PP |
-| reviewedHead | 6dc090025ab32234804efe415b6f7bf295416056 |
-| reviewedTree | ff4d28518f885a9eb72af8f61353064aeebad827 |
-| 已验收工程基线 | G01-F 285c3d123d533e26aa68f3d2fab5d5b968329504；[完整 CI 46139876328](https://github.com/ttiaogou/FRDM/actions/runs/46139876328) completed/success |
-| 当前任务 | D01-B CI 单项历史测试契约修复 |
-| 当前状态 | PARTIAL_IMPLEMENTED / PRIOR_CI_FAIL / FIX_COMMIT_CI_PENDING；缓存及旧入口受 S0 冻结与引用核查约束 |
-| 验证策略 | 精确 S1 退役及逆向恢复；保留 S0、既有检测及完整 CI；真机待验 |
+| reviewedHead | c8859f33eef335a523401aa586d6d6ca48716107 |
+| reviewedTree | f3221e458bb2ec9846a022235cebd046320c733e |
+| 已验收工程基线 | D01-B CI 修复 c8859f33eef335a523401aa586d6d6ca48716107；[完整 CI 46142186044](https://github.com/ttiaogou/FRDM/actions/runs/46142186044) completed/success |
+| 当前任务 | D01-C 诊断与采集归档统一导出 |
+| 当前状态 | IMPLEMENTED / BASELINE_CI_PASS / COMMIT_CI_PENDING；D01-B 遗留缓存未收敛，真机未验 |
+| 验证策略 | 三种范围复用原事务；精确 S1/测试迁移及完整 CI；真机待验 |
 | 设备验收 | F01–F12 DEFERRED / NOT_RUN；用户独立执行 |
 | 当前职责建档 | 32 项：A 16、B 12、C 4；证据基线仍按职责表，不虚报逐方法核查 |
-| 台账 | 30 项：CLOSED 8、RETAINED 3、CANDIDATE 8、OPEN 6、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 3 |
+| 台账 | 30 项：CLOSED 8、RETAINED 3、CANDIDATE 8、OPEN 3、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 6 |
 | 工作区 | 远端 Git tree/compare；无本地 checkout 验证 |
-| 改动范围 | 仅调整旧节点 ZIP 入口存在性断言及方法截取边界；R01 精确迁移及治理记录；生产源码、S0、原业务保护不改 |
-| 下一阶段 | 核验修复提交完整 CI；D01-B 剩余缓存及旧入口审计与 S0 冻结边界决议；D01-C 综合导出 |
+| 改动范围 | MainActivity 三范围菜单、综合确认及复用封存回调；SessionSampleArchiveManager 关联诊断兼容；相关测试及治理记录；S0/业务采集/归档保存清理不改 |
+| 下一阶段 | 复核 D01-C 完整 CI；D01-B 遗留缓存与 S0 冻结边界仍待专项决议；D01-D 遗留审计按授权处理 |
 
 ## 批次进度
 
@@ -29,7 +29,8 @@
 | G01-E | 完成：导航及精确保护接入，46137618668 完整 CI success |
 | G01-F | 累计差异、规范、归档、结构及已验收基线复核完成；完整 CI 46139876328 success |
 | D01-A | 只读核心链路审计；遗留引用未穷尽 |
-| D01-B | 独立节点 ZIP 退役子项实施，完整 CI 待查；剩余缓存/旧接收器未收敛 |
+| D01-B | 独立节点 ZIP 退役子项实施，修复提交完整 CI 46142186044 success；剩余缓存/旧接收器未收敛 |
+| D01-C | 三范围统一导出已实施；新提交完整 CI 待查 |
 
 ## G01-F 复核及验收证据
 
@@ -51,6 +52,12 @@
 
 - [CI 46140766984](https://github.com/ttiaogou/FRDM/actions/runs/46140766984) 对 6dc090025ab32234804efe415b6f7bf295416056 completed/failure：架构及资源、Freedom APK、OCR APK、CodeQL 均 success；[单测 job 140966463064](https://github.com/ttiaogou/FRDM/actions/runs/46140766984/job/140966463064) App 961 项中 1 项失败，FloatingWindowLifecycleBoundaryTest.runRecordsZipExportRemainsIndependentOfTheFloatingWindow 第 106 行仍要求已授权退役的 launchNodeDumpExport() 存在。
 - 仅把旧存在性断言迁移为禁止入口及方法存在，更新 logExport 方法截取边界；原有悬浮生命周期、保存、回读、清理及其他断言不变。原测试 blob b7e725a22c349128aa720bf32fa8e13f95336ca9 → 9dc38c8285e88d2d30f033f414f46b7111e6eab2；R01 保留原清单并追加精确新 pin 与逆向重建检查。生产源码不变，新 CI 待验证。
+
+## D01-C 本轮证据
+
+- MainActivity 94a8c122f60d52f24d59b4edb96d212a7d6a295d → 099ca52fb0d6dcf1ae9d394fa624725f5d233a3c；综合范围默认全部已封存样本，选择等待封存时复用原确认、轮询，保留原归档选择路径。诊断、归档、综合共用 createExportBundle、SAF、回读和保护性清理；未改请求码及保存事务。
+- SessionSampleArchiveManager 7840a6f0f279bd4b6f33bc6814c6e053eed059ae → c1527cfb178dffd2b429924f0a245cb6327edde3；只修正关联历史报告兼容条件，排除 active/finalizing、未关联历史封存要求与删除授权不变。
+- [D01-C 精确迁移测试](../../tools/architecture/test_pp_d01c_combined_export_migration.py) 接入原 R00/R01/D01-B/R08-D 历史链；[组合导出测试](../../app/src/test/java/com/freedom/ui/logs/D01cCombinedExportTest.kt) 覆盖双样本共享关联诊断、未封存、旧关联与未关联历史、独立异常、无样本情形、清理保护。新 CI 待验证，未本地构建/真机测试。
 
 ## 接续维护
 

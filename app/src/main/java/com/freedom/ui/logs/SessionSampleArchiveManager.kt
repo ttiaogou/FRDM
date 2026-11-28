@@ -424,7 +424,7 @@ internal object SessionSampleArchiveManager {
                         val retained = File(historyRoot, id)
                         val primarySealed = id !in excluded &&
                             (File(primary, "diagnostic_manifest.json").isFile ||
-                                (!includeAllDiagnostics && (File(primary, "diagnostic_report.json").isFile || File(primary, "diagnostic_report.txt").isFile)))
+                                (id in linkedIds && (File(primary, "diagnostic_report.json").isFile || File(primary, "diagnostic_report.txt").isFile)))
                         val retainedSealed = File(retained, "incident_retention.json").isFile
                         var reportIncluded = false
                         val status = when {
