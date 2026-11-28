@@ -1,22 +1,22 @@
 # AUDIT_CHECKPOINT — PP 当前治理检查点
 
-仅记录当前进度，不替代 [AGENTS.md](../../AGENTS.md)，不授权下一阶段改动。历史见 Git 提交及原审计报告。reviewedHead/tree 为本轮实际复核、完整 CI 已通过的施工前基线；本次结项记录提交的 SHA 和 CI 以 Git/Actions 实际记录为准，避免自引用及无意义反复提交。
+仅记录当前进度，不替代 [AGENTS.md](../../AGENTS.md)，不授权下一阶段改动。历史见 Git 提交及原审计报告。reviewedHead/tree 为本轮实际复核的施工前基线，最近完整 CI 已通过的提交另见已验收工程基线；本次结项记录提交的 SHA 和 CI 以 Git/Actions 实际记录为准，避免自引用及无意义反复提交。
 
 | 字段 | 当前记录 |
 | --- | --- |
 | repository / branch | ttiaogou/FRDM / PP |
-| reviewedHead | 285c3d123d533e26aa68f3d2fab5d5b968329504 |
-| reviewedTree | b3f7bb009e97b801f070a1b1ce95c543cabf4606 |
+| reviewedHead | 6dc090025ab32234804efe415b6f7bf295416056 |
+| reviewedTree | ff4d28518f885a9eb72af8f61353064aeebad827 |
 | 已验收工程基线 | G01-F 285c3d123d533e26aa68f3d2fab5d5b968329504；[完整 CI 46139876328](https://github.com/ttiaogou/FRDM/actions/runs/46139876328) completed/success |
-| 当前任务 | D01-B 节点采集与可视化职责收敛（独立节点 ZIP 退役子项） |
-| 当前状态 | PARTIAL_IMPLEMENTED / BASELINE_CI_PASS / COMMIT_CI_PENDING；缓存及旧入口受 S0 冻结与引用核查约束 |
+| 当前任务 | D01-B CI 单项历史测试契约修复 |
+| 当前状态 | PARTIAL_IMPLEMENTED / PRIOR_CI_FAIL / FIX_COMMIT_CI_PENDING；缓存及旧入口受 S0 冻结与引用核查约束 |
 | 验证策略 | 精确 S1 退役及逆向恢复；保留 S0、既有检测及完整 CI；真机待验 |
 | 设备验收 | F01–F12 DEFERRED / NOT_RUN；用户独立执行 |
 | 当前职责建档 | 32 项：A 16、B 12、C 4；证据基线仍按职责表，不虚报逐方法核查 |
 | 台账 | 30 项：CLOSED 8、RETAINED 3、CANDIDATE 8、OPEN 6、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 3 |
 | 工作区 | 远端 Git tree/compare；无本地 checkout 验证 |
-| 改动范围 | MainActivity 与 LatestAccessibilityNodeDump 精确删除 140 行；R00/R01/R08-D 追加精确迁移；新增专项测试及治理记录；S0/采集/归档/可视化不改 |
-| 下一阶段 | 先复核本提交完整 CI；继续 D01-B 缓存与旧入口引用核验及 S0 冻结边界决议；D01-C 综合导出 |
+| 改动范围 | 仅调整旧节点 ZIP 入口存在性断言及方法截取边界；R01 精确迁移及治理记录；生产源码、S0、原业务保护不改 |
+| 下一阶段 | 核验修复提交完整 CI；D01-B 剩余缓存及旧入口审计与 S0 冻结边界决议；D01-C 综合导出 |
 
 ## 批次进度
 
@@ -46,6 +46,11 @@
 - 基线 S0 Service blob 2ee39d722c21947e1a73305ec8559e1f0226cdc8；其旧高亮接收器仍读取 LatestAccessibilityNodeDump。禁止为清理缓存而擅改 S0。
 - MainActivity 7e4148b1006924f66b11308f394b7752279f0984 → 94a8c122f60d52f24d59b4edb96d212a7d6a295d；LatestAccessibilityNodeDump 0373e7e20e2d921aebb2559fe910a6c7aed22c67 → 2d636faa98ed11fdecae133692ab3b4ff720905e。两文件均仅删 70 行，精确逆向重建原文。新检测 [D01-B](../../tools/architecture/test_pp_d01b_node_zip_retirement.py) 保留原 R08-D 历史逆向，R00/R01 追加准确 S1/证据 pin，未删减原断言。
 - 保留现有运行诊断、归档导出、可视化布局保存、自动监控摘要及缓存读写；D01-C 未施工。无本地 Gradle/真机结果；新提交 CI 状态以后续实际 Actions 为准。
+
+## D01-B CI 修复证据
+
+- [CI 46140766984](https://github.com/ttiaogou/FRDM/actions/runs/46140766984) 对 6dc090025ab32234804efe415b6f7bf295416056 completed/failure：架构及资源、Freedom APK、OCR APK、CodeQL 均 success；[单测 job 140966463064](https://github.com/ttiaogou/FRDM/actions/runs/46140766984/job/140966463064) App 961 项中 1 项失败，FloatingWindowLifecycleBoundaryTest.runRecordsZipExportRemainsIndependentOfTheFloatingWindow 第 106 行仍要求已授权退役的 launchNodeDumpExport() 存在。
+- 仅把旧存在性断言迁移为禁止入口及方法存在，更新 logExport 方法截取边界；原有悬浮生命周期、保存、回读、清理及其他断言不变。原测试 blob b7e725a22c349128aa720bf32fa8e13f95336ca9 → 9dc38c8285e88d2d30f033f414f46b7111e6eab2；R01 保留原清单并追加精确新 pin 与逆向重建检查。生产源码不变，新 CI 待验证。
 
 ## 接续维护
 

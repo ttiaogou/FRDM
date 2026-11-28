@@ -341,6 +341,11 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "business/src/test/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinatorTest.kt"
                 self.assertEqual("690d0330efb0dfce042ebae573f6b6fc41a186c9", expected[path])
                 expected[path] = "2196239ec6feb94c51eb6bc6a70e87e2c51b977b"
+            if field == "protected_test_files":
+                # D01-B CI: the authorized retired ZIP must be absent, not present.
+                path = "app/src/test/java/com/freedom/architecture/FloatingWindowLifecycleBoundaryTest.kt"
+                self.assertEqual("b7e725a22c349128aa720bf32fa8e13f95336ca9", expected[path])
+                expected[path] = "9dc38c8285e88d2d30f033f414f46b7111e6eab2"
             if field == "protected_rule_files":
                 # G01-E: only the explicitly approved append-only AGENTS governance navigation.
                 # Preserve the original manifest pin and verify the exact new full blob.
@@ -593,6 +598,15 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         reviewed_migration_evidence[path] = "3fdc82bc0c55b47f47ae544f8fa08c29b9feaa31"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
+
+    def test_d01b_floating_export_contract_exact_migration(self):
+        path = ROOT / "app/src/test/java/com/freedom/architecture/FloatingWindowLifecycleBoundaryTest.kt"
+        source = path.read_text(encoding="utf-8")
+        self.assertEqual("9dc38c8285e88d2d30f033f414f46b7111e6eab2", git_blob(source.encode("utf-8")))
+        for current, previous in [["            .substringBefore(\"private fun confirmSessionSampleExport(\")\n","            .substringBefore(\"private fun launchNodeDumpExport(\")\n"],["        assertFalse(recordsEntry.contains(\"launchNodeDumpExport()\"))\n        assertFalse(activity.contains(\"private fun launchNodeDumpExport(\"))\n","        assertTrue(recordsEntry.contains(\"launchNodeDumpExport()\"))\n"]]:
+            self.assertEqual(1, source.count(current))
+            source = source.replace(current, previous, 1)
+        self.assertEqual("b7e725a22c349128aa720bf32fa8e13f95336ca9", git_blob(source.encode("utf-8")))
 
     def test_g01e_agents_exact_append_only_migration(self):
         path = ROOT / "AGENTS.md"
