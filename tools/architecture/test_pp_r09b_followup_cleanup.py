@@ -728,6 +728,8 @@ CHANGES = {
     ]
   ]
 }
+# B1 rolled back because the existing floating action tests protect the menu contract.
+OVERLAY = "app/src/main/java/com/freedom/adapters/accessibility/android/MonitorOverlay.kt"
 HELPER = "app/src/main/java/com/freedom/adapters/ai/AiHttpTransportSupport.kt"
 HELPER_SHA = "4f554b193371269082187a5fc2bf7744c86effeb"
 MODULES = ("app", "business", "core", "gesture/gesture-api", "gesture/gesture-core",
@@ -755,6 +757,15 @@ class PpR09bFollowupCleanupTest(unittest.TestCase):
     def test_exact_inverse_and_shared_transport(self):
         for path, (previous, current) in OLD_NEW.items():
             source = (ROOT / path).read_text(encoding="utf-8")
+            if path == OVERLAY:
+                # Preserve exact rejected B1 patch as historical evidence, not the live contract.
+                self.assertEqual(previous, blob(source), path)
+                lines = source.splitlines(keepends=True)
+                for index, prior, replacement in reversed(CHANGES[path]):
+                    self.assertEqual(prior, lines[index])
+                    self.assertEqual("", replacement)
+                    del lines[index]
+                source = "".join(lines)
             self.assertEqual(current, blob(source), path)
             self.assertEqual(previous, blob(restore(path, source)), path)
             with self.assertRaises(AssertionError):
@@ -770,7 +781,7 @@ class PpR09bFollowupCleanupTest(unittest.TestCase):
             self.assertEqual(1, len(re.findall(r"\bfun " + method + r"\(", helper)))
 
     def test_retired_symbols_and_live_overlay_entry(self):
-        retired = re.compile(r"\b(?:showNodeMoreMenu|MonitorSettingsRepository)\b")
+        retired = re.compile(r"\bMonitorSettingsRepository\b")
         issues = []
         for module in MODULES:
             directory = ROOT / module
@@ -780,7 +791,12 @@ class PpR09bFollowupCleanupTest(unittest.TestCase):
                         issues.append(str(path.relative_to(ROOT)))
         self.assertEqual([], issues)
         overlay = (ROOT / "app/src/main/java/com/freedom/adapters/accessibility/android/MonitorOverlay.kt").read_text(encoding="utf-8")
-        self.assertNotRegex(overlay, r"\b(?:PopupMenu|requestGlobalNodeHierarchy|clearGlobalNodeLayoutBounds)\b")
+        self.assertEqual(OLD_NEW[OVERLAY][0], blob(overlay))
+        for token in ("PopupMenu(context, anchor)", "private fun showNodeMoreMenu(",
+                      "private fun requestGlobalNodeHierarchy(", "private fun clearGlobalNodeLayoutBounds(",
+                      "ACTION_SHOW_GLOBAL_NODE_HIERARCHY", "ACTION_CLEAR_GLOBAL_NODE_LAYOUT_BOUNDS",
+                      'menu.add("查看节点层级")'):
+            self.assertIn(token, overlay)
         self.assertIn("requestNodeBounds = ::requestGlobalNodeLayoutBounds", overlay)
         self.assertIn("ACTION_SHOW_GLOBAL_NODE_LAYOUT_BOUNDS", overlay)
         ports = (ROOT / "app/src/main/java/com/freedom/application/ports/MonitorDataPorts.kt").read_text(encoding="utf-8")

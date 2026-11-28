@@ -430,6 +430,9 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "app/src/main/java/com/freedom/adapters/accessibility/android/MonitorOverlay.kt"
         self.assertEqual("9c88ed19eddca26138fad43d6a852f8df3a1de44", reviewed_s1[path])
         reviewed_s1[path] = "1e4ff5d38f5c2b0433b81352cf9f0c8d031d6c66"
+        # R09-B1 CI: restore the complete original protected overlay; B2/B3 unchanged.
+        self.assertEqual("1e4ff5d38f5c2b0433b81352cf9f0c8d031d6c66", reviewed_s1[path])
+        reviewed_s1[path] = "9c88ed19eddca26138fad43d6a852f8df3a1de44"
         path = "app/src/main/java/com/freedom/application/ports/MonitorDataPorts.kt"
         self.assertEqual("509ea931ee65ee7994515aaff785d02ce7ff4102", reviewed_s1[path])
         reviewed_s1[path] = "93624f30c8026b53eefba63a3591fcf4e959c71a"

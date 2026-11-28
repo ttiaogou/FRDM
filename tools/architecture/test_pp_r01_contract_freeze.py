@@ -166,6 +166,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R09-B1/B2/B3 exact approved production changes.
                 self.assertEqual("009a91302db56eb8faa4767e9835c65b321c05d8", expected[path])
                 expected[path] = "ecd3b1ce0ea3dec8ccd5cb787434a397974ce15a"
+                # R09-B1 CI rollback preserves original overlay contract.
+                self.assertEqual("ecd3b1ce0ea3dec8ccd5cb787434a397974ce15a", expected[path])
+                expected[path] = "8233890fe4ad1f273070e1f10e95ce7c625ffc12"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -460,6 +463,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         }.items():
             self.assertNotIn(path, reviewed_migration_evidence)
             reviewed_migration_evidence[path] = replacement
+        # R09-B1 CI: retain exact historical patch evidence and enforce restored live contract.
+        path = "tools/architecture/test_pp_r09b_followup_cleanup.py"
+        self.assertEqual("1a07053392e4699bc752edf40ddc47c0ad81090d", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "3838580c5e544cd360a2503f78113f423008443a"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
