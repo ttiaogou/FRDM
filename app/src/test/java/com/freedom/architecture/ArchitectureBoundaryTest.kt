@@ -883,7 +883,18 @@ class ArchitectureBoundaryTest {
         assertTrue("CI must build the Freedom debug APK", freedomJob.contains(":app:assembleDebug"))
         assertTrue("CI must build the OCR plugin debug APK", ocrJob.contains(":ocr-plugin:assembleDebug"))
         assertTrue("Freedom APK must be uploaded", freedomJob.contains("Freedom-debug-apk"))
-        assertTrue("OCR APK must be uploaded", ocrJob.contains("Freedom-OCR-plugin-debug-apk"))
+        assertTrue("OCR APK must be uploaded", freedomJob.contains("Freedom-OCR-plugin-debug-apk"))
+        assertTrue("CI must independently test the OCR plugin", ocrJob.contains(":ocr-plugin:testDebugUnitTest"))
+        assertTrue("CI must build the matching OCR delivery APK on the Freedom runner",
+            freedomJob.contains(":ocr-plugin:assembleDebug"))
+        val signatureGate = freedomJob.indexOf("      - name: Verify all delivery APK signatures before upload".trimStart())
+        assertTrue("CI must verify delivery signatures", signatureGate >= 0)
+        for (upload in listOf("Upload Freedom debug APK", "Upload shrink-only Freedom debug APK", "Upload OCR plugin debug APK")) {
+            assertTrue("$upload must follow the signing gate",
+                freedomJob.indexOf("- name: $upload") > signatureGate)
+        }
+        assertFalse("Independent OCR runner must not upload an unpaired delivery APK",
+            ocrJob.contains("Freedom-OCR-plugin-debug-apk"))
 
         val codeqlJob = jobBody("codeql")
         assertTrue(

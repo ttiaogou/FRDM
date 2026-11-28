@@ -205,6 +205,11 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 self.assertEqual("06485947b2fda4007b4ef09d1371c06b2f745fb2", expected[path])
                 expected[path] = "92633e6fdc095e6780325ec923712a249821194b"
             if field == "protected_test_files":
+                # R09-F CI: relocate the OCR artifact assertion to its verified delivery job.
+                path = "app/src/test/java/com/freedom/architecture/ArchitectureBoundaryTest.kt"
+                self.assertEqual("f7158e8658aafc9c58efd9d4fc6322fbc0178b1a", expected[path])
+                expected[path] = "5de62c7a40ea101eb4a99291264fac0b617f0b1a"
+            if field == "protected_test_files":
                 # Reflection targets follow the actual owner; original regressions remain.
                 for path, (previous, replacement) in {
                     "business/src/test/kotlin/com/freedom/features/aireply/AiReplyObservationRuntimeTest.kt": ("ebca85f52082cb8954bba1ce780e815f2f46a2e4", "2ac15e03b5ecc30548dc492f0c0a01ea9403d077"),

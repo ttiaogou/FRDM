@@ -35,3 +35,8 @@
 | F12 | 持久化、重启、精简 APK | 数据不丢失、不重复计数、原任务按验证恢复；精简版重复上述核心场景 |
 
 每项记录 PASS/FAIL/BLOCKED/NOT_RUN、测试时间、前置条件、可观察结果、脱敏日志定位。当前均 NOT_RUN；无设备/用户提供日志不得填 PASS。R09-G 前必须明确真机结果或由用户明确批准延期；不以本报告或全绿 CI 替代真机验收。
+
+## R09-F CI follow-up
+
+- CI 46132065471: architecture, independent OCR test/build, paired APK build and signature gate passed; all three signer SHA-256 digests were 2015ddeba4ddbc3107d1af012026fae58f2f0d2a3baa3352958adddf381498ff. App test failed only ArchitectureBoundaryTest.ciRunsTheArchitectureGateBeforeAndroidBuild: OCR APK must be uploaded. The old assertion was tied to the independent runner rather than the new paired delivery runner.
+- Relocate exactly the existing OCR upload assertion to the actual delivery job, retain the independent OCR build assertion, additionally require independent OCR tests, paired OCR build, signature gate preceding all three uploads and no unpaired official OCR upload. R01 records the exact revised test blob; no removed test, no loosened assertion, no workflow or production change in this correction. New full CI required; true device tests remain NOT_RUN.
