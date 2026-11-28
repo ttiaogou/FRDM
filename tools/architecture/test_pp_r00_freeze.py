@@ -370,6 +370,16 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/ports/ChatSessionManagementPolicy.kt"
         self.assertEqual("fb8d97a3a33e6c576cc636f7eb95b00f838d6167", reviewed_s1[path])
         reviewed_s1[path] = "bd4a945fd3c7835704e7731f7f1c862f18ff4b7f"
+        # R08-D: exact relocation of Activity export presentation; S0 unchanged.
+        path = "app/src/main/java/com/freedom/MainActivity.kt"
+        self.assertEqual("7afbe0c4eb9f8f67f96f9833665093424948d9c2", reviewed_s1[path])
+        reviewed_s1[path] = "7e4148b1006924f66b11308f394b7752279f0984"
+        path = "app/src/main/java/com/freedom/ui/logs/LogRecordsDialog.kt"
+        self.assertEqual("468cbf7f53b5cd88fed715847b09392d25fbabae", reviewed_s1[path])
+        reviewed_s1[path] = "cc26e51c6a2fb3788359b189ca23f979e1371f4f"
+        path = "app/src/main/java/com/freedom/ui/logs/LogTextFormatter.kt"
+        self.assertEqual("0e61d27a625a3b71bae1d29a3f78d5cc4c6660d0", reviewed_s1[path])
+        reviewed_s1[path] = "de38ba4bb7b4c1219fcf1e7b988bb84036507c92"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

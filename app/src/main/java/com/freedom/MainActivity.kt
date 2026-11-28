@@ -22,7 +22,6 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ImageView
 import android.widget.ScrollView
@@ -2052,75 +2051,9 @@ class MainActivity : Activity() {
             Toast.makeText(this, "请先选择已封存的采集任务", Toast.LENGTH_SHORT).show()
             return
         }
-        val contentLabels = archives.flatMap { it.contentLabels }.distinct()
-        val confirmationContent = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(8), dp(18), dp(12))
-            addView(TextView(this@MainActivity).apply {
-                text = buildString {
-                    append("采集任务数量：").append(archives.size).append("\n")
-                    append("导出方式：合并为一个 ZIP；采集样本和关联的运行诊断按运行 ID 分目录保存")
-                        .append("\n\n")
-                    archives.take(12).forEachIndexed { index, archive ->
-                        append(index + 1).append(". ").append(archive.runId).append("\n")
-                        append("   ").append(archive.durationLabel()).append("；")
-                            .append(archive.sampleCountLabel()).append("\n")
-                    }
-                    if (archives.size > 12) append("……另有 ").append(archives.size - 12).append(" 条采集任务\n")
-                }
-                textSize = 13f
-                setTextColor(FreedomUi.SECONDARY)
-                setPadding(0, dp(4), 0, dp(10))
-            })
-            addView(TextView(this@MainActivity).apply {
-                text = "包含内容（按归档实际文件检测）"
-                textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(FreedomUi.TEXT)
-                setPadding(0, dp(4), 0, dp(4))
-            })
-            if (contentLabels.isEmpty()) {
-                addView(TextView(this@MainActivity).apply {
-                    text = "未识别到可展示的数据分类；导出仍会保留归档中的原始文件。"
-                    textSize = 12f
-                    setTextColor(FreedomUi.MUTED)
-                })
-            } else {
-                contentLabels.forEach { label ->
-                    addView(CheckBox(this@MainActivity).apply {
-                        text = label
-                        isChecked = true
-                        isEnabled = false
-                        textSize = 13f
-                    })
-                }
-            }
-            addView(TextView(this@MainActivity).apply {
-                text = "本次导出会尝试附带每条运行对应的 diagnostic_report.txt、诊断事件、计数器及清单；若诊断尚未封存，会在导出清单中标明。"
-                textSize = 12f
-                setTextColor(FreedomUi.SECONDARY)
-                setPadding(0, dp(8), 0, 0)
-            })
-            addView(TextView(this@MainActivity).apply {
-                text = "导出的内容可能包含聊天文本、截图及其他个人信息，请注意隐私与数据安全。"
-                textSize = 12f
-                setTextColor(FreedomUi.MUTED)
-                setPadding(0, dp(12), 0, 0)
-            })
+        CollectionExportDialog.confirmSessionSampleExport(this, ::dp, archives) {
+            beginSessionSampleExport(archives)
         }
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(if (archives.size == 1) "导出采集任务" else "批量导出采集任务")
-            .setView(ScrollView(this).apply {
-                isVerticalScrollBarEnabled = false
-                isHorizontalScrollBarEnabled = false
-                addView(confirmationContent)
-                isFillViewport = true
-            })
-            .setNegativeButton("取消", null)
-            .setPositiveButton("导出 ZIP") { _, _ -> beginSessionSampleExport(archives) }
-            .show()
-        FreedomUi.styleAlertDialog(dialog, this, ::dp)
-        CollectionExportDialog.stylePrimaryExportButton(dialog.getButton(AlertDialog.BUTTON_POSITIVE), ::dp)
     }
 
     private fun beginSessionSampleExport(
@@ -2259,22 +2192,8 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun buildLogExportContent(records: List<String>): String = buildString {
-        append("Freedom 运行日志\n")
-        append("导出时间：")
-        append(
-            java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
-                .format(java.util.Date())
-        )
-        append("\n记录数量：").append(records.size)
-        append("\n导出内容：包含完整技术详情\n")
-        append("=".repeat(72)).append("\n\n")
-        append(LogTextFormatter.formatLogLines(
-            records.map(com.freedom.core.logging.RunLogBudgetPolicy::redactSensitivePayload),
-            includeTechnicalDetails = true
-        ))
-        if (records.isNotEmpty()) append('\n')
-    }
+    private fun buildLogExportContent(records: List<String>): String =
+        LogTextFormatter.buildLogExportContent(records)
 
     @Deprecated("Use the document picker result to write the selected URI")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

@@ -145,6 +145,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R08-C exact reviewed private viewport policy relocation.
                 self.assertEqual("67fce22dc06c5840f164aa58f76bd10e9741805c", expected[path])
                 expected[path] = "2b233aeab2e7c5183d9c47c633276bb141ddd165"
+                # R08-D exact reviewed export presentation relocation.
+                self.assertEqual("2b233aeab2e7c5183d9c47c633276bb141ddd165", expected[path])
+                expected[path] = "e90afbdd451822838d2889adb3023ba755814983"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -379,6 +382,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "business/src/test/kotlin/com/freedom/features/aireply/ports/R08PrivateViewportPolicyTest.kt"
         self.assertEqual("7782eff5c10d273eaa61706da7c5c5b9d585d961", reviewed_migration_evidence[path])
         reviewed_migration_evidence[path] = "b2749e4b4739c6f6c9f8c155751117d8d29789cd"
+        # R08-D preserves historical evidence and pins exact presentation migration.
+        path = "tools/architecture/test_pp_r08_activity_export_presentation_migration.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "d17659994930f521942b574fd0e7dec3b8f5acd8"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

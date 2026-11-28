@@ -4,6 +4,23 @@ package com.freedom.ui.logs
 internal object LogTextFormatter {
     private const val LOG_DETAIL_SEPARATOR = "\u001F"
 
+    fun buildLogExportContent(records: List<String>): String = buildString {
+        append("Freedom 运行日志\n")
+        append("导出时间：")
+        append(
+            java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+                .format(java.util.Date())
+        )
+        append("\n记录数量：").append(records.size)
+        append("\n导出内容：包含完整技术详情\n")
+        append("=".repeat(72)).append("\n\n")
+        append(LogTextFormatter.formatLogLines(
+            records.map(com.freedom.core.logging.RunLogBudgetPolicy::redactSensitivePayload),
+            includeTechnicalDetails = true
+        ))
+        if (records.isNotEmpty()) append('\n')
+    }
+
     fun formatLogLines(
         lines: List<String>,
         includeTechnicalDetails: Boolean

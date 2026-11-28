@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -32,6 +33,84 @@ internal object CollectionExportDialog {
         ).apply { cornerRadius = dp(11).toFloat() }
         view.minimumHeight = dp(44)
         view.setPadding(dp(12), dp(8), dp(12), dp(8))
+    }
+
+    /** Confirmation presentation only; the Activity retains the export transaction. */
+    fun confirmSessionSampleExport(
+        activity: Activity,
+        dp: (Int) -> Int,
+        archives: List<SessionSampleArchive>,
+        onConfirm: () -> Unit
+    ) {
+        val contentLabels = archives.flatMap { it.contentLabels }.distinct()
+        val confirmationContent = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(12))
+            addView(TextView(activity).apply {
+                text = buildString {
+                    append("采集任务数量：").append(archives.size).append("\n")
+                    append("导出方式：合并为一个 ZIP；采集样本和关联的运行诊断按运行 ID 分目录保存")
+                        .append("\n\n")
+                    archives.take(12).forEachIndexed { index, archive ->
+                        append(index + 1).append(". ").append(archive.runId).append("\n")
+                        append("   ").append(archive.durationLabel()).append("；")
+                            .append(archive.sampleCountLabel()).append("\n")
+                    }
+                    if (archives.size > 12) append("……另有 ").append(archives.size - 12).append(" 条采集任务\n")
+                }
+                textSize = 13f
+                setTextColor(FreedomUi.SECONDARY)
+                setPadding(0, dp(4), 0, dp(10))
+            })
+            addView(TextView(activity).apply {
+                text = "包含内容（按归档实际文件检测）"
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(FreedomUi.TEXT)
+                setPadding(0, dp(4), 0, dp(4))
+            })
+            if (contentLabels.isEmpty()) {
+                addView(TextView(activity).apply {
+                    text = "未识别到可展示的数据分类；导出仍会保留归档中的原始文件。"
+                    textSize = 12f
+                    setTextColor(FreedomUi.MUTED)
+                })
+            } else {
+                contentLabels.forEach { label ->
+                    addView(CheckBox(activity).apply {
+                        text = label
+                        isChecked = true
+                        isEnabled = false
+                        textSize = 13f
+                    })
+                }
+            }
+            addView(TextView(activity).apply {
+                text = "本次导出会尝试附带每条运行对应的 diagnostic_report.txt、诊断事件、计数器及清单；若诊断尚未封存，会在导出清单中标明。"
+                textSize = 12f
+                setTextColor(FreedomUi.SECONDARY)
+                setPadding(0, dp(8), 0, 0)
+            })
+            addView(TextView(activity).apply {
+                text = "导出的内容可能包含聊天文本、截图及其他个人信息，请注意隐私与数据安全。"
+                textSize = 12f
+                setTextColor(FreedomUi.MUTED)
+                setPadding(0, dp(12), 0, 0)
+            })
+        }
+        val dialog = AlertDialog.Builder(activity)
+            .setTitle(if (archives.size == 1) "导出采集任务" else "批量导出采集任务")
+            .setView(ScrollView(activity).apply {
+                isVerticalScrollBarEnabled = false
+                isHorizontalScrollBarEnabled = false
+                addView(confirmationContent)
+                isFillViewport = true
+            })
+            .setNegativeButton("取消", null)
+            .setPositiveButton("导出 ZIP") { _, _ -> onConfirm() }
+            .show()
+        FreedomUi.styleAlertDialog(dialog, activity, dp)
+        CollectionExportDialog.stylePrimaryExportButton(dialog.getButton(AlertDialog.BUTTON_POSITIVE), dp)
     }
 
     fun show(
