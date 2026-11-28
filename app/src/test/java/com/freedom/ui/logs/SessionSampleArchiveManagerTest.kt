@@ -307,7 +307,7 @@ class SessionSampleArchiveManagerTest {
     }
 
     @Test
-    fun batchArchiveKeepsEachRunInItsOwnDirectory() {
+    fun unifiedExportKeepsEachRunInItsOwnDirectory() {
         val directory = Files.createTempDirectory("freedom-sample-batch").toFile()
         try {
             val firstFile = createRunArchive(
@@ -320,15 +320,20 @@ class SessionSampleArchiveManagerTest {
             val second = requireNotNull(SessionSampleArchiveManager.inspect(secondFile))
             val destination = File(directory, "combined.zip")
 
-            SessionSampleArchiveManager.createBatchArchive(listOf(first, second), destination)
+            val receipt = SessionSampleArchiveManager.createExportBundle(
+                listOf(first, second), File(directory, "diagnostics/runs"), destination
+            )
+            assertEquals(setOf("run-first", "run-second"), receipt.sources
+                .filter { it.kind == SessionSampleArchiveManager.SourceKind.SAMPLE }
+                .map { it.runId }.toSet())
 
             ZipFile(destination).use { combined ->
-                assertTrue(combined.getEntry("run-first/run.jsonl") != null)
-                assertTrue(combined.getEntry("run-first/chat_samples.jsonl") != null)
-                assertTrue(combined.getEntry("run-second/run.jsonl") != null)
+                assertTrue(combined.getEntry("samples/run-first/run.jsonl") != null)
+                assertTrue(combined.getEntry("samples/run-first/chat_samples.jsonl") != null)
+                assertTrue(combined.getEntry("samples/run-second/run.jsonl") != null)
                 assertTrue(combined.getEntry("EXPORT-MANIFEST.txt") != null)
                 assertEquals("run-first-chat", combined.getInputStream(
-                    combined.getEntry("run-first/chat_samples.jsonl")
+                    combined.getEntry("samples/run-first/chat_samples.jsonl")
                 ).bufferedReader().use { it.readText() })
             }
             assertTrue(firstFile.isFile)
@@ -338,13 +343,34 @@ class SessionSampleArchiveManagerTest {
         }
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun batchArchiveRequiresAtLeastTwoRuns() {
+    @Test
+    fun unifiedExportAcceptsOneRunAndPreservesSource() {
         val directory = Files.createTempDirectory("freedom-sample-one").toFile()
         try {
             val source = createRunArchive(directory, "one.zip", "one", 1L, 2L, 0, 0, false)
             val archive = requireNotNull(SessionSampleArchiveManager.inspect(source))
-            SessionSampleArchiveManager.createBatchArchive(listOf(archive), File(directory, "out.zip"))
+            val destination = File(directory, "out.zip")
+            val receipt = SessionSampleArchiveManager.createExportBundle(
+                listOf(archive), File(directory, "diagnostics/runs"), destination
+            )
+            ZipFile(destination).use { zip ->
+                assertTrue(zip.getEntry("samples/one/run.jsonl") != null)
+                assertTrue(zip.getEntry("EXPORT-MANIFEST.txt") != null)
+            }
+            assertEquals(listOf("one"), receipt.sources.map { it.runId })
+            assertTrue(source.isFile)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun unifiedExportRejectsEmptySelectionWithoutDiagnostics() {
+        val directory = Files.createTempDirectory("freedom-sample-empty").toFile()
+        try {
+            SessionSampleArchiveManager.createExportBundle(
+                emptyList(), File(directory, "diagnostics/runs"), File(directory, "out.zip")
+            )
         } finally {
             directory.deleteRecursively()
         }

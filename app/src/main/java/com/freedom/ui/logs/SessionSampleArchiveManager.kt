@@ -528,67 +528,6 @@ internal object SessionSampleArchiveManager {
                     original.length() == file.length() && original.readBytes().contentEquals(file.readBytes())
             }
 
-    /** Writes one aggregate ZIP. Each source run is isolated under its own runId directory. */
-    fun createBatchArchive(
-        archives: List<SessionSampleArchive>,
-        destination: File
-    ) {
-        require(archives.size >= 2) { "批量导出至少需要选择两条采集任务" }
-        require(archives.all { it.file.isFile }) { "部分采集归档已不存在，请刷新列表" }
-        destination.parentFile?.let { parent ->
-            check(parent.isDirectory || parent.mkdirs()) { "无法创建批量导出临时目录" }
-        }
-        if (destination.exists()) check(destination.delete()) { "无法覆盖临时导出文件" }
-
-        try {
-            ZipOutputStream(BufferedOutputStream(FileOutputStream(destination))).use { output ->
-                val manifest = StringBuilder()
-                    .append("Freedom 会话采集批量导出\n")
-                    .append("导出时间：")
-                    .append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date()))
-                    .append("\n采集任务数量：").append(archives.size).append("\n\n")
-                val usedRunDirectoryNames = linkedSetOf<String>()
-                archives.forEachIndexed { index, archive ->
-                    val baseRunDirectoryName = safePathSegment(archive.runId)
-                    var safeRunId = baseRunDirectoryName
-                    var suffix = 2
-                    while (!usedRunDirectoryNames.add(safeRunId)) {
-                        safeRunId = "$baseRunDirectoryName-$suffix"
-                        suffix += 1
-                    }
-                    manifest.append(index + 1).append(". ").append(archive.runId)
-                        .append(" | ").append(archive.durationLabel())
-                        .append(" | ").append(archive.sampleCountLabel())
-                        .append(" | 完整性清单=").append(archive.archiveIntegrityStatus ?: "无")
-                        .append(" | 中断恢复=").append(if (archive.recoveredAfterProcessRestart) "是" else "否")
-                        .append(" | 采集告警=").append(archive.captureWarnings.joinToString(",").ifBlank { "无" })
-                        .append('\n')
-                    ZipFile(archive.file).use { source ->
-                        val entries = source.entries()
-                        while (entries.hasMoreElements()) {
-                            val entry = entries.nextElement()
-                            if (entry.isDirectory) continue
-                            val safeEntryName = safeEntryPath(entry.name)
-                            val targetName = "$safeRunId/$safeEntryName"
-                            output.putNextEntry(ZipEntry(targetName).apply {
-                                if (entry.time > 0L) time = entry.time
-                            })
-                            source.getInputStream(entry).use { input -> input.copyTo(output) }
-                            output.closeEntry()
-                        }
-                    }
-                }
-                output.putNextEntry(ZipEntry("EXPORT-MANIFEST.txt"))
-                output.write(manifest.toString().toByteArray(Charsets.UTF_8))
-                output.closeEntry()
-            }
-            check(destination.isFile && destination.length() > 0L) { "批量 ZIP 生成失败" }
-        } catch (error: Exception) {
-            runCatching { destination.delete() }
-            throw error
-        }
-    }
-
     private fun jsonString(line: String, key: String): String? {
         val match = Regex("\\\"${Regex.escape(key)}\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"").find(line)
         return match?.groupValues?.getOrNull(1)

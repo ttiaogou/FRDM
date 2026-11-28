@@ -53,6 +53,10 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 - OWN-31：基线 c8859f33eef335a523401aa586d6d6ca48716107，完整 CI 46142186044 success。MainActivity 仍唯一持有导出和封存等待事务；CollectionExportDialog 仅展示，SessionSampleArchiveManager 唯一执行 ZIP 组合、校验及保护性清理；三种范围仅改变输入集合，不新建状态所有者。D01-C 新 CI 待验。
 - OWN-30：RunDiagnosticsManager 仍持有诊断历史锁及 active/finalizing 排除集合；综合范围保留已有关联诊断报告兼容且不放宽未关联诊断或删除授权。诊断记录写入、归档格式及 S0 未改。
 
+## D01-D1 职责补证
+
+- OWN-31：基线 2f5a7a4aa0325cf14cc1163ffc280f56d8d2122a，完整 CI 46143262439 success。删除 SessionSampleArchiveManager 旧 createBatchArchive；MainActivity 现行三范围入口与唯一 createExportBundle/SAF/回读/保护性清理不改。单一生产打包实现由 D01-D1 全模块引用检测保护，新 CI 待验；旧节点检查器和 S0 未施工。
+
 ## 证据及覆盖边界
 
 - [R09-A](FRDM-PP-R09-A-REPOSITORY-ARCHITECTURE-ACCEPTANCE.md)、[R09-C](FRDM-PP-R09-C-ENTRY-STATE-UI-OWNERSHIP-ACCEPTANCE.md)、[R09-D](FRDM-PP-R09-D-RECOVERY-CHECKPOINT-ASYNC-ISOLATION.md)、[R09-G](FRDM-PP-R09-G-FINAL-ENGINEERING-ACCEPTANCE.md) 为验收证据，[历史归档](../archive/README.md) 供追溯。

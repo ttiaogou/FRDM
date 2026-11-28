@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_d01d1_batch_packager_retirement import restore_d01d1_source
 
 ROOT = Path(__file__).resolve().parents[2]
 ACTIVITY = "app/src/main/java/com/freedom/MainActivity.kt"
@@ -17,6 +18,8 @@ EDITS = {
 
 
 def restore_d01c_source(path, source):
+    if path == MANAGER:
+        source = restore_d01d1_source(path, source)
     for current, previous in EDITS[path]:
         if source.count(current) != 1:
             raise AssertionError("D01-C inverse anchor changed: " + current[:100])
@@ -30,7 +33,8 @@ class D01cCombinedExportMigrationTest(unittest.TestCase):
     def test_exact_authorized_changes(self):
         for path in EDITS:
             source = (ROOT / path).read_text(encoding="utf-8")
-            self.assertEqual(CURRENT[path], git_blob(source.encode("utf-8")))
+            reviewed_source = restore_d01d1_source(path, source) if path == MANAGER else source
+            self.assertEqual(CURRENT[path], git_blob(reviewed_source.encode("utf-8")))
             self.assertEqual(PREVIOUS[path], git_blob(restore_d01c_source(path, source).encode("utf-8")))
 
     def test_single_transaction_and_default_comprehensive_scope(self):

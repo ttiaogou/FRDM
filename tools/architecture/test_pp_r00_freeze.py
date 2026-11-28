@@ -463,6 +463,9 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "app/src/main/java/com/freedom/ui/logs/SessionSampleArchiveManager.kt"
         self.assertEqual("7840a6f0f279bd4b6f33bc6814c6e053eed059ae", reviewed_s1[path])
         reviewed_s1[path] = "c1527cfb178dffd2b429924f0a245cb6327edde3"
+        # D01-D1: retire only the unused old batch writer.
+        self.assertEqual("c1527cfb178dffd2b429924f0a245cb6327edde3", reviewed_s1[path])
+        reviewed_s1[path] = "f64aa840ffb36e8ae9a679af9bbcb2af7fc1efe5"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 
