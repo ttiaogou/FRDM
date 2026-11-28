@@ -61,6 +61,80 @@ def contract_violations(contracts, source_paths, evidence_paths):
     return issues
 
 
+
+def governance_record_violations(root):
+    """Validate mutable governance records, without freezing their evolving contents."""
+    issues = []
+    records = {}
+    for name in ("RESPONSIBILITY_MAP", "AUDIT_REGISTER", "AUDIT_CHECKPOINT"):
+        path = root / "docs/audits" / (name + ".md")
+        if path.is_symlink() or not path.is_file():
+            issues.append("Missing or symlink governance record: " + name)
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except UnicodeError:
+            issues.append("Non-UTF-8 governance record: " + name)
+            continue
+        if not source.strip():
+            issues.append("Empty governance record: " + name)
+        records[name] = source
+
+    own = records.get("RESPONSIBILITY_MAP", "")
+    own_ids = re.findall(r"^\|\s*(OWN-\d+)\s*\|", own, re.M)
+    if len(own_ids) != len(set(own_ids)):
+        issues.append("Duplicate responsibility ID")
+    if not {"OWN-%02d" % i for i in range(1, 33)}.issubset(own_ids):
+        issues.append("Missing initial responsibility ID")
+    for line in own.splitlines():
+        if re.match(r"^\|\s*OWN-\d+\s*\|", line):
+            cells = re.split(r"(?<!\\)\|", line)[1:-1]
+            if len(cells) < 6 or any(not cell.strip() for cell in cells):
+                issues.append("Incomplete responsibility record: " + cells[0].strip())
+
+    ledger = records.get("AUDIT_REGISTER", "")
+    issue_ids = []
+    statuses = {"CANDIDATE", "OPEN", "RETAINED", "LIMITATION", "DEFERRED",
+                "IN_PROGRESS", "VERIFY_PENDING", "CLOSED", "REOPENED"}
+    for line in ledger.splitlines():
+        match = re.match(r"^\|\s*([A-Z][A-Z0-9-]*-\d+|R09G-G\d+)\s*\|", line)
+        if not match:
+            continue
+        issue_id = match.group(1)
+        issue_ids.append(issue_id)
+        cells = re.split(r"(?<!\\)\|", line)[1:-1]
+        if len(cells) < 5 or any(not cell.strip() for cell in cells):
+            issues.append("Incomplete audit record: " + issue_id)
+        elif cells[3].strip() not in statuses:
+            issues.append("Invalid audit status: " + issue_id)
+    if len(issue_ids) != len(set(issue_ids)):
+        issues.append("Duplicate audit ID")
+    initial_ids = ({"R09G-G%02d" % i for i in range(1, 10)}
+                   | {"DOC-%03d" % i for i in range(1, 9)} | {"GOV-001"})
+    if not initial_ids.issubset(issue_ids):
+        issues.append("Missing initial audit ID")
+
+    checkpoint = records.get("AUDIT_CHECKPOINT", "")
+    fields = {}
+    for line in checkpoint.splitlines():
+        match = re.match(r"^\|\s*(repository / branch|reviewedHead|reviewedTree|当前任务|当前状态|设备验收|下一阶段)\s*\|\s*([^|]+)\|$", line)
+        if match:
+            name, value = match.groups()
+            if name in fields:
+                issues.append("Duplicate checkpoint field: " + name)
+            fields[name] = value.strip()
+    for name in ("repository / branch", "reviewedHead", "reviewedTree",
+                 "当前任务", "当前状态", "设备验收", "下一阶段"):
+        if not fields.get(name):
+            issues.append("Missing checkpoint field: " + name)
+    if fields.get("repository / branch") != "ttiaogou/FRDM / PP":
+        issues.append("Invalid checkpoint repository/branch")
+    for name in ("reviewedHead", "reviewedTree"):
+        if not re.fullmatch(r"[0-9a-f]{40}", fields.get(name, "")):
+            issues.append("Invalid checkpoint SHA: " + name)
+    return issues
+
+
 class PpR01ContractFreezeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -264,6 +338,12 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "business/src/test/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinatorTest.kt"
                 self.assertEqual("690d0330efb0dfce042ebae573f6b6fc41a186c9", expected[path])
                 expected[path] = "2196239ec6feb94c51eb6bc6a70e87e2c51b977b"
+            if field == "protected_rule_files":
+                # G01-E: only the explicitly approved append-only AGENTS governance navigation.
+                # Preserve the original manifest pin and verify the exact new full blob.
+                path = "AGENTS.md"
+                self.assertEqual("e0879a754be35699d0cc8741caa4e31cccd1aa1b", expected[path])
+                expected[path] = "edb31ea66ae4ff5f6fd8aea0dd3b347c7cf8352f"
             issues.extend(evidence_violations(ROOT, expected))
         # New R04 regression evidence is pinned independently of the historical inventory.
         issues.extend(evidence_violations(ROOT, {
@@ -503,6 +583,66 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         reviewed_migration_evidence[path] = "0e5244a48297dee14ba617b4c916d5961ab62df0"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
+
+    def test_g01e_agents_exact_append_only_migration(self):
+        path = ROOT / "AGENTS.md"
+        self.assertFalse(path.is_symlink())
+        actual = path.read_bytes()
+        self.assertEqual("e0879a754be35699d0cc8741caa4e31cccd1aa1b",
+                         self.manifest["protected_rule_files"]["AGENTS.md"])
+        self.assertEqual(9563, len(actual))
+        self.assertEqual("e0879a754be35699d0cc8741caa4e31cccd1aa1b",
+                         git_blob(actual[:7238]))
+        self.assertEqual("edb31ea66ae4ff5f6fd8aea0dd3b347c7cf8352f", git_blob(actual))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entry = root / "AGENTS.md"
+            expected = {"AGENTS.md": "edb31ea66ae4ff5f6fd8aea0dd3b347c7cf8352f"}
+            entry.write_bytes(actual)
+            self.assertEqual([], evidence_violations(root, expected))
+            for changed in (actual[:7238], b"!" + actual[1:], actual + b"\n"):
+                with self.subTest(length=len(changed)):
+                    entry.write_bytes(changed)
+                    self.assertEqual(["Protected evidence changed: AGENTS.md"],
+                                     evidence_violations(root, expected))
+
+    def test_g01e_governance_records_are_structurally_valid(self):
+        self.assertEqual([], governance_record_violations(ROOT))
+
+    def test_g01e_governance_records_reject_loss_duplicates_and_invalid_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audits = root / "docs/audits"
+            audits.mkdir(parents=True)
+            for name in ("RESPONSIBILITY_MAP.md", "AUDIT_REGISTER.md", "AUDIT_CHECKPOINT.md"):
+                (audits / name).write_bytes((ROOT / "docs/audits" / name).read_bytes())
+            self.assertEqual([], governance_record_violations(root))
+            own = audits / "RESPONSIBILITY_MAP.md"
+            original = own.read_text(encoding="utf-8")
+            row = next(line for line in original.splitlines() if line.startswith("| OWN-01 |"))
+            own.write_text(original + "\n" + row + "\n", encoding="utf-8")
+            self.assertIn("Duplicate responsibility ID", governance_record_violations(root))
+            own.write_text(original.replace(row, "", 1), encoding="utf-8")
+            self.assertIn("Missing initial responsibility ID", governance_record_violations(root))
+            own.write_text(original, encoding="utf-8")
+            ledger = audits / "AUDIT_REGISTER.md"
+            original = ledger.read_text(encoding="utf-8")
+            row = next(line for line in original.splitlines() if line.startswith("| R09G-G01 |"))
+            ledger.write_text(original + "\n" + row + "\n", encoding="utf-8")
+            self.assertIn("Duplicate audit ID", governance_record_violations(root))
+            cells = re.split(r"(?<!\\)\|", row)[1:-1]
+            cells[3] = " INVALID_STATUS "
+            ledger.write_text(original.replace(row, "|" + "|".join(cells) + "|", 1), encoding="utf-8")
+            self.assertIn("Invalid audit status: R09G-G01", governance_record_violations(root))
+            ledger.write_text(original, encoding="utf-8")
+            # Mutable records may grow; the gate must not require the original count or blob.
+            ledger.write_text(original + "\n| GOV-999 | test | evidence | CANDIDATE | review |\n",
+                              encoding="utf-8")
+            self.assertEqual([], governance_record_violations(root))
+            checkpoint = audits / "AUDIT_CHECKPOINT.md"
+            checkpoint.unlink()
+            self.assertIn("Missing or symlink governance record: AUDIT_CHECKPOINT",
+                          governance_record_violations(root))
 
     def test_contracts_map_to_real_frozen_sources_and_existing_regressions(self):
         source_paths = set(self.source_manifest["permanent_s0"]) | set(

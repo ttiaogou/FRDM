@@ -48,4 +48,4 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 - [R09-A](FRDM-PP-R09-A-REPOSITORY-ARCHITECTURE-ACCEPTANCE.md)、[R09-C](FRDM-PP-R09-C-ENTRY-STATE-UI-OWNERSHIP-ACCEPTANCE.md)、[R09-D](FRDM-PP-R09-D-RECOVERY-CHECKPOINT-ASYNC-ISOLATION.md)、[R09-G](FRDM-PP-R09-G-FINAL-ENGINEERING-ACCEPTANCE.md) 为验收证据，[历史归档](../archive/README.md) 供追溯。
 - G01-D 重点重核页面观察/指纹、身份解析、图片与拦截状态、配对配额、联系人账本、图片资源、OCR、诊断、配置及动态 session 的相关源码。G01-B/C 的入口、共享对象、发送及恢复等源码证据沿用相同生产 blob。
 - OWN-13/21/31/32 的完整读写者及状态字段、其他边缘能力、全仓动态调用图尚未验证；见 GOV-001。不得由类存在推断职责已全部分离，也不得把缺少映射作为删除依据。
-- 实际职责冲突登记至 [AUDIT_REGISTER.md](AUDIT_REGISTER.md)；进度见 [AUDIT_CHECKPOINT.md](AUDIT_CHECKPOINT.md)。G01-E 才接入 AGENTS 维护导航。
+- 实际职责冲突登记至 [AUDIT_REGISTER.md](AUDIT_REGISTER.md)；进度见 [AUDIT_CHECKPOINT.md](AUDIT_CHECKPOINT.md)。G01-E 已接入 AGENTS 维护导航，职责证据仍按本表原基线记录。
