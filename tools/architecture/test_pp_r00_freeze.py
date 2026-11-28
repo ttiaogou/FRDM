@@ -506,6 +506,19 @@ class PpR00FreezeTest(unittest.TestCase):
             self.assertNotIn(path, reviewed_s0)
             self.assertEqual(previous, reviewed_s1[path])
             reviewed_s1[path] = current
+        # R10-B: exact anomaly-only diagnostic evidence and observation wiring.
+        for path, (previous, current) in {
+            "app/src/main/java/com/freedom/application/ports/RunDiagnosticsPort.kt": ("54be6c66cd020f4ea3a6a18b9c75210d464ed98e", "6acced4f474ccdd656037baa1ca3dd7034ac8991"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoPrivateFollowUpController.kt": ("14c07c5bcfc97bbefd617ad68dc1d04a1d7f391d", "432ed69027cf36bfac1388bd780c1a348570a00a"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": ("5341a89da104101fe1430c0f6ba5477d94c048c7", "9234f23e0b5b1409999fb1c3acc352a6464d40cf"),
+            "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": ("2611f7d457dbff02c2c4aef116714b86dfa8c7ef", "155a3dfd1446806f43cc0c549305e0f5a86108d8"),
+            "app/src/main/java/com/freedom/data/RunDiagnosticsManager.kt": ("8964b04c99e4bc3f0b3fe5f80108448183b4fccc", "02fd54b52c18a9b0aae0cb0b4f31b6bdd6f65ba4"),
+            "app/src/main/java/com/freedom/data/RunIncidentEvidenceStore.kt": ("720b768ae07581657b3fb55a8b0c0a1035a839d4", "ac00434a0e5c7aef4cad64ea35af2d41074248a1"),
+            "app/src/main/java/com/freedom/data/RunIncidentHistoryStore.kt": ("5cba70974c3deb7d92d4890d11b66cc4c5cc3e44", "83a26b804230c880149734b509307ee7931d96e2"),
+        }.items():
+            self.assertNotIn(path, reviewed_s0)
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = current
         self.assertEqual([], freeze_violations(
             reviewed_s0, reviewed_s1, actual))
 

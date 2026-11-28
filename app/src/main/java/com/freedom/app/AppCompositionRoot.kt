@@ -413,6 +413,17 @@ internal class AccessibilityServiceDependencies internal constructor(
                             generation, ownedNestedPage && session.taskId == currentTaskId
                         )
                     }
+                    // Same observation path for all three tasks. Explicit child waits also use
+                    // the adapter's read-only capture path; diagnostic failure never gates a task.
+                    if (session != null && generation == runSessionCoordinator.currentRunGeneration() &&
+                        runSessionCoordinator.isPageObservationAllowed()) {
+                        val reason = if (!recognized && !ownedNestedPage &&
+                            session.lifecycle == com.freedom.core.runtime.PageRuntimeLifecycle.UNCLASSIFIED &&
+                            runSessionCoordinator.currentPageRuntimeSession()?.lifecycle ==
+                            com.freedom.core.runtime.PageRuntimeLifecycle.UNCLASSIFIED)
+                            "PAGE_ROUTE_UNCLASSIFIED" else null
+                        momoSocialAdapter.captureAnomalyPage(session.taskId, generation, reason)
+                    }
                     // Explicitly wake the existing business observer after route reconciliation.
                     // This also covers a quiet chat with no further accessibility events.
                     if (aiReplyObservationRuntime.isPrivateFollowUpActive() &&

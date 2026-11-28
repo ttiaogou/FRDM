@@ -1,5 +1,8 @@
 package com.freedom.data
 
+import com.freedom.core.accessibility.api.AccessibilityTreeSnapshot
+import com.freedom.core.accessibility.api.NodeTextCapture
+import com.freedom.core.accessibility.api.WindowRef
 import com.freedom.core.logging.RunDiagnosticInput
 import com.freedom.core.logging.RunLogSeveritySource
 import android.content.Context
@@ -60,6 +63,9 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         val rollingStore: RunEventRollingStore = RunEventRollingStore(directory),
         val incidentStore: RunIncidentEvidenceStore = RunIncidentEvidenceStore(directory, RunDiagnosticEventJsonCodec::encode),
         var incidentQueueRejected: Long = 0,
+        var pendingPageAnomaly: RunDiagnosticEvent? = null,
+        var lastPageAnomalyAttemptMs: Long = -1_000L,
+        var pageAnomalyWritePending: Boolean = false,
         var incidentUnexpectedFailures: Long = 0,
         var writtenEventBytes: Long = 0L,
         var normalEvictedEvents: Long = 0L,
@@ -262,6 +268,64 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
         )
         recordInternal(current, event,
             allowDedup = input.level != RunLogLevel.ERROR && input.level != RunLogLevel.FATAL)
+    }
+
+    /** A page-related warning is useful only with explicit matching live window evidence. */
+    @Synchronized
+    override fun pendingPageAnomaly(window: WindowRef, taskId: String): String? {
+        val state = activeRun?.takeUnless { it.finishRequested } ?: return null
+        val event = state.pendingPageAnomaly ?: return null
+        if (SystemClock.elapsedRealtime() - event.elapsedRealtimeMs !in 0L..5_000L ||
+            event.packageName != window.packageName || event.windowId != window.windowId ||
+            event.pageGeneration != window.generation ||
+            (!event.activityClass.isNullOrBlank() && event.activityClass != window.activityClass) ||
+            (event.taskId != "UNKNOWN" && event.taskId != state.runId && event.taskId != taskId)) return null
+        val code = Regex("[A-Za-z0-9_.:-]{1,100}")
+        val component = event.component.takeIf { code.matches(it) } ?: "PAGE"
+        val type = event.eventType.takeIf { code.matches(it) } ?: "ANOMALY"
+        val reason = event.reason?.takeIf { code.matches(it) } ?: "UNCONFIRMED"
+        return "$component:$type:$reason"
+    }
+
+    /** Bound even unsuccessful reads; the writer owns the actual count and structure dedup. */
+    @Synchronized
+    override fun claimPageAnomaly(runId: String): Boolean {
+        val state = activeRun?.takeIf { it.runId == runId && !it.finishRequested } ?: return false
+        val now = SystemClock.elapsedRealtime()
+        if (state.pageAnomalyWritePending || !state.incidentStore.hasPageEvidenceCapacity ||
+            now - state.lastPageAnomalyAttemptMs < 1_000L ||
+            !hasQueueRoom(RunEventRollingStore.Lane.WARNING)) return false
+        state.lastPageAnomalyAttemptMs = now
+        return true
+    }
+
+    /** FIFO writer, same run seal barrier and incident retention as other anomaly evidence. */
+    @Synchronized
+    override fun recordPageAnomaly(runId: String, taskId: String, runGeneration: Long, reason: String,
+                                   snapshot: AccessibilityTreeSnapshot) {
+        val state = activeRun?.takeIf { it.runId == runId && !it.finishRequested } ?: return
+        if (snapshot.textCapture != NodeTextCapture.NONE || snapshot.nodes.isEmpty() ||
+            snapshot.nodes.size > 480 || snapshot.windowId < 0 ||
+            snapshot.windowId != snapshot.window.windowId || state.pageAnomalyWritePending ||
+            !state.incidentStore.hasPageEvidenceCapacity) return
+        if (!Regex("[A-Za-z0-9_.:-]{1,320}").matches(reason) ||
+            !Regex("[A-Za-z0-9_.:-]{1,100}").matches(taskId)) return
+        try {
+            if (!hasQueueRoom(RunEventRollingStore.Lane.WARNING)) throw RejectedExecutionException("page evidence queue reserve")
+            state.pageAnomalyWritePending = true
+            writer.execute {
+                try {
+                    state.incidentStore.recordPageEvidence(taskId, runGeneration, reason, snapshot)
+                } catch (_: Exception) {
+                    synchronized(this) { state.incidentUnexpectedFailures++ }
+                } finally {
+                    synchronized(this) { state.pageAnomalyWritePending = false }
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            state.pageAnomalyWritePending = false
+            state.incidentQueueRejected++
+        }
     }
 
     /** The plugin pipe is bound to the run that issued the OCR request, never a later run. */
@@ -633,6 +697,13 @@ class RunDiagnosticsManager private constructor(context: Context) : RunDiagnosti
             if (activeRun !== state) return
             // Count each admitted strongly identified anomaly in its incident transaction.
             // Ordinary/legacy dedup remains unchanged.
+            if ((event.windowId ?: -1) >= 0 && event.pageGeneration != null &&
+                !event.packageName.isNullOrBlank() &&
+                event.category in setOf(RunLogCategory.NAVIGATION, RunLogCategory.GESTURE,
+                    RunLogCategory.TASK, RunLogCategory.INPUT) &&
+                RunIncidentEvidencePolicy.triggerLevel(event) != null) {
+                state.pendingPageAnomaly = event
+            }
             val mergeableTrigger = RunIncidentEvidencePolicy.triggerLevel(event) != null &&
                 RunIncidentEvidencePolicy.transactionKey(event) != null
             if (allowDedup && !mergeableTrigger) {

@@ -84,3 +84,7 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 
 - OWN-20/04/07：基线 c0d3f2cb8f98160fe5d394a131025936fa53b8c5，真机拦截故障根因为设置页重复身份校验导致现有父路由证据不足。MomoInterceptionTransactionController 以已准入子事务和唯一设置行为页面证据，状态标签可选、弹窗实际开关证明保留；MomoSocialAdapter 复用同一组件证据。父任务和最终 UI 写权仍分别归原 TaskCoordinator/UiWriteAuthorization；不增租约、状态 owner 或入口。
 - OWN-19：复用现有 Freedom 相册选图及发送目标检查器补齐 WAIT_FREEDOM/WAIT_SELECTION 路由证据，保留窗口、选择数量、发送证明和禁止盲重放约束；源代码同类风险，非已复现设备故障。检查证据见 test_pp_r10a_child_component_evidence.py，完整新 CI 与真机仍待核验。
+
+## R10-B 异常节点证据补证
+
+- OWN-05/30/32：基线 aa68a9894146bab0d83a5cc6b7ff19ade398ed23，R10-A 完整 CI 46151140749 success。共享观察/现有子事务在异常信号时复用 gateway 限时只读结构快照；RunDiagnosticsManager 原 FIFO writer 及 RunIncidentEvidenceStore 保存独立有界异常节点证据，历史保留复用 RunIncidentHistoryStore；普通 MomoChatSampleNodeTreeStore、悬浮可视化及 ZIP 打包事务职责不变。无新 owner、无新采集循环。新 CI 与真机待验，部分无窗口上下文的故障不能保证取到节点树。

@@ -268,6 +268,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R10-A preserves the original manifests and registers the exact source change.
                 self.assertEqual("6f80d78495bb6d21fcc7bfb095795248e68d64c7", expected[path])
                 expected[path] = "b8a440786d9809c732a98dbf4d111781a80ec0a3"
+                # R10-B exact authorized anomaly-only evidence changes.
+                self.assertEqual("b8a440786d9809c732a98dbf4d111781a80ec0a3", expected[path])
+                expected[path] = "c5c84784588d6c93800afd4e97e226104de6e0f6"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -684,6 +687,21 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r10a_child_component_evidence.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "b7d7dbdcfcc577811a7afebac7ffb4848c41fe08"
+        # R10-B retains exact R05/R08/D01/R10-A evidence through the new inverse.
+        for path, (previous, current) in {
+            "tools/architecture/test_pp_d01d3_legacy_node_cache_retirement.py": ("01dba43f13ccde5ac9dc4cbe1329a3b64c8ebfc4", "858fc5406a128aa2382c8fb7f075748eaa48b439"),
+            "tools/architecture/test_pp_r05_follow_up_boundary_migration.py": ("6d1103b2b8a7c7e4bdafd0e56d56436f4da5a573", "90ed4837b5490d63052955d1f7044be414415db6"),
+            "tools/architecture/test_pp_r08_diagnostic_serialization_migration.py": ("f34263967f041f6f9e0734fc4388e2dbe58909d2", "32c7240b5e60dd0a14cce4c0195334e87129adbc"),
+            "tools/architecture/test_pp_r10a_child_component_evidence.py": ("b7d7dbdcfcc577811a7afebac7ffb4848c41fe08", "fc0f64ee9a4d1fdfb32dd51ab21cd7603d084e1d"),
+        }.items():
+            self.assertEqual(previous, reviewed_migration_evidence[path])
+            reviewed_migration_evidence[path] = current
+        for path, current in {
+            "tools/architecture/test_pp_r10b_anomaly_node_evidence.py": "2553cece41e3f6c65d9ccc36e20701d1d2ec5c48",
+            "app/src/test/java/com/freedom/data/R10bAnomalyNodeEvidenceTest.kt": "a290b0452bd0269a90ca7d9aad2c5419041a7fd8",
+        }.items():
+            self.assertNotIn(path, reviewed_migration_evidence)
+            reviewed_migration_evidence[path] = current
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

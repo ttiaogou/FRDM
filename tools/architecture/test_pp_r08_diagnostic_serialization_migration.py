@@ -35,6 +35,9 @@ FORMATTER_BLOCK = "    /** The existing JSON size ceiling and compatibility fall
 POLICY_IMPORT = "import com.freedom.core.logging.RunLogBudgetPolicy\n"
 
 def restore_sources(manager, codec, formatter):
+    from tools.architecture.test_pp_r10b_anomaly_node_evidence import BEFORE as R10B_BEFORE, restore_r10b_source
+    if git_blob(manager.encode("utf-8")) != R10B_BEFORE[MANAGER]:
+        manager = restore_r10b_source(MANAGER, manager)
     def inverse(source, edits):
         for current, previous in edits:
             if source.count(current) != 1:

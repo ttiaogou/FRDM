@@ -12,6 +12,9 @@ EDITS = {"app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.k
 
 def restore_r10a_source(path, source):
     from tools.architecture.test_pp_r00_freeze import git_blob
+    from tools.architecture.test_pp_r10b_anomaly_node_evidence import AFTER as R10B_AFTER, restore_r10b_source
+    if path in R10B_AFTER and git_blob(source.encode("utf-8")) == R10B_AFTER[path]:
+        source = restore_r10b_source(path, source)
     lines = source.split("\n")
     for index, current, previous in EDITS[path]:
         if lines[index:index + len(current)] != current:
@@ -28,7 +31,8 @@ class R10aChildComponentEvidenceTest(unittest.TestCase):
         from tools.architecture.test_pp_r00_freeze import git_blob
         for path in EDITS:
             source = (ROOT / path).read_text(encoding="utf-8")
-            self.assertEqual(AFTER[path], git_blob(source.encode("utf-8")))
+            from tools.architecture.test_pp_r10b_anomaly_node_evidence import AFTER as R10B_AFTER
+            self.assertEqual(R10B_AFTER.get(path, AFTER[path]), git_blob(source.encode("utf-8")))
             self.assertEqual(BEFORE[path], git_blob(restore_r10a_source(path, source).encode("utf-8")))
 
     def test_live_child_proof_and_unchanged_final_authority(self):

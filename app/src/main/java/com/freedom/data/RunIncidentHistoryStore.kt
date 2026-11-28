@@ -23,6 +23,7 @@ internal class RunIncidentHistoryStore(
         private fun safeId(id: String) = id.matches(Regex("[A-Za-z0-9._-]{1,120}")) && id != "." && id != ".."
         private fun size(dir: File): Long = dir.walkTopDown().filter(File::isFile).sumOf(File::length)
         private fun unresolved(dir: File): Boolean =
+            RunIncidentEvidenceStore.pageEvidenceFiles(dir).isNotEmpty() ||
             RunIncidentEvidenceStore.directories(dir).any {
                 RunIncidentEvidenceStore.transactionState(it) != Outcome.RESOLVED
             }
@@ -31,7 +32,7 @@ internal class RunIncidentHistoryStore(
     /** A failed copy, manifest or verification must leave the original run untouched. */
     fun preserve(run: File, writeManifest: (File) -> Unit): Boolean {
         val incidents = RunIncidentEvidenceStore.directories(run)
-        if (incidents.isEmpty()) return true
+        if (incidents.isEmpty() && RunIncidentEvidenceStore.pageEvidenceFiles(run).isEmpty()) return true
         if (!safeId(run.name)) return false
         val target = File(root, run.name)
         val pending = File(root, ".${run.name}.pending")

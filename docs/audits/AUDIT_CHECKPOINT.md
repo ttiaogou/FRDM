@@ -5,18 +5,26 @@
 | 字段 | 当前记录 |
 | --- | --- |
 | repository / branch | ttiaogou/FRDM / PP |
-| reviewedHead | c0d3f2cb8f98160fe5d394a131025936fa53b8c5 |
-| reviewedTree | 6c3ad8876c640bc0949d3d7c8364f456fa248476 |
-| 已验收工程基线 | D01-D4 de167db5ca40c4b12dd12b541229b88434a52586；[完整 CI 46148339153](https://github.com/ttiaogou/FRDM/actions/runs/46148339153) completed/success |
-| 当前任务 | R10-A 简化消息拦截、父子事务页面归属、图片发送同类风险 |
-| 当前状态 | IMPLEMENTED / VERIFY_PENDING；前置 CI 46149485099 因 Maven 429 下载失败，其他四项通过；新提交完整 CI 待核验 |
-| 验证策略 | R10-A 新精确逆向及正负向源码门禁、拦截状态策略测试、原 M04/R00/R01/R05/D01 历史保护及全 CI；真机未复测 |
+| reviewedHead | aa68a9894146bab0d83a5cc6b7ff19ade398ed23 |
+| reviewedTree | 526da6bb5411a8d64c89daf29ffcc6834130c762 |
+| 已验收工程基线 | R10-A aa68a9894146bab0d83a5cc6b7ff19ade398ed23；[完整 CI 46151140749](https://github.com/ttiaogou/FRDM/actions/runs/46151140749) completed/success |
+| 当前任务 | R10-B 全局异常节点证据优先采集 |
+| 当前状态 | IMPLEMENTED / VERIFY_PENDING；R10-A 完整 CI 已通过，新提交完整 CI 待验 |
+| 验证策略 | R10-B Kotlin 异常取证、容量、去重、脱敏和留存测试；精确逆向、源码门禁与历史保护；新 CI 和真机待验 |
 | 设备验收 | 用户独立执行；F08 拦截进入设置页后卡住（FAIL），图片发送部分仍待测，其他设备场景不推断 PASS；F08/F09 修复后待复测 |
 | 当前职责建档 | 32 项：A 16、B 12、C 4；证据基线仍按职责表，不虚报逐方法核查 |
-| 台账 | 35 项：CLOSED 8、RETAINED 3、CANDIDATE 6、OPEN 2、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 14 |
+| 台账 | 35 项：CLOSED 8、RETAINED 3、CANDIDATE 6、OPEN 1、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 15 |
 | 工作区 | 远端 Git tree/compare；无本地 checkout 验证 |
-| 改动范围 | MomoSocialAdapter、MomoInterceptionTransactionController、MomoInterceptionRecoveryPolicy；一项现有策略测试、精确逆向证据和冻结 pin；治理记录；CI 配置、S0、原清单和规则不变 |
-| 下一阶段 | 核验 R10-A CI 及真机拦截/图片发送；第二次提交处理 R10-003 异常节点优先采集；D01 候选及其他真机事项保留 |
+| 改动范围 | 现有共享页面观察、Momo 子事务异常通知、诊断 port/writer/incident store/history；新回归及精确逆向、治理记录；普通节点采集、业务动作、S0、CI、原清单和规则不变 |
+| 下一阶段 | 核验 R10-B 完整 CI；设备复测拦截/图片和异常节点导出；D01 候选及其他真机事项保留 |
+
+## R10-B 本轮证据
+
+- 全局统一观察入口覆盖私聊、招呼、动态任务；连续观察仍 UNCLASSIFIED 才触发通用取证，准确包名/窗口 ID/代次匹配且 5 秒内的页面类告警可以触发；拦截/图片现有子事务明确证据失败在原 wait 回调触发，正常发送中、手势等待和退避不触发。无新调度器/任务授权。
+- 共用 MomoSocialAdapter 只读 captureAnomalyPage；目标包、当前窗口、runId 重验，NONE 文本模式，480 节点、48 深度、300ms；每轮至少间隔 1s、单份写入在途、诊断 warning lane 容量检查。重复结构及原因在 writer 去重；窗口/运行代次或原因变化可保留新证据。
+- RunIncidentEvidenceStore 原 writer 内独立异常节点保留 16 份、每份 128 KiB（最多 2 MiB/轮），结构 JSON 原子写入 incidents/page_nodes/page-N.json；普通 64 份预算/标准 16 份不变。超限不覆盖既有现场，过大缩减节点并保留截断信息；故障时也可能因窗口切换、无根、写队列满或容量耗尽未采到，不把取证变成业务前置条件。
+- 原诊断 manifest、ZIP 组合以及 incident history 复制校验包含异常节点文件，只有节点证据没有日志 incident 的轮次也保留；原历史 20 轮/16 MiB 上限仍生效。仅有精确窗口证据的告警才参与，未覆盖每个无上下文错误或崩溃后的页面；不为故障而持续采样所有节点。
+- 原 R05/R08/D01/R10-A 精确逆向经 R10-B 归一后继续核验，原 R00/R01 清单和 S0 不修改。新源码/测试未本地 Gradle 执行；真机、实际 ZIP 尚待验。
 
 ## R10-A 本轮证据
 

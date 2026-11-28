@@ -38,6 +38,9 @@ def restore_r05f_sources(adapter, image=None, owner=None):
     if owner is None:
         owner = (MOMO / "MomoPrivateFollowUpController.kt").read_text(encoding="utf-8")
     if git_blob(owner.encode("utf-8")) != OWNER:
+        from tools.architecture.test_pp_r10b_anomaly_node_evidence import restore_r10b_source
+        owner = restore_r10b_source("app/src/main/java/com/freedom/adapters/social/momo/MomoPrivateFollowUpController.kt", owner)
+    if git_blob(owner.encode("utf-8")) != OWNER:
         raise AssertionError("R05-G operation/recovery owner changed")
     types = region(owner, "// The existing Momo adapter owns this short-lived platform navigation transaction.", "/** Shared platform child lifecycle")
     image = replace_once(image, "/** Image-only observation and verification", types + "/** Image-only observation and verification")

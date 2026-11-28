@@ -499,6 +499,25 @@ internal class MomoSocialAdapter(
             fingerprint to ownedNestedPage
         }
 
+    /** One read-only capture path for the unified observer and explicit child failures.
+     * No ordinary event sampling, no raw node retention, and no additional scheduler. */
+    internal fun captureAnomalyPage(taskId: String, runGeneration: Long, explicitReason: String? = null) {
+        runCatching {
+            val runId = diagnostics.activeRunId() ?: return
+            val window = accessibilityGateway.currentGestureWindow() ?: return
+            if (window.packageName != targetPackage || window.windowId < 0) return
+            val reason = explicitReason ?: diagnostics.pendingPageAnomaly(window, taskId) ?: return
+            if (!diagnostics.claimPageAnomaly(runId)) return
+            val snapshot = accessibilityGateway.inspectActiveWindow(
+                TreeInspectionRequest(maxNodes = 480, maxDepth = 48, maxDurationMs = 300L,
+                    textCapture = NodeTextCapture.NONE)
+            ) ?: return
+            if (snapshot.window != window || snapshot.windowId != window.windowId ||
+                !accessibilityGateway.isWindowCurrent(window) || diagnostics.activeRunId() != runId) return
+            diagnostics.recordPageAnomaly(runId, taskId, runGeneration, reason, snapshot)
+        }
+    }
+
     /** Reuse the existing image-browser readiness check and canonical window identity.
      * No image-content anchors, coordinates or new structural fingerprint are required.
      */
@@ -5614,7 +5633,12 @@ internal class MomoSocialAdapter(
         targetPackage = targetPackage,
         onLog = onLog,
         isBoundAiReplyUiOperationOwned = isBoundAiReplyUiOperationOwned,
-        captureImageSendBaseline = ::captureImageSendBaseline
+        captureImageSendBaseline = ::captureImageSendBaseline,
+        onPageAnomaly = { child, reason ->
+            child.target.taskLease?.let { lease ->
+                captureAnomalyPage(lease.taskId, lease.runGeneration, "${child.logPrefix}:${child.stage}:$reason")
+            }
+        }
     )
 
     private val imageTransaction = MomoImageSendTransactionController(

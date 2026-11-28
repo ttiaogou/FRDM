@@ -1,5 +1,7 @@
 package com.freedom.application.ports
 
+import com.freedom.core.accessibility.api.AccessibilityTreeSnapshot
+import com.freedom.core.accessibility.api.WindowRef
 import com.freedom.core.logging.RunDiagnosticInput
 import com.freedom.core.logging.RunLogCategory
 import com.freedom.core.logging.RunLogLevel
@@ -13,6 +15,12 @@ interface RunDiagnosticsPort {
     fun withSealedHistoryForExport(copy: (Set<String>) -> Unit) = copy(emptySet())
     /** Diagnostic-only input; no monitor-history duplication is required. */
     fun recordInput(input: RunDiagnosticInput) {}
+
+    /** Read-only, run-scoped anomaly evidence; no task or UI authority. */
+    fun pendingPageAnomaly(window: WindowRef, taskId: String): String? = null
+    fun claimPageAnomaly(runId: String): Boolean = false
+    fun recordPageAnomaly(runId: String, taskId: String, runGeneration: Long, reason: String,
+                          snapshot: AccessibilityTreeSnapshot) {}
 
     /** Run-scoped, pre-sanitized wire evidence. Never routed through ordinary runtime logs. */
     fun recordAiContextDiagnostic(runId: String, jsonLine: String) {}

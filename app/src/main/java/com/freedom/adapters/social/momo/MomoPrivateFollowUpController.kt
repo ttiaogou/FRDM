@@ -41,7 +41,8 @@ internal class MomoPrivateFollowUpController(
     private val targetPackage: String,
     private val onLog: (String) -> Unit,
     private val isBoundAiReplyUiOperationOwned: (TaskLease?) -> Boolean,
-    private val captureImageSendBaseline: (ChatDraftInputTarget, String, () -> Boolean) -> MomoImageSendBaseline?
+    private val captureImageSendBaseline: (ChatDraftInputTarget, String, () -> Boolean) -> MomoImageSendBaseline?,
+    private val onPageAnomaly: (PrivateFollowUpTransaction, String) -> Unit = { _, _ -> }
 ) {
     @Volatile private var privateFollowUp: PrivateFollowUpTransaction? = null
 
@@ -91,6 +92,18 @@ internal class MomoPrivateFollowUpController(
         val count = ++child.waitObservationCount
         if (count == 1L || count % 10L == 0L) {
             onLog("${child.logPrefix} WAIT stage=${child.stage};reason=$reason;observations=$count")
+            // Ordinary asynchronous waits/backoff are not anomalies. Capture actual evidence
+            // failures at the existing observer, while this exact transaction is still current.
+            if (followUpCurrent(child) && (reason.startsWith("UNKNOWN_") ||
+                    reason in setOf("INTERCEPTION_SETTINGS_IDENTITY_UNCONFIRMED",
+                        "INTERCEPTION_SETTINGS_STATE_UNKNOWN", "INTERCEPTION_POPUP_SOURCE_UNCONFIRMED",
+                        "INTERCEPTION_POPUP_STATE_UNKNOWN", "PAGE_WRITE_LEASE_WAIT",
+                        "ORIGINAL_CHAT_NOT_CURRENT", "SWITCH_STATE_NOT_READABLE", "SWITCH_ON_NOT_CONFIRMED",
+                        "ALBUM_SELECTOR_WINDOW_UNAVAILABLE", "FREEDOM_NAME_NOT_FOUND_IN_CURRENT_CHILD_WINDOW",
+                        "SELECTED_ALBUM_WINDOW_NOT_CURRENT") ||
+                    (count >= 10L && reason == "ORIGINAL_CHAT_RETURN_PENDING"))) {
+                runCatching { onPageAnomaly(child, reason) }
+            }
         }
     }
 

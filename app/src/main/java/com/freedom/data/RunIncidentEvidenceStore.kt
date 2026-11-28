@@ -1,5 +1,11 @@
 package com.freedom.data
 
+import com.freedom.core.accessibility.api.AccessibilityTreeSnapshot
+import com.freedom.core.accessibility.api.NodeTextCapture
+import com.freedom.core.accessibility.diagnostics.NodeDumpFormatter
+import com.freedom.core.accessibility.diagnostics.NodeDumpFormat
+import com.freedom.core.accessibility.diagnostics.NodeDumpOptions
+import java.security.MessageDigest
 import com.freedom.core.logging.RunDiagnosticEvent
 import com.freedom.core.logging.RunIncidentEvidencePolicy
 import com.freedom.core.logging.RunIncidentEvidencePolicy.Relation
@@ -64,6 +70,62 @@ internal class RunIncidentEvidenceStore(
     private var claimed = 0
     private var warningClaims = 0
     private var nonFatalClaims = 0
+
+    // Separate bounded node-evidence reserve: ordinary samples and event captures cannot consume it.
+    private val pageSignatures = mutableSetOf<String>()
+    @Volatile private var pageEvidenceCount = 0
+    val hasPageEvidenceCapacity: Boolean get() = pageEvidenceCount < MAX_PAGE_EVIDENCE
+
+    /** Same diagnostic writer; store structural JSON only, with the actual page and reason.
+     * A repeated reason/structure is not a new capture, even if its timestamp changes.
+     * A partial bounded snapshot is useful evidence but never a business-success proof. */
+    fun recordPageEvidence(taskId: String, runGeneration: Long, reason: String,
+                           snapshot: AccessibilityTreeSnapshot): Boolean {
+        if (!hasPageEvidenceCapacity || snapshot.textCapture != NodeTextCapture.NONE ||
+            snapshot.nodes.isEmpty() || snapshot.windowId < 0 || snapshot.window.windowId != snapshot.windowId ||
+            !Regex("[A-Za-z0-9_.:-]{1,320}").matches(reason) ||
+            !Regex("[A-Za-z0-9_.:-]{1,100}").matches(taskId)) return false
+        return runCatching {
+            val full = NodeDumpFormatter.dump(snapshot, NodeDumpOptions(
+                format = NodeDumpFormat.JSON, maxNodes = 480, includeText = false, indent = ""))
+            val stopReason = snapshot.stopReason?.takeIf { Regex("[A-Za-z0-9_.:-]{1,100}").matches(it) }
+                ?: "UNKNOWN"
+            // The formatter is deterministic; remove only its top-level capture timestamp.
+            val structure = full.content.replaceFirst(
+                "\"capturedAtEpochMs\": ${snapshot.capturedAtEpochMs}", "\"capturedAtEpochMs\": 0")
+            val signatureMaterial = listOf(taskId, runGeneration.toString(), reason,
+                stopReason, snapshot.truncated.toString(), structure).joinToString("|")
+            val signature = MessageDigest.getInstance("SHA-256")
+                .digest(signatureMaterial.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+            if (signature in pageSignatures) return false
+
+            var limit = 480
+            var dump = full
+            var payload: String
+            while (true) {
+                // task/reason/signature are bounded code strings; both nested objects come
+                // from the existing escaping formatter, never raw chat text.
+                payload = """{"schemaVersion":1,"capturePriority":"ANOMALY","taskId":"$taskId","runGeneration":$runGeneration,"reason":"$reason","signature":"$signature","snapshotTruncated":${snapshot.truncated},"snapshotStopReason":"$stopReason","manifest":${dump.manifestJson},"tree":${dump.content}}"""
+                if (bytes(payload) <= MAX_PAGE_EVIDENCE_BYTES) break
+                check(limit > 1) { "node evidence exceeds byte ceiling" }
+                limit = (limit / 2).coerceAtLeast(1)
+                dump = NodeDumpFormatter.dump(snapshot, NodeDumpOptions(
+                    format = NodeDumpFormat.JSON, maxNodes = limit, includeText = false, indent = ""))
+            }
+            val directory = File(File(runDirectory, ROOT), PAGE_NODES)
+            check(directory.isDirectory || directory.mkdirs())
+            val file = File(directory, "page-${pageEvidenceCount + 1}.json")
+            check(!file.exists()) { "page evidence already exists" }
+            writeAtomic(file, payload)
+            pageSignatures.add(signature)
+            pageEvidenceCount++
+            true
+        }.getOrElse {
+            stats = stats.copy(writeFailures = stats.writeFailures + 1)
+            false
+        }
+    }
 
     @Volatile var stats: Stats = Stats()
         private set
@@ -283,6 +345,9 @@ internal class RunIncidentEvidenceStore(
 
     companion object {
         private const val ROOT = "incidents"
+        private const val PAGE_NODES = "page_nodes"
+        internal const val MAX_PAGE_EVIDENCE = 16
+        internal const val MAX_PAGE_EVIDENCE_BYTES = 128L * 1024L
         private const val TIMELINE = "timeline.jsonl"
         private const val CAPTURE = "capture.json"
         private const val END = "capture_end.json"
@@ -304,10 +369,15 @@ internal class RunIncidentEvidenceStore(
                 it.isDirectory && it.name.matches(Regex("incident-[0-9]+"))
             }.sortedBy { it.name.substringAfter("incident-").toLongOrNull() ?: Long.MAX_VALUE }
 
+        fun pageEvidenceFiles(runDirectory: File): List<File> =
+            File(File(runDirectory, ROOT), PAGE_NODES).listFiles().orEmpty()
+                .filter { it.isFile && it.name.matches(Regex("page-[0-9]+[.]json")) }
+                .sortedBy { it.name.substringAfter("page-").substringBefore(".").toIntOrNull() ?: Int.MAX_VALUE }
+
         fun files(runDirectory: File): List<File> =
             directories(runDirectory).flatMap { dir ->
                 listOf(CAPTURE, TIMELINE, END, TRANSACTION, LATEST, "error_detail.txt").map { File(dir, it) }.filter(File::isFile)
-            }
+            } + pageEvidenceFiles(runDirectory)
 
         fun transactionState(directory: File): Outcome? = runCatching {
             val value = Regex(""""state":"([A-Z_]+)"""").find(File(directory, TRANSACTION).readText())

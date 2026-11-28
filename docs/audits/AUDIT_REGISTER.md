@@ -71,7 +71,7 @@ D01-E 工程验收基线 de167db5ca40c4b12dd12b541229b88434a52586；[CI 46148339
 | --- | --- | --- | --- | --- |
 | R10-001 | 拦截/高 | 2026-11-28 用户诊断：进入 ChatSettingActivity 后持续 INTERCEPTION_SETTINGS_IDENTITY_UNCONFIRMED，UNCLASSIFIED；OWN-20/04/07。基线 c0d3f2cb8f98160fe5d394a131025936fa53b8c5，控制器在 setting_layout_harass 已匹配后仍要求 tv_user_name 与原标题一致 | VERIFY_PENDING | R10-A 移除设置页用户名要求；现有行/开关证据复用到父路由，开关确认和返回原会话保留；新 CI、F08/F09 真机验证后关闭 |
 | R10-002 | 图片/高 | OWN-19/04：基线 c0d3f2cb8f98160fe5d394a131025936fa53b8c5，选图/发送已经使用 ownedSelectionTarget/ownedSendTarget，子页面归属却可能只接受完整相册壳/selector；遮挡后的 chat detail 分类可先于子证据 | VERIFY_PENDING | 复用原有按阶段目标证据及当前窗口检查；无真机复现证据，属于源码确认的潜在阻塞路径，不改图片选择、发送、失败重试或计数算法 |
-| R10-003 | 诊断/中 | 用户故障采集没有设置页节点证据，现有 KEY_PAGE/STANDARD 预算；OWN-30/32 | OPEN | 用户明确授权的第二次提交：异常现场优先、去重、容量保护；本次不修改采集链 |
+| R10-003 | 诊断/中 | 用户故障采集没有设置页节点证据；AI 普通节点样本和全局运行诊断生命周期不同。OWN-30/32，基线 aa68a9894146bab0d83a5cc6b7ff19ade398ed23 | VERIFY_PENDING | R10-B 复用现有统一观察/子事务失败通知和诊断 FIFO writer；异常结构 JSON 独立 16 份、每份 128 KiB，去重与原封存/保留/综合导出复用；完整 CI 和真实设备故障取证待验 |
 
 本次前置 CI 46149485099 的主 APK job 下载 OpenCV/ONNX Runtime 时 Maven Central 返回 HTTP 429，架构、单测、独立 OCR 和 CodeQL 均成功；外部依赖限流，不在 R10-A 修改构建配置。
 
@@ -80,3 +80,5 @@ D01-E 工程验收基线 de167db5ca40c4b12dd12b541229b88434a52586；[CI 46148339
 代码相似、语义职责、正反调用链、状态/缓存、监听器/回调生命周期、不可达及依赖/资源。当前现有架构检测与 G01-A 文档扫描继续使用；AI 发现的问题必须区分候选与确认。删除生产代码需独立任务授权及行为保护，不因本台账自动执行。
 
 [职责归属表](RESPONSIBILITY_MAP.md) · [当前检查点](AUDIT_CHECKPOINT.md) · [R09-F 真机清单](FRDM-PP-R09-F-APK-DEVICE-REGRESSION.md) · [历史归档](../archive/README.md)。
+
+R10-A 基线 aa68a9894146bab0d83a5cc6b7ff19ade398ed23 完整 CI 46151140749 success；F08/F09 真机修复效果仍待复测。R10-B 不因上一轮 CI 通过而关闭真机事项。
