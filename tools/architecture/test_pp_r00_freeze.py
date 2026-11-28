@@ -349,6 +349,13 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsCheckpointVerification.kt"
         self.assertEqual("8834d6054710aa10c7dafbbb5b6fe756737b7def", reviewed_s1[path])
         reviewed_s1[path] = "e313a29018b7a10d25b21e78fb196c24a538fe19"
+        # R08-A: exact relocation of diagnostic-only draft state; S0 unchanged.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ai/AiReplyDraftCoordinator.kt"
+        self.assertEqual("21d90c5e10b1f4edd858c0b9fc48a932e8dfe928", reviewed_s1[path])
+        reviewed_s1[path] = "db6fc22c3d0e17178191a7e945c93e36c7a90ebe"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ai/AiModelCallDiagnostics.kt"
+        self.assertEqual("c5f87169bd3e1550109eacb0474aa98d6e026ff2", reviewed_s1[path])
+        reviewed_s1[path] = "08280b83bb964694feb8b40244b318d836bc8244"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

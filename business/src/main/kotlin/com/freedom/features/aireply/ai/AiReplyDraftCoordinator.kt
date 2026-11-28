@@ -1,7 +1,6 @@
 package com.freedom.features.aireply.ai
 
 import com.freedom.core.logging.RunDiagnosticInput
-import com.freedom.core.logging.RunLogCategory
 import com.freedom.core.logging.RunLogLevel
 import com.freedom.features.aireply.domain.message.ChatMessage
 import com.freedom.features.aireply.domain.message.ChatMessageBatch
@@ -37,85 +36,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-
-/**
- * Shared, safe model/send event contract for both registered AI reply businesses.
- * Diagnostics only: no conversation text, raw transport responses, page fingerprints or UI capabilities.
- * Fixed fields allow model and send events to be joined without changing persistence contracts.
- */
-internal object AiReplyTraceContract {
-    fun format(
-        component: String,
-        requestId: String,
-        taskId: String?,
-        generation: Long,
-        eventType: String,
-        attemptIndex: Int? = null,
-        retryState: String? = null,
-        reasonCode: String? = null,
-        delayMs: Long? = null,
-        responseMode: String? = null,
-        outcomeCategory: String? = null,
-        segmentIndex: Int? = null,
-        segmentCount: Int? = null,
-        sendAttemptId: String? = null,
-        sendConfirmationId: String? = null,
-        sendStatus: String? = null,
-        finalState: String? = null,
-        sendAttemptOrigin: String? = null
-    ): RunDiagnosticInput {
-        // Never serialize arbitrary provider, adapter or persisted identifier text.
-        fun safe(value: String?): String = value?.takeIf {
-            it.length in 1..128 && it.all { char ->
-                char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' ||
-                    char == '_' || char == '-' || char == '.' || char == ':'
-            }
-        } ?: "UNKNOWN"
-        val safeTask = taskId?.takeIf {
-            it == AiDecisionTaskIds.PRIVATE_MESSAGES ||
-                it == AiDecisionTaskIds.RECEIVED_GREETINGS
-        } ?: "UNKNOWN"
-        val prefix = if (component == "MODEL") "AI 模型生命周期：" else "AI 消息发送链路："
-        val message = prefix +
-            "component=${safe(component)}；requestId=${safe(requestId)}；taskId=$safeTask；" +
-            "generation=$generation；eventType=${safe(eventType)}；" +
-            "attemptIndex=${attemptIndex ?: "NONE"}；retryState=${safe(retryState)}；" +
-            "reasonCode=${safe(reasonCode)}；delayMs=${delayMs ?: "NONE"}；" +
-            "responseMode=${safe(responseMode)}；outcomeCategory=${safe(outcomeCategory)}；" +
-            "segmentIndex=${segmentIndex ?: "NONE"}；segmentCount=${segmentCount ?: "NONE"}；" +
-            "sendAttemptId=${safe(sendAttemptId)}；sendConfirmationId=${safe(sendConfirmationId)}；" +
-            "sendStatus=${safe(sendStatus)}；sendAttemptOrigin=${safe(sendAttemptOrigin)}；" +
-            "finalState=${safe(finalState)}"
-        val level = when (eventType) {
-            "MODEL_REQUEST_FINISHED" -> when (finalState) {
-                "SUCCEEDED", "CANCELLED" -> RunLogLevel.INFO
-                else -> RunLogLevel.ERROR
-            }
-            "MODEL_ATTEMPT_FINISHED" -> when (outcomeCategory) {
-                "VALID_DECISION", "LOCAL_PRECHECK_BLOCKED" -> RunLogLevel.INFO
-                else -> RunLogLevel.WARN
-            }
-            "MODEL_RETRY_SCHEDULE_FAILED" -> RunLogLevel.ERROR
-            "MESSAGE_SEND_UNCERTAIN", "MESSAGE_SEND_REJECTED", "MESSAGE_SEND_DEFERRED" -> RunLogLevel.WARN
-            "MODEL_ATTEMPT_STARTED", "MODEL_RETRY_SCHEDULED", "MODEL_RETRY_EXECUTING",
-            "MODEL_RETRY_CANCELLED", "MESSAGE_SEND_SUBMITTED", "MESSAGE_SEND_REHYDRATED",
-            "MESSAGE_SEND_CONFIRMED", "MESSAGE_SEND_COMPLETED" -> RunLogLevel.INFO
-            else -> RunLogLevel.WARN
-        }
-        return RunDiagnosticInput(
-            eventType = safe(eventType),
-            level = level,
-            category = RunLogCategory.TASK,
-            component = if (component == "MODEL") "AiModel" else "AiSend",
-            message = message,
-            taskId = safeTask.takeUnless { it == "UNKNOWN" },
-            traceId = safe(requestId).takeUnless { it == "UNKNOWN" },
-            result = safe(finalState ?: sendStatus ?: outcomeCategory ?: retryState),
-            reason = safe(reasonCode),
-            requestGeneration = generation
-        )
-    }
-}
 
 enum class SendConfirmationResult {
     NOT_PENDING,
@@ -198,115 +118,8 @@ class AiReplyDraftCoordinator(
     /** Only a first-chunk focus rejection with a freshly re-read empty composer can be retried. */
     private val verifiedEmptyInputRetries = linkedMapOf<String, VerifiedEmptyInputRetry>()
 
-    /** Diagnostic-only trace. Never consulted by model decisions, send gates or retry scheduling. */
-    private data class ModelLifecycleTrace(
-        val requestId: String,
-        val taskId: String,
-        val requestGeneration: Long,
-        var attemptIndex: Int = -1,
-        var scheduledRetries: Int = 0,
-        var retryPending: Boolean = false,
-        var lastOutcomeCategory: String = "UNKNOWN",
-        var terminalLogged: Boolean = false
-    )
-
-    private var modelLifecycleTrace: ModelLifecycleTrace? = null
-    /** Diagnostic-only de-duplication, never used to advance a send or release a gate. */
-    private val emittedSendTraceKeys = LinkedHashSet<String>()
-
-    private fun lifecycleRecord(
-        trace: ModelLifecycleTrace,
-        eventType: String,
-        retryState: String = "NONE",
-        reasonCode: String = "NONE",
-        delayMs: Long? = null,
-        responseMode: String = "UNKNOWN",
-        finalState: String? = null
-    ): RunDiagnosticInput = AiReplyTraceContract.format(
-        component = "MODEL", requestId = trace.requestId, taskId = trace.taskId,
-        generation = trace.requestGeneration, eventType = eventType,
-        attemptIndex = trace.attemptIndex, retryState = retryState, reasonCode = reasonCode,
-        delayMs = delayMs, responseMode = responseMode,
-        outcomeCategory = trace.lastOutcomeCategory, finalState = finalState
-    )
-
-    private fun recordModelEvidence(
-        type: String, level: RunLogLevel, taskId: String, requestId: String,
-        requestGeneration: Long, result: String, message: String
-    ) {
-        runCatching {
-            onDiagnosticLog(RunDiagnosticInput(
-                eventType = type, level = level, category = RunLogCategory.TASK,
-                component = "AiModel", message = message, taskId = taskId,
-                traceId = requestId, requestGeneration = requestGeneration, result = result
-            ))
-        }
-    }
-
-    /** Emits fixed diagnostic codes only; model output and exception messages never enter this log. */
-    private fun recordModelLifecycle(
-        requestId: String,
-        requestGeneration: Long,
-        eventType: String,
-        attemptIndex: Int,
-        retryState: String = "NONE",
-        reasonCode: String = "NONE",
-        delayMs: Long? = null,
-        responseMode: String = "UNKNOWN",
-        outcomeCategory: String = "UNKNOWN"
-    ) {
-        val log = synchronized(lock) {
-            val trace = modelLifecycleTrace?.takeIf {
-                it.requestId == requestId && it.requestGeneration == requestGeneration && !it.terminalLogged
-            } ?: return@synchronized null
-            when (eventType) {
-                "MODEL_ATTEMPT_STARTED" -> trace.attemptIndex = attemptIndex
-                "MODEL_ATTEMPT_FINISHED" -> trace.lastOutcomeCategory = outcomeCategory
-                "MODEL_RETRY_SCHEDULED" -> {
-                    trace.retryPending = true
-                    trace.scheduledRetries++
-                }
-                "MODEL_RETRY_EXECUTING", "MODEL_RETRY_CANCELLED" -> trace.retryPending = false
-            }
-            lifecycleRecord(trace, eventType, retryState, reasonCode, delayMs, responseMode)
-        }
-        // Diagnostics must never cause a model decision or UI action to fail.
-        log?.let { runCatching { onDiagnosticLog(it) } }
-    }
-
-    private fun terminalLifecycleRecord(
-        trace: ModelLifecycleTrace,
-        finalState: String,
-        reasonCode: String,
-        retryState: String = when {
-            finalState == "SUCCEEDED" -> "SUCCEEDED"
-            finalState == "CANCELLED" -> "CANCELLED_GENERATION_CHANGED"
-            trace.lastOutcomeCategory == "EMPTY_MODEL_OUTPUT" &&
-                trace.scheduledRetries == MAX_EMPTY_MODEL_RETRIES -> "EXHAUSTED"
-            else -> "NONE"
-        }
-    ): RunDiagnosticInput = lifecycleRecord(
-        trace, "MODEL_REQUEST_FINISHED", retryState, reasonCode, finalState = finalState
-    )
-
-    /** Exactly one model-generation terminal event, separate from later send confirmation. */
-    private fun completeModelLifecycle(
-        requestId: String,
-        requestGeneration: Long,
-        finalState: String,
-        reasonCode: String,
-        retryState: String? = null
-    ) {
-        val log = synchronized(lock) {
-            val trace = modelLifecycleTrace?.takeIf {
-                it.requestId == requestId && it.requestGeneration == requestGeneration && !it.terminalLogged
-            } ?: return@synchronized null
-            trace.terminalLogged = true
-            if (retryState == null) terminalLifecycleRecord(trace, finalState, reasonCode)
-            else terminalLifecycleRecord(trace, finalState, reasonCode, retryState)
-        }
-        log?.let { runCatching { onDiagnosticLog(it) } }
-    }
+    /** Diagnostic-only state uses the existing transaction lock; it has no business authority. */
+    private val requestTrace = AiReplyRequestTrace(lock, onDiagnosticLog, MAX_PROCESSED_KEYS, MAX_EMPTY_MODEL_RETRIES)
     private var activeInputObservationAtMillis = 0L
     private var activeMessageKey: String? = null
     private var activeRequestId: String? = null
@@ -384,31 +197,10 @@ class AiReplyDraftCoordinator(
         sendStatus: String = "UNKNOWN",
         reasonCode: String = "NONE",
         recoveredFromLedger: Boolean = false
-    ) {
-        val log = synchronized(lock) {
-            val terminal = eventType in setOf(
-                "MESSAGE_SEND_CONFIRMED", "MESSAGE_SEND_UNCERTAIN", "MESSAGE_SEND_COMPLETED"
-            )
-            val key = "$requestId|$requestGeneration|$segmentIndex|${sendAttemptId.orEmpty()}|$eventType"
-            if (terminal && !emittedSendTraceKeys.add(key)) return@synchronized null
-            while (emittedSendTraceKeys.size > MAX_PROCESSED_KEYS) {
-                emittedSendTraceKeys.remove(emittedSendTraceKeys.first())
-            }
-            val taskId = modelLifecycleTrace?.takeIf {
-                it.requestId == requestId && it.requestGeneration == requestGeneration
-            }?.taskId
-            AiReplyTraceContract.format(
-                component = "SEND", requestId = requestId, taskId = taskId,
-                generation = requestGeneration, eventType = eventType,
-                segmentIndex = segmentIndex, segmentCount = segmentCount,
-                sendAttemptId = sendAttemptId, sendConfirmationId = sendConfirmationId,
-                sendStatus = sendStatus, reasonCode = reasonCode,
-                sendAttemptOrigin = if (recoveredFromLedger) "RECOVERED_SYNTHETIC" else "ORIGINAL"
-            )
-        }
-        // Logging is observational only: callback failure cannot affect send state.
-        log?.let { runCatching { onDiagnosticLog(it) } }
-    }
+    ) = requestTrace.recordSendTrace(
+        eventType, requestId, requestGeneration, segmentIndex, segmentCount,
+        sendAttemptId, sendConfirmationId, sendStatus, reasonCode, recoveredFromLedger
+    )
 
     private fun recordSendTrace(
         eventType: String,
@@ -529,16 +321,7 @@ class AiReplyDraftCoordinator(
             // Invalidate callbacks even when the optional UNKNOWN journal update fails.
             // The pre-submit durable SENDING/SENT_UNCONFIRMED record remains non-replayable.
             generation.incrementAndGet()
-            modelLifecycleTrace?.takeIf { !it.terminalLogged }?.let { trace ->
-                trace.terminalLogged = true
-                cancelledModelLogs = (if (trace.retryPending) listOf(
-                    lifecycleRecord(trace, "MODEL_RETRY_CANCELLED", "CANCELLED_GENERATION_CHANGED", "RUNTIME_RESET")
-                ) else emptyList()) + terminalLifecycleRecord(
-                    trace, "CANCELLED", "RUNTIME_RESET", "CANCELLED_GENERATION_CHANGED"
-                )
-            }
-            modelLifecycleTrace = null
-            emittedSendTraceKeys.clear()
+            cancelledModelLogs = requestTrace.resetLocked()
             pendingSendConfirmation?.let { pendingConfirmation ->
                 val requestId = activeRequestId
                 val repository = replySegmentTaskRepository
@@ -883,7 +666,7 @@ class AiReplyDraftCoordinator(
             }
             pending.set(true)
             generation.get().also { requestGeneration ->
-                modelLifecycleTrace = ModelLifecycleTrace(requestId, policy.taskId, requestGeneration)
+                requestTrace.beginLocked(requestId, policy.taskId, requestGeneration)
             }
         }
         // Diagnostics observe the already selected context; they do not select, repair or
@@ -974,7 +757,7 @@ class AiReplyDraftCoordinator(
             else -> ModelResponseMode.STRICT_JSON
         }
         val responseMode = modelResponseMode.name
-        recordModelLifecycle(
+        requestTrace.recordModelLifecycle(
             requestId, requestGeneration, "MODEL_ATTEMPT_STARTED", emptyRetryAttempt,
             responseMode = responseMode
         )
@@ -1003,7 +786,7 @@ class AiReplyDraftCoordinator(
                 )
             )
         } catch (error: Throwable) {
-            recordModelLifecycle(
+            requestTrace.recordModelLifecycle(
                 requestId, requestGeneration, "MODEL_ATTEMPT_FINISHED", emptyRetryAttempt,
                 reasonCode = "DECIDE_EXCEPTION", responseMode = responseMode,
                 outcomeCategory = "MODEL_CALL_FAILED"
@@ -1033,12 +816,12 @@ class AiReplyDraftCoordinator(
                 ?: evaluation.callDiagnostics?.safeCode ?: evaluation.status.reasonCode
             val contentState = evaluation.outputContentState
                 ?: evaluation.callDiagnostics?.responseContentState ?: "UNKNOWN"
-            recordModelLifecycle(
+            requestTrace.recordModelLifecycle(
                 requestId, requestGeneration, "MODEL_ATTEMPT_FINISHED", emptyRetryAttempt,
                 reasonCode = outcomeCategory.name, responseMode = responseMode,
                 outcomeCategory = outcomeCategory.name
             )
-            recordModelEvidence("MODEL_RESULT_CLASSIFIED",
+            requestTrace.recordModelEvidence("MODEL_RESULT_CLASSIFIED",
                 if (outcomeCategory == AiModelOutputCategory.LOCAL_PRECHECK_BLOCKED) RunLogLevel.INFO else RunLogLevel.WARN,
                 policy.taskId, requestId, requestGeneration, outcomeCategory.name,
                 "AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
@@ -1083,12 +866,12 @@ class AiReplyDraftCoordinator(
                                 val retryState = if (!isCurrentGeneration(requestGeneration)) {
                                     "CANCELLED_GENERATION_CHANGED"
                                 } else "CANCELLED_RUNTIME_INACTIVE"
-                                recordModelLifecycle(
+                                requestTrace.recordModelLifecycle(
                                     requestId, requestGeneration, "MODEL_RETRY_CANCELLED",
                                     emptyRetryAttempt + 1, retryState, "RETRY_GATE_CHANGED",
                                     responseMode = nextMode
                                 )
-                                completeModelLifecycle(
+                                requestTrace.completeModelLifecycle(
                                     requestId, requestGeneration, "CANCELLED", "RETRY_GATE_CHANGED", retryState
                                 )
                                 return@schedule
@@ -1098,7 +881,7 @@ class AiReplyDraftCoordinator(
                             val composerReady = runCatching { inputPort.verifyDraft(target, "") }
                                 .getOrNull()?.status == ChatDraftInputStatus.VERIFIED
                             if (!composerReady) {
-                                recordModelLifecycle(
+                                requestTrace.recordModelLifecycle(
                                     requestId, requestGeneration, "MODEL_RETRY_CANCELLED",
                                     emptyRetryAttempt + 1, "CANCELLED_CONTEXT_CHANGED",
                                     "COMPOSER_NOT_VERIFIED", responseMode = nextMode
@@ -1107,7 +890,7 @@ class AiReplyDraftCoordinator(
                                 finish("MODEL_EMPTY_RETRY_CONTEXT_CHANGED", requestGeneration)
                                 return@schedule
                             }
-                            recordModelLifecycle(
+                            requestTrace.recordModelLifecycle(
                                 requestId, requestGeneration, "MODEL_RETRY_EXECUTING",
                                 emptyRetryAttempt + 1, "EXECUTING", "COMPOSER_VERIFIED",
                                 responseMode = nextMode
@@ -1128,14 +911,14 @@ class AiReplyDraftCoordinator(
                         }
                     }.isSuccess
                     if (scheduled) {
-                        recordModelLifecycle(
+                        requestTrace.recordModelLifecycle(
                             requestId, requestGeneration, "MODEL_RETRY_SCHEDULED",
                             emptyRetryAttempt + 1, "SCHEDULED", "EMPTY_MODEL_OUTPUT",
                             retryDelayMs, nextMode
                         )
                         return
                     }
-                    recordModelLifecycle(
+                    requestTrace.recordModelLifecycle(
                         requestId, requestGeneration, "MODEL_RETRY_SCHEDULE_FAILED",
                         emptyRetryAttempt + 1, reasonCode = "SCHEDULER_UNAVAILABLE",
                         responseMode = nextMode
@@ -1156,7 +939,7 @@ class AiReplyDraftCoordinator(
             return
         }
         val decision = (evaluation as AiReplyEvaluation.Model).decision
-        recordModelLifecycle(
+        requestTrace.recordModelLifecycle(
             requestId, requestGeneration, "MODEL_ATTEMPT_FINISHED", emptyRetryAttempt,
             reasonCode = "VALID_DECISION", responseMode = responseMode,
             outcomeCategory = "VALID_DECISION"
@@ -1164,7 +947,7 @@ class AiReplyDraftCoordinator(
         val draftPresent = !decision.draft.isNullOrBlank()
         val draftLength = decision.draft?.codePointCount(0, decision.draft.length) ?: 0
         val messageCount = if (draftPresent) ReplyMessageSegments.parse(decision.draft!!).messages.size else 0
-        recordModelEvidence("MODEL_RESULT_CLASSIFIED", RunLogLevel.INFO,
+        requestTrace.recordModelEvidence("MODEL_RESULT_CLASSIFIED", RunLogLevel.INFO,
             policy.taskId, requestId, requestGeneration, "VALID_DECISION",
             "AI 模型结果分类：requestId=$requestId；taskId=${policy.taskId}；" +
             "generation=$requestGeneration；outcomeCategory=VALID_DECISION；" +
@@ -1185,7 +968,7 @@ class AiReplyDraftCoordinator(
                 "reasonHash=${diagnosticHash(decision.reason)}；" +
                 "draftPresent=${!decision.draft.isNullOrBlank()}"
         )
-        recordModelEvidence("MODEL_DECISION_DETAIL", RunLogLevel.DEBUG,
+        requestTrace.recordModelEvidence("MODEL_DECISION_DETAIL", RunLogLevel.DEBUG,
             policy.taskId, requestId, requestGeneration, "VALID_DECISION",
             "AI 模型决策详情：requestId=$requestId；action=${decision.action.name}；" +
             "reasonHash=${diagnosticHash(decision.reason)}；" +
@@ -1197,7 +980,7 @@ class AiReplyDraftCoordinator(
             "inputTokens=${decision.usage?.inputTokens ?: "UNKNOWN"}；" +
             "outputTokens=${decision.usage?.outputTokens ?: "UNKNOWN"}；" +
             "draftPresent=$draftPresent；draftLength=$draftLength；messageCount=$messageCount")
-        completeModelLifecycle(
+        requestTrace.completeModelLifecycle(
             requestId, requestGeneration, "SUCCEEDED", "MODEL_DECISION_${decision.action.name}"
         )
         updateTaskStatus(ReplyTaskStatus.MODEL_COMPLETED, requestGeneration)
@@ -2303,23 +2086,7 @@ class AiReplyDraftCoordinator(
                 while (failedRequests.size > MAX_PROCESSED_KEYS) failedRequests.remove(failedRequests.keys.first())
                 processedMessageKeys.remove(key)
             }
-            modelLifecycleTrace?.takeIf {
-                it.requestGeneration == requestGeneration && !it.terminalLogged
-            }?.let { trace ->
-                trace.terminalLogged = true
-                val cancelled = reasonCode == "MODEL_EMPTY_RETRY_CONTEXT_CHANGED" ||
-                    reasonCode.startsWith("AI_REPLY_STATE_CHANGED")
-                val retryState = when {
-                    reasonCode == "MODEL_EMPTY_RETRY_CONTEXT_CHANGED" -> "CANCELLED_CONTEXT_CHANGED"
-                    cancelled -> "CANCELLED_RUNTIME_INACTIVE"
-                    trace.lastOutcomeCategory == "EMPTY_MODEL_OUTPUT" &&
-                        trace.scheduledRetries == MAX_EMPTY_MODEL_RETRIES -> "EXHAUSTED"
-                    else -> "NONE"
-                }
-                terminalLog = terminalLifecycleRecord(
-                    trace, if (cancelled) "CANCELLED" else "FAILED", reasonCode, retryState
-                )
-            }
+            terminalLog = requestTrace.finishLocked(requestGeneration, reasonCode)
             if (technicalPreSendFailure && preSend && durableFailureRecorded &&
                 key != null && id != null && originalTarget != null && visitToken != null
             ) AiReplyPreSendModelFailure(
