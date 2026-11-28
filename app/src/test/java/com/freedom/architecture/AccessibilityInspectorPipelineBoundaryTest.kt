@@ -19,32 +19,46 @@ class AccessibilityInspectorPipelineBoundaryTest {
 
     @Test
     fun inspectorRemainsSnapshotOnlyAndDoesNotExecuteTargetActions() {
-        val inspector = source(
-            "app/src/main/java/com/freedom/ui/logs/NodeInspectorDialog.kt"
-        )
-
-        assertTrue("Inspector must render immutable node snapshots", inspector.contains("AccessibilityNodeSnapshot"))
-        assertTrue("Inspector must read snapshots through its presentation port", inspector.contains("capturePort.latestSnapshots(selectedSource)"))
-        assertTrue("Inspector must route highlight requests through its presentation port", inspector.contains("capturePort.requestNodeBoundsHighlight"))
-        assertFalse("Manual capture entry belongs to the floating-button menu, not the inspector", inspector.contains("requestManualCapture()"))
-        assertFalse("UI must not send Android capture broadcasts directly", inspector.contains("ACTION_MANUAL_NODE_CAPTURE"))
-        assertFalse("UI must not retain live Android node handles", inspector.contains("AccessibilityNodeInfo"))
-        assertFalse("Inspector must not perform node actions", inspector.contains("performAction("))
-        assertFalse("Inspector must not dispatch screen gestures", inspector.contains("dispatchGesture("))
+        val bounds = source("app/src/main/java/com/freedom/adapters/accessibility/android/NodeBoundsHighlightOverlay.kt")
+        val hierarchy = source("app/src/main/java/com/freedom/adapters/accessibility/android/NodeHierarchyOverlay.kt")
+        val owner = source("app/src/main/java/com/freedom/application/monitor/GlobalNodeLayoutVisualizationUseCase.kt")
+        assertTrue("The capture owner passes detached snapshots to the overlay", owner.contains("showInteractiveNodeLayoutBounds(snapshots, label)"))
+        assertTrue("The capture owner exposes the same detached snapshots", owner.contains("fun snapshots(): List<AccessibilityTreeSnapshot> = latestSnapshots"))
+        assertTrue("The bounds view reuses captured windows for hierarchy", bounds.contains("NodeHierarchyOverlay.show(this.context, capturedSnapshots)"))
+        for (inspector in listOf(bounds, hierarchy)) {
+            assertTrue("Inspector must render immutable node snapshots", inspector.contains("AccessibilityNodeSnapshot"))
+            assertTrue("Inspector must consume detached trees", inspector.contains("AccessibilityTreeSnapshot"))
+            assertFalse("Manual capture entry belongs to the floating-button menu, not the inspector", inspector.contains("requestManualCapture()"))
+            assertFalse("UI must not send Android capture broadcasts directly", inspector.contains("ACTION_MANUAL_NODE_CAPTURE"))
+            assertFalse("UI must not import live Android node handles", inspector.contains("import android.view.accessibility.AccessibilityNodeInfo"))
+            assertFalse("Inspector must not perform node actions", inspector.contains("performAction("))
+            assertFalse("Inspector must not dispatch screen gestures", inspector.contains("dispatchGesture("))
+        }
     }
 
     @Test
-    fun inspectorFilteringIsDebouncedOffMainThreadAndInvalidatesStaleWork() {
-        val inspector = source(
-            "app/src/main/java/com/freedom/ui/logs/NodeInspectorDialog.kt"
-        )
-
-        assertTrue("Filtering must use a dedicated executor", inspector.contains("filterExecutor.execute"))
-        assertTrue("Typing must be debounced", inspector.contains("filterHandler.postDelayed(scheduleFilter, 160L)"))
-        assertTrue("Late results must be rejected by request sequence", inspector.contains("requestId != filterRequestSequence"))
-        assertTrue("Late results must not update a dismissed dialog", inspector.contains("!inspectorDialog.isShowing"))
-        assertTrue("Pending work must be cancelled on dismissal", inspector.contains("pendingFilterRunnable?.let(filterHandler::removeCallbacks)"))
-        assertTrue("Filter executor must be released on dismissal", inspector.contains("filterExecutor.shutdownNow()"))
+    fun liveInspectorSearchUsesCurrentDetachedSnapshotsAndClearsItsPresentation() {
+        // The retired Activity used an asynchronous 160ms filter. The existing floating
+        // surfaces evaluate detached trees synchronously; do not claim executor equivalence.
+        val bounds = source("app/src/main/java/com/freedom/adapters/accessibility/android/NodeBoundsHighlightOverlay.kt")
+        val hierarchy = source("app/src/main/java/com/freedom/adapters/accessibility/android/NodeHierarchyOverlay.kt")
+        val search = source("app/src/main/java/com/freedom/adapters/accessibility/android/InspectorSearchBarView.kt")
+        assertTrue(search.contains("private fun notifyChanged() = onChanged(currentQuery(), regularExpression, enabledAttributes.toSet())"))
+        assertTrue(bounds.contains("searchCriteria = searchCriteria.copy(query = query, regularExpression = regex, attributes = attributes)"))
+        assertTrue(bounds.contains("searchResults = capturedSnapshots.associate"))
+        assertTrue(bounds.contains("NodeInspectorVisibilitySession.hiddenPaths(snapshot.window)"))
+        assertTrue(bounds.contains("fun dispose()"))
+        assertTrue(bounds.contains("removeCallbacks(longPressRunnable)"))
+        assertTrue(bounds.contains("searchBar?.hideKeyboard()"))
+        assertTrue(bounds.contains("searchBar = null"))
+        assertTrue(hierarchy.contains("searchCriteria = searchCriteria.copy(query = query, regularExpression = regex, attributes = attributes)"))
+        assertTrue(hierarchy.contains("val snapshot = currentSnapshot() ?: return"))
+        assertTrue(hierarchy.contains("val rows = treeRows ?: return"))
+        assertTrue(hierarchy.contains("InspectorSearchEngine.evaluate(snapshot, searchCriteria, hiddenPaths)"))
+        assertTrue(hierarchy.contains("removeVisibilityObserver?.invoke()"))
+        assertTrue(hierarchy.contains("treeRows = null"))
+        assertTrue(hierarchy.contains("capturedSnapshots = emptyList()"))
+        assertTrue(hierarchy.contains("searchCriteria = InspectorSearchCriteria()"))
     }
 
     @Test

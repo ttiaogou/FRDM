@@ -259,6 +259,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # D01-D1 exact retirement; all live source and S0 guards remain.
                 self.assertEqual("35228cb4bc9cd4a72b81bfb014550b9891070d05", expected[path])
                 expected[path] = "cd45c1be998ee7de2a217db2ad00e1688bd55a06"
+                # D01-D2: exact S1 retirement; S0 and the original manifest stay unchanged.
+                self.assertEqual("cd45c1be998ee7de2a217db2ad00e1688bd55a06", expected[path])
+                expected[path] = "aed81c353771212cff21424a8c9e3d3ad75dd6ab"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -360,6 +363,11 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "app/src/test/java/com/freedom/ui/logs/SessionSampleArchiveManagerTest.kt"
                 self.assertEqual("755a8f1aa7c51037e3c1036223ea9e733d313423", expected[path])
                 expected[path] = "efbc15dfc2c46e3c976caa10270e07c34aa2fa25"
+            if field == "protected_test_files":
+                # D01-D2: migrate the retired Activity presentation checks to the live overlays.
+                path = "app/src/test/java/com/freedom/architecture/AccessibilityInspectorPipelineBoundaryTest.kt"
+                self.assertEqual("14aa980f91bd9478b45b95790593439bd27167aa", expected[path])
+                expected[path] = "8acfe58fc2d9d9f6f6d6e0958a794c8b4b0e8bbb"
             if field == "protected_rule_files":
                 # G01-E: only the explicitly approved append-only AGENTS governance navigation.
                 # Preserve the original manifest pin and verify the exact new full blob.
@@ -626,6 +634,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_d01d1_batch_packager_retirement.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "80a7acc2c6f867ad14d153266434c362d39f5589"
+        # D01-D2: preserve historical inspector tests and require retired symbols absent.
+        path = "tools/architecture/test_pp_d01d2_legacy_inspector_retirement.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "121afa08950dfa3caad75e9b5d07ed4239be6d51"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

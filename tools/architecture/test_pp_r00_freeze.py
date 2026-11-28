@@ -466,6 +466,18 @@ class PpR00FreezeTest(unittest.TestCase):
         # D01-D1: retire only the unused old batch writer.
         self.assertEqual("c1527cfb178dffd2b429924f0a245cb6327edde3", reviewed_s1[path])
         reviewed_s1[path] = "f64aa840ffb36e8ae9a679af9bbcb2af7fc1efe5"
+        # D01-D2: explicitly authorized retirement of four S1 legacy Activity inspector files.
+        # Preserve the original manifest, verify the previous pins and require exact absence.
+        for path, previous in {
+            "app/src/main/java/com/freedom/application/ports/NodeCapturePresentationPort.kt": "dcea2c8aefabbd712435273a9262fcd51ec75f2d",
+            "app/src/main/java/com/freedom/ui/logs/NodeInspectorBoundsMap.kt": "ab0dff47ab04ea956eede8d2ba9345177f577629",
+            "app/src/main/java/com/freedom/ui/logs/NodeInspectorDialog.kt": "4ed1964e5f932df8ce3a02c72821e7e801f0d648",
+            "app/src/main/java/com/freedom/ui/logs/NodeInspectorTextFormatter.kt": "a6c7dbb92e20257fc41ad774ea6a4519a8d7b631",
+        }.items():
+            self.assertNotIn(path, m["permanent_s0"])
+            self.assertEqual(previous, reviewed_s1[path])
+            self.assertNotIn(path, actual)
+            del reviewed_s1[path]
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

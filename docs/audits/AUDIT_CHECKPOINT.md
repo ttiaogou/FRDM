@@ -5,18 +5,18 @@
 | 字段 | 当前记录 |
 | --- | --- |
 | repository / branch | ttiaogou/FRDM / PP |
-| reviewedHead | 2f5a7a4aa0325cf14cc1163ffc280f56d8d2122a |
-| reviewedTree | 633c7e5d64c3ec93f6cd8ce56ea7478e5f2851e8 |
-| 已验收工程基线 | D01-C 2f5a7a4aa0325cf14cc1163ffc280f56d8d2122a；[完整 CI 46143262439](https://github.com/ttiaogou/FRDM/actions/runs/46143262439) completed/success |
-| 当前任务 | D01-D1 退役旧批量 ZIP 打包器 |
-| 当前状态 | IMPLEMENTED / BASELINE_CI_PASS / COMMIT_CI_PENDING；旧节点检查器、缓存及 S0 未施工，真机未验 |
-| 验证策略 | 旧 writer 精确删除，测试迁移及历史逆向保护；全模块 src 引用检测及完整 CI；真机待验 |
+| reviewedHead | 080fcd17a43f919898435a720806b1d9b8440cb4 |
+| reviewedTree | 02baaa29b6915bbc3f2d0d35637fb63a6fc38965 |
+| 已验收工程基线 | D01-D1 080fcd17a43f919898435a720806b1d9b8440cb4；[完整 CI 46144656958](https://github.com/ttiaogou/FRDM/actions/runs/46144656958) completed/success |
+| 当前任务 | D01-D2 旧节点检查器及专属组件退役 |
+| 当前状态 | IMPLEMENTED / BASELINE_CI_PASS / COMMIT_CI_PENDING；旧缓存及 S0 广播仍保留，真机未验 |
+| 验证策略 | 四 S1 文件精确退役；现行快照只读及搜索清理契约、历史测试逆向；全模块生产引用门禁及完整 CI |
 | 设备验收 | F01–F12 DEFERRED / NOT_RUN；用户独立执行 |
 | 当前职责建档 | 32 项：A 16、B 12、C 4；证据基线仍按职责表，不虚报逐方法核查 |
-| 台账 | 30 项：CLOSED 8、RETAINED 3、CANDIDATE 7、OPEN 3、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 7 |
+| 台账 | 30 项：CLOSED 8、RETAINED 3、CANDIDATE 6、OPEN 3、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 8 |
 | 工作区 | 远端 Git tree/compare；无本地 checkout 验证 |
-| 改动范围 | 仅删 SessionSampleArchiveManager.createBatchArchive；相关单测、R00/R01/D01-C/D01-D1 精确迁移及治理记录；现行三范围打包及安全机制不改 |
-| 下一阶段 | 复核 D01-D1 完整 CI；D01-D2 旧检查器专属组件审计与退役；D01-D3 S0 冻结冲突独立决议 |
+| 改动范围 | 仅删除旧 Activity 检查器四个专属文件；迁移两项展示测试，R00/R01 精确退役保护及治理记录；现行生产链路不改 |
+| 下一阶段 | 复核 D01-D2 完整 CI；D01-D3 旧广播、缓存及 S0 冻结边界独立决议；D01-D4 回归 |
 
 ## 批次进度
 
@@ -31,7 +31,8 @@
 | D01-A | 只读核心链路审计；遗留引用未穷尽 |
 | D01-B | 独立节点 ZIP 退役子项实施，修复提交完整 CI 46142186044 success；剩余缓存/旧接收器未收敛 |
 | D01-C | 三范围统一导出已实施；完整 CI 46143262439 success |
-| D01-D1 | 旧批量 ZIP 打包器退役；新提交完整 CI 待查 |
+| D01-D1 | 旧批量 ZIP 打包器退役；完整 CI 46144656958 success |
+| D01-D2 | 旧节点检查器四个专属组件退役；新提交完整 CI 待查 |
 
 ## G01-F 复核及验收证据
 
@@ -65,6 +66,12 @@
 - 基线 2f5a7a4aa0325cf14cc1163ffc280f56d8d2122a；[CI 46143262439](https://github.com/ttiaogou/FRDM/actions/runs/46143262439) 五个 job 全部 success。分批扫描同一 Git Tree 中 App main 239 个 Kotlin/Java/XML/AIDL/JSON/properties 文件，旧方法仅自身定义，明确已见两处单测调用；不将词法扫描冒充全仓动态调用分析。
 - SessionSampleArchiveManager c1527cfb178dffd2b429924f0a245cb6327edde3 → f64aa840ffb36e8ae9a679af9bbcb2af7fc1efe5，精确删除旧方法 61 行；现行 createExportBundle、cleanupAfterVerifiedExport、源指纹与封存保护逐字节不变。
 - SessionSampleArchiveManagerTest 755a8f1aa7c51037e3c1036223ea9e733d313423 → efbc15dfc2c46e3c976caa10270e07c34aa2fa25；旧多归档隔离、内容和源保护迁移至当前 samples/runId 结构，旧至少两条限制退役，验证单条有效及空选择无诊断拒绝。新增 [D01-D1 精确迁移与全模块引用门禁](../../tools/architecture/test_pp_d01d1_batch_packager_retirement.py)，串接 D01-C 历史逆向，原清单及 S0 不变。新 CI 待验，无本地 Gradle/真机结果。
+
+## D01-D2 本轮证据
+
+- 基线 080fcd17a43f919898435a720806b1d9b8440cb4；[CI 46144656958](https://github.com/ttiaogou/FRDM/actions/runs/46144656958) 五个 job 全部 success。接续 D01-D 首段 App 112 个文件引用扫描，对 D01-D1 基线其余 127 个 App main 文件扫描；四个候选标识仅在四个专属文件自身/组内出现，未声称穷尽动态调用。
+- 退役 S1 旧检查器文件及 blob：NodeInspectorDialog.kt 4ed1964e5f932df8ce3a02c72821e7e801f0d648；NodeInspectorBoundsMap.kt ab0dff47ab04ea956eede8d2ba9345177f577629；NodeInspectorTextFormatter.kt a6c7dbb92e20257fc41ad774ea6a4519a8d7b631；NodeCapturePresentationPort.kt dcea2c8aefabbd712435273a9262fcd51ec75f2d。原 manifest 与 S0 不变，R00 校验旧 pin、精确缺失与其它全部源码；新增 [D01-D2 检测](../../tools/architecture/test_pp_d01d2_legacy_inspector_retirement.py)。
+- AccessibilityInspectorPipelineBoundaryTest 14aa980f91bd9478b45b95790593439bd27167aa → 8acfe58fc2d9d9f6f6d6e0958a794c8b4b0e8bbb；只迁移旧 Activity 两项展示测试，逆向可恢复原文件，剩余 Service/窗口/预算/触摸/隐私测试原文不变。现行浮动搜索同步计算，旧 Activity 的 160ms 独立 executor 契约不再适用；不宣称性能等价、不改动现行搜索，后续独立性能评估。现行悬浮可视化、归档、Service、缓存、监控及共享 core 工具均未修改。新 CI 待验，无本地 Gradle/真机结果。
 
 ## 接续维护
 

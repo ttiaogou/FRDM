@@ -41,7 +41,7 @@ DOC-001～006 的关闭仅针对文档问题，证据为 G01-C HEAD 的 [架构�
 | D01-002 | 缓存/高 | OWN-32：LatestAccessibilityNodeDump 与 GlobalNodeLayoutVisualizationUseCase 分别保存节点；前者仍有 S0 Service 高亮接收器读取 | OPEN | 不改 S0；先完成引用审计、冻结范围决议 |
 | D01-003 | 缓存/高 | MomoSocialAdapter.onNodeTreeSnapshot 经 AppCompositionRoot 写入旧自动缓存；仍有 S0 读取者 | OPEN | 与 D01-002 同步收敛，保留正式归档 |
 | D01-004 | 入口/中 | 旧 ACTION_MANUAL_NODE_CAPTURE 接收器仍注册，现行 UI 未发现发送者 | CANDIDATE | 全仓引用及动态入口核验；S0 独立决议 |
-| D01-005 | 接口/中 | NodeInspectorDialog、NodeCapturePresentationPort 等旧检查器关联组件 | CANDIDATE | 全仓引用、测试保护及实际入口核查后处理 |
+| D01-005 | 接口/中 | D01-D2：旧检查器及其专属 Port、BoundsMap、TextFormatter 共四文件退役；App main 239 文件引用仅四文件互相依赖；两项旧展示测试迁移至当前悬浮快照链 | VERIFY_PENDING | 全模块引用、完整 CI、真机；现行同步搜索与退役对话框 160ms 异步防抖不等价，性能需独立评估 |
 | D01-006 | 导出/中 | 独立节点 ZIP SAF 请求码、临时文件及保存回调已精确移除；CI 46142186044 success | VERIFY_PENDING | 真机回归 |
 | D01-007 | 调度/中 | AndroidMonitorPreviewScheduler 350ms 防抖与监控摘要仍有生产用途 | CANDIDATE | 保留有效调度；后续核查全部摘要消费者 |
 | D01-008 | 导出/高 | D01-C：主界面及悬浮入口共用三范围菜单，综合导出默认，全部已封存样本和全量诊断使用原事务 | VERIFY_PENDING | 新提交 CI 及真机三范围验证 |
@@ -52,7 +52,9 @@ DOC-001～006 的关闭仅针对文档问题，证据为 G01-C HEAD 的 [架构�
 
 D01-C 证据基线 c8859f33eef335a523401aa586d6d6ca48716107（完整 CI 46142186044 success）。本阶段不修改节点缓存、旧广播、S0 或持久化归档格式。D01-C 完整 CI 46143262439 success（HEAD 2f5a7a4aa0325cf14cc1163ffc280f56d8d2122a）；真机待验。活动目录最终复制校验仍严格执行；旧关联诊断无删除清单时仍保留源目录。
 
-D01-D1 证据基线 2f5a7a4aa0325cf14cc1163ffc280f56d8d2122a。D01-C 完整 CI 已通过。旧批量 writer 退役，原三范围打包、封存、回读及清理实现字节不变；全仓源码/测试/资源引用门禁新增，CI 待验；D01-D2/D3 不施工。
+D01-D1 证据基线 2f5a7a4aa0325cf14cc1163ffc280f56d8d2122a。D01-C 完整 CI 已通过。旧批量 writer 退役，原三范围打包、封存、回读及清理实现字节不变；全仓源码/测试/资源引用门禁新增，D01-D1 完整 CI 46144656958 success；D01-D3 未施工。
+
+D01-D2 证据基线 080fcd17a43f919898435a720806b1d9b8440cb4，完整 CI 46144656958 success。四个专属 S1 文件明确退役，保留历史 SHA、原冻结清单、测试逆向证据；现行悬浮两界面、搜索、布局导出、旧 Service 广播与缓存均不修改。旧 Activity 专属异步过滤测试迁移为现有同步快照搜索及清理验证，不宣称线程/防抖等价；真机性能待独立评估。新 CI 待验。
 
 ## 持续扫描范围
 

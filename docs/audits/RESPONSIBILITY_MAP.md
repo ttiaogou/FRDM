@@ -41,7 +41,7 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 | OWN-29 | OCR 插件引擎及模型 | [OcrPluginService](../../ocr-plugin/src/main/java/com/freedom/ocr/plugin/OcrPluginService.kt) / [OcrEngineHolder](../../ocr-plugin/src/main/java/com/freedom/ocr/plugin/runtime/OcrEngineHolder.kt) / [OcrModelManager](../../ocr-plugin/src/main/java/com/freedom/ocr/plugin/model/OcrModelManager.kt) | 插件侧推理、引擎缓存、模型校验安装；真机未验收 | [r09f_apk_delivery](../../tools/architecture/test_pp_r09f_apk_delivery.py) | A |
 | OWN-30 | 诊断与日志 | [RunDiagnosticsManager](../../app/src/main/java/com/freedom/data/RunDiagnosticsManager.kt) / [AiModelCallDiagnostics](../../business/src/main/kotlin/com/freedom/features/aireply/ai/AiModelCallDiagnostics.kt) | 诊断寿命、事件记录、安全字段；不是任务授权 | [r08_diagnostic_serialization_migration](../../tools/architecture/test_pp_r08_diagnostic_serialization_migration.py) | A |
 | OWN-31 | 配置及 UI | [MainActivity](../../app/src/main/java/com/freedom/MainActivity.kt) / [ConfigurationHome](../../app/src/main/java/com/freedom/ui/config/ConfigurationHome.kt) / [EncryptedAiModelConfigurationRepository](../../app/src/main/java/com/freedom/data/ai/EncryptedAiModelConfigurationRepository.kt) / [SharedPreferencesGestureSettingsRepository](../../app/src/main/java/com/freedom/data/SharedPreferencesGestureSettingsRepository.kt) / [OcrPluginSettingsStore](../../app/src/main/java/com/freedom/data/OcrPluginSettingsStore.kt) | 界面与配置持久化分离；配置键及实际 owner 待细化 | [r08_activity_export_presentation_migration](../../tools/architecture/test_pp_r08_activity_export_presentation_migration.py) | C |
-| OWN-32 | 节点检查工具 | [NodeInspectorOperations](../../core/src/main/kotlin/com/freedom/core/accessibility/inspector/NodeInspectorOperations.kt) / [NodeInspectorDialog](../../app/src/main/java/com/freedom/ui/logs/NodeInspectorDialog.kt) | 检查与展示能力；完整接线和寿命待复核 | [r09a_repository_acceptance](../../tools/architecture/test_pp_r09a_repository_acceptance.py) | C |
+| OWN-32 | 节点检查工具 | [NodeInspectorOperations](../../core/src/main/kotlin/com/freedom/core/accessibility/inspector/NodeInspectorOperations.kt) / [GlobalNodeLayoutVisualizationUseCase](../../app/src/main/java/com/freedom/application/monitor/GlobalNodeLayoutVisualizationUseCase.kt) / [NodeBoundsHighlightOverlay](../../app/src/main/java/com/freedom/adapters/accessibility/android/NodeBoundsHighlightOverlay.kt) / [NodeHierarchyOverlay](../../app/src/main/java/com/freedom/adapters/accessibility/android/NodeHierarchyOverlay.kt) | 检查与展示能力；完整接线和寿命待复核 | [r09a_repository_acceptance](../../tools/architecture/test_pp_r09a_repository_acceptance.py) | C |
 
 ## D01-B 职责补证
 
@@ -56,6 +56,10 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 ## D01-D1 职责补证
 
 - OWN-31：基线 2f5a7a4aa0325cf14cc1163ffc280f56d8d2122a，完整 CI 46143262439 success。删除 SessionSampleArchiveManager 旧 createBatchArchive；MainActivity 现行三范围入口与唯一 createExportBundle/SAF/回读/保护性清理不改。单一生产打包实现由 D01-D1 全模块引用检测保护，新 CI 待验；旧节点检查器和 S0 未施工。
+
+## D01-D2 职责补证
+
+- OWN-32：基线 080fcd17a43f919898435a720806b1d9b8440cb4，完整 CI 46144656958 success。旧 Activity 检查器、专属 Port、BoundsMap、TextFormatter 退役。现行 GlobalNodeLayoutVisualizationUseCase 持有实时快照，两个悬浮展示复用 InspectorSearchEngine，布局保存由 NodeLayoutSnapshotExporter 负责；不增加入口或状态所有者。旧缓存、S0 Service 广播以及动态浏览监控未收敛，C 状态保留。现行搜索同步执行，旧对话框的异步防抖不等价，独立性能评估待做；新 CI 待验。
 
 ## 证据及覆盖边界
 
