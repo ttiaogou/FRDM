@@ -271,6 +271,8 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R10-B exact authorized anomaly-only evidence changes.
                 self.assertEqual("b8a440786d9809c732a98dbf4d111781a80ec0a3", expected[path])
                 expected[path] = "c5c84784588d6c93800afd4e97e226104de6e0f6"
+                self.assertEqual("c5c84784588d6c93800afd4e97e226104de6e0f6", expected[path])
+                expected[path] = "55139eefd2169ac3fff645814d90e8c04b9eec81"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -299,6 +301,11 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R07-B reviewed relocation to the existing observation owner.
                 self.assertEqual("06485947b2fda4007b4ef09d1371c06b2f745fb2", expected[path])
                 expected[path] = "92633e6fdc095e6780325ec923712a249821194b"
+            if field == "protected_test_files":
+                # R10-B CI adds assertions without removing existing recovery coverage.
+                path = "app/src/test/java/com/freedom/application/runtime/RunSessionCoordinatorTest.kt"
+                self.assertEqual("3aa98fc11bca6bfe5f838997a3da627e88ba915d", expected[path])
+                expected[path] = "46864941e760c33e76cd06c8396bfa05ecab27eb"
             if field == "protected_test_files":
                 # R10-A explicitly changes only the confirmed-row/unknown-status behavior.
                 path = "app/src/test/java/com/freedom/adapters/social/momo/MomoInterceptionRecoveryPolicyTest.kt"
@@ -702,6 +709,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         }.items():
             self.assertNotIn(path, reviewed_migration_evidence)
             reviewed_migration_evidence[path] = current
+        # R10-B CI correction preserves the prior source through exact inverse evidence.
+        path = "tools/architecture/test_pp_r10b_anomaly_node_evidence.py"
+        self.assertEqual("2553cece41e3f6c65d9ccc36e20701d1d2ec5c48", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "c1ddb6fc807b820a262664c9be3723099e5b04f3"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

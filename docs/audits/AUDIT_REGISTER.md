@@ -82,3 +82,5 @@ D01-E 工程验收基线 de167db5ca40c4b12dd12b541229b88434a52586；[CI 46148339
 [职责归属表](RESPONSIBILITY_MAP.md) · [当前检查点](AUDIT_CHECKPOINT.md) · [R09-F 真机清单](FRDM-PP-R09-F-APK-DEVICE-REGRESSION.md) · [历史归档](../archive/README.md)。
 
 R10-A 基线 aa68a9894146bab0d83a5cc6b7ff19ade398ed23 完整 CI 46151140749 success；F08/F09 真机修复效果仍待复测。R10-B 不因上一轮 CI 通过而关闭真机事项。
+
+R10-003 追加 CI 证据：基线 0839659c0824bf77bc0c0136ca550090f0ae4f84，CI 46152556918 三项 PP reduction 测试同因失败（AppCompositionRoot PageRuntimeLifecycle 4 > 2），其他任务跳过；本次将持续未确认的观察结果归还现有 RunSessionCoordinator，组装层不重复判定，原阈值不变，新增回归断言。状态仍 VERIFY_PENDING，新 CI 及真机取证待验。

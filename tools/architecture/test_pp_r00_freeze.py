@@ -519,6 +519,14 @@ class PpR00FreezeTest(unittest.TestCase):
             self.assertNotIn(path, reviewed_s0)
             self.assertEqual(previous, reviewed_s1[path])
             reviewed_s1[path] = current
+        # R10-B CI correction: reuse the route owner's observation result.
+        for path, (previous, current) in {
+            "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": ("155a3dfd1446806f43cc0c549305e0f5a86108d8", "a840f96dd596bb45bdfa979bd4e155362de245d3"),
+            "app/src/main/java/com/freedom/application/runtime/RunSessionCoordinator.kt": ("a01cf47c5301a113b058f032a8a62e7409a65cb9", "7c196f8482829d9355fd3bca90a1e32922705b04"),
+        }.items():
+            self.assertNotIn(path, reviewed_s0)
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = current
         self.assertEqual([], freeze_violations(
             reviewed_s0, reviewed_s1, actual))
 

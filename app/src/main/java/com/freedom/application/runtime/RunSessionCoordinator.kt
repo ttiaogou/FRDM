@@ -187,13 +187,14 @@ class RunSessionCoordinator(
         }
     }
 
-    /** An unverified page retains observation, not write authority. */
+    /** An unverified page retains observation, not write authority.
+     * Returns true only for a continuing unclassified observation, for read-only diagnostics. */
     @Synchronized
-    fun reconcileUnclassifiedPage(observedGeneration: Long, ownedPageVerified: Boolean) {
+    fun reconcileUnclassifiedPage(observedGeneration: Long, ownedPageVerified: Boolean): Boolean {
         if (!isPageObservationAllowed() || observedGeneration != runGeneration ||
-            pageTransitionInProgress) return
-        val current = pageRuntime ?: return
-        if (current.lifecycle == PageRuntimeLifecycle.STOPPING) return
+            pageTransitionInProgress) return false
+        val current = pageRuntime ?: return false
+        if (current.lifecycle == PageRuntimeLifecycle.STOPPING) return false
         if (ownedPageVerified) {
             if (current.lifecycle == PageRuntimeLifecycle.UNCLASSIFIED) {
                 val pending = current.copy(lifecycle = PageRuntimeLifecycle.STARTING)
@@ -202,7 +203,10 @@ class RunSessionCoordinator(
             }
         } else if (current.lifecycle != PageRuntimeLifecycle.UNCLASSIFIED) {
             logPageLifecycle(unclassifiedPage(current), "UNKNOWN_WRITE_HOLD：页面归属未确认；仅保留观察")
+        } else {
+            return true
         }
+        return false
     }
 
     private fun unclassifiedPage(current: PageRuntimeSessionState): PageRuntimeSessionState {

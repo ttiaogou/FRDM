@@ -408,19 +408,17 @@ internal class AccessibilityServiceDependencies internal constructor(
                         addLog("统一入口观察[READ_RETRY]：type=${it.javaClass.simpleName}；保留运行授权")
                     }.getOrDefault(false)
                     val session = runSessionCoordinator.currentPageRuntimeSession()
-                    if (!recognized && session != null && generation == runSessionCoordinator.currentRunGeneration()) {
+                    val stillUnclassified = if (!recognized && session != null &&
+                        generation == runSessionCoordinator.currentRunGeneration()) {
                         runSessionCoordinator.reconcileUnclassifiedPage(
                             generation, ownedNestedPage && session.taskId == currentTaskId
                         )
-                    }
-                    // Same observation path for all three tasks. Explicit child waits also use
-                    // the adapter's read-only capture path; diagnostic failure never gates a task.
+                    } else false
+                    // Reuse the route owner's observation result; never decide its lifecycle here.
                     if (session != null && generation == runSessionCoordinator.currentRunGeneration() &&
                         runSessionCoordinator.isPageObservationAllowed()) {
-                        val reason = if (!recognized && !ownedNestedPage &&
-                            session.lifecycle == com.freedom.core.runtime.PageRuntimeLifecycle.UNCLASSIFIED &&
-                            runSessionCoordinator.currentPageRuntimeSession()?.lifecycle ==
-                            com.freedom.core.runtime.PageRuntimeLifecycle.UNCLASSIFIED)
+                        val reason = if (stillUnclassified && !ownedNestedPage &&
+                            session == runSessionCoordinator.currentPageRuntimeSession())
                             "PAGE_ROUTE_UNCLASSIFIED" else null
                         momoSocialAdapter.captureAnomalyPage(session.taskId, generation, reason)
                     }

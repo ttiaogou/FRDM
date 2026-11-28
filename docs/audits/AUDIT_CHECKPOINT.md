@@ -5,18 +5,24 @@
 | 字段 | 当前记录 |
 | --- | --- |
 | repository / branch | ttiaogou/FRDM / PP |
-| reviewedHead | aa68a9894146bab0d83a5cc6b7ff19ade398ed23 |
-| reviewedTree | 526da6bb5411a8d64c89daf29ffcc6834130c762 |
+| reviewedHead | 0839659c0824bf77bc0c0136ca550090f0ae4f84 |
+| reviewedTree | 1c6878caa23e698549805c696518bd4288825498 |
 | 已验收工程基线 | R10-A aa68a9894146bab0d83a5cc6b7ff19ade398ed23；[完整 CI 46151140749](https://github.com/ttiaogou/FRDM/actions/runs/46151140749) completed/success |
-| 当前任务 | R10-B 全局异常节点证据优先采集 |
-| 当前状态 | IMPLEMENTED / VERIFY_PENDING；R10-A 完整 CI 已通过，新提交完整 CI 待验 |
+| 当前任务 | R10-B CI 修复：复用页面状态所有者的只读观察结果 |
+| 当前状态 | CI_CORRECTED / VERIFY_PENDING；CI 46152556918 架构 243 项中 3 项同根因失败，其余构建任务跳过；新 CI 待验 |
 | 验证策略 | R10-B Kotlin 异常取证、容量、去重、脱敏和留存测试；精确逆向、源码门禁与历史保护；新 CI 和真机待验 |
 | 设备验收 | 用户独立执行；F08 拦截进入设置页后卡住（FAIL），图片发送部分仍待测，其他设备场景不推断 PASS；F08/F09 修复后待复测 |
 | 当前职责建档 | 32 项：A 16、B 12、C 4；证据基线仍按职责表，不虚报逐方法核查 |
 | 台账 | 35 项：CLOSED 8、RETAINED 3、CANDIDATE 6、OPEN 1、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 15 |
 | 工作区 | 远端 Git tree/compare；无本地 checkout 验证 |
-| 改动范围 | 现有共享页面观察、Momo 子事务异常通知、诊断 port/writer/incident store/history；新回归及精确逆向、治理记录；普通节点采集、业务动作、S0、CI、原清单和规则不变 |
+| 改动范围 | AppCompositionRoot、RunSessionCoordinator、原协调器测试及 R10-B 精确逆向、冻结 pin、治理记录；诊断存储、容量、业务动作、S0、CI、架构检测阈值和原清单不变 |
 | 下一阶段 | 核验 R10-B 完整 CI；设备复测拦截/图片和异常节点导出；D01 候选及其他真机事项保留 |
+
+## R10-B CI 修复证据
+
+- CI 46152556918 架构 job 141002125916：243 tests，3 failures；同一 PP reduction 规则指出 AppCompositionRoot 的 PageRuntimeLifecycle 引用 4 > 2。其他四个 job 跳过，不推断编译通过。
+- 将原 reconcileUnclassifiedPage 返回值改为只读观察结果：仅同代次、允许观察、未处于交接或 STOPPING、且仍然未确认时返回 true；首次转入未确认、已确认、旧代次返回 false。原状态转移及写权门禁不变。组装层复用返回值并校验同一 session，不自行增加生命周期判定。实际文本引用：AppCompositionRoot 4→2，RunSessionCoordinator 33→33；原架构 verifier 和阈值不改。
+- 原协调器回归增强首次/持续/旧代次/恢复断言，原测试仍保留；精确逆向复原前一 CI 源码，R00/R01 原清单不变。完整 CI 和真机待验证。
 
 ## R10-B 本轮证据
 
