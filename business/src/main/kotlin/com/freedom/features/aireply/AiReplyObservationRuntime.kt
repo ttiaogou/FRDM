@@ -71,8 +71,6 @@ import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 import com.freedom.features.recovery.RecoveryEventIdentity
 import com.freedom.features.recovery.RecoveryScheduler
 import com.freedom.features.recovery.RecoveryScheduleRepository
-import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
 import java.util.LinkedHashSet
 
 /**
@@ -247,7 +245,6 @@ class AiReplyObservationRuntime(
         private const val RECEIVED_GREETINGS_USER_QUIET_MIN_MS = 2_000
         private const val RECEIVED_GREETINGS_USER_QUIET_MAX_MS = 5_000
         private const val RECEIVED_GREETINGS_USER_ACTIVE_RECHECK_DELAY_MS = 10_000L
-        private const val MAX_OCR_DEBUG_TEXT_CHARS = 4_200
         private const val MAX_OCR_DEBUG_BATCHES_PER_WINDOW = 24
         private const val SESSION_OPEN_VERIFY_DELAY_MS = 2_200L
         private const val SESSION_RETURN_DELAY_MS = 1_500L
@@ -5002,8 +4999,7 @@ class AiReplyObservationRuntime(
         val expectedWindowSessionKey = windowSessionKey(snapshot)
         if (currentSessionBinding?.observedDetailTarget != null) {
             return observedPrivateDetailVerified(snapshot) && observedPrivateDetailVerified(active) &&
-                expectedWindowSessionKey != null && batch.windowSessionKey == expectedWindowSessionKey &&
-                hasSameWindowSession(snapshot, active)
+                matchesMessageReadWindowEvidence(snapshot, batch, active, expectedWindowSessionKey)
         }
         if (receivedGreetingsTaskActive || greetingChatBinding != null) {
             val reason = greetingBindingRejectReason(active)
@@ -5011,14 +5007,9 @@ class AiReplyObservationRuntime(
                 onLog("GREETING_CHAT_READ_REJECTED reason=$reason")
                 return false
             }
-            return expectedWindowSessionKey != null &&
-                batch.windowSessionKey == expectedWindowSessionKey &&
-                hasSameWindowSession(snapshot, active)
+            return matchesMessageReadWindowEvidence(snapshot, batch, active, expectedWindowSessionKey)
         }
-        return active.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE &&
-            active.packageName == snapshot.packageName &&
-            active.hasSameWindowIdentity(snapshot) &&
-            hasSameWindowSession(snapshot, active) &&
+        return matchesPrivateMessageReadPageEvidence(snapshot, active) &&
             expectedWindowSessionKey != null &&
             (currentSessionWindowKey == null || currentSessionWindowKey == expectedWindowSessionKey) &&
             batch.windowSessionKey == expectedWindowSessionKey
@@ -5085,17 +5076,12 @@ class AiReplyObservationRuntime(
         batch: ChatMessageBatch,
         fresh: ChatPageSnapshot
     ): String {
-        if (fresh.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE) return "FRESH_CHAT_DETAIL_NOT_CONFIRMED"
-        if (fresh.packageName != source.packageName) return "FRESH_PACKAGE_MISMATCH"
-        if (!fresh.hasSameWindowIdentity(source)) return "WINDOW_IDENTITY_CHANGED"
-        if (!hasSameWindowSession(source, fresh)) return "WINDOW_GENERATION_OR_SESSION_CHANGED"
+        sendConfirmationPageEvidenceRejectionReason(source, fresh)?.let { return it }
         val sourceWindowKey = windowSessionKey(source) ?: return "SOURCE_WINDOW_SESSION_UNAVAILABLE"
         if (!receivedGreetingsTaskActive && greetingChatBinding == null &&
             currentSessionWindowKey != null && currentSessionWindowKey != sourceWindowKey
         ) return "ACTIVE_WINDOW_BINDING_MISMATCH"
-        if (batch.status == MessageReadStatus.WINDOW_STALE) return "OCR_READ_INVALIDATED"
-        if (batch.windowSessionKey != sourceWindowKey) return "OCR_BATCH_WINDOW_MISMATCH"
-        return "GATE_REJECTED_UNCLASSIFIED"
+        return sendConfirmationBatchEvidenceRejectionReason(batch, sourceWindowKey)
     }
 
     /**
@@ -5685,9 +5671,7 @@ class AiReplyObservationRuntime(
             return
         }
         if (batch.ocrAttempted) {
-            val mergedOcrCount = batch.ocrTargets.count { target ->
-                batch.messages.any { message -> message.bounds == target.rowBounds }
-            }
+            val mergedOcrCount = countMergedOcrTargets(batch)
             val latestText = batch.messagesBottomToTop.firstOrNull()?.content
                 ?.takeIf(String::isNotBlank)
                 ?.let(::escapeOcrDebugText)
@@ -6369,49 +6353,6 @@ class AiReplyObservationRuntime(
                     "最终文本=\"$displayText\"；中文候选=\"$chineseDisplay\"；Latin候选=\"$latinDisplay\""
             )
         }
-    }
-
-    private fun createOcrDebugFingerprint(
-        windowSessionKey: String?,
-        targets: List<com.freedom.features.aireply.domain.message.ChatMessageOcrTarget>,
-        finalRows: Map<Int, String>,
-        chineseRows: Map<Int, String>,
-        latinRows: Map<Int, String>,
-        failureReason: String?
-    ): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        digest.update(windowSessionKey.orEmpty().toByteArray(StandardCharsets.UTF_8))
-        digest.update(failureReason.orEmpty().toByteArray(StandardCharsets.UTF_8))
-        targets.forEach { target ->
-            digest.update(target.rowIndex.toString().toByteArray(StandardCharsets.UTF_8))
-            digest.update(0)
-            digest.update(finalRows[target.rowIndex].orEmpty().toByteArray(StandardCharsets.UTF_8))
-            digest.update(0)
-            digest.update(chineseRows[target.rowIndex].orEmpty().toByteArray(StandardCharsets.UTF_8))
-            digest.update(0)
-            digest.update(latinRows[target.rowIndex].orEmpty().toByteArray(StandardCharsets.UTF_8))
-            digest.update(0)
-        }
-        return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
-    }
-
-    private fun escapeOcrDebugText(value: String): String {
-        val escaped = buildString(value.length) {
-            value.forEach { character ->
-                append(
-                    when (character) {
-                        '\\' -> "\\\\"
-                        '\n' -> "\\n"
-                        '\r' -> "\\r"
-                        '\t' -> "\\t"
-                        '\"' -> "\\\""
-                        else -> character.toString()
-                    }
-                )
-            }
-        }
-        return if (escaped.length <= MAX_OCR_DEBUG_TEXT_CHARS) escaped
-        else escaped.take(MAX_OCR_DEBUG_TEXT_CHARS) + "…[已截断]"
     }
 
     private fun handleSessionListPage(snapshot: ChatPageSnapshot) {

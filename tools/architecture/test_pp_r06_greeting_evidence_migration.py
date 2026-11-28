@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_r06_message_read_evidence_migration import restore_r06d_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 AI = ROOT / "business/src/main/kotlin/com/freedom/features/aireply/"
@@ -21,6 +22,7 @@ def replace_once(source, old, new):
     return source.replace(old, new, 1)
 
 def restore_r06c_runtime(runtime, owner=None):
+    runtime = restore_r06d_runtime(runtime)
     if owner is None:
         owner = (AI / "ReceivedGreetingsChatEvidence.kt").read_text(encoding="utf-8")
     if git_blob(owner.encode("utf-8")) != OWNER:

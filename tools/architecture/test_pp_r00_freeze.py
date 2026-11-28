@@ -261,6 +261,14 @@ class PpR00FreezeTest(unittest.TestCase):
         self.assertNotIn(path, reviewed_s1)
         self.assertNotIn(path, m["permanent_s0"])
         reviewed_s1[path] = "d02c68e6bd40a3ab88de3e518e126dc9af598d1f"
+        # R06-E: reviewed stateless message/OCR evidence extraction.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("9e231125225143534c708288b104876900e7d51a", reviewed_s1[path])
+        reviewed_s1[path] = "64727753394d6c5c3cf1e497a36ade3ffa7cc578"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ChatMessageReadEvidence.kt"
+        self.assertNotIn(path, reviewed_s1)
+        self.assertNotIn(path, m["permanent_s0"])
+        reviewed_s1[path] = "69586bffabff2436c67f844b81b66fede6477f6a"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 
