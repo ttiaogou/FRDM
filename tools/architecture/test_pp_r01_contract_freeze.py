@@ -163,6 +163,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R09-B exact retired-handle cleanup; original manifest and S0 unchanged.
                 self.assertEqual("88822eb6021711bc55ee6396bd7e536f33838f78", expected[path])
                 expected[path] = "009a91302db56eb8faa4767e9835c65b321c05d8"
+                # R09-B1/B2/B3 exact approved production changes.
+                self.assertEqual("009a91302db56eb8faa4767e9835c65b321c05d8", expected[path])
+                expected[path] = "ecd3b1ce0ea3dec8ccd5cb787434a397974ce15a"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -450,6 +453,13 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r09b_legacy_inventory.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "3e5c5d0e7f913113749e72133e101cb28091ccea"
+        # R09-B1/B2/B3 exact inverse and direct HTTP regression evidence.
+        for path, replacement in {
+            "tools/architecture/test_pp_r09b_followup_cleanup.py": "1a07053392e4699bc752edf40ddc47c0ad81090d",
+            "app/src/test/java/com/freedom/adapters/ai/AiHttpTransportSupportTest.kt": "3fd5846c0af9bbc31d00f0cb08add604f40bb9d8",
+        }.items():
+            self.assertNotIn(path, reviewed_migration_evidence)
+            reviewed_migration_evidence[path] = replacement
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

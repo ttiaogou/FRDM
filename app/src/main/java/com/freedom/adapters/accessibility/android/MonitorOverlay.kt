@@ -23,7 +23,6 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
-import android.widget.PopupMenu
 import android.widget.Toast
 import com.freedom.R
 import com.freedom.adapters.android.MonitorActions
@@ -616,41 +615,6 @@ object MonitorOverlay {
             }
     }
 
-    private fun requestGlobalNodeHierarchy(context: Context) {
-        val app = context.applicationContext
-        if (!isFreedomAccessibilityEnabled(app)) {
-            Toast.makeText(app, "请先启用 Freedom 无障碍服务，再查看节点层级", Toast.LENGTH_LONG).show()
-            return
-        }
-        runCatching {
-            app.sendBroadcast(
-                Intent(MonitorActions.ACTION_SHOW_GLOBAL_NODE_HIERARCHY).setPackage(app.packageName)
-            )
-        }.onFailure { error ->
-            log(app, "节点层级视图请求发送失败：${error.javaClass.simpleName}")
-        }
-    }
-
-    private fun showNodeMoreMenu(context: Context, anchor: View) {
-        PopupMenu(context, anchor).apply {
-            menu.add("查看节点层级").setOnMenuItemClickListener {
-                collapseMenu()
-                requestGlobalNodeHierarchy(context)
-                true
-            }
-            menu.add("清除节点边界").setOnMenuItemClickListener {
-                collapseMenu()
-                clearGlobalNodeLayoutBounds(context)
-                true
-            }
-            menu.add("收起菜单").setOnMenuItemClickListener {
-                collapseMenu()
-                true
-            }
-            show()
-        }
-    }
-
     private fun requestGlobalNodeLayoutBounds(context: Context) {
         val app = context.applicationContext
         if (!isFreedomAccessibilityEnabled(app)) {
@@ -668,23 +632,6 @@ object MonitorOverlay {
         }.onFailure { error ->
             log(app, "全局节点可视化请求发送失败：${error.javaClass.simpleName}")
             Toast.makeText(app, "节点可视化请求失败，请通过采集与导出获取运行日志", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun clearGlobalNodeLayoutBounds(context: Context) {
-        val app = context.applicationContext
-        if (!isFreedomAccessibilityEnabled(app)) {
-            Toast.makeText(app, "Freedom 无障碍服务未启用，无法清除节点边界层", Toast.LENGTH_LONG).show()
-            return
-        }
-        runCatching {
-            app.sendBroadcast(
-                Intent(MonitorActions.ACTION_CLEAR_GLOBAL_NODE_LAYOUT_BOUNDS).setPackage(app.packageName)
-            )
-        }.onSuccess {
-            log(app, "已从悬浮按钮请求清除目标 App 节点边界层")
-        }.onFailure { error ->
-            log(app, "清除节点边界请求发送失败：${error.javaClass.simpleName}")
         }
     }
 

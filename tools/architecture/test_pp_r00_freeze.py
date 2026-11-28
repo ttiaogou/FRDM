@@ -426,6 +426,23 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt"
         self.assertEqual("26ee9be133eb554f0b08bd000dd055f0164a95b8", reviewed_s1[path])
         reviewed_s1[path] = "d6e9a30f6c4094172d271dc066cf158e0d201cb0"
+        # R09-B1/B2/B3: exact approved dead declarations and shared HTTP primitives.
+        path = "app/src/main/java/com/freedom/adapters/accessibility/android/MonitorOverlay.kt"
+        self.assertEqual("9c88ed19eddca26138fad43d6a852f8df3a1de44", reviewed_s1[path])
+        reviewed_s1[path] = "1e4ff5d38f5c2b0433b81352cf9f0c8d031d6c66"
+        path = "app/src/main/java/com/freedom/application/ports/MonitorDataPorts.kt"
+        self.assertEqual("509ea931ee65ee7994515aaff785d02ce7ff4102", reviewed_s1[path])
+        reviewed_s1[path] = "93624f30c8026b53eefba63a3591fcf4e959c71a"
+        path = "app/src/main/java/com/freedom/adapters/ai/DeepSeekAiModelTransport.kt"
+        self.assertEqual("078a09b43ad3268983c140501f91b6cbeb727291", reviewed_s1[path])
+        reviewed_s1[path] = "8af8c4772b2415924e64d63cdd47a5e37bb5dea8"
+        path = "app/src/main/java/com/freedom/adapters/ai/OpenAiCompatibleAiModelTransport.kt"
+        self.assertEqual("9007ab686f11b4717347706bed5675858e13a565", reviewed_s1[path])
+        reviewed_s1[path] = "70e73359219880554132f75f193749ac9d81288b"
+        path = "app/src/main/java/com/freedom/adapters/ai/AiHttpTransportSupport.kt"
+        self.assertNotIn(path, reviewed_s1)
+        self.assertNotIn(path, m["permanent_s0"])
+        reviewed_s1[path] = "4f554b193371269082187a5fc2bf7744c86effeb"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

@@ -9,7 +9,6 @@ import com.freedom.features.aireply.ai.AiModelResult
 import com.freedom.features.aireply.ai.AiModelServiceProvider
 import com.freedom.features.aireply.ai.AiModelTransport
 import com.freedom.features.aireply.ai.TokenUsage
-import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
@@ -33,7 +32,7 @@ class DeepSeekAiModelTransport(
         require(config.isReadyForCloudProvider) { "AI_MODEL_NOT_CONFIGURED" }
         val wire = AiContextWireDiagnostics(request, "DEEPSEEK", config.apiKey, wireDiagnostic, wireDiagnosticLog)
         trace.stage = AiModelCallStage.ENDPOINT
-        val endpoint = chatCompletionsEndpoint(config.apiBaseUrl)
+        val endpoint = AiHttpTransportSupport.chatCompletionsEndpoint(config.apiBaseUrl, CHAT_COMPLETIONS_PATH)
         trace.stage = AiModelCallStage.CONNECTION_OPEN
         val connection = connectionFactory.open(URL(endpoint))
         try {
@@ -61,13 +60,13 @@ class DeepSeekAiModelTransport(
             wire.event("HTTP_RESPONSE", status)
             if (status !in 200..299) {
                 runCatching { connection.errorStream?.use {
-                    trace.captureProviderError(String(readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8))
+                    trace.captureProviderError(String(AiHttpTransportSupport.readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8))
                 } }
-                throw httpFailure(status)
+                throw AiHttpTransportSupport.httpFailure(status)
             }
             trace.stage = AiModelCallStage.RESPONSE_READ
             val responseText = connection.inputStream.use {
-                String(readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8)
+                String(AiHttpTransportSupport.readBounded(it, MAX_RESPONSE_BYTES), StandardCharsets.UTF_8)
             }
             trace.stage = AiModelCallStage.RESPONSE_PARSE
             parseResponse(responseText, config.modelName, request, connection.getHeaderField("x-request-id"))
@@ -82,16 +81,6 @@ class DeepSeekAiModelTransport(
             throw AiModelHttpException("HTTP_TRANSPORT_FAILED", retryable = true, cause = failure)
         } finally {
             connection.disconnect()
-        }
-    }
-
-    private fun chatCompletionsEndpoint(baseUrl: String): String {
-        val normalized = baseUrl.trim().trimEnd('/')
-        require(normalized.startsWith("https://", ignoreCase = true)) { "HTTPS_REQUIRED" }
-        return if (normalized.endsWith(CHAT_COMPLETIONS_PATH, ignoreCase = true)) {
-            normalized
-        } else {
-            "$normalized$CHAT_COMPLETIONS_PATH"
         }
     }
 
@@ -217,31 +206,6 @@ class DeepSeekAiModelTransport(
             usage = usage,
             finishReason = finishReason
         )
-    }
-
-    private fun httpFailure(status: Int): AiModelHttpException = when (status) {
-        401 -> AiModelHttpException("HTTP_401_UNAUTHORIZED")
-        403 -> AiModelHttpException("HTTP_403_FORBIDDEN")
-        404 -> AiModelHttpException("HTTP_404_NOT_FOUND")
-        408 -> AiModelHttpException("HTTP_408_TIMEOUT", retryable = true)
-        413 -> AiModelHttpException("HTTP_413_REQUEST_TOO_LARGE")
-        429 -> AiModelHttpException("HTTP_429_RATE_LIMITED", retryable = true)
-        in 500..599 -> AiModelHttpException("HTTP_5XX_SERVER_ERROR", retryable = true)
-        else -> AiModelHttpException("HTTP_$status")
-    }
-
-    private fun readBounded(input: java.io.InputStream, maxBytes: Int): ByteArray {
-        val output = ByteArrayOutputStream(minOf(maxBytes, 8_192))
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        var total = 0
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            total += count
-            if (total > maxBytes) throw AiModelHttpException("HTTP_RESPONSE_TOO_LARGE")
-            output.write(buffer, 0, count)
-        }
-        return output.toByteArray()
     }
 
     companion object {

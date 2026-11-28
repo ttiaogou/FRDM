@@ -1,11 +1,5 @@
 package com.freedom.application.ports
 
-/** Read/write boundary for target selection and the existing monitor presentation snapshot. */
-interface MonitorSettingsRepository {
-    fun targetPackage(): String
-    fun setTargetPackage(packageName: String)
-}
-
 data class MonitorPresentationSnapshot(
     val appLabel: String,
     val pageLabel: String,
