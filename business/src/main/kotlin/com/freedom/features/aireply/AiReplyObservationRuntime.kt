@@ -389,7 +389,7 @@ class AiReplyObservationRuntime(
         }
 
     /** Owns asynchronous OCR/message callback lifetime; Runtime handles only validated results. */
-    private val messageReadCoordinator by lazy(LazyThreadSafetyMode.NONE) {
+    private val messageReadCoordinator: ChatMessageReadCoordinator by lazy(LazyThreadSafetyMode.NONE) {
         ChatMessageReadCoordinator(
             scheduler = scheduler,
             messagePort = chatMessagePort,
@@ -9167,7 +9167,7 @@ class AiReplyObservationRuntime(
         }
     }
 
-    private fun invalidateMessageReadTransaction() = messageReadCoordinator.invalidateMessageReadTransaction()
+    private fun invalidateMessageReadTransaction(): Unit = messageReadCoordinator.invalidateMessageReadTransaction()
 
     private fun invalidatePendingMessageRead() {
         messageReadCoordinator.clearGreetingModelFailureRetry()
@@ -9181,7 +9181,7 @@ class AiReplyObservationRuntime(
         cancelMessageReadRetry()
     }
 
-    private fun cancelMessageReadRetry() = messageReadCoordinator.cancelMessageReadRetry()
+    private fun cancelMessageReadRetry(): Unit = messageReadCoordinator.cancelMessageReadRetry()
 
     /**
      * Emits bounded, redacted node evidence in numbered records. MonitorStore persists up to

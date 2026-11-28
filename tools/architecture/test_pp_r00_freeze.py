@@ -312,6 +312,10 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/aireply/ChatMessageReadCoordinator.kt"
         self.assertEqual("ac219e52e7439bde82f7c38641736c001bf6e1ba", reviewed_s1[path])
         reviewed_s1[path] = "8d00203bdb93c2e7cfb046ab8ebabf9002373058"
+        # R07-E compile-only explicit Kotlin type annotations.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("26846bb806159f33ddffad506fd9ecfc9de2a2cc", reviewed_s1[path])
+        reviewed_s1[path] = "ef2c4f6218f4ccfde40a1ebcef26ee5860562b06"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

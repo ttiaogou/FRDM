@@ -124,6 +124,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R07-E exact reviewed read lifecycle relocation.
                 self.assertEqual("d42cc0350c728b036395c6980a52cbbef2dede6c", expected[path])
                 expected[path] = "41c70c7a33d37b233318eef9fc04c6a3417b5de5"
+                # R07-E compile-only repair retains prior exact pin.
+                self.assertEqual("41c70c7a33d37b233318eef9fc04c6a3417b5de5", expected[path])
+                expected[path] = "0baa28ac95b8645e1528e7cb41bb8fd4bdf19869"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -279,6 +282,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r07_message_read_lifecycle_migration.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "7c1c21b4643d7e32b1b5a4b622c9bd0bfda0bc6d"
+        # R07-E compile-only repair extends exact inverse and explicit type protection.
+        path = "tools/architecture/test_pp_r07_message_read_lifecycle_migration.py"
+        self.assertEqual("7c1c21b4643d7e32b1b5a4b622c9bd0bfda0bc6d", reviewed_migration_evidence[path])
+        reviewed_migration_evidence[path] = "019f92291a5d403f4f13cc5c11c6933dbf265628"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

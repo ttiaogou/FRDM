@@ -8,6 +8,21 @@ ROOT = Path(__file__).resolve().parents[2]
 AI = ROOT / "business/src/main/kotlin/com/freedom/features/aireply/"
 PREVIOUS = "f605c1eb88f1eb97929db49a87459e2bca9530f5"
 OWNER = "8d00203bdb93c2e7cfb046ab8ebabf9002373058"
+# Compile-only type inference repair; reverse exact annotations before historical inverse.
+TYPE_ANNOTATION_REPAIR = [
+  [
+    "private val messageReadCoordinator: ChatMessageReadCoordinator by lazy(LazyThreadSafetyMode.NONE) {",
+    "private val messageReadCoordinator by lazy(LazyThreadSafetyMode.NONE) {"
+  ],
+  [
+    "private fun cancelMessageReadRetry(): Unit = messageReadCoordinator.cancelMessageReadRetry()",
+    "private fun cancelMessageReadRetry() = messageReadCoordinator.cancelMessageReadRetry()"
+  ],
+  [
+    "private fun invalidateMessageReadTransaction(): Unit = messageReadCoordinator.invalidateMessageReadTransaction()",
+    "private fun invalidateMessageReadTransaction() = messageReadCoordinator.invalidateMessageReadTransaction()"
+  ]
+]
 FIELDS = [
   "messageReadRetryTask",
   "messageReadRetryCount",
@@ -187,6 +202,10 @@ def restore_r07d_runtime(runtime, owner=None):
         owner = (AI / "ChatMessageReadCoordinator.kt").read_text(encoding="utf-8")
     if git_blob(owner.encode("utf-8")) != OWNER:
         raise AssertionError("R07-E message read lifecycle owner changed")
+    for current, previous in TYPE_ANNOTATION_REPAIR:
+        if runtime.count(current) != 1:
+            raise AssertionError("R07-E explicit type contract changed: " + current)
+        runtime = runtime.replace(current, previous, 1)
     for current, previous, count in INVERSE:
         if runtime.count(current) != count:
             raise AssertionError("R07-E inverse anchor changed: " + current[:100])
@@ -215,6 +234,11 @@ class PpR07MessageReadLifecycleMigrationTest(unittest.TestCase):
         self.assertIn("messageReadCoordinator.privateModelFailureRecovery !== failure", runtime)
         self.assertIn("expectedGeneration != requestGeneration || !requestInFlight", owner)
         self.assertIn("messagePort.invalidateOcrRecognitionReuse()", owner)
+        for current, previous in TYPE_ANNOTATION_REPAIR:
+            self.assertEqual(1, runtime.count(current))
+            self.assertNotIn(previous, runtime)
+            with self.subTest(annotation=current), self.assertRaises(AssertionError):
+                restore_r07d_runtime(runtime.replace(current, previous, 1), owner)
 
     def test_mutations_reject_stale_read_or_visit_and_retry_loss(self):
         runtime = (AI / "AiReplyObservationRuntime.kt").read_text(encoding="utf-8")
