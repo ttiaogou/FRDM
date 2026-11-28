@@ -1,4 +1,6 @@
-# Freedom OCR 插件架构（AutoJs6 核心移植版）
+# Freedom OCR 插件架构、安装及交付（PP）
+
+> 核查基线：9919a0b30a9cfd19235d691ee4ccfee5ec664564。本页整合根目录 OCR 旧说明；规范及现行实现以 AGENTS.md、Gradle、Manifest 和源码为准。真机验收未完成。
 
 ## 目标与边界
 
@@ -20,6 +22,7 @@ Freedom OCR plugin.apk (independent installation)
   ├─ OcrEngineHolder (adapted from AutoJs6 PpOcrV5EngineHolder)
   ├─ PaddleOCR + ONNX Runtime + OpenCV
   └─ OcrModelManager
+       ├─ APK assets/models/ppocrv6_small/ (build-time pinned model)
        └─ plugin-private storage / noBackupFilesDir/ocr/models/
             └─ ppocrv6_small/
 ```
@@ -67,13 +70,21 @@ Freedom 与 AutoJs6 的唯一重要安全协议适配是 Service 权限：
 
 插件管理页从设备已安装的 OCR Action/Category 服务中发现插件，并与目录合并展示。用户可启用/禁用（主机偏好状态）、安装/更新或跳转系统卸载界面。卸载插件不会卸载 Freedom 主程序；卸载 Freedom 也不要求将 OCR 引擎合并到主 APK。
 
-正式 tag 发布的 Actions 会分别上传 `Freedom-release-apk` 和 `Freedom-OCR-plugin-release-apk` 两个独立 Artifacts，并把主 APK、插件 APK、插件目录 JSON 和兼容性清单作为独立 Release assets 发布。Debug 构建同样分别上传 `Freedom-debug-apk` 与 `Freedom-OCR-plugin-debug-apk`，不再将两份 APK 压成一个用户必须整体下载的 ZIP。只下载主 APK 时，不需要下载 OCR 插件；需要 OCR 时再单独安装插件。
+### 使用与当前交付
+
+单独安装 Freedom 主 APK，打开配置页 OCR 插件管理；需要 OCR 时安装并启用同批签名匹配的插件。目录安装由系统安装器确认；也可从同一 CI run 下载配套 APK。禁用或卸载插件不等于卸载主程序；非 OCR 业务仍由主程序提供，实际设备行为须验收。
+
+当前 PP 的 [android-build.yml](../../.github/workflows/android-build.yml) 在同一个 build-freedom-apk job 构建普通、shrink-only 主 APK 和配套 OCR APK，使用 apksigner 验证三者签名一致后分别上传 Freedom-debug-apk、Freedom-slim-debug-apk、Freedom-OCR-plugin-debug-apk。独立 OCR job 负责插件测试/构建，不是正式配套工件的另一来源。不同 run 的 debug 签名不保证一致，不要混装或盲目卸载旧版本。正式升级需一致的长期签名。
+
+历史说明中 tag Release 自动发布主/插件 APK、目录和兼容性清单的流程，在当前 PP 工作流树中未发现对应发布 job；仅保留为历史信息，不承诺现有 tag 自动发布。目录示例见 [release-manifest.example.json](release-manifest.example.json)。
 
 ## OCR 运行时和模型
 
 Freedom 首发插件通过 AutoJs6 `IOcrPlugin` API 暴露 PP-OCRv6 Small。引擎使用移植适配后的 `OcrEngineHolder`，按模型版本和推理配置缓存引擎；配置变化时先释放旧引擎，再初始化新引擎。FD 解码器支持编码图片及 AIDL 的 raw ARGB 图片格式。
 
-模型仍由 Freedom 插件内的 `OcrModelManager` 下载到插件自己的 `noBackupFilesDir/ocr/models/`，通过固定 revision、文件大小和 SHA-256 校验，并以 staging 目录替换。模型不放在主 APK，也不放在插件 APK 中。未来可在目录中登记其他使用兼容 API 的 OCR 插件或发行版本；不同推理引擎可作为不同 package 的独立插件。
+当前固定模型（PP-OCRv6 Small，modelId ppocrv6_small）由 [ocr-plugin/build.gradle.kts](../../ocr-plugin/build.gradle.kts) 的 prepareBundledOcrModels 根据 [内置目录](../../ocr-plugin/src/main/assets/ocr-model-catalog.json) 在构建时获取/复用缓存，校验最小文件大小与固定 SHA-256，并将检测/识别 ONNX 及识别 YAML 放入插件 APK 的 assets/models/ppocrv6_small/。模型不进入主 APK。
+
+运行时 OcrModelManager 优先从插件内置 assets 安装到插件私有 noBackupFilesDir/ocr/models/，校验大小和 SHA-256 后以 staging 目录替换，已有有效模型按版本/校验复用。固定内置模型的首次识别不要求手机连接模型源；源码仍有远端目录/无内置 assets 的网络下载分支，不将任意外部模型都宣称为离线可用。引擎缓存与失败处理保持现状。
 
 ## Freedom 业务接入和行为保留
 
@@ -88,6 +99,6 @@ gradle :app:assembleDebug
 gradle :ocr-plugin:assembleDebug
 ```
 
-正式版要求 Freedom 主 APK 和 OCR 插件 APK 使用同一份长期 keystore。GitHub Actions tag 发布使用 Secrets：`ANDROID_KEYSTORE_BASE64`、`ANDROID_SIGNING_STORE_PASSWORD`、`ANDROID_SIGNING_KEY_ALIAS`、`ANDROID_SIGNING_KEY_PASSWORD`。
+正式版要求 Freedom 主 APK 和 OCR 插件 APK 使用同一份长期 keystore。两个模块支持 releaseStoreFile、releaseStorePassword、releaseKeyAlias、releaseKeyPassword Gradle 属性；当前 PP CI 验收为 debug 配套签名，不宣称已配置正式发布或长期升级签名。
 
-静态边界验证确保：主 APK 不依赖 `:ocr-plugin`，不声明 ONNX Runtime/OpenCV，不包含 ONNX 模型；主 APK 与插件 APK 只共享 `:ocr-plugin-api`。AIDL、Parcelable、服务绑定、插件安装、签名权限和模型推理仍需通过 Android Gradle 构建及真机测试确认。具体设备验收步骤见 [`OCR-PLUGIN-DEVICE-ACCEPTANCE.md`](OCR-PLUGIN-DEVICE-ACCEPTANCE.md)。静态脚本通过不等同于 Gradle 编译或真机验收。
+静态边界验证确保：主 APK 不依赖 `:ocr-plugin`，不声明 ONNX Runtime/OpenCV，不包含 ONNX 模型；主 APK 与插件 APK 只共享 `:ocr-plugin-api`。G01-A CI 已通过两应用 Gradle 构建、自动测试及三份 debug APK 签名配套检查；实际设备上的服务绑定、安装、权限和模型推理仍未验收。具体设备验收步骤见 [`OCR-PLUGIN-DEVICE-ACCEPTANCE.md`](OCR-PLUGIN-DEVICE-ACCEPTANCE.md)。静态脚本通过不等同于 Gradle 编译或真机验收。

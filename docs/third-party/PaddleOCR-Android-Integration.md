@@ -1,6 +1,6 @@
 # PaddleOCR Android integration
 
-Freedom no longer packages PaddleOCR runtime or model files in the main application APK. The host uses the AutoJs6-compatible OCR AIDL/Parcelable contract and Action/Category service discovery from the lightweight `:ocr-plugin-api` module. PaddleOCR is hosted in the separately-installed `:ocr-plugin` application module, and PP-OCRv6_small model files are downloaded by that plugin at runtime. The full upstream port notice and adapted file list are in `AUTOJS6-PLUGIN-PORTING-NOTICE.md`.
+Freedom no longer packages PaddleOCR runtime or model files in the main application APK. The host uses the AutoJs6-compatible OCR AIDL/Parcelable contract and Action/Category service discovery from the lightweight `:ocr-plugin-api` module. PaddleOCR is hosted in the separately-installed `:ocr-plugin` application module, and the pinned PP-OCRv6_small model files are verified at plugin build time and packaged into the separate plugin APK. The full upstream port notice and adapted file list are in `AUTOJS6-PLUGIN-PORTING-NOTICE.md`.
 
 ## Ownership and dependencies
 
@@ -28,6 +28,6 @@ All other SDK source files are generated under the plugin build directory. The u
 
 ## PP-OCRv6_small models
 
-The model manager fetches detection and recognition ONNX models from the official PaddlePaddle Hugging Face repositories using immutable revisions. It checks the detection and recognition ONNX SHA-256 values against pinned constants, verifies the config file and records all three file hashes in a local manifest, then atomically activates the model directory.
+The plugin Gradle prepareBundledOcrModels task fetches or reuses the detection and recognition ONNX models and recognition YAML from immutable revisions in the bundled catalog, checking minimum sizes and pinned SHA-256 values. OcrModelManager installs these assets into plugin-private storage, verifies all three hashes and records them in a local manifest before activating the staged directory. A remote download path still exists for models without bundled assets.
 
-The first download requires internet access. Once installed, inference is local/offline. See `docs/ocr/OCR-PLUGIN-ARCHITECTURE.md` for the package split, AutoJs6-compatible plugin discovery, separate host/plugin downloads, signing requirements, and build flow.
+The fixed bundled model does not require the device to contact a model host on first recognition; uncached build-time downloads and optional remote models require network access. Actual offline device inference remains to be verified. See `docs/ocr/OCR-PLUGIN-ARCHITECTURE.md` for the package split, AutoJs6-compatible plugin discovery, separate host/plugin downloads, signing requirements, and build flow.
