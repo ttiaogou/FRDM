@@ -13,18 +13,9 @@ import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import com.freedom.adapters.accessibility.android.AndroidAccessibilityEventForwarder
 import com.freedom.adapters.accessibility.android.AndroidAccessibilitySubscriptionPolicy
-import com.freedom.adapters.accessibility.diagnostics.LatestAccessibilityNodeDump
-import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
 import com.freedom.adapters.accessibility.android.NodeHierarchyOverlay
 import com.freedom.core.runtime.RunMode
 import com.freedom.core.accessibility.api.UnifiedAccessibilityEvent
-import com.freedom.core.accessibility.api.AccessibilityTreeLimits
-import com.freedom.core.accessibility.api.NodePath
-import com.freedom.core.accessibility.api.NodeTextCapture
-import com.freedom.core.accessibility.api.TreeInspectionRequest
-import com.freedom.core.accessibility.query.NodeTargetResolver
-import com.freedom.core.accessibility.query.NodeTreeIndex
-import com.freedom.core.accessibility.overlay.NodeBoundsHighlightPlanner
 import com.freedom.adapters.android.MonitorActions
 import com.freedom.core.logging.RunLogCategory
 import com.freedom.core.logging.RunLogLevel
@@ -65,7 +56,6 @@ class FreedomAccessibilityService : AccessibilityService() {
     private val momoSocialAdapterDelegate get() = dependencies.momoSocialAdapterDelegate
     private val momoSocialAdapter get() = dependencies.momoSocialAdapter
     private val unifiedAccessibilityEntry get() = dependencies.unifiedAccessibilityEntry
-    private val accessibilityTreePreviewUseCase get() = dependencies.accessibilityTreePreviewUseCase
     private val monitorPreviewSchedulerDelegate get() = dependencies.monitorPreviewSchedulerDelegate
     private val monitorPreviewScheduler get() = dependencies.monitorPreviewScheduler
     private val gestureCalibrationController get() = dependencies.gestureCalibrationController
@@ -101,7 +91,6 @@ class FreedomAccessibilityService : AccessibilityService() {
             runSessionCoordinator.onTargetPackageChanged("监听目标已更新")
             activityRecoveryCoordinator.stop()
             windowContextTracker.clearActivityClass()
-            LatestAccessibilityNodeDump.clear()
             overlayPort.clearNodeBoundsHighlight()
             NodeHierarchyOverlay.clear()
             globalNodeLayoutVisualizationUseCase.clear()
@@ -134,198 +123,16 @@ class FreedomAccessibilityService : AccessibilityService() {
         }
     }
 
-    private val manualNodeCaptureReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            addLog("节点采集请求[MANUAL]：已进入串行采集队列；仅采集当前目标 App 的同包名窗口；不会与程序自主采集并发遍历")
-            accessibilityTreePreviewUseCase.captureManual()
-        }
-    }
-
     private val nodeBoundsHighlightReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                MonitorActions.ACTION_HIGHLIGHT_NODE_BOUNDS -> handleNodeBoundsHighlightRequest(intent)
-                MonitorActions.ACTION_SHOW_NODE_LAYOUT_BOUNDS -> handleNodeLayoutBoundsRequest(intent)
                 MonitorActions.ACTION_SHOW_GLOBAL_NODE_LAYOUT_BOUNDS -> handleGlobalNodeLayoutBoundsRequest()
                 MonitorActions.ACTION_SHOW_GLOBAL_NODE_HIERARCHY -> handleGlobalNodeHierarchyRequest()
                 MonitorActions.ACTION_CLEAR_GLOBAL_NODE_LAYOUT_BOUNDS -> {
                     globalNodeLayoutVisualizationUseCase.clear()
                     NodeHierarchyOverlay.clear()
                 }
-                MonitorActions.ACTION_CLEAR_NODE_BOUNDS_HIGHLIGHT -> {
-                    overlayPort.clearNodeBoundsHighlight()
-                    addLog("节点高亮已清除[USER_REQUEST]")
-                }
             }
-        }
-    }
-
-    /** Re-captures and resolves a short-lived target in the exact selected target-app window. */
-    private fun handleNodeBoundsHighlightRequest(intent: Intent) {
-        val source = runCatching {
-            NodeCaptureSource.valueOf(
-                intent.getStringExtra(MonitorActions.EXTRA_NODE_CAPTURE_SOURCE).orEmpty()
-            )
-        }.getOrNull()
-        val pathIndices = intent.getIntegerArrayListExtra(MonitorActions.EXTRA_NODE_PATH)
-        val requestedWindowId = intent.getIntExtra(MonitorActions.EXTRA_NODE_WINDOW_ID, -1)
-        if (source == null || pathIndices == null || pathIndices.size > 64 || pathIndices.any { it < 0 }) {
-            addLog("节点高亮拒绝[INVALID_REQUEST]：采集来源或节点路径无效")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-
-        val sourceSnapshot = LatestAccessibilityNodeDump.latestAll(source).firstOrNull { snapshot ->
-            snapshot.window.packageName == monitorRepository.targetPackage() &&
-                (requestedWindowId < 0 || snapshot.windowId == requestedWindowId)
-        }
-        if (sourceSnapshot == null) {
-            addLog("节点高亮拒绝[SOURCE_SNAPSHOT_UNAVAILABLE]：没有与当前目标应用及所选窗口一致的来源快照")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-
-        val path = NodePath(pathIndices.toList())
-        val sourceIndex = NodeTreeIndex(sourceSnapshot)
-        if (NodeBoundsHighlightPlanner.create(sourceSnapshot, path) == null) {
-            addLog("节点高亮拒绝[BOUNDS_UNAVAILABLE]：所选节点不存在或没有成功采集有效屏幕边界")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-        val target = sourceIndex.targetFor(path) ?: run {
-            addLog("节点高亮拒绝[TARGET_UNAVAILABLE]：无法从当前快照创建短期节点目标")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-
-        val refreshedSnapshot = runCatching {
-            accessibilityGateway.inspectTargetWindows(
-                TreeInspectionRequest(
-                    maxNodes = AccessibilityTreeLimits.MAX_NODES_PER_SCAN,
-                    textCapture = NodeTextCapture.NONE,
-                    allowVisibleWindowFallback = true
-                )
-            ).firstOrNull { snapshot ->
-                snapshot.window.packageName == sourceSnapshot.window.packageName &&
-                    snapshot.windowId == sourceSnapshot.windowId
-            }
-        }.getOrNull()
-        if (refreshedSnapshot == null) {
-            addLog("节点高亮拒绝[REFRESH_FAILED]：无法重新读取所选目标应用窗口")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-
-        val resolution = NodeTargetResolver.resolve(target, refreshedSnapshot)
-        if (!resolution.isResolved) {
-            addLog(
-                "节点高亮拒绝[RESOLUTION_FAILED]：status=${resolution.status}；" +
-                    "scanned=${resolution.scannedNodeCount}；elapsed=${resolution.queryElapsedMs}ms；" +
-                    "reason=${resolution.stopReason ?: "NONE"}"
-            )
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-
-        val resolvedPath = resolution.resolvedPath ?: run {
-            addLog("节点高亮拒绝[RESOLVED_PATH_MISSING]：解析结果没有目标路径")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-        val highlightPlan = NodeBoundsHighlightPlanner.create(refreshedSnapshot, resolvedPath)
-        if (highlightPlan == null) {
-            addLog("节点高亮拒绝[REFRESHED_BOUNDS_UNAVAILABLE]：最新快照没有可绘制的有效边界")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-
-        val pathLabel = resolvedPath.childIndices.joinToString("/").ifBlank { "root" }
-        val shown = overlayPort.showNodeBoundsHighlight(
-            selectedBounds = highlightPlan.selectedBounds,
-            ancestorBounds = highlightPlan.ancestorBounds,
-            label = highlightPlan.label,
-            durationMs = 5_000L
-        )
-        if (shown) {
-            addLog(
-                "节点高亮已显示[VALIDATED]：package=${refreshedSnapshot.window.packageName}；" +
-                    "windowId=${refreshedSnapshot.windowId}；path=$pathLabel；" +
-                    "resolution=${resolution.status}；windowGeneration=${refreshedSnapshot.window.generation}；duration=5000ms"
-            )
-        } else {
-            addLog("节点高亮失败[OVERLAY_ATTACH_FAILED]：无法附加无触摸屏幕边界层")
-        }
-    }
-
-    /** Draws all freshly captured accessible bounds for one same-package target-app window. */
-    private fun handleNodeLayoutBoundsRequest(intent: Intent) {
-        val source = runCatching {
-            NodeCaptureSource.valueOf(
-                intent.getStringExtra(MonitorActions.EXTRA_NODE_CAPTURE_SOURCE).orEmpty()
-            )
-        }.getOrNull()
-        val requestedWindowId = intent.getIntExtra(MonitorActions.EXTRA_NODE_WINDOW_ID, -1)
-        if (source == null) {
-            addLog("全局节点边界预览拒绝[INVALID_REQUEST]：采集来源无效")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-
-        val expectedPackage = monitorRepository.targetPackage()
-        val sourceSnapshot = LatestAccessibilityNodeDump.latestAll(source).firstOrNull { snapshot ->
-            snapshot.window.packageName == expectedPackage && snapshot.windowId == requestedWindowId
-        }
-        if (sourceSnapshot == null) {
-            addLog("全局节点边界预览拒绝[SOURCE_SNAPSHOT_UNAVAILABLE]：目标应用或窗口快照已变化")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-
-        val freshSnapshot = runCatching {
-            accessibilityGateway.inspectTargetWindows(
-                TreeInspectionRequest(
-                    maxNodes = AccessibilityTreeLimits.MAX_NODES_PER_SCAN,
-                    textCapture = NodeTextCapture.NONE,
-                    allowVisibleWindowFallback = true
-                )
-            ).firstOrNull { snapshot ->
-                snapshot.window.packageName == expectedPackage &&
-                    snapshot.windowId == requestedWindowId &&
-                    snapshot.window.generation == sourceSnapshot.window.generation
-            }
-        }.getOrNull()
-        if (freshSnapshot == null) {
-            addLog("全局节点边界预览拒绝[REFRESH_FAILED]：所选目标窗口已变化或不可访问")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-
-        val bounds = freshSnapshot.nodes.asSequence()
-            .filter { it.visible && !it.bounds.isEmpty }
-            .map { it.bounds }
-            .distinct()
-            .toList()
-        if (bounds.isEmpty()) {
-            addLog("全局节点边界预览拒绝[NO_VISIBLE_BOUNDS]：所选窗口没有可绘制节点边界")
-            overlayPort.clearNodeBoundsHighlight()
-            return
-        }
-        val drawLimit = 600
-        val label = "${expectedPackage.substringAfterLast('.')} 布局边界 · ${bounds.size.coerceAtMost(drawLimit)}/${bounds.size}" +
-            if (freshSnapshot.truncated) " · 扫描不完整" else ""
-        val shown = overlayPort.showNodeLayoutBounds(
-            bounds = bounds,
-            label = label,
-            durationMs = 12_000L
-        )
-        if (shown) {
-            addLog(
-                "全局节点边界预览已显示[VALIDATED]：package=$expectedPackage；" +
-                    "windowId=${freshSnapshot.windowId}；bounds=${bounds.size.coerceAtMost(drawLimit)}/${bounds.size}；" +
-                    "truncated=${freshSnapshot.truncated}；duration=12000ms"
-            )
-        } else {
-            addLog("全局节点边界预览失败[OVERLAY_ATTACH_FAILED]：无法附加无触摸边界层")
         }
     }
 
@@ -358,17 +165,10 @@ class FreedomAccessibilityService : AccessibilityService() {
             bootRecoveryReceiver,
             IntentFilter(MonitorActions.ACTION_BOOT_RECOVERY)
         )
-        serviceReceiverRegistry.register(
-            manualNodeCaptureReceiver,
-            IntentFilter(MonitorActions.ACTION_MANUAL_NODE_CAPTURE)
-        )
         val nodeHighlightFilter = IntentFilter().apply {
-            addAction(MonitorActions.ACTION_HIGHLIGHT_NODE_BOUNDS)
-            addAction(MonitorActions.ACTION_SHOW_NODE_LAYOUT_BOUNDS)
             addAction(MonitorActions.ACTION_SHOW_GLOBAL_NODE_LAYOUT_BOUNDS)
             addAction(MonitorActions.ACTION_SHOW_GLOBAL_NODE_HIERARCHY)
             addAction(MonitorActions.ACTION_CLEAR_GLOBAL_NODE_LAYOUT_BOUNDS)
-            addAction(MonitorActions.ACTION_CLEAR_NODE_BOUNDS_HIGHLIGHT)
         }
         serviceReceiverRegistry.register(nodeBoundsHighlightReceiver, nodeHighlightFilter)
         val calibrationFilter = IntentFilter().apply {

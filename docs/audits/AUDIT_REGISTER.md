@@ -38,12 +38,12 @@ DOC-001～006 的关闭仅针对文档问题，证据为 G01-C HEAD 的 [架构�
 | ID | 分类/等级 | 证据与影响 | 状态 | 后续处置及关闭/复核依据 |
 | --- | --- | --- | --- | --- |
 | D01-001 | 导出/高 | OWN-31/32：独立节点 ZIP 入口与专属事务、createArchive 已退役；D01-B 修复提交 CI 46142186044 success | VERIFY_PENDING | 真机入口检查 |
-| D01-002 | 缓存/高 | OWN-32：LatestAccessibilityNodeDump 与 GlobalNodeLayoutVisualizationUseCase 分别保存节点；前者仍有 S0 Service 高亮接收器读取 | OPEN | 不改 S0；先完成引用审计、冻结范围决议 |
-| D01-003 | 缓存/高 | MomoSocialAdapter.onNodeTreeSnapshot 经 AppCompositionRoot 写入旧自动缓存；仍有 S0 读取者 | OPEN | 与 D01-002 同步收敛，保留正式归档 |
-| D01-004 | 入口/中 | 旧 ACTION_MANUAL_NODE_CAPTURE 接收器仍注册，现行 UI 未发现发送者 | CANDIDATE | 全仓引用及动态入口核验；S0 独立决议 |
+| D01-002 | 缓存/高 | D01-D3：用户专项授权后精确移除 S0 Service 的旧读取及清理引用，退役 LatestAccessibilityNodeDump；实时可视化快照、MonitorStore 摘要及历史归档保持独立职责 | VERIFY_PENDING | 新提交完整 CI、真机切换目标及清理 |
+| D01-003 | 缓存/高 | D01-D3：删除 MomoSocialAdapter 专属 onNodeTreeSnapshot 回调及 CompositionRoot 旧缓存接线；正式 sampleStore.recordNodeTree 原文保留 | VERIFY_PENDING | 完整 CI、真机采集归档 |
+| D01-004 | 入口/中 | D01-D3：删除旧手动采集、单节点高亮、单窗口布局及旧清除广播；保留现行三个全局可视化广播；App main 235 文件扫描无其他发送者 | VERIFY_PENDING | 全模块引用门禁、完整 CI 及真机 |
 | D01-005 | 接口/中 | D01-D2：旧检查器及其专属 Port、BoundsMap、TextFormatter 共四文件退役；App main 239 文件引用仅四文件互相依赖；两项旧展示测试迁移至当前悬浮快照链 | VERIFY_PENDING | 全模块引用、完整 CI、真机；现行同步搜索与退役对话框 160ms 异步防抖不等价，性能需独立评估 |
 | D01-006 | 导出/中 | 独立节点 ZIP SAF 请求码、临时文件及保存回调已精确移除；CI 46142186044 success | VERIFY_PENDING | 真机回归 |
-| D01-007 | 调度/中 | AndroidMonitorPreviewScheduler 350ms 防抖与监控摘要仍有生产用途 | CANDIDATE | 保留有效调度；后续核查全部摘要消费者 |
+| D01-007 | 调度/中 | D01-D3：保留 AndroidMonitorPreviewScheduler 350ms 防抖、自动串行扫描、运行门禁、MonitorStore 摘要；仅移除旧手动分支与旧缓存回调 | VERIFY_PENDING | 完整 CI、动态浏览监控及生命周期真机复核 |
 | D01-008 | 导出/高 | D01-C：主界面及悬浮入口共用三范围菜单，综合导出默认，全部已封存样本和全量诊断使用原事务 | VERIFY_PENDING | 新提交 CI 及真机三范围验证 |
 | D01-009 | 兼容/高 | D01-C：组合范围保留旧关联诊断报告兼容；未关联历史仍要求 diagnostic_manifest，active/finalizing 排除和删除保护不变 | VERIFY_PENDING | 新组合范围测试及完整 CI |
 | D01-010 | 遗留/中 | D01-D1：同一基线分批扫描 App 239 个 main 源码及资源，createBatchArchive 仅见定义；旧两项单测已迁移到唯一 createExportBundle，生产仅删旧方法 61 行 | VERIFY_PENDING | 新提交全模块引用检测、单元测试及完整 CI；不宣称动态可达性穷尽 |
@@ -55,6 +55,8 @@ D01-C 证据基线 c8859f33eef335a523401aa586d6d6ca48716107（完整 CI 46142186
 D01-D1 证据基线 2f5a7a4aa0325cf14cc1163ffc280f56d8d2122a。D01-C 完整 CI 已通过。旧批量 writer 退役，原三范围打包、封存、回读及清理实现字节不变；全仓源码/测试/资源引用门禁新增，D01-D1 完整 CI 46144656958 success；D01-D3 未施工。
 
 D01-D2 证据基线 080fcd17a43f919898435a720806b1d9b8440cb4，完整 CI 46144656958 success。四个专属 S1 文件明确退役，保留历史 SHA、原冻结清单、测试逆向证据；现行悬浮两界面、搜索、布局导出、旧 Service 广播与缓存均不修改。旧 Activity 专属异步过滤测试迁移为现有同步快照搜索及清理验证，不宣称线程/防抖等价；真机性能待独立评估。新 CI 待验。
+
+D01-D3 证据基线 880aed8170612c9947caeca18e94301c9c8c089f；D01-D2 完整 CI 46145903809 success。经用户专项授权，S0 Service 仅删除旧节点广播、两个专属处理器、旧缓存引用及专属 imports/getter；原 R00/R01 manifest 不动，原 S0 旧 blob 与新 blob 均精确核验并逆向恢复，其他 S0 保持原 pin。旧缓存文件退役，四个 S1 文件仅收敛专属常量/回调/手动分支；当前全局可视化、自动监控调度、正式归档、手势和任务入口不改。原旧缓存及旧测试仅作为历史证据保留在 Python 逆向检测中。新 CI 待验，真机待验；共享 NodeCaptureSource 等候选不在本轮额外删除范围。
 
 ## 持续扫描范围
 

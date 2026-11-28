@@ -262,6 +262,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # D01-D2: exact S1 retirement; S0 and the original manifest stay unchanged.
                 self.assertEqual("cd45c1be998ee7de2a217db2ad00e1688bd55a06", expected[path])
                 expected[path] = "aed81c353771212cff21424a8c9e3d3ad75dd6ab"
+                # D01-D3: one exact authorized S0 node-only migration; original manifest preserved.
+                self.assertEqual("aed81c353771212cff21424a8c9e3d3ad75dd6ab", expected[path])
+                expected[path] = "6f80d78495bb6d21fcc7bfb095795248e68d64c7"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -368,6 +371,15 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "app/src/test/java/com/freedom/architecture/AccessibilityInspectorPipelineBoundaryTest.kt"
                 self.assertEqual("14aa980f91bd9478b45b95790593439bd27167aa", expected[path])
                 expected[path] = "8acfe58fc2d9d9f6f6d6e0958a794c8b4b0e8bbb"
+            if field == "protected_test_files":
+                # D01-D3: exact migration of obsolete manual/legacy highlight assertions.
+                for path, (previous, current) in {
+                    "app/src/test/java/com/freedom/application/monitor/AccessibilityTreePreviewUseCaseTest.kt": ("417e63bb7d8e5c608211a9e3e099f9dce7c995a1", "2a5e14313b881369cf894e2f5cbe3545402b0e92"),
+                    "app/src/test/java/com/freedom/architecture/AccessibilityInspectorPipelineBoundaryTest.kt": ("8acfe58fc2d9d9f6f6d6e0958a794c8b4b0e8bbb", "36011d6f7db2726e0b056c0ad9a8e72c54dbe258"),
+                    "app/src/test/java/com/freedom/application/monitor/GlobalNodeLayoutVisualizationUseCaseTest.kt": ("9534769443d7ca8376b72829b2da0fe5d3b9a5eb", "906ff57e562b332da26a31e2c4c3a42363fe90e9"),
+                }.items():
+                    self.assertEqual(previous, expected[path])
+                    expected[path] = current
             if field == "protected_rule_files":
                 # G01-E: only the explicitly approved append-only AGENTS governance navigation.
                 # Preserve the original manifest pin and verify the exact new full blob.
@@ -638,6 +650,18 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_d01d2_legacy_inspector_retirement.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "121afa08950dfa3caad75e9b5d07ed4239be6d51"
+        # D01-D3: retain exact historical proofs through the authorized inverse.
+        for path, (previous, current) in {
+            "tools/architecture/test_pp_d01b_node_zip_retirement.py": ("37b9ed6d70d625b1412b6496e3ca89920ec93db2", "f0ed49a254ff293e198ac44eb15ae19b64e3c8c3"),
+            "tools/architecture/test_pp_d01d2_legacy_inspector_retirement.py": ("121afa08950dfa3caad75e9b5d07ed4239be6d51", "1d7fde2b059b8d742cc74962fa7fd7c0997756e7"),
+            "tools/architecture/test_pp_r05_facade_convergence.py": ("5422e057795e4b30d6dde17123f7301d8a98fe46", "70b530adc1f034b2d17ac801aec67d614d52cb14"),
+            "tools/architecture/test_pp_r08_composition_history_migration.py": ("83b0e32117415b1d924c9c418b2a77e956d51fcd", "c22692bc7c38cfb81af3fedde4ebd4eed69342e9"),
+        }.items():
+            self.assertEqual(previous, reviewed_migration_evidence[path])
+            reviewed_migration_evidence[path] = current
+        path = "tools/architecture/test_pp_d01d3_legacy_node_cache_retirement.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "fed2bc5b09ee2e2afceb9f8c5a425ce5687bbe62"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

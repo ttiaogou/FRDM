@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_d01d3_legacy_node_cache_retirement import ADAPTER, restore_d01d3_source
 
 ROOT = Path(__file__).resolve().parents[2]
 MOMO = ROOT / "app/src/main/java/com/freedom/adapters/social/momo/"
@@ -60,6 +61,7 @@ REVERSE_PATCH = [
 ]
 
 def restore_r05g_adapter(adapter):
+    adapter = restore_d01d3_source(ADAPTER, adapter)
     for offset, current, previous in REVERSE_PATCH:
         if adapter[offset:offset + len(current)] != current:
             raise AssertionError("Missing or moved R05-H direct binding: " + current[:100])

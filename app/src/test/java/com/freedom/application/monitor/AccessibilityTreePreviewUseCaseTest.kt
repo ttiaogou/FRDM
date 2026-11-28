@@ -9,7 +9,6 @@ import com.freedom.core.accessibility.api.NodeTextCapture
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.accessibility.api.TreeInspectionRequest
 import com.freedom.core.accessibility.api.WindowRef
-import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -27,7 +26,7 @@ class AccessibilityTreePreviewUseCaseTest {
         )
         var request: TreeInspectionRequest? = null
         var saved: MonitorPresentationSnapshot? = null
-        var captured: AccessibilityTreeSnapshot? = null
+        var refreshCount = 0
         val repository = object : MonitorSnapshotRepository {
             override fun updateAppPage(appLabel: String?, pageLabel: String?) = Unit
             override fun save(snapshot: MonitorPresentationSnapshot) { saved = snapshot }
@@ -46,8 +45,7 @@ class AccessibilityTreePreviewUseCaseTest {
             isRunning = { true },
             snapshotRepository = repository,
             onLog = {},
-            onRefresh = {},
-            onSnapshotCaptured = { snapshot, _ -> captured = snapshot }
+            onRefresh = { refreshCount++ }
         )
         useCase.scanActiveWindow()
 
@@ -55,18 +53,19 @@ class AccessibilityTreePreviewUseCaseTest {
         assertEquals("节点结构预览", saved?.pageLabel)
         assertTrue(saved?.nodePreview.orEmpty().none { it.contains("private chat text") })
         assertTrue(saved?.nodePreview.orEmpty().any { it.contains("com.example:id/message") })
-        assertSame(tree, captured)
+        assertEquals(tree.visitedNodeCount, saved?.visitedNodeCount)
+        assertEquals(tree.truncated, saved?.truncated)
+        assertEquals(1, refreshCount)
     }
 
     @Test
-    fun manualCaptureRunsWhenBackgroundMonitorIsNotRunningAndKeepsSourceSeparate() {
+    fun automaticPreviewDoesNotInspectOrPersistWhenBackgroundMonitorIsNotRunning() {
         val tree = AccessibilityTreeSnapshot(
             window = WindowRef("com.example", "ChatActivity", 3),
             nodes = listOf(node("android.widget.FrameLayout", "", null)),
             visitedNodeCount = 1,
             truncated = false
         )
-        var captures = mutableListOf<NodeCaptureSource>()
         var inspectCount = 0
         var saved: MonitorPresentationSnapshot? = null
         val repository = object : MonitorSnapshotRepository {
@@ -88,21 +87,16 @@ class AccessibilityTreePreviewUseCaseTest {
             isRunning = { false },
             snapshotRepository = repository,
             onLog = {},
-            onRefresh = {},
-            onSnapshotCaptured = { _, source -> captures += source }
+            onRefresh = {}
         )
 
         useCase.scanActiveWindow()
         assertEquals(0, inspectCount)
-        useCase.captureManual()
-
-        assertEquals(1, inspectCount)
-        assertEquals(listOf(NodeCaptureSource.MANUAL), captures)
         assertEquals(null, saved)
     }
 
     @Test
-    fun manualCaptureRequestsAndPublishesEveryMatchingTargetWindow() {
+    fun automaticPreviewReadsOnlyActiveWindowAndKeepsWindowSummaryBounded() {
         val first = AccessibilityTreeSnapshot(
             window = WindowRef("com.example", "ChatActivity", 5, windowId = 11),
             nodes = listOf(node("android.widget.FrameLayout", "", null).copy(windowId = 11)),
@@ -119,11 +113,10 @@ class AccessibilityTreePreviewUseCaseTest {
         )
         var activeWindowCalled = false
         var targetWindowsCalled = false
-        var published: List<AccessibilityTreeSnapshot> = emptyList()
-        var publishedSource: NodeCaptureSource? = null
+        var saved: MonitorPresentationSnapshot? = null
         val repository = object : MonitorSnapshotRepository {
             override fun updateAppPage(appLabel: String?, pageLabel: String?) = Unit
-            override fun save(snapshot: MonitorPresentationSnapshot) = Unit
+            override fun save(snapshot: MonitorPresentationSnapshot) { saved = snapshot }
             override fun read() = MonitorPresentationSnapshot("", "", emptyList(), 0, false)
         }
         val useCase = AccessibilityTreePreviewUseCase(
@@ -140,22 +133,19 @@ class AccessibilityTreePreviewUseCaseTest {
                 }
                 override fun isWindowCurrent(window: WindowRef) = true
             },
-            isRunning = { false },
+            isRunning = { true },
             snapshotRepository = repository,
             onLog = {},
-            onRefresh = {},
-            onSnapshotsCaptured = { snapshots, source ->
-                published = snapshots
-                publishedSource = source
-            }
+            onRefresh = {}
         )
 
-        useCase.captureManual()
+        useCase.scanActiveWindow()
 
-        assertTrue(targetWindowsCalled)
-        assertFalse(activeWindowCalled)
-        assertEquals(listOf(11, 12), published.map { it.windowId })
-        assertEquals(NodeCaptureSource.MANUAL, publishedSource)
+        assertFalse(targetWindowsCalled)
+        assertTrue(activeWindowCalled)
+        assertEquals(first.visitedNodeCount, saved?.visitedNodeCount)
+        assertEquals(first.truncated, saved?.truncated)
+        assertEquals(1, saved?.nodePreview?.size)
     }
 
     private fun node(className: String, viewId: String, text: String?, childCount: Int = 0) =

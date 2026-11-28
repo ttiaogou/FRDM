@@ -113,7 +113,6 @@ internal class MomoSocialAdapter(
     gestureSettingsRepository: GestureSettingsRepository,
     private val gesturePolicy: GestureApi,
     private val screenshotCapture: AndroidScreenshotCapture? = null,
-    private val onNodeTreeSnapshot: (AccessibilityTreeSnapshot) -> Unit = {},
     private val latestDialogWindowObservation: () -> AndroidDialogWindowObservation? = { null },
     private val conversationRepository: ConversationRepository,
     private val diagnostics: RunDiagnosticsPort,
@@ -5962,7 +5961,6 @@ internal class MomoSocialAdapter(
                 snapshot,
                 MomoNodeTreeCapturePriorityPolicy.classify(snapshot.window.activityClass, inspection.pageType)
             )
-            onNodeTreeSnapshot(snapshot)
         }
         val chatKind = when (inspection.pageType) {
             MomoChatPageType.UNKNOWN -> ChatPageKind.UNKNOWN

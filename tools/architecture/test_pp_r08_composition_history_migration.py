@@ -2,6 +2,7 @@
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_d01d3_legacy_node_cache_retirement import restore_d01d3_source
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSITION = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
@@ -40,6 +41,7 @@ RESOLVER_BLOCK = "\n    /**\n     * One runtime-local, single-use preload slot. 
 R09D_CONTACT_GUARD = "                // OCR can be invalidated before consume; never reuse a previous contact's history.\n                if (preparedDraftHistory?.let { it.contactId != verifiedIdentity.contactId } == true) {\n                    clear()\n                    addLog(\"AI 草稿历史读取：预加载联系人已变化；丢弃旧历史并重新查询\")\n                }\n"
 
 def restore_sources(composition, resolver):
+    composition = restore_d01d3_source(COMPOSITION, composition)
     if resolver.count(R09D_CONTACT_GUARD) != 1:
         raise AssertionError("R09-D preload contact isolation guard changed")
     resolver = resolver.replace(R09D_CONTACT_GUARD, "", 1)

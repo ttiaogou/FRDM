@@ -41,6 +41,9 @@ class GlobalNodeLayoutVisualizationUseCaseTest {
 
         assertTrue(useCase.show())
         assertEquals(NodeTextCapture.EPHEMERAL, gateway.request?.textCapture)
+        assertEquals(1, gateway.targetWindowCalls)
+        assertEquals(0, gateway.activeWindowCalls)
+        assertEquals(listOf(11, 12), useCase.snapshots().map { it.windowId })
         assertEquals(2, useCase.snapshots().size)
         assertEquals(3, overlay.snapshots.flatMap { it.nodes }.count { it.visible && !it.bounds.isEmpty })
         assertEquals(1, overlay.showCount)
@@ -87,9 +90,15 @@ class GlobalNodeLayoutVisualizationUseCaseTest {
 
     private class FakeGateway(var windows: List<AccessibilityTreeSnapshot>) : ActiveWindowInspectionPort {
         var request: TreeInspectionRequest? = null
+        var activeWindowCalls = 0
+        var targetWindowCalls = 0
         override fun displayMetrics() = DisplayMetricsSnapshot(1080, 1920, 3f)
-        override fun inspectActiveWindow(request: TreeInspectionRequest) = windows.firstOrNull()
+        override fun inspectActiveWindow(request: TreeInspectionRequest): AccessibilityTreeSnapshot? {
+            activeWindowCalls++
+            return windows.firstOrNull()
+        }
         override fun inspectTargetWindows(request: TreeInspectionRequest): List<AccessibilityTreeSnapshot> {
+            targetWindowCalls++
             this.request = request
             return windows
         }

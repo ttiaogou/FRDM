@@ -3,6 +3,7 @@ import unittest
 import re
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_d01d3_legacy_node_cache_retirement import retired_cache_evidence
 from tools.architecture.test_pp_d01c_combined_export_migration import restore_d01c_source
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,13 +33,13 @@ def restore_d01b_activity(source):
 class D01bNodeZipRetirementTest(unittest.TestCase):
     def test_exact_removals_only_and_retained_cache_contract(self):
         for path, removals in ((ACTIVITY, ACTIVITY_REMOVALS), (CACHE, CACHE_REMOVALS)):
-            source = (ROOT / path).read_text(encoding="utf-8")
+            source = retired_cache_evidence() if path == CACHE else (ROOT / path).read_text(encoding="utf-8")
             if path == ACTIVITY:
                 source = restore_d01c_source(path, source)
             self.assertEqual(CURRENT[path], git_blob(source.encode("utf-8")))
             self.assertEqual(PREVIOUS[path], git_blob(restore_exact(source, removals, PREVIOUS[path]).encode("utf-8")))
         activity = (ROOT / ACTIVITY).read_text(encoding="utf-8")
-        cache = (ROOT / CACHE).read_text(encoding="utf-8")
+        cache = retired_cache_evidence()
         self.assertNotIn("fun createArchive(", cache)
         for token in ("fun update(", "fun updateAll(", "fun latestAll(", "fun clear("):
             self.assertIn(token, cache)
@@ -56,7 +57,7 @@ class D01bNodeZipRetirementTest(unittest.TestCase):
 
     def test_inverse_rejects_damage_to_live_export_and_cache(self):
         activity = (ROOT / ACTIVITY).read_text(encoding="utf-8")
-        cache = (ROOT / CACHE).read_text(encoding="utf-8")
+        cache = retired_cache_evidence()
         for token in ("launchLogExport()", "cleanupAfterVerifiedExport("):
             with self.assertRaises(AssertionError):
                 restore_d01b_activity(activity.replace(token, "retired", 1))

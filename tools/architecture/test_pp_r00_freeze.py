@@ -478,8 +478,27 @@ class PpR00FreezeTest(unittest.TestCase):
             self.assertEqual(previous, reviewed_s1[path])
             self.assertNotIn(path, actual)
             del reviewed_s1[path]
+        # D01-D3: user-authorized exact node-only S0 migration. Original manifest remains immutable.
+        reviewed_s0 = dict(m["permanent_s0"])
+        path = "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt"
+        self.assertEqual("2ee39d722c21947e1a73305ec8559e1f0226cdc8", reviewed_s0[path])
+        reviewed_s0[path] = "22d1c7743405d93be4f89013c927bc6f74ba5c0f"
+        for path, (previous, current) in {
+            "app/src/main/java/com/freedom/adapters/android/MonitorActions.kt": ("7178c1ab450d2f907654ca99b18074380b85d4ce", "33ba225388dd5db5cfc82fcbec2cb8d056c27ce9"),
+            "app/src/main/java/com/freedom/app/AppCompositionRoot.kt": ("0aed30d8527e25c3ac9d732b194a1f9aaf145b6f", "2611f7d457dbff02c2c4aef116714b86dfa8c7ef"),
+            "app/src/main/java/com/freedom/adapters/social/momo/MomoSocialAdapter.kt": ("e92cb4a3348146fa055fd3aa2b6abda2dac80824", "8af64ca8d467e4d1eea9e8b2a7cdd411b2cee95f"),
+            "app/src/main/java/com/freedom/application/monitor/AccessibilityTreePreviewUseCase.kt": ("0ae9544e71ac944c2090b643ea755ddfedfe6f27", "ea7326f8099a31a976ead6904155fe63f37fc3e7"),
+        }.items():
+            self.assertNotIn(path, reviewed_s0)
+            self.assertEqual(previous, reviewed_s1[path])
+            reviewed_s1[path] = current
+        path = "app/src/main/java/com/freedom/adapters/accessibility/diagnostics/LatestAccessibilityNodeDump.kt"
+        self.assertNotIn(path, reviewed_s0)
+        self.assertEqual("2d636faa98ed11fdecae133692ab3b4ff720905e", reviewed_s1[path])
+        self.assertNotIn(path, actual)
+        del reviewed_s1[path]
         self.assertEqual([], freeze_violations(
-            m["permanent_s0"], reviewed_s1, actual))
+            reviewed_s0, reviewed_s1, actual))
 
     def test_detects_changed_deleted_added_and_moved_sources(self):
         s0 = {"core.kt": git_blob(b"core")}

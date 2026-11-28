@@ -21,7 +21,6 @@ import com.freedom.adapters.accessibility.android.AndroidOverlayPort
 import com.freedom.adapters.accessibility.android.AndroidServiceReceiverRegistry
 import com.freedom.adapters.accessibility.android.AndroidWindowContextTracker
 import com.freedom.adapters.accessibility.android.MonitorOverlay
-import com.freedom.adapters.accessibility.diagnostics.LatestAccessibilityNodeDump
 import com.freedom.adapters.android.AndroidAppLabelResolver
 import com.freedom.adapters.android.MonitorActions
 import com.freedom.adapters.android.gestures.MomoGesturePolicySettingsProvider
@@ -54,7 +53,6 @@ import com.freedom.application.runtime.RunSessionCoordinator
 import com.freedom.application.runtime.EntryPageObservationRetry
 import com.freedom.core.accessibility.api.UnifiedAccessibilityEntry
 import com.freedom.core.accessibility.api.UnifiedAccessibilityEvent
-import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
 import com.freedom.core.accessibility.events.InputOriginClassifier
 import com.freedom.core.accessibility.events.TouchInteractionMonitor
 import com.freedom.core.accessibility.gesture.toGestureCoordinateContext
@@ -566,9 +564,6 @@ internal class AccessibilityServiceDependencies internal constructor(
             gestureSettingsRepository = root.gestureSettingsRepository,
             screenshotCapture = accessibilityGateway,
             gesturePolicy = gesturePolicy,
-            onNodeTreeSnapshot = { snapshot ->
-                LatestAccessibilityNodeDump.update(snapshot, NodeCaptureSource.AUTOMATIC)
-            },
             latestDialogWindowObservation = windowContextTracker::currentDialogWindowObservation,
             conversationRepository = root.conversationRepository,
             diagnostics = diagnostics,
@@ -990,11 +985,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             isRunning = { monitorRepository.isRunRequested() },
             snapshotRepository = monitorSnapshotRepository,
             onLog = addLog,
-            onRefresh = refreshViews,
-            onSnapshotCaptured = { snapshot, source -> LatestAccessibilityNodeDump.update(snapshot, source) },
-            onSnapshotsCaptured = { snapshots, source ->
-                if (source == NodeCaptureSource.MANUAL) LatestAccessibilityNodeDump.updateAll(snapshots, source)
-            }
+            onRefresh = refreshViews
         )
     }
     val monitorPreviewSchedulerDelegate = lazy(LazyThreadSafetyMode.NONE) {

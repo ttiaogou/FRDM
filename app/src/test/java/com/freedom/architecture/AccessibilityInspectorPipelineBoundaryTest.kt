@@ -62,23 +62,17 @@ class AccessibilityInspectorPipelineBoundaryTest {
     }
 
     @Test
-    fun screenHighlightMustRefreshAndResolveBeforeDrawing() {
-        val service = source(
-            "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt"
-        )
-        val start = service.indexOf("private fun handleNodeBoundsHighlightRequest(intent: Intent)")
-        assertTrue("Highlight request handler must exist", start >= 0)
-        val end = service.indexOf("\n    private fun handleNodeLayoutBoundsRequest", start)
-        assertTrue("Highlight request handler must end before the next handler", end > start)
-        val handler = service.substring(start, end)
-
-        val refresh = handler.indexOf("inspectTargetWindows(")
-        val resolve = handler.indexOf("NodeTargetResolver.resolve(")
-        val draw = handler.indexOf("showNodeBoundsHighlight(")
-        assertTrue("Fresh-window capture must precede resolution", refresh >= 0 && refresh < resolve)
-        assertTrue("Resolution must precede drawing", resolve >= 0 && resolve < draw)
-        assertTrue("Unresolved targets must be rejected", handler.contains("if (!resolution.isResolved)"))
-        assertTrue("Failure paths must clear any previous highlight", handler.contains("clearNodeBoundsHighlight()"))
+    fun retiredHighlightBroadcastsAreAbsentAndFreshGlobalCapturePrecedesDrawing() {
+        val service = source("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
+        val useCase = source("app/src/main/java/com/freedom/application/monitor/GlobalNodeLayoutVisualizationUseCase.kt")
+        assertFalse(service.contains("handleNodeBoundsHighlightRequest("))
+        assertFalse(service.contains("handleNodeLayoutBoundsRequest("))
+        assertFalse(service.contains("LatestAccessibilityNodeDump"))
+        val capture = useCase.indexOf("gateway.inspectTargetWindows(")
+        val filter = useCase.indexOf("snapshot.window.packageName == expectedPackage")
+        val draw = useCase.indexOf("overlay.showInteractiveNodeLayoutBounds(snapshots, label)")
+        assertTrue(capture >= 0 && filter > capture && draw > filter)
+        assertTrue(useCase.contains("overlay.clearNodeBoundsHighlight()"))
     }
 
     @Test
@@ -116,23 +110,18 @@ class AccessibilityInspectorPipelineBoundaryTest {
     }
 
     @Test
-    fun fullLayoutPreviewMustRefreshTheSelectedTargetWindowBeforeDrawing() {
-        val service = source(
-            "app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt"
-        )
-        val start = service.indexOf("private fun handleNodeLayoutBoundsRequest(intent: Intent)")
-        assertTrue("Full layout preview handler must exist", start >= 0)
-        val end = service.indexOf("\n    private fun handleGlobalNodeLayoutBoundsRequest", start)
-        assertTrue("Full layout preview handler must end before the next handler", end > start)
-        val handler = service.substring(start, end)
-        val sourceCheck = handler.indexOf("LatestAccessibilityNodeDump.latestAll(source)")
-        val refresh = handler.indexOf("inspectTargetWindows(")
-        val draw = handler.indexOf("showNodeLayoutBounds(")
-        assertTrue("Selected source snapshot must be checked before refresh", sourceCheck >= 0 && sourceCheck < refresh)
-        assertTrue("Fresh capture must precede layout drawing", refresh >= 0 && refresh < draw)
-        assertTrue("Preview must remain scoped to the target package", handler.contains("snapshot.window.packageName == expectedPackage"))
-        assertTrue("Preview must preserve selected window identity", handler.contains("snapshot.windowId == requestedWindowId"))
-        assertTrue("Preview must reject changed window generations", handler.contains("snapshot.window.generation == sourceSnapshot.window.generation"))
+    fun globalHierarchyUsesTheSameFreshWindowSnapshotsAndClearsOnTargetChange() {
+        val service = source("app/src/main/java/com/freedom/accessibility/FreedomAccessibilityService.kt")
+        val owner = source("app/src/main/java/com/freedom/application/monitor/GlobalNodeLayoutVisualizationUseCase.kt")
+        val handler = service.substringAfter("private fun handleGlobalNodeHierarchyRequest()").substringBefore("override fun onServiceConnected()")
+        assertTrue(handler.contains("globalNodeLayoutVisualizationUseCase.snapshots()"))
+        assertTrue(handler.contains("NodeHierarchyOverlay.show(this, snapshots)"))
+        assertFalse(handler.contains("inspectTargetWindows("))
+        assertTrue(owner.contains("snapshot.window.packageName == expectedPackage"))
+        assertTrue(owner.contains("fun snapshots(): List<AccessibilityTreeSnapshot> = latestSnapshots"))
+        val target = service.substringAfter("private val targetChangedReceiver").substringBefore("private val refreshReceiver")
+        assertTrue(target.contains("globalNodeLayoutVisualizationUseCase.clear()"))
+        assertTrue(target.contains("NodeHierarchyOverlay.clear()"))
     }
 
     @Test

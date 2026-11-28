@@ -7,7 +7,6 @@ import com.freedom.core.accessibility.api.ActiveWindowInspectionPort
 import com.freedom.core.accessibility.api.NodeTextCapture
 import com.freedom.core.accessibility.api.TreeInspectionRequest
 import com.freedom.core.accessibility.api.AccessibilityTreeLimits
-import com.freedom.core.accessibility.diagnostics.NodeCaptureSource
 import java.util.ArrayDeque
 
 /**
@@ -21,23 +20,17 @@ internal class AccessibilityTreePreviewUseCase(
     private val snapshotRepository: MonitorSnapshotRepository,
     private val onLog: (String) -> Unit,
     private val onRefresh: () -> Unit,
-    private val onSnapshotCaptured: (com.freedom.core.accessibility.api.AccessibilityTreeSnapshot, NodeCaptureSource) -> Unit = { _, _ -> },
-    private val onSnapshotsCaptured: (List<com.freedom.core.accessibility.api.AccessibilityTreeSnapshot>, NodeCaptureSource) -> Unit = { _, _ -> },
     private val maxNodesPerScan: Int = AccessibilityTreeLimits.MAX_NODES_PER_SCAN,
     private val maxDisplayNodes: Int = AccessibilityTreeLimits.MAX_DISPLAY_NODES
 ) {
     private val scanLock = Any()
-    private val pendingSources = ArrayDeque<NodeCaptureSource>()
+    private val pendingScans = ArrayDeque<Unit>()
     private var draining = false
 
-    /** Scheduled program capture and explicit manual capture share one serial scan queue. */
-    fun scanActiveWindow() = enqueue(NodeCaptureSource.AUTOMATIC)
-
-    fun captureManual() = enqueue(NodeCaptureSource.MANUAL)
-
-    private fun enqueue(source: NodeCaptureSource) {
+    /** Scheduled program captures retain the serial scan queue. */
+    fun scanActiveWindow() {
         val shouldDrain = synchronized(scanLock) {
-            pendingSources.addLast(source)
+            pendingScans.addLast(Unit)
             if (draining) false else {
                 draining = true
                 true
@@ -48,39 +41,33 @@ internal class AccessibilityTreePreviewUseCase(
 
     private fun drainQueue() {
         while (true) {
-            val source = synchronized(scanLock) {
-                if (pendingSources.isEmpty()) {
+            synchronized(scanLock) {
+                if (pendingScans.isEmpty()) {
                     draining = false
-                    null
-                } else pendingSources.removeFirst()
-            } ?: return
-            runCatching { capture(source) }.onFailure { error ->
-                onLog("节点采集异常：source=${source.name}；原因=${error.javaClass.simpleName}")
+                    return
+                }
+                pendingScans.removeFirst()
+            }
+            runCatching { capture() }.onFailure { error ->
+                onLog("节点采集异常：source=AUTOMATIC；原因=${error.javaClass.simpleName}")
             }
         }
     }
 
-    private fun capture(source: NodeCaptureSource) {
-        if (source == NodeCaptureSource.AUTOMATIC && !isRunning()) return
+    private fun capture() {
+        if (!isRunning()) return
         val request = TreeInspectionRequest(
             maxNodes = maxNodesPerScan,
-            // Both sources collect structure only. Text/description is never included in this view.
+            // The monitor collects structure only. Text/description is never included in this view.
             textCapture = NodeTextCapture.NONE,
             allowVisibleWindowFallback = true
         )
-        val trees = if (source == NodeCaptureSource.MANUAL) {
-            gateway.inspectTargetWindows(request)
-        } else {
-            gateway.inspectActiveWindow(request)?.let(::listOf).orEmpty()
-        }
-        if (trees.isEmpty()) {
-            onLog("节点扫描未完成：source=${source.name}；当前目标应用没有公开可访问的窗口根节点")
+        val tree = gateway.inspectActiveWindow(request)
+        if (tree == null) {
+            onLog("节点扫描未完成：source=AUTOMATIC；当前目标应用没有公开可访问的窗口根节点")
             return
         }
 
-        trees.forEach { onSnapshotCaptured(it, source) }
-        onSnapshotsCaptured(trees, source)
-        val tree = trees.first()
         val appLabel = appLabelResolver.resolve(tree.window.packageName)
         val displayLines = ArrayList<String>(maxDisplayNodes)
         for (node in tree.nodes) {
@@ -112,22 +99,20 @@ internal class AccessibilityTreePreviewUseCase(
             displayLines += line
         }
 
-        if (source == NodeCaptureSource.AUTOMATIC) {
-            snapshotRepository.save(
-                MonitorPresentationSnapshot(
-                    appLabel = appLabel,
-                    pageLabel = "节点结构预览",
-                    nodePreview = displayLines,
-                    visitedNodeCount = tree.visitedNodeCount,
-                    truncated = tree.truncated
-                )
+        snapshotRepository.save(
+            MonitorPresentationSnapshot(
+                appLabel = appLabel,
+                pageLabel = "节点结构预览",
+                nodePreview = displayLines,
+                visitedNodeCount = tree.visitedNodeCount,
+                truncated = tree.truncated
             )
-        }
+        )
         onLog(
-            "节点采集完成：source=${source.name}；捕获目标应用窗口 ${trees.size} 个；" +
+            "节点采集完成：source=AUTOMATIC；捕获目标应用窗口 1 个；" +
                 "当前预览窗口访问 ${tree.visitedNodeCount} 个节点，显示 ${displayLines.size} 个；" +
                 "未采集或持久化文本/描述" +
-                if (trees.any { it.truncated }) "；节点或窗口数量达到扫描上限，结果可能不完整" else ""
+                if (tree.truncated) "；节点或窗口数量达到扫描上限，结果可能不完整" else ""
         )
         onRefresh()
     }

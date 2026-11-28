@@ -61,6 +61,10 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 
 - OWN-32：基线 080fcd17a43f919898435a720806b1d9b8440cb4，完整 CI 46144656958 success。旧 Activity 检查器、专属 Port、BoundsMap、TextFormatter 退役。现行 GlobalNodeLayoutVisualizationUseCase 持有实时快照，两个悬浮展示复用 InspectorSearchEngine，布局保存由 NodeLayoutSnapshotExporter 负责；不增加入口或状态所有者。旧缓存、S0 Service 广播以及动态浏览监控未收敛，C 状态保留。现行搜索同步执行，旧对话框的异步防抖不等价，独立性能评估待做；新 CI 待验。
 
+## D01-D3 职责补证
+
+- OWN-32：基线 880aed8170612c9947caeca18e94301c9c8c089f，完整 CI 46145903809 success。用户专项授权后，S0 Service 仅精确退役旧节点广播处理及缓存引用，原冻结清单与其他 S0 不变。GlobalNodeLayoutVisualizationUseCase 是用户实时可视化快照所有者；AccessibilityTreePreviewUseCase 仅产生结构化自动监控摘要；MomoChatSampleNodeTreeStore 仍保存历史采集，不再额外写入旧缓存。保留 NodeLayoutSnapshotExporter 及三范围 ZIP。D01-D3 新 CI/真机待验；C 状态保留直到集成验收。
+
 ## 证据及覆盖边界
 
 - [R09-A](FRDM-PP-R09-A-REPOSITORY-ARCHITECTURE-ACCEPTANCE.md)、[R09-C](FRDM-PP-R09-C-ENTRY-STATE-UI-OWNERSHIP-ACCEPTANCE.md)、[R09-D](FRDM-PP-R09-D-RECOVERY-CHECKPOINT-ASYNC-ISOLATION.md)、[R09-G](FRDM-PP-R09-G-FINAL-ENGINEERING-ACCEPTANCE.md) 为验收证据，[历史归档](../archive/README.md) 供追溯。

@@ -3,6 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from tools.architecture.test_pp_r00_freeze import git_blob
+from tools.architecture.test_pp_d01d3_legacy_node_cache_retirement import INSPECTOR_TEST, restore_d01d3_source
 
 ROOT = Path(__file__).resolve().parents[2]
 TEST = "app/src/test/java/com/freedom/architecture/AccessibilityInspectorPipelineBoundaryTest.kt"
@@ -14,6 +15,7 @@ NEW_TEST_BLOCK = "    @Test\n    fun inspectorRemainsSnapshotOnlyAndDoesNotExecu
 
 
 def restore_d01d2_test(source):
+    source = restore_d01d3_source(INSPECTOR_TEST, source)
     if source.count(NEW_TEST_BLOCK) != 1:
         raise AssertionError("D01-D2 test migration anchor changed")
     restored = source.replace(NEW_TEST_BLOCK, OLD_TEST_BLOCK, 1)
@@ -25,7 +27,7 @@ def restore_d01d2_test(source):
 class D01d2LegacyInspectorRetirementTest(unittest.TestCase):
     def test_exact_test_migration(self):
         source = (ROOT / TEST).read_text(encoding="utf-8")
-        self.assertEqual(CURRENT, git_blob(source.encode("utf-8")))
+        self.assertEqual(CURRENT, git_blob(restore_d01d3_source(INSPECTOR_TEST, source).encode("utf-8")))
         self.assertEqual(PREVIOUS, git_blob(restore_d01d2_test(source).encode("utf-8")))
 
     def test_retired_files_and_production_references_absent(self):
