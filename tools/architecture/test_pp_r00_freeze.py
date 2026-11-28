@@ -397,6 +397,14 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "business/src/main/kotlin/com/freedom/features/conversation/domain/contact/ContactHistoryResolver.kt"
         self.assertEqual("ebab2e333685c707cf484b8eb911c66877b76712", reviewed_s1[path])
         reviewed_s1[path] = "235214217df96e84e291d5a58256365551881275"
+        # R08-G: same-package evidence extraction; exact prior source reconstructed by migration test.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ports/ChatPagePort.kt"
+        self.assertEqual("5e7d75815304073b585412bbcbf01f1952c680d9", reviewed_s1[path])
+        reviewed_s1[path] = "e7bbace419e928f0b850c4b8175cbd9acd901076"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ports/ChatPageSnapshot.kt"
+        self.assertNotIn(path, reviewed_s1)
+        self.assertNotIn(path, m["permanent_s0"])
+        reviewed_s1[path] = "a1a904f1435e94a1b60a0d5bc6240882c9a268eb"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

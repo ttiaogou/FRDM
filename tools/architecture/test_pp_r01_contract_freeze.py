@@ -154,6 +154,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R08-F exact reviewed runtime-local preload relocation.
                 self.assertEqual("76a60f7086f827234d58ddc5ea32817c92503761", expected[path])
                 expected[path] = "99bdc00f6d7c1f2828c96f6e5aa8e1842bd501aa"
+                # R08-G exact reviewed evidence-model extraction.
+                self.assertEqual("99bdc00f6d7c1f2828c96f6e5aa8e1842bd501aa", expected[path])
+                expected[path] = "b1f1ff7d6322412d1b129c74509e4fd21128300a"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -403,6 +406,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         }.items():
             self.assertNotIn(path, reviewed_migration_evidence)
             reviewed_migration_evidence[path] = replacement
+        # R08-G exact evidence and interface contract reconstruction.
+        path = "tools/architecture/test_pp_r08_chat_page_contract_migration.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "45252af931dc11bcff7f934e36d111abb857dae1"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
