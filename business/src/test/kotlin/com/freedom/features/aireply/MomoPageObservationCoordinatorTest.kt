@@ -148,6 +148,38 @@ class MomoPageObservationCoordinatorTest {
         assertFalse(coordinator.isFullInspectionPending())
     }
 
+    @Test
+    fun explicitReplacementAndCancelledCallbackRetainCurrentPurpose() {
+        val scheduler = FakeScheduler()
+        val coordinator = createCoordinator(scheduler, ArrayDeque())
+        val observed = mutableListOf<AiReplyPageReadPurpose>()
+        val callback = { observed.add(coordinator.consumeFullInspectionPurpose()); Unit }
+        coordinator.scheduleExplicitFullInspection(120L, AiReplyPageReadPurpose.SCROLL_AFTER, callback)
+        coordinator.scheduleExplicitFullInspection(240L, AiReplyPageReadPurpose.MESSAGE_READ_RETRY, callback)
+        scheduler.runCancelledWithDelay(120L)
+        assertTrue(observed.isEmpty())
+        assertTrue(coordinator.hasExplicitInspection())
+        assertEquals(AiReplyPageReadPurpose.MESSAGE_READ_RETRY, coordinator.pendingPageReadPurpose)
+        scheduler.runNextWithDelay(240L)
+        assertEquals(listOf(AiReplyPageReadPurpose.MESSAGE_READ_RETRY), observed)
+        assertFalse(coordinator.hasExplicitInspection())
+        assertEquals(AiReplyPageReadPurpose.FULL_INSPECTION, coordinator.pendingPageReadPurpose)
+    }
+
+    @Test
+    fun retiredExplicitInspectionCannotDeliverAfterResetBoundary() {
+        val scheduler = FakeScheduler()
+        val coordinator = createCoordinator(scheduler, ArrayDeque())
+        var callbacks = 0
+        coordinator.scheduleExplicitFullInspection(120L, AiReplyPageReadPurpose.SCROLL_AFTER) { callbacks++ }
+        coordinator.cancelExplicitInspectionHandle()
+        coordinator.reset()
+        coordinator.clearExplicitInspectionHandle()
+        scheduler.runCancelledWithDelay(120L)
+        assertEquals(0, callbacks)
+        assertFalse(coordinator.hasExplicitInspection())
+    }
+
     private fun createCoordinator(
         scheduler: FakeScheduler,
         statuses: ArrayDeque<ReceivedGreetingsPageArrivalStatus>,
@@ -190,6 +222,12 @@ class MomoPageObservationCoordinatorTest {
         fun runNext() {
             val entry = entries.firstOrNull { !it.cancelled } ?: error("No pending task")
             entry.cancelled = true
+            entry.task()
+        }
+
+        fun runCancelledWithDelay(delayMillis: Long) {
+            val entry = entries.firstOrNull { it.cancelled && it.delay == delayMillis }
+                ?: error("No cancelled task with delay=$delayMillis")
             entry.task()
         }
 

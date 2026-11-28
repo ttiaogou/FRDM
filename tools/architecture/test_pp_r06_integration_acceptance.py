@@ -9,6 +9,9 @@ from tools.architecture.test_pp_r06_page_evidence_migration import restore_r06a_
 ROOT = Path(__file__).resolve().parents[2]
 AI = "business/src/main/kotlin/com/freedom/features/aireply/"
 RUNTIME = AI + "AiReplyObservationRuntime.kt"
+PAGE_OWNER = AI + "MomoPageObservationCoordinator.kt"
+PAGE_STATE = {"pageInspectionTask", "fullInspectionCallbackToken", "pendingPageReadPurpose",
+              "regionRefreshTask", "lastPageInspection", "lastConfirmedChatListInspection", "lastRegionFingerprint"}
 BASELINE = "1c0c3bc1669f0cdc56e3abbb36c2f8c0be064f8a"
 OWNERS = {
     "AiReplyPageEvidence.kt": (
@@ -91,7 +94,11 @@ def integration_violations(sources):
                 issues.append(name + ": forbidden dependency " + token)
     for state in STATE:
         declaration = r"\b(?:val|var)\s+" + re.escape(state) + r"\b"
-        if len(re.findall(r"\bprivate\s+(?:val|var)\s+" + re.escape(state) + r"\b", runtime)) != 1:
+        if state in PAGE_STATE:
+            owner = sources.get(PAGE_OWNER, "")
+            if re.search(declaration, runtime) or len(re.findall(declaration, owner)) != 1:
+                issues.append("Page observation state ownership changed: " + state)
+        elif len(re.findall(r"\bprivate\s+(?:val|var)\s+" + re.escape(state) + r"\b", runtime)) != 1:
             issues.append("Runtime state declaration changed: " + state)
         if any(re.search(declaration, source) for source in helper_sources.values()):
             issues.append("Runtime state duplicated in helper: " + state)
@@ -105,7 +112,7 @@ def integration_violations(sources):
 class PpR06IntegrationAcceptanceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        paths = set(WIRING) | {AI + name for name in OWNERS}
+        paths = set(WIRING) | {AI + name for name in OWNERS} | {PAGE_OWNER}
         cls.sources = {path: (ROOT / path).read_text(encoding="utf-8") for path in paths}
 
     def test_all_five_stages_reconstruct_frozen_r06a_runtime(self):

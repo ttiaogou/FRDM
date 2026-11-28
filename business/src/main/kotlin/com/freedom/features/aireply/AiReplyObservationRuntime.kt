@@ -330,11 +330,6 @@ class AiReplyObservationRuntime(
     private val awaitingNormalInboxAfterGreetingsReturn: Boolean
         get() = receivedGreetingsTaskFlow.awaitingNormalInboxAfterReturn
 
-    private var pageInspectionTask: ScheduledTask? = null
-    private var fullInspectionCallbackToken = 0L
-    /** Purpose carried with the next scheduled full observation. */
-    private var pendingPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
-    private var regionRefreshTask: ScheduledTask? = null
     private val inboxPageRecognizer = MomoInboxPageRecognizer()
     private val receivedGreetingsPageRecognizer by lazy(LazyThreadSafetyMode.NONE) {
         MomoReceivedGreetingsPageRecognizer {
@@ -383,11 +378,6 @@ class AiReplyObservationRuntime(
     private var readinessDeferredRetryCount = 0
     private var readinessDeferredRetryLimitLogged = false
     private var readinessDeferredRetryGeneration = 0L
-    /** Startup navigation is page-structure verified and remains bounded. */
-    private var lastPageInspection: ChatPageSnapshot? = null
-    /** Last positively confirmed inbox anchor; survives only same-window transient UNKNOWN samples. */
-    private var lastConfirmedChatListInspection: ChatPageSnapshot? = null
-    private var lastRegionFingerprint = ""
     private var lastMessageFingerprint = ""
     private val loggedOcrDebugFingerprints = LinkedHashSet<String>()
     private val contactMessageLedger = ContactMessageLedger(contactMessageLedgerRepository)
@@ -416,7 +406,7 @@ class AiReplyObservationRuntime(
             shouldDrainPendingSnapshot = { !receivedGreetingsTaskActive },
             onValidatedResult = { requestedSnapshot, batch, activeSnapshot ->
                 if (!recoveryContext.pending) {
-                    lastPageInspection = activeSnapshot
+                    pageObservationCoordinator.lastPageInspection = activeSnapshot
                     handleMessageReadBatch(batch, requestedSnapshot)
                 } else {
                     onLog("AI 身份业务续接[STALE_MESSAGE_READ_IGNORED]：恢复事务仍在进行；丢弃旧消息批次")
@@ -1281,25 +1271,16 @@ class AiReplyObservationRuntime(
         // from 350ms to 350ms + debounce and leaves LIST_CONFIRMED behind the test/runtime
         // retry boundary.
         if (hasProtectedPrivateInspection() || hasProtectedSendInspection()) return
-        pendingPageReadPurpose = AiReplyPageReadPurpose.RECEIVED_GREETINGS
+        pageObservationCoordinator.pendingPageReadPurpose = AiReplyPageReadPurpose.RECEIVED_GREETINGS
         runFullInspection()
     }
 
     private fun runFullInspection() {
-        // An event/watcher can satisfy an ordinary pending full observation before
-        // its explicit timer fires. Retire that timer rather than losing its handle.
-        // Protected send/scroll reads are still shielded at their existing entry gates.
-        ++fullInspectionCallbackToken
-        pageInspectionTask?.cancel()
-        pageInspectionTask = null
-        pageObservationCoordinator.cancelFullInspection()
-        val purpose = pendingPageReadPurpose
-        pendingPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
-        runFullInspection(purpose)
+        runFullInspection(pageObservationCoordinator.consumeFullInspectionPurpose())
     }
 
     private fun runFullInspection(purpose: AiReplyPageReadPurpose) {
-        pageInspectionTask = null
+        pageObservationCoordinator.clearExplicitInspectionHandle()
         if (!isAiReplyActive()) return
         if (isPrivateFollowUpActive()) {
             runPrivateFollowUpObservation()
@@ -1336,7 +1317,7 @@ class AiReplyObservationRuntime(
         val inspection = pageRead.snapshot
         val observationDecision = pageObservationSemantics.classify(
             snapshot = inspection,
-            previous = lastPageInspection,
+            previous = pageObservationCoordinator.lastPageInspection,
             targetPackage = targetPackage()
         ).copy(
             observationGeneration = pageRead.observationGeneration,
@@ -1745,7 +1726,7 @@ class AiReplyObservationRuntime(
         if (isPrivateFollowUpActive()) return
         val incomingInspection = observation.snapshot ?: return
         if (observation.status == ObservationStatus.TEMPORARILY_UNAVAILABLE) return
-        val previous = lastPageInspection
+        val previous = pageObservationCoordinator.lastPageInspection
         val inspection = stabilizeIncomingPageSnapshot(incomingInspection)
         val pageFingerprint = PageFingerprint(
             packageName = inspection.packageName,
@@ -1776,7 +1757,7 @@ class AiReplyObservationRuntime(
             // directly from this observation. Existing recovery gates collect fresh proof.
             requestUnifiedPauseAndCheckpoint(RECEIVED_GREETINGS_TASK_ID, "GREETING_TASK_LEASE_LOST")
             sessionManagerState = SessionManagerState.PAUSED
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             onLog("收到的招呼恢复[LEASE_LOST_READ_ONLY]：已读取当前页面；等待既有恢复验证重新确认操作权")
             scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
             return
@@ -1960,7 +1941,7 @@ class AiReplyObservationRuntime(
             inspection.pageKind == ChatPageKind.CHAT_LIST
         val verifiedGreetingsInboxReturn = if (inboxReturnCandidate) {
             if (!verifyGreetingsToPrivateHandoff(observation, inspection, matchedRouteId)) {
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             true
@@ -1972,7 +1953,7 @@ class AiReplyObservationRuntime(
         if (verifiedGreetingsInboxReturn &&
             tryRearmSuspendedPrivateRecovery(observation, inspection, matchedRouteId)
         ) {
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             return
         }
         // A list BACK may first reveal its verified entry-card surface. Only this
@@ -2152,7 +2133,7 @@ class AiReplyObservationRuntime(
             // source identity for the next route comparison, but retire its locators:
             // the unconfirmed destination must not become the comparison baseline or
             // allow a region refresh/action to reuse the departed window's targets.
-            lastPageInspection = previous.copy(
+            pageObservationCoordinator.lastPageInspection = previous.copy(
                 messageListTarget = null,
                 inputFieldTarget = null,
                 sessionListNavigationTarget = null,
@@ -2219,7 +2200,7 @@ class AiReplyObservationRuntime(
             if (!ensureAndroidRecoveryReady(inspection, "PRIVATE_DETAIL_ROUTE_HANDOFF") ||
                 !retargetInterruptedPrivateDetail(observation.observationGeneration, privateSendReturnedToInbox)
             ) {
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 scheduleFullInspectionAfter(350L)
                 return
             }
@@ -2257,7 +2238,7 @@ class AiReplyObservationRuntime(
                 if (!receivedGreetingsCheckpointVerifier.hasActiveVerification()) {
                     scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
                 }
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             if (privateDetailRecovery &&
@@ -2270,7 +2251,7 @@ class AiReplyObservationRuntime(
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 聊天详情恢复[ROUTE_WAIT]：当前页面未独立确认原目标聊天；继续只读复核")
                 scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             if (sharedMessageListRecovery &&
@@ -2286,18 +2267,18 @@ class AiReplyObservationRuntime(
                 if (!messageListCheckpointVerifier.hasActiveVerification()) {
                     scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
                 }
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             if (targetRoute == null) {
                 onLog("统一页面恢复[ROUTE_WAIT]：当前目标应用页面尚未匹配业务指纹；继续等待")
                 scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             // Android READY must precede BOTH fresh route samples and UI ownership.
             if (!ensureAndroidRecoveryReady(inspection, "UNIFIED_ROUTE")) {
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             val privateListFaultEvidence = if (recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
@@ -2314,7 +2295,7 @@ class AiReplyObservationRuntime(
                 onLog("消息列表统一检查点[ORIGINAL_FAULT_WAIT]：reason=${recoveryContext.reason}；" +
                     "evidence=${privateListFaultEvidence.name}；保留原恢复事务")
                 schedulePendingPrivateListObservation()
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             // Compare the business decision independently of the page fingerprint.
@@ -2345,7 +2326,7 @@ class AiReplyObservationRuntime(
                         if (!messageListCheckpointVerifier.hasActiveVerification()) {
                             scheduleFullInspectionAfter(350L)
                         }
-                        lastPageInspection = inspection
+                        pageObservationCoordinator.lastPageInspection = inspection
                         return
                     }
                     result
@@ -2375,7 +2356,7 @@ class AiReplyObservationRuntime(
                         if (!receivedGreetingsCheckpointVerifier.hasActiveVerification()) {
                             scheduleFullInspectionAfter(350L)
                         }
-                        lastPageInspection = inspection
+                        pageObservationCoordinator.lastPageInspection = inspection
                         return
                     }
                     result
@@ -2389,14 +2370,14 @@ class AiReplyObservationRuntime(
                         sessionManagerState = SessionManagerState.PAUSED
                         onLog("统一页面恢复[GATE_WAIT]：页面状态或运行代次未确认；保留检查点并继续只读复核")
                         scheduleFullInspectionAfter(EXTERNAL_PAGE_RECOVERY_POLL_DELAY_MS)
-                        lastPageInspection = inspection
+                        pageObservationCoordinator.lastPageInspection = inspection
                         return
                     }
                     if (!recoveryContext.observeTarget(targetRoute, verificationKey)) {
                         recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = false))
                         onLog("统一页面恢复[RECOVERY_VERIFYING]：目标路由=$targetRoute；第${recoveryContext.verificationSamples}/2次快照尚未稳定")
                         scheduleFullInspectionAfter(350L)
-                        lastPageInspection = inspection
+                        pageObservationCoordinator.lastPageInspection = inspection
                         return
                     }
                     recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationSample(stable = true))
@@ -2416,12 +2397,12 @@ class AiReplyObservationRuntime(
                     sessionManagerState = SessionManagerState.PAUSED
                     onLog("收到招呼通用检查点[ADAPTER_CONFIRMATION_WAIT]：列表窗口或目标结构尚未重新确认；继续只读观察")
                     scheduleFullInspectionAfter(350L)
-                    lastPageInspection = inspection
+                    pageObservationCoordinator.lastPageInspection = inspection
                     return
                 }
             }
             if (!ensureAndroidRecoveryReady(inspection, "BEFORE_UI_OWNERSHIP")) {
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             if (targetTaskId == null || !claimTaskOwnership(targetTaskId, "统一页面路由双快照验证完成", verifiedHandoff = true)) {
@@ -2436,12 +2417,12 @@ class AiReplyObservationRuntime(
                 } else {
                     scheduleFullInspectionAfter(350L)
                 }
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             // Close the gap between lease claim and checkpoint acknowledgement.
             if (!ensureAndroidRecoveryReady(inspection, "BEFORE_RESUME_ACK")) {
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             if (sharedProof != null) {
@@ -2451,7 +2432,7 @@ class AiReplyObservationRuntime(
                         receivedGreetingsCheckpointVerifier.deferResume()
                         onLog("收到招呼通用检查点[COMPLETE_REJECTED]：通用恢复事务尚未确认；继续只读复核")
                         scheduleFullInspectionAfter(350L)
-                        lastPageInspection = inspection
+                        pageObservationCoordinator.lastPageInspection = inspection
                         return
                     }
                     recoveryContext.acknowledgeVerifiedCheckpoint(targetRoute, sharedProof)
@@ -2467,7 +2448,7 @@ class AiReplyObservationRuntime(
                         onLog("消息列表统一检查点[COMPLETE_REJECTED]：尚未完成恢复事务确认；保持暂停")
                         messageListCheckpointVerifier.deferOwnership()
                         scheduleFullInspectionAfter(RecoveryScheduler.readOnlyRetryDelayMs(1))
-                        lastPageInspection = inspection
+                        pageObservationCoordinator.lastPageInspection = inspection
                         return
                     }
                     recoveryContext.acknowledgeVerifiedCheckpoint(targetRoute, sharedProof)
@@ -2487,7 +2468,7 @@ class AiReplyObservationRuntime(
                     sessionManagerState = SessionManagerState.PAUSED
                     onLog("AI 聊天详情恢复[WINDOW_REBIND_WAIT]：窗口发生变化且身份返回证据未确认；保持检查点")
                     scheduleFullInspectionAfter(350L)
-                    lastPageInspection = inspection
+                    pageObservationCoordinator.lastPageInspection = inspection
                     return
                 }
             }
@@ -2500,7 +2481,7 @@ class AiReplyObservationRuntime(
                 sessionManagerState = SessionManagerState.PAUSED
                 onLog("AI 聊天详情恢复[CHAT_REBIND_WAIT]：原目标聊天绑定未完整复核；保留检查点并继续只读观察")
                 scheduleFullInspectionAfter(350L)
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 return
             }
             if (targetTaskId == PRIVATE_MESSAGES_TASK_ID && targetRoute == messageListRecoveryRoute.routeId) {
@@ -2565,7 +2546,7 @@ class AiReplyObservationRuntime(
             )
             if (targetRoute == chatDetailRecoveryRoute.routeId) {
                 sessionManagerState = SessionManagerState.READING_SESSION
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 if (privateDetailRecovery) {
                     currentSessionWindowKey = windowSessionKey(inspection)
                     if (isSendConfirmationPending()) {
@@ -2609,7 +2590,7 @@ class AiReplyObservationRuntime(
                     onLog("AI 私聊业务[INTERRUPTED_VISIT_RETAINED]：旧详情执行资格失效；原未完成记录保留")
                 }
                 reanchorRestoredMessageList(inspection)
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 // A page recovery is not startup admission. If the startup probe was
                 // interrupted, it must collect its original three fresh samples first.
                 if (pageSelectedPrivateStartupVerificationPending &&
@@ -2631,11 +2612,11 @@ class AiReplyObservationRuntime(
                     sessionManagerState = SessionManagerState.PAUSED
                     onLog("统一页面恢复[ADAPTER_CONFIRMATION_WAIT]：收到招呼路由已通过双快照，但适配器列表确认状态尚未同步；保持暂停并等待新鲜只读复核")
                     scheduleFullInspectionAfter(350L)
-                    lastPageInspection = inspection
+                    pageObservationCoordinator.lastPageInspection = inspection
                     return
                 }
                 sessionManagerState = SessionManagerState.PAUSED
-                lastPageInspection = inspection
+                pageObservationCoordinator.lastPageInspection = inspection
                 if (sharedGreetingsRecovery && receivedGreetingsTaskActive) {
                     // Existing active traversal continues only on the next fresh observation.
                     scheduleFullInspectionAfter(RECEIVED_GREETINGS_RECHECK_DELAY_MS)
@@ -2651,7 +2632,7 @@ class AiReplyObservationRuntime(
         // A submitted send holds the page, but must not suppress read-only proof collection.
         // The normal draft/gesture path remains blocked until the existing matcher confirms it.
         if (isSendConfirmationPending()) {
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             val boundDetail = observation.status == ObservationStatus.CONFIRMED_PAGE &&
                 sessionRunStarted && if (receivedGreetingsTaskActive) {
                     ownsTask(RECEIVED_GREETINGS_TASK_ID) && greetingBindingRejectReason(inspection) == null
@@ -2680,7 +2661,7 @@ class AiReplyObservationRuntime(
         deferredSendProofRetryAttempt = 0
         // 模型请求和分段填入期间，不让遍历任务抢走页面。
         if (isConversationDraftPending()) {
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             // The idle timer may already have fired. Preserve the due round without
             // starting traversal or requiring another accessibility event to wake it.
             if (pairWake != null && pairWake?.due == true && !receivedGreetingsTaskActive) {
@@ -2716,7 +2697,7 @@ class AiReplyObservationRuntime(
         }
         val previousKey = previous?.stableKey()
         val nextKey = inspection.stableKey()
-        lastPageInspection = inspection
+        pageObservationCoordinator.lastPageInspection = inspection
 
         // Consume the adapter's one-shot identity-return receipt only after fresh,
         // task-owned evidence independently identifies the selected conversation.
@@ -2839,7 +2820,7 @@ class AiReplyObservationRuntime(
             return
         }
         if (inspection.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE) {
-            lastRegionFingerprint = ""
+            pageObservationCoordinator.lastRegionFingerprint = ""
         }
         if (previousKey != nextKey || observation.status == ObservationStatus.CONFIRMED_UNKNOWN) {
             onLog("AI 模式页面结构识别：${summarize(inspection)}")
@@ -3091,7 +3072,7 @@ class AiReplyObservationRuntime(
             onLog("跨任务恢复[PRIVATE_TO_GREETINGS_EVIDENCE_CHANGED]：目标页面或检查点身份已变化；重新从第一份稳定快照验证")
         }
         if (crossTaskGreetingsHandoffRetryGate.isWaitingOn(handoffEvidenceKey)) {
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             return true
         }
         if (isConversationDraftPending()) {
@@ -3099,12 +3080,12 @@ class AiReplyObservationRuntime(
             sessionManagerState = SessionManagerState.PAUSED
             onLog("跨任务恢复[PRIVATE_TO_GREETINGS_WAIT]：仍有未决草稿事务；仅保留原私人消息检查点")
             scheduleFullInspectionAfter(350L)
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             return true
         }
         if (!ensureAndroidRecoveryReady(inspection, "CROSS_TASK_GREETINGS_OBSERVATION")) {
             pageRecoveryVerificationGate.reset(gate)
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             return true
         }
         // This adapter call is read-only; it verifies the exact listview structure and
@@ -3117,14 +3098,14 @@ class AiReplyObservationRuntime(
             pageRecoveryVerificationGate.reset(gate)
             onLog("跨任务恢复[PRIVATE_TO_GREETINGS_VERIFYING]：列表观察=$arrival；等待适配器完整指纹及独立快照")
             scheduleFullInspectionAfter(350L)
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             return true
         }
         val stableFingerprint = currentFingerprint ?: return true
         if (!pageRecoveryVerificationGate.observe(gate, stableFingerprint)) {
             onLog("跨任务恢复[PRIVATE_TO_GREETINGS_VERIFYING]：第${pageRecoveryVerificationGate.stableSamples(gate)}/2次独立列表快照；私人消息检查点保留")
             scheduleFullInspectionAfter(350L)
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             return true
         }
         val adapterConfirmed = receivedGreetingsTaskFlow.synchronizeRecoveryConfirmation()
@@ -3135,7 +3116,7 @@ class AiReplyObservationRuntime(
             // beginFromConfirmedList. Never release the private lease while they block.
             pageRecoveryVerificationGate.reset(gate)
             sessionManagerState = SessionManagerState.PAUSED
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             scheduleCrossTaskGreetingsHandoffReadOnlyRetry(
                 handoffEvidenceKey, "ADAPTER_ADMISSION_NOT_READY"
             )
@@ -3147,7 +3128,7 @@ class AiReplyObservationRuntime(
             pageRecoveryVerificationGate.reset(gate)
             onLog("跨任务恢复[PRIVATE_TO_GREETINGS_ADAPTER_WAIT]：列表窗口指纹或Android执行资格再次变化；不转交租约")
             scheduleFullInspectionAfter(350L)
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             return true
         }
         val pending = recoveryContext.snapshot()
@@ -3160,7 +3141,7 @@ class AiReplyObservationRuntime(
         ) {
             pageRecoveryVerificationGate.reset(gate)
             onLog("跨任务恢复[PRIVATE_TO_GREETINGS_IDENTITY_WAIT]：私人消息检查点身份或运行代次不一致；保持原恢复门禁")
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             scheduleFullInspectionAfter(350L)
             return true
         }
@@ -3182,7 +3163,7 @@ class AiReplyObservationRuntime(
             resetCrossTaskGreetingsHandoffRetry()
             receivedGreetingsPageProbePending = false
             unmatchedNavigationObservationPending = false
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             onLog(
                 "跨任务恢复[PRIVATE_TO_GREETINGS_TRANSFERRED]：目标列表双快照=true；" +
                     "适配器确认=true；UI操作权=true；私人消息checkpointId=${pending.checkpointId}；" +
@@ -3193,7 +3174,7 @@ class AiReplyObservationRuntime(
             // gestures without a fresh list proof. Return to the same pending recovery identity.
             val privateRecoveryRestored = restoreSuspendedPrivateRecovery(pending)
             sessionManagerState = SessionManagerState.PAUSED
-            lastPageInspection = inspection
+            pageObservationCoordinator.lastPageInspection = inspection
             pageRecoveryVerificationGate.reset(gate)
             if (privateRecoveryRestored) {
                 scheduleCrossTaskGreetingsHandoffReadOnlyRetry(
@@ -3428,19 +3409,19 @@ class AiReplyObservationRuntime(
     }
 
     private fun runRegionRefresh() {
-        regionRefreshTask = null
+        pageObservationCoordinator.clearLegacyRegionRefreshHandle()
         if (!isAiReplyActive() || !chatPagePort.supportsTargetPackage(targetPackage())) return
-        val previous = lastPageInspection
+        val previous = pageObservationCoordinator.lastPageInspection
             ?.takeIf { it.pageKind == ChatPageKind.CHAT_DETAIL_CANDIDATE }
             ?: return
         val refresh = chatPagePort.refreshKnownChatRegions(previous)
         if (!refresh.pathsResolved) {
             onLog("AI 模式聊天区域定位已失效；等待下一次页面结构/导航事件重新识别")
-            lastPageInspection = previous.copy(
+            pageObservationCoordinator.lastPageInspection = previous.copy(
                 messageListTarget = null,
                 inputFieldTarget = null
             )
-            lastRegionFingerprint = ""
+            pageObservationCoordinator.lastRegionFingerprint = ""
             scheduleFullInspection()
         } else {
             val fingerprint = listOf(
@@ -3449,8 +3430,8 @@ class AiReplyObservationRuntime(
                 refresh.inputRegionNodeCount,
                 refresh.inputRegionEditableNodeCount
             ).joinToString("|")
-            if (fingerprint != lastRegionFingerprint) {
-                lastRegionFingerprint = fingerprint
+            if (fingerprint != pageObservationCoordinator.lastRegionFingerprint) {
+                pageObservationCoordinator.lastRegionFingerprint = fingerprint
                 onLog(
                     "AI 模式已定向检查聊天区域：消息区域节点=${refresh.messageRegionNodeCount}；" +
                         "含文本节点=${refresh.messageRegionTextNodeCount}；" +
@@ -3537,8 +3518,8 @@ class AiReplyObservationRuntime(
                     "样本归档已启动=$sampleCaptureActive；自动会话遍历已启动=$sessionRunStarted"
             )
         }
-        pageInspectionTask?.cancel()
-        regionRefreshTask?.cancel()
+        pageObservationCoordinator.cancelExplicitInspectionHandle()
+        pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
         resetCrossTaskGreetingsHandoffRetry()
         cancelAiReadinessRetry(resetCount = true)
         cancelSessionSafeViewportRetry(resetCount = true)
@@ -3548,15 +3529,15 @@ class AiReplyObservationRuntime(
         serviceInterruptionCheckpointPersisted = false
         sessionTransitionTask?.cancel()
         cancelMessageReadRetry()
-        pageInspectionTask = null
-        regionRefreshTask = null
+        pageObservationCoordinator.clearExplicitInspectionHandle()
+        pageObservationCoordinator.clearLegacyRegionRefreshHandle()
         sessionTransitionTask = null
         missedPrivateSessionTapKey = null
         missedPrivateSessionTapCount = 0
         confirmedPrivateReturnBackRetryCount = 0
         confirmedPrivateReturnAwaitingRecovery = false
-        lastPageInspection = null
-        lastConfirmedChatListInspection = null
+        pageObservationCoordinator.lastPageInspection = null
+        pageObservationCoordinator.lastConfirmedChatListInspection = null
         recoveryTransaction.reset()
         messageListCheckpointVerifier.reset()
         receivedGreetingsCheckpointVerifier.reset()
@@ -3573,7 +3554,7 @@ class AiReplyObservationRuntime(
         pageRecoveryVerificationGate.reset()
         receivedGreetingsRecoveryVerificationPending = false
         receivedGreetingsRecoveryVerifiedForNextSnapshot = false
-        lastRegionFingerprint = ""
+        pageObservationCoordinator.lastRegionFingerprint = ""
         lastMessageFingerprint = ""
         loggedOcrDebugFingerprints.clear()
         ocrDebugBatchLimitLogged = false
@@ -3681,7 +3662,7 @@ class AiReplyObservationRuntime(
         }
 
         // Retire old locators even on the first sample; this subpage is not yet a bound visit.
-        lastPageInspection = snapshot
+        pageObservationCoordinator.lastPageInspection = snapshot
         unmatchedNavigationObservationPending = false
         val windowKey = windowSessionKey(snapshot)
         val surfaceKey = chatSurfaceKey(snapshot)
@@ -4325,8 +4306,8 @@ class AiReplyObservationRuntime(
         cancelSessionSafeViewportRetry(resetCount = true)
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
-        pageInspectionTask?.cancel()
-        pageInspectionTask = null
+        pageObservationCoordinator.cancelExplicitInspectionHandle()
+        pageObservationCoordinator.clearExplicitInspectionHandle()
         if (taskId == RECEIVED_GREETINGS_TASK_ID && !isGreetingsCompletionReturnRecovery()) {
             receivedGreetingsTaskFlow.suspendForRecovery()
         }
@@ -4392,7 +4373,7 @@ class AiReplyObservationRuntime(
      * Once the shared plan exists it owns autonomous observations exclusively.
      */
     private fun schedulePendingPrivateListObservation() {
-        if (messageListCheckpointVerifier.hasRetainedObservationPlan() || pageInspectionTask != null) return
+        if (messageListCheckpointVerifier.hasRetainedObservationPlan() || pageObservationCoordinator.hasExplicitInspection()) return
         messageRecoveryRetryAttempt = (messageRecoveryRetryAttempt + 1)
             .coerceAtMost(RecoveryScheduler.fastRetryCount + 1)
         val delay = RecoveryScheduler.readOnlyRetryDelayMs(messageRecoveryRetryAttempt)
@@ -4506,19 +4487,19 @@ class AiReplyObservationRuntime(
                 // proof that a newly visible ordinary inbox belongs to greetings.
                 (privateToGreetingsHandoff != null && !recoveryContext.pending &&
                     !awaitingNormalInboxAfterGreetingsReturn &&
-                    lastPageInspection?.pageKind == ChatPageKind.CHAT_LIST &&
+                    pageObservationCoordinator.lastPageInspection?.pageKind == ChatPageKind.CHAT_LIST &&
                     receivedGreetingsTaskFlow.traversalStatus() == ReceivedGreetingsTraversalStatus.NAVIGATING))
 
     fun requestPageRouteObservation() {
         if (isPrivateFollowUpActive()) {
-            if (isAiReplyActive() && sessionRunStarted && pageInspectionTask == null)
+            if (isAiReplyActive() && sessionRunStarted && !pageObservationCoordinator.hasExplicitInspection())
                 scheduleFullInspectionAfter(fullInspectionDebounceMs)
             return
         }
         if (!isAiReplyActive() || !sessionRunStarted ||
             hasProtectedPrivateInspection() || hasProtectedSendInspection()
         ) return
-        if (pageInspectionTask != null) return
+        if (pageObservationCoordinator.hasExplicitInspection()) return
         scheduleFullInspection()
     }
 
@@ -4822,7 +4803,7 @@ class AiReplyObservationRuntime(
             pageObservationCoordinator.onPageChangeEvent()
             receivedGreetingsPageProbePending = true
         }
-        val knownInspection = lastPageInspection
+        val knownInspection = pageObservationCoordinator.lastPageInspection
         val knownChatDetail = knownInspection?.let {
             inboxPageRecognizer.isChatDetail(it)
         } == true
@@ -4868,10 +4849,10 @@ class AiReplyObservationRuntime(
             // Invalidate before scheduling a debounced inspection. An OCR callback that returns
             // during the debounce window must not be delivered to a different chat/session.
             invalidatePendingMessageRead()
-            regionRefreshTask?.cancel()
-            regionRefreshTask = null
+            pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
+            pageObservationCoordinator.clearLegacyRegionRefreshHandle()
             pageObservationCoordinator.cancelRegionRefresh()
-            lastRegionFingerprint = ""
+            pageObservationCoordinator.lastRegionFingerprint = ""
         }
         val hasChatNavigationEvidence = chatListNavigation || event.signals.any {
             it == AccessibilityUiSignal.CHAT_NAVIGATION || it == AccessibilityUiSignal.MESSAGE_TAB
@@ -4884,8 +4865,8 @@ class AiReplyObservationRuntime(
             hasChatNavigationEvidence = hasChatNavigationEvidence
         )
         if (requiresFullInspection || receivedGreetingsPageProbePending) {
-            regionRefreshTask?.cancel()
-            regionRefreshTask = null
+            pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
+            pageObservationCoordinator.clearLegacyRegionRefreshHandle()
             pageObservationCoordinator.cancelRegionRefresh()
             if (hasProtectedSendInspection()) {
                 // Window/route invalidation above is still mandatory. Only the
@@ -4899,10 +4880,10 @@ class AiReplyObservationRuntime(
                 onLog("AI 页面观察[ACTIVE_RECHECK_RETAINED]：保留已排定的手势复查；event=${event.type}")
                 return
             }
-            pageInspectionTask?.cancel()
-            pageInspectionTask = null
+            pageObservationCoordinator.cancelExplicitInspectionHandle()
+            pageObservationCoordinator.clearExplicitInspectionHandle()
             if (receivedGreetingsPageProbePending) {
-                pendingPageReadPurpose = AiReplyPageReadPurpose.RECEIVED_GREETINGS
+                pageObservationCoordinator.pendingPageReadPurpose = AiReplyPageReadPurpose.RECEIVED_GREETINGS
             }
             pageObservationCoordinator.signalFullInspection()
             return
@@ -4913,8 +4894,8 @@ class AiReplyObservationRuntime(
             // A failed known-region refresh already queues a fresh full inspection. Keep that
             // stronger recovery request; a subsequent scroll event must not replace it with a
             // weaker region refresh that could reuse the invalidated locators.
-            if (pageInspectionTask != null) return
-            regionRefreshTask?.cancel()
+            if (pageObservationCoordinator.hasExplicitInspection()) return
+            pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
             pageObservationCoordinator.cancelFullInspection()
             pageObservationCoordinator.signalRegionRefresh()
         }
@@ -5266,8 +5247,8 @@ class AiReplyObservationRuntime(
         activePrivateFollowUp = child
         sessionTransitionTask?.cancel()
         sessionTransitionTask = null
-        regionRefreshTask?.cancel()
-        regionRefreshTask = null
+        pageObservationCoordinator.cancelLegacyRegionRefreshHandle()
+        pageObservationCoordinator.clearLegacyRegionRefreshHandle()
         invalidatePendingMessageRead()
         port.reset("PRIVATE_FOLLOW_UP_BEGIN")
         val started = port.beginPrivateFollowUp(
@@ -7701,7 +7682,7 @@ class AiReplyObservationRuntime(
         receivedGreetingsRecoveryRetryAttempt = 0
         pendingNavigationSourceResult = null
         unmatchedNavigationObservationPending = false
-        lastPageInspection = inspection
+        pageObservationCoordinator.lastPageInspection = inspection
         sessionManagerState = SessionManagerState.WAITING_FOR_SESSION_LIST
         onLog("收到的招呼返回恢复[RESUMED]：Android READY、双快照、原任务租约已确认；下一次新鲜观察继续返回或确认到达")
         scheduleFullInspectionAfter(0L)
@@ -8266,7 +8247,7 @@ class AiReplyObservationRuntime(
                 ) return@verifyRejectedReturn
                 val returned = inspectFreshPageSnapshot()
                 if (returned?.pageKind == ChatPageKind.CHAT_LIST && returned.packageName == targetPackage()) {
-                    lastPageInspection = returned
+                    pageObservationCoordinator.lastPageInspection = returned
                     handleSessionListPage(returned)
                 } else {
                     onLog("AI 会话管理已暂停：身份不匹配后的返回未能确认会话列表；不继续点击")
@@ -8967,7 +8948,7 @@ class AiReplyObservationRuntime(
             val transientUnknownOnSameWindow = isSemanticallyUnconfirmed(refreshed) &&
                 refreshed.packageName == targetPackage() &&
                 refreshed.windowIdentityKey() == expectedWindowIdentity &&
-                lastConfirmedChatListInspection?.hasSameWindowIdentity(refreshed) == true
+                pageObservationCoordinator.lastConfirmedChatListInspection?.hasSameWindowIdentity(refreshed) == true
             if (transientUnknownOnSameWindow) {
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.UnknownPage("MESSAGE_LIST_VIEWPORT_UNKNOWN"))
                 recoveryTransaction.dispatch(RecoveryTransactionEvent.VerificationStarted(1))
@@ -8978,7 +8959,7 @@ class AiReplyObservationRuntime(
             if (refreshed.pageKind != ChatPageKind.CHAT_LIST ||
                 refreshed.packageName != targetPackage() ||
                 refreshed.windowIdentityKey() != expectedWindowIdentity ||
-                lastConfirmedChatListInspection?.hasSameWindowIdentity(refreshed) != true
+                pageObservationCoordinator.lastConfirmedChatListInspection?.hasSameWindowIdentity(refreshed) != true
             ) {
                 cancelSessionSafeViewportRetry(resetCount = true)
                 onLog(
@@ -9013,35 +8994,15 @@ class AiReplyObservationRuntime(
     /** Keeps low-level safety checks on the shared observation semantics boundary. */
     private fun isSemanticallyUnconfirmed(
         snapshot: ChatPageSnapshot,
-        previous: ChatPageSnapshot? = lastPageInspection
+        previous: ChatPageSnapshot? = pageObservationCoordinator.lastPageInspection
     ): Boolean = pageObservationSemantics.classify(
         snapshot = snapshot,
         previous = previous,
         targetPackage = targetPackage()
     ).status != ObservationStatus.CONFIRMED_PAGE
 
-    /**
-     * Keeps the last positively confirmed inbox identity as comparison-only evidence across
-     * transient UNKNOWN samples. It never supplies coordinates or node paths to an action.
-     */
-    private fun stabilizeIncomingPageSnapshot(incoming: ChatPageSnapshot): ChatPageSnapshot {
-        val confirmed = lastConfirmedChatListInspection
-            ?: lastPageInspection?.takeIf { it.pageKind == ChatPageKind.CHAT_LIST }
-        val stable = stabilizeConfirmedChatList(confirmed, incoming)
-        when {
-            stable.pageKind == ChatPageKind.CHAT_LIST -> lastConfirmedChatListInspection = stable
-            isSemanticallyUnconfirmed(stable, confirmed) && confirmed != null &&
-                confirmed.packageName == stable.packageName &&
-                confirmed.hasSameWindowIdentity(stable) ->
-                lastConfirmedChatListInspection = confirmed
-            else -> lastConfirmedChatListInspection = null
-        }
-        lastPageInspection = stable
-        if (stable !== incoming) {
-            onLog("AI 页面稳定性[TRANSIENT_UNKNOWN_NORMALIZED]：新快照的窗口代次、消息Tab锚点和可见主列表视口一致；使用新快照数据，不复用旧节点路径或坐标")
-        }
-        return stable
-    }
+    private fun stabilizeIncomingPageSnapshot(incoming: ChatPageSnapshot): ChatPageSnapshot =
+        pageObservationCoordinator.stabilizeIncomingPageSnapshot(incoming, ::isSemanticallyUnconfirmed, onLog)
 
     /**
      * Retains an AI Reply intent when the foreground quiet gate defers dispatch. Every retry
@@ -9102,7 +9063,7 @@ class AiReplyObservationRuntime(
                     "page=${fresh.pageKind.name}；Activity=${fresh.activityClass.substringAfterLast('.')}; " +
                     "windowGeneration=${fresh.windowGeneration}；使用本轮新快照重新计算操作"
             )
-            lastPageInspection = fresh
+            pageObservationCoordinator.lastPageInspection = fresh
             retry(fresh)
         }
     }
@@ -9146,19 +9107,19 @@ class AiReplyObservationRuntime(
      * original startup timer to run. This grants no page or gesture proof.
      */
     private fun hasProtectedPrivateInspection(): Boolean {
-        if (pageInspectionTask == null || !sessionRunStarted || receivedGreetingsTaskActive) return false
+        if (!pageObservationCoordinator.hasExplicitInspection() || !sessionRunStarted || receivedGreetingsTaskActive) return false
         val gestureRecovery = recoveryContext.sourceTaskId == PRIVATE_MESSAGES_TASK_ID &&
             recoveryContext.routeId == messageListRecoveryRoute.routeId &&
             (recoveryContext.reason?.startsWith("GESTURE_SCROLL_") == true ||
                 recoveryContext.reason == "GESTURE_WINDOW_CHANGED" ||
                 recoveryContext.reason == "PRIVATE_SCROLL_CALLBACK_LEASE_LOST")
-        return pendingPageReadPurpose == AiReplyPageReadPurpose.SCROLL_AFTER || gestureRecovery
+        return pageObservationCoordinator.pendingPageReadPurpose == AiReplyPageReadPurpose.SCROLL_AFTER || gestureRecovery
     }
 
     /** Passive events may not replace an already queued send-proof read with debounce. */
     private fun hasProtectedSendInspection(): Boolean =
-        pageInspectionTask != null && sessionRunStarted && !recoveryContext.pending &&
-            isSendConfirmationPending() && pendingPageReadPurpose == AiReplyPageReadPurpose.MESSAGE_READ_RETRY
+        pageObservationCoordinator.hasExplicitInspection() && sessionRunStarted && !recoveryContext.pending &&
+            isSendConfirmationPending() && pageObservationCoordinator.pendingPageReadPurpose == AiReplyPageReadPurpose.MESSAGE_READ_RETRY
 
     private fun scheduleFullInspection() {
         scheduleFullInspectionAfter(fullInspectionDebounceMs, AiReplyPageReadPurpose.FULL_INSPECTION)
@@ -9169,18 +9130,7 @@ class AiReplyObservationRuntime(
         purpose: AiReplyPageReadPurpose = AiReplyPageReadPurpose.FULL_INSPECTION
     ) {
         cancelMessageReadRetry()
-        pageObservationCoordinator.cancelFullInspection()
-        pageObservationCoordinator.cancelRegionRefresh()
-        val token = ++fullInspectionCallbackToken
-        pageInspectionTask?.cancel()
-        pageInspectionTask = null
-        pendingPageReadPurpose = purpose
-        pageInspectionTask = sharedPageObservationCoordinator.scheduleReadOnlyObservation(delayMs) observation@{
-            // A cancelled callback must not retire a replacement observation or advance a
-            // new child. Reset/route recovery can also clear the pending slot without reposting.
-            if (token != fullInspectionCallbackToken || pageInspectionTask == null) return@observation
-            runFullInspection()
-        }
+        pageObservationCoordinator.scheduleExplicitFullInspection(delayMs, purpose, ::runFullInspection)
     }
 
     /**
@@ -9215,12 +9165,12 @@ class AiReplyObservationRuntime(
                 refreshed.packageName != targetPackage() ||
                 refreshed.messageListTarget == null || refreshed.inputFieldTarget == null
             ) {
-                lastPageInspection = refreshed
-                lastRegionFingerprint = ""
+                pageObservationCoordinator.lastPageInspection = refreshed
+                pageObservationCoordinator.lastRegionFingerprint = ""
                 cancelMessageReadRetry()
                 return@schedule
             }
-            lastPageInspection = refreshed
+            pageObservationCoordinator.lastPageInspection = refreshed
             readVisibleMessages(refreshed)
         }
     }

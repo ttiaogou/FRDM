@@ -421,8 +421,9 @@ class ArchitectureVerifierUnitTest(unittest.TestCase):
     def test_p2_observation_guard_rejects_legacy_timers_and_missing_runtime_wiring(self):
         changed = dict(self.recovery_code)
         runtime = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
-        changed[runtime] = changed[runtime].replace(
-            "pageInspectionTask = sharedPageObservationCoordinator.scheduleReadOnlyObservation",
+        momo = "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt"
+        changed[momo] = changed[momo].replace(
+            "pageInspectionTask = observationCoordinator.scheduleReadOnlyObservation",
             "pageInspectionTask = scheduler.schedule"
         )
         self.assertTrue(any("bypasses common scheduler" in item

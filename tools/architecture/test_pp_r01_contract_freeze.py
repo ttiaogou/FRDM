@@ -109,6 +109,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R06-F appends the exact reviewed R00 source/owner pins.
                 self.assertEqual("f3b31960b6a7240c1dac532d3a9d4ec618d86532", expected[path])
                 expected[path] = "e693f9d3f699bc2d973500484327ab964d54eac1"
+                # R07-B reviewed relocation to the existing observation owner.
+                self.assertEqual("e693f9d3f699bc2d973500484327ab964d54eac1", expected[path])
+                expected[path] = "69fed894d80b28862f552d5584500b25553c543a"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -119,9 +122,23 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "tools/architecture/verify_boundaries.py"
                 self.assertEqual("713a0cfc1ed4617a37a31c66e1a0b056f42db1a3", expected[path])
                 expected[path] = "f625a28a50f90ee07d6d32587a776c4a39fdc66a"
+                # R07-B reviewed relocation to the existing observation owner.
+                self.assertEqual("f625a28a50f90ee07d6d32587a776c4a39fdc66a", expected[path])
+                expected[path] = "d38ca403c504f37db495383cbfd8c5ee60d8d942"
                 path = "tools/architecture/test_verify_boundaries.py"
                 self.assertEqual("bec2d575a43477763c2309a04a9e6014ad39967a", expected[path])
                 expected[path] = "06485947b2fda4007b4ef09d1371c06b2f745fb2"
+                # R07-B reviewed relocation to the existing observation owner.
+                self.assertEqual("06485947b2fda4007b4ef09d1371c06b2f745fb2", expected[path])
+                expected[path] = "92633e6fdc095e6780325ec923712a249821194b"
+            if field == "protected_test_files":
+                # Reflection targets follow the actual owner; original regressions remain.
+                for path, (previous, replacement) in {
+                    "business/src/test/kotlin/com/freedom/features/aireply/AiReplyObservationRuntimeTest.kt": ("ebca85f52082cb8954bba1ce780e815f2f46a2e4", "2ac15e03b5ecc30548dc492f0c0a01ea9403d077"),
+                    "business/src/test/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinatorTest.kt": ("2ce47f253365ea3841b53eff4e0d30a073eca23a", "690d0330efb0dfce042ebae573f6b6fc41a186c9"),
+                }.items():
+                    self.assertEqual(previous, expected[path])
+                    expected[path] = replacement
             issues.extend(evidence_violations(ROOT, expected))
         # New R04 regression evidence is pinned independently of the historical inventory.
         issues.extend(evidence_violations(ROOT, {
@@ -175,6 +192,16 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r06_integration_acceptance.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "9b37f8e5acbdeff306fba0ac78a1dac50c7cd735"
+        # R07-B preserves the R06 inverse chain and moves the state owner assertion.
+        for path, (previous, replacement) in {
+            "tools/architecture/test_pp_r06_diagnostics_migration.py": ("b8aa9ab9b90a3b9549efcf69545977b129a8cf29", "d6c8f93abc902986c7e70cb6f5b7f2b7b284e276"),
+            "tools/architecture/test_pp_r06_integration_acceptance.py": ("9b37f8e5acbdeff306fba0ac78a1dac50c7cd735", "9b6be1181f0d057c56037853c004b5bd6f32c6fa"),
+        }.items():
+            self.assertEqual(previous, reviewed_migration_evidence[path])
+            reviewed_migration_evidence[path] = replacement
+        path = "tools/architecture/test_pp_r07_page_observation_migration.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "f2620e02c77dea679f3a44f8ab71215d5d67be51"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

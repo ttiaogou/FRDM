@@ -277,6 +277,13 @@ class PpR00FreezeTest(unittest.TestCase):
         self.assertNotIn(path, reviewed_s1)
         self.assertNotIn(path, m["permanent_s0"])
         reviewed_s1[path] = "a7ae4eac8cc824af0984955e520e54f20f3ab10e"
+        # R07-B exact state relocation; preserve original S1 inventory and historical pins.
+        path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
+        self.assertEqual("ee67d98af55bdcba4270128132db9b5317f6c942", reviewed_s1[path])
+        reviewed_s1[path] = "046026a655768a091e5ce70e1b8cdc37f9291539"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt"
+        self.assertEqual("564440b87ad96fd78d5e8a46cc5545e0fa8188be", reviewed_s1[path])
+        reviewed_s1[path] = "26ee9be133eb554f0b08bd000dd055f0164a95b8"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

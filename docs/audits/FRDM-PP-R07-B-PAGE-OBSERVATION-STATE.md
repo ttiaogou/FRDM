@@ -1,0 +1,9 @@
+# R07-B — 页面观察调度及快照缓存生命周期收敛
+
+Baseline PP 18a1716b8aed03f3aef2b546817d90d54608dc8c; R07-A CI [46107815800](https://github.com/ttiaogou/FRDM/actions/runs/46107815800) completed/success.
+
+Seven existing fields moved from AiReplyObservationRuntime to MomoPageObservationCoordinator: pageInspectionTask, fullInspectionCallbackToken, pendingPageReadPurpose, regionRefreshTask, lastPageInspection, lastConfirmedChatListInspection, lastRegionFingerprint. Existing owner holds the explicit handle, token, purpose and cache; Runtime retains business policy and calls the owner. Explicit scheduling/consumption and snapshot stabilization move with the state. Scheduler remains the shared PageObservationCoordinator. Raw observation generation remains in AiReplyPageReadCoordinator. No new coordinator, task/lease owner or recovery route.
+
+Preserve exact cancellation ordering, protected send/scroll arbitration, original delay, stale callback token and null-handle gate, same-window cache comparison and original log callback. Reset still orchestrates cross-owner order; separate cancel/clear APIs intentionally preserve the existing sequence. regionRefreshTask is retained (no non-null assignment found); separate cleanup requires approval. No changes to gestures, fingerprints, recovery algorithms, task admission or persistent storage.
+
+R07-B exact inverse restores R06-F source and pins live owner; R06 historical inverse chain remains active. R00/R01 exact pins and R06-G ownership checks updated; P2 hard gate still requires the shared scheduler at the actual owner and rejects local scheduler bypass. Original reflective tests target actual owner; new tests force cancelled callbacks and verify purpose/handle ownership. Static inverse verified byte-for-byte prior to commit. Full CI and device regression remain separate acceptance steps. No local git workspace via API.

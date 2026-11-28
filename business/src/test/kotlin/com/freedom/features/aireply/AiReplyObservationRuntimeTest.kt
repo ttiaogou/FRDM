@@ -1334,11 +1334,16 @@ class AiReplyObservationRuntimeTest {
         assertEquals("AI_REPLY_PRIVATE_MESSAGES", fixture.ownership.activeTaskId())
     }
 
-    private fun cancelFixtureStartupObservation(fixture: PreScrollPageRecoveryFixture) {
-        val field = fixture.runtime.javaClass.getDeclaredField("pageInspectionTask")
+    private fun pageObservationOwner(runtime: AiReplyObservationRuntime): MomoPageObservationCoordinator {
+        val field = runtime.javaClass.getDeclaredField("pageObservationCoordinator\$delegate")
             .apply { isAccessible = true }
-        (field.get(fixture.runtime) as? ScheduledTask)?.cancel()
-        field.set(fixture.runtime, null)
+        return (field.get(runtime) as Lazy<*>).value as MomoPageObservationCoordinator
+    }
+
+    private fun cancelFixtureStartupObservation(fixture: PreScrollPageRecoveryFixture) {
+        val owner = pageObservationOwner(fixture.runtime)
+        owner.cancelExplicitInspectionHandle()
+        owner.clearExplicitInspectionHandle()
     }
 
     @Test
@@ -8130,9 +8135,7 @@ class AiReplyObservationRuntimeTest {
 
             // Match the device trace: the last observed page is the source chat, and
             // global BACK does not have a matching generic navigation receipt.
-            AiReplyObservationRuntime::class.java.getDeclaredField("lastPageInspection").apply {
-                isAccessible = true
-            }.set(runtime, source)
+            pageObservationOwner(runtime).lastPageInspection = source
             port.greetingDetailReturnProof = scenario != "NO_RETURN_PROOF"
             port.receivedGreetingsTraversalStatusValue = ReceivedGreetingsTraversalStatus.NAVIGATING
             val listActivity = "com.immomo.momo.message.sayhi.activity.reflect.NewSayHiSessionListActivity"

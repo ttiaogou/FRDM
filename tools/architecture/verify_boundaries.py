@@ -931,13 +931,14 @@ def unified_page_observation_violations(code_by_path: dict[str, str]) -> list[st
             r"\bprivate\s+val\s+sharedPageObservationCoordinator\s*:\s*PageObservationCoordinator\s*,",
             r"\bsharedCoordinator\s*=\s*sharedPageObservationCoordinator\b",
             r"\bisObservationActive\s*=\s*isAiReplyActive\b",
-            r"\bpageInspectionTask\s*=\s*sharedPageObservationCoordinator\.scheduleReadOnlyObservation\s*\(",
+            r"\bpageObservationCoordinator\.scheduleExplicitFullInspection\s*\(",
             r"ReceivedGreetingsPageArrivalStatus\.LIST_CONFIRMED\s*->\s*\{\s*startReceivedGreetingsTaskFromConfirmedPage\s*\(",
         ),
         "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt": (
             r"\bsharedCoordinator\s*:\s*PageObservationCoordinator\b",
             r"\bisEnabled\s*=\s*isObservationActive\b",
             r"\bscheduleReadOnlyObservation\s*=\s*observationCoordinator::scheduleReadOnlyObservation\b",
+            r"\bpageInspectionTask\s*=\s*observationCoordinator\.scheduleReadOnlyObservation\s*\(",
         ),
         "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsPageArrivalWatcher.kt": (
             r"\bprivate\s+val\s+scheduleReadOnlyObservation\s*:\s*\(Long,\s*\(\)\s*->\s*Unit\)",
@@ -970,6 +971,7 @@ def unified_page_observation_violations(code_by_path: dict[str, str]) -> list[st
         "business/src/main/kotlin/com/freedom/features/aireply/MomoPageObservationCoordinator.kt": (
             r"\b(?:Shared)?PageObservationCoordinator\s*\(\s*scheduler\b",
             r"\bonReceivedGreetingsConfirmed\b",
+            r"\bpageInspectionTask\s*=\s*scheduler\.schedule\s*\(",
             r"\bstartReceivedGreetingsTaskFromConfirmedPage\s*\(",
         ),
         "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsPageArrivalWatcher.kt": (
