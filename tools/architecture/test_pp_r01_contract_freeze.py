@@ -171,6 +171,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r06_diagnostics_migration.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "b8aa9ab9b90a3b9549efcf69545977b129a8cf29"
+        # R06-G protects the integrated ownership and reconstruction gate.
+        path = "tools/architecture/test_pp_r06_integration_acceptance.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "9b37f8e5acbdeff306fba0ac78a1dac50c7cd735"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 
