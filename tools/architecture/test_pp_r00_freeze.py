@@ -390,6 +390,13 @@ class PpR00FreezeTest(unittest.TestCase):
         path = "app/src/main/java/com/freedom/data/RunDiagnosticReportFormatter.kt"
         self.assertEqual("1cc1720451ebb4523a8d6d3eae1cf76e8e4b5733", reviewed_s1[path])
         reviewed_s1[path] = "9c16ec9e6c76b8ec87a2d3a470887a416f9920c3"
+        # R08-F: exact relocation of the runtime-local draft history preload; S0 unchanged.
+        path = "app/src/main/java/com/freedom/app/AppCompositionRoot.kt"
+        self.assertEqual("357ba685dcd4acde01ac7b41eebac43207a63c2f", reviewed_s1[path])
+        reviewed_s1[path] = "0aed30d8527e25c3ac9d732b194a1f9aaf145b6f"
+        path = "business/src/main/kotlin/com/freedom/features/conversation/domain/contact/ContactHistoryResolver.kt"
+        self.assertEqual("ebab2e333685c707cf484b8eb911c66877b76712", reviewed_s1[path])
+        reviewed_s1[path] = "235214217df96e84e291d5a58256365551881275"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

@@ -151,6 +151,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R08-E exact reviewed diagnostic serialization relocation.
                 self.assertEqual("e90afbdd451822838d2889adb3023ba755814983", expected[path])
                 expected[path] = "76a60f7086f827234d58ddc5ea32817c92503761"
+                # R08-F exact reviewed runtime-local preload relocation.
+                self.assertEqual("76a60f7086f827234d58ddc5ea32817c92503761", expected[path])
+                expected[path] = "99bdc00f6d7c1f2828c96f6e5aa8e1842bd501aa"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -393,6 +396,13 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r08_diagnostic_serialization_migration.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "f34263967f041f6f9e0734fc4388e2dbe58909d2"
+        # R08-F retains all historical evidence and pins direct behavior and exact inverse.
+        for path, replacement in {
+            "tools/architecture/test_pp_r08_composition_history_migration.py": "bed8d6302c2a573fa318bdd3a130a368436b77ec",
+            "business/src/test/kotlin/com/freedom/features/conversation/domain/contact/R08DraftHistoryPreloadTest.kt": "74da3cfefa90d189fa1541786cf7f8211e691b6b",
+        }.items():
+            self.assertNotIn(path, reviewed_migration_evidence)
+            reviewed_migration_evidence[path] = replacement
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

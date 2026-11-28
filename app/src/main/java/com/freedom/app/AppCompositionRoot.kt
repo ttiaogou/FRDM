@@ -103,6 +103,7 @@ import com.freedom.features.accountbrowse.ports.AccountBrowseCheckpointRepositor
 import com.freedom.features.recovery.RecoveryScheduleRepository
 import com.freedom.features.recovery.UnifiedRecoveryTransactionManager
 import com.freedom.features.conversation.domain.contact.ContactIdentityConfidence
+import com.freedom.features.conversation.domain.contact.ContactHistoryResolver
 import com.freedom.features.conversation.ports.ConversationRepository
 import com.freedom.gesture.api.GestureApi as PublicGestureApi
 import com.freedom.application.gesture.GestureRuntimeFactory
@@ -660,10 +661,12 @@ internal class AccessibilityServiceDependencies internal constructor(
     }
     val aiReplyDraftCoordinator: AiReplyDraftCoordinator by aiReplyDraftCoordinatorDelegate
     val aiReplyObservationRuntime: AiReplyObservationRuntime by lazy(LazyThreadSafetyMode.NONE) {
-        // The history preloaded before OCR is consumed by the later draft callback. Keeping this
-        // cache at the single runtime composition boundary avoids reading the same repository
-        // rows again after OCR completes.
-        var preparedDraftHistory: com.freedom.features.aireply.ai.VerifiedDraftHistory? = null
+        val draftHistoryPreload = ContactHistoryResolver.DraftHistoryPreload(
+            loadHistory = { identity, title ->
+                ContactHistoryResolver(root.conversationRepository).loadDraftHistory(identity, title)
+            },
+            addLog = addLog
+        )
         AiReplyObservationRuntime(
             scheduler = taskScheduler,
             chatPagePort = momoSocialAdapter,
@@ -690,23 +693,13 @@ internal class AccessibilityServiceDependencies internal constructor(
                     .resolve(identity, title)
             },
             prepareDraftHistory = { identity, snapshot ->
-                preparedDraftHistory = null
+                draftHistoryPreload.clear()
                 val privatePolicy = requireNotNull(root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.PRIVATE_MESSAGES)) {
                     "Private messages policy is not registered"
                 }
                 val verifiedIdentity = privatePolicy.contextPolicy().verifiedHistoryIdentity(identity)
                 if (verifiedIdentity != null) {
-                    val history = com.freedom.features.conversation.domain.contact.ContactHistoryResolver(
-                        root.conversationRepository
-                    ).loadDraftHistory(verifiedIdentity, snapshot.chatTitleText)
-                    preparedDraftHistory = history
-                    addLog(
-                        if (history != null) {
-                            "AI 草稿历史预加载：已验证联系人历史=${history.messages.size}条；OCR 尚未启动"
-                        } else {
-                            "AI 草稿历史预加载：未找到可用历史；OCR 尚未启动"
-                        }
-                    )
+                    draftHistoryPreload.prepare(verifiedIdentity, snapshot.chatTitleText)
                 }
             },
             onDraftConversationObserved = { batch, snapshot, identity, visitToken ->
@@ -714,25 +707,7 @@ internal class AccessibilityServiceDependencies internal constructor(
                     "Private messages policy is not registered"
                 }
                 val verifiedIdentity = privatePolicy.contextPolicy().verifiedHistoryIdentity(identity)
-                val history = if (verifiedIdentity != null) {
-                    preparedDraftHistory?.also {
-                        preparedDraftHistory = null
-                        addLog("AI 草稿历史读取：复用 OCR 前已完成的历史预加载；不重复查询")
-                    } ?: runCatching {
-                        com.freedom.features.conversation.domain.contact.ContactHistoryResolver(root.conversationRepository)
-                            .loadDraftHistory(verifiedIdentity, snapshot.chatTitleText)
-                    }.onFailure {
-                        addLog(
-                            "AI 草稿历史读取失败：CONTACT_HISTORY_READ_FAILED；" +
-                                "contactIdVerified=true；exception=${it.javaClass.simpleName}；" +
-                                "降级为仅当前窗口上下文"
-                        )
-                    }.getOrNull()
-                } else {
-                    preparedDraftHistory = null
-                    addLog("AI 草稿上下文：身份未达到 PLATFORM_ID_VERIFIED；不加载联系人历史；仅当前窗口上下文")
-                    null
-                }
+                val history = draftHistoryPreload.consume(verifiedIdentity, snapshot.chatTitleText)
                 addLog(
                     if (history != null) {
                         "AI 草稿上下文合并顺序：已验证联系人历史=${history.messages.size}条；" +
@@ -752,7 +727,7 @@ internal class AccessibilityServiceDependencies internal constructor(
             onGreetingDraftConversationObserved = { batch, snapshot, _, visitToken ->
                 // Greeting contacts are new conversations: use the verified current-window OCR
                 // only. Never reuse a private-chat preload or query stored contact history.
-                preparedDraftHistory = null
+                draftHistoryPreload.clear()
                 val greetingPolicy = requireNotNull(root.aiReplyPolicyRegistry.resolve(AiDecisionTaskIds.RECEIVED_GREETINGS)) {
                     "Received greetings policy is not registered"
                 }
