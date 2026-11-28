@@ -5,18 +5,18 @@
 | 字段 | 当前记录 |
 | --- | --- |
 | repository / branch | ttiaogou/FRDM / PP |
-| reviewedHead | 880aed8170612c9947caeca18e94301c9c8c089f |
-| reviewedTree | f3571511ee199aad421fda330167941af7dec90b |
-| 已验收工程基线 | D01-D2 880aed8170612c9947caeca18e94301c9c8c089f；[完整 CI 46145903809](https://github.com/ttiaogou/FRDM/actions/runs/46145903809) completed/success |
-| 当前任务 | D01-D3 旧广播及重复节点缓存收敛（用户专项授权 S0 精确迁移） |
-| 当前状态 | IMPLEMENTED / BASELINE_CI_PASS / COMMIT_CI_PENDING；真机未验 |
-| 验证策略 | 原冻结清单不变，精确 S0/S1 与历史测试逆向；全模块生产引用门禁、现行节点采集职责及完整 CI |
+| reviewedHead | 8b51829fd256af52559bfba5c0549dc80a05c028 |
+| reviewedTree | 4118ecc03db6997e26e4c5078ac39461236ad19e |
+| 已验收工程基线 | D01-D3 8b51829fd256af52559bfba5c0549dc80a05c028；[完整 CI 46147357411](https://github.com/ttiaogou/FRDM/actions/runs/46147357411) completed/success |
+| 当前任务 | D01-D4 全仓引用复核及专项回归 |
+| 当前状态 | BASELINE_CI_PASS / EXTENDED_REFERENCE_GATE_ADDED / COMMIT_CI_PENDING；真机未验 |
+| 验证策略 | 现有 233 项 Python 测试及完整 CI 基线通过；新增 Git tracked 运行源码/配置、原始广播字符串、测试 import 与三范围事务、节点职责回归；新 CI 待验 |
 | 设备验收 | F01–F12 DEFERRED / NOT_RUN；用户独立执行 |
 | 当前职责建档 | 32 项：A 16、B 12、C 4；证据基线仍按职责表，不虚报逐方法核查 |
-| 台账 | 30 项：CLOSED 8、RETAINED 3、CANDIDATE 4、OPEN 1、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 12 |
+| 台账 | 32 项：CLOSED 8、RETAINED 3、CANDIDATE 6、OPEN 1、LIMITATION 1、DEFERRED 1、VERIFY_PENDING 12 |
 | 工作区 | 远端 Git tree/compare；无本地 checkout 验证 |
-| 改动范围 | 仅旧节点广播、旧缓存及专属写入/手动分支；现行可视化、自动监控摘要、历史归档、业务与手势不改；相关回归及治理记录 |
-| 下一阶段 | 复核 D01-D3 完整 CI；D01-D4 全仓引用复核与专项回归；D01-E 集成验收 |
+| 改动范围 | 仅新增 D01-D4 复核测试、R01 新证据 pin 及治理记录；生产、冻结清单、旧断言和 CI 配置不改 |
+| 下一阶段 | 核查 D01-D4 新 CI 与共享候选引用输出；D01-E 专项集成与真机验收；候选问题独立决议 |
 
 ## 批次进度
 
@@ -33,7 +33,8 @@
 | D01-C | 三范围统一导出已实施；完整 CI 46143262439 success |
 | D01-D1 | 旧批量 ZIP 打包器退役；完整 CI 46144656958 success |
 | D01-D2 | 旧节点检查器四个专属组件退役；完整 CI 46145903809 success |
-| D01-D3 | 用户专项授权 S0 节点旧广播及重复缓存退役；新提交完整 CI 待查 |
+| D01-D3 | 用户专项授权 S0 节点旧广播及重复缓存退役；完整 CI 46147357411 success |
+| D01-D4 | 扩展全仓引用及专项回归；新提交完整 CI 待查 |
 
 ## G01-F 复核及验收证据
 
@@ -80,6 +81,12 @@
 - S0 FreedomAccessibilityService 2ee39d722c21947e1a73305ec8559e1f0226cdc8 → 22d1c7743405d93be4f89013c927bc6f74ba5c0f，精确删除旧手动 receiver、两个旧高亮处理器、旧分支/注册/缓存引用及专属 imports/getter；原 manifest 不改、其余 75 个 S0 pin 不改。保留现行三个广播、统一事件入口、生命周期及手势校准。
 - MonitorActions 7178c1ab450d2f907654ca99b18074380b85d4ce → 33ba225388dd5db5cfc82fcbec2cb8d056c27ce9；AppCompositionRoot 0aed30d8527e25c3ac9d732b194a1f9aaf145b6f → 2611f7d457dbff02c2c4aef116714b86dfa8c7ef；MomoSocialAdapter e92cb4a3348146fa055fd3aa2b6abda2dac80824 → 8af64ca8d467e4d1eea9e8b2a7cdd411b2cee95f；AccessibilityTreePreviewUseCase 0ae9544e71ac944c2090b643ea755ddfedfe6f27 → ea7326f8099a31a976ead6904155fe63f37fc3e7。旧缓存 2d636faa98ed11fdecae133692ab3b4ff720905e 完整退役；监控运行门禁、350ms 防抖、串行扫描及结构化摘要原行为保留；归档记录原文不改。
 - 新增 [D01-D3 精确迁移检测](../../tools/architecture/test_pp_d01d3_legacy_node_cache_retirement.py)，八个修改的生产/单测源码可逆向恢复；历史缓存内容仅在测试证据中保留，继续串接 D01-B、D01-D2、R05-H、R08-F 旧逆向。原安全断言仍作用于现行链路或历史精确证据，不把旧单节点重新定位机制宣称为现行功能。完整新 CI 待验，无本地 Gradle/真机结果。
+
+## D01-D4 本轮证据
+
+- 8b51829fd256af52559bfba5c0549dc80a05c028 对应 CI 46147357411，五个 job 全部 success，233 项 Python 测试，D01-B/C/D1/D2/D3 16 项专项及 R00/R01 冻结门禁全部通过。Git Tree 937 个 tracked 文件，459 个 main 源码及文本资源（app 234、business 118、core 58、gesture 21、ocr-plugin-api 11、ocr-plugin 17）。已有门禁覆盖各自范围，不将全部 tracked 文件宣称为已逐个读取。
+- 新增 [D01-D4 全仓引用及专项回归](../../tools/architecture/test_pp_d01d4_node_export_reference_regression.py)，基于 git ls-files 检查运行源码、构建配置、旧广播字面量/参数、旧组件测试 import；保留历史证据及合法负向断言。检查三范围唯一打包、回读再清理、源数据保护、节点职责、窗口变化及生命周期；输出共享候选引用，不禁止合理使用。新 CI 待验，无本地 Gradle 或真机结果。
+- D01-013/014 新增候选：可视化失败分支保留当前快照的契约需决议；共享类型/工具引用待新门禁输出及语义核验。生产源码未改。D01-001～012 仍待真机，历史状态原样保留。
 
 ## 接续维护
 

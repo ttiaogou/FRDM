@@ -662,6 +662,10 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_d01d3_legacy_node_cache_retirement.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "fed2bc5b09ee2e2afceb9f8c5a425ce5687bbe62"
+        # D01-D4: add independent repository reference and integration regression evidence.
+        path = "tools/architecture/test_pp_d01d4_node_export_reference_regression.py"
+        self.assertNotIn(path, reviewed_migration_evidence)
+        reviewed_migration_evidence[path] = "d069e1b60408b2cb4789286d4b62be93bc091cc2"
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

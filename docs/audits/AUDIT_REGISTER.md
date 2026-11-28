@@ -58,6 +58,11 @@ D01-D2 证据基线 080fcd17a43f919898435a720806b1d9b8440cb4，完整 CI 4614465
 
 D01-D3 证据基线 880aed8170612c9947caeca18e94301c9c8c089f；D01-D2 完整 CI 46145903809 success。经用户专项授权，S0 Service 仅删除旧节点广播、两个专属处理器、旧缓存引用及专属 imports/getter；原 R00/R01 manifest 不动，原 S0 旧 blob 与新 blob 均精确核验并逆向恢复，其他 S0 保持原 pin。旧缓存文件退役，四个 S1 文件仅收敛专属常量/回调/手动分支；当前全局可视化、自动监控调度、正式归档、手势和任务入口不改。原旧缓存及旧测试仅作为历史证据保留在 Python 逆向检测中。新 CI 待验，真机待验；共享 NodeCaptureSource 等候选不在本轮额外删除范围。
 
+D01-D4 基线 8b51829fd256af52559bfba5c0549dc80a05c028，完整 CI 46147357411 success：233 项 Python 测试（D01-B/C/D1/D2/D3 专项 16 项）及全模块单元测试、Freedom/OCR APK、CodeQL 全部通过。459 个 main 源码及文本资源纳入现有全模块门禁；新增全仓 Git tracked 运行源码/配置、原始广播字面量及测试 import 复核，结果待新 CI。D01-001～012 保持 VERIFY_PENDING，真机尚未验收。
+
+| D01-013 | 生命周期/中 | GlobalNodeLayoutVisualizationUseCase.show 在 visibleNodeCount == 0 或 overlay attach 失败时 latestSnapshots 已赋值；层级入口仍可读取。可能是允许独立查看层级的有意行为，需明确契约及真机复核 | CANDIDATE | 独立评估失败后层级可用性、窗口及临时文本生命周期；不在 D01-D4 改生产行为 |
+| D01-014 | 遗留/低 | core NodeCaptureSource 原独立缓存来源枚举，以及旧高亮共享 planner 等；新增复核输出实际引用文件供判断 | CANDIDATE | 新 CI 日志及逐方法依赖核验，独立授权后才可删除；不能凭词法结果删除共享能力 |
+
 ## 持续扫描范围
 
 代码相似、语义职责、正反调用链、状态/缓存、监听器/回调生命周期、不可达及依赖/资源。当前现有架构检测与 G01-A 文档扫描继续使用；AI 发现的问题必须区分候选与确认。删除生产代码需独立任务授权及行为保护，不因本台账自动执行。

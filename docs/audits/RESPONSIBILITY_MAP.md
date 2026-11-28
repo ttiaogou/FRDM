@@ -65,6 +65,10 @@ OWN 编号稳定。一行中的多个组件承担不同子职责，不代表共�
 
 - OWN-32：基线 880aed8170612c9947caeca18e94301c9c8c089f，完整 CI 46145903809 success。用户专项授权后，S0 Service 仅精确退役旧节点广播处理及缓存引用，原冻结清单与其他 S0 不变。GlobalNodeLayoutVisualizationUseCase 是用户实时可视化快照所有者；AccessibilityTreePreviewUseCase 仅产生结构化自动监控摘要；MomoChatSampleNodeTreeStore 仍保存历史采集，不再额外写入旧缓存。保留 NodeLayoutSnapshotExporter 及三范围 ZIP。D01-D3 新 CI/真机待验；C 状态保留直到集成验收。
 
+## D01-D4 职责补证
+
+- OWN-30/31/32：基线 8b51829fd256af52559bfba5c0549dc80a05c028，完整 CI 46147357411 success。R00/R01 及 D01 系列 16 项专项检测通过；生产职责不变。新增跨模块引用和现行节点/导出生命周期回归；新 CI 待验，真机未验。可视化失败时快照留存及共享候选见 D01-013/014，C 状态不提前升级。
+
 ## 证据及覆盖边界
 
 - [R09-A](FRDM-PP-R09-A-REPOSITORY-ARCHITECTURE-ACCEPTANCE.md)、[R09-C](FRDM-PP-R09-C-ENTRY-STATE-UI-OWNERSHIP-ACCEPTANCE.md)、[R09-D](FRDM-PP-R09-D-RECOVERY-CHECKPOINT-ASYNC-ISOLATION.md)、[R09-G](FRDM-PP-R09-G-FINAL-ENGINEERING-ACCEPTANCE.md) 为验收证据，[历史归档](../archive/README.md) 供追溯。
