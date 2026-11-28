@@ -405,6 +405,20 @@ class PpR00FreezeTest(unittest.TestCase):
         self.assertNotIn(path, reviewed_s1)
         self.assertNotIn(path, m["permanent_s0"])
         reviewed_s1[path] = "a1a904f1435e94a1b60a0d5bc6240882c9a268eb"
+        # R08-H exact shared node-read fallback convergence, existing adapter layer only.
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoChatListSessionExtractor.kt"
+        self.assertEqual("581a0a323522ed6e12b71fe2e1d85fb197adb18e", reviewed_s1[path])
+        reviewed_s1[path] = "38213acdb5353e60329e4c02d62ca500edc959bf"
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoChatMessageReader.kt"
+        self.assertEqual("1cc8714d36bcf379ee108dccb108aa988dc33fa2", reviewed_s1[path])
+        reviewed_s1[path] = "2eeddb722db9e09ccd8ff0b7a141ae6973b537f1"
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoChatPageInspector.kt"
+        self.assertEqual("25af913c686272851a511bf33f667f01b4431f6e", reviewed_s1[path])
+        reviewed_s1[path] = "31442fe88ecc22fbf47c3dd13bf648a1508ad464"
+        path = "app/src/main/java/com/freedom/adapters/social/momo/MomoNodeReadFallbacks.kt"
+        self.assertNotIn(path, reviewed_s1)
+        self.assertNotIn(path, m["permanent_s0"])
+        reviewed_s1[path] = "df39945103fb16e193cefcdac85a5bf84162b382"
         self.assertEqual([], freeze_violations(
             m["permanent_s0"], reviewed_s1, actual))
 

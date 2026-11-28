@@ -2,6 +2,10 @@ package com.freedom.adapters.social.momo
 
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
+import com.freedom.adapters.social.momo.momoReadBooleanOrFalse as safeBoolean
+import com.freedom.adapters.social.momo.momoReadIntOrZero as safeInt
+import com.freedom.adapters.social.momo.momoReadNodeOrNull as safeNode
+import com.freedom.adapters.social.momo.momoReadBounds as boundsOf
 import com.freedom.core.accessibility.api.NodePath
 import com.freedom.core.accessibility.api.NodeTarget
 import com.freedom.core.accessibility.api.ScreenRect
@@ -1046,12 +1050,6 @@ internal class MomoChatListSessionExtractor(
         }.getOrDefault(false)
     }
 
-    private fun boundsOf(node: AccessibilityNodeInfo): ScreenRect {
-        val rect = Rect()
-        runCatching { node.getBoundsInScreen(rect) }
-        return ScreenRect(rect.left, rect.top, rect.right, rect.bottom)
-    }
-
     private fun empty(reason: String) = MomoChatListSessionExtraction(
         viewport = null,
         candidates = emptyList(),
@@ -1066,10 +1064,6 @@ internal class MomoChatListSessionExtractor(
 
     private inline fun safeString(block: () -> String?): String =
         runCatching { block().orEmpty() }.getOrDefault("")
-    private fun safeBoolean(block: () -> Boolean): Boolean = runCatching(block).getOrDefault(false)
-    private fun safeInt(block: () -> Int): Int = runCatching(block).getOrDefault(0)
-    private fun safeNode(block: () -> AccessibilityNodeInfo?): AccessibilityNodeInfo? = runCatching(block).getOrNull()
-
     companion object {
         private const val STATUS_NEW_VIEW_ID = "chatlist_item_tv_status_new"
         private const val ITEM_LAYOUT_VIEW_ID = "item_layout"

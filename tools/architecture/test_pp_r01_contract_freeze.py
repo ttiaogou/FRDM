@@ -157,6 +157,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 # R08-G exact reviewed evidence-model extraction.
                 self.assertEqual("99bdc00f6d7c1f2828c96f6e5aa8e1842bd501aa", expected[path])
                 expected[path] = "b1f1ff7d6322412d1b129c74509e4fd21128300a"
+                # R08-H exact reviewed node-read fallback convergence.
+                self.assertEqual("b1f1ff7d6322412d1b129c74509e4fd21128300a", expected[path])
+                expected[path] = "88822eb6021711bc55ee6396bd7e536f33838f78"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -410,6 +413,13 @@ class PpR01ContractFreezeTest(unittest.TestCase):
         path = "tools/architecture/test_pp_r08_chat_page_contract_migration.py"
         self.assertNotIn(path, reviewed_migration_evidence)
         reviewed_migration_evidence[path] = "45252af931dc11bcff7f934e36d111abb857dae1"
+        # R08-H exact inverse and direct read fallback tests.
+        for path, replacement in {
+            "tools/architecture/test_pp_r08_momo_read_fallback_convergence.py": "4cb01a2609b86c0d3d6ab4bc4ae310b49dd7ca5b",
+            "app/src/test/java/com/freedom/adapters/social/momo/R08MomoNodeReadFallbacksTest.kt": "86e2878392bc9cfe751c6e5f090669b8c14c0e55",
+        }.items():
+            self.assertNotIn(path, reviewed_migration_evidence)
+            reviewed_migration_evidence[path] = replacement
         issues.extend(evidence_violations(ROOT, reviewed_migration_evidence))
         self.assertEqual([], issues)
 

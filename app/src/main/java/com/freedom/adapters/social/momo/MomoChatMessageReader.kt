@@ -1,7 +1,10 @@
 package com.freedom.adapters.social.momo
 
-import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
+import com.freedom.adapters.social.momo.momoReadBooleanOrFalse as safeBoolean
+import com.freedom.adapters.social.momo.momoReadIntOrZero as safeInt
+import com.freedom.adapters.social.momo.momoReadNodeOrNull as safeNode
+import com.freedom.adapters.social.momo.momoReadBounds as boundsOf
 import com.freedom.adapters.accessibility.android.AndroidActiveWindowRootAccess
 import com.freedom.core.accessibility.api.ScreenRect
 import com.freedom.core.accessibility.api.WindowRef
@@ -1021,12 +1024,6 @@ internal class MomoChatMessageReader(
         return MessageListResolution(null, visited, 0, false, reason)
     }
 
-    private fun boundsOf(node: AccessibilityNodeInfo): ScreenRect {
-        val rect = Rect()
-        runCatching { node.getBoundsInScreen(rect) }
-        return ScreenRect(rect.left, rect.top, rect.right, rect.bottom)
-    }
-
     private fun intersects(first: ScreenRect, second: ScreenRect): Boolean =
         first.left < second.right && first.right > second.left &&
             first.top < second.bottom && first.bottom > second.top
@@ -1083,11 +1080,6 @@ internal class MomoChatMessageReader(
     }
 
     private inline fun safeString(block: () -> String): String = runCatching(block).getOrDefault("")
-    private fun safeBoolean(block: () -> Boolean): Boolean = runCatching(block).getOrDefault(false)
-    private fun safeInt(block: () -> Int): Int = runCatching(block).getOrDefault(0)
-    private fun safeNode(block: () -> AccessibilityNodeInfo?): AccessibilityNodeInfo? =
-        runCatching(block).getOrNull()
-
     private companion object {
         const val MAX_VISIBLE_ROWS = 48
         const val MAX_NODES_PER_ROW = 64

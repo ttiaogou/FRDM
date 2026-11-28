@@ -2,6 +2,9 @@ package com.freedom.adapters.social.momo
 
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
+import com.freedom.adapters.social.momo.momoReadBooleanOrFalse as safeBoolean
+import com.freedom.adapters.social.momo.momoReadIntOrZero as safeInt
+import com.freedom.adapters.social.momo.momoReadNodeOrNull as safeNode
 import java.util.ArrayDeque
 
 /**
@@ -735,10 +738,6 @@ internal class MomoChatPageInspector(
         hints.any { hint -> value.contains(hint) }
     private inline fun safeString(block: () -> String?): String =
         runCatching { block().orEmpty() }.getOrDefault("")
-    private fun safeBoolean(block: () -> Boolean): Boolean = runCatching(block).getOrDefault(false)
-    private fun safeInt(block: () -> Int): Int = runCatching(block).getOrDefault(0)
-    private fun safeNode(block: () -> AccessibilityNodeInfo?): AccessibilityNodeInfo? = runCatching(block).getOrNull()
-
     companion object {
         const val MAX_PAGE_INSPECTION_NODES = 800
         const val MAX_REGION_INSPECTION_NODES = 240
