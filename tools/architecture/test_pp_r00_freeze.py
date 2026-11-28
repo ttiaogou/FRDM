@@ -252,7 +252,11 @@ class PpR00FreezeTest(unittest.TestCase):
         # R06-C: preserve exact reviewed private candidate evidence relocation.
         path = "business/src/main/kotlin/com/freedom/features/aireply/AiReplyObservationRuntime.kt"
         self.assertEqual("a20bf91b008cecd8146a0a7135f4ad46e5090757", reviewed_s1[path])
-        reviewed_s1[path] = "b3e21fb598010c1fae1fc2086fb7042f5b1d0829"
+        reviewed_s1[path] = "9e231125225143534c708288b104876900e7d51a"
+        path = "business/src/main/kotlin/com/freedom/features/aireply/ReceivedGreetingsChatEvidence.kt"
+        self.assertNotIn(path, reviewed_s1)
+        self.assertNotIn(path, m["permanent_s0"])
+        reviewed_s1[path] = "6c8c124a55dac2dd99000bc67570f508138bbf96"
         path = "business/src/main/kotlin/com/freedom/features/aireply/PrivateMessageCandidateEvidence.kt"
         self.assertNotIn(path, reviewed_s1)
         self.assertNotIn(path, m["permanent_s0"])

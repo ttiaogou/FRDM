@@ -1067,15 +1067,13 @@ class AiReplyObservationRuntime(
             return GreetingChatAdmission.Rejected("PLATFORM_ID_NOT_VERIFIED")
         }
         val displayName = receivedGreetingsTaskFlow.currentDisplayName()
-        if (ChatSessionManagementPolicy.matchChatHeader(displayName, snapshot.chatTitleText) == null) {
+        if (!matchesReceivedGreetingsChatHeader(snapshot, displayName)) {
             return GreetingChatAdmission.Rejected("CHAT_HEADER_MISMATCH")
         }
-        val sessionKey = windowSessionKey(snapshot)
-        val titleKey = snapshot.conversationIdentityKey()
-        if (snapshot.packageName != targetPackage() ||
-            snapshot.pageKind != ChatPageKind.CHAT_DETAIL_CANDIDATE ||
-            sessionKey == null || titleKey == null
-        ) return GreetingChatAdmission.Rejected("CHAT_WINDOW_NOT_VERIFIED")
+        val observedWindowEvidence = collectReceivedGreetingsChatWindowEvidence(snapshot)
+        val verifiedWindowEvidence = verifyReceivedGreetingsChatWindowEvidence(
+            snapshot, targetPackage(), observedWindowEvidence
+        ) ?: return GreetingChatAdmission.Rejected("CHAT_WINDOW_NOT_VERIFIED")
 
         val lease = taskCoordinator?.currentLease()
         if (taskCoordinator != null &&
@@ -1088,8 +1086,8 @@ class AiReplyObservationRuntime(
                 rowKeyHash = rowHash,
                 contactId = contactId,
                 normalizedDisplayName = ChatSessionManagementPolicy.normalizeSessionTitle(displayName),
-                chatTitleKey = titleKey,
-                windowSessionKey = sessionKey,
+                chatTitleKey = verifiedWindowEvidence.chatTitleKey,
+                windowSessionKey = verifiedWindowEvidence.windowSessionKey,
                 taskLease = lease
             )
         )
@@ -1131,23 +1129,6 @@ class AiReplyObservationRuntime(
                     else -> null
                 }
             }
-        }
-    }
-
-    /**
-     * A transition can expose chat anchors before its composer/list enters the display.
-     * This is binding readiness, not a page fingerprint or a gesture target calculation.
-     * Only explicit offscreen evidence defers admission; missing diagnostic evidence
-     * does not replace the existing independent identity/window proof.
-     */
-    private fun hasOffscreenGreetingChatLocators(snapshot: ChatPageSnapshot): Boolean {
-        val display = snapshot.screenBounds?.takeUnless { it.isEmpty } ?: return false
-        val paths = listOfNotNull(snapshot.messageListTarget, snapshot.inputFieldTarget)
-            .map { it.path.childIndices.joinToString("/") }
-        return snapshot.structureEvidence.any { node ->
-            node.path in paths && node.boundsValid &&
-                (node.right <= display.left || node.left >= display.right ||
-                    node.bottom <= display.top || node.top >= display.bottom)
         }
     }
 

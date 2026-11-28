@@ -105,7 +105,7 @@ class PpR01ContractFreezeTest(unittest.TestCase):
                 path = "tools/architecture/test_pp_r00_freeze.py"
                 self.assertEqual("1524f5031c0391d615fbf016d8ae9867d8086c78", expected[path])
                 # R04 also pins the reviewed relocation; R03 remains in the R00 gate.
-                expected[path] = "016abb364a826e247dcac56dd905d5abdf7a2bdb"
+                expected[path] = "32d83a0b2eba795fa2955c1ad85e5b5d5e640121"
                 # R05-E relocates the image order check to the actual image owner;
                 # the original M04 manifest and every frozen action assertion remain pinned.
                 path = "tools/architecture/test_m04_media_click_freeze.py"
@@ -156,7 +156,9 @@ class PpR01ContractFreezeTest(unittest.TestCase):
             "tools/architecture/test_pp_r05_facade_convergence.py": "5422e057795e4b30d6dde17123f7301d8a98fe46",
             "tools/architecture/test_pp_r05_integration_acceptance.py": "cb2537f571b13e7114f0ba4ecc8aba79785c43d8",
             "tools/architecture/test_pp_r06_page_evidence_migration.py": "75bb710a68fffd979258b4b7f453694cc86cfa40",
-            "tools/architecture/test_pp_r06_private_candidate_migration.py": "1e95a5869e90cd6a7fd8c919056e6bea8b74ee93",
+            "tools/architecture/test_pp_r06_private_candidate_migration.py": "4c75d9113449ceea34488255cc96471e0c194a1c",
+            "tools/architecture/test_pp_r06_greeting_evidence_migration.py": "e606139026ef1e1a4bbf00b635d0297303ef7054",
+            "business/src/test/kotlin/com/freedom/features/aireply/ReceivedGreetingsChatEvidenceTest.kt": "f2621a1c7cd67e765b593b417bdba550e082e78d",
         }))
         self.assertEqual([], issues)
 
